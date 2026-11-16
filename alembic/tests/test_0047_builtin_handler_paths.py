@@ -91,13 +91,8 @@ class TestMigrationMetadata:
 
 
 class TestModuleAllowlist:
-    def test_every_allowlisted_module_ships_under_builtin_handlers(
-        self, migration: ModuleType
-    ) -> None:
-        """The "coded but not routable" guard: a stale name would rewrite to a dead entrypoint."""
-        shipped = {p.stem for d in _HANDLER_DIRS.values() for p in d.glob("*.py")}
-        missing = sorted(set(migration._MODULES) - shipped)
-        assert not missing, f"allowlisted modules not under any builtin_handlers/: {missing}"
+    def test_allowlist_has_no_duplicates(self, migration: ModuleType) -> None:
+        """The on-disk "ships under builtin_handlers/" check was retired with that Python data plane (08e67f47f)."""
         assert len(migration._MODULES) == len(set(migration._MODULES)) == 45
 
     def test_old_bundles_directories_no_longer_exist(self) -> None:

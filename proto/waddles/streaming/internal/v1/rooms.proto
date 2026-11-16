@@ -25,8 +25,9 @@ service RoomsService {
   // be a participant who joined the room.
   rpc ListHands(ListHandsRequest) returns (ListHandsResponse);
 
-  // Scope "streaming.rooms:write" (member-level actions).
+  // Scope "streaming.rooms:create" (its own per-action scope; a "write" token cannot create).
   rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
+  // Scope "streaming.rooms:write" (member-level actions).
   rpc DeleteRoom(DeleteRoomRequest) returns (DeleteRoomResponse);
   // Scope "streaming.rooms:write". A call carrying the "streaming.rooms:moderate" service
   // JWT instead additionally registers the participant as room STAFF in the server-side
@@ -79,6 +80,8 @@ message Room {
   // Seconds a room may stay empty before the server deletes it (the effective
   // value after server clamping). 0 means expiry is disabled for this room.
   uint32 empty_timeout_secs = 9;
+  uint32 participant_count = 10;
+  uint32 hand_count = 11;
 }
 
 message Participant {

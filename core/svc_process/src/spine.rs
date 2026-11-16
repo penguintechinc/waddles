@@ -433,6 +433,9 @@ fn record_executor_call(
                 if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
+                if e.detail.as_deref() == Some("pool_exhausted") {
+                    metrics.record_pool_exhausted(app_id);
+                }
                 "executor_error"
             }
             _ => "malformed",
@@ -732,6 +735,30 @@ impl DigestSource {
         }
     }
 
+    /// Whether this source's bundle is provably stateless (see
+    /// `bundle_active_set::concurrent::is_stateless`). `Static` (the legacy single-bundle env
+    /// path) and any scope without a recorded capability set are NOT: they stay scope-serial.
+    fn is_stateless(&self) -> bool {
+        match self {
+            DigestSource::Static(_) => false,
+            DigestSource::Active { scope, digests } => digests.stateless(scope),
+        }
+    }
+
+    /// Where this source's bundle may be placed on the executor partition: the legacy
+    /// `Static` path is unpartitioned; `Active` classifies the scope's recorded language and
+    /// fails closed (`UnknownLanguage`) when none is recorded or it is in no class.
+    fn placement(&self) -> bundle_active_set::Placement {
+        match self {
+            DigestSource::Static(_) => bundle_active_set::Placement::Unpartitioned,
+            DigestSource::Active { scope, digests } => digests
+                .language(scope)
+                .map_or(bundle_active_set::Placement::UnknownLanguage, |l| {
+                    bundle_active_set::partition::table().placement(&l)
+                }),
+        }
+    }
+
     /// Like [`Self::current`], but additionally treats an `Active`-path
     /// digest that resolved to an empty string the same as "no active
     /// digest known" (`None`) -- the one call [`handle_delivered`]'s own
@@ -819,7 +846,7 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `not_implemented` rather than this loop failing to start, the same
     /// graceful-degradation posture `core/svc_action::capabilities::
     /// StageCapabilities::with_kv`'s doc describes.
-    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    pub kv_conn: Option<redis::aio::ConnectionManager>,
     /// The manifest-declared-capability snapshot
     /// `bundle_host_kv::authorize::authorize_kv` checks before granting
     /// `kv` (coordinator fix on PR #425: "undeclared means denied").
@@ -830,6 +857,9 @@ pub struct ProcessDeps<S: SpineOps> {
     /// [`StageCapabilities`] this loop constructs, so a capability change
     /// is visible to the very next `kv` host-call.
     pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    /// Per-tenant at-rest sealing for `kv` values (`crate::kv_sealing`); one
+    /// shared handle (one DEK cache) cloned into every per-invoke capability.
+    pub kv_sealing: Option<bundle_host_kv::Sealing>,
     /// The standard enforcement gate (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5) every per-invoke [`StageCapabilities`] this loop constructs is
@@ -930,6 +960,11 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `BUNDLE_PLATFORM_TABLE_PASSWORD` is unset or the connection failed
     /// (every `platform_table.*` call then denies `not_implemented`).
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// The `object-storage` host capability's production wiring
+    /// (`crate::bundle_storage::try_build_wiring`), cloned into every per-invoke
+    /// `StageCapabilities`. `None` when `BUNDLE_STORAGE_*` is unset (logged +
+    /// gauge at startup) -- every `object_storage.*` call then denies `not_implemented`.
+    pub object_storage_wiring: Option<crate::capabilities::ObjectStorageWiring>,
     /// The `gameserver-net` host capability's production wiring (`crate::lib::
     /// try_build_gameserver_net_wiring`). `None` when the connection-resolver endpoints are
     /// unconfigured (every `gameserver_net.*` call then denies `not_implemented`).
@@ -954,6 +989,9 @@ pub struct ProcessDeps<S: SpineOps> {
     /// `StageCapabilities`. `None` when its config/dependencies are not
     /// provisioned (every `media.*` call then denies `not_implemented`).
     pub media_wiring: Option<crate::media::MediaWiring>,
+    /// `overlay.publish-surface` wiring (`crate::surface::build_surface_wiring`); `None` leaves
+    /// `surface.publish` denying `not_implemented`.
+    pub surface_wiring: Option<crate::surface::SurfaceWiring>,
     /// The tenant stream-DEK source (hub-api `KeyService` in production, the hard-gated
     /// dev/alpha KEK otherwise) [`handle_delivered`] decrypts inbound identity fields with.
     /// `None` is a deployment error, not an opt-out: an event that carries identity fields
@@ -1096,8 +1134,8 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     verified_scope: Option<(i32, i32)>,
     trace: Option<TraceContext>,
     invocation: Option<Arc<crate::identity::InvocationIdentity>>,
-) -> StageCapabilities<redis::aio::MultiplexedConnection> {
-    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+) -> StageCapabilities<redis::aio::ConnectionManager> {
+    let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
         tenant,
         community,
         deps.app_id.clone(),
@@ -1118,6 +1156,11 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
         trace: trace.clone(),
         read_only: false,
     });
+    // Per-tenant at-rest sealing of kv values (order-independent with `with_kv`).
+    let caps = match &deps.kv_sealing {
+        Some(sealing) => caps.with_kv_sealing(sealing.clone()),
+        None => caps,
+    };
     let caps = match &deps.kv_conn {
         Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
         None => caps,
@@ -1136,6 +1179,10 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     };
     let caps = match &deps.platform_table_wiring {
         Some(pt) => caps.with_platform_table(pt.clone()),
+        None => caps,
+    };
+    let caps = match &deps.object_storage_wiring {
+        Some(os) => caps.with_object_storage(os.clone()),
         None => caps,
     };
     let caps = match &deps.gameserver_net_wiring {
@@ -1158,6 +1205,10 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
         ),
         None => caps,
     };
+    let caps = match &deps.surface_wiring {
+        Some(surface) => caps.with_surface(surface.clone()),
+        None => caps,
+    };
     // Live per-community config for `get-context().config_json` (None when hub-api is not
     // configured): served only for the verified envelope scope.
     let caps = caps.with_bundle_config(hub_client::bundle_config::global());
@@ -1168,18 +1219,75 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
     }
 }
 
+/// Records `queue_wait_seconds` for one delivered entry: how long it sat in
+/// the stream (its id's millisecond timestamp) before this stage picked it
+/// up -- the KEDA scale signal. A malformed id is logged, never fatal.
+fn record_queue_wait(app_id: &str, entry_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match bundle_active_set::stream_entry_age(entry_id, now_ms) {
+        Some(wait) => stage_metrics::stage_metrics().record_queue_wait(app_id, wait),
+        None => tracing::debug!(
+            app_id,
+            entry_id,
+            "stream entry id has no millisecond prefix; queue wait not recorded"
+        ),
+    }
+}
+
 async fn handle_delivered<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
 ) -> Result<(), SpineError> {
+    use tracing::Instrument as _;
     let started = std::time::Instant::now();
-    let outcome = handle_delivered_inner(d, deps).await;
+    record_queue_wait(&deps.app_id, &d.entry_id);
+    // Command-latency: the consume instant, the publish -> consume queue-wait hop (XADD time from
+    // the entry id), and the `process.consume` span parented on the envelope's W3C trace context.
+    let consumed_ms = command_latency::stamp::now_ms();
+    let queue_wait_ms = command_latency::stage::record_queue_wait(
+        command_latency::Hop::QueueWait,
+        &d.entry_id,
+        consumed_ms,
+    );
+    let span = tracing::info_span!(
+        "process.consume",
+        app_id = %deps.app_id,
+        tenant_id = d.env.tenant_id,
+        community_id = d.env.community_id,
+        deliveries = d.deliveries,
+        queue_wait_ms = queue_wait_ms,
+        result = tracing::field::Empty,
+        "otel.kind" = "consumer",
+    );
+    if let Some(trace) = &d.env.trace {
+        command_latency::span::set_remote_parent(
+            &span,
+            &trace.traceparent,
+            trace.tracestate.as_deref(),
+        );
+    }
+    let outcome = handle_delivered_inner(d, deps, consumed_ms)
+        .instrument(span.clone())
+        .await;
     let result = match &outcome {
         Ok(result) => result.as_str(),
         // The ack/DLQ/append write itself failed: the entry stays pending
         // for redelivery, so it is neither delivered nor dead-lettered.
         Err(_) => "spine_error",
     };
+    span.record("result", result);
+    match &outcome {
+        Ok(StageResult::DeadLettered) => command_latency::span::record_error(
+            &span,
+            "DeadLettered",
+            "entry dead-lettered by the process stage",
+        ),
+        Err(err) => command_latency::span::record_error(&span, "SpineError", &err.to_string()),
+        Ok(_) => {}
+    }
     stage_metrics::stage_metrics().record_stage(&deps.app_id, result, started.elapsed());
     outcome.map(|_| ())
 }
@@ -1192,7 +1300,9 @@ async fn handle_delivered<S: SpineOps>(
 async fn handle_delivered_inner<S: SpineOps>(
     d: &Delivered,
     deps: &ProcessDeps<S>,
+    consumed_ms: u64,
 ) -> Result<StageResult, SpineError> {
+    use tracing::Instrument as _;
     // Spec §5.11: hop verification runs before any other processing.
     // Verified against THIS entry's own `d.stream` (not a single fixed
     // key, unlike `svc_action::dispatch`'s action-stream reader) --
@@ -1262,7 +1372,10 @@ async fn handle_delivered_inner<S: SpineOps>(
     // boundary): decrypt them here -- after hop verification, strictly before tokenization and
     // dispatch -- into an in-memory-only copy. A failure dead-letters the still-encrypted
     // original; it is never dropped and never forwarded.
-    let raw_event = match decrypt_inbound_event(d, deps).await {
+    let raw_event = match decrypt_inbound_event(d, deps)
+        .instrument(tracing::info_span!("process.decrypt"))
+        .await
+    {
         Ok(event) => event,
         Err(err) => {
             return deps
@@ -1296,6 +1409,7 @@ async fn handle_delivered_inner<S: SpineOps>(
                 match deps
                     .tokenize_memo
                     .tokenize_delivered(d, &raw_event, &d.env.tenant, minter.as_ref())
+                    .instrument(tracing::info_span!("process.tokenize"))
                     .await
                 {
                     Ok(tokenized) => (tokenized.event, Some(tokenized.mentions)),
@@ -1408,7 +1522,14 @@ async fn handle_delivered_inner<S: SpineOps>(
             0
         });
 
-    let Some(connection) = deps.connections.pick_dispatch() else {
+    // Executor sharding (T6): route to one of this app's owner executors
+    // (legacy round-robin when sharding is off or an executor has no id);
+    // a non-owner pick is still served via the on-demand `ensure_loaded`
+    // below.
+    let Some(connection) = deps
+        .connections
+        .pick_dispatch_for_app(&deps.app_id, deps.digest_source.placement())
+    else {
         // Escalated WARN -> ERROR (fix/executor-link-heartbeat, alpha
         // 2026-10-02 incident: svc-process/svc-action were rolled and each
         // bundle-executor stayed bound to its old, terminated pod; the new
@@ -1701,6 +1822,25 @@ async fn handle_delivered_inner<S: SpineOps>(
     let scope = Scope::new(d.env.tenant.clone(), d.env.community.clone());
     let dest_stream = scope.action_stream(&dest_app_id);
     let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    // Command-latency: carry the inbound trace onto the action envelope with this stage's stamps
+    // added -- the publish time (entry id), consume/hand-off instants and the REGISTERED command the
+    // message invokes (read in place from the decrypted text; the text itself is never kept). The
+    // trace id (the only part the binding MAC covers) is untouched.
+    let command = raw_event
+        .payload
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .and_then(|text| command_latency::registry::global().detect(text));
+    let trace_out = d.env.trace.clone().map(|mut t| {
+        t.tracestate = command_latency::stage::process_handoff_tracestate(
+            t.tracestate.as_deref(),
+            &d.entry_id,
+            consumed_ms,
+            command_latency::stamp::now_ms(),
+            command,
+        );
+        t
+    });
     let envelope_out = StageEnvelope {
         // Scope + schema version are copied VERBATIM from the verified
         // inbound envelope (never re-derived): the copied `binding` covers
@@ -1719,7 +1859,7 @@ async fn handle_delivered_inner<S: SpineOps>(
         workstream_id: d.env.workstream_id.clone(),
         event_id: d.env.event_id.clone(),
         session_id: d.env.session_id.clone(),
-        trace: d.env.trace.clone(),
+        trace: trace_out,
         binding: d.env.binding.clone(),
     };
 
@@ -1753,10 +1893,37 @@ async fn drain_batch<R: StreamReader, S: SpineOps>(
     }
     let batch = reader.read().await?;
     stage_metrics::stage_metrics().record_batch(batch.len());
-    for d in &batch {
-        handle_delivered(d, deps).await?;
-    }
+    // Bounded per-app concurrency (latency suspect #4): entries with different ordering keys
+    // overlap, entries sharing one never do; `APP_DRAIN_CONCURRENCY=1` is the old serial loop.
+    let tuning = bundle_active_set::concurrent::tuning();
+    bundle_active_set::concurrent::run_keyed(
+        &batch,
+        tuning.concurrency,
+        |d| drain_ordering_key(d, deps, tuning.ordering),
+        |d| async move { handle_delivered(d, deps).await.map(|_| ()) },
+    )
+    .await?;
     Ok(batch.len())
+}
+
+/// The key two entries must share to be handled strictly in arrival order: their app scope
+/// `(tenant, community, app)`. Bundle kv/db/economy have no atomic compare-and-set, so a stateful
+/// app is serial per scope; the actor is only added for a bundle whose approved manifest is
+/// provably stateless AND when `APP_DRAIN_ORDERING=actor` opts in
+/// (`bundle_active_set::concurrent::drain_key`).
+fn drain_ordering_key<S: SpineOps>(
+    d: &Delivered,
+    deps: &ProcessDeps<S>,
+    ordering: bundle_active_set::concurrent::Ordering,
+) -> bundle_active_set::concurrent::DrainKey {
+    bundle_active_set::concurrent::drain_key(
+        &d.env.tenant,
+        d.env.community.as_deref(),
+        &deps.app_id,
+        d.env.event.actor.as_deref(),
+        ordering,
+        deps.digest_source.is_stateless(),
+    )
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves.
@@ -1789,8 +1956,23 @@ pub async fn run(
     deps: ProcessDeps<SpineClient>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
-    let app_id = deps.app_id.clone();
     let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    run_with_client(cfg, grants, deps, dlq, shutdown).await
+}
+
+/// Same as [`run`] but reuses an already-connected, process-shared `dlq`
+/// [`SpineClient`] (cheap clone of one multiplexed connection) instead of
+/// opening and probing a fresh TLS connection per consumer -- the
+/// connection-storm fix (alpha incident 2026-11). Only the blocking
+/// [`GroupReader`] socket stays per-consumer (spec Sec5.7 rule 2).
+pub async fn run_with_client(
+    cfg: SpineConfig,
+    grants: Vec<Grant>,
+    deps: ProcessDeps<SpineClient>,
+    dlq: SpineClient,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), SpineError> {
+    let app_id = deps.app_id.clone();
     let streams: Vec<String> = grants.iter().map(|g| g.stream.clone()).collect();
     let sampler_client = dlq.clone();
     let reader = GroupReader::connect(
@@ -1959,7 +2141,7 @@ pub(crate) async fn ensure_consumer_group(
     group: &str,
 ) -> Result<bool, SpineError> {
     let client = build_raw_client(cfg)?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
+    let mut conn = client.get_connection_manager().await?;
     let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg(stream)
@@ -2594,6 +2776,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -2631,6 +2814,7 @@ mod tests {
             // instead of here.
             kv_conn: None,
             kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            kv_sealing: None,
             gate: test_gate(),
             tenant_id: 0,
             community_id: 0,
@@ -2681,10 +2865,12 @@ mod tests {
             reputation_wiring: None,
             economy_wiring: None,
             platform_table_wiring: None,
+            object_storage_wiring: None,
             gameserver_net_wiring: None,
             identity_wiring: None,
             ai_wiring: None,
             media_wiring: None,
+            surface_wiring: None,
             dek_provider: Some(crate::identity_crypto::test_support::dek_provider()),
         };
         (deps, metrics)
@@ -3000,6 +3186,10 @@ mod tests {
             test_scope("waddles.bot.commands.default"),
             active_digest.clone(),
         );
+        digests.set_language(
+            test_scope("waddles.bot.commands.default"),
+            "rust".to_string(),
+        );
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
         deps.digest_source = DigestSource::Active {
@@ -3016,6 +3206,91 @@ mod tests {
         assert_eq!(load_body.digest, active_digest);
         assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
         assert_eq!(*deps.spine.acked.lock().unwrap(), vec![d.entry_id.clone()]);
+    }
+
+    /// Stateful-by-default drain ordering: two messages for the same app scope share a key even
+    /// from different actors (so they never overlap -- kv has no atomic compare-and-set); another
+    /// community is another key; only a recorded-stateless bundle under `actor` mode splits by
+    /// actor.
+    #[tokio::test]
+    async fn drain_ordering_key_is_per_scope_and_actor_overlap_needs_stateless_opt_in() {
+        use bundle_active_set::concurrent::Ordering as O;
+        let ring = test_ring();
+        let d1 = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let mut d2 = d1.clone();
+        d2.env.event.actor = Some("someone_else".to_string());
+        let mut d3 = d1.clone();
+        d3.env.community = Some("other".to_string());
+        let digests = Arc::new(ActiveDigests::new());
+        let scope = test_scope("waddles.bot.commands.default");
+        let mut deps = test_deps(FakeSpineOps::default(), Arc::new(ConnectionRegistry::new()));
+        deps.digest_source = DigestSource::Active {
+            scope: scope.clone(),
+            digests: Arc::clone(&digests),
+        };
+        for mode in [O::Scope, O::Actor] {
+            assert_eq!(
+                drain_ordering_key(&d1, &deps, mode),
+                drain_ordering_key(&d2, &deps, mode),
+                "{mode:?}: nothing recorded => assumed stateful => serial per scope"
+            );
+            assert_ne!(
+                drain_ordering_key(&d1, &deps, mode),
+                drain_ordering_key(&d3, &deps, mode),
+                "{mode:?}: a different community overlaps"
+            );
+        }
+        digests.set_stateless(scope.clone(), false);
+        assert_eq!(
+            drain_ordering_key(&d1, &deps, O::Actor),
+            drain_ordering_key(&d2, &deps, O::Actor),
+            "a declared-stateful bundle ignores the actor opt-in"
+        );
+        digests.set_stateless(scope, true);
+        assert_eq!(
+            drain_ordering_key(&d1, &deps, O::Scope),
+            drain_ordering_key(&d2, &deps, O::Scope),
+            "default mode never splits by actor"
+        );
+        assert_ne!(
+            drain_ordering_key(&d1, &deps, O::Actor),
+            drain_ordering_key(&d2, &deps, O::Actor),
+            "stateless + actor opt-in overlaps per actor"
+        );
+    }
+
+    /// Executor partition fail-closed: an `Active` scope whose language was never recorded (or is
+    /// in no class) has no eligible executor, so the delivery is dead-lettered loudly and never
+    /// invoked on whichever executor happens to be connected.
+    #[tokio::test]
+    async fn handle_delivered_active_scope_without_a_known_language_never_reaches_an_executor() {
+        let ring = test_ring();
+        let d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let (connections, load_count, _last_load) =
+            connected_registry_with_fake_executor_expecting_load_first(serde_json::json!(null), 0)
+                .await;
+        let digests = Arc::new(ActiveDigests::new());
+        let scope = test_scope("waddles.bot.commands.default");
+        digests.set(scope.clone(), format!("sha256:{}", "a".repeat(64)));
+        let spine = FakeSpineOps::default();
+        let mut deps = test_deps(spine, connections);
+        deps.digest_source = DigestSource::Active {
+            scope: scope.clone(),
+            digests: Arc::clone(&digests),
+        };
+        assert_eq!(
+            deps.digest_source.placement(),
+            bundle_active_set::Placement::UnknownLanguage
+        );
+        handle_delivered(&d, &deps).await.unwrap();
+        assert_eq!(load_count.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(deps.spine.dead_lettered.lock().unwrap().len(), 1);
+        assert!(deps.spine.acked.lock().unwrap().is_empty());
+        digests.set_language(scope, "cobol".to_string());
+        assert_eq!(
+            deps.digest_source.placement(),
+            bundle_active_set::Placement::UnknownLanguage
+        );
     }
 
     // regression: multi-tenant consumers invoked with empty legacy digest,
@@ -3159,6 +3434,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3235,6 +3511,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3327,6 +3604,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3433,6 +3711,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3492,6 +3771,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3536,6 +3816,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3599,6 +3880,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3661,6 +3943,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -3827,6 +4110,88 @@ mod tests {
         assert_eq!(source.platform, "discord");
         assert_eq!(source.account_id, "bot-123");
         assert_eq!(source.channel_id.as_deref(), Some("origin-channel"));
+    }
+
+    /// Command-latency propagation through the real `handle_delivered`: the inbound first-door stamp
+    /// survives onto the action envelope with this stage's stamps added (publish time from the entry
+    /// id, consume/hand-off instants, the REGISTERED command read from the text), the trace id the
+    /// binding MAC covers is untouched, and the action hop verification therefore still passes.
+    #[tokio::test]
+    async fn handle_delivered_carries_the_first_door_stamp_and_adds_process_stamps() {
+        use command_latency::stamp::{now_ms, Door, Stamps};
+        assert!(command_latency::registry::global().register("songrequest"));
+        command_latency::switch::set_disabled(false);
+        let ring = test_ring();
+        let mut d = fixture_delivered("acme", Some("main"), &ring, "k1");
+        let trace_id = "0af7651916cd43dd8448eb211c80319c";
+        let t0 = now_ms().saturating_sub(120);
+        d.entry_id = format!("{}-0", now_ms().saturating_sub(80));
+        d.env.trace = Some(penguin_spine::Trace {
+            traceparent: format!("00-{trace_id}-b7ad6b7169203331-01"),
+            tracestate: Some(
+                Stamps {
+                    t0_ms: Some(t0),
+                    door: Some(Door::Gateway),
+                    ..Stamps::default()
+                }
+                .merge_into_tracestate(Some("vendor=1")),
+            ),
+        });
+        d.env.binding.mac = penguin_spine::compute_binding_mac(
+            &ring,
+            "k1",
+            "acme",
+            Some("main"),
+            &d.env.workstream_id,
+            &d.env.event_id,
+            Some(trace_id),
+        )
+        .unwrap();
+        let reply = wire_platform_event(&PlatformEvent {
+            platform: "twitch".to_string(),
+            event_type: "chat.message".to_string(),
+            actor: Some("bot".to_string()),
+            payload: serde_json::from_value(serde_json::json!({"text": "pong"})).unwrap(),
+            occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
+            source: None,
+        })
+        .unwrap();
+        let connections = connected_registry_with_fake_executor(reply).await;
+        let deps = test_deps(FakeSpineOps::default(), connections);
+
+        handle_delivered(&d, &deps).await.unwrap();
+
+        assert!(deps.spine.dead_lettered.lock().unwrap().is_empty());
+        let appended = deps.spine.appended.lock().unwrap();
+        assert_eq!(appended.len(), 1);
+        let trace = appended[0].1.trace.as_ref().expect("trace carried");
+        assert!(
+            trace.traceparent.contains(trace_id),
+            "the MAC-covered trace id is untouched"
+        );
+        let ts = trace.tracestate.as_deref().expect("tracestate carried");
+        assert!(ts.ends_with(",vendor=1"), "foreign member preserved: {ts}");
+        let s = Stamps::from_tracestate(Some(ts));
+        assert_eq!(s.t0_ms, Some(t0), "first door survives the hop");
+        assert_eq!(s.door, Some(Door::Gateway));
+        assert_eq!(
+            s.publish_ms,
+            command_latency::stamp::entry_id_ms(&d.entry_id)
+        );
+        let (pc, pd) = (s.consume_ms.unwrap(), s.handoff_ms.unwrap());
+        assert!(
+            pc >= s.publish_ms.unwrap() && pd >= pc,
+            "stamps are ordered"
+        );
+        assert_eq!(
+            s.command.as_deref(),
+            Some("songrequest"),
+            "the registered command, read from the decrypted text"
+        );
+        assert!(
+            !ts.contains("foo"),
+            "no argument or user text ever reaches the tracestate"
+        );
     }
 
     #[tokio::test]
@@ -4158,6 +4523,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -4406,6 +4772,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )
@@ -5200,10 +5567,7 @@ mod tests {
 
             // Three entries; read two without acking -> pending 2, lag 1.
             let raw = redis::Client::open(cfg.valkey_url.as_str()).expect("redis client");
-            let mut conn = raw
-                .get_multiplexed_async_connection()
-                .await
-                .expect("raw connection");
+            let mut conn = raw.get_connection_manager().await.expect("raw connection");
             for _ in 0..3 {
                 let _: String = redis::cmd("XADD")
                     .arg(&stream)
@@ -5418,6 +5782,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )

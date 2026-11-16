@@ -38,11 +38,10 @@
 # on its own now: every platform Secret (seaweedfs-sse-kek, tenant-kek, bundle-signing,
 # service-jwt, waddlebot-valkey-tls, and the DB/Redis/S3-root/JWT/module/
 # service-api-key/credential-encryption/envelope-binding fields inside
-# waddlebot-secrets) is provisioned by the chart itself via lookup(KEEP)-then-
-# generate(alpha/local)-or-require(else) Helm template logic -- see
-# k8s/helm/waddlebot/templates/auto-provisioned-secrets.yaml,
-# auto-provisioned-keys-job.yaml, infrastructure/valkey-tls-secret.yaml, and
-# secrets.yaml. An existing Secret is always left untouched. If a real
+# waddlebot-secrets) is provisioned by the chart itself at RUNTIME, create-if-absent,
+# in every tier -- see k8s/helm/waddlebot/templates/provision-secrets.yaml,
+# auto-provisioned-keys-job.yaml (and infrastructure/valkey-tls-secret.yaml for the
+# TLS material). An existing Secret is always left untouched. If a real
 # --skip-secrets-style step is ever needed again, it belongs in the chart,
 # not here.
 #

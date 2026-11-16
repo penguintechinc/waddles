@@ -49,3 +49,11 @@ Keys: `weights.*`, `cooldowns.{chat_message,command_usage}` (seconds, 0 disables
 cargo test --locked && cargo clippy --all-targets --locked -- -D warnings
 cargo component build --release --target wasm32-wasip2 --locked
 ```
+
+## Per-community opt-out (`accrual_enabled`)
+
+Community config (bundle-admin gateway `PUT /api/v1/apps/community/<id>/bundles/waddles.core.app.reputation-accrual/config`)
+accepts `accrual_enabled` (boolean, default `true`). An explicit `false` makes the bundle return outcome
+`community_disabled` for every event of that community: no tool call, no accrual. Only an explicit `false`
+disables; absent / `{}` / unparseable keeps accrual ON. Used for the synthetic latency-canary community
+(`docs/observability/command-latency.md`). Added in 1.0.1.

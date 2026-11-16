@@ -41,16 +41,19 @@
 //! without the score having moved. Denied/rejected attempts never reach the
 //! store; the gate records those (`bundle_capability_gate::audit`).
 
+mod floor;
 mod metrics;
 mod postgres;
 mod scale;
+
+pub use floor::{FloorBanStatus, FloorEnqueue, FloorScope, FLOOR_ACTOR, MAX_TENANT_FANOUT};
 
 use std::future::Future;
 use std::pin::Pin;
 
 pub use postgres::{
-    connect, load_membership, run_membership_refresh, ConnectConfig, PostgresReputationStore,
-    FLOOR_SOFT_BAN_REASON,
+    connect, floor_sql_key, load_membership, run_membership_refresh, ConnectConfig,
+    PostgresReputationStore, FLOOR_SOFT_BAN_REASON,
 };
 pub use scale::{
     ReasonClass, ScoreScale, ACTIVITY_CAP, MODERATION_CAP, SCALE_DEFAULT, SCALE_MAX, SCALE_MIN,
@@ -482,6 +485,43 @@ pub trait ReputationStore: Send + Sync {
     ) -> BoxFuture<'a, Result<bool, ReputationError>> {
         Box::pin(async { Err(unsupported("lift_soft_ban")) })
     }
+
+    /// Re-verifies an automated floor ban in SQL (`reputation_verify_floor_breach`): `true` only if
+    /// the scope's ban is enabled AND the user's score is below its floor. `scope.community_id`
+    /// is the community to verify (tenant scope: the target community of the fan-out).
+    fn verify_floor_breach<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _user: uuid::Uuid,
+        _floor: FloorScope,
+    ) -> BoxFuture<'a, Result<bool, ReputationError>> {
+        Box::pin(async { Err(unsupported("verify_floor_breach")) })
+    }
+
+    /// Enqueues a floor ban for (`target_community`, user, scope, `key`) as a QUEUED outbox row
+    /// for the action stage: SQL re-verifies the breach and applies the hourly quota under the
+    /// community's advisory lock in one transaction. `scope.community_id` is the ORIGIN community;
+    /// `key` is HOST-derived (never guest-chosen). See [`FloorEnqueue`].
+    fn floor_ban_enqueue<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+        _target_community: i32,
+        _user: uuid::Uuid,
+        _floor: FloorScope,
+        _key: &'a str,
+        _platform: &'a str,
+    ) -> BoxFuture<'a, Result<FloorEnqueue, ReputationError>> {
+        Box::pin(async { Err(unsupported("floor_ban_enqueue")) })
+    }
+
+    /// The tenant's live community ids (the tenant-ban fan-out set), host-enumerated in SQL.
+    /// More than [`MAX_TENANT_FANOUT`] communities is an error, never a truncated set.
+    fn tenant_communities<'a>(
+        &'a self,
+        _scope: &'a ReputationScope,
+    ) -> BoxFuture<'a, Result<Vec<i32>, ReputationError>> {
+        Box::pin(async { Err(unsupported("tenant_communities")) })
+    }
 }
 
 /// Fail-loud error for a store that does not implement an op (never a silent
@@ -602,5 +642,135 @@ mod tests {
         assert!(ok(400, 400).is_err());
         assert!(ok(500, 400).is_err());
         assert!(ok(400, 851).is_err());
+    }
+
+    /// A store that implements ONLY the required methods (a source-compatible double).
+    struct RequiredOnly;
+
+    impl ReputationStore for RequiredOnly {
+        fn get<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _user: uuid::Uuid,
+        ) -> BoxFuture<'a, Result<i64, ReputationError>> {
+            Box::pin(async { Ok(600) })
+        }
+
+        fn adjust<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _user: uuid::Uuid,
+            _delta: i32,
+            _reason: &'a str,
+            _caps: ReputationCaps,
+            _key: &'a IdempotencyKey,
+        ) -> BoxFuture<'a, Result<i64, ReputationError>> {
+            Box::pin(async { Ok(601) })
+        }
+
+        fn adjust_many<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _items: &'a [(uuid::Uuid, i32)],
+            _reason: &'a str,
+            _caps: ReputationCaps,
+            _key: &'a IdempotencyKey,
+        ) -> BoxFuture<'a, Result<(), ReputationError>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn get_many<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _users: &'a [uuid::Uuid],
+        ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+
+        fn leaderboard<'a>(
+            &'a self,
+            _scope: &'a ReputationScope,
+            _limit: u32,
+        ) -> BoxFuture<'a, Result<Vec<ScoreEntry>, ReputationError>> {
+            Box::pin(async { Ok(Vec::new()) })
+        }
+    }
+
+    /// Every optional store op fails LOUDLY (`backend`, naming the op) on a store that does not
+    /// implement it -- never a silent empty result or a fabricated success -- while the
+    /// required ops keep working.
+    #[tokio::test]
+    async fn unimplemented_store_ops_fail_loud_naming_the_op() {
+        let store = RequiredOnly;
+        let scope = ReputationScope {
+            tenant_id: 1,
+            community_id: 10,
+            app_id: "waddles.test.app".to_string(),
+        };
+        let user = uuid::Uuid::nil();
+        let key = IdempotencyKey::new("k:1").unwrap();
+        let caps = ReputationCaps {
+            per_user_daily_abs_max: 10,
+            per_scope_daily_abs_max: 100,
+        };
+        assert_eq!(store.get(&scope, user).await, Ok(600));
+
+        let backend = |op: &str| {
+            Err::<(), _>(ReputationError::Backend(format!(
+                "reputation store does not implement {op}"
+            )))
+        };
+        assert_eq!(
+            store
+                .override_score(&scope, user, 700, "r", &key)
+                .await
+                .map(|_| ()),
+            backend("override_score")
+        );
+        assert_eq!(
+            store
+                .apply(&scope, user, 1, ReasonClass::Activity, "src", caps, &key)
+                .await
+                .map(|_| ()),
+            backend("apply")
+        );
+        assert_eq!(
+            store.get_tenant(&scope, user).await.map(|_| ()),
+            backend("get_tenant")
+        );
+        assert_eq!(
+            store.history(&scope, user, 5, None).await.map(|_| ()),
+            backend("history")
+        );
+        assert_eq!(
+            store.below_threshold(&scope, 600, 5).await.map(|_| ()),
+            backend("below_threshold")
+        );
+        assert_eq!(
+            store.tenant_policy(&scope).await.map(|_| ()),
+            backend("tenant_policy")
+        );
+        assert_eq!(
+            store.active_logic_app(&scope).await.map(|_| ()),
+            backend("active_logic_app")
+        );
+        assert_eq!(
+            store.is_soft_banned(&scope, user).await.map(|_| ()),
+            backend("is_soft_banned")
+        );
+        assert_eq!(
+            store
+                .soft_ban(&scope, user, FLOOR_SOFT_BAN_REASON)
+                .await
+                .map(|_| ()),
+            backend("soft_ban")
+        );
+        assert_eq!(
+            store
+                .lift_soft_ban(&scope, user, FLOOR_SOFT_BAN_REASON)
+                .await
+                .map(|_| ()),
+            backend("lift_soft_ban")
+        );
     }
 }

@@ -132,7 +132,10 @@ def tenant_public_id(dal: Any, tenant_id: int) -> str:
     try:
         row = dal(dal.tenants.id == tenant_id).select(dal.tenants.public_id).first()
         value = getattr(row, "public_id", None) if row is not None else None
-    except Exception:  # noqa: BLE001 - best-effort label; telemetry must never break a request
+    except Exception as exc:  # noqa: BLE001 - best-effort label; telemetry must never break a request
+        logger.warning(
+            "credential_resolver.tenant_public_id lookup failed: %s: %s", type(exc).__name__, exc
+        )
         return "unknown"
     return str(value) if value else "unknown"
 

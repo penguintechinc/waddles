@@ -457,6 +457,7 @@ async def remove_tenant_admin(
             async_dal, dal, tenant_id=tenant_id, user_id=user_id, tenant_slug=tenant_slug
         )
     except ApiError as exc:
+        logger.warning("remove_tenant_admin rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return MessageResponse(success=True, message="Tenant admin removed")
 

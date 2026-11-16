@@ -156,6 +156,36 @@ impl FeatureGate for DbBundleConfigGate {
     }
 }
 
+/// Opt-out kill switch for executor slot sharding
+/// (`bundle_active_set::sharding`, executor scale-out phase 1): unseen /
+/// OFF / license server unreachable = sharding ON (each app loads only on
+/// its 2 owner executors); ON = legacy broadcast to every executor.
+pub const DISABLE_EXECUTOR_SHARDING_FLAG: &str = "waddles.disable-executor-sharding";
+
+/// Production [`FeatureGate`] for [`DISABLE_EXECUTOR_SHARDING_FLAG`]:
+/// `enabled()` answers "is sharding on?" (the negated raw flag), and a
+/// bypassed (PenguinTech-domain) client reads as sharding ON -- the same
+/// bypass-awareness [`DbBundleConfigGate`] needs, since bypass makes every
+/// raw flag read `true`.
+pub struct ExecutorShardingGate(Arc<LicenseClient>);
+
+impl ExecutorShardingGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for ExecutorShardingGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_EXECUTOR_SHARDING_FLAG).await
+        })
+    }
+}
+
 /// Opt-out kill-switch for the multi-tenant, change-log-driven active-set
 /// loader (`crate::changelog_consumer`) -- dataplane scale design rev 4,
 /// §8 step 2: "Multi-tenant watermark polling ...
@@ -310,6 +340,27 @@ impl BundleReputationCapabilityGate {
 impl FeatureGate for BundleReputationCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move { self.0.flag_enabled(BUNDLE_REPUTATION_CAPABILITY_FLAG).await })
+    }
+}
+
+/// Gates the AUTOMATED floor ban (`crate::capabilities::floor_ban`): the host-asserted
+/// `system:reputation_floor` actor is attached only while this flag is ON. A plain opt-in flag,
+/// default OFF (unseen / license server unreachable resolve to `false`).
+pub const REPUTATION_AUTO_BAN_FLAG: &str = "waddles.reputation-auto-ban";
+
+/// Production [`FeatureGate`] for [`REPUTATION_AUTO_BAN_FLAG`] -- plain read of
+/// `LicenseClient::flag_enabled` (fail-closed default).
+pub struct ReputationAutoBanGate(Arc<LicenseClient>);
+
+impl ReputationAutoBanGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for ReputationAutoBanGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(REPUTATION_AUTO_BAN_FLAG).await })
     }
 }
 
@@ -476,6 +527,26 @@ impl HarnessMediaGenerationGate {
 impl FeatureGate for HarnessMediaGenerationGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move { self.0.flag_enabled(HARNESS_MEDIA_GENERATION_FLAG).await })
+    }
+}
+
+/// Default-OFF PostHog flag gating the bundle `overlay.publish-surface` host capability
+/// (`surface.publish`: gRPC delivery to svc-presentation). Same key as svc-action's.
+pub const OVERLAY_SURFACES_FLAG: &str = "waddles.overlay-surfaces";
+
+/// Production [`FeatureGate`] for [`OVERLAY_SURFACES_FLAG`] -- plain read of
+/// `LicenseClient::flag_enabled` (fail-closed default).
+pub struct OverlaySurfacesGate(Arc<LicenseClient>);
+
+impl OverlaySurfacesGate {
+    pub fn new(client: Arc<LicenseClient>) -> Self {
+        Self(client)
+    }
+}
+
+impl FeatureGate for OverlaySurfacesGate {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move { self.0.flag_enabled(OVERLAY_SURFACES_FLAG).await })
     }
 }
 
@@ -911,6 +982,20 @@ fn shared_flags_license_client() -> Option<Arc<LicenseClient>> {
     CLIENT
         .get_or_init(|| build_license_client("waddles").ok())
         .clone()
+}
+
+/// The command-latency kill-switch resolver (`waddles.disable-command-latency-telemetry`): `true`
+/// means telemetry is DISABLED. Opt-out convention: an unseen flag leaves the mechanism ON. Under the
+/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would
+/// switch the mechanism off, so the bypass answer is the ENV baseline only.
+pub async fn command_latency_kill_switch_wanted() -> bool {
+    let env = command_latency::switch::env_baseline_disabled();
+    match shared_flags_license_client() {
+        Some(c) if !c.bypass_active() => {
+            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
+        }
+        _ => env,
+    }
 }
 
 /// `crate::telemetry::register_flags_metrics`'s counter, wired in here --
@@ -1808,5 +1893,67 @@ mod tests {
             .with_bypass_domain(BYPASS_DOMAIN);
         let near_miss = apply_deployment_domain(near_miss, Some("evil-waddles.app"));
         assert!(!near_miss.domain_bypassed());
+    }
+}
+
+#[cfg(test)]
+mod capability_gate_default_tests {
+    use super::*;
+
+    /// A client that has never reached a license server (no network is touched at build).
+    fn unseen_client() -> Arc<LicenseClient> {
+        let cfg = LicenseConfig::new("svc-process-test-capability-gates")
+            .expect("default LicenseConfig::new never fails");
+        LicenseClient::new(cfg).expect("LicenseClient::new with a valid default config")
+    }
+
+    /// Every opt-in capability gate is fail-closed (OFF) when its flag was never seen.
+    #[tokio::test]
+    async fn every_opt_in_capability_gate_defaults_off_for_an_unseen_flag() {
+        let c = unseen_client();
+        let gates: Vec<(&str, Box<dyn FeatureGate>)> = vec![
+            ("db", Box::new(BundleDbCapabilityGate::new(Arc::clone(&c)))),
+            (
+                "reputation",
+                Box::new(BundleReputationCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "economy",
+                Box::new(BundleEconomyCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "platform_table",
+                Box::new(BundlePlatformTableCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "gameserver_net",
+                Box::new(BundleGameServerNetCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "object_storage",
+                Box::new(BundleObjectStorageCapabilityGate::new(Arc::clone(&c))),
+            ),
+            (
+                "identity",
+                Box::new(BundleIdentityCapabilityGate::new(Arc::clone(&c))),
+            ),
+            ("ai", Box::new(BundleAiCapabilityGate::new(Arc::clone(&c)))),
+            (
+                "media",
+                Box::new(HarnessMediaGenerationGate::new(Arc::clone(&c))),
+            ),
+        ];
+        assert_eq!(gates.len(), 9);
+        for (name, gate) in gates {
+            assert!(!gate.enabled().await, "{name} gate must default OFF");
+        }
+    }
+
+    /// The bundle egress flag is fail-closed (OFF) for a never-seen flag.
+    #[tokio::test]
+    async fn bundle_egress_flag_defaults_off_for_an_unseen_flag() {
+        use bundle_host_http::egress::FeatureFlag;
+        let flag = BundleEgressFlag::new(unseen_client());
+        assert!(!flag.enabled().await);
     }
 }

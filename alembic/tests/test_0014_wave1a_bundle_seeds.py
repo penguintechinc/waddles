@@ -18,10 +18,9 @@ Additional coverage specific to 0014:
     Postgres rejected it as invalid JSON -- caught by a real `docker run`
     round-trip, not by this test alone, but locked in here so a future edit
     can't silently reintroduce it without a real DB);
-  - every seeded app_id's `process`/`action` entrypoint resolves to a
-    real, already-shipped module file under `core/svc_process/builtin_handlers/` /
-    `core/svc_action/builtin_handlers/` -- the "coded but not routable" guard this
-    migration exists to close (gh-298);
+  - every seeded app_id's `process`/`action` entrypoint appears in the emitted
+    SQL (the on-disk module-file checks were retired with the Python
+    `builtin_handlers/` data plane, commit 08e67f47f);
   - no app_id is seeded twice;
   - `upgrade()`/`downgrade()` are each idempotent when the underlying SQL
     is inspected for `ON CONFLICT`/`IF NOT EXISTS`-equivalent guards.
@@ -40,9 +39,6 @@ import pytest
 _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0014_wave1a_bundle_seeds.py"
 )
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_PROCESS_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_process" / "builtin_handlers"
-_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "builtin_handlers"
 
 # app_id -> (process module name or None, action module name or None).
 # Mirrors the `bundles.<module>:<function>` entrypoint convention; the
@@ -231,42 +227,11 @@ class TestSeededStagesJsonIsValid:
 
 
 class TestEveryEntrypointResolvesToAnExistingModuleFile:
-    """The core "coded but not routable" guard gh-298 exists to close --
-    every entrypoint this migration seeds must resolve to a real module
-    file, not just a plausible-looking string."""
+    """Every entrypoint this migration seeds is present in the emitted SQL.
 
-    def test_process_bundles_directory_exists(self) -> None:
-        assert _PROCESS_BUNDLES_DIR.is_dir(), (
-            f"{_PROCESS_BUNDLES_DIR} does not exist -- test is pointed at the "
-            "wrong repo layout"
-        )
-
-    def test_action_bundles_directory_exists(self) -> None:
-        assert _ACTION_BUNDLES_DIR.is_dir(), (
-            f"{_ACTION_BUNDLES_DIR} does not exist -- test is pointed at the "
-            "wrong repo layout"
-        )
-
-    @pytest.mark.parametrize(
-        "app_id,modules", sorted(EXPECTED_ENTRYPOINT_MODULES.items())
-    )
-    def test_process_and_action_modules_exist(self, app_id, modules) -> None:
-        process_module, action_module = modules
-        assert process_module or action_module, f"{app_id} declares no stage at all"
-
-        if process_module is not None:
-            path = _PROCESS_BUNDLES_DIR / f"{process_module}.py"
-            assert path.is_file(), (
-                f"{app_id}'s process entrypoint references "
-                f"bundles.{process_module}:transform but {path} does not exist"
-            )
-
-        if action_module is not None:
-            path = _ACTION_BUNDLES_DIR / f"{action_module}.py"
-            assert path.is_file(), (
-                f"{app_id}'s action entrypoint references "
-                f"bundles.{action_module}:<fn> but {path} does not exist"
-            )
+    The on-disk "module file exists" checks were removed: the Python
+    `core/svc_*/builtin_handlers/` data plane they pointed at was deleted
+    (commit 08e67f47f), so they could only fail."""
 
     def test_every_seeded_app_id_has_a_process_or_action_entrypoint_in_sql(
         self, upgrade_sql

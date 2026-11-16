@@ -26,6 +26,8 @@ expect_used = "deny"
 # Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
 # Dependency Pinning. Cargo.lock is committed alongside this file.
 [dependencies]
+# Direct pin so the entrypoint can install the process-level CryptoProvider (see src/crypto.rs).
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 clap = { version = "=4.5.51", features = ["derive"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }
@@ -56,7 +58,7 @@ tempfile = "=3.23.0"
 # 2026-09-22, verified to resolve from a fresh CARGO_HOME with
 # `--locked`) -- match it verbatim in any other Rust crate here that
 # needs a penguin-libs package before one publishes to a registry.
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "53e95619f1b3e49e1150b78a125981fcc5905d8a", package = "penguin-bundle-host", version = "=0.5.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "96a5065f1d379ea0cfc7c7716c6eab628138330a", package = "penguin-bundle-host", version = "=0.6.0" }
 
 [dev-dependencies]
 mockito = "=1.7.0"

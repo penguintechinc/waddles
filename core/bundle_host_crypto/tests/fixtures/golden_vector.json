@@ -1,0 +1,24 @@
+{
+  "dek_hex": "0102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f20",
+  "tenant_id": "42",
+  "aad_parts": [
+    "42",
+    "7",
+    "waddles.bot.a",
+    "kv",
+    "counters.total"
+  ],
+  "dek_version": 3,
+  "nonce_hex": "a0a1a2a3a4a5a6a7a8a9aaab",
+  "plaintext_hex": "7b2268656c6c6f223a22776f726c64227d",
+  "data_subkey_hex": "cd26a263f177c5cada25d96f496f495f915bda1ad3ee3faeb2d2e53d434cf9de",
+  "envelope_hex": "fe5742440100000003a0a1a2a3a4a5a6a7a8a9aaabb4697db1b45debb47ac8e278c2a0469781c4d1c0bf5f10c72123f1637e1ed5826d",
+  "blind_context": [
+    "7",
+    "waddles.bot.a",
+    "users",
+    "handle"
+  ],
+  "blind_value_hex": "616c696365",
+  "blind_index_hex": "d3716982d09723cf00ccb84a9868875a8a9e330a5c028e0de2e476d97a86db5c"
+}

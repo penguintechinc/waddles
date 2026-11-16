@@ -49,7 +49,7 @@ spec:
         # API, see critical-rules.md Data Plane) now exists; no longer the shared
         # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
         # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.hubApi.imageTag) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Every deploy
         # now carries a unique per-deploy global.imageTag (alpha SHA8, beta beta-<epoch>), so
         # the old hardcoded Always (a workaround for a stale same-tag `alpha` push) is
@@ -60,6 +60,22 @@ spec:
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        # F3 -- HTTPS-only HTTP listener (the plaintext bind is replaced, not supplemented). hypercorn
+        # floors TLS at 1.2 (1.3 negotiated when offered); ECDSA P-256 cert from the internal CA;
+        # AES-GCM/ChaCha20 suites; HTTP/2 via ALPN (hypercorn h2). A bad cert/key fails startup loud.
+        command:
+        - hypercorn
+        - app:app
+        - --bind
+        - 0.0.0.0:{{ .Values.pipeline.hubApi.port }}
+        - --certfile
+        - /etc/waddlebot/tls/tls.crt
+        - --keyfile
+        - /etc/waddlebot/tls/tls.key
+        - --ciphers
+        - ECDHE+AESGCM:ECDHE+CHACHA20
+        {{- end }}
         ports:
         - name: http
           containerPort: {{ .Values.pipeline.hubApi.port }}
@@ -109,6 +125,7 @@ spec:
         # kms.enabled -- the platform-managed baseline needs none of it.
         {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "hub-api") | nindent 8 }}
         {{- if .Values.hubApi.trustForwardedHost }}
         {{- range .Values.httproute.rules }}
         {{- if contains "hub-api" (.service | toString) }}{{ fail "hubApi.trustForwardedHost=true but an HTTPRoute rule targets hub-api directly; only hub-webui may front it" }}{{ end }}
@@ -180,6 +197,12 @@ spec:
           value: /etc/waddlebot/host-api-tls/tls.crt
         - name: STREAMING_RTC_GRPC_CLIENT_KEY_FILE
           value: /etc/waddlebot/host-api-tls/tls.key
+        # TLS server name verified against the svc-streaming cert SANs (waddlebot.hostApiTlsDesiredDnsNames);
+        # defaults to the Service name from the target, so it always matches a SAN.
+        - name: STREAMING_RTC_GRPC_SERVER_NAME
+          value: {{ .Values.pipeline.hubApi.streamingRtc.serverName | default (printf "%s-svc-streaming" (include "waddlebot.fullname" .)) | quote }}
+        - name: STREAMING_RTC_TIMEOUT_SECONDS
+          value: {{ .Values.pipeline.hubApi.streamingRtc.timeoutSeconds | default 10 | quote }}
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
@@ -218,8 +241,6 @@ spec:
         {{- end }}
         - name: MODULE_NAME
           value: "hub-api"
-        - name: PIPELINE_STAGE
-          value: "hub-api"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.hubApi.port | quote }}
         - name: GRPC_PORT
@@ -240,6 +261,10 @@ spec:
         # above (shared -config/-secrets objects) -- same whole-object envFrom pattern
         # svc-action.yaml/svc-ingest.yaml use for the same keys; no per-key duplicates
         # added here.
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerEnv" . | nindent 8 }}
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
+        {{- end }}
         - name: CONNECTIONS_STATE_TTL_S
           value: {{ .Values.pipeline.hubApi.connectionsStateTtlS | quote }}
         # feature/seaweedfs-object-storage -- least-privilege "hub-api" S3 identity
@@ -259,6 +284,23 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        # T7 platform-secret escrow: dedicated bucket + dedicated identity (own Secret, never the
+        # envFrom'd one) -- hub_api/services/platform_secrets/escrow.py. No bundle or data-plane
+        # identity names this bucket.
+        {{- if .Values.infrastructure.seaweedfs.enabled }}
+        - name: PLATFORM_ESCROW_S3_BUCKET
+          value: {{ .Values.infrastructure.seaweedfs.escrow.bucketName | quote }}
+        - name: PLATFORM_ESCROW_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_ACCESS_KEY_ID
+        - name: PLATFORM_ESCROW_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_SECRET_ACCESS_KEY
+        {{- end }}
         - name: CREDENTIAL_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
@@ -325,22 +367,6 @@ spec:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_DURABLE_PASSWORD
         {{- end }}
-        {{- if .Values.modules.bot.enabled }}
-        - name: MODULE_LOAD_BOT
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.social.enabled }}
-        - name: MODULE_LOAD_SOCIAL
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.customer.enabled }}
-        - name: MODULE_LOAD_CUSTOMER
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.marketing.enabled }}
-        - name: MODULE_LOAD_MARKETING
-          value: "true"
-        {{- end }}
         # Per-environment env baseline (e.g. FLAG_<KEY> feature-flag fallbacks honoured by
         # flask_core when PostHog is unresolved). Free-tier flags only -- license flags are
         # never env-bypassable. Rendered last so an explicit entry here wins on collision.
@@ -348,11 +374,12 @@ spec:
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
-        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http") | nindent 8 }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http" "scheme" (include "waddlebot.transitProbeScheme" .)) | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -366,6 +393,7 @@ spec:
           httpGet:
             path: /ready
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
@@ -385,6 +413,9 @@ spec:
         {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
         {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
         {{- end }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
         - name: credential-manager-ca
           mountPath: /etc/waddlebot/credential-manager
@@ -402,6 +433,9 @@ spec:
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
       {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
       {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if include "waddlebot.transitTlsEnabled" . }}
+      {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-api") | nindent 6 }}
       {{- end }}
       {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
       - name: credential-manager-ca

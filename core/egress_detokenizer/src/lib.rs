@@ -468,6 +468,53 @@ mod tests {
         assert!(!out.text.contains('\n'));
     }
 
+    /// Every HTML-significant character is escaped (ampersand first-class: an unescaped `&`
+    /// would let a name smuggle an entity), and nothing else is touched.
+    #[test]
+    fn overlay_sink_escapes_ampersand_and_both_quote_kinds() {
+        let out = detokenize(
+            "{user:x}",
+            &names(&[("x", "a&b \"c\" 'd' <e>")]),
+            Sink::Overlay,
+        );
+        assert_eq!(out.text, "a&amp;b &quot;c&quot; &#39;d&#39; &lt;e&gt;");
+        for raw in ['<', '>', '"', '\''] {
+            assert!(!out.text.contains(raw), "raw {raw:?} survived");
+        }
+    }
+
+    #[test]
+    fn detokenized_text_exposes_the_wire_text_by_ref_and_by_value() {
+        let t = tokens_unchanged("hi {user:abc}");
+        assert_eq!(t.as_str(), "hi {user:abc}");
+        assert_eq!(t.clone().into_string(), "hi {user:abc}");
+    }
+
+    /// The production adapter's failure mapping over a REAL `HubClient` that cannot
+    /// authenticate (unreadable service-account token): the RPC fails before the network and
+    /// surfaces as `ResolutionUnavailable`, which the egress pass turns into "send the tokens
+    /// unchanged" -- never a name, never a panic.
+    #[tokio::test]
+    async fn hub_client_resolver_maps_an_rpc_failure_to_resolution_unavailable() {
+        let client = hub_client::HubClient::connect_lazy(
+            "http://127.0.0.1:1",
+            "http://127.0.0.1:1",
+            "/nonexistent/sa-token",
+            "identity:display-name:resolve",
+            None,
+        )
+        .expect("a lazy client builds without dialing");
+        let resolver = HubClientResolver(Arc::new(client));
+        let err = resolver
+            .resolve_many("7", vec!["abc".to_string()])
+            .await
+            .expect_err("no service-account token, so the RPC must fail");
+        assert!(matches!(err, DetokenizeError::ResolutionUnavailable(_)));
+        let sent =
+            detokenize_for_egress("hi {user:abc}", "7", Some(&resolver), Sink::Discord).await;
+        assert_eq!(sent.as_str(), "hi {user:abc}");
+    }
+
     #[test]
     fn overlay_sink_html_escapes_the_name() {
         let out = detokenize(

@@ -452,11 +452,14 @@ impl BundleConfigCache {
             tokio::time::sleep(cache.seed_window).await;
             // Cleared BEFORE draining so a scope queued after the drain schedules a new flush.
             cache.seed_scheduled.store(false, Ordering::SeqCst);
-            let keys = cache
-                .pending_seed
-                .lock()
-                .map(|mut p| std::mem::take(&mut *p))
-                .unwrap_or_default();
+            // A poisoned lock still holds the queued keys: recover them rather than silently
+            // dropping the seed batch.
+            let keys = std::mem::take(
+                &mut *cache
+                    .pending_seed
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner()),
+            );
             cache.seed(&keys).await;
         });
     }

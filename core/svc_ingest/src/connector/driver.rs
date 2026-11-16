@@ -813,6 +813,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 next = transport.next_frame() => next,
                 }
             };
+            let first_door = transport.frame_first_door();
             let bytes = match next {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => return (ConnectionEnd::RemoteClosed, frames_ok),
@@ -849,7 +850,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
                 continue;
             }
 
-            let work = self.process_frame(platform, pinned, ctx, bytes, &mut logs);
+            let work = self.process_frame(platform, pinned, ctx, bytes, first_door, &mut logs);
             tokio::pin!(work);
             let mut done: Option<FrameVerdict> = None;
             let mut early_end: Option<ConnectionEnd> = None;
@@ -901,7 +902,42 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
     /// only the invoker/sink (never the transport), so the pump can write a
     /// heartbeat while this is in flight; the transport is told the verdict
     /// afterwards.
+    ///
+    /// The command-latency first door is the instant the transport handed the frame to the driver, or
+    /// the earlier `first_door` the transport resolved itself (HTTP edge stamp). The whole in-task chain (`on-frame` -> sink -> `publish_event`) runs inside the
+    /// scope, so the publish funnel stamps `t0` into the envelope's tracestate (metadata only).
     async fn process_frame(
+        &self,
+        platform: &str,
+        pinned: &PinnedConnector,
+        ctx: &ConnectionCtx,
+        bytes: Vec<u8>,
+        first_door: Option<(u64, command_latency::Door)>,
+        logs: &mut PumpLogs,
+    ) -> FrameVerdict {
+        // A transport that resolved an earlier door (the HTTP edge stamp) wins; otherwise this is the
+        // driver's own frame receipt (`gateway`).
+        let (t0, door) = first_door.unwrap_or_else(|| {
+            (
+                command_latency::stamp::now_ms(),
+                command_latency::Door::Gateway,
+            )
+        });
+        command_latency::first_door::with_first_door(
+            t0,
+            door,
+            self.process_frame_inner(platform, pinned, ctx, bytes, logs)
+                .instrument(tracing::info_span!(
+                    "ingest.receive",
+                    platform = %platform,
+                    "otel.kind" = "consumer",
+                )),
+        )
+        .await
+    }
+
+    /// The body of [`Self::process_frame`], unchanged by the first-door wrapper.
+    async fn process_frame_inner(
         &self,
         platform: &str,
         pinned: &PinnedConnector,

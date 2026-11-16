@@ -20,6 +20,7 @@ vi.mock('@penguintechinc/react-libs', () => ({
 }));
 vi.mock('../../components/GlobalBanner', () => ({ default: () => null }));
 vi.mock('../../components/VendorRequestFooter', () => ({ default: () => null }));
+vi.mock('../../lib/useFeatureFlag', () => ({ useFeatureFlag: () => false }));
 
 const mockAuth = {
   user: { username: 'testuser', displayName: 'Test User' },

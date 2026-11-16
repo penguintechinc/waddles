@@ -19,7 +19,6 @@ const PUBLICAPI_ROWS: readonly ContractRow[] = [
   ['getStreamDetails(entityId)', 'GET /api/v1/public/streams/{entityId}'],
   ['getSignupSettings()', 'GET /api/v1/signup-settings'],
   ['getBanner()', 'GET /api/v1/public/banner'],
-  ['getMusicQueue(communityId)', 'GET /api/v1/public/communities/{communityId}/music-station/queue'],
 ];
 
 const COMMUNITYAPI_ROWS: readonly ContractRow[] = [

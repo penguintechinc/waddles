@@ -266,6 +266,7 @@ fn run(cli: Cli) -> Result<u8, String> {
 }
 
 fn main() -> ExitCode {
+    waddles_ops_cli::crypto::install_default_provider_or_exit();
     init_tracing();
     match run(Cli::parse()) {
         Ok(code) => ExitCode::from(code),

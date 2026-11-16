@@ -31,12 +31,15 @@ from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by 
     app,
     client,
     fake,
+    pid,
+    record_room,
     seed_user,
     user_headers,
     user_uuid,
 )
 
 ROOM_OTHER = "3c2a1b0f-9e8d-4c7b-8a6f-5e4d3c2b1a09"
+VICTIM = "9c1d2e3f-0a1b-4c2d-8e3f-4a5b6c7d8e9f"
 
 
 def _json_headers(headers: dict[str, str]) -> dict[str, str]:
@@ -52,7 +55,7 @@ def _two_communities(overlay_db: Any, fake: FakeRooms) -> tuple[dict[str, str], 
     """Admin+member of community B only; the real room ROOM lives in community A."""
     cid_a = seed_community(overlay_db, name="community-a")
     fake.seed_room(cid_a)  # ROOM belongs to A
-    fake.seed_participant(cid_a, user_uuid(901))
+    fake.seed_participant(cid_a, VICTIM)
     headers_b, cid_b = user_headers(
         overlay_db,
         scope=f"{SCOPE_ADMIN} {SCOPE_READ} {SCOPE_WRITE}",
@@ -71,8 +74,8 @@ class TestCrossCommunityIsolation:
             ("GET", "", None),
             ("DELETE", "", None),
             ("GET", "/participants", None),
-            ("POST", "/kick", {"identity": user_uuid(901)}),
-            ("POST", "/mute", {"identity": user_uuid(901)}),
+            ("POST", "/kick", {"identity": VICTIM}),
+            ("POST", "/mute", {"identity": VICTIM}),
             ("POST", "/lock", None),
             ("POST", "/mute-all", None),
             ("GET", "/raised-hands", None),
@@ -100,7 +103,7 @@ class TestCrossCommunityIsolation:
         # A's room is untouched: still there, unlocked, participant not kicked.
         state = fake.rooms[(str(cid_a), ROOM)]
         assert state["locked"] is False
-        assert user_uuid(901) in state["members"]
+        assert VICTIM in state["members"]
         assert all(req.community_id == str(cid_b) for _, req, _ in fake.calls)
 
     @pytest.mark.parametrize("action", ["join", "leave", "raise-hand", "lower-hand"])
@@ -173,18 +176,19 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
         await client.post(
             f"/api/v1/admin/{cid_b}/calls/rooms/{ROOM}/kick",
             headers=_json_headers(headers),
-            data=json.dumps({"identity": user_uuid(901), "community_id": cid_a}),
+            data=json.dumps({"identity": VICTIM, "community_id": cid_a}),
         )
-        fake.seed_room(cid_b, ROOM_OTHER)  # B's own room: the join reaches the RPC
+        fake.seed_room(cid_b, ROOM_OTHER)  # B own room: the join reaches the RPC
+        record_room(overlay_db, cid_b, ROOM_OTHER)
         await client.post(
             f"/api/v1/community/{cid_b}/interact/voice/rooms/{ROOM_OTHER}/join",
             headers=_json_headers(headers),
-            data=json.dumps({"community_id": cid_a, "participant_id": user_uuid(901)}),
+            data=json.dumps({"community_id": cid_a, "participant_id": VICTIM}),
         )
         assert {req.community_id for _, req, _ in fake.calls} == {str(cid_b)}
         join = next(req for name, req, _ in fake.calls if name == "JoinRoom")
-        assert join.participant_id == user_uuid(902)  # the caller, not the body's participant
-        assert fake.rooms[(str(cid_a), ROOM)]["members"].keys() == {user_uuid(901)}
+        assert join.participant_id == pid(cid_b, 902)  # the caller, not the body's participant
+        assert fake.rooms[(str(cid_a), ROOM)]["members"].keys() == {VICTIM}
 
     @pytest.mark.parametrize(
         "path_suffix,body",
@@ -224,7 +228,7 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
     ) -> None:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         fake.seed_room(cid_b, ROOM_OTHER)
-        fake.seed_participant(cid_b, user_uuid(902), ROOM_OTHER)
+        fake.seed_participant(cid_b, pid(cid_b, 902), ROOM_OTHER)
         body = await (
             await client.get(
                 f"/api/v1/admin/{cid_b}/calls/rooms/{ROOM_OTHER}/participants", headers=headers

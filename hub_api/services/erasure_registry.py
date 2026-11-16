@@ -222,6 +222,10 @@ RULES: tuple[Rule, ...] = (
     core("bundle_reputation_tenant_scores"),
     core("bundle_reputation_soft_bans"),
     core("bundle_reputation_adjustments"),
+    # Automated hard-ban outbox (alembic 0114): refused rows deleted, confirmed bans pseudonymised
+    # (never deleted), undelivered bans kept -- `floor_ban_erasure` via the SECURITY DEFINER
+    # function `reputation_floor_ban_erase_subject` (hub-api has no DELETE/UPDATE on the table).
+    core("bundle_reputation_floor_bans"),
     core("ephemeral_pseudonyms"),
     # --- retained: Art. 5(2) / 17(3)(e) evidence -------------------------------------------------
     retain("cookie_consent", "consent record (Art. 5(2)); ERASURE_RETAINED_TABLES"),
@@ -482,6 +486,17 @@ RULES: tuple[Rule, ...] = (
         "overlay_access_log",
         "ip_address",
         reason="anonymous overlay viewer log (overlay key + IP), no user id",
+    ),
+    exempt(
+        "overlay_scene_components",
+        "display_name",
+        reason="widget label copied from the bundle manifest declaration at placement; no person "
+        "input, table has no user-keyed or *_by column",
+    ),
+    exempt(
+        "overlay_widget_registry",
+        "display_name",
+        reason="widget label declared by the bundle manifest (overlay_widgets), not a person",
     ),
     exempt("permission_scopes", "display_name", reason=_ORG_NAME),
     exempt("server_link_requests", "initiated_by", reason="enum: community | platform"),

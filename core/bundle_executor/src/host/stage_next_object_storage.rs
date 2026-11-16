@@ -283,3 +283,6 @@ mod tests {
         assert!(check_str("k", &"x".repeat(1025)).is_err());
     }
 }
+
+#[cfg(test)]
+mod round_trip_tests;

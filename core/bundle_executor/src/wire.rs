@@ -751,6 +751,7 @@ mod tests {
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 },
                 EchoHandlerRef(handler_for_conn),
                 "test-peer",
@@ -813,6 +814,7 @@ mod tests {
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 },
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
@@ -853,6 +855,7 @@ mod tests {
                 runtime: "runc".to_string(),
                 verified: false,
             },
+            executor_id: None,
         }
     }
 

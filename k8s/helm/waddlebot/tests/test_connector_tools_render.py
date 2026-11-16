@@ -90,7 +90,8 @@ def test_flag_on_renders_env_port_and_tls_volumes() -> None:
 def test_shared_cert_sans_are_not_widened_and_dedicated_secrets_are_minted() -> None:
     res = _render(*_ON)
     assert res.returncode == 0, res.stderr[-500:]
-    docs = [d for d in yaml.safe_load_all(res.stdout) if d]
+    from provision_harness import with_provisioned  # type: ignore[import-not-found]
+    docs = with_provisioned([d for d in yaml.safe_load_all(res.stdout) if d])
     secrets = {d["metadata"]["name"]: d for d in docs if d.get("kind") == "Secret"}
     own = [n for n in secrets if n.endswith("-svc-ingest-host-api-tls")]
     cli = [n for n in secrets if n.endswith("-ingest-executor-tls")]
@@ -102,7 +103,8 @@ def test_shared_cert_sans_are_not_widened_and_dedicated_secrets_are_minted() -> 
          "--values", str(_CHART_DIR / "values-alpha.yaml")],
         capture_output=True, text=True, check=False,
     )
-    base_shared = next(d for d in yaml.safe_load_all(base.stdout) if d and d.get("kind") == "Secret"
+    base_docs = with_provisioned([d for d in yaml.safe_load_all(base.stdout) if d])
+    base_shared = next(d for d in base_docs if d.get("kind") == "Secret"
                        and d["metadata"]["name"].endswith("-host-api-tls"))
     assert base_shared["metadata"]["annotations"]["waddlebot.io/cert-sans-sha256"] == sans
 

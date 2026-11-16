@@ -21,9 +21,9 @@ Configuration (all from the environment, rendered by the Helm chart into hub-api
 - `STREAMING_RTC_GRPC_SERVER_NAME` -- optional TLS server-name override.
 
 Every call mints a short-lived (60s) ES256 JWT for hub-api's own SPIFFE identity with the
-single scope the RPC needs (`streaming.rooms:read|write|moderate`) via the app's
-`ServiceJwtIssuer`; the downstream verifies it before parsing anything. Every request carries
-`api_version="v1"`; the server refuses anything else.
+single scope the RPC needs (`streaming.rooms:read|create|write|moderate`; CreateRoom has its
+own `create`) via the app's `ServiceJwtIssuer`; the downstream verifies it before parsing
+anything. Every request carries `api_version="v1"`; the server refuses anything else.
 
 Raw gRPC failures are translated to `RoomsRpcError(http_status, message, code)` -- an explicit
 HTTP status per failure class, never a masked success (an unknown room is 404, a refused scope
@@ -66,6 +66,7 @@ HUB_API_SERVICE = "hub-api"
 API_VERSION = "v1"
 
 SCOPE_READ = "streaming.rooms:read"
+SCOPE_CREATE = "streaming.rooms:create"
 SCOPE_WRITE = "streaming.rooms:write"
 SCOPE_MODERATE = "streaming.rooms:moderate"
 
@@ -98,6 +99,10 @@ ROUTE_RPCS: dict[tuple[str, str], str] = {
     ("POST", f"{_MEMBER}/<room_name>/leave"): "LeaveRoom",
     ("POST", f"{_MEMBER}/<room_name>/raise-hand"): "RaiseHand",
     ("POST", f"{_MEMBER}/<room_name>/lower-hand"): "LowerHand",
+    (
+        "GET",
+        f"{_COMMUNITIES}/<int:community_id>/calls/rooms/<room_id>/participants",
+    ): "ListParticipants",
     ("GET", f"{_COMMUNITIES}/<int:community_id>/calls/rooms/<room_id>/hands/mine"): "ListHands",
     ("GET", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "ListRooms",
     ("POST", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "CreateRoom",
@@ -474,7 +479,7 @@ class RoomsClient:
         """
         resp = await self._call(
             "CreateRoom",
-            SCOPE_WRITE,
+            SCOPE_CREATE,
             rooms_pb2.CreateRoomRequest(
                 api_version=API_VERSION,
                 community_id=str(community_id),

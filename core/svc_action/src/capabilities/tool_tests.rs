@@ -45,6 +45,7 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,
@@ -215,6 +216,7 @@ async fn world_scoped(
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 }),
             ),
         )
@@ -749,7 +751,7 @@ async fn pool_exhaustion_and_malformed_envelope_are_typed() {
 
 #[tokio::test]
 async fn unwired_tool_and_unknown_op_fail_loudly() {
-    let bare = StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+    let bare = StageCapabilities::<_, redis::aio::ConnectionManager>::new(
         FakeRelayQueue::default(),
         test_egress(),
         Arc::new(Mutex::new(UsageBatcher::new())),

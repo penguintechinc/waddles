@@ -77,11 +77,10 @@ const CONTROL_CONN_RESPONSE_TIMEOUT: Duration = Duration::from_secs(2);
 async fn connect_with_response_timeout(
     client: &redis::Client,
     response_timeout: Duration,
-) -> Result<redis::aio::MultiplexedConnection, redis::RedisError> {
-    let config = redis::AsyncConnectionConfig::new().set_response_timeout(Some(response_timeout));
-    client
-        .get_multiplexed_async_connection_with_config(&config)
-        .await
+) -> Result<redis::aio::ConnectionManager, redis::RedisError> {
+    let config =
+        redis::aio::ConnectionManagerConfig::new().set_response_timeout(Some(response_timeout));
+    client.get_connection_manager_with_config(config).await
 }
 
 /// Builds a `redis::Client` for `cfg`'s transport, mirroring
@@ -137,7 +136,7 @@ pub trait RelaySource: Send {
     async fn brpop_one(&mut self) -> Result<Option<String>, String>;
 }
 
-impl RelaySource for redis::aio::MultiplexedConnection {
+impl RelaySource for redis::aio::ConnectionManager {
     async fn brpop_one(&mut self) -> Result<Option<String>, String> {
         // `redis::AsyncCommands::brpop` (also named `brpop`, brought into
         // scope by the `use` above) would otherwise be ambiguous with this
@@ -252,13 +251,13 @@ pub trait ReplayGuard: Send + Sync {
 /// The production [`ReplayGuard`]: `SET <key> 1 NX PX <ttl>` on the existing
 /// Valkey (a connection that is not the one blocked in `BRPOP`).
 pub struct ValkeyReplayGuard {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyReplayGuard {
     /// Wraps a dedicated (non-blocking) connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }
@@ -772,13 +771,13 @@ pub trait DrainControl: Send + Sync {
 /// command behind a blocking pop, so the drain opens a second connection for
 /// these writes).
 pub struct ValkeyDrainControl {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyDrainControl {
     /// Wraps a dedicated control connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }
@@ -815,7 +814,7 @@ impl DrainControl for ValkeyDrainControl {
 /// A Valkey list queue with a caller-chosen key (the Twitch
 /// [`RelaySource`] impl on the bare connection hardcodes its key).
 pub struct ListQueue {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     key: &'static str,
 }
 
@@ -904,6 +903,23 @@ async fn handle_discord_entry<C: DrainControl, X: ActionExecutor, G: ReplayGuard
     // its result). An unavailable check does not execute and acks `failed`.
     let claim = claim_once(guard, "discord", op, &stamp).await;
     if matches!(claim, Err(SenderError::Rejected { .. })) {
+        return;
+    }
+    // Command-latency canary egress sink: a stamp-verified, replay-claimed `chat.send` that is
+    // EXACTLY the canary's (numeric tenant + numeric community + sentinel channel) is acknowledged
+    // without any platform call -- the synthetic command's "outbound" lands here, never in Discord.
+    // The match is exact on all three, so no real community's send can be swallowed.
+    if claim.is_ok() && crate::canary::sink_matches(&entry) {
+        tracing::info!(
+            platform = "discord",
+            op,
+            "canary sink: acknowledged without a platform call"
+        );
+        if let Some(op_id) = &entry.op_id {
+            if let Err(err) = ctl.post_ack(op_id, &ack_payload(&Ok(None))).await {
+                tracing::error!(platform = "discord", op, error = %err, "canary sink: failed to post the op result; the canary will time out");
+            }
+        }
         return;
     }
     // The stamp gate above ran first; the executor (when configured) then
@@ -2074,12 +2090,11 @@ mod tests {
     async fn real_valkey_replay_guard_is_atomic_single_use_with_ttl() {
         const RACERS: usize = 32;
         let (client, prefix) = real_valkey().await;
-        let guard =
-            ValkeyReplayGuard::new(client.get_multiplexed_async_connection().await.unwrap());
+        let guard = ValkeyReplayGuard::new(client.get_connection_manager().await.unwrap());
         let key = format!("{prefix}:a");
         assert!(guard.claim(&key, 400).await.unwrap(), "first claim wins");
         assert!(!guard.claim(&key, 400).await.unwrap(), "duplicate loses");
-        let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+        let mut conn = client.get_connection_manager().await.unwrap();
         let pttl: i64 = redis::cmd("PTTL")
             .arg(&key)
             .query_async(&mut conn)
@@ -3339,7 +3354,8 @@ mod tests {
         use wiremock::matchers::{method, path};
         use wiremock::{Mock, MockServer, ResponseTemplate};
         // Tenant 7 is the default tenant here, so the env-token sender serves it.
-        crate::tenant_discord::set_default_tenant_id(7);
+        let _default =
+            crate::tenant_discord::test_default_tenant::DefaultTenantGuard::hold(7).await;
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/channels/1/messages"))
@@ -3438,8 +3454,7 @@ mod tests {
         let url = std::env::var("VALKEY_URL")
             .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
         let client = redis::Client::open(url).unwrap();
-        let guard =
-            ValkeyReplayGuard::new(client.get_multiplexed_async_connection().await.unwrap());
+        let guard = ValkeyReplayGuard::new(client.get_connection_manager().await.unwrap());
         let queue = FakeQueue {
             payloads: payloads.into_iter().map(|p| Ok(Some(p))).collect(),
             idx: AtomicUsize::new(0),
@@ -3673,6 +3688,13 @@ GRANT SELECT (tenant_id, pseudonym, handle) ON ephemeral_pseudonyms TO {role};
         async fn drain_one(egress: &Egress, text: &str, tenant: i64) -> String {
             use wiremock::matchers::{method, path};
             use wiremock::{Mock, MockServer, ResponseTemplate};
+            // The env-token sender serves ONLY the default tenant (fail-closed since #1289), and
+            // this drain has no per-tenant executor: make the op's tenant the default for this
+            // run. What is under test is the detokenizer's tenant scoping, not that gate (which
+            // `tenant_discord`/the drain's own tests cover); the guard keeps parallel tests from
+            // racing the process-wide default id.
+            let _default =
+                crate::tenant_discord::test_default_tenant::DefaultTenantGuard::hold(tenant).await;
             let server = MockServer::start().await;
             Mock::given(method("POST"))
                 .and(path("/channels/1/messages"))
@@ -3711,12 +3733,8 @@ GRANT SELECT (tenant_id, pseudonym, handle) ON ephemeral_pseudonyms TO {role};
                     .expect("valkey"),
                 key,
             };
-            let guard = ValkeyReplayGuard::new(
-                client
-                    .get_multiplexed_async_connection()
-                    .await
-                    .expect("valkey"),
-            );
+            let guard =
+                ValkeyReplayGuard::new(client.get_connection_manager().await.expect("valkey"));
             let ctl = FakeCtl::default();
             let (tx, rx) = oneshot::channel();
             let pins = test_pin_keys();

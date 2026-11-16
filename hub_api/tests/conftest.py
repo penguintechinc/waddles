@@ -111,6 +111,7 @@ from services.schema import (
     bind_tenant_tables,
     bind_token_billing_tables,
 )
+from services.scope_registry import MODERATOR_SEED_SCOPES
 
 # Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
 # in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
@@ -137,21 +138,47 @@ _TEST_SIGNING_KEY_ID = "test-key-1"
 
 
 @pytest.fixture(autouse=True)
-def bundle_signing_test_env(monkeypatch: Any) -> None:
+def bundle_signing_test_env(monkeypatch: Any) -> Any:
     """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
 
     `bundle_approval_service.approve_version()` (spec SS5.6, artifact
-    signing) fails closed without `BUNDLE_SIGNING_PRIVATE_KEY`/
-    `BUNDLE_SIGNING_KEY_ID` set -- rather than mock signing away across
-    the ~30 existing `approve_version()`/`seed_one()` call sites in this
-    suite, this autouse fixture makes REAL Ed25519 signing happen on every
-    approval, matching this codebase's own "prove the wiring, don't fake
-    it" standard for security-sensitive code. A test specifically
-    exercising the "no key configured" failure path removes these with
-    `monkeypatch.delenv(...)` itself.
+    signing) fails closed without a key configured -- rather than mock
+    signing away across the ~30 existing `approve_version()`/`seed_one()`
+    call sites in this suite, this autouse fixture makes REAL Ed25519
+    signing happen on every approval, seeding both the `platform_vault`
+    process cache (`SecretType.BUNDLE_SIGNING`) and the legacy env vars.
+    A test specifically exercising the "no key configured" failure path
+    clears the process cache (`get_process_cache().seed(())`) and/or
+    removes env vars itself.
     """
+    import uuid
+
+    from services.platform_secrets.bootstrap import get_process_cache
+    from services.platform_secrets.cache import CachedSecret
+    from services.platform_secrets.registry import SecretType
+    from services.platform_secrets.repository import STATE_ACTIVE
+
     monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
     monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+    cache = get_process_cache()
+    cache.seed(
+        [
+            CachedSecret(
+                secret_type=int(SecretType.BUNDLE_SIGNING),
+                scope_id=None,
+                version=1,
+                state=STATE_ACTIVE,
+                kid=_TEST_SIGNING_KEY_ID,
+                public_id=uuid.UUID(int=1),
+                public_material=None,
+                activated_at=None,
+                verify_until=None,
+                plaintext=b"t" * 32,
+            )
+        ]
+    )
+    yield
+    cache.seed(())
 
 
 @pytest.fixture(autouse=True)
@@ -455,13 +482,82 @@ def seed_community(
     return community_id
 
 
+_ROLE_KINDS = {"community-admin": 1, "community-owner": 1, "admin": 1, "moderator": 2}
+
+
+def role_kind_fields(name: str) -> dict[str, Any]:
+    """`is_system`/`role_kind` for a seeded role NAME, as the 0117 insert trigger sets them."""
+    kind = _ROLE_KINDS.get(name, 0)
+    return {"is_system": kind != 0, "role_kind": kind}
+
+
+def _seed_kind_role(dal: Any, community_id: int, name: str) -> int | None:
+    """Create (once) the predefined role row for `name`, as the 0117 trigger does for real seeding.
+
+    Authorization reads scopes from `community_roles`, so a member seeded by NAME alone holds
+    nothing; admin/owner get the admin kind (computed full scope set), moderator the moderator kind.
+    Names with no predefined kind return None (a bare member row, no scopes).
+    """
+    kind = _ROLE_KINDS.get(name)
+    if kind is None or "community_roles" not in dal.tables:
+        return None
+    existing = (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
+        .select()
+        .first()
+    )
+    if existing is not None:
+        return int(existing.id)
+    scopes = (
+        ["community:manage_channels", "channels:moderate", *MODERATOR_SEED_SCOPES]
+        if kind == 2
+        else []
+    )
+    return int(
+        dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            is_system=True,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+    )
+
+
 def seed_membership(
     overlay_db: Any, *, community_id: int, user_id: int, role: str = "community-owner"
 ) -> None:
     """Insert one active `community_members` row for `user_id` in `community_id`."""
     dal = overlay_db.dal
+    role_id = _seed_kind_role(dal, community_id, role)
     dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role=role, is_active=True
+        community_id=community_id,
+        user_id=str(user_id),
+        role=role,
+        is_active=True,
+        community_role_id=role_id,
+    )
+    dal.commit()
+
+
+def seed_scoped_member(
+    overlay_db: Any, *, community_id: int, user_id: int, scopes: list[str], name: str = "custom"
+) -> None:
+    """Active member holding a CUSTOM role with exactly `scopes` (no predefined kind, no extras)."""
+    dal = overlay_db.dal
+    role_id = dal.community_roles.insert(
+        community_id=community_id,
+        name=f"{name}{user_id}",
+        is_system=False,
+        role_kind=0,
+        base_claims={"scopes": scopes},
+    )
+    dal.community_members.insert(
+        community_id=community_id,
+        user_id=str(user_id),
+        role=name,
+        is_active=True,
+        community_role_id=role_id,
     )
     dal.commit()
 
@@ -704,6 +800,8 @@ def lifecycle_db(tmp_path: Any) -> Any:
     role_id = dal.community_roles.insert(
         community_id=community_id,
         name="admin",
+        is_system=True,
+        role_kind=1,
         base_claims={"scopes": ["community:manage_members"]},
     )
     dal.community_members.insert(
@@ -792,6 +890,14 @@ def make_user_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG)
     )
 
 
+_LEGACY_ADMIN_ROLES = {"super_admin", "platform-admin"}
+
+
+def _with_global_admin_scope(scope: str) -> str:
+    """Add the `users:admin` global-admin scope (the real token bypass authority, not `roles`)."""
+    return " ".join(sorted({*scope.split(), "users:admin"}))
+
+
 def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG) -> str:
     """Mint a JWT with `roles=["super_admin"]` -- `sub` matches a `seed_super_admin()` row.
 
@@ -811,7 +917,7 @@ def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENAN
         roles=["super_admin"],
         secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope),
     )
 
 
@@ -832,7 +938,7 @@ def make_user_token_with_roles(
         roles=roles,
         secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope) if set(roles) & _LEGACY_ADMIN_ROLES else scope,
     )
 
 
@@ -1738,6 +1844,22 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("description", String(100)),
         Column("registered_at", DateTime),
         UniqueConstraint("tenant_id", "community_id", "app_id", "command"),
+    )
+    # bundle_precompile_requests (migration 0108) -- AOT precompile queue, enqueued by the
+    # approval/signing paths. sqlite mirror; the lease SQL is Postgres-only and proven in
+    # alembic/tests/test_0108_bundle_precompile_requests.py.
+    Table(
+        "bundle_precompile_requests",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("artifact_digest", String(80), nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(64), nullable=False),
+        Column("requested_at", DateTime),
+        Column("claimed_at", DateTime),
+        Column("attempts", Integer, nullable=False, server_default="0"),
+        Column("last_error", String(500)),
+        UniqueConstraint("artifact_digest"),
     )
     # app_global_installs / bundle_tenant_availability (migration 0027) --
     # GLOBAL and TENANT tiers of the App Bundle 3-tier split

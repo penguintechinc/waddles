@@ -132,16 +132,19 @@ def diff_versions(
         old_versions = old.get(name)
         if old_versions is None:
             continue  # brand-new package -- always fine
-        if sorted(old_versions) == sorted(new_versions):
+        removed = sorted(set(old_versions) - set(new_versions))
+        added = sorted(set(new_versions) - set(old_versions))
+        if not removed:
+            # Every previously-resolved version is still present: extra versions of the same
+            # package (a second semver-major pulled in by a new dependency) are additions.
             continue
-        for old_v, new_v in zip(sorted(old_versions), sorted(new_versions)):
-            if old_v != new_v:
-                changes.append((name, old_v, new_v))
-        # Length mismatch beyond the zipped pairs (version added/removed at
-        # a cardinality the zip didn't cover) -- flag the extras too.
-        if len(new_versions) > len(old_versions):
-            for extra in sorted(new_versions)[len(old_versions):]:
-                changes.append((name, "(none)", extra))
+        for old_v, new_v in zip(removed, added):
+            changes.append((name, old_v, new_v))
+        # An old version vanished with no replacement (or more vanished than were added).
+        for old_v in removed[len(added):]:
+            changes.append((name, old_v, "(removed)"))
+        for extra in added[len(removed):]:
+            changes.append((name, "(none)", extra))
     return changes
 
 

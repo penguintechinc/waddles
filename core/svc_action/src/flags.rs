@@ -37,12 +37,22 @@ pub const EGRESS_VIA_DISPATCHER_FLAG: &str = "waddles.core.egress-via-dispatcher
 /// OFF ⇒ every egress call is denied `feature_disabled`.
 pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 
+/// Gates the bundle `overlay.publish-surface` host capability (`crate::surface`). Default OFF
+/// (unseen/absent denies `feature_disabled`), the standard opt-in shape.
+pub const OVERLAY_SURFACES_FLAG: &str = "waddles.overlay-surfaces";
+
 /// Gates the bundle `db` host capability (`crate::capabilities::
 /// StageCapabilities::handle_db`) -- same key and same plain opt-in shape
 /// (unseen/OFF denies `feature_disabled`) as `core/svc_process/src/
 /// license.rs::BUNDLE_DB_CAPABILITY_FLAG`; both stages gate on the
 /// identical flag so enabling `db` is one PostHog toggle, not two.
 pub const BUNDLE_DB_CAPABILITY_FLAG: &str = "waddles.bundle-db-capability";
+
+/// The automated reputation floor-ban kill switch (default OFF). The process stage refuses to
+/// enqueue and THIS stage's outbox dispatcher does not sweep while it is OFF, so a queued ban never
+/// reaches a platform with the flag off (rows stay queued, nothing is lost). The durable SQL switch
+/// (`reputation_floor_ban_halted`) is checked by both stages in addition.
+pub const REPUTATION_AUTO_BAN_FLAG: &str = "waddles.reputation-auto-ban";
 
 /// Opt-out kill-switch for the DB-driven active-bundle loader
 /// (`crate::bundle_loader`) -- **inverted from the retired
@@ -179,6 +189,42 @@ pub fn db_bundle_config_flag(
 ) -> Arc<dyn FeatureFlag> {
     match license {
         Some(client) => boxed(DisableDbBundleConfigFlag::new(Arc::clone(client))),
+        None => boxed(StaticFlag(true)),
+    }
+}
+
+/// Opt-out kill switch for executor slot sharding
+/// (`bundle_active_set::sharding`, executor scale-out phase 1): unseen /
+/// OFF / license server unreachable = sharding ON (each app loads only on
+/// its 2 owner executors); ON = legacy broadcast to every executor. Same
+/// key `core/svc_process/src/license.rs` gates on.
+pub const DISABLE_EXECUTOR_SHARDING_FLAG: &str = "waddles.disable-executor-sharding";
+
+/// Production [`FeatureFlag`] for [`DISABLE_EXECUTOR_SHARDING_FLAG`]:
+/// `enabled()` answers "is sharding on?" (negated raw flag); a bypassed
+/// client reads as sharding ON (see [`DisableDbBundleConfigFlag`] for why
+/// bypass must be checked first).
+pub struct ExecutorShardingFlag(Arc<penguin_licensing::LicenseClient>);
+
+impl FeatureFlag for ExecutorShardingFlag {
+    fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            if self.0.bypass_active() {
+                return true;
+            }
+            !self.0.flag_enabled(DISABLE_EXECUTOR_SHARDING_FLAG).await
+        })
+    }
+}
+
+/// The sharding [`FeatureFlag`] for `crate::changelog_consumer::run`: the
+/// real kill switch over a license client, or "sharding ON" (= flag unseen)
+/// when no license client is available.
+pub fn executor_sharding_flag(
+    license: &Option<Arc<penguin_licensing::LicenseClient>>,
+) -> Arc<dyn FeatureFlag> {
+    match license {
+        Some(client) => boxed(ExecutorShardingFlag(Arc::clone(client))),
         None => boxed(StaticFlag(true)),
     }
 }
@@ -519,6 +565,20 @@ pub async fn resolve_flag_with<F: FlagSource>(
 fn shared_flags_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> {
     static CLIENT: OnceLock<Option<Arc<penguin_licensing::LicenseClient>>> = OnceLock::new();
     CLIENT.get_or_init(crate::build_license_client).clone()
+}
+
+/// The command-latency kill-switch resolver (`waddles.disable-command-latency-telemetry`): `true`
+/// means telemetry is DISABLED. Opt-out convention: an unseen flag leaves the mechanism ON. Under the
+/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would
+/// switch the mechanism off, so the bypass answer is the ENV baseline only.
+pub async fn command_latency_kill_switch_wanted() -> bool {
+    let env = command_latency::switch::env_baseline_disabled();
+    match shared_flags_license_client() {
+        Some(c) if !c.bypass_active() => {
+            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
+        }
+        _ => env,
+    }
 }
 
 /// `crate::telemetry::register_flags_metrics`'s counter, wired in here --

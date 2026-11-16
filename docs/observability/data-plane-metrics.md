@@ -66,6 +66,8 @@ Guest op strings are folded through an allow-list (`KNOWN_OPS`, else `other`); t
 | `waddles_sandbox_trip_total` | counter | `stage, app_id, limit` | executor-reported trips: `timeout`, `memory`, `trap`, `denied` |
 | `waddles_spine_dlq_total` | counter | `stage, reason` | dead-letter writes by the record's `error.kind` |
 | `waddles_tenant_boundary_violations_total` | counter | `stage, reason` | §5.11 hop-verification failures |
+| `waddles_floor_ban_enqueue_total` | counter | `stage, scope, result` | process-stage automated floor-ban outbox enqueues. `scope`: `community_hard_floor`, `tenant_floor`; `result`: `queued`, `known`, `rate_limited` (alert: quota hit), `refused`, `error` |
+| `waddles_floor_ban_dispatch_total` | counter | `stage, result` | action-stage automated floor-ban outbox deliveries. `result`: `done` (sender-confirmed), `failed` (retry scheduled), `refused`, `dead` (attempts exhausted: ALERT), `lease_lost`, `store_error` |
 | `waddles_identity_decrypt_failures_total` | counter | `stage, reason` | inbound identity-field decrypt failures (`dek_unavailable`, `dek_unconfigured`, `aead`, `bad_envelope`, `not_an_envelope`); the event is dead-lettered (`IDENTITY_DECRYPT_FAILED`), never dropped |
 | `waddles_process_tokenize_memo_total` | counter | `stage, result` | **process only** — per-message PII-tokenization memo lookups (`core/svc_process/src/tokenize_memo.rs`). `result`: `miss` (this consumer ran the tokenization and the hub-api mint), `hit` (reused a completed entry), `inflight_wait` (joined another consumer's in-flight tokenization), `bypass` (memo skipped, tokenized directly). Healthy: `miss` ≈ distinct messages, `hit + inflight_wait` ≈ messages × (consuming apps − 1) |
 | `waddles_process_tokenize_mint_calls_total` | counter | `stage, outcome` | **process only** — hub-api `MintEphemeralPseudonyms` calls issued by the tokenization pass; `outcome`: `ok`, `error`. Mint calls per message = this ÷ `waddles_process_tokenize_memo_total{result="miss"}` (must be ≤ 1) |
@@ -115,7 +117,16 @@ Notes:
 | `waddles_executor_host_call_seconds` | histogram | `capability, op, result` | host-call round trip executor→stage→executor; `result`: `ok`, `denied`, `error`, `connection_lost`, `backpressure`, `malformed` |
 | `waddles_executor_sandbox_trip_total` | counter | `app_id, limit` | `timeout`, `memory`, `trap` |
 | `waddles_executor_invocations_active` | gauge (up/down) | — | guests currently executing (decrements on every exit path) |
-| `waddles_executor_bundles_loaded` | gauge | — | resident compiled components (distinct digests); explicit `0` after a disconnect wipe |
+| `waddles_executor_bundles_loaded` | gauge | — | digests in one stage's registry; explicit `0` after a disconnect wipe |
+| `executor_loaded_modules` | gauge | — | compiled modules resident in the process-wide shared cache (all stages, executor-scale T1) |
+| `executor_memory_bytes` | gauge | — | estimated resident compiled-code bytes in the shared cache (budget `EXECUTOR_MEMORY_BUDGET_MB`) |
+| `executor_load_duration_seconds` | histogram | `source, result` | time to make one module resident; `source`: `aot` (verified `.cwasm` deserialize), `compile` (JIT) |
+| `executor_precompile_fallback_total` | counter | `reason` | AOT misses that fell back to JIT (logged at ERROR); `reason`: `fetch`, `signature`, `deserialize` |
+| `executor_module_evictions_total` | counter | — | idle unpinned modules evicted (LRU) to honour the memory budget; they reload on their next call |
+| `waddles_executor_warm_pool_total` | counter | `result` = `hit` / `miss` / `fill_failed` | warm-pool lookups per stage invoke (hit = a prewarmed one-shot guest was taken, skipping instantiation; miss = pool enabled but empty -> cold instantiate; fill_failed = a background prewarm could not instantiate and that digest now serves cold). Absent entirely when the pool is off |
+| `waddles_executor_warm_pool_size` | gauge | — | prewarmed guests ready right now across every digest |
+| `waddles_executor_prewarm_seconds` | histogram | — | OFF-request-path instantiate time of one warm-pool guest (the cost the pool moved off the path); `waddles_executor_instantiate_seconds` keeps measuring the on-path cost (near zero on a hit) |
+| `executor_partition_unroutable_total` | counter | `stage`, `class` = `compiled` / `scripted` / `unknown_language` | active bundles, per reconcile tick, that no live executor of the right language class can host (reported by svc-process / svc-action; each is also logged at ERROR when the set changes) |
 | `waddles_executor_connection_attempts_total` | counter | `result`, `stage` | `connected`, `failed` |
 | `waddles_executor_connection_up` | gauge | `stage` | `1` while that stage's host-API session is established, explicit `0` otherwise (one series per configured stage) |
 | `waddles_executor_session_seconds` | histogram | `stage` | length of each established session |
@@ -160,3 +171,22 @@ Fail-closed is unchanged: no key / no token means the event is dead-lettered, ne
 | Capability host crates (`bundle_host_kv`, `_db`, `_economy`, `_reputation`) and `svc_process::identity` register instruments **with** `_seconds`/`_total` suffixes | via the Prometheus bridge they scrape as `…_seconds_seconds` / `…_total_total`, so dashboards querying the single-suffixed names read empty on the scrape path (OTLP→Prometheus translators that de-duplicate are unaffected). Fix = rename the instruments (see *Naming*), a separate, dashboard-visible change |
 | `host_api::Connection::invoke` has no timeout and the read loop's EOF does not fail pending requests | an executor that dies mid-invoke can leave that consumer's `invoke` pending forever; only `heartbeat`/`mark_closed` stop *new* invokes. Found while testing the closed-connection path |
 | `svc_ingest` / `svc_streaming` | out of scope for this change |
+
+## Command latency SLA (svc-ingest, svc-process, svc-action)
+
+Owner SLA: non-external commands p99 < 1 s, first door -> outbound platform call confirmed. The first-door stamp
+rides the envelope's W3C `tracestate` (`waddles=t0:...`), so no payload or spine change. Full design, spans, logs,
+canary, handoff list and the ranked latency suspects: [`command-latency.md`](command-latency.md). Everything is behind
+the opt-out kill switch `waddles.disable-command-latency-telemetry` (unseen/OFF = telemetry ON).
+
+| Metric | Type | Labels | Meaning |
+|---|---|---|---|
+| `waddles_command_hop_seconds` | histogram | `hop` (`ingest_publish`, `queue_wait`, `process_stage`, `action_queue_wait`, `dispatch_to_invoke`, `executor_to_outbound`, `outbound_call`) | seconds one command spent in one hop; 5 ms-10 s buckets with extra resolution at 0.5-1.5 s |
+| `waddles_command_e2e_seconds` | histogram | `command` (registered commands only, else `other`), `bundle_lang` (closed set, unmapped `unknown`), `outcome` (`ok`, `refused`, `timeout`, `error`), `door` (`gateway`, `sink`, `http`, `publish`) | first door -> outbound op confirmed, recorded where svc-action sees the Discord ack |
+| `waddles_command_e2e_over_budget_total` | counter | `command`, `bundle_lang`, `outcome` | e2e >= 1.0 s |
+| `waddles_command_latency_marker_invalid_total` | counter | `reason` (`skewed`, `stale`, `missing`) | first-door stamps refused: a forged/skewed stamp only skips its own sample |
+| `waddles_canary_e2e_seconds` | histogram | `outcome` | synthetic canary command, same end point as a user command |
+| `waddles_canary_failures_total` | counter | `reason` | `timeout` (>5 s), `misconfigured`, `publish_failed`, `store_unavailable`, `not_ok`, `result_unreadable` |
+
+Label policy holds: no id, user, message text, channel or slug is ever a label; `command` is a registry lookup,
+never the user's text.

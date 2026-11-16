@@ -32,6 +32,31 @@ pub trait EconomyHost: Send + Sync {
 /// Community-and-app scoped configuration; missing values have documented defaults.
 pub trait ConfigStore: Send + Sync {
     fn get(&self, key: &str) -> Result<Option<Vec<u8>>, String>;
+    /// The live per-community config (`get-context().config_json`: the manifest
+    /// `community_config_schema` merged over its defaults); absent or unreadable = `{}`.
+    fn community_config_json(&self) -> String {
+        "{}".to_string()
+    }
+}
+
+/// Community-scoped accrual switch (`accrual_enabled`, manifest default `true`). ONLY an explicit
+/// JSON `false` disables minting for the community; an absent key, empty/`{}` config or anything
+/// unparseable keeps it ON, so real communities behave exactly as before this switch existed.
+pub fn accrual_enabled(config_json: &str) -> bool {
+    serde_json::from_str::<Value>(config_json)
+        .ok()
+        .and_then(|v| v.get("accrual_enabled").and_then(Value::as_bool))
+        .unwrap_or(true)
+}
+
+/// Refuses a MINTING operation (credit / pot payout / exchange) in a community that opted out of
+/// accrual. Loud (`Forbidden`), never a silent success. Spending and transfers are unaffected.
+fn require_accrual_enabled(store: &dyn ConfigStore) -> Result<(), ToolError> {
+    if accrual_enabled(&store.community_config_json()) {
+        Ok(())
+    } else {
+        Err(ToolError::Forbidden)
+    }
 }
 
 #[derive(Deserialize)]
@@ -205,6 +230,7 @@ fn run(
                 .filter(|n| *n != 0 && *n != i64::MIN)
                 .ok_or_else(|| invalid("invalid delta"))?;
             let balance = if delta > 0 {
+                require_accrual_enabled(store)?;
                 host.credit(&user, delta as u64)?
             } else {
                 host.debit(&user, delta.unsigned_abs())?
@@ -263,6 +289,7 @@ fn run(
         "pay_pot" => {
             fields(&args, &["winners"])?;
             write(ctx)?;
+            require_accrual_enabled(store)?;
             let rows = args
                 .get("winners")
                 .and_then(Value::as_array)
@@ -290,6 +317,7 @@ fn run(
         "exchange" => {
             fields(&args, &["user", "from_amount"])?;
             write(ctx)?;
+            require_accrual_enabled(store)?;
             // Admin-only: `from_amount` is a caller-asserted external-points claim and
             // no host-verified redemption source exists yet (follow-up).
             admin(ctx)?;
@@ -388,6 +416,16 @@ mod tests {
     impl ConfigStore for Kv {
         fn get(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
             Ok(self.0.clone())
+        }
+    }
+    /// A store whose community config (`get-context().config_json`) is `cfg`.
+    struct CfgKv(&'static str);
+    impl ConfigStore for CfgKv {
+        fn get(&self, _: &str) -> Result<Option<Vec<u8>>, String> {
+            Ok(None)
+        }
+        fn community_config_json(&self) -> String {
+            self.0.to_string()
         }
     }
     fn setup(config: Option<Value>) -> (ToolRegistry, Arc<Host>) {
@@ -522,11 +560,23 @@ mod tests {
         )
         .unwrap();
         // Pinned result shape (consumed by the Steal contract fixture).
-        let mut keys: Vec<&str> = out.as_object().unwrap().keys().map(String::as_str).collect();
+        let mut keys: Vec<&str> = out
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["alias", "amount", "from", "from_balance", "to", "to_balance"]
+            [
+                "alias",
+                "amount",
+                "from",
+                "from_balance",
+                "to",
+                "to_balance"
+            ]
         );
         assert_eq!(out["from"], ALICE);
         assert_eq!(out["to"], BOB);
@@ -633,5 +683,52 @@ mod tests {
             assert!(call(&r, "get_balance", json!({"user":ALICE})).is_err());
             assert!(h.calls.lock().unwrap().is_empty());
         }
+    }
+    #[test]
+    fn community_opt_out_blocks_minting_but_not_spending_or_reads() {
+        let h = Arc::new(Host::default());
+        let r = build_registry(h.clone(), Arc::new(CfgKv(r#"{"accrual_enabled":false}"#)));
+        assert!(matches!(
+            call(&r, "adjust_balance", keyed(json!({"user":ALICE,"delta":5}))),
+            Err(ToolError::Forbidden)
+        ));
+        assert!(matches!(
+            call(
+                &r,
+                "pay_pot",
+                keyed(json!({"winners":[{"user":ALICE,"amount":2}]}))
+            ),
+            Err(ToolError::Forbidden)
+        ));
+        assert!(
+            h.calls.lock().unwrap().is_empty(),
+            "no host mint when disabled"
+        );
+        // Debits and reads are not accrual: still served.
+        call(
+            &r,
+            "adjust_balance",
+            keyed(json!({"user":ALICE,"delta":-5})),
+        )
+        .unwrap();
+        call(&r, "get_balance", json!({"user":ALICE})).unwrap();
+    }
+
+    #[test]
+    fn only_an_explicit_false_disables_minting() {
+        for cfg in [
+            "{}",
+            "",
+            "garbage",
+            r#"{"accrual_enabled":true}"#,
+            r#"{"accrual_enabled":"no"}"#,
+        ] {
+            assert!(accrual_enabled(cfg), "{cfg:?}");
+        }
+        assert!(!accrual_enabled(r#"{"accrual_enabled":false}"#));
+        let h = Arc::new(Host::default());
+        let r = build_registry(h.clone(), Arc::new(CfgKv(r#"{"accrual_enabled":true}"#)));
+        call(&r, "adjust_balance", keyed(json!({"user":ALICE,"delta":5}))).unwrap();
+        assert_eq!(h.calls.lock().unwrap().len(), 1);
     }
 }

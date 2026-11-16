@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 import yaml
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART_DIR = Path(__file__).resolve().parents[1]
 _ALPHA_VALUES = _CHART_DIR / "values-alpha.yaml"
@@ -39,7 +40,8 @@ def docs() -> list[dict[str, Any]]:
         pytest.fail(f"helm template failed:\n{result.stdout}\n{result.stderr}")
     parsed = [d for d in yaml.safe_load_all(result.stdout) if d]
     assert parsed, "helm template produced zero documents -- cannot be a pass"
-    return parsed
+    # Both Secrets are created at RUNTIME by the provision-secrets hook; run the real hook.
+    return with_provisioned(parsed)
 
 
 def _secret(docs: list[dict[str, Any]], name_suffix: str) -> dict[str, Any]:

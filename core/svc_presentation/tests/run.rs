@@ -43,6 +43,7 @@ async fn run_with_shutdown_binds_connects_serves_and_stops_cleanly() {
 
     let http_port = free_port();
     let metrics_port = free_port();
+    let grpc_port = free_port();
 
     // Overlay detokenization is on by default, so startup needs a connectable
     // hub-api gRPC endpoint (or it fails loud, by design, before binding).
@@ -66,6 +67,8 @@ async fn run_with_shutdown_binds_connects_serves_and_stops_cleanly() {
         &http_port.to_string(),
         "--metrics-port",
         &metrics_port.to_string(),
+        "--surface-grpc-port",
+        &grpc_port.to_string(),
         "--bind-addr",
         "127.0.0.1",
         "--db-name",

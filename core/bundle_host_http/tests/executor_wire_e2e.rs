@@ -217,6 +217,7 @@ async fn run_session_scoped(guard: Arc<EgressGuard>, specs: &[&str], scope: Call
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             executor,
             "test-peer",

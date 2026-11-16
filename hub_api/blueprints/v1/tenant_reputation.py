@@ -14,6 +14,7 @@ Discovery contract: module-level `BLUEPRINTS` (auto-mounted by `routers/_discove
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -27,6 +28,8 @@ from services import community_reputation_service as reputation_svc
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
+
+logger = logging.getLogger(__name__)
 
 tenant_reputation_bp = Blueprint("v1_tenant_reputation", __name__, url_prefix="/api/v1/tenant")
 
@@ -83,6 +86,9 @@ async def get_tenant_reputation_config(tenant_slug: str) -> tuple[Any, int]:
             current_app.config["async_dal"], current_app.config["dal"], tenant_id=ctx.tenant_id
         )
     except ApiError as exc:
+        logger.warning(
+            "get_tenant_reputation_config rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(_dto(cfg))
 
@@ -109,6 +115,9 @@ async def put_tenant_reputation_config(
             at_risk_threshold=data.tenantAtRiskThreshold,
         )
     except ApiError as exc:
+        logger.warning(
+            "put_tenant_reputation_config rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(_dto(cfg))
 

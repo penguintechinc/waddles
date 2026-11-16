@@ -1,0 +1,25 @@
+[package]
+name = "command-latency"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "Apache-2.0"
+publish = false
+description = "Shared command-latency telemetry for the data-plane stage services (svc_ingest, svc_process, svc_action): the non-PII first-door timestamp carried in the W3C tracestate `waddles` member, the bounded command/bundle-language label registries, the per-hop and end-to-end OTel histograms, the SLO-budget counters and the opt-out kill switch `waddles.disable-command-latency-telemetry`. A path dependency within this repo, NOT a penguin-libs crate: the spine envelope is an external crate that cannot take a new field without a library release, so the stamps ride the existing `trace.tracestate` string. Metadata only -- never used for authorization."
+
+[lib]
+name = "command_latency"
+path = "src/lib.rs"
+
+[dependencies]
+tracing = "=0.1.44"
+tokio = { version = "=1.53.3", features = ["rt", "time", "sync"] }
+opentelemetry = "=0.32.0"
+tracing-opentelemetry = "=0.33.0"
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "time", "test-util", "net"] }
+opentelemetry_sdk = { version = "=0.32.1", features = ["testing", "rt-tokio"] }
+opentelemetry-otlp = { version = "=0.32.0", default-features = false, features = ["grpc-tonic", "metrics", "trace"] }
+redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp"] }
+tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["registry"] }

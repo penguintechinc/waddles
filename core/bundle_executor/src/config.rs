@@ -235,6 +235,114 @@ pub struct CliConfig {
     #[arg(long, env = "BUNDLE_MAX_COMPONENT_BYTES", default_value_t = 33_554_432)]
     pub bundle_max_component_bytes: u64,
 
+    /// Upper bound on a precompiled `.cwasm` artifact fetched from the bundle
+    /// bucket (`precompiled/<engine_fp>/<digest>.cwasm`). Compiled code is
+    /// several times larger than the source component, hence its own cap
+    /// (default 256 MiB); an oversized object fails the AOT path and falls
+    /// back (loudly) to a local compile.
+    #[arg(
+        long,
+        env = "BUNDLE_MAX_PRECOMPILED_BYTES",
+        default_value_t = 268_435_456
+    )]
+    pub bundle_max_precompiled_bytes: u64,
+
+    /// Resident compiled-module budget for the whole process, in MiB, shared
+    /// by every stage this executor serves. Above it, idle modules no
+    /// in-flight invoke is using are evicted least-recently-used first and
+    /// new loads only verify (compile/deserialize happens on first call).
+    /// `0` = unlimited (unreferenced modules are then dropped immediately).
+    #[arg(long, env = "EXECUTOR_MEMORY_BUDGET_MB", default_value_t = 8192)]
+    pub executor_memory_budget_mb: u64,
+
+    /// The container's memory limit in MiB, used ONLY to validate
+    /// `EXECUTOR_MEMORY_BUDGET_MB` at startup (the budget must leave room for
+    /// linear memories, Cranelift state and the runtime inside the limit).
+    /// Unset = auto-detected from the cgroup (`memory.max`); when neither is
+    /// known the check is skipped with a WARN. Set it explicitly under gVisor,
+    /// where the cgroup file may not reflect the pod limit.
+    #[arg(long, env = "EXECUTOR_CONTAINER_MEMORY_LIMIT_MB")]
+    pub executor_container_memory_limit_mb: Option<u64>,
+
+    /// JSON map `{key_id: base64 Ed25519 public key}` of the DEDICATED
+    /// precompiler signing key(s) (ConfigMap
+    /// `<fullname>-executor-precompile-signing-public`). The ONLY keys a
+    /// `.cwasm` signature is verified against -- never the bundle-approval
+    /// `BUNDLE_SIGNING_PUBLIC_KEYS`. Unset = every load JIT-compiles (each
+    /// one logged at ERROR + `executor_precompile_fallback_total`).
+    #[arg(long, env = "PRECOMPILE_SIGNING_PUBLIC_KEYS")]
+    pub precompile_signing_public_keys: Option<String>,
+
+    /// Kill switch `waddles.disable-aot-precompile` (opt-out, unseen = AOT on).
+    /// This credential-less sandbox has no PostHog egress, so the flag is read
+    /// from its Docker/Helm ENV baseline (`FLAG_` + key, `.`/`-` -> `_`), the
+    /// same convention every stage uses. `true` = never load `.cwasm`
+    /// artifacts; always JIT-compile.
+    #[arg(
+        long,
+        env = "FLAG_WADDLES_DISABLE_AOT_PRECOMPILE",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub flag_disable_aot_precompile: bool,
+
+    /// Stable executor identity (StatefulSet pod name, e.g.
+    /// `waddlebot-svc-bundles-executor-0`) sent to stages in the `hello` frame
+    /// for slot ownership. Unset = `POD_NAME` (downward API).
+    #[arg(long, env = "EXECUTOR_ID")]
+    pub executor_id: Option<String>,
+
+    /// StatefulSet (sharded) mode: refuse to start without a resolvable
+    /// executor identity (see [`CliConfig::validate_executor_id`]).
+    #[arg(
+        long,
+        env = "EXECUTOR_REQUIRE_ID",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub executor_require_id: bool,
+
+    /// Warm instance pool: up to this many fresh, never-used instances kept pre-instantiated
+    /// per bundle digest (latency suspect #2). `0` (default) = off. Each is one-shot -- see
+    /// `crate::warm_pool` for the isolation guarantee -- and holds guest linear memory (up to
+    /// `EXECUTOR_MEMORY_LIMIT_MB`), so size it with the pool's memory limit in mind.
+    #[arg(long, env = "EXECUTOR_WARM_POOL_SIZE", default_value_t = 0)]
+    pub executor_warm_pool_size: u32,
+
+    /// Process-wide ceiling on warm instances across every digest and stage.
+    #[arg(long, env = "EXECUTOR_WARM_POOL_MAX_TOTAL", default_value_t = 16)]
+    pub executor_warm_pool_max_total: u32,
+
+    /// Warm entries for a digest nobody invoked for this long are dropped (frees memory).
+    #[arg(long, env = "EXECUTOR_WARM_POOL_IDLE_SECS", default_value_t = 120)]
+    pub executor_warm_pool_idle_secs: u64,
+
+    /// Kill switch `waddles.disable-executor-warm-pool` (opt-out, unseen = pool as configured
+    /// by `EXECUTOR_WARM_POOL_SIZE`): read from the ENV baseline like the AOT switch, since this
+    /// credential-less sandbox has no PostHog egress. `true` = never prewarm, always cold.
+    #[arg(
+        long,
+        env = "FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL",
+        default_value_t = false,
+        action = clap::ArgAction::Set
+    )]
+    pub flag_disable_executor_warm_pool: bool,
+
+    /// Language class this executor pool serves: `compiled`, `scripted` or `any`
+    /// (default). A `compiled`/`scripted` executor reports a class-qualified
+    /// `executor_id` (`compiled:<pod>`) in `hello`, so the stages
+    /// (`bundle_active_set::partition`) only ever load bundles of that class onto it;
+    /// `any` keeps the bare pod name (pre-partition wire shape). Anything else
+    /// refuses to start (see [`CliConfig::validate_language_partition`]).
+    #[arg(long, env = "EXECUTOR_LANGUAGE_CLASS", default_value = "any")]
+    pub executor_language_class: String,
+
+    /// Comma-separated languages this pool serves (`rust,csharp,go`), informational
+    /// for logs/telemetry and validated for shape; required non-empty for a
+    /// `compiled`/`scripted` pool so a misrendered chart cannot ship an empty pool.
+    #[arg(long, env = "EXECUTOR_LANGUAGES", default_value = "")]
+    pub executor_languages: String,
+
     /// JSON object mapping `key_id -> base64(32-byte Ed25519 public key)`
     /// (spec SS5.6/Gemini condition 9) -- the platform key(s)
     /// `crate::signing::verify_artifact_signature` checks a bundle's
@@ -250,6 +358,13 @@ pub struct CliConfig {
     /// to enforce signatures in the first place.
     #[arg(long, env = "BUNDLE_SIGNING_PUBLIC_KEYS")]
     pub bundle_signing_public_keys: Option<String>,
+
+    /// Migration switch for where artifact-signature verifying keys come from: `configmap`
+    /// (`BUNDLE_SIGNING_PUBLIC_KEYS`, the default for this binary) or `db`
+    /// (`platform_vault.public_keys` via `platform_keys::KeyCache`). Never a silent fallback:
+    /// see `crate::signing::require_supported_key_source`.
+    #[arg(long, env = "BUNDLE_SIGNING_KEY_SOURCE")]
+    pub bundle_signing_key_source: Option<String>,
 
     /// Interval between `crate::heartbeat`'s liveness checks (and, when
     /// `EXECUTOR_SELF_PING_ENABLED` is set, this executor's own `ping`
@@ -367,6 +482,68 @@ pub struct CliConfig {
     pub connector_pin_digest_spectrum: Option<String>,
 }
 
+/// Share of the container limit above which a budget is flagged as tight.
+const BUDGET_WARN_PERCENT: u64 = 70;
+
+/// Pure budget-vs-limit rule: a budget at or above the container limit can only
+/// end in an OOM kill, so it refuses to start; a budget above
+/// [`BUDGET_WARN_PERCENT`] of the limit, an unlimited budget (`0`) under a
+/// known limit, or an unknown limit each return a warning string.
+pub fn check_memory_budget(
+    budget_mb: u64,
+    container_limit_mb: Option<u64>,
+) -> Result<Option<String>, ExecutorError> {
+    let Some(limit) = container_limit_mb else {
+        return Ok(Some(
+            "container memory limit unknown (no EXECUTOR_CONTAINER_MEMORY_LIMIT_MB, no readable \
+             cgroup limit); EXECUTOR_MEMORY_BUDGET_MB was not validated"
+                .to_string(),
+        ));
+    };
+    if budget_mb == 0 {
+        return Ok(Some(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB=0 (unlimited) under a {limit} MiB container limit: \
+             resident compiled modules are unbounded"
+        )));
+    }
+    if budget_mb >= limit {
+        return Err(ExecutorError::Config(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB={budget_mb} must be below the container memory limit \
+             ({limit} MiB): compiled modules share the limit with linear memories and compile \
+             state"
+        )));
+    }
+    if budget_mb.saturating_mul(100) > limit.saturating_mul(BUDGET_WARN_PERCENT) {
+        return Ok(Some(format!(
+            "EXECUTOR_MEMORY_BUDGET_MB={budget_mb} is above {BUDGET_WARN_PERCENT}% of the \
+             {limit} MiB container limit; little headroom remains for instances and compiles"
+        )));
+    }
+    Ok(None)
+}
+
+/// Reads the container memory limit (MiB) from the cgroup v2 `memory.max` or v1
+/// `memory.limit_in_bytes`; `None` when unlimited or unreadable.
+fn cgroup_memory_limit_mb() -> Option<u64> {
+    [
+        "/sys/fs/cgroup/memory.max",
+        "/sys/fs/cgroup/memory/memory.limit_in_bytes",
+    ]
+    .iter()
+    .find_map(|path| std::fs::read_to_string(path).ok())
+    .and_then(|raw| parse_cgroup_limit_mb(&raw))
+}
+
+/// Parses one cgroup limit file body into MiB (`max`/huge v1 sentinel = none).
+fn parse_cgroup_limit_mb(raw: &str) -> Option<u64> {
+    let bytes: u64 = raw.trim().parse().ok()?;
+    // cgroup v1 reports "unlimited" as a value near i64::MAX.
+    if bytes == 0 || bytes >= (1 << 60) {
+        return None;
+    }
+    Some(bytes / (1024 * 1024))
+}
+
 impl CliConfig {
     /// Resolved compile-concurrency cap: the explicit value when >= 1,
     /// else `min(4, available CPUs)`. Kept small because each in-flight
@@ -378,6 +555,122 @@ impl CliConfig {
         }
         let cpus = std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get);
         u32::try_from(cpus.min(4)).unwrap_or(4).max(1)
+    }
+
+    /// The executor identity reported in `hello`: `EXECUTOR_ID` when set and
+    /// non-blank, else `POD_NAME` (the StatefulSet pod name via the downward
+    /// API), else `None` (stages then fall back to broadcast for this
+    /// executor, logging WARN).
+    #[must_use]
+    pub fn resolved_executor_id(&self) -> Option<String> {
+        self.executor_id
+            .clone()
+            .or_else(|| std::env::var("POD_NAME").ok())
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+    }
+
+    /// The pool's class label, strictly parsed: `"compiled"`, `"scripted"` or `"any"`.
+    pub fn language_class(&self) -> Result<&'static str, ExecutorError> {
+        match self
+            .executor_language_class
+            .trim()
+            .to_ascii_lowercase()
+            .as_str()
+        {
+            "" | "any" => Ok("any"),
+            "compiled" => Ok("compiled"),
+            "scripted" => Ok("scripted"),
+            other => Err(ExecutorError::Config(format!(
+                "EXECUTOR_LANGUAGE_CLASS {other:?} is not one of compiled, scripted, any"
+            ))),
+        }
+    }
+
+    /// The languages in `EXECUTOR_LANGUAGES`, trimmed and lower-cased, blanks dropped.
+    #[must_use]
+    pub fn language_list(&self) -> Vec<String> {
+        self.executor_languages
+            .split(',')
+            .map(|l| l.trim().to_ascii_lowercase())
+            .filter(|l| !l.is_empty())
+            .collect()
+    }
+
+    /// Startup validation of the language partition: a valid class, and for a
+    /// `compiled`/`scripted` pool a non-empty list of well-formed language tokens.
+    /// Fail loud -- a typo must never silently widen a pool to `any`.
+    pub fn validate_language_partition(&self) -> Result<(), ExecutorError> {
+        let class = self.language_class()?;
+        let langs = self.language_list();
+        if class != "any" && langs.is_empty() {
+            return Err(ExecutorError::Config(format!(
+                "EXECUTOR_LANGUAGE_CLASS={class} requires a non-empty EXECUTOR_LANGUAGES"
+            )));
+        }
+        for l in &langs {
+            let ok = l
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "+#.-".contains(c));
+            if !ok {
+                return Err(ExecutorError::Config(format!(
+                    "EXECUTOR_LANGUAGES token {l:?} must be lower-case letters, digits or + # . -"
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// The identity reported in `hello`: the resolved pod identity, class-qualified
+    /// (`compiled:<pod>` / `scripted:<pod>`) for a partitioned pool, bare for `any`.
+    /// MUST stay in lock-step with `bundle_active_set::partition::qualify_executor_id`
+    /// (pinned by a test here and one there). `None` when no identity resolves.
+    #[must_use]
+    pub fn reported_executor_id(&self) -> Option<String> {
+        let id = self.resolved_executor_id()?;
+        Some(match self.language_class().unwrap_or("any") {
+            "any" => id,
+            class => format!("{class}:{id}"),
+        })
+    }
+
+    /// Fails startup loudly when `EXECUTOR_REQUIRE_ID=true` (StatefulSet mode,
+    /// slot sharding) and no identity resolves -- an anonymous executor in a
+    /// sharded pool would silently degrade every stage to broadcast.
+    pub fn validate_executor_id(&self) -> Result<(), ExecutorError> {
+        if self.executor_require_id && self.resolved_executor_id().is_none() {
+            return Err(ExecutorError::Config(
+                "EXECUTOR_REQUIRE_ID is set (StatefulSet mode) but neither EXECUTOR_ID nor \
+                 POD_NAME is set; wire POD_NAME from metadata.name via the downward API"
+                    .to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// The process-wide resident module budget in bytes (`0` = unlimited).
+    #[must_use]
+    pub fn memory_budget_bytes(&self) -> u64 {
+        self.executor_memory_budget_mb.saturating_mul(1024 * 1024)
+    }
+
+    /// The container memory limit in MiB: the explicit
+    /// `EXECUTOR_CONTAINER_MEMORY_LIMIT_MB`, else the cgroup limit, else `None`.
+    #[must_use]
+    pub fn container_memory_limit_mb(&self) -> Option<u64> {
+        self.executor_container_memory_limit_mb
+            .filter(|v| *v > 0)
+            .or_else(cgroup_memory_limit_mb)
+    }
+
+    /// Startup validation of `EXECUTOR_MEMORY_BUDGET_MB` against the container
+    /// limit (see [`check_memory_budget`]). `Ok(Some(msg))` is a warning the
+    /// caller must log; `Err` refuses to start.
+    pub fn validate_memory_budget(&self) -> Result<Option<String>, ExecutorError> {
+        check_memory_budget(
+            self.executor_memory_budget_mb,
+            self.container_memory_limit_mb(),
+        )
     }
 
     /// A config good enough to build the wasmtime `Engine`/`Linker` with
@@ -415,7 +708,21 @@ impl CliConfig {
             bundle_bucket_ca_file: None,
             bundle_fetch_timeout_s: 30,
             bundle_max_component_bytes: 33_554_432,
+            bundle_max_precompiled_bytes: 268_435_456,
+            executor_memory_budget_mb: 8192,
+            executor_container_memory_limit_mb: None,
+            flag_disable_aot_precompile: false,
+            precompile_signing_public_keys: None,
+            executor_id: None,
+            executor_require_id: false,
+            executor_warm_pool_size: 0,
+            executor_warm_pool_max_total: 16,
+            executor_warm_pool_idle_secs: 120,
+            flag_disable_executor_warm_pool: false,
+            executor_language_class: "any".to_string(),
+            executor_languages: String::new(),
             bundle_signing_public_keys: None,
+            bundle_signing_key_source: None,
             executor_heartbeat_interval_secs: 5,
             executor_heartbeat_enabled: true,
             executor_self_ping_enabled: false,
@@ -772,6 +1079,112 @@ mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
     use super::*;
     use clap::Parser;
+
+    #[test]
+    fn memory_budget_must_be_below_the_container_limit() {
+        // at or above the limit: refuse to start
+        assert!(check_memory_budget(12_288, Some(12_288)).is_err());
+        assert!(check_memory_budget(16_384, Some(12_288)).is_err());
+        // default budget under the shipped 12Gi limit: fine, no warning
+        assert_eq!(check_memory_budget(8192, Some(12_288)).unwrap(), None);
+        // tight (>70%): starts, warns
+        assert!(check_memory_budget(10_000, Some(12_288)).unwrap().is_some());
+        // unlimited budget under a known limit, or unknown limit: warns
+        assert!(check_memory_budget(0, Some(12_288)).unwrap().is_some());
+        assert!(check_memory_budget(8192, None).unwrap().is_some());
+    }
+
+    fn partition_cfg(class: &str, langs: &str) -> CliConfig {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_id = Some("pod-0".to_string());
+        cfg.executor_language_class = class.to_string();
+        cfg.executor_languages = langs.to_string();
+        cfg
+    }
+
+    /// The reported identity is class-qualified for a partitioned pool and bare for `any`
+    /// (the exact strings `bundle_active_set::partition::parse_executor_id` expects).
+    #[test]
+    fn reported_executor_id_is_class_qualified() {
+        assert_eq!(
+            partition_cfg("compiled", "rust")
+                .reported_executor_id()
+                .as_deref(),
+            Some("compiled:pod-0")
+        );
+        assert_eq!(
+            partition_cfg("SCRIPTED", "python")
+                .reported_executor_id()
+                .as_deref(),
+            Some("scripted:pod-0")
+        );
+        assert_eq!(
+            partition_cfg("any", "").reported_executor_id().as_deref(),
+            Some("pod-0")
+        );
+        assert_eq!(
+            partition_cfg("", "").reported_executor_id().as_deref(),
+            Some("pod-0")
+        );
+        let mut anon = partition_cfg("compiled", "rust");
+        anon.executor_id = None;
+        if std::env::var("POD_NAME").is_err() {
+            assert_eq!(anon.reported_executor_id(), None);
+        }
+    }
+
+    #[test]
+    fn language_partition_validation_fails_loud() {
+        assert!(partition_cfg("compiled", "rust, csharp ,go")
+            .validate_language_partition()
+            .is_ok());
+        assert!(partition_cfg("any", "")
+            .validate_language_partition()
+            .is_ok());
+        let typo = partition_cfg("compilled", "rust").validate_language_partition();
+        assert!(matches!(typo, Err(ExecutorError::Config(m)) if m.contains("compilled")));
+        let empty = partition_cfg("scripted", " , ").validate_language_partition();
+        assert!(matches!(empty, Err(ExecutorError::Config(m)) if m.contains("non-empty")));
+        let bad = partition_cfg("scripted", "Py thon").validate_language_partition();
+        assert!(matches!(bad, Err(ExecutorError::Config(m)) if m.contains("py thon")));
+        assert_eq!(
+            partition_cfg("scripted", "Python, RUBY").language_list(),
+            vec!["python".to_string(), "ruby".to_string()]
+        );
+    }
+
+    #[test]
+    fn language_class_env_is_read_by_clap() {
+        let cfg = CliConfig::try_parse_from([
+            "bundle-executor",
+            "--stage-host-api-addr",
+            "svc-process:8301",
+            "--executor-language-class",
+            "scripted",
+            "--executor-languages",
+            "python",
+        ])
+        .unwrap();
+        assert_eq!(cfg.language_class().unwrap(), "scripted");
+    }
+
+    #[test]
+    fn explicit_container_limit_overrides_and_is_validated() {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_memory_budget_mb = 4096;
+        cfg.executor_container_memory_limit_mb = Some(4096);
+        assert!(cfg.validate_memory_budget().is_err());
+        cfg.executor_container_memory_limit_mb = Some(6144);
+        assert_eq!(cfg.validate_memory_budget().unwrap(), None);
+    }
+
+    #[test]
+    fn cgroup_limit_parsing_handles_max_and_v1_sentinel() {
+        assert_eq!(parse_cgroup_limit_mb("max\n"), None);
+        assert_eq!(parse_cgroup_limit_mb("9223372036854771712\n"), None);
+        assert_eq!(parse_cgroup_limit_mb("12884901888\n"), Some(12_288));
+        assert_eq!(parse_cgroup_limit_mb("garbage"), None);
+    }
 
     #[test]
     fn for_healthcheck_produces_a_valid_config() -> Result<(), ExecutorError> {

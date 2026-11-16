@@ -151,6 +151,23 @@ def _seed(container: str) -> dict[str, int]:
     ids["admin_user"] = int(
         _sql(container, "INSERT INTO hub_users (username) VALUES ('live-admin') RETURNING id")
     )
+    # The admin administers its tenant (`tenant_admins` row): the community authz gate
+    # (`authorize_community`) grants a tenant admin the community-admin bypass.
+    _sql(
+        container,
+        "INSERT INTO tenant_admins (tenant_id, user_id) "  # noqa: S608
+        f"VALUES ({ids['tenant']}, {ids['admin_user']})",
+    )
+    # Channel-ownership proof (#1271): binding a Twitch channel requires the installing hub user to
+    # have OAuth-linked the broadcaster's Twitch account (a `hub_user_identities` row, which the
+    # social-login / account-linking flow writes). The harness's admin is that linked owner of both
+    # fake channels -- the real `_prove_ownership` path still runs; nothing is bypassed.
+    for channel_id in (CHANNEL_ID, OTHER_CHANNEL_ID):
+        _sql(
+            container,
+            "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "  # noqa: S608
+            f"VALUES ({ids['admin_user']}, 'twitch', '{channel_id}')",
+        )
     for key, name, tenant in (
         ("a", "live-a", "tenant"),
         ("b", "live-b", "tenant"),
@@ -187,6 +204,18 @@ async def _serve(manifest_path: Path) -> None:
         async_dal = AsyncDAL(pydal_uri, pool_size=2, migrate=False)
         async_dal.dal.define_table(
             "tenants", Field("slug"), Field("is_active", "boolean"), migrate=False, rname="tenants"
+        )
+        # `authorize_community` first proves the community belongs to the caller's tenant
+        # (IDOR guard) before honouring the admin token's global-admin scope.
+        async_dal.dal.define_table(
+            "communities", Field("tenant_id", "integer"), migrate=False, rname="communities"
+        )
+        async_dal.dal.define_table(
+            "tenant_admins",
+            Field("user_id", "integer"),
+            Field("tenant_id", "integer"),
+            migrate=False,
+            rname="tenant_admins",
         )
         install_dal = AsyncDB(pg.dsn, pool_size=4, echo=False)
         await install_dal.reflect()

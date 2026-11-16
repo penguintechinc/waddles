@@ -40,7 +40,7 @@ use svc_ingest::connector_runtime::boot::{
 use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError, TransportPlan};
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
 use svc_ingest::connector_runtime::selector::ConnectorSelector;
-use svc_ingest::identity_crypto::LocalDevDekProvider;
+use svc_ingest::identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider};
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 use tokio::sync::oneshot;
 use wiremock::matchers::{method, path};
@@ -343,7 +343,7 @@ async fn flag_on_runs_spectrum_through_the_production_boot_and_refuses_a_mismatc
     );
     let lease_conn = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     // The production path: selector (flag ON) -> settings (digest from env).
@@ -387,7 +387,9 @@ async fn flag_on_runs_spectrum_through_the_production_boot_and_refuses_a_mismatc
                 vec![7u8; 32],
             )])),
             active_kid: "k1".into(),
-            dek: Arc::new(LocalDevDekProvider::new("local", "BOOT_WIRING_SP_KEK").unwrap()),
+            dek: Arc::new(ConfiguredDekProvider::local_dev(
+                LocalDevDekProvider::new("local", "BOOT_WIRING_SP_KEK").unwrap(),
+            )),
             identity_metrics: prometheus::IntCounterVec::new(
                 prometheus::Opts::new("boot_wiring_sp_identity_total", "test"),
                 &["tenant", "status"],
@@ -444,7 +446,7 @@ async fn flag_on_runs_spectrum_through_the_production_boot_and_refuses_a_mismatc
     );
     let mut kc = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let keys: Vec<String> = redis::cmd("KEYS")

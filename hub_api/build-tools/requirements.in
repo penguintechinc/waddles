@@ -1,0 +1,6 @@
+# Build-time-only tooling for installing libs/flask_core WITHOUT build isolation
+# (`pip install --no-deps --no-build-isolation`): isolation would fetch setuptools unhashed
+# from the network at image build time. Installed with --require-hashes before flask_core and
+# uninstalled right after, so it never ships in the runtime image.
+# Used by hub_api/Dockerfile and bundles/Dockerfile.core-bundles (hub-deps-builder).
+setuptools>=80.0.0

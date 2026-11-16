@@ -17,6 +17,7 @@ from typing import Any
 
 import psycopg2
 import pytest
+from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey, X25519PublicKey
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
@@ -42,7 +43,9 @@ from services.envelope.service import TenantEnvelopeService  # noqa: E402
 from services.stream_dek_broker import (  # noqa: E402
     OUTCOME_DENIED_SERVICE,
     OUTCOME_ISSUED,
+    PURPOSE_AT_REST,
     StreamDekBroker,
+    StreamDekDeniedError,
     StreamDekRequest,
     StreamDekServiceDeniedError,
     seal_context,
@@ -162,7 +165,7 @@ async def test_issue_rotate_and_ciphertext_only_at_rest(
     assert (purpose, version, status, kind) == (PURPOSE_INGEST_STREAM, 1, "active", "platform")
     assert k1 not in bytes(wrapped)  # never plaintext (nor the handed-out key) at rest
 
-    await broker._keys.rotate_dek(tenant, reason="test")  # noqa: SLF001
+    await broker._keys_by_lineage[PURPOSE_INGEST_STREAM].rotate_dek(tenant, reason="test")  # noqa: SLF001
     c3 = X25519PrivateKey.generate()
     rotated = await broker.issue(_request(c3, tenant))
     assert rotated.version == 2
@@ -250,3 +253,93 @@ def test_rbac_hub_api_append_only_and_data_plane_locked_out(
     ):
         for privilege in ("SELECT", "INSERT", "UPDATE", "DELETE"):
             assert not can(role, privilege), f"{role} must not {privilege} {table}"
+
+
+@pytest.fixture
+async def dual_broker(pg_db: PgTestDatabase) -> AsyncIterator[StreamDekBroker]:
+    """Real broker serving BOTH lineages (at-rest + ingest-stream) over the migrated DB."""
+    dal = await build_install_dal(pg_db.dsn, pool_size=4)
+    at_rest_repo = PenguinDalEnvelopeRepository(dal)
+    stream_repo = PenguinDalEnvelopeRepository(dal, purpose=PURPOSE_INGEST_STREAM)
+    kek = CountingPlatformKek(os.urandom(32))
+
+    def _svc(repo: PenguinDalEnvelopeRepository, lineage: str | None) -> TenantEnvelopeService:
+        return TenantEnvelopeService(
+            keys=repo,
+            configs=at_rest_repo,
+            registry=KmsProviderRegistry(),
+            platform_kek=lambda: kek,
+            gate=FakeGate(),
+            lineage=lineage,
+            sibling_keys=(stream_repo,) if lineage is None else (at_rest_repo,),
+        )
+
+    yield StreamDekBroker(
+        dal,
+        _svc(stream_repo, PURPOSE_INGEST_STREAM),
+        at_rest_keys=_svc(at_rest_repo, None),
+        ttl_seconds=600,
+    )
+    await dal.close()
+
+
+async def test_at_rest_lineage_cross_tenant_isolation_and_audit(
+    dual_broker: StreamDekBroker, sql: psycopg2.extensions.connection, tenant: int
+) -> None:
+    """Real DDL (0120): at-rest keys are per-tenant, wrapped, audited; B cannot reach A's."""
+    other = int(
+        _one(
+            sql,
+            "INSERT INTO tenants (slug) VALUES (%s) RETURNING id",
+            (f"t-{uuid.uuid4().hex[:10]}",),
+        )
+    )
+    process = "spiffe://penguintech.io/alpha/svc-action"
+
+    def at_rest(client: X25519PrivateKey, tid: int, claim: str = "system") -> StreamDekRequest:
+        request = _request(client, tid, sub=process)
+        return StreamDekRequest(
+            tenant_id=request.tenant_id,
+            purpose=PURPOSE_AT_REST,
+            version=0,
+            caller_public_key=request.caller_public_key,
+            claim_tenant=claim,
+            caller_sub=process,
+        )
+
+    keys: dict[int, bytes] = {}
+    for tid in (tenant, other):
+        client = X25519PrivateKey.generate()
+        issued = await dual_broker.issue(at_rest(client, tid), lineage=PURPOSE_AT_REST)
+        keys[tid] = _unseal(
+            issued.sealed_dek, client, seal_context("svc-action", tid, PURPOSE_AT_REST, 1)
+        )
+    assert keys[tenant] != keys[other] and len(keys[tenant]) == 32
+
+    # A tenant-bound principal for `other` (claim = its numeric id) cannot obtain `tenant`'s key.
+    with pytest.raises(StreamDekDeniedError):
+        await dual_broker.issue(
+            at_rest(X25519PrivateKey.generate(), tenant, claim=str(other)), lineage=PURPOSE_AT_REST
+        )
+    # ...and one tenant's key cannot open the other's: the seal context binds the tenant id.
+    client = X25519PrivateKey.generate()
+    issued = await dual_broker.issue(at_rest(client, tenant), lineage=PURPOSE_AT_REST)
+    with pytest.raises(InvalidTag):
+        _unseal(issued.sealed_dek, client, seal_context("svc-action", other, PURPOSE_AT_REST, 1))
+
+    with sql.cursor() as cur:
+        cur.execute(
+            "SELECT purpose, wrapped_dek FROM keystore.tenant_encryption_keys "
+            "WHERE tenant_id = %s AND purpose = %s",
+            (tenant, PURPOSE_AT_REST),
+        )
+        rows = cur.fetchall()
+        cur.execute(
+            "SELECT outcome, caller_service FROM keystore.stream_dek_issuances "
+            "WHERE tenant_id = %s AND purpose = %s ORDER BY id",
+            (tenant, PURPOSE_AT_REST),
+        )
+        audit = cur.fetchall()
+    assert len(rows) == 1 and keys[tenant] not in bytes(rows[0][1])
+    assert [row[0] for row in audit][:1] == [OUTCOME_ISSUED]
+    assert all(row[1] == "svc-action" for row in audit)

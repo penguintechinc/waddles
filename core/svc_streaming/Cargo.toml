@@ -55,7 +55,7 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "http2"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = [
     "sqlx-postgres",
     "sqlx-sqlite",
@@ -100,16 +100,21 @@ rtc = "=0.21.1"
 async-trait = "=0.1.92"
 # Host-API mTLS listener (`rooms::host_api`): same crates/versions as the stage
 # services' `host_api.rs` (svc_action/svc_process); all already in Cargo.lock.
-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
-tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12", "ring"] }
 rustls-pki-types = "=1.15.1"
-hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service"] }
+hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service", "http1", "http2"] }
 # Rooms gRPC control plane (`rooms::grpc`): hub-api -> svc-streaming RoomsService, served over
 # the same mTLS accept loop as the host-API. `transport` = tonic's `Routes`/server; stubs are
 # generated at build time from `proto/waddles/streaming/internal/v1/rooms.proto` (build.rs).
 # tonic/tonic-prost/prost are already resolved at these exact versions in Cargo.lock.
 tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "router"] }
 tonic-prost = "=0.14.6"
+# `grpc.health.v1` on the rooms gRPC listener (in-mesh health checks over mTLS; kubelet gRPC
+# probes cannot present a client cert, so the chart keeps its HTTP probes). Same hyperium
+# release train as `tonic` above; its deps (tonic/tonic-prost/prost/tokio/tokio-stream) are
+# already resolved at compatible versions in Cargo.lock.
+tonic-health = "=0.14.6"
 prost = "=0.14.4"
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"

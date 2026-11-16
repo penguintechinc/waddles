@@ -531,6 +531,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -627,11 +636,13 @@ name = "bundle-active-set"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "sea-orm",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -651,6 +662,7 @@ name = "bundle-config-db"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "command-latency",
  "hub_client",
  "opentelemetry",
  "redis",
@@ -671,6 +683,24 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "bundle-host-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "hub_client",
+ "opentelemetry",
+ "redis",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -734,12 +764,14 @@ dependencies = [
 name = "bundle-host-kv"
 version = "0.1.0"
 dependencies = [
+ "bundle-host-crypto",
  "opentelemetry",
  "redis",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 
@@ -799,6 +831,7 @@ name = "bundle-host-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bundle-host-crypto",
  "bytes",
  "futures",
  "http",
@@ -809,6 +842,23 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "bundle-host-surface"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prost",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]
@@ -898,6 +948,7 @@ dependencies = [
 name = "circuit-breaker"
 version = "0.1.0"
 dependencies = [
+ "tokio",
  "tracing",
 ]
 
@@ -974,6 +1025,16 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "command-latency"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -2786,8 +2847,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.5.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=53e95619f1b3e49e1150b78a125981fcc5905d8a#53e95619f1b3e49e1150b78a125981fcc5905d8a"
+version = "0.6.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=96a5065f1d379ea0cfc7c7716c6eab628138330a#96a5065f1d379ea0cfc7c7716c6eab628138330a"
 dependencies = [
  "regex",
  "serde",
@@ -3328,11 +3389,14 @@ version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed"
 dependencies = [
+ "arc-swap",
  "arcstr",
  "async-lock",
+ "backon",
  "bytes",
  "cfg-if",
  "combine",
+ "futures-channel",
  "futures-util",
  "itoa",
  "percent-encoding",
@@ -3397,6 +3461,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -3912,6 +3977,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "prost",
+ "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -4313,10 +4379,12 @@ dependencies = [
  "bundle-host-platform-table",
  "bundle-host-reputation",
  "bundle-host-storage",
+ "bundle-host-surface",
  "bundle-tool-call",
  "chrono",
  "circuit-breaker",
  "clap",
+ "command-latency",
  "connection_resolver",
  "futures-util",
  "governor",
@@ -4349,6 +4417,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tonic",
  "tower",
  "tower-http 0.7.1",

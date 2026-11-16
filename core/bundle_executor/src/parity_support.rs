@@ -174,6 +174,100 @@ mod tests {
         assert_eq!(&a[14..15], "5");
     }
 
+    /// The REAL bridge over the in-memory duplex: every capability the scripted stage serves is
+    /// exercised end to end and the call log records ops only.
+    #[tokio::test]
+    async fn scripted_bridge_serves_the_parity_stage_end_to_end() {
+        let (bridge, log) = scripted_bridge();
+        let ctx = bridge
+            .call(
+                "parity",
+                1,
+                CapabilityKind::Context,
+                "get-context",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ctx["tenant"], PARITY_TENANT);
+        bridge
+            .call(
+                "parity",
+                2,
+                CapabilityKind::Log,
+                "log",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        bridge
+            .call(
+                "parity",
+                3,
+                CapabilityKind::Clock,
+                "now",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        let flag = bridge
+            .call(
+                "parity",
+                4,
+                CapabilityKind::Flags,
+                "enabled",
+                serde_json::json!({}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(flag["enabled"], true);
+        assert!(bridge
+            .call(
+                "parity",
+                5,
+                CapabilityKind::Flags,
+                "other",
+                serde_json::json!({})
+            )
+            .await
+            .is_err());
+        let who = bridge
+            .call(
+                "parity",
+                6,
+                CapabilityKind::Db,
+                "identity.lookup",
+                serde_json::json!({"kind":"platform-identity","platform":"twitch","platform_user_id":"9"}),
+            )
+            .await
+            .unwrap();
+        assert_eq!(who["uuid"], pseudonym_uuid("twitch", "9"));
+        assert_eq!(
+            *log.lock().unwrap(),
+            vec![
+                "get-context",
+                "log",
+                "now",
+                "enabled",
+                "other",
+                "identity.lookup"
+            ],
+            "ops only, in order"
+        );
+    }
+
+    #[test]
+    fn answer_rejects_a_platform_identity_lookup_missing_its_fields() {
+        let body = HostCallBody {
+            app_id: "parity".to_string(),
+            call_id: 1,
+            capability: CapabilityKind::Db,
+            op: "identity.lookup".to_string(),
+            args: serde_json::json!({"kind":"platform-identity","platform":"twitch"}),
+        };
+        assert_eq!(answer(&body).unwrap_err().code, "invalid_args");
+    }
+
     #[test]
     fn answer_serves_identity_and_refuses_unknown_ops() {
         let call = |cap, op: &str, args| HostCallBody {

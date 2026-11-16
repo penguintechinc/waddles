@@ -40,9 +40,9 @@ CREATE TABLE bundle_community_config (id BIGSERIAL PRIMARY KEY, tenant_id INTEGE
 INSERT INTO tenants VALUES (1, 'a'), (2, 'b');
 ";
 
-/// Exactly the grants of the migration (mirrored; the alembic test proves the migration itself).
+/// Exactly the effective grants of alembic 0107+0108 (mirrored; the alembic tests prove the migrations):
+/// no `communities` access at all.
 const GRANTS: &str = "
-GRANT SELECT (id, tenant_id) ON communities TO {role};
 GRANT SELECT (id) ON app_versions TO {role};
 GRANT SELECT (id, app_version_id, manifest_json) ON app_version_uploads TO {role};
 GRANT SELECT (app_id, tenant_id, community_id, version_id) ON app_active_versions TO {role};
@@ -143,8 +143,8 @@ async fn seed(env: &Env, n: i64) {
     };
     exec(o, &format!("INSERT INTO app_versions (id, app_id, version, artifact_digest) VALUES (1, '{APP}', '1.0.0', 'sha256:x'), (2, '{APP}', '2.0.0', 'sha256:y')")).await;
     exec(o, &format!("INSERT INTO app_version_uploads (app_id, app_version_id, manifest_json, staging_source_key) VALUES ('{APP}', 1, '{}'::jsonb, 'k1'), ('{APP}', 2, '{}'::jsonb, 'k2')", manifest(60), manifest(120))).await;
-    exec(o, &format!("INSERT INTO app_active_versions (app_id, tenant_id, community_id, version_id) VALUES ('{APP}', 1, 0, 1), ('{APP}', 1, 12, 2)")).await;
-    exec(o, &format!("INSERT INTO bundle_community_config (tenant_id, community_id, app_id, version, config, schema_sha256, updated_by) VALUES (1, 10, '{APP}', 1, '{{\"default_duration_minutes\":45}}', 'h', 7), (1, 10, '{APP}', 2, '{{\"default_duration_minutes\":30,\"extra\":true}}', 'h', 7)")).await;
+    exec(o, &format!("INSERT INTO app_active_versions (app_id, tenant_id, community_id, version_id) VALUES ('{APP}', 1, 0, 1), ('{APP}', 1, 12, 2), ('{APP}', 2, 0, 2)")).await;
+    exec(o, &format!("INSERT INTO bundle_community_config (tenant_id, community_id, app_id, version, config, schema_sha256, updated_by) VALUES (1, 10, '{APP}', 1, '{{\"default_duration_minutes\":45}}', 'h', 7), (1, 10, '{APP}', 2, '{{\"default_duration_minutes\":30,\"extra\":true}}', 'h', 7), (2, 99, '{APP}', 1, '{{\"tenant2_only\":true}}', 'h', 8)")).await;
 }
 
 fn key(community: i64) -> ConfigKey {
@@ -176,13 +176,16 @@ async fn warm_up_is_one_batched_query_with_hub_api_merge_semantics() {
     ));
     let cache = BundleConfigCache::new(src.clone(), None, CacheConfig::default());
     let mut keys: Vec<ConfigKey> = (10..70).map(key).collect();
-    keys.push(ConfigKey::new(1, 99, APP)); // community of ANOTHER tenant: must not resolve
+    keys.push(ConfigKey::new(1, 99, APP)); // another tenant's community id under tenant 1
     keys.push(ConfigKey::new(1, 10, "waddles.core.app.inactive")); // not active: absent
     keys.push(key(10)); // duplicate scope: deduplicated
     let loaded = cache.seed(&keys).await;
     assert_eq!(src.query_count(), 1, "N scopes = ONE query");
-    assert_eq!(loaded, 60, "cross-tenant + inactive scopes are absent");
-    assert_eq!(cache.len(), 60);
+    assert_eq!(
+        loaded, 61,
+        "inactive scope absent; (1, 99) resolves to tenant 1's defaults only"
+    );
+    assert_eq!(cache.len(), 61);
     // Community 10: latest saved version (2) over the schema defaults; null default kept.
     let c10 = src.get(&key(10)).await.expect("c10");
     assert_eq!(c10.version, 2);
@@ -200,8 +203,20 @@ async fn warm_up_is_one_batched_query_with_hub_api_merge_semantics() {
     // Community 12: its own activation (version 2 manifest) beats the tenant-wide one.
     let c12 = src.get(&key(12)).await.expect("c12");
     assert_eq!(parsed(&c12.config_json)["default_duration_minutes"], 120);
-    // Cross-tenant and inactive lazy-load as NOT_FOUND.
-    assert!(src.get(&ConfigKey::new(1, 99, APP)).await.is_err());
+    // Tenant isolation without `communities`: every table read is filtered by the scope's own
+    // tenant, so tenant 1 asking about tenant 2's community id sees ONLY tenant 1's defaults
+    // (version 0), never tenant 2's saved config; tenant 2 sees its own.
+    let cross = src.get(&ConfigKey::new(1, 99, APP)).await.expect("(1, 99)");
+    assert_eq!(cross.version, 0);
+    assert_eq!(
+        parsed(&cross.config_json),
+        json!({"default_duration_minutes": 60, "flag": null})
+    );
+    assert!(!cross.config_json.contains("tenant2_only"));
+    let own = src.get(&ConfigKey::new(2, 99, APP)).await.expect("(2, 99)");
+    assert_eq!(own.version, 1);
+    assert_eq!(parsed(&own.config_json)["tenant2_only"], true);
+    // An app that is not active for the tenant is NOT_FOUND on lazy-load.
     assert!(src
         .get(&ConfigKey::new(1, 10, "waddles.core.app.inactive"))
         .await
@@ -283,6 +298,8 @@ async fn read_only_role_cannot_write_or_read_other_columns() {
         "SELECT artifact_digest FROM app_versions".to_string(),
         "SELECT staging_source_key FROM app_version_uploads".to_string(),
         "SELECT name FROM communities".to_string(),
+        "SELECT id FROM communities".to_string(),
+        "SELECT tenant_id FROM communities".to_string(),
         "SELECT slug FROM tenants".to_string(),
         format!("CREATE TABLE {}_t (x int)", env.role),
     ] {

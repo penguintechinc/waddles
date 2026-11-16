@@ -24,24 +24,66 @@ already taken by the Bot module port (M5, per this PR's task brief).
 
 from __future__ import annotations
 
+import functools
+import logging
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import document_response, validate_request, validate_response
 
 from services import admin_service as svc
 from services import community_reputation_service as reputation_svc
+from services.community_authz import guard_target_member, resolve_editor_scopes_async
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
-from services.errors import ApiError
+from services.errors import ApiError, forbidden
 from services.pagination import parse_limit
+from services.scope_registry import (
+    SCOPE_COMMANDS_MANAGE,
+    SCOPE_MEMBERS_REMOVE,
+    SCOPE_MEMBERS_ROLES,
+    SCOPE_MEMBERS_VIEW,
+    SCOPE_MODULES_MANAGE,
+    SCOPE_PLATFORMS_MANAGE,
+    SCOPE_REPUTATION_MANAGE,
+    SCOPE_SETTINGS_MANAGE,
+    SCOPE_TEMP_PASSWORD,
+)
+
+logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("v1_admin", __name__, url_prefix="/api/v1/admin")
+
+
+async def _require_member_scope(community_id: int, scope: str) -> None:
+    """403 unless the caller holds the dedicated per-action community `scope`."""
+    async_dal, dal = _dal()
+    held = await resolve_editor_scopes_async(request, async_dal, dal, community_id=community_id)
+    if scope not in held:
+        raise forbidden(f"Missing required scope: {scope}")
+
+
+def require_member_scope(scope: str) -> Callable[[Any], Any]:
+    """Route decorator: 403 unless the caller holds the dedicated community `scope` (async DAL)."""
+
+    def decorate(fn: Any) -> Any:
+        @functools.wraps(fn)
+        async def wrapper(**kwargs: Any) -> Any:
+            try:
+                await _require_member_scope(kwargs["community_id"], scope)
+            except ApiError as exc:
+                logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
+                return _err(exc)
+            return await fn(**kwargs)
+
+        return wrapper
+
+    return decorate
 
 
 def _dal() -> tuple[Any, Any]:
@@ -363,7 +405,7 @@ class CommandsResponse:
 
 @admin_bp.route("/<int:community_id>/settings", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_SETTINGS_MANAGE)  # type: ignore[misc]
 @validate_response(SettingsResponse)
 async def get_settings(community_id: int) -> SettingsResponse | tuple[dict[str, object], int]:
     """Get community settings."""
@@ -392,7 +434,7 @@ async def get_settings(community_id: int) -> SettingsResponse | tuple[dict[str, 
 
 @admin_bp.route("/<int:community_id>/settings", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_SETTINGS_MANAGE)  # type: ignore[misc]
 @validate_request(UpdateSettingsRequest)
 @validate_response(MessageResponse)
 async def update_settings(
@@ -422,7 +464,7 @@ async def update_settings(
 
 @admin_bp.route("/<int:community_id>/members", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_MEMBERS_VIEW)  # type: ignore[misc]
 @validate_response(MembersResponse)
 async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, object], int]:
     """Get community members."""
@@ -470,7 +512,7 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
 
 @admin_bp.route("/<int:community_id>/members/<int:user_id>/role", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_MEMBERS_ROLES)  # type: ignore[misc]
 @validate_request(UpdateRoleRequest)
 @validate_response(MessageResponse)
 async def update_member_role(
@@ -482,6 +524,9 @@ async def update_member_role(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         await svc.update_member_role(
             async_dal,
             dal,
@@ -492,13 +537,14 @@ async def update_member_role(
             caller_id=caller_id,
         )
     except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message="Role updated")
 
 
 @admin_bp.route("/<int:community_id>/members/<int:user_id>/reputation", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_REPUTATION_MANAGE)  # type: ignore[misc]
 @validate_request(AdjustReputationRequest)
 # NOT @validate_response -- update_async + response returned to caller
 # hits the crash class documented in services/dto_response.py.
@@ -510,6 +556,9 @@ async def adjust_reputation(
     ctx = get_tenant_context(request)
     assert ctx is not None
     try:
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         new_score, change = await svc.adjust_reputation(
             async_dal,
             dal,
@@ -521,6 +570,7 @@ async def adjust_reputation(
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning("adjust_reputation rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return jsonify_dto(
         ReputationResponse(success=True, reputation=_reputation_dto(new_score), change=change)
@@ -563,6 +613,9 @@ async def get_reputation_config(community_id: int) -> tuple[Any, int]:
         await _authorize_reputation_admin(community_id)
         cfg = await reputation_svc.get_community_config(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.warning(
+            "get_reputation_config rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(_config_response(cfg))
 
@@ -590,6 +643,9 @@ async def put_reputation_config(
             at_risk_threshold=data.atRiskThreshold,
         )
     except ApiError as exc:
+        logger.warning(
+            "put_reputation_config rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(_config_response(cfg))
 
@@ -609,6 +665,9 @@ async def get_reputation_at_risk(community_id: int) -> tuple[Any, int]:
             limit=parse_limit(request.args.get("limit"), default=50),
         )
     except ApiError as exc:
+        logger.warning(
+            "get_reputation_at_risk rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(AtRiskResponse(success=True, members=members))
 
@@ -636,6 +695,9 @@ async def get_reputation_history(community_id: int) -> tuple[Any, int]:
             offset=int(raw_offset),
         )
     except ApiError as exc:
+        logger.warning(
+            "get_reputation_history rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(HistoryResponse(success=True, entries=entries))
 
@@ -655,6 +717,9 @@ async def list_reputation_soft_bans(community_id: int) -> tuple[Any, int]:
             limit=parse_limit(request.args.get("limit"), default=50),
         )
     except ApiError as exc:
+        logger.warning(
+            "list_reputation_soft_bans rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(SoftBansResponse(success=True, softBans=bans))
 
@@ -670,7 +735,8 @@ async def put_reputation_soft_ban(
     async_dal, dal = _dal()
     try:
         expires = datetime.fromisoformat(data.expiresAt) if data.expiresAt else None
-    except ValueError:
+    except ValueError as exc:
+        logger.warning("put_reputation_soft_ban invalid expiresAt: %s", type(exc).__name__)
         return _err(ApiError("Invalid expiresAt", 400, "BAD_REQUEST"))
     if expires is not None and expires.tzinfo is None:
         expires = expires.replace(tzinfo=UTC)
@@ -686,6 +752,9 @@ async def put_reputation_soft_ban(
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning(
+            "put_reputation_soft_ban rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return jsonify_dto(MessageResponse(success=True, message="Soft ban set"))
 
@@ -707,6 +776,9 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:
+        logger.warning(
+            "delete_reputation_soft_ban rejected: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     if not cleared:
         return _err(ApiError("Member is not soft-banned", 404, "NOT_FOUND"))
@@ -715,7 +787,7 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
 
 @admin_bp.route("/<int:community_id>/members/<int:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_MEMBERS_REMOVE)  # type: ignore[misc]
 @validate_request(RemoveMemberRequest)
 @validate_response(MessageResponse)
 async def remove_member(
@@ -727,6 +799,9 @@ async def remove_member(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         await svc.remove_member(
             async_dal,
             dal,
@@ -737,13 +812,14 @@ async def remove_member(
             reason=data.reason,
         )
     except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message="Member removed")
 
 
 @admin_bp.route("/<int:community_id>/temp-password", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_TEMP_PASSWORD)  # type: ignore[misc]
 @validate_request(TempPasswordRequest)
 # NOT @validate_response -- insert_async + response hits the crash class
 # documented in services/dto_response.py.
@@ -792,7 +868,7 @@ async def generate_temp_password(data: TempPasswordRequest, community_id: int) -
 
 @admin_bp.route("/<int:community_id>/modules", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_MODULES_MANAGE)  # type: ignore[misc]
 @validate_response(ModulesResponse)
 async def get_modules(community_id: int) -> ModulesResponse | tuple[dict[str, object], int]:
     """Get installed modules for a community."""
@@ -822,7 +898,7 @@ async def get_modules(community_id: int) -> ModulesResponse | tuple[dict[str, ob
 
 @admin_bp.route("/<int:community_id>/modules/<int:module_id>/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_MODULES_MANAGE)  # type: ignore[misc]
 @validate_request(UpdateModuleConfigRequest)
 @validate_response(MessageResponse)
 async def update_module_config(
@@ -849,7 +925,7 @@ async def update_module_config(
 
 @admin_bp.route("/<int:community_id>/connected-platforms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_PLATFORMS_MANAGE)  # type: ignore[misc]
 @validate_response(ConnectedPlatformsResponse)
 async def get_connected_platforms(
     community_id: int,
@@ -871,7 +947,7 @@ async def get_connected_platforms(
 
 @admin_bp.route("/<int:community_id>/commands", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community:admin")  # type: ignore[misc]
+@require_member_scope(SCOPE_COMMANDS_MANAGE)  # type: ignore[misc]
 @validate_response(CommandsResponse)
 async def get_commands(community_id: int) -> CommandsResponse | tuple[dict[str, object], int]:
     """Get the commands reference list."""

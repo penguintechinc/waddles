@@ -207,6 +207,31 @@ impl HandOp {
     }
 }
 
+/// Moderation tools that act on OTHER participants or the whole room: moderate scope only.
+pub const MODERATOR_TOOLS: [&str; 6] = [
+    "room.kick",
+    "room.mute",
+    "room.unmute",
+    "room.mute_all",
+    "room.lock",
+    "room.unlock",
+];
+
+/// `room.leave` removes only the verified caller from the room: member scope.
+pub const LEAVE_TOOL: &str = "room.leave";
+
+/// The manifest `required_scope` a moderation tool declares (host-verified before
+/// dispatch); `None` for a tool that is not part of the moderation set.
+pub fn moderation_scope(tool: &str) -> Option<&'static str> {
+    if MODERATOR_TOOLS.contains(&tool) {
+        Some(scope_for(GrantRole::Moderator))
+    } else if tool == LEAVE_TOOL {
+        Some(scope_for(GrantRole::Member))
+    } else {
+        None
+    }
+}
+
 /// The community scope a role bundle maps to (what the host verifies).
 pub fn scope_for(role: GrantRole) -> &'static str {
     if role.is_staff() {
@@ -310,6 +335,29 @@ mod tests {
         assert!(JOIN_TTL_SECS >= t["ttl_min_secs"].as_i64().unwrap());
         assert_eq!(t["alg"], "ES256");
         assert!(!t["forbidden_claims"].as_array().unwrap().is_empty());
+    }
+
+    #[test]
+    fn moderation_scopes_match_the_contract() {
+        let c = contract();
+        let m = &c["moderation"];
+        let min_role = m["min_role"].as_object().unwrap();
+        assert_eq!(min_role.len(), MODERATOR_TOOLS.len());
+        for tool in MODERATOR_TOOLS {
+            assert_eq!(min_role[tool], "moderator", "{tool}");
+            assert_eq!(
+                moderation_scope(tool),
+                m["scope_for_moderator_only"].as_str(),
+                "{tool}"
+            );
+        }
+        assert_eq!(m["self_service"], serde_json::json!([LEAVE_TOOL]));
+        assert_eq!(moderation_scope(LEAVE_TOOL), m["leave_scope"].as_str());
+        assert_eq!(moderation_scope("room.create"), None);
+        assert_eq!(
+            m["args_forbidden"],
+            serde_json::json!(["actor_id", "actor_role"])
+        );
     }
 
     #[test]

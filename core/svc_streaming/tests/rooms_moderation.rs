@@ -19,12 +19,9 @@ use webrtc::media_stream::track_local::TrackLocal;
 use webrtc::peer_connection::PeerConnection;
 
 use rtc_common::*;
-use svc_streaming::rooms::token::TokenKeys;
 use svc_streaming::rooms::{host_api, media, RoomService};
 use svc_streaming::rtc::metrics::RtcMetrics;
 use svc_streaming::rtc::pc_factory::PeerConnectionFactory;
-
-const SECRET: &str = "0123456789abcdef0123456789abcdef";
 
 struct Harness {
     host: axum::Router,
@@ -42,7 +39,7 @@ fn harness(base: u16, moderation: bool) -> Harness {
         RoomService::new(
             server,
             metrics,
-            Some(TokenKeys::new(SECRET).unwrap()),
+            Some(rtc_common::test_token_keys()),
             "http://svc.test".into(),
         )
         .with_moderation(moderation),
@@ -508,8 +505,21 @@ async fn list_and_participants_are_community_scoped_and_ids_only() {
     assert_eq!(parts["count"], 2);
     for e in parts["participants"].as_array().unwrap() {
         let keys: Vec<&String> = e.as_object().unwrap().keys().collect();
-        assert_eq!(keys, ["muted", "participant_id", "publisher", "subscriber"]);
+        assert_eq!(
+            keys,
+            [
+                "joined_at",
+                "muted",
+                "participant_id",
+                "publisher",
+                "subscriber"
+            ]
+        );
         Uuid::parse_str(e["participant_id"].as_str().unwrap()).unwrap();
+        assert!(
+            e["joined_at"].as_i64().is_some_and(|t| t > 0),
+            "joined_at is the unix-seconds join time, never a made-up 0"
+        );
     }
     let _ = (p.pc.close().await, v.pc.close().await);
 }

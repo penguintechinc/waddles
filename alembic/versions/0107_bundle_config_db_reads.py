@@ -19,8 +19,8 @@ upload staging keys, `artifact_digest` or any other column; no INSERT/UPDATE/DEL
   - `app_versions (id)` -- join key only.
   - `app_version_uploads (id, app_version_id, manifest_json)` -- the published manifest, read for
     `community_config_schema.properties.*.default` (public bundle metadata, no secrets).
-  - `communities (id, tenant_id)` -- the tenant gate (svc-process only: svc-action already holds
-    table-level `communities: SELECT` in `config/postgres/service-roles.yaml`).
+  - `communities (id, tenant_id)` -- the tenant gate (svc-process only). SUPERSEDED: revoked again by
+    0108_revoke_cfg_communities (least privilege; the reader no longer joins `communities`).
 
 The same grants are declared in `config/postgres/service-roles.yaml` (`columns:`), which
 `migrations/run-alembic.sh` re-asserts with `service_roles.py reconcile --strict` after every

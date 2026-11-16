@@ -1000,7 +1000,9 @@ pub mod testing {
 
     use super::{derive_seal_key, seal_info, DEK_LEN, INGEST_STREAM_PURPOSE, STREAM_DEK_SCOPE};
     use crate::pb::key_service_server::{KeyService, KeyServiceServer};
-    use crate::pb::{GetStreamDekRequest, GetStreamDekResponse};
+    use crate::pb::{
+        GetStreamDekRequest, GetStreamDekResponse, GetTenantDekRequest, GetTenantDekResponse,
+    };
 
     /// The bearer token the fake hub accepts (the test's mint hands this out).
     pub const FAKE_TOKEN: &str = "fake-hub-key-token";
@@ -1149,16 +1151,31 @@ pub mod testing {
 
     #[tonic::async_trait]
     impl KeyService for FakeKeyService {
+        /// The stream-DEK client under test never calls `GetTenantDek`; refuse loudly if it does.
+        async fn get_tenant_dek(
+            &self,
+            _request: Request<GetTenantDekRequest>,
+        ) -> Result<Response<GetTenantDekResponse>, Status> {
+            Err(Status::unimplemented(
+                "GetTenantDek is not part of this fake",
+            ))
+        }
+
         async fn get_stream_dek(
             &self,
             request: Request<GetStreamDekRequest>,
         ) -> Result<Response<GetStreamDekResponse>, Status> {
-            let auth = request
+            // A missing or non-ASCII `authorization` header is an unauthenticated call, refused
+            // loudly -- never coerced into an empty string that merely fails the compare below.
+            let Some(auth) = request
                 .metadata()
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
-                .unwrap_or_default()
-                .to_string();
+            else {
+                return Err(Status::unauthenticated(
+                    "missing or unreadable authorization",
+                ));
+            };
             if auth != format!("Bearer {FAKE_TOKEN}") {
                 return Err(Status::unauthenticated("unauthorized"));
             }

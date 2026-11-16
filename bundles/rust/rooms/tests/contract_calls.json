@@ -51,42 +51,27 @@
     "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.leave": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_role": "member"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.kick": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
   },
   "room.mute": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
   },
   "room.unmute": {
     "room_id": "00000000-0000-0000-0000-000000000001",
-    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "participant_id": "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
   },
   "room.mute_all": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.lock": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   },
   "room.unlock": {
-    "room_id": "00000000-0000-0000-0000-000000000001",
-    "actor_id": "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa",
-    "actor_role": "admin"
+    "room_id": "00000000-0000-0000-0000-000000000001"
   }
 }

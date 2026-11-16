@@ -127,11 +127,9 @@ cd /home/penguin/code/Waddles/k8s
 ## Deployment Tool by Environment
 
 **Helm is the only supported deployment path, alpha through production** — see
-[`QUICKSTART.md`](../QUICKSTART.md#deploy-with-helm). `k8s/kustomize/` exists in this repo but is
-deprecated (see [`ARCHITECTURE.md`](../ARCHITECTURE.md#build-status-caveats)); do not use it for
-new deployments. The install scripts below (`install-microk8s.sh`, `install-k8s.sh`) also expose a
-`--manifests` flag that applies k8s/manifests/ (not a real path — that directory does not exist in
-this repo today) via Kustomize, so `--manifests` is non-functional. Use the default `--helm` deployment method.
+[`QUICKSTART.md`](../QUICKSTART.md#deploy-with-helm). The legacy Kustomize overlays and raw
+manifests were removed; the install scripts below (`install-microk8s.sh`, `install-k8s.sh`) deploy
+the Helm chart only.
 
 | Environment | Tool |
 |---|---|
@@ -375,27 +373,6 @@ global:
   imageRegistry: "ghcr.io/penguintechinc/waddlebot"
   imageTag: "latest"
   imagePullPolicy: IfNotPresent
-  storageClass: "standard"
-```
-
-**Resource Presets**:
-```yaml
-resourcePresets:
-  small:
-    cpu: "100m"
-    memory: "128Mi"
-    cpuLimit: "500m"
-    memoryLimit: "512Mi"
-  medium:
-    cpu: "250m"
-    memory: "256Mi"
-    cpuLimit: "1000m"
-    memoryLimit: "1Gi"
-  large:
-    cpu: "500m"
-    memory: "512Mi"
-    cpuLimit: "2000m"
-    memoryLimit: "2Gi"
 ```
 
 **Module Configuration Example**:
@@ -423,41 +400,9 @@ processing:
 
 ### Environment Variables
 
-**Shared Environment Variables** (applied to all modules):
-```yaml
-sharedEnv:
-  # Database
-  DB_HOST: "postgresql"
-  DB_PORT: "5432"
-  DB_NAME: "waddlebot"
-  DB_USER: "waddlebot"
-  DB_POOL_SIZE: "20"
-
-  # Redis
-  REDIS_HOST: "redis"
-  REDIS_PORT: "6379"
-  REDIS_DB: "0"
-
-  # SeaweedFS S3 gateway
-  S3_ENDPOINT_URL: "http://infra-seaweedfs:8333"
-  S3_FORCE_PATH_STYLE: "true"
-
-  # Ollama
-  OLLAMA_HOST: "http://ollama:11434"
-  OLLAMA_MODEL: "llama3.1"
-
-  # Qdrant
-  QDRANT_HOST: "qdrant"
-  QDRANT_PORT: "6333"
-
-  # Service URLs
-  ROUTER_URL: "http://router:8000"
-  HUB_URL: "http://hub:8060"
-
-  # Logging
-  LOG_LEVEL: "INFO"
-  LOG_FORMAT: "json"
-```
+**Shared configuration**: the chart renders one `waddlebot-config` ConfigMap
+(`templates/configmap.yaml`) from the `infrastructure.*`, `global.*` and `config.*` values;
+there is no free-form shared env map (the old `sharedEnv` key was removed -- nothing read it).
 
 ### Secrets Management
 
@@ -488,31 +433,15 @@ kubectl create secret generic waddlebot-secrets \
 
 ### Storage Classes
 
-**MicroK8s**:
+Set per component (there is no global storage class key; empty = cluster default):
 ```yaml
-global:
-  storageClass: "microk8s-hostpath"
-```
-
-**kind/minikube**:
-```yaml
-global:
-  storageClass: "standard"
-```
-
-**Cloud Providers**:
-```yaml
-# AWS
-global:
-  storageClass: "gp3"
-
-# GCP
-global:
-  storageClass: "standard-rwo"
-
-# Azure
-global:
-  storageClass: "managed-premium"
+infrastructure:
+  postgresql:
+    persistence:
+      storageClass: "gp3"   # AWS; GCP standard-rwo; Azure managed-premium
+  seaweedfs:
+    persistence:
+      storageClass: "microk8s-hostpath"
 ```
 
 ### Ingress Configuration
@@ -584,15 +513,12 @@ kubectl top nodes
 kubectl top pods -n waddlebot
 ```
 
-**Apply HPA Configurations**:
-```bash
-# Apply all HPA configs
-kubectl apply -f k8s/hpa/
-
-# Or individually
-kubectl apply -f k8s/hpa/router-hpa.yaml
-kubectl apply -f k8s/hpa/receiver-modules-hpa.yaml
-kubectl apply -f k8s/hpa/action-modules-hpa.yaml
+**Enable HPAs** (rendered by the chart, `templates/autoscaling.yaml`):
+```yaml
+autoscaling:
+  services:
+    hubApi: { enabled: true }
+    svcProcessRust: { enabled: true }
 ```
 
 **HPA Configuration Example** (Router):
@@ -1045,8 +971,7 @@ kubectl set resources deployment router -n waddlebot \
   --limits=cpu=2000m,memory=2Gi \
   --requests=cpu=500m,memory=512Mi
 
-# Enable HPA
-kubectl apply -f k8s/hpa/router-hpa.yaml
+# Enable HPA: set autoscaling.services.<key>.enabled=true in the values file, then helm upgrade
 ```
 
 ### Application Errors
@@ -1168,20 +1093,9 @@ spec:
 
 ### External Databases
 
-**Use Managed Services** (recommended):
-```yaml
-sharedEnv:
-  DB_HOST: "postgres.rds.amazonaws.com"
-  REDIS_HOST: "redis.cache.amazonaws.com"
-```
-
-**Connection Pooling**:
-```yaml
-sharedEnv:
-  DB_POOL_SIZE: "50"
-  DB_MAX_OVERFLOW: "20"
-  DB_POOL_TIMEOUT: "30"
-```
+The chart wires every workload to its in-cluster PostgreSQL/Valkey (TLS, verify-full against the
+chart's internal CA); there are no external-database values. The old `sharedEnv.DB_HOST` /
+`REDIS_HOST` overrides were removed -- nothing read them.
 
 ### TLS/SSL Configuration
 
@@ -1374,7 +1288,6 @@ spec:
 - [`QUICKSTART.md`](../QUICKSTART.md) — fastest path to a running Helm deployment
 - [`ARCHITECTURE.md`](../ARCHITECTURE.md) — the v3.0.x 8-container pipeline and build status
 - [`WORKFLOWS.md`](../WORKFLOWS.md) — GitHub Actions CI/CD workflows
-- [`k8s/hpa/README.md`](../../k8s/hpa/README.md) — the separate Kustomize-based HPA overlay
 - [`k8s/helm/waddlebot/README.md`](../../k8s/helm/waddlebot/README.md) — Helm chart documentation
 
 ---

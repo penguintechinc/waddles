@@ -10,10 +10,8 @@ calls for; (b) the concatenated `stages` JSON blob is syntactically valid
 once its `||`-joined literals are combined (the exact bug `0014_wave1a_bundle_seeds`'
 own test suite was authored to catch: a bare `... || '...'::jsonb` casts
 only the LAST literal unless the whole concatenation is wrapped in
-`(...)::jsonb`); (c) both ingest and action entrypoints resolve to real,
-already-shipped module files under `core/svc_ingest/builtin_handlers/` /
-`core/svc_action/builtin_handlers/` (the "coded but not routable" guard `0014`'s
-own test establishes); (d) the `app_tenant_availability` row is upserted
+`(...)::jsonb`); (c) [the on-disk module-file check was retired with the
+Python `builtin_handlers/` data plane, commit 08e67f47f]; (d) the `app_tenant_availability` row is upserted
 with the app-specific `config_defaults` secret refs set directly; (e) both
 upgrade()/downgrade() are idempotent (`ON CONFLICT ... DO UPDATE`) and
 downgrade() removes exactly what upgrade() added, in FK-safe order.
@@ -32,9 +30,6 @@ import pytest
 _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0019_kick_app.py"
 )
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_INGEST_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_ingest" / "builtin_handlers"
-_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "builtin_handlers"
 
 KICK_APP_ID = "waddles.bot.kick.default"
 TENANT_SLUG = "global"
@@ -226,28 +221,6 @@ class TestSeededStagesJsonIsValid:
             "found a ::jsonb cast applied directly to the last literal of a "
             "|| chain with no wrapping parens -- only that literal would be "
             "cast, not the full concatenated JSON"
-        )
-
-
-class TestEntrypointsResolveToRealModules:
-    """The 'coded but not routable' guard 0014_wave1a_bundle_seeds' own
-    test suite establishes: every seeded entrypoint must resolve to a
-    real, already-shipped module file, not a stale/typo'd path."""
-
-    def test_ingest_module_file_exists(self) -> None:
-        ingest_module_name, _, _, _ = EXPECTED[KICK_APP_ID]
-        module_path = _INGEST_BUNDLES_DIR / f"{ingest_module_name}.py"
-        assert module_path.is_file(), (
-            f"{KICK_APP_ID}'s ingest entrypoint references bundles.{ingest_module_name}, "
-            f"but no {module_path} file exists"
-        )
-
-    def test_action_module_file_exists(self) -> None:
-        _, action_module_name, _, _ = EXPECTED[KICK_APP_ID]
-        module_path = _ACTION_BUNDLES_DIR / f"{action_module_name}.py"
-        assert module_path.is_file(), (
-            f"{KICK_APP_ID}'s action entrypoint references bundles.{action_module_name}, "
-            f"but no {module_path} file exists"
         )
 
 

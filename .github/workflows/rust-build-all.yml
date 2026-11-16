@@ -75,8 +75,10 @@ jobs:
           - bundle_host_db
           - bundle_host_http
           - bundle_host_kv
+          - bundle_host_crypto
           - bundle_tool_call
           - circuit_breaker
+          - command_latency
           - connector_e2e
           - discord_mentions
           - egress_assertion

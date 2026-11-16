@@ -79,22 +79,6 @@ Returns the namespace where resources should be created.
 {{- end }}
 
 {{/*
-Image path with registry prefix
-Constructs the full image path including registry, repository, and tag.
-Usage: {{ include "waddlebot.image" (dict "image" .Values.modules.router "global" .Values.global "defaultTag" .Chart.AppVersion) }}
-*/}}
-{{- define "waddlebot.image" -}}
-{{- $registry := .global.imageRegistry | default "" }}
-{{- $repository := .image.repository | required "image.repository is required" }}
-{{- $tag := .image.tag | default .defaultTag | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
 Service Account name
 Returns the name of the service account to use.
 */}}
@@ -145,31 +129,6 @@ Args (dict): root (the root "."), role.
 {{- if not (has .role .root.Values.infrastructure.postgresql.serviceRoles.roles) -}}
 {{- fail (printf "unknown PostgreSQL service role %q -- add it to config/postgres/service-roles.yaml AND infrastructure.postgresql.serviceRoles.roles in values.yaml" .role) -}}
 {{- end -}}
-{{- end }}
-
-{{/*
-Resolve + validate one role's password (secrets.yaml calls this exactly once per role).
-Args (dict): ctx (root "."), role. Precedence: explicit infrastructure.postgresql.
-serviceRoles.passwords.<role> > existing key in the credentials Secret (KEEP) > generate
-(alpha/local only) > fail closed -- the shared waddlebot.autoSecretValue policy. The value
-must be URL-safe ([A-Za-z0-9._~-], it is embedded in DATABASE_URL) and >= 16 chars, and
-must not look like a placeholder / repo default: the same rules scripts/db/
-service_roles.py enforces at migration time, so a bad value fails here, at render.
-*/}}
-{{- define "waddlebot.db.rolePassword" -}}
-{{- $ctx := .ctx -}}
-{{- $role := .role -}}
-{{- $key := include "waddlebot.db.passwordKey" $role -}}
-{{- $explicit := index ($ctx.Values.infrastructure.postgresql.serviceRoles.passwords | default dict) $role | default "" | toString -}}
-{{- $explicit = ternary "" $explicit (hasPrefix "REPLACE_ME" $explicit) -}}
-{{- $value := include "waddlebot.autoSecretValue" (dict "ctx" $ctx "key" $key "explicit" $explicit "length" 32 "secret" (include "waddlebot.db.credentialsSecretName" $ctx)) -}}
-{{- if not (regexMatch "^[A-Za-z0-9._~-]{16,}$" $value) -}}
-{{- fail (printf "PostgreSQL password for role %q must be >=16 chars of [A-Za-z0-9._~-] (it is embedded in DATABASE_URL)" $role) -}}
-{{- end -}}
-{{- if regexMatch "(?i)(changeme|change_me|replace_me|example|password|dev_)" $value -}}
-{{- fail (printf "PostgreSQL password for role %q looks like a placeholder / repo default -- refusing" $role) -}}
-{{- end -}}
-{{- $value -}}
 {{- end }}
 
 {{/* Connection target pieces (the in-chart Postgres Service). */}}
@@ -248,51 +207,16 @@ Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_p
 {{- end }}
 
 {{/*
-Redis connection URL
-Constructs the Redis connection URL from values.
-Supports both external and internal Redis instances.
-Format: redis://[:password@]host:port[/database]
+Per-image tag resolution
+Precedence: explicit per-component tag > global.imageTags[<image>] > global.imageTag > "latest".
+global.imageTags (default empty) lets a deploy pin each image independently, so an image that
+was not rebuilt keeps its old tag string and its pods are NOT restarted. Unset = unchanged
+behaviour (every image reads global.imageTag).
+Usage: {{ include "waddlebot.resolveImageTag" (dict "root" . "image" "svc-ingest" "explicit" .Values.x.imageTag) }}
 */}}
-{{- define "waddlebot.redis.url" -}}
-{{- if .Values.redis.enabled }}
-{{- $host := printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- $port := .Values.redis.master.service.port | default 6379 }}
-{{- $password := .Values.redis.auth.password | default "" }}
-{{- $database := .Values.redis.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- else }}
-{{- $host := .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- $port := .Values.redis.external.port | default 6379 }}
-{{- $password := .Values.redis.external.password | default "" }}
-{{- $database := .Values.redis.external.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-Module image helper
-Simplified image helper for module-specific images.
-Uses global registry and chart version as defaults.
-Handles both bare module names and legacy patterns with properly scoped registry.
-Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag" .Values.modules.router.imageTag) }}
-*/}}
-{{- define "waddlebot.moduleImage" -}}
-{{- $registry := .root.Values.global.imageRegistry | default "" }}
-{{- $repository := .module | required "module name is required" }}
-{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
+{{- define "waddlebot.resolveImageTag" -}}
+{{- $per := get (.root.Values.global.imageTags | default dict) (.image | toString) | default "" -}}
+{{- .explicit | default $per | default .root.Values.global.imageTag | default "latest" | toString -}}
 {{- end }}
 
 {{/*
@@ -304,50 +228,12 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- define "waddlebot.legacyModuleImage" -}}
 {{- $registry := .root.Values.global.imageRegistry | default "" }}
 {{- $repository := .module | required "module name is required" }}
-{{- $tag := .imageTag | default .root.Values.global.imageTag | default "latest" | toString }}
+{{- $tag := include "waddlebot.resolveImageTag" (dict "root" .root "image" $repository "explicit" .imageTag) }}
 {{- if $registry }}
 {{- printf "%s/%s:%s" $registry $repository $tag }}
 {{- else }}
 {{- printf "%s:%s" $repository $tag }}
 {{- end }}
-{{- end }}
-
-{{/*
-Redis host
-Returns the Redis host name.
-*/}}
-{{- define "waddlebot.redis.host" -}}
-{{- if .Values.redis.enabled }}
-{{- printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- else }}
-{{- .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Redis port
-Returns the Redis port.
-*/}}
-{{- define "waddlebot.redis.port" -}}
-{{- if .Values.redis.enabled }}
-{{- .Values.redis.master.service.port | default 6379 }}
-{{- else }}
-{{- .Values.redis.external.port | default 6379 }}
-{{- end }}
-{{- end }}
-
-{{/*
-Create the name of the config map for common configuration
-*/}}
-{{- define "waddlebot.commonConfigName" -}}
-{{- printf "%s-config" (include "waddlebot.fullname" .) }}
-{{- end }}
-
-{{/*
-Create the name of the secret for common secrets
-*/}}
-{{- define "waddlebot.commonSecretName" -}}
-{{- printf "%s-secrets" (include "waddlebot.fullname" .) }}
 {{- end }}
 
 {{/*
@@ -384,64 +270,6 @@ a rendered Secret. Call as:
 {{- if regexMatch "(?i)(REPLACE_ME|CHANGE_ME|changeme|example)" $v }}
 {{- fail (printf "refusing to render placeholder value for %q -- set a real value or remove the key (see docs/PLATFORM_CREDENTIALS.md)" .key) }}
 {{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-API Key Secret Name
-Returns the name of the secret containing API keys.
-*/}}
-{{- define "waddlebot.apiKeySecretName" -}}
-{{- if .Values.apiKeys.existingSecret }}
-{{- .Values.apiKeys.existingSecret }}
-{{- else }}
-{{- printf "%s-api-keys" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-License Key Secret Name
-Returns the name of the secret containing license keys.
-*/}}
-{{- define "waddlebot.licenseSecretName" -}}
-{{- if .Values.license.existingSecret }}
-{{- .Values.license.existingSecret }}
-{{- else }}
-{{- printf "%s-license" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-Ingress API Version
-Returns the appropriate API version for Ingress based on Kubernetes version.
-*/}}
-{{- define "waddlebot.ingress.apiVersion" -}}
-{{- if .Capabilities.APIVersions.Has "networking.k8s.io/v1" }}
-{{- print "networking.k8s.io/v1" }}
-{{- else if .Capabilities.APIVersions.Has "networking.k8s.io/v1beta1" }}
-{{- print "networking.k8s.io/v1beta1" }}
-{{- else }}
-{{- print "extensions/v1beta1" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return true if cert-manager is enabled
-*/}}
-{{- define "waddlebot.certManager.enabled" -}}
-{{- if and .Values.ingress.enabled .Values.ingress.certManager.enabled }}
-{{- true }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return the appropriate cert-manager annotation
-*/}}
-{{- define "waddlebot.certManager.annotation" -}}
-{{- if eq .Values.ingress.certManager.issuer.kind "ClusterIssuer" }}
-cert-manager.io/cluster-issuer: {{ .Values.ingress.certManager.issuer.name }}
-{{- else }}
-cert-manager.io/issuer: {{ .Values.ingress.certManager.issuer.name }}
 {{- end }}
 {{- end }}
 
@@ -483,7 +311,8 @@ and excluded on that basis) -- stdlib `urllib.request` only, no extra dependency
 Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
 */}}
 {{- define "waddlebot.waitForHubApiInitContainer" -}}
-{{- $url := printf "http://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
+{{- $scheme := ternary "https" "http" (not (not (include "waddlebot.transitTlsEnabled" .))) }}
+{{- $url := printf "%s://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" $scheme (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
 - name: wait-for-hub-api
   image: "{{ .Values.waitForHubApi.image }}"
   imagePullPolicy: IfNotPresent
@@ -505,10 +334,23 @@ Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
     value: {{ .Values.waitForHubApi.stableIntervalSeconds | quote }}
   - name: MAX_BACKOFF_SECONDS
     value: {{ .Values.waitForHubApi.maxBackoffSeconds | quote }}
+  {{- include "waddlebot.transitCaEnv" . | nindent 2 }}
   command: ["python3", "-c"]
   args:
     - |
-      import os, time, random, sys, urllib.request, urllib.error
+      import os, ssl, time, random, sys, urllib.request, urllib.error
+
+      # F3 -- under global.internalTransitTls the probe VERIFIES hub-api against the internal CA
+      # (INTERNAL_CA_PEM from the Secret); a bad/missing CA is a hard error, never an unverified
+      # or plaintext fallback.
+      ctx = None
+      if os.environ["HUB_API_READY_URL"].startswith("https://"):
+          pem = os.environ.get("INTERNAL_CA_PEM", "").strip()
+          if not pem:
+              print("wait-for-hub-api: https URL but INTERNAL_CA_PEM is empty", file=sys.stderr)
+              sys.exit(1)
+          ctx = ssl.create_default_context(cadata=pem)
+          ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
       url = os.environ["HUB_API_READY_URL"]
       need = int(os.environ["STABLE_CHECKS"])
@@ -524,7 +366,7 @@ Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       while consecutive < need:
           attempt += 1
           try:
-              with urllib.request.urlopen(url, timeout=3) as resp:
+              with urllib.request.urlopen(url, timeout=3, context=ctx) as resp:
                   ok = resp.status == 200
           except (urllib.error.URLError, OSError) as exc:
               ok = False
@@ -636,6 +478,29 @@ waddlebot.hostApiTlsMaterialAvailable) -- the Secret template guarantees real ma
 whenever hub-api itself is enabled.
 */}}
 
+{{/*
+Single trust root (global.internalTransitTls.enabled): hub-api's gRPC listener serves the SAME
+cert-manager certificate (internal CA, FQDN SAN) as its HTTPS listener, and every gRPC client's
+HUB_API_GRPC_CA_FILE is that Secret's ca.crt -- one issuer, one CA, no self-generated gRPC CA.
+Off: the legacy self-generated/ExternalSecret `<fullname>-hub-api-grpc-tls` Secret.
+*/}}
+{{- define "waddlebot.hubApiGrpcTlsSecretName" -}}
+{{- if include "waddlebot.transitTlsEnabled" . -}}
+{{- include "waddlebot.transitTlsSecretName" (dict "root" . "component" "hub-api") -}}
+{{- else -}}
+{{- printf "%s-hub-api-grpc-tls" (include "waddlebot.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/* Host clients dial for hub-api's gRPC port: the FQDN under transit TLS (the CA's nameConstraints and the cert SAN permit only that form), else the bare Service name. */}}
+{{- define "waddlebot.hubApiGrpcHost" -}}
+{{- if include "waddlebot.transitTlsEnabled" . -}}
+{{- include "waddlebot.svcFqdn" (dict "root" . "name" "hub-api-v3") -}}
+{{- else -}}
+{{- printf "%s-hub-api-v3" (include "waddlebot.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
 {{- define "waddlebot.hubApiGrpcTlsDesiredDnsNames" -}}
 {{- $svcName := printf "%s-hub-api-v3" (include "waddlebot.fullname" .) -}}
 {{- $ns := .Values.namespace -}}
@@ -644,12 +509,6 @@ whenever hub-api itself is enabled.
 
 {{- define "waddlebot.hubApiGrpcTlsSansSha256" -}}
 {{- include "waddlebot.hubApiGrpcTlsDesiredDnsNames" . | sha256sum -}}
-{{- end }}
-
-{{- define "waddlebot.hubApiGrpcTlsMaterialAvailable" -}}
-{{- if .Values.pipeline.hubApi.enabled -}}
-true
-{{- end -}}
 {{- end }}
 
 {{/* Server-role env for hub-api's own container -- matches hub_api/grpc_internal/
@@ -666,7 +525,7 @@ end state, see that function's own docstring). */}}
 {{- define "waddlebot.hubApiGrpcTlsVolume" -}}
 - name: hub-api-grpc-tls
   secret:
-    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    secretName: {{ include "waddlebot.hubApiGrpcTlsSecretName" . }}
     defaultMode: 0440
 {{- end }}
 
@@ -687,7 +546,7 @@ hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FIL
 {{- define "waddlebot.hubApiGrpcCaVolume" -}}
 - name: hub-api-grpc-ca
   secret:
-    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    secretName: {{ include "waddlebot.hubApiGrpcTlsSecretName" . }}
     items:
       - key: ca.crt
         path: ca.crt
@@ -697,6 +556,86 @@ hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FIL
 {{- define "waddlebot.hubApiGrpcCaVolumeMount" -}}
 - name: hub-api-grpc-ca
   mountPath: /etc/waddlebot/hub-api-grpc-ca
+  readOnly: true
+{{- end }}
+
+{{/*
+svc-presentation's in-cluster surface gRPC listener (waddles.presentation.internal.v1.SurfaceService,
+core/svc_presentation/src/surfaces/ingress.rs): its OWN identity Secret `<fullname>-presentation-grpc-tls`
+(keys ca.crt/tls.crt/tls.key), minted at runtime by templates/provision-secrets.yaml (ECDSA P-256,
+own CA) like hub-api's gRPC identity. SANs are the svc-presentation Service's DNS names so
+`bundle_host_surface::SurfaceHost` verifies the server by hostname. Callers mount ONLY the CA.
+*/}}
+{{- define "waddlebot.presentationGrpcEnabled" -}}
+{{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcSvcName" -}}
+{{- printf "%s-svc-presentation" (include "waddlebot.fullname" .) -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsDesiredDnsNames" -}}
+{{- $svcName := include "waddlebot.presentationGrpcSvcName" . -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsSansSha256" -}}
+{{- include "waddlebot.presentationGrpcTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{/* Endpoint the stages dial (https, the Service DNS name the cert's SANs cover). */}}
+{{- define "waddlebot.presentationGrpcEndpoint" -}}
+{{- printf "https://%s:%v" (include "waddlebot.presentationGrpcSvcName" .) .Values.pipeline.svcPresentation.grpcPort -}}
+{{- end }}
+
+{{/* Server-role env for svc-presentation (core/svc_presentation/src/config.rs). */}}
+{{- define "waddlebot.presentationGrpcTlsServerEnv" -}}
+- name: SURFACE_GRPC_PORT
+  value: {{ .Values.pipeline.svcPresentation.grpcPort | quote }}
+- name: SURFACE_GRPC_TLS_CERT_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.crt
+- name: SURFACE_GRPC_TLS_KEY_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.key
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolume" -}}
+- name: presentation-grpc-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolumeMount" -}}
+- name: presentation-grpc-tls
+  mountPath: /etc/waddlebot/presentation-grpc-tls
+  readOnly: true
+{{- end }}
+
+{{/* Caller-role env + CA-only mount (svc-action-rust, svc-process-rust): `overlay.publish-surface`
+delivery (`bundle_host_surface::SurfaceHost`). Never the server's tls.crt/tls.key. */}}
+{{- define "waddlebot.presentationGrpcClientEnv" -}}
+- name: PRESENTATION_GRPC_ENDPOINT
+  value: {{ include "waddlebot.presentationGrpcEndpoint" . | quote }}
+- name: PRESENTATION_GRPC_CA_FILE
+  value: /etc/waddlebot/presentation-grpc-ca/ca.crt
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolume" -}}
+- name: presentation-grpc-ca
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    items:
+      - key: ca.crt
+        path: ca.crt
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolumeMount" -}}
+- name: presentation-grpc-ca
+  mountPath: /etc/waddlebot/presentation-grpc-ca
   readOnly: true
 {{- end }}
 
@@ -977,58 +916,10 @@ regenerated, closing the gap where #541 added the drift *detection*
 {{- end }}
 
 {{/*
-fix/helm-alpha-self-provisioning -- lookup-then-generate-or-require for a single key
-inside the monolithic waddlebot-secrets Secret (templates/secrets.yaml). Mirrors
-templates/auto-provisioned-secrets.yaml's KEEP-vs-GENERATE policy but at per-key
-granularity, since waddlebot-secrets also carries user-supplied pass-through values
-(OAuth tokens, AWS/GCP creds, etc.) that must always reflect current .Values and are
-therefore never routed through this helper.
-
-Args (dict): ctx (the root "."), key (Secret data key name, e.g. "JWT_SECRET"),
-explicit (the value already resolved from .Values, "" if unset/placeholder), length
-(random byte-string length, default 32), optional secret (the Secret to look the key up
-in; default "waddlebot-secrets"), optional legacySecret/legacyKey (a SECOND Secret/key
-read ONLY as a one-way migration source when `secret` has no value yet -- how
-POSTGRES_PASSWORD moves out of waddlebot-secrets into waddlebot-db-admin on `helm upgrade`
-without minting a new password that the Postgres PVC's initdb-time password would reject).
-
-Precedence: explicit non-placeholder value from .Values wins outright (operator/
-ExternalSecret already deliberately set it) > existing Secret key (KEEP, never
-rotated) > fresh random generation (alpha/local only) > fail closed elsewhere.
+Per-key lookup-then-generate (waddlebot.autoSecretValue) was REMOVED: template-time `lookup` is empty under
+`helm template | kubectl apply` / ArgoCD and would regenerate every secret. Generation is now runtime,
+create-if-absent, in every tier -- templates/provision-secrets.yaml + files/provision-secrets.sh.
 */}}
-{{- define "waddlebot.autoSecretValue" -}}
-{{- $ctx := .ctx -}}
-{{- $key := .key -}}
-{{- $explicit := .explicit | default "" -}}
-{{- $length := .length | default 32 -}}
-{{- $hex := .hex | default false -}}
-{{- $secretName := .secret | default "waddlebot-secrets" -}}
-{{- if ne $explicit "" -}}
-{{- $explicit -}}
-{{- else -}}
-{{- $tier := $ctx.Values.global.deploymentTier -}}
-{{- $canGenerate := or (eq $tier "alpha") (eq $tier "local") (.alwaysGenerate | default false) -}}
-{{- $existing := lookup "v1" "Secret" $ctx.Values.namespace $secretName -}}
-{{- $legacy := dict -}}
-{{- if .legacySecret -}}
-{{- $legacy = lookup "v1" "Secret" $ctx.Values.namespace .legacySecret | default dict -}}
-{{- end -}}
-{{- $legacyKey := .legacyKey | default $key -}}
-{{- if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $existing "key" $key)) -}}
-{{- index $existing.data $key | b64dec -}}
-{{- else if (include "waddlebot.secretKeyNonEmpty" (dict "existing" $legacy "key" $legacyKey)) -}}
-{{- index $legacy.data $legacyKey | b64dec -}}
-{{- else if $canGenerate -}}
-{{- if $hex -}}
-{{- sha256sum (randBytes 32) -}}
-{{- else -}}
-{{- randAlphaNum (int $length) -}}
-{{- end -}}
-{{- else -}}
-{{- fail (printf "%s: key %q has no value and global.deploymentTier=%q is outside alpha/local -- auto-generation is alpha/local only. Set the corresponding value explicitly (or pre-populate this Secret via ExternalSecret/SealedSecret) before deploying." $secretName $key $tier) -}}
-{{- end -}}
-{{- end -}}
-{{- end -}}
 
 {{/* Server-role volume: full cert+key+CA bundle, mounted by templates/infrastructure/redis.yaml. */}}
 {{- define "waddlebot.valkeyTlsServerVolume" -}}
@@ -1086,6 +977,9 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
 {{- define "waddlebot.bundleStorage.env" -}}
 {{- include "waddlebot.bundleStorage.validate" . -}}
 {{- if eq .Values.bundleStorage.mode "bundled" }}
+{{- /* Bundled SeaweedFS is signed by the runtime-generated transit CA: pin it as the ONLY trust anchor for THIS client. External S3 renders no CA var, so the host crate verifies with the system roots (public CA) -- never the private transit CA. */}}
+- name: BUNDLE_STORAGE_CA_FILE
+  value: {{ include "waddlebot.transitTls.caPath" . | quote }}
 - name: BUNDLE_STORAGE_ENDPOINT
   value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
 - name: BUNDLE_STORAGE_BUCKET
@@ -1177,6 +1071,31 @@ true
 {{- end -}}
 
 {{/*
+Kata Containers isolation for the bundle executors (bundleExecutor.runtimeClass).
+Renders pod-spec lines (runtimeClassName, nodeSelector, affinity) for the svc-bundles-executor
+Deployment ONLY -- never included by any other data-plane workload. Empty output when
+disabled. Fails the render if enabled with an empty name (no silent fallback to runc).
+Call: include "waddlebot.executorKataPodSpec" .
+*/}}
+{{- define "waddlebot.executorKataPodSpec" -}}
+{{- $rc := .Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if $rc.enabled -}}
+{{- if not $rc.name -}}
+{{- fail "bundleExecutor.runtimeClass.enabled=true requires a non-empty bundleExecutor.runtimeClass.name (the RuntimeClass, e.g. \"kata\", must exist in the cluster)" -}}
+{{- end -}}
+runtimeClassName: {{ $rc.name | quote }}
+{{- with .Values.bundleExecutor.nodeSelector }}
+nodeSelector:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- with .Values.bundleExecutor.affinity }}
+affinity:
+  {{- toYaml . | nindent 2 }}
+{{- end }}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Bundle storage v2 (docs/bundle-storage-v2.md): BUNDLE_DB_* env for svc-process-rust / svc-action-rust.
 Off by default (bundleStorageV2.db.enabled=false -> renders nothing, db capability stays
 not_implemented). Enabled -> the password is read by secretKeyRef from an operator-managed
@@ -1203,6 +1122,25 @@ chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
 {{- end -}}
 
 {{/*
+Effective executor sizing for ONE pool, as JSON {"resources": {...}, "memoryBudgetMb": N}.
+Default: the pool's own resources + memoryBudgetMb. When Kata is enabled
+(bundleExecutor.runtimeClass.enabled) and bundleExecutor.runtimeClass.resources is set, those
+requests/limits REPLACE the pool's (they size the workload inside the guest VM; the RuntimeClass
+`overhead` is added by Kubernetes on top automatically) and the LRU budget becomes
+bundleExecutor.runtimeClass.memoryBudgetMb (0/unset fails the budget < limit render check).
+The caller validates budget < memory LIMIT on the EFFECTIVE values.
+Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJson
+*/}}
+{{- define "waddlebot.executorEffective" -}}
+{{- $rc := .root.Values.bundleExecutor.runtimeClass | default dict -}}
+{{- if and $rc.enabled $rc.resources -}}
+{{- dict "resources" $rc.resources "memoryBudgetMb" (int ($rc.memoryBudgetMb | default 0)) | toJson -}}
+{{- else -}}
+{{- dict "resources" .pool.resources "memoryBudgetMb" (int .pool.memoryBudgetMb) | toJson -}}
+{{- end -}}
+{{- end -}}
+
+{{/*
 Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api only (DDL provisioning at install/upgrade/uninstall).
 Off by default; password only ever from an operator-managed existingSecret (required when enabled).
 */}}
@@ -1223,20 +1161,90 @@ Off by default; password only ever from an operator-managed existingSecret (requ
 
 {{/*
 svc-bundles-executor stage dial list -- the comma-separated `host:port` value of
-STAGE_HOST_API_ADDR: one entry per `pipeline.rustDataPlane.bundleExecutor.stages` item
+STAGE_HOST_API_ADDR: one entry per stage of ONE executor pool (waddlebot.executorPools)
 (`<fullname>-<target>:<port>`), in order. The executor runs one independent dial loop per
 entry (core/bundle_executor/src/config.rs). Fails the render on an empty list -- an executor
-that dials no stage would serve nothing.
+that dials no stage would serve nothing. Call with (dict "root" $ "stages" $pool.stages).
 */}}
 {{- define "waddlebot.bundleExecutorStageAddrs" -}}
-{{- $stages := .Values.pipeline.rustDataPlane.bundleExecutor.stages | default list -}}
+{{- $stages := .stages | default list -}}
 {{- if not $stages -}}
 {{- fail "pipeline.rustDataPlane.bundleExecutor.stages must list at least one stage ({target, port}) for svc-bundles-executor to dial" -}}
 {{- end -}}
-{{- $fullname := include "waddlebot.fullname" . -}}
+{{- $fullname := include "waddlebot.fullname" .root -}}
 {{- $addrs := list -}}
 {{- range $stage := $stages -}}
 {{- $addrs = append $addrs (printf "%s-%s:%v" $fullname $stage.target $stage.port) -}}
 {{- end -}}
 {{- join "," $addrs -}}
+{{- end }}
+
+{{/*
+RTC media exposure (svc-streaming SFU). Validates pipeline.svcStreaming.webrtc and returns the
+resolved settings as JSON (`include ... | fromJson`): udpPort, iceTcpEnabled, iceTcpPort,
+serviceEnabled, serviceType, nodePortUdp, nodePortTcp. Every misconfiguration FAILS the render
+loudly -- there is no silent fallback to a different exposure:
+  - the media port(s) must be unprivileged, distinct from every other declared containerPort;
+  - NodePort is the alpha/local exemption only (global.deploymentTier alpha|local); beta/gamma/
+    production must use LoadBalancer (no NodePort/hostPort/externalIPs anywhere);
+  - the published port must equal the bound port (the SFU advertises the port it binds in ICE
+    candidates, so a remapped nodePort/LB port would hand clients an unreachable candidate).
+*/}}
+{{- define "waddlebot.svcStreaming.rtcMedia" -}}
+{{- $s := .Values.pipeline.svcStreaming -}}
+{{- $w := $s.webrtc -}}
+{{- $svc := $w.media.service -}}
+{{- $tier := .Values.global.deploymentTier | default "" | toString -}}
+{{- $udp := int $w.udpPort -}}
+{{- $tcpOn := eq (toString $w.iceTcp.enabled) "true" -}}
+{{- $tcp := int $w.iceTcp.port -}}
+{{- if or (lt $udp 1024) (gt $udp 65535) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.udpPort must be an unprivileged port (1024-65535), got %v" $w.udpPort) -}}
+{{- end -}}
+{{- if eq $udp (int $s.srtPort) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.udpPort %d collides with srtPort (both UDP)" $udp) -}}
+{{- end -}}
+{{- if $tcpOn -}}
+{{- if or (lt $tcp 1024) (gt $tcp 65535) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.iceTcp.port must be an unprivileged port (1024-65535), got %v" $w.iceTcp.port) -}}
+{{- end -}}
+{{- range $name, $p := dict "port" $s.port "metricsPort" $s.metricsPort "grpcPort" $s.grpcPort "rtmpPort" $s.rtmpPort -}}
+{{- if eq $tcp (int $p) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.iceTcp.port %d collides with %s (both TCP)" $tcp $name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- $type := $svc.type | default "" | toString -}}
+{{- if eq (toString $svc.enabled) "true" -}}
+{{- if not (has $type (list "NodePort" "LoadBalancer")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.type must be NodePort or LoadBalancer, got %q" $type) -}}
+{{- end -}}
+{{- if eq $type "NodePort" -}}
+{{- if not (has $tier (list "alpha" "local")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.type=NodePort is the alpha/local exemption only (global.deploymentTier=%q); beta/gamma/production must use LoadBalancer -- no NodePort/hostPort/externalIPs" $tier) -}}
+{{- end -}}
+{{- if ne (int $svc.nodePort.udp) $udp -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.nodePort.udp (%v) must equal webrtc.udpPort (%d): the SFU advertises the port it binds, so the node port must match" $svc.nodePort.udp $udp) -}}
+{{- end -}}
+{{- if and $tcpOn (ne (int $svc.nodePort.tcp) $tcp) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.nodePort.tcp (%v) must equal webrtc.iceTcp.port (%d)" $svc.nodePort.tcp $tcp) -}}
+{{- end -}}
+{{- else -}}
+{{- if or (ne (int $svc.nodePort.udp) 0) (ne (int $svc.nodePort.tcp) 0) -}}
+{{- fail "pipeline.svcStreaming.webrtc.media.service.nodePort.* must be 0 for a LoadBalancer Service (the cluster assigns node ports; the published LB port equals the bound port)" -}}
+{{- end -}}
+{{- end -}}
+{{- if not (has (toString $svc.externalTrafficPolicy) (list "Local" "Cluster")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.service.externalTrafficPolicy must be Local or Cluster, got %q" (toString $svc.externalTrafficPolicy)) -}}
+{{- end -}}
+{{- end -}}
+{{- range $e := $w.media.networkPolicy.fromEntities -}}
+{{- if not (has $e (list "world" "host" "remote-node")) -}}
+{{- fail (printf "pipeline.svcStreaming.webrtc.media.networkPolicy.fromEntities: %q is not allowed (world|host|remote-node)" $e) -}}
+{{- end -}}
+{{- end -}}
+{{- if not $w.media.networkPolicy.fromEntities -}}
+{{- fail "pipeline.svcStreaming.webrtc.media.networkPolicy.fromEntities must not be empty: external media clients could never reach the SFU (an empty list renders an allow-nothing rule)" -}}
+{{- end -}}
+{{- dict "udpPort" $udp "iceTcpEnabled" $tcpOn "iceTcpPort" $tcp "serviceEnabled" (eq (toString $svc.enabled) "true") "serviceType" $type "nodePortUdp" (int $svc.nodePort.udp) "nodePortTcp" (int $svc.nodePort.tcp) | toJson -}}
 {{- end }}

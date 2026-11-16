@@ -20,8 +20,9 @@ use std::time::Duration;
 
 use bundle_executor::manifest::WitWorld;
 use bundle_host_http::guarded::GuardedLimits;
-use connection_resolver::{ConnectionKind, ConnectionResolver, ResolverConfig, ResolverMetrics};
+use connection_resolver::ConnectionResolver;
 use connector_e2e::{digest_of, RigConnector, WireRig};
+use grpc_hub::FakeHub;
 use svc_ingest::connector::sender_exec::kick_slots::KickSlots;
 use svc_ingest::connector::sender_exec::policy::registered_op;
 use svc_ingest::connector::sender_exec::subst::SubstError;
@@ -35,6 +36,9 @@ use svc_ingest::outbound_ops::{OutboundAction, PolicyOp};
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/grpc_hub.rs"]
+mod grpc_hub;
+
 const WASM: &[u8] = include_bytes!("fixtures/kick_connector.wasm");
 const COMMUNITY: i64 = 7;
 const TOKEN: &str = "KICK-OAUTH-SECRET";
@@ -42,91 +46,35 @@ const CHAN: &str = "kick-chan";
 const BROADCASTER: &str = "777";
 const MSG_ID: &str = "828f83bb-e391-4c78-9e91-af35a172840e";
 
-struct NoMetrics;
-
-impl ResolverMetrics for NoMetrics {
-    fn resolve(&self, _: ConnectionKind, _: &'static str, _: Duration) {}
-    fn list(&self, _: &'static str) {}
-}
-
-/// Synthetic service-account token file, removed on drop.
-struct TestSa(std::path::PathBuf);
-
-impl Drop for TestSa {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.0) {
-            eprintln!("synthetic sa token cleanup failed: {e}");
-        }
-    }
-}
-
 type Slots = KickSlots<ResolverKickCredentials<ConnectionResolver>>;
 
-/// A fake hub-api serving ONE Kick connection (community 7, connection 12, kind-1 token).
-/// Returns the server (request counts are read back from it) and the production slot source.
-async fn hub(broadcaster: Option<&str>) -> (MockServer, Slots, TestSa) {
+/// A fake hub-api serving ONE Kick connection (community 7, connection 12, kind-1 token) over
+/// real in-process gRPC. Returns the hub (call counts are read back from it) and the production
+/// slot source.
+async fn hub(broadcaster: Option<&str>) -> (FakeHub, Slots) {
     let metadata = broadcaster.map_or_else(
         || serde_json::json!({}),
         |b| serde_json::json!({ "broadcaster_user_id": b }),
     );
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/internal/service-token"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"token": "machine-tok", "expires_in": 3600})),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/internal/provider-connections"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "success": true,
+    let (hub, resolver) = grpc_hub::start(
+        &serde_json::json!({
             "items": [{"communityId": COMMUNITY, "connectionId": 12, "tenantId": 3,
                        "secretVersion": 1, "provider": "kick", "kind": 1, "metadata": metadata}],
             "nextAfter": null
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!(
-            "/api/v1/internal/communities/{COMMUNITY}/provider-connections/12/resolve"
-        )))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        }),
+        &serde_json::json!({
             "communityId": COMMUNITY, "connectionId": 12, "provider": "kick", "kind": 1,
             "accessToken": TOKEN, "expiresAt": null, "metadata": metadata
-        })))
-        .mount(&server)
-        .await;
-    // One file per rig: tests run in parallel inside this process and each removes its own on drop.
-    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-    let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    let sa = std::env::temp_dir().join(format!("kick-sa-{}-{n}", std::process::id()));
-    std::fs::write(&sa, "synthetic-sa").unwrap();
-    let resolver = ConnectionResolver::new(
-        ResolverConfig::new(
-            server.uri(),
-            "alpha",
-            format!("{}/internal/service-token", server.uri()),
-            sa.to_string_lossy().to_string(),
-        ),
-        Arc::new(NoMetrics),
+        }),
+        "kick-out",
     )
-    .unwrap();
-    (
-        server,
-        KickSlots::new(ResolverKickCredentials::new(resolver)),
-        TestSa(sa),
-    )
+    .await;
+    (hub, KickSlots::new(ResolverKickCredentials::new(resolver)))
 }
 
-async fn resolves(hub: &MockServer) -> usize {
-    hub.received_requests()
-        .await
-        .unwrap()
-        .iter()
-        .filter(|r| r.url.path().ends_with("/resolve"))
-        .count()
+/// `ResolveConnection` calls that reached the hub.
+async fn resolves(hub: &FakeHub) -> usize {
+    hub.resolves()
 }
 
 struct Rewrite {
@@ -158,8 +106,7 @@ type Exec =
 struct Rig {
     exec: Exec,
     server: MockServer,
-    hub: MockServer,
-    _sa: TestSa,
+    hub: FakeHub,
     _wire: WireRig,
 }
 
@@ -198,7 +145,7 @@ async fn rig_with(broadcaster: Option<&str>) -> Rig {
         },
         vec![IpAddr::V4(Ipv4Addr::LOCALHOST)],
     );
-    let (hub, slots, sa) = hub(broadcaster).await;
+    let (hub, slots) = hub(broadcaster).await;
     let exec = SenderExecutor::new(
         Rewrite {
             inner: WireTemplateBuilder::new(Arc::clone(&wire.link), Arc::clone(&wire.registry)),
@@ -212,7 +159,6 @@ async fn rig_with(broadcaster: Option<&str>) -> Rig {
         exec,
         server,
         hub,
-        _sa: sa,
         _wire: wire,
     }
 }
@@ -222,6 +168,7 @@ fn send(text: &str) -> OutboundAction {
         channel: CHAN.into(),
         text: text.into(),
         origin_channel: Some(CHAN.into()),
+        tenant_id: None,
     }
 }
 

@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
-import xml.etree.ElementTree as ET
 from pathlib import Path
 
 import pytest
 import yaml
+from defusedxml import ElementTree as ET
 
 ROOT = Path(__file__).resolve().parents[3]
 WAVE4 = ("giveaway", "bonustickets", "wheel", "audiocommand", "tts", "channelpoints")

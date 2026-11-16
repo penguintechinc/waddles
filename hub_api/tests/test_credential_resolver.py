@@ -40,6 +40,26 @@ def resolver() -> DefaultCredentialResolver:
     return DefaultCredentialResolver()
 
 
+def test_tenant_public_id_lookup_failure_is_logged_and_never_raises(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The telemetry label degrades to `unknown` on a DB error, but the failure is on record."""
+    from services.credential_resolver import tenant_public_id
+
+    class _BrokenDal:
+        tenants = type("T", (), {"id": 1, "public_id": 2})()
+
+        def __call__(self, *_args: Any, **_kwargs: Any) -> Any:
+            raise RuntimeError("db down")
+
+    caplog.set_level("WARNING", logger="services.credential_resolver")
+    assert tenant_public_id(_BrokenDal(), 7) == "unknown"
+    assert any(
+        "tenant_public_id lookup failed: RuntimeError: db down" in r.getMessage()
+        for r in caplog.records
+    )
+
+
 class TestGlobalTenantLane:
     async def test_resolves_from_env_vars(
         self, resolver: DefaultCredentialResolver, guild_pairing_db: Any, monkeypatch: Any

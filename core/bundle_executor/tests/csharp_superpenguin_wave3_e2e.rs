@@ -371,6 +371,7 @@ async fn run_steps(app: &str, wasm: Vec<u8>, steps: &[Step]) -> Vec<Run> {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

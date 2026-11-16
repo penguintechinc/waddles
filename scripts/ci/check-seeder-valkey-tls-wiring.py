@@ -62,11 +62,17 @@ def _pod_spec(doc: dict[str, Any]) -> dict[str, Any]:
     return {}
 
 
-def _decode(field: str, value: Any) -> str | None:
-    """Plaintext for a Secret/ConfigMap data entry (base64 for Secret `data`)."""
+def _decode(kind: str, field: str, value: Any) -> str | None:
+    """Plaintext for a Secret/ConfigMap data entry.
+
+    Only a Secret's `data` is base64; a ConfigMap's `data` is already plaintext (decoding it
+    crashed with "string argument should contain only ASCII characters" on any non-ASCII
+    ConfigMap value, e.g. the beta SPIRE scripts, and silently mangled values that happened
+    to be valid base64).
+    """
     if not isinstance(value, str):
         return None
-    if field == "data":
+    if kind == "Secret" and field == "data":
         try:
             return base64.b64decode(value, validate=True).decode("utf-8", errors="replace")
         except (binascii.Error, UnicodeDecodeError):
@@ -88,7 +94,7 @@ def _index_configmaps_and_secrets(
         values: dict[str, str] = {}
         for field in ("data", "stringData"):
             for key, raw in (doc.get(field) or {}).items():
-                decoded = _decode(field, raw)
+                decoded = _decode(kind, field, raw)
                 if decoded is not None:
                     values[key] = decoded
         (configmaps if kind == "ConfigMap" else secrets)[name] = values

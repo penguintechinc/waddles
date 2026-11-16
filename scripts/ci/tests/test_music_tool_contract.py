@@ -15,7 +15,13 @@ _spec = importlib.util.spec_from_file_location(
 gen = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(gen)
 
-PROVIDERS = [p.parent.name.removeprefix("music-") for p in (ROOT / "bundles/rust").glob("music-*/bundle.yaml")]
+#: `music-requests` is the queue SERVICE bundle (tools `requests.*`), not a music provider.
+NON_PROVIDER_BUNDLES = {"music-requests"}
+PROVIDERS = sorted(
+    p.parent.name.removeprefix("music-")
+    for p in (ROOT / "bundles/rust").glob("music-*/bundle.yaml")
+    if p.parent.name not in NON_PROVIDER_BUNDLES
+)
 
 
 def test_at_least_one_provider_examined() -> None:

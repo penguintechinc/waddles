@@ -21,6 +21,7 @@ proves directly and deterministically.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
@@ -61,7 +62,9 @@ def _render_docs(result: subprocess.CompletedProcess[str]) -> list[dict[str, Any
 def _container_env(docs: list[dict[str, Any]], deployment_name_suffix: str, container_name: str) -> dict[str, Any]:
     deployments = [
         doc for doc in docs
-        if doc.get("kind") == "Deployment" and doc.get("metadata", {}).get("name", "").endswith(deployment_name_suffix)
+        if doc.get("kind") in ("Deployment", "StatefulSet") and re.search(
+            re.escape(deployment_name_suffix) + r"(-native|-script)?$", doc.get("metadata", {}).get("name", "")
+        )
     ]
     assert deployments, f"no Deployment ending in {deployment_name_suffix!r} found"
     containers = deployments[0]["spec"]["template"]["spec"]["containers"]

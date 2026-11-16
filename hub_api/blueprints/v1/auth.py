@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
@@ -520,9 +521,10 @@ async def login(
             _cfg(),
             email=data.email,
             password=data.password,
-            tenant_slug=data.tenantSlug or "default",
+            tenant_slug=data.tenantSlug or DEFAULT_TENANT_SLUG,
         )
     except auth_service.RequiresVerificationError:
+        logger.info("login blocked: email verification required")
         return (
             VerificationRequiredResponse(
                 success=False,
@@ -532,6 +534,7 @@ async def login(
             403,
         )
     except ApiError as exc:
+        logger.warning("login rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     issue_session_cookie(result.token)
     return LoginResponse(success=True, token=result.token, user=_login_user_dto(result))
