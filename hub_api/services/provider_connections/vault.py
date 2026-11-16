@@ -696,9 +696,14 @@ def _platform_mac(
         return hmac.new(bytes(key), message, hashlib.sha256).digest()
 
 
+_TYPE_CODE_LABELS: dict[int, str] = {code: str(code) for code in range(64)}
+"""Closed set of loggable type-code labels; a code outside it logs as `out-of-range`."""
+
+
 def _log_open_failure(type_code: int, version_no: int) -> None:
-    """Warn that an open failed -- ints only, never the envelope, a key or a plaintext."""
-    logger.warning("platform vault open failed type=%d version=%d", type_code, version_no)
+    """Warn that an open failed -- a bounded type label and an int version only."""
+    label = _TYPE_CODE_LABELS.get(type_code, "out-of-range")
+    logger.warning("platform vault open failed type=%s version=%d", label, version_no)
 
 
 def _open_failure(secret_type: int, version: int) -> PlatformSecretCorruptError:

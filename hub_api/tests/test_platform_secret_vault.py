@@ -373,8 +373,11 @@ class TestNoSecretBytesInErrorsOrLogs:
         assert len(caplog.records) >= 7, "denominator: seal, open and failure records captured"
         text = "\n".join(r.getMessage() for r in caplog.records) + "\n" + caplog.text
         _no_secret_material(text, (envelope, envelope[24:], fingerprint, mac, chain))
-        # only ints and the non-secret key id are logged
-        assert any("kek_id=" in r.getMessage() for r in caplog.records)
+        # only ints and a bounded type label are logged (the key id is deliberately not logged)
+        assert any(
+            "type=" in r.getMessage() and "version=" in r.getMessage() for r in caplog.records
+        )
+        assert not any("kek_id" in r.getMessage() for r in caplog.records)
         assert all(r.name == "services.provider_connections.vault" for r in caplog.records)
 
 
