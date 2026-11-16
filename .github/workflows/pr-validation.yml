@@ -139,6 +139,11 @@ jobs:
       - name: check-no-stubs
         run: make check-no-stubs
 
+      # A core/ bin crate using rustls without install_default() panics at first TLS build
+      # ("Could not automatically determine the process-level CryptoProvider") -> CrashLoop.
+      - name: check-rustls-provider
+        run: make check-rustls-provider
+
       # PII boundary: only svc-ingest's outbound drain and svc-presentation may reference the
       # egress detokenizer (svc-action used to detokenize into Valkey queues). Prints files
       # examined; zero examined or any violation fails, and the negative test runs first.

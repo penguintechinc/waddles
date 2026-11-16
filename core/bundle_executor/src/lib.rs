@@ -34,6 +34,7 @@ pub mod config;
 pub mod connector;
 pub mod connector_boot;
 pub mod connector_wire;
+pub mod crypto;
 pub mod engine;
 pub mod engine_config;
 pub mod error;

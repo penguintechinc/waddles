@@ -54,6 +54,7 @@ fn healthcheck_mode(args: &[String]) -> Option<HealthcheckMode> {
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    bundle_executor::crypto::install_default_provider_or_exit();
     let args: Vec<String> = std::env::args().collect();
     if matches!(
         args.get(1).map(String::as_str),

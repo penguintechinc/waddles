@@ -23,6 +23,7 @@ pub mod bucket;
 pub mod build;
 /// hub-api notification client. Stubbed.
 pub mod callback;
+pub mod crypto;
 /// `waddles_publisher` Postgres client. Stubbed.
 pub mod db;
 /// Every failure mode `bundle-compiler` can exit with.
