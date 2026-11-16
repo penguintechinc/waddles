@@ -342,7 +342,8 @@ def test_escrow_roundtrip_on_real_postgres_restores_same_keys_after_a_wipe(hub, 
         )
 
     boot(alpha)
-    assert _count(owner, "secrets") == 3 and len(store.objects) == 4  # 3 objects + manifest
+    assert _count(owner, "secrets") == 3 and len(store.objects) == 5
+    # 3 sealed objects + the latest-pointer manifest + the write-once generation-1 manifest
     with hub.begin() as conn:  # update_state + insert_secret SQL as the real role
         _add_v2(SqlRepository(conn), int(SecretType.BUNDLE_SIGNING), datetime.now(UTC))
     with hub.begin() as conn:
