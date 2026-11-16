@@ -626,6 +626,14 @@ class TestPortScopedIngress:
                 assert (50204, "TCP") not in admitted, (
                     "hub-api gRPC must not be open to the whole namespace"
                 )
+            if comp == "svc-presentation":
+                # Surface gRPC port is left to the dedicated svc-presentation-grpc CNP (only
+                # svc-action-rust/svc-process-rust allowlisted); see
+                # tests/test_presentation_grpc_render.py for the allow/deny proof.
+                declared = {p for p in declared if p[0] != 50051}
+                assert (50051, "TCP") not in admitted, (
+                    "svc-presentation gRPC must not be open to the whole namespace"
+                )
             assert declared <= admitted, (
                 f"{w['metadata']['name']}: declared {declared - admitted} not admitted"
             )

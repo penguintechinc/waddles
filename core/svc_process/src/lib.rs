@@ -61,6 +61,7 @@ pub mod scope_names;
 pub mod source_supervisor;
 pub mod spine;
 pub mod stage_metrics;
+pub mod surface;
 pub mod telemetry;
 pub mod tokenize_memo;
 
@@ -1798,6 +1799,7 @@ fn try_start_process_loop(
                 // denies every non-platform permission (`ai.generate` included).
                 ai_wiring: None,
                 media_wiring: None,
+                surface_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -2363,6 +2365,16 @@ fn try_start_changelog_consumer(
                             None
                         }
                     };
+                    // `overlay.publish-surface` host capability: gRPC delivery to svc-presentation
+                    // with a community-bound JWT, behind the default-OFF flag
+                    // `waddles.overlay-surfaces`. Unwired (loud log) without
+                    // PRESENTATION_GRPC_ENDPOINT or a license client -> `not_implemented`.
+                    deps.surface_wiring = bundle_db_license_client.as_ref().and_then(|client| {
+                        surface::build_surface_wiring(
+                            &config.cli,
+                            std::sync::Arc::new(license::OverlaySurfacesGate::new(client.clone())),
+                        )
+                    });
                     // Live per-community bundle config (`get-context().config_json`): hub-api
                     // gRPC + Valkey version-key invalidation; non-fatal when unconfigured.
                     // The version key lives on hub-api's own (durable spine) Valkey, not the
@@ -2591,6 +2603,7 @@ async fn build_source_supervisor_deps(
         identity_wiring: None,
         ai_wiring: None,
         media_wiring: None,
+        surface_wiring: None,
         // The shared, once-built tenant stream-DEK source (`build_dek_provider`); `None`
         // only before `run_with_shutdown` has installed it, in which case every event that
         // carries an encrypted identity field is dead-lettered (fail closed).

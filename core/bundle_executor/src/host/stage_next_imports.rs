@@ -374,6 +374,117 @@ impl overlay::Host for ExecState {
     ) -> Result<types::TransportResult, types::TransportError> {
         Err(overlay_not_implemented())
     }
+
+    /// Bundle state surface publish: rides the usual host-call round trip as
+    /// `capability = db`, `op = "surface.publish"` with only the guest's two
+    /// words. The community is server-derived by the stage from the
+    /// invocation scope; the executor decides nothing (no schema, no limit).
+    async fn publish_surface(
+        &mut self,
+        surface_id: String,
+        payload_json: String,
+    ) -> Result<types::TransportResult, types::TransportError> {
+        let args = serde_json::json!({
+            "surface_id": surface_id,
+            "payload_json": payload_json,
+        });
+        match call(self, CapabilityKind::Db, "surface.publish", args).await {
+            Ok(_) => Ok(types::TransportResult {
+                ok: true,
+                status: None,
+                detail: None,
+                provider_message_id: None,
+            }),
+            Err(e) => Err(surface_transport_error(e)),
+        }
+    }
+}
+
+/// Maps a stage-side `surface.publish` failure onto the WIT
+/// `transport-error`. Stable codes pass through verbatim (`invalid`,
+/// `rate_limited`, `not_granted`, `not_implemented`, ...); only
+/// `rate_limited`/`unavailable` are marked retryable, and a rate-limit
+/// message of the form `retry_after_ms=<n>` populates `retry-after-ms`.
+fn surface_transport_error(err: ExecutorError) -> types::TransportError {
+    match err {
+        ExecutorError::HostCallDenied { code, message, .. } => {
+            let retry_after_ms = message
+                .split_whitespace()
+                .find_map(|w| w.strip_prefix("retry_after_ms="))
+                .and_then(|n| n.parse::<u32>().ok());
+            types::TransportError {
+                retryable: matches!(code.as_str(), "rate_limited" | "unavailable"),
+                code,
+                message,
+                retry_after_ms,
+            }
+        }
+        other => types::TransportError {
+            retryable: false,
+            code: "backend".to_string(),
+            message: other.to_string(),
+            retry_after_ms: None,
+        },
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+
+    fn denied(code: &str, message: &str) -> ExecutorError {
+        ExecutorError::HostCallDenied {
+            capability: "db",
+            op: "surface.publish",
+            code: code.into(),
+            message: message.into(),
+        }
+    }
+
+    #[test]
+    fn rate_limited_is_retryable_and_carries_the_delay() {
+        let e = surface_transport_error(denied("rate_limited", "slow down retry_after_ms=2500"));
+        assert!(e.retryable);
+        assert_eq!(e.code, "rate_limited");
+        assert_eq!(e.retry_after_ms, Some(2500));
+    }
+
+    #[test]
+    fn unavailable_is_retryable_without_a_delay() {
+        let e = surface_transport_error(denied("unavailable", "presentation down"));
+        assert!(e.retryable);
+        assert_eq!(e.retry_after_ms, None);
+    }
+
+    #[test]
+    fn refusals_are_not_retryable_and_pass_their_code_through() {
+        for code in [
+            "invalid",
+            "not_implemented",
+            "not_granted",
+            "too_large",
+            "denied",
+        ] {
+            let e = surface_transport_error(denied(code, "m"));
+            assert!(!e.retryable, "{code}");
+            assert_eq!(e.code, code);
+            assert_eq!(e.retry_after_ms, None);
+        }
+    }
+
+    #[test]
+    fn a_lost_stage_connection_is_a_non_retryable_backend_error() {
+        let e = surface_transport_error(ExecutorError::ConnectionUnavailable);
+        assert_eq!(e.code, "backend");
+        assert!(!e.retryable);
+    }
+
+    #[test]
+    fn a_garbled_delay_is_ignored() {
+        let e = surface_transport_error(denied("rate_limited", "retry_after_ms=soon"));
+        assert!(e.retryable);
+        assert_eq!(e.retry_after_ms, None);
+    }
 }
 
 #[cfg(test)]
