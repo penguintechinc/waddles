@@ -272,8 +272,15 @@ def test_gateway_to_webui_is_reencrypted(dal2: list[dict[str, Any]]) -> None:
     assert web["containers"][0]["readinessProbe"]["httpGet"]["scheme"] == "HTTPS"
     policies = [d for d in dal2 if d["kind"] == "BackendTLSPolicy"]
     assert len(policies) == 1
+    # dal2alpha runs Gateway API v1.6.1, which serves BackendTLSPolicy only as v1 (v1alpha3 served=false)
+    assert policies[0]["apiVersion"] == "gateway.networking.k8s.io/v1"
     spec = policies[0]["spec"]
-    assert spec["targetRefs"][0]["name"] == "waddlebot-hub-webui-v3"
+    assert spec["targetRefs"][0] == {
+        "group": "",
+        "kind": "Service",
+        "name": "waddlebot-hub-webui-v3",
+    }
+    assert set(spec["validation"]) == {"hostname", "caCertificateRefs"}
     assert spec["validation"]["hostname"] == f"waddlebot-hub-webui-v3{_FQDN_SUFFIX}"
     assert spec["validation"]["caCertificateRefs"][0]["kind"] == "ConfigMap"
 

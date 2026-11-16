@@ -51,7 +51,7 @@ data:
     {{- $bt.caPem | nindent 4 }}
 {{- end }}
 ---
-apiVersion: {{ $bt.apiVersion | default "gateway.networking.k8s.io/v1alpha3" }}
+apiVersion: {{ $bt.apiVersion | default "gateway.networking.k8s.io/v1" }}
 kind: BackendTLSPolicy
 metadata:
   name: {{ include "waddlebot.fullname" . }}-hub-webui-backend-tls
