@@ -14,6 +14,7 @@
 //! ([`http::overlay_page`]) -- see `README.md`'s "Live Overlay Pipeline".
 
 pub mod config;
+pub mod crypto;
 pub mod db;
 pub mod error;
 pub mod flags;
