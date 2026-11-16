@@ -279,6 +279,11 @@ async def _serve(manifest_path: Path) -> None:
         await grpc_server.start()
 
         port = _free_port()
+        # T10: user JWTs are ES256 from the platform key ring (no shared secret). The live hub runs
+        # in this process, so an in-memory ring both signs the admin token and verifies it.
+        from flask_core import jwt_keyring as _jk  # noqa: PLC0415
+
+        _jk.set_jwt_keyring(_jk.generate_test_keyring())
         admin_token = create_jwt_token(
             user_id=str(ids["admin_user"]), username="live-admin", email="admin@example.invalid",
             roles=["super_admin"], tenant=TENANT_SLUG, scope="connections:admin",
