@@ -351,9 +351,20 @@ async def admin_update_overrides(
     overrides = payload.get("overrides")
     if not isinstance(overrides, list):
         return {"success": False, "error": "overrides must be an array"}, 400
-    ok = update_channel_permission_overrides(
-        current_app.config["dal"], community_id, channel_id, overrides
-    )
+    try:
+        editor = resolve_editor_scopes(
+            request, current_app.config["dal"], community_id=community_id
+        )
+        ok = update_channel_permission_overrides(
+            current_app.config["dal"],
+            community_id,
+            channel_id,
+            overrides,
+            editor_scopes=editor,
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
+        return _guard_error(exc)
     if not ok:
         return {"success": False, "error": "Channel not found"}, 404
     return {"success": True, "message": "Permission overrides updated"}, 200
