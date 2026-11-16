@@ -40,8 +40,12 @@ concurrency:
 jobs:
   proto-gate:
     name: buf lint + buf breaking + stub drift
-    # bare dal2-alpha-ci image has no cc/make/cmake and sudo is blocked (no-new-privileges): C-toolchain jobs stay on hosted ubuntu-latest until a custom runner image bakes them in (same exception as rust-crate-ci.yml lint-test)
-    runs-on: ubuntu-latest
+    # Canonical runner-routing expression (github-actions-workflows skill): dal2-alpha-ci for every non-main ref.
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # The bare ARC runner image has no cc/make and sudo is blocked, so the toolchain comes from a
+    # digest-pinned job container (run by the pod's dind sidecar): Python 3.13 + make (make check-proto) + git.
+    container:
+      image: python:3.13-bookworm@sha256:cc55e4ded9c95f6ce2133b3d096db43f214d280c2a8af65d83e246c8fa7d168c
     timeout-minutes: 20
     env:
       # buf release pinned by exact version; the binary is verified against its upstream SHA256.
@@ -81,10 +85,12 @@ jobs:
           chmod +x "$bindir/buf"
           echo "$bindir" >> "$GITHUB_PATH"
 
-      - name: Set up Python 3.13
-        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
-        with:
-          python-version: '3.13'
+      # Python 3.13 is the job container's interpreter (setup-python's builds target Ubuntu, not Debian).
+      - name: Verify Python 3.13 + make
+        run: |
+          set -euo pipefail
+          python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
+          make --version | head -1
 
       - name: Install protoc toolchain (hash-locked)
         run: python3 -m pip install --no-cache-dir --require-hashes -r scripts/requirements-protoc.txt
