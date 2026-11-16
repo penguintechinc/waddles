@@ -5,6 +5,7 @@ FLAG_*  # feature-flag ENV baselines; name derived at runtime from the flag key 
 AWS_CA_BUNDLE  # read by botocore (hub-api S3 client) to trust the internal CA
 PGSSLMODE  # read by libpq/psycopg in hub-api CronJobs
 PGSSLROOTCERT  # read by libpq/psycopg in hub-api CronJobs
+PGCHANNELBINDING  # read by libpq/psycopg (channel binding) in postgres-client CronJobs; asyncpg/sqlx ignore it
 EXECUTOR_LANGUAGES  # language-partition contract; reader lands with open PR #1359 (executor perf set)
 EXECUTOR_LANGUAGE_CLASS  # language-partition contract; reader lands with open PR #1359 (executor perf set)
 BUNDLE_STORAGE_*  # object_storage capability wiring; svc-process/svc-action never call with_object_storage yet -- GAP, see PR #1369
