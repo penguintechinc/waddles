@@ -28,10 +28,17 @@
 
 pub mod authorize;
 pub mod backend;
+#[cfg(feature = "grpc")]
+pub mod grpc_wiring;
 mod limits;
 mod metrics;
 pub mod policy;
 pub mod scope;
+pub mod seal;
+#[cfg(test)]
+mod seal_policy_tests;
+#[cfg(test)]
+mod seal_tests;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,13 +47,29 @@ use sha2::{Digest, Sha256};
 
 pub use authorize::CapabilitySnapshot;
 pub use backend::{
-    BoxFuture, CasDelete, CasOutcome, KvBackend, QuotaOutcome, ReconcileOutcome, VERSION_SCHEME,
+    BoxFuture, ByteCasOutcome, CasDelete, CasOutcome, KvBackend, QuotaOutcome, ReconcileOutcome,
+    VERSION_SCHEME,
 };
 pub use limits::{
     LIST_SCAN_CAP, MAX_BYTES_PER_INVOKE, MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_LISTS_PER_INVOKE,
     MAX_LIST_LIMIT, MAX_OPS_PER_INVOKE, MAX_TTL_SECONDS, MAX_VALUE_BYTES,
 };
 pub use scope::KvScope;
+pub use seal::{AlwaysSeal, Sealing, SealingGate};
+
+/// How many read-modify-CAS rounds a sealed `increment` tries before it
+/// reports contention.
+const SEALED_INCREMENT_ATTEMPTS: u32 = 64;
+
+/// Jittered, growing backoff after a lost compare-and-set race, so many
+/// writers on one hot counter spread out instead of retrying in lockstep.
+fn conflict_backoff(attempt: u32) -> Duration {
+    let jitter_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()));
+    let ceiling_us = 200u64.saturating_mul(u64::from(attempt.min(10)) + 1);
+    Duration::from_micros(jitter_ns % ceiling_us + 50)
+}
 
 /// The `kv` capability's error surface. Deliberately richer than
 /// `stage.wit`'s two-variant `kv.error` (`too-large`/`backend`) --
@@ -85,6 +108,15 @@ pub enum KvError {
     /// Valkey itself failed (network, protocol, script error).
     #[error("backend error: {0}")]
     Backend(String),
+    /// The tenant's data key could not be resolved (broker down, revoked,
+    /// unknown tenant) or the scope lacks numeric ids. The op is refused;
+    /// nothing is ever written in plaintext as a fallback.
+    #[error("tenant data key unavailable: {0}")]
+    KeyUnavailable(String),
+    /// A sealed value failed authentication (wrong tenant/community/app/key
+    /// binding, tamper, or corruption).
+    #[error("integrity failure: {0}")]
+    Integrity(String),
 }
 
 impl KvError {
@@ -114,6 +146,8 @@ impl KvError {
             | KvError::QuotaExceeded(m)
             | KvError::RateLimited(m)
             | KvError::Reconciling(m)
+            | KvError::KeyUnavailable(m)
+            | KvError::Integrity(m)
             | KvError::Backend(m) => m.clone(),
         }
     }
@@ -131,6 +165,8 @@ impl KvError {
             KvError::RateLimited(_) => "rate_limited",
             KvError::Reconciling(_) => "reconciling",
             KvError::Backend(_) => "backend",
+            KvError::KeyUnavailable(_) => "key_unavailable",
+            KvError::Integrity(_) => "integrity",
         }
     }
 }
@@ -239,7 +275,7 @@ pub fn error_detail(err: &KvError) -> String {
 /// was a single INFO line with a bare kind. Guest-caused rejections (`invalid_key`,
 /// `too_large`, `quota_exceeded`, `rate_limited`) log at WARN so a chatty bundle cannot
 /// flood ERROR; everything the operator must act on (`not_granted`, `backend`,
-/// `reconciling`) logs at ERROR. No key, value or secret is ever included.
+/// `reconciling`, `key_unavailable`, `integrity`) logs at ERROR. No key, value or secret is ever included.
 pub fn report_failure(stage: &'static str, op: &str, scope: &KvScope, err: &KvError) {
     let kind = err.code();
     metrics::record_stage_error(stage, op, kind);
@@ -260,7 +296,11 @@ pub fn report_failure(stage: &'static str, op: &str, scope: &KvScope, err: &KvEr
             error = %detail,
             "bundle kv call rejected"
         ),
-        KvError::NotGranted(_) | KvError::Reconciling(_) | KvError::Backend(_) => {
+        KvError::NotGranted(_)
+        | KvError::Reconciling(_)
+        | KvError::Backend(_)
+        | KvError::KeyUnavailable(_)
+        | KvError::Integrity(_) => {
             tracing::error!(
                 stage,
                 tenant = %scope.tenant,
@@ -285,6 +325,10 @@ pub struct KvHost<B: KvBackend> {
     /// "undeclared means denied" is the default for any `app_id` it has
     /// never been told about.
     capabilities: Arc<CapabilitySnapshot>,
+    /// Per-tenant value sealing ([`seal`]). `None` only for hosts built
+    /// without it (unit tests of unrelated behaviour); every production
+    /// stage attaches it via [`KvHost::with_sealing`].
+    sealing: Option<Sealing>,
 }
 
 impl<B: KvBackend> KvHost<B> {
@@ -292,7 +336,21 @@ impl<B: KvBackend> KvHost<B> {
         Self {
             backend,
             capabilities,
+            sealing: None,
         }
+    }
+
+    /// Attaches per-tenant at-rest value sealing: `set` seals before the
+    /// write, `get` opens sealed values (and passes legacy plaintext through).
+    #[must_use]
+    pub fn with_sealing(mut self, sealing: Sealing) -> Self {
+        self.sealing = Some(sealing);
+        self
+    }
+
+    /// In-place form of [`Self::with_sealing`] for a host already built.
+    pub fn attach_sealing(&mut self, sealing: Sealing) {
+        self.sealing = Some(sealing);
     }
 
     /// Self-heal, low-severity fix (PR #425 security review): if the live
@@ -403,11 +461,18 @@ impl<B: KvBackend> KvHost<B> {
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
         self.charge_bytes(scope, call_id, key.len()).await?;
-        let value = self
+        let stored = self
             .backend
             .get(&scope.data_key(key))
             .await
             .map_err(KvError::Backend)?;
+        let value = match (stored, &self.sealing) {
+            (Some(raw), Some(sealing)) => sealing
+                .open_for_read(&self.backend, scope, key, raw)
+                .await
+                .map(Some)?,
+            (stored, _) => stored,
+        };
         if let Some(v) = &value {
             self.charge_bytes(scope, call_id, v.len()).await?;
         }
@@ -452,13 +517,23 @@ impl<B: KvBackend> KvHost<B> {
             .await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        // Seal before any backend write: a key failure refuses the op here,
+        // so there is no code path that stores plaintext as a fallback.
+        let stored = match &self.sealing {
+            Some(sealing) => {
+                sealing
+                    .seal_for_write(&self.backend, scope, key, value)
+                    .await?
+            }
+            None => value.to_vec(),
+        };
         match self
             .backend
             .set_with_quota(
                 &scope.data_key(key),
                 &scope.live_key(),
                 &scope.legacy_count_key(),
-                value,
+                &stored,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
             )
@@ -499,6 +574,68 @@ impl<B: KvBackend> KvHost<B> {
             .map_err(KvError::Backend)
     }
 
+    /// Sealed `increment`: read the stored value, open it, add `delta`,
+    /// re-seal, and write back through an atomic compare-and-set (Lua) that
+    /// only succeeds if the stored bytes are still what was read. A
+    /// concurrent writer yields a conflict and the loop re-reads, so no
+    /// update is ever lost; contention beyond [`SEALED_INCREMENT_ATTEMPTS`]
+    /// fails loud rather than spinning. The counter is sealed at rest like
+    /// every other value (never a plaintext `INCRBY`).
+    async fn sealed_increment(
+        &self,
+        sealing: &Sealing,
+        scope: &KvScope,
+        key: &str,
+        delta: i64,
+        ttl: u32,
+    ) -> Result<i64, KvError> {
+        let data_key = scope.data_key(key);
+        for attempt in 0..SEALED_INCREMENT_ATTEMPTS {
+            let stored = self
+                .backend
+                .get(&data_key)
+                .await
+                .map_err(KvError::Backend)?;
+            let current = sealing
+                .read_counter(&self.backend, scope, key, stored.clone())
+                .await?;
+            let new_value = current.checked_add(delta).ok_or_else(|| {
+                KvError::Backend("value is not an integer or out of range".to_string())
+            })?;
+            let sealed = sealing
+                .seal_for_write(&self.backend, scope, key, new_value.to_string().as_bytes())
+                .await?;
+            match self
+                .backend
+                .compare_and_set_with_quota(
+                    &data_key,
+                    &scope.live_key(),
+                    &scope.legacy_count_key(),
+                    stored.as_deref(),
+                    &sealed,
+                    ttl,
+                    limits::MAX_KEYS_PER_APP,
+                )
+                .await
+                .map_err(KvError::Backend)?
+            {
+                ByteCasOutcome::Written => return Ok(new_value),
+                ByteCasOutcome::QuotaExceeded => {
+                    return Err(KvError::QuotaExceeded(format!(
+                        "app already holds the maximum {} live keys",
+                        limits::MAX_KEYS_PER_APP
+                    )))
+                }
+                ByteCasOutcome::Conflict => {
+                    tokio::time::sleep(conflict_backoff(attempt)).await;
+                }
+            }
+        }
+        Err(KvError::Backend(
+            "increment contention: gave up after repeated concurrent writes; retry".to_string(),
+        ))
+    }
+
     /// `stage.wit` `kv.increment`. `ttl_seconds` follows the same clamp/
     /// `0`-means-no-expiry rule as [`Self::set`], applied on every call
     /// (not just the first) -- passing `0` clears any TTL a prior call set.
@@ -533,6 +670,9 @@ impl<B: KvBackend> KvHost<B> {
         self.charge_bytes(scope, call_id, key.len()).await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        if let Some(sealing) = &self.sealing {
+            return self.sealed_increment(sealing, scope, key, delta, ttl).await;
+        }
         match self
             .backend
             .increment_with_quota(
@@ -618,6 +758,17 @@ impl<B: KvBackend> KvHost<B> {
             .get_versioned(&scope.data_key(key))
             .await
             .map_err(KvError::Backend)?;
+        // The version token is taken over the *stored* bytes, so under
+        // sealing it versions the ciphertext; the guest still gets plaintext.
+        let found = match (found, &self.sealing) {
+            (Some((raw, version)), Some(sealing)) => Some((
+                sealing
+                    .open_for_read(&self.backend, scope, key, raw)
+                    .await?,
+                version,
+            )),
+            (found, _) => found,
+        };
         if let Some((v, _)) = &found {
             self.charge_bytes(scope, call_id, v.len()).await?;
         }
@@ -663,6 +814,17 @@ impl<B: KvBackend> KvHost<B> {
             .await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        // Seal before any backend write: a key failure refuses the op here,
+        // so there is no code path that stores plaintext as a fallback. The
+        // version compare runs on the stored (sealed) bytes inside Valkey.
+        let stored = match &self.sealing {
+            Some(sealing) => {
+                sealing
+                    .seal_for_write(&self.backend, scope, key, value)
+                    .await?
+            }
+            None => value.to_vec(),
+        };
         match self
             .backend
             .cas_with_quota(
@@ -670,7 +832,7 @@ impl<B: KvBackend> KvHost<B> {
                 &scope.live_key(),
                 &scope.legacy_count_key(),
                 expected_version,
-                value,
+                &stored,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
             )

@@ -98,8 +98,9 @@ impl Room {
     }
 
     async fn op(&self, op: &str, extra: Value) -> (StatusCode, Value) {
-        // Only the hand/staff ops carry a contract version; the moderation ops refuse the field.
         let mut body = json!({"community_id": "7", "room_id": self.id});
+        // Only the versioned hand/staff ops carry `api_version`; the legacy ops (kick, mute, ...)
+        // refuse unknown fields, so adding it everywhere would 400 them.
         if op.starts_with("room.hand.") || op.starts_with("room.staff.") {
             body["api_version"] = json!("v1");
         }

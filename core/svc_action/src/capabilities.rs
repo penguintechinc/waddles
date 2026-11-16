@@ -64,9 +64,11 @@ use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
 mod event_sync;
+mod floor_ban;
 mod host_tools;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
+pub use floor_ban::{FloorBanCommand, FloorSendError, FloorSendFailure};
 pub use tool::ToolWiring;
 
 /// A raw platform account id held host-side. A newtype so the id can never reach a log line or
@@ -1088,6 +1090,8 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Connectio
     /// other unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
+    /// `overlay.publish-surface` wiring (`crate::surface`); `None` denies `not_implemented`.
+    surface: Option<crate::surface::SurfaceWiring>,
     /// The OTel instruments every `host-call` served by this value is timed
     /// into (`waddles_host_call_latency_seconds`). Always the process-wide
     /// set in production; tests swap it via `with_stage_metrics` so they can
@@ -1148,6 +1152,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             kv: None,
             gate,
             db: None,
+            surface: None,
             stage_metrics: stage_metrics::stage_metrics(),
             bundle_config: None,
             egress_dispatcher_flag: None,
@@ -1354,6 +1359,19 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         self
     }
 
+    /// Attaches per-tenant at-rest sealing to the `kv` capability: values are
+    /// sealed with the tenant DEK on write and opened on read. Call after
+    /// [`Self::with_kv`]; a no-op when `kv` is not configured. Every
+    /// production construction calls this; a host without it would store
+    /// plaintext.
+    #[must_use]
+    pub fn with_kv_sealing(mut self, sealing: bundle_host_kv::Sealing) -> Self {
+        if let Some(kv) = self.kv.as_mut() {
+            kv.attach_sealing(sealing);
+        }
+        self
+    }
+
     /// Attaches the `db` capability's live wiring -- called once at
     /// startup (`crate::lib`) with the shared, process-wide [`DbWiring`],
     /// never per-connection. Builder-style so existing `StageCapabilities::new`
@@ -1362,6 +1380,35 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     pub fn with_db(mut self, db: DbWiring) -> Self {
         self.db = Some(db);
         self
+    }
+
+    /// Attaches the `overlay.publish-surface` wiring (delivery host + default-OFF flag).
+    #[must_use]
+    pub fn with_surface(mut self, surface: crate::surface::SurfaceWiring) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
+    /// `surface.publish`: community and app id come from the host-verified scope, never args.
+    async fn handle_surface(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        if call.op != "surface.publish" {
+            return Err(denied(
+                "unknown_op",
+                format!("surface op {:?} not supported", call.op),
+            ));
+        }
+        let gate_scope = scope.gate_scope();
+        crate::surface::publish(
+            self.surface.as_ref(),
+            gate_scope.app_id(),
+            i64::from(gate_scope.community_id()),
+            &call.args,
+        )
+        .await
     }
 
     async fn handle_relay(
@@ -2722,6 +2769,16 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     }
 
     fn handle_context(&self, scope: &InvokeScope) -> Result<serde_json::Value, HostResultError> {
+        self.handle_context_with_base(scope, std::env::var(PUBLIC_WEBUI_URL_ENV).ok().as_deref())
+    }
+
+    /// `handle_context` with the public web base URL injected (the env read is the caller's
+    /// job so tests never touch process-global state).
+    fn handle_context_with_base(
+        &self,
+        scope: &InvokeScope,
+        web_base_url: Option<&str>,
+    ) -> Result<serde_json::Value, HostResultError> {
         self.gate
             .authorize(
                 &scope.gate_scope(),
@@ -2743,6 +2800,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         if scope.tenant_id >= 1 && scope.community_id >= 0 {
             ctx["tenant_id"] = serde_json::json!(i64::from(scope.tenant_id));
             ctx["community_id"] = serde_json::json!(scope.community_id);
+        }
+        // Platform web base URL (omitted when unset/invalid): lets service bundles build
+        // user-facing links such as the community music page. Not a secret.
+        if let Some(base) = normalize_web_base_url(web_base_url) {
+            ctx["web_base_url"] = serde_json::json!(base);
         }
         Ok(ctx)
     }
@@ -2821,7 +2883,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             scope.tenant.clone(),
             scope.community.clone(),
             scope.app_id.clone(),
-        );
+        )
+        .with_ids(scope.tenant_id, scope.community_id);
 
         // Every failed kv call is reported from here (ERROR/WARN log with the underlying
         // KvError kind + message, `waddles_bundle_kv_errors_total{stage,op,kind}`): the guest
@@ -3439,6 +3502,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             CapabilityKind::Db if call.op.starts_with("tool.") => {
                 self.handle_tool(scope, &call).await
             }
+            // `surface.publish`: own handler (namespace ownership + flag + gRPC delivery), never
+            // the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("surface.") => {
+                self.handle_surface(scope, &call).await
+            }
             // `platform_table.*` is hosted by the PROCESS stage only (like
             // `reputation`/`economy`/`identity`/`ai`: community-scoped, stage-next
             // process-world capabilities). The action stage fails LOUD rather than
@@ -3446,6 +3514,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             CapabilityKind::Db if call.op.starts_with("platform_table.") => Err(denied(
                 "not_implemented",
                 "platform-table is hosted by the process stage only (not the action stage)",
+            )),
+            // `object_storage.*` is likewise hosted by the PROCESS stage only (its S3
+            // wiring + audit sink live in `svc_process::bundle_storage`). Fail LOUD
+            // instead of falling into `handle_db`'s unrelated `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("object_storage.") => Err(denied(
+                "not_implemented",
+                "object-storage is hosted by the process stage only (not the action stage)",
             )),
             CapabilityKind::Db if bundle_host_db::v2::wire::is_v2_op(&call.op) => {
                 self.handle_db_v2(scope, &call).await
@@ -3486,6 +3561,23 @@ impl CapabilityHandler for DenyAllCapabilities {
 /// behind one `Arc<dyn CapabilityHandler>`.
 pub fn boxed(handler: impl CapabilityHandler + 'static) -> Arc<dyn CapabilityHandler> {
     Arc::new(handler)
+}
+
+/// Env var carrying the public web UI base URL (for links bundles hand to users).
+const PUBLIC_WEBUI_URL_ENV: &str = "PUBLIC_WEBUI_URL";
+
+/// Normalises the configured public web base URL: trimmed, `https://` (or `http://` for dev
+/// only), trailing slashes dropped; anything else (unset, empty, other scheme, no host) is
+/// `None` so the context simply omits `web_base_url` instead of handing out a bad link base.
+fn normalize_web_base_url(raw: Option<&str>) -> Option<String> {
+    let t = raw?.trim().trim_end_matches('/');
+    let host = t
+        .strip_prefix("https://")
+        .or_else(|| t.strip_prefix("http://"))?;
+    if host.is_empty() || host.starts_with('/') || host.bytes().any(|b| b.is_ascii_whitespace()) {
+        return None;
+    }
+    Some(t.to_string())
 }
 
 #[cfg(test)]
@@ -4124,6 +4216,60 @@ mod tests {
         let ctx = h.handle_context(&scope()).expect("context");
         assert_eq!(ctx["tenant_id"], 7);
         assert_eq!(ctx["community_id"], 3);
+    }
+
+    /// `web_base_url` normalisation: https (or dev http), trimmed, no trailing slash; else None.
+    #[test]
+    fn web_base_url_is_normalised_or_omitted() {
+        for (raw, want) in [
+            (
+                Some("https://app.example.org"),
+                Some("https://app.example.org"),
+            ),
+            (
+                Some("  https://app.example.org/// "),
+                Some("https://app.example.org"),
+            ),
+            (
+                Some("http://localhost:8080/"),
+                Some("http://localhost:8080"),
+            ),
+            (
+                Some("https://app.example.org/sub"),
+                Some("https://app.example.org/sub"),
+            ),
+        ] {
+            assert_eq!(normalize_web_base_url(raw).as_deref(), want, "{raw:?}");
+        }
+        for bad in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("ftp://x.example"),
+            Some("javascript:1"),
+            Some("https://"),
+            Some("https:///x"),
+            Some("app.example.org"),
+            Some("https://a b.example"),
+        ] {
+            assert_eq!(normalize_web_base_url(bad), None, "{bad:?}");
+        }
+    }
+
+    /// The bundle context carries `web_base_url` only when the platform configured one.
+    #[test]
+    fn get_context_carries_web_base_url_only_when_set() {
+        let h = caps(FakeRelayQueue::default());
+        let with = h
+            .handle_context_with_base(&scope(), Some("https://app.example.org/"))
+            .expect("context");
+        assert_eq!(with["web_base_url"], "https://app.example.org");
+        for unset in [None, Some(""), Some("ftp://nope")] {
+            let ctx = h
+                .handle_context_with_base(&scope(), unset)
+                .expect("context");
+            assert!(ctx.get("web_base_url").is_none(), "{unset:?}");
+        }
     }
 
     /// Kill switch `waddles.disable-bundle-community-config`: OFF/unset serves config, ON adds none.
@@ -5062,6 +5208,27 @@ mod tests {
         }
     }
 
+    /// regression: object_storage.* used to fall into `handle_db` on the action stage.
+    #[tokio::test]
+    async fn object_storage_is_refused_loudly_on_the_action_stage() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        for op in [
+            "object_storage.put",
+            "object_storage.get",
+            "object_storage.list",
+        ] {
+            let err = capabilities
+                .handle(
+                    &scope(),
+                    call(CapabilityKind::Db, op, serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_implemented", "{op}");
+            assert!(err.message.contains("process stage only"), "{op}");
+        }
+    }
+
     #[tokio::test]
     async fn db_capability_rejects_an_unknown_op() {
         let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
@@ -5461,6 +5628,7 @@ mod tests {
                     "CANARY_COMMUNITY_ID" => "1",
                     "CANARY_GUILD_ID" => "1000000000000000001",
                     "CANARY_CHANNEL_ID" => "123456789012345678",
+                    "CANARY_ENVIRONMENT" => "alpha",
                     _ => return None,
                 }
                 .to_string(),

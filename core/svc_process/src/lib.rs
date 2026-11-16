@@ -42,6 +42,7 @@ pub mod ai;
 pub mod builtins;
 pub mod bundle_admin;
 pub mod bundle_loader;
+pub mod bundle_storage;
 pub mod capabilities;
 pub mod changelog_consumer;
 pub mod config;
@@ -52,6 +53,7 @@ pub mod host_api;
 pub mod http;
 pub mod identity;
 pub mod identity_crypto;
+pub mod kv_sealing;
 pub mod license;
 pub mod media;
 pub mod metrics_facade;
@@ -60,6 +62,7 @@ pub mod scope_names;
 pub mod source_supervisor;
 pub mod spine;
 pub mod stage_metrics;
+pub mod surface;
 pub mod telemetry;
 pub mod tokenize_memo;
 
@@ -493,11 +496,23 @@ where
     host_api::ensure_crypto_provider_installed();
 
     let (_telemetry_guard, prom_registry) = telemetry::init(SERVICE_NAME);
+    // Fail LOUD on a partial BUNDLE_STORAGE_* config; log + gauge the disabled state.
+    bundle_storage::validate_startup()?;
     // Build the stage's OTel instruments NOW, strictly after `telemetry::init`
     // installed the global meter provider: an instrument created earlier
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Executor language partition: parse EXECUTOR_LANGUAGE_CLASSES now and refuse to start on a
+    // malformed table -- a silent default would route bundles to the wrong executor class.
+    bundle_active_set::concurrent::init_tuning_from_env()
+        .map_err(|e| anyhow::anyhow!("invalid drain tuning: {e}"))?;
+    bundle_active_set::init_table_from_env().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid {}: {e}",
+            bundle_active_set::partition::ENV_LANGUAGE_CLASSES
+        )
+    })?;
     // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
     command_latency::switch::init_from_env();
     let _ = command_latency::metrics::metrics();
@@ -1057,6 +1072,9 @@ async fn try_build_reputation_wiring(
                 flag: Arc::new(license::BundleReputationCapabilityGate::new(Arc::clone(
                     license_client,
                 ))),
+                auto_ban_flag: Some(Arc::new(license::ReputationAutoBanGate::new(Arc::clone(
+                    license_client,
+                )))),
             })
         }
         Err(err) => {
@@ -1509,6 +1527,19 @@ fn try_start_process_loop(
     };
     let bundle_db_password = config.bundle_db_password.clone();
     let bundle_db_license_client = Arc::clone(&license_client);
+    // Per-tenant at-rest sealing of bundle kv values (opt-out kill-switch
+    // `waddles.disable-tenant-at-rest-encryption`; unseen/OFF = sealing ON).
+    let kv_sealing = {
+        let (sealing, dek_cache) = kv_sealing::build(&config.cli, Some(&license_client));
+        match build_redis_client(&spine_cfg) {
+            Some(client) => bundle_host_kv::grpc_wiring::spawn_dek_invalidation(client, dek_cache),
+            None => tracing::error!(
+                "kv sealing: no spine Valkey client; DEK rotation/revocation signals will not \
+                 be received (cache TTL bounds staleness)"
+            ),
+        }
+        Some(sealing)
+    };
     let bundle_reputation_cfg = bundle_host_reputation::ConnectConfig {
         host: cli.bundle_reputation_host.clone(),
         port: cli.bundle_reputation_port,
@@ -1578,6 +1609,7 @@ fn try_start_process_loop(
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -1753,6 +1785,7 @@ fn try_start_process_loop(
                 // (`bundle_host_kv::authorize`'s own module doc: "undeclared
                 // means denied").
                 kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+                kv_sealing: kv_sealing.clone(),
                 egress: Arc::clone(&egress),
                 pii_gate: Arc::clone(&pii_gate),
                 // `crate::build_hub_client`'s connected `HubClientMinter`,
@@ -1768,6 +1801,10 @@ fn try_start_process_loop(
                 reputation_wiring: reputation_wiring.clone(),
                 economy_wiring: economy_wiring.clone(),
                 platform_table_wiring: platform_table_wiring.clone(),
+                // `object_storage` is wired only on the multi-tenant path: this legacy
+                // path runs at the `(0, 0)` fail-closed scope, and storage prefixes
+                // are keyed by (tenant, community) -- a zero scope must never reach S3.
+                object_storage_wiring: None,
                 gameserver_net_wiring: gameserver_net_wiring.clone(),
                 // The legacy single-bundle path runs at the `(0, 0)` fail-closed
                 // scope (no resolved tenant/community), where every
@@ -1780,6 +1817,7 @@ fn try_start_process_loop(
                 // denies every non-platform permission (`ai.generate` included).
                 ai_wiring: None,
                 media_wiring: None,
+                surface_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -2289,6 +2327,10 @@ fn try_start_changelog_consumer(
                         }
                         None => None,
                     };
+                    deps.object_storage_wiring = match &bundle_db_license_client {
+                        Some(client) => bundle_storage::try_build_wiring(&config.cli, client).await,
+                        None => None,
+                    };
                     deps.gameserver_net_wiring = bundle_db_license_client
                         .as_ref()
                         .and_then(|client| try_build_gameserver_net_wiring(&config.cli, client));
@@ -2341,6 +2383,16 @@ fn try_start_changelog_consumer(
                             None
                         }
                     };
+                    // `overlay.publish-surface` host capability: gRPC delivery to svc-presentation
+                    // with a community-bound JWT, behind the default-OFF flag
+                    // `waddles.overlay-surfaces`. Unwired (loud log) without
+                    // PRESENTATION_GRPC_ENDPOINT or a license client -> `not_implemented`.
+                    deps.surface_wiring = bundle_db_license_client.as_ref().and_then(|client| {
+                        surface::build_surface_wiring(
+                            &config.cli,
+                            std::sync::Arc::new(license::OverlaySurfacesGate::new(client.clone())),
+                        )
+                    });
                     // Live per-community bundle config (`get-context().config_json`): hub-api
                     // gRPC + Valkey version-key invalidation; non-fatal when unconfigured.
                     // The version key lives on hub-api's own (durable spine) Valkey, not the
@@ -2371,6 +2423,28 @@ fn try_start_changelog_consumer(
                             bundle_db_license_client.clone(),
                         )));
                     }
+                    // Per-tenant at-rest sealing of bundle kv values; see
+                    // `crate::kv_sealing`. The gate honours the opt-out
+                    // kill-switch when a license client exists, else seals.
+                    let (sealing, dek_cache) =
+                        kv_sealing::build(&config.cli, bundle_db_license_client.as_ref());
+                    match build_redis_client(&deps.spine_cfg) {
+                        Some(client) => {
+                            bundle_host_kv::grpc_wiring::spawn_dek_invalidation(client, dek_cache);
+                        }
+                        None => tracing::error!(
+                            "kv sealing: no spine Valkey client; DEK rotation/revocation \
+                             signals will not be received (cache TTL bounds staleness)"
+                        ),
+                    }
+                    deps.kv_sealing = Some(sealing);
+                    // `command` latency label: registered commands from the read REPLICA only
+                    // (never the primary, never an env list); seed + periodic + lazy-on-miss.
+                    let _latency_labels =
+                        bundle_config_db::labels::start(command_latency::labels::Wanted {
+                            commands: true,
+                            bundles: false,
+                        });
                     let deps = Arc::new(deps);
                     start_bundle_admin_consumer(&deps).await;
                     Some(
@@ -2535,6 +2609,9 @@ async fn build_source_supervisor_deps(
         license: gate,
         kv_conn,
         kv_capabilities,
+        // Assigned by the caller once the license client (kill-switch) is
+        // known -- see `try_start_changelog_consumer`.
+        kv_sealing: None,
         gate: capability_gate,
         app_version_snapshot,
         egress,
@@ -2557,10 +2634,12 @@ async fn build_source_supervisor_deps(
         reputation_wiring: None,
         economy_wiring: None,
         platform_table_wiring: None,
+        object_storage_wiring: None,
         gameserver_net_wiring: None,
         identity_wiring: None,
         ai_wiring: None,
         media_wiring: None,
+        surface_wiring: None,
         // The shared, once-built tenant stream-DEK source (`build_dek_provider`); `None`
         // only before `run_with_shutdown` has installed it, in which case every event that
         // carries an encrypted identity field is dead-lettered (fail closed).

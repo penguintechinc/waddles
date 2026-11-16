@@ -126,6 +126,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
     metrics.group_pending("waddles.scrape.test", "s", 2);
     metrics.insecure_transport("valkey", "tls", false);
     metrics.tenant_boundary_violation("process", "mac_mismatch");
+    metrics.record_floor_ban_enqueue("community_hard_floor", "queued");
     metrics.identity_decrypt_failure("dek_unavailable");
     metrics.tokenize_memo("hit");
     metrics.tokenize_mint_call("ok");

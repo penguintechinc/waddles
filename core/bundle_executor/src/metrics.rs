@@ -45,7 +45,7 @@ pub const SLOW_BUCKETS_S: [f64; 13] = [
 
 /// Every instrument name this module registers -- asserted against emitted
 /// data in tests and mirrored in `docs/observability/data-plane-metrics.md`.
-pub const METRIC_NAMES: [&str; 26] = [
+pub const METRIC_NAMES: [&str; 29] = [
     "waddles_executor_load_seconds",
     "waddles_executor_loads_total",
     "waddles_executor_unloads_total",
@@ -73,6 +73,10 @@ pub const METRIC_NAMES: [&str; 26] = [
     "executor_load_duration_seconds",
     "executor_precompile_fallback_total",
     "executor_module_evictions_total",
+    // Warm instance pool (latency suspect #2).
+    "waddles_executor_warm_pool_total",
+    "waddles_executor_warm_pool_size",
+    "waddles_executor_prewarm_seconds",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -219,6 +223,9 @@ pub struct ExecutorMetrics {
     load_duration_seconds: Histogram<f64>,
     precompile_fallback: Counter<u64>,
     module_evictions: Counter<u64>,
+    warm_pool_total: Counter<u64>,
+    warm_pool_size: Gauge<u64>,
+    prewarm_seconds: Histogram<f64>,
 }
 
 /// Keeps `waddles_executor_invocations_active` accurate on every exit path
@@ -368,6 +375,19 @@ impl ExecutorMetrics {
                 "executor_module_evictions_total",
                 "Idle unpinned modules evicted from the shared cache to honour EXECUTOR_MEMORY_BUDGET_MB",
             ),
+            warm_pool_total: counter(
+                "waddles_executor_warm_pool_total",
+                "Warm-pool lookups per invoke by result (hit, miss) and fill failures (fill_failed)",
+            ),
+            warm_pool_size: meter
+                .u64_gauge(instrument_name("waddles_executor_warm_pool_size"))
+                .with_description("Pre-instantiated guest instances currently ready in the warm pool")
+                .build(),
+            prewarm_seconds: hist(
+                "waddles_executor_prewarm_seconds",
+                "Off-request-path instantiation time of one warm-pool instance",
+                &LATENCY_BUCKETS_S,
+            ),
             connector_call_seconds: hist(
                 "waddles_executor_connector_call_seconds",
                 "Connector-world export call time (slot wait excluded), by export and outcome",
@@ -407,6 +427,25 @@ impl ExecutorMetrics {
     pub fn record_precompile_fallback(&self, reason: &'static str) {
         self.precompile_fallback
             .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// One warm-pool outcome (`waddles_executor_warm_pool_total{result}`): `hit` (an invoke took
+    /// a prewarmed instance), `miss` (pool enabled but empty -> cold instantiate), or
+    /// `fill_failed` (a background prewarm could not instantiate).
+    pub fn record_warm_pool(&self, result: &'static str) {
+        self.warm_pool_total
+            .add(1, &[KeyValue::new("result", result)]);
+    }
+
+    /// Ready warm instances right now (`waddles_executor_warm_pool_size`).
+    pub fn set_warm_pool_size(&self, ready: usize) {
+        self.warm_pool_size
+            .record(u64::try_from(ready).unwrap_or(u64::MAX), &[]);
+    }
+
+    /// Off-path instantiate time of one warm instance (`waddles_executor_prewarm_seconds`).
+    pub fn record_prewarm(&self, elapsed: Duration) {
+        self.prewarm_seconds.record(elapsed.as_secs_f64(), &[]);
     }
 
     /// `count` modules evicted for budget (`executor_module_evictions_total`).
@@ -1163,6 +1202,9 @@ mod tests {
         m.record_module_load("aot", "ok", Duration::from_millis(1));
         m.record_precompile_fallback("signature");
         m.record_module_evictions(1);
+        m.record_warm_pool("hit");
+        m.set_warm_pool_size(2);
+        m.record_prewarm(Duration::from_millis(3));
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1174,7 +1216,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 26);
+        assert_eq!(METRIC_NAMES.len(), 29);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",

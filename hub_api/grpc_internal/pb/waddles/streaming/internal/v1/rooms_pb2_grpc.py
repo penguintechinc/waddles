@@ -184,13 +184,13 @@ class RoomsServiceServicer:
         raise NotImplementedError("Method not implemented!")
 
     def CreateRoom(self, request, context):
-        """Scope "streaming.rooms:write" (member-level actions)."""
+        """Scope "streaming.rooms:create" (its own per-action scope; a "write" token cannot create)."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
 
     def DeleteRoom(self, request, context):
-        """Missing associated documentation comment in .proto file."""
+        """Scope "streaming.rooms:write" (member-level actions)."""
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")

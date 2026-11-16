@@ -240,9 +240,9 @@ pub fn uid() -> String {
 
 /// Creates a room in `community` over gRPC and returns it.
 pub async fn create_room(h: &mut Harness, community: &str, timeout: Option<u32>) -> Room {
-    let write = jwt(
+    let create = jwt(
         &h.signing_pem,
-        svc_streaming::rooms::grpc_auth::SCOPE_WRITE,
+        svc_streaming::rooms::grpc_auth::SCOPE_CREATE,
         |_| {},
     );
     h.client
@@ -253,7 +253,7 @@ pub async fn create_room(h: &mut Harness, community: &str, timeout: Option<u32>)
                 empty_timeout_secs: timeout,
                 ..Default::default()
             },
-            &write,
+            &create,
         ))
         .await
         .unwrap()

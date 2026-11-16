@@ -110,6 +110,7 @@ def test_svc_ingest_is_allow_listed_for_exactly_connections_resolve_on_the_syste
     # static-kind scope (that is svc-action's alone).
     assert entry["allowed_scopes"] == [
         "connections:resolve",  # bound/twitch OAuth credential resolution
+        "keys:tenant-dek:read",  # tenant-DEK broker GetTenantDek (feature/tenant-key-provisioning)
         "connections:list",  # binding discovery
         "dataplane:resolve-scope",  # handle -> tenant/community scope resolver
         "dataplane:app-commands",  # desired-state app commands (read-only)

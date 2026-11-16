@@ -241,6 +241,8 @@ def _seed_admin(
     role_id = dal.community_roles.insert(
         community_id=community_id,
         name="admin",
+        is_system=True,
+        role_kind=1,
         base_claims={"scopes": ["community:manage_members"]},
     )
     dal.community_members.insert(
@@ -278,6 +280,31 @@ class TestCommunityAdminAuthz:
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.get("/api/v1/admin/not-a-number/workflows", headers=headers)
         assert response.status_code == 400
+
+    async def test_broad_manage_members_scope_cannot_list_workflows(
+        self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
+    ) -> None:
+        """A non-admin-kind role with only `community:manage_members` lacks `workflow:manage`."""
+        dal = automation_db.dal
+        dal.communities.insert(id=COMMUNITY_ID, name="c", display_name="C")
+        role_id = dal.community_roles.insert(
+            community_id=COMMUNITY_ID,
+            name="moderator",
+            is_system=True,
+            role_kind=2,
+            base_claims={"scopes": ["community:manage_members", "community:manage_channels"]},
+        )
+        dal.community_members.insert(
+            community_id=COMMUNITY_ID,
+            user_id=str(ADMIN_USER_ID),
+            role="moderator",
+            is_active=True,
+            community_role_id=role_id,
+        )
+        dal.commit()
+        headers = user_auth_headers(user_id=ADMIN_USER_ID)
+        response = await client.get(f"/api/v1/admin/{COMMUNITY_ID}/workflows", headers=headers)
+        assert response.status_code == 403
 
     async def test_admin_can_list_workflows(
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore

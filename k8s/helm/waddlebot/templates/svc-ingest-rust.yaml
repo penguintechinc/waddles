@@ -132,7 +132,9 @@ spec:
           value: {{ .Values.pipeline.defaultTenantId | quote }}
         {{- end }}
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         # Machine-JWT bootstrap + hub-api's internal gRPC, ALWAYS rendered: every tenant's
         # identity-field DEK is fetched from hub-api's KeyService (scope key:stream-dek:read,
         # serviceJwt.identities.svc-ingest) before an event can be encrypted and published, so
@@ -142,7 +144,7 @@ spec:
         # TokenReview would reject it). The mint is gRPC (TLS 1.3, pinned CA via
         # HUB_API_GRPC_CA_FILE).
         - name: SERVICE_JWT_TOKEN_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         - name: SERVICE_JWT_SA_TOKEN_PATH
           value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
         # This pod's own SPIFFE id (the same one hub-api authenticates it as). svc-ingest derives
@@ -151,8 +153,15 @@ spec:
         - name: SPIFFE_ID
           value: {{ tpl (index .Values.serviceJwt.identities "svc-ingest").spiffeId . | quote }}
         - name: HUB_API_GRPC_ENDPOINT
-          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s-hub-api-v3:%v" (include "waddlebot.fullname" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+          value: {{ .Values.pipeline.rustDataPlane.hubApiGrpcEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
         {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
+        {{- if and (.Values.interactionsGateway | default dict).enabled ((.Values.interactionsGateway | default dict).edgeRequestStart | default dict).enabled }}
+        # Command-latency first door: trust the Gateway-stamped `x-request-start` ONLY where the
+        # interactions HTTPRoute overwrites it (templates/interactions-gateway.yaml). Otherwise a
+        # client-sent header is ignored and the handler entry time is the first door.
+        - name: INGEST_TRUST_EDGE_REQUEST_START
+          value: "true"
+        {{- end }}
         {{- if .Values.pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled }}
         # waddles.ingest-dynamic-connections env baseline: svc-ingest resolves each event's
         # guild/channel to a numeric scope via hub-api and stamps schema-v3 envelopes (an

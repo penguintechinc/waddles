@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use axum::http::StatusCode;
 use svc_streaming::rooms::grpc::pb::*;
-use svc_streaming::rooms::grpc_auth::{SCOPE_READ, SCOPE_WRITE};
+use svc_streaming::rooms::grpc_auth::{SCOPE_CREATE, SCOPE_READ, SCOPE_WRITE};
 use svc_streaming::rooms::media;
 use svc_streaming::rtc::pc_factory::PeerConnectionFactory;
 use tonic::Code;
@@ -60,6 +60,7 @@ async fn room_exists(h: &mut Harness, community: &str, room: &str) -> bool {
 async fn empty_room_is_reaped_at_its_timeout_with_hands_locks_and_an_info_log() {
     let log = LogCapture::install();
     let mut h = harness(42540, true).await;
+    let create = jwt(&h.signing_pem, SCOPE_CREATE, |_| {});
     let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
     let moderate = jwt(
         &h.signing_pem,
@@ -77,7 +78,7 @@ async fn empty_room_is_reaped_at_its_timeout_with_hands_locks_and_an_info_log() 
                 empty_timeout_secs: Some(300),
                 ..Default::default()
             },
-            &write,
+            &create,
         ))
         .await
         .unwrap()

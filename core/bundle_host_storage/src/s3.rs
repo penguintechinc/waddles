@@ -40,6 +40,11 @@ fn be(e: impl std::fmt::Display) -> StorageError {
     StorageError::Backend(e.to_string())
 }
 
+/// Server-assigned last-modified of a stored object, unix seconds (negative clamps to 0).
+fn last_modified_unix(m: &object_store::ObjectMeta) -> u64 {
+    u64::try_from(m.last_modified.timestamp()).unwrap_or(0)
+}
+
 fn attrs(content_type: &str, tags: &[String]) -> Attributes {
     let mut a = Attributes::new();
     a.insert(
@@ -53,7 +58,12 @@ fn attrs(content_type: &str, tags: &[String]) -> Attributes {
     a
 }
 
-fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, StorageError> {
+fn meta_from(
+    key: &str,
+    size: u64,
+    modified_unix: u64,
+    a: &Attributes,
+) -> Result<ObjectMeta, StorageError> {
     // Every object is written with a content type (`attrs`); a missing one means
     // the stored metadata is corrupt, so fail loudly instead of guessing a default.
     let content_type = match a.get(&Attribute::ContentType) {
@@ -86,6 +96,7 @@ fn meta_from(key: &str, size: u64, a: &Attributes) -> Result<ObjectMeta, Storage
         size,
         content_type,
         tags,
+        modified_unix: Some(modified_unix),
     })
 }
 
@@ -142,7 +153,9 @@ impl ObjectBackend for S3Backend {
             )
             .await
         {
-            Ok(r) => meta_from(key, r.meta.size, &r.attributes).map(Some),
+            Ok(r) => {
+                meta_from(key, r.meta.size, last_modified_unix(&r.meta), &r.attributes).map(Some)
+            }
             Err(object_store::Error::NotFound { .. }) => Ok(None),
             Err(e) => Err(be(e)),
         }
@@ -152,9 +165,10 @@ impl ObjectBackend for S3Backend {
         match self.client.get(&ObjectPath::from(key)).await {
             Ok(r) => {
                 let (size, attributes) = (r.meta.size, r.attributes.clone());
+                let modified = last_modified_unix(&r.meta);
                 let body = r.bytes().await.map_err(be)?;
                 Ok(Some(StoredObject {
-                    meta: meta_from(key, size, &attributes)?,
+                    meta: meta_from(key, size, modified, &attributes)?,
                     body,
                 }))
             }
@@ -213,13 +227,16 @@ impl ObjectBackend for S3Backend {
 
 /// Builds the `object_store` HTTP client options for an S3 endpoint.
 ///
-/// For an `https://` endpoint with `S3_CA_FILE` set, that internal CA is the ONLY trust anchor
-/// (system roots are disabled) and an unreadable/invalid CA is a hard error. With `S3_CA_FILE`
+/// For an `https://` endpoint with `BUNDLE_STORAGE_CA_FILE` set, that internal CA is the ONLY trust anchor
+/// (system roots are disabled) and an unreadable/invalid CA is a hard error. With `BUNDLE_STORAGE_CA_FILE`
 /// unset (an external S3 with a public CA) the default system roots verify the server -- either
 /// way verification is mandatory: there is no unverified or plaintext fallback. `http://`
 /// endpoints (local/ci only) get the default options.
 fn s3_client_options(endpoint: &str) -> Result<object_store::ClientOptions, String> {
-    s3_client_options_from(endpoint, std::env::var("S3_CA_FILE").ok().as_deref())
+    s3_client_options_from(
+        endpoint,
+        std::env::var("BUNDLE_STORAGE_CA_FILE").ok().as_deref(),
+    )
 }
 
 /// Testable core of [`s3_client_options`]: the CA path is passed in instead of read from env.
@@ -234,16 +251,18 @@ fn s3_client_options_from(
     let Some(path) = ca_file.filter(|p| !p.trim().is_empty()) else {
         return Ok(options);
     };
-    let pem = std::fs::read(path).map_err(|e| format!("reading S3_CA_FILE {path}: {e}"))?;
+    let pem =
+        std::fs::read(path).map_err(|e| format!("reading BUNDLE_STORAGE_CA_FILE {path}: {e}"))?;
     // `Certificate::from_pem` accepts input with no certificate block at all; an empty trust store would then
     // fail every handshake with an opaque error, so reject it here with the real cause.
     if !String::from_utf8_lossy(&pem).contains("-----BEGIN CERTIFICATE-----") {
         return Err(format!(
-            "S3_CA_FILE {path} is not a valid PEM certificate: no CERTIFICATE block"
+            "BUNDLE_STORAGE_CA_FILE {path} is not a valid PEM certificate: no CERTIFICATE block"
         ));
     }
-    let cert = object_store::Certificate::from_pem(&pem)
-        .map_err(|e| format!("S3_CA_FILE {path} is not a valid PEM certificate: {e}"))?;
+    let cert = object_store::Certificate::from_pem(&pem).map_err(|e| {
+        format!("BUNDLE_STORAGE_CA_FILE {path} is not a valid PEM certificate: {e}")
+    })?;
     Ok(options
         .with_no_system_certificates(true)
         .with_root_certificate(cert))
@@ -265,7 +284,7 @@ mod s3_tls_tests {
     fn https_with_missing_file_fails_loud() {
         let err = s3_client_options_from("https://s3.internal:8333", Some("/nonexistent/ca.pem"))
             .unwrap_err();
-        assert!(err.contains("reading S3_CA_FILE"), "{err}");
+        assert!(err.contains("reading BUNDLE_STORAGE_CA_FILE"), "{err}");
     }
 
     #[test]

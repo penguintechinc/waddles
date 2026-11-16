@@ -249,14 +249,29 @@ class TestModeratorEdit:
         assert (await response.get_json())["code"] == "SCOPE_ESCALATION"
         assert dal.community_roles[roles["moderator"]].base_claims["scopes"] == MODERATOR_SCOPES
 
-    async def test_editor_may_remove_scopes_it_lacks(
+    async def test_editor_must_hold_every_current_scope_to_edit(
+        self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        """No downgrading a role more powerful than yourself, even just removing scopes."""
+        dal, community_id = community_db
+        response = await _put(
+            client,
+            _url(community_id, roles["moderator"]),
+            _limited(auth_headers, "roles:manage channels:read community:read"),
+            {"scopes": ["channels:read", "community:read"]},
+        )
+        assert response.status_code == 403
+        assert (await response.get_json())["code"] == "SCOPE_ESCALATION"
+        assert dal.community_roles[roles["moderator"]].base_claims["scopes"] == MODERATOR_SCOPES
+
+    async def test_editor_holding_all_current_scopes_may_remove_some(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
         dal, community_id = community_db
         response = await _put(
             client,
             _url(community_id, roles["moderator"]),
-            _limited(auth_headers, "roles:manage channels:read community:read"),
+            _limited(auth_headers, "roles:manage " + " ".join(MODERATOR_SCOPES)),
             {"scopes": ["channels:read", "community:read"]},
         )
         assert response.status_code == 200
@@ -325,6 +340,74 @@ class TestCustomRoleCrud:
         assert deleted.status_code == 200
 
 
+class TestNoDeletingStrongerRole:
+    async def test_cannot_delete_custom_role_holding_scopes_editor_lacks(
+        self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        dal, community_id = community_db
+        strong = dal.community_roles.insert(
+            community_id=community_id,
+            name="strong",
+            is_system=False,
+            role_kind=0,
+            base_claims={"scopes": ["channels:moderate", "channels:read"]},
+        )
+        dal.commit()
+        response = await client.delete(
+            _url(community_id, strong), headers=_limited(auth_headers, "roles:manage channels:read")
+        )
+        assert response.status_code == 403
+        assert (await response.get_json())["code"] == "SCOPE_ESCALATION"
+        assert dal.community_roles[strong] is not None
+
+    async def test_can_delete_custom_role_whose_scopes_editor_holds(
+        self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        _, community_id = community_db
+        response = await client.delete(
+            _url(community_id, roles["vip"]),
+            headers=_limited(auth_headers, "roles:manage channels:read"),
+        )
+        assert response.status_code == 200
+
+
+class TestDedicatedScopes:
+    def test_per_action_scopes_registered_and_admin_only(self) -> None:
+        for scope in (
+            reg.SCOPE_GITHUB_MANAGE,
+            reg.SCOPE_COMMUNITY_ADMIN,
+            reg.SCOPE_PROFILE_MANAGE,
+            reg.SCOPE_BRANDING_MANAGE,
+            reg.SCOPE_BILLING_MANAGE,
+            reg.SCOPE_MEMBERS_MANAGE,
+            reg.SCOPE_WORKFLOW_MANAGE,
+            reg.SCOPE_BYOK_MANAGE,
+            reg.SCOPE_AI_ROUTING_MANAGE,
+            reg.SCOPE_OVERLAY_MANAGE,
+            reg.SCOPE_CALLS_MANAGE,
+        ):
+            assert scope in reg.all_scopes()
+            assert scope in reg.effective_scopes(reg.KIND_ADMIN, [])
+            assert scope not in reg.effective_scopes(reg.KIND_MODERATOR, MODERATOR_SCOPES)
+
+    def test_moderator_scopes_do_not_satisfy_community_admin_gates(
+        self, community_db: Any, roles: dict[str, int]
+    ) -> None:
+        dal, community_id = community_db
+        dal.community_members.insert(
+            community_id=community_id,
+            user_id="51",
+            role="moderator",
+            community_role_id=roles["moderator"],
+            is_active=True,
+        )
+        dal.commit()
+        held = member_scopes_sync(dal, community_id, 51)
+        assert held and reg.SCOPE_GITHUB_MANAGE not in held
+        assert reg.SCOPE_COMMUNITY_ADMIN not in held
+        assert reg.SCOPE_PROFILE_MANAGE not in held
+
+
 class TestScopeEndpointAndSync:
     async def test_scope_registry_endpoint(
         self, client: Any, auth_headers: Any, community_db: Any
@@ -332,7 +415,7 @@ class TestScopeEndpointAndSync:
         _, community_id = community_db
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/scopes",
-            headers=auth_headers(scope="community.interaction:read", user_id="1"),
+            headers=auth_headers(scope="community.roles:view", user_id="1"),
         )
         assert response.status_code == 200
         assert "roles:manage" in (await response.get_json())["scopes"]
@@ -374,6 +457,8 @@ class TestNoRoleNameAuthorization:
             "_BYPASS_ROLES",
             '"platform-admin" in',
             "role.belongs([",
+            "_ADMIN_ROLE_NAMES",
+            '"community-owner", "community-admin")',
         ],
     )
     def test_removed_constructs_stay_removed(self, needle: str) -> None:
@@ -385,3 +470,125 @@ class TestNoRoleNameAuthorization:
             scanned += 1
             assert needle not in path.read_text(encoding="utf-8"), f"{needle} in {path}"
         assert scanned > 50
+
+
+ADMIN_LEVEL_SCOPES = (
+    "billing:manage",
+    "media.byok:manage",
+    "ai.routing:manage",
+    "github:manage",
+    "workflow:manage",
+    "roles:manage",
+    "token.billing:manage",
+    "marketplace.lifecycle:manage",
+    "bundles.permissions:manage",
+    "bundles.activation:manage",
+    "provider.connections:manage",
+    "stream:config.manage",
+    "members:roles.manage",
+    "bundles.admin:admin",
+    "community:admin",
+    "community.profile:manage",
+    "community.settings:manage",
+    "community.modules:manage",
+    "members:temp_password.reset",
+    "community.platforms:manage",
+    "community.commands:manage",
+)
+
+
+class TestModeratorSeed:
+    def test_seed_is_registered_and_moderation_level_only(self) -> None:
+        assert set(reg.MODERATOR_SEED_SCOPES) <= reg.all_scopes()
+        assert not set(reg.MODERATOR_SEED_SCOPES) & set(ADMIN_LEVEL_SCOPES)
+
+    def test_admin_level_scopes_are_registered(self) -> None:
+        assert set(ADMIN_LEVEL_SCOPES) <= reg.all_scopes()
+
+    def test_migration_seed_matches_registry(self) -> None:
+        import importlib.util
+
+        path = Path(__file__).resolve().parents[2] / "alembic/versions/0117_community_role_kind.py"
+        spec = importlib.util.spec_from_file_location("m0117", path)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        assert tuple(module.MODERATOR_SEED_SCOPES) == tuple(reg.MODERATOR_SEED_SCOPES)
+
+
+class TestEveryAdminGateHasDedicatedScope:
+    """AST sweep: no blueprint admin gate may fall back to the broad manage_* OR-set."""
+
+    def test_admin_gates_pass_scope(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "blueprints"
+        gates = 0
+        missing: list[str] = []
+        for path in root.rglob("*.py"):
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if not isinstance(node, ast.Call):
+                    continue
+                fn = node.func
+                name = fn.attr if isinstance(fn, ast.Attribute) else getattr(fn, "id", "")
+                kw = {k.arg: k.value for k in node.keywords if k.arg}
+                admin_true = (
+                    "admin" in kw
+                    and isinstance(kw["admin"], ast.Constant)
+                    and kw["admin"].value is True
+                )
+                if (name == "authorize_community" and admin_true) or (
+                    name == "require_community_admin"
+                ):
+                    gates += 1
+                    if "scope" not in kw:
+                        missing.append(f"{path.name}:{node.lineno}")
+        # Denominator floor (a sweep that finds ~nothing must fail, not pass). 26 after the
+        # community music-queue blueprint (admin gates) moved into the music-requests bundle.
+        assert gates >= 26, gates
+        assert not missing, missing
+
+
+class TestNoTokenScopeAdminGates:
+    """AST sweep: admin.py and the interaction admin blueprint gate on community scopes only."""
+
+    def test_admin_blueprint_has_no_jwt_scope_gates(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "blueprints/v1"
+        tree = ast.parse((root / "admin.py").read_text(encoding="utf-8"))
+        calls = [
+            n
+            for n in ast.walk(tree)
+            if isinstance(n, ast.Call) and getattr(n.func, "id", "") == "require_scope"
+        ]
+        gated = [
+            f.name
+            for f in ast.walk(tree)
+            if isinstance(f, ast.AsyncFunctionDef)
+            and any(
+                isinstance(d, ast.Call) and getattr(d.func, "id", "") == "require_member_scope"
+                for d in f.decorator_list
+            )
+        ]
+        assert not calls, [c.lineno for c in calls]
+        assert len(gated) >= 11, gated
+
+    def test_interaction_admin_routes_use_community_scopes(self) -> None:
+        import ast
+
+        root = Path(__file__).resolve().parent.parent / "blueprints/v1"
+        tree = ast.parse((root / "community_interaction.py").read_text(encoding="utf-8"))
+        admin_funcs = 0
+        offenders: list[str] = []
+        for f in ast.walk(tree):
+            if not isinstance(f, ast.AsyncFunctionDef):
+                continue
+            decos = [ast.unparse(d) for d in f.decorator_list]
+            if not any("interaction_admin_bp" in d for d in decos):
+                continue
+            admin_funcs += 1
+            if any(d.startswith("require_scope(") for d in decos):
+                offenders.append(f.name)
+        assert admin_funcs >= 13, admin_funcs
+        assert not offenders, offenders

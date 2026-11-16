@@ -113,15 +113,19 @@ impl ActorContext {
 ///
 /// | role | scopes |
 /// |---|---|
-/// | `community-owner`, `owner` | member, vip, moderate, admin, owner, rooms:* |
-/// | `community-admin` | member, vip, moderate, admin, rooms:* |
-/// | `moderator` | member, moderate, rooms:kick, rooms:mute, rooms:lock, rooms:hands |
+/// | `community-owner`, `owner` | member, vip, moderate, admin, owner, rooms:* + all music scopes |
+/// | `community-admin` | member, vip, moderate, admin, rooms:* + all music scopes |
+/// | `moderator` | member, moderate, rooms:kick, rooms:mute, rooms:lock, rooms:hands + all music scopes |
+/// | `vip` | member, vip + music read/write/stats |
+/// | `member` | member + music read/write/stats |
 ///
 /// `rooms:*` = every dedicated room scope: management (`rooms:create`, `rooms:update`,
 /// `rooms:close`, `rooms:guests`) and moderation (`rooms:kick`, `rooms:mute`, `rooms:lock`,
 /// `rooms:hands`). A moderator holds exactly the moderation ones (what it can do today).
-/// | `vip` | member, vip |
-/// | `member` | member |
+///
+/// Music scopes (`waddles.core.service.music-requests`): `music:requests.read`,
+/// `music:history.read`, `music:requests.write` and `music:stats.read` for every member; moderator and above also get
+/// `music:requests.manage`, `music:dj.manage` and `music:settings.write`.
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
     match role {
         // SuperadminService::create_community persists the initial member as
@@ -140,6 +144,13 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "rooms:mute",
             "rooms:lock",
             "rooms:hands",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
         "community-admin" => &[
             "community:member",
@@ -154,6 +165,13 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "rooms:mute",
             "rooms:lock",
             "rooms:hands",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
         "moderator" => &[
             "community:member",
@@ -162,9 +180,29 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "rooms:mute",
             "rooms:lock",
             "rooms:hands",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
-        "vip" => &["community:member", "community:vip"],
-        "member" => &["community:member"],
+        "vip" => &[
+            "community:member",
+            "community:vip",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+        ],
+        "member" => &[
+            "community:member",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+        ],
         _ => &[],
     }
 }

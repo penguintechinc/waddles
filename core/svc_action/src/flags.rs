@@ -37,12 +37,22 @@ pub const EGRESS_VIA_DISPATCHER_FLAG: &str = "waddles.core.egress-via-dispatcher
 /// OFF ⇒ every egress call is denied `feature_disabled`.
 pub const BUNDLE_EGRESS_FLAG: &str = "waddles.core.bundle-egress";
 
+/// Gates the bundle `overlay.publish-surface` host capability (`crate::surface`). Default OFF
+/// (unseen/absent denies `feature_disabled`), the standard opt-in shape.
+pub const OVERLAY_SURFACES_FLAG: &str = "waddles.overlay-surfaces";
+
 /// Gates the bundle `db` host capability (`crate::capabilities::
 /// StageCapabilities::handle_db`) -- same key and same plain opt-in shape
 /// (unseen/OFF denies `feature_disabled`) as `core/svc_process/src/
 /// license.rs::BUNDLE_DB_CAPABILITY_FLAG`; both stages gate on the
 /// identical flag so enabling `db` is one PostHog toggle, not two.
 pub const BUNDLE_DB_CAPABILITY_FLAG: &str = "waddles.bundle-db-capability";
+
+/// The automated reputation floor-ban kill switch (default OFF). The process stage refuses to
+/// enqueue and THIS stage's outbox dispatcher does not sweep while it is OFF, so a queued ban never
+/// reaches a platform with the flag off (rows stay queued, nothing is lost). The durable SQL switch
+/// (`reputation_floor_ban_halted`) is checked by both stages in addition.
+pub const REPUTATION_AUTO_BAN_FLAG: &str = "waddles.reputation-auto-ban";
 
 /// Opt-out kill-switch for the DB-driven active-bundle loader
 /// (`crate::bundle_loader`) -- **inverted from the retired

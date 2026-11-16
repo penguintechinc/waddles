@@ -82,7 +82,13 @@ from services.current_user import get_current_user_id
 from services.errors import ApiError, forbidden, unauthorized
 from services.global_identity import is_global_admin
 from services.schema import bind_community_authz_tables
-from services.scope_registry import KIND_ADMIN, SCOPE_GLOBAL_ADMIN, all_scopes, effective_scopes
+from services.scope_registry import (
+    KIND_ADMIN,
+    SCOPE_GLOBAL_ADMIN,
+    all_scopes,
+    effective_scopes,
+    guard_grant,
+)
 
 
 @dataclass(slots=True, frozen=True)
@@ -191,7 +197,7 @@ _ADMIN_SCOPES = frozenset({"community:manage_members", "community:manage_channel
 
 
 async def require_community_admin(
-    async_dal: Any, dal: Any, request: Request, *, community_id: int
+    async_dal: Any, dal: Any, request: Request, *, community_id: int, scope: str | None = None
 ) -> None:
     """Raise :class:`ApiError` (401/403) unless the caller admins `community_id`.
 
@@ -241,7 +247,13 @@ async def require_community_admin(
     role = await get_caller_community_role(
         async_dal, dal, community_id=community_id, user_id=user_id
     )
-    if role is None or not (role.scopes & _ADMIN_SCOPES):
+    # A dedicated per-action `scope` replaces the broad multi-purpose OR-set.
+    allowed = (
+        (scope in role.scopes)
+        if (role is not None and scope)
+        else bool(role is not None and role.scopes & _ADMIN_SCOPES)
+    )
+    if not allowed:
         raise forbidden("Community admin access required")
 
 
@@ -449,6 +461,7 @@ async def require_community_admin_scoped(
     user_id: int,
     tenant_id: int,
     scopes_claim: frozenset[str],
+    scope: str | None = None,
 ) -> CommunityMembership:
     """Port of `requireCommunityAdmin` -- raise 403 unless bypass or an admin/moderator scope."""
     membership = await resolve_community_membership_scoped(
@@ -459,7 +472,11 @@ async def require_community_admin_scoped(
         tenant_id=tenant_id,
         scopes_claim=scopes_claim,
     )
-    if membership is None or not (membership.bypass or membership.is_admin):
+    # A dedicated per-action `scope` replaces the broad multi-purpose admin OR-set.
+    held = membership is not None and (
+        membership.bypass or ((scope in membership.scopes) if scope else membership.is_admin)
+    )
+    if not held:
         raise forbidden("Community admin access required")
     return membership
 
@@ -491,7 +508,13 @@ def _decode_caller(request: Any) -> tuple[int, frozenset[str]]:
 
 
 async def authorize_community(
-    request: Any, async_dal: Any, dal: Any, *, community_id: int, admin: bool
+    request: Any,
+    async_dal: Any,
+    dal: Any,
+    *,
+    community_id: int,
+    admin: bool,
+    scope: str | None = None,
 ) -> CommunityMembership:
     """One-call authz gate for a `:communityId`-scoped route (M7 `_scoped` variant).
 
@@ -505,8 +528,17 @@ async def authorize_community(
     if ctx is None:
         raise forbidden("Tenant context not resolved")
     user_id, scopes = _decode_caller(request)
-    check = require_community_admin_scoped if admin else require_community_member_scoped
-    return await check(
+    if admin:
+        return await require_community_admin_scoped(
+            async_dal,
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            tenant_id=ctx.tenant_id,
+            scopes_claim=scopes,
+            scope=scope,
+        )
+    return await require_community_member_scoped(
         async_dal,
         dal,
         community_id=community_id,
@@ -543,6 +575,45 @@ def resolve_editor_scopes(request: Any, dal: Any, *, community_id: int) -> froze
         if is_tenant_admin:
             return all_scopes()
     return frozenset(member_scopes_sync(dal, community_id, user_id) | token_scopes)
+
+
+async def resolve_editor_scopes_async(
+    request: Any, async_dal: Any, dal: Any, *, community_id: int
+) -> frozenset[str]:
+    """Async twin of :func:`resolve_editor_scopes` for handlers that already hold the async DAL.
+
+    Goes through `resolve_community_membership_scoped` (tenant ownership check first, then the
+    global/tenant-admin bypass, then the member's role scopes), unioned with the token scopes.
+    """
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        raise forbidden("Tenant context not resolved")
+    user_id, token_scopes = _decode_caller(request)
+    membership = await resolve_community_membership_scoped(
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=user_id,
+        tenant_id=ctx.tenant_id,
+        scopes_claim=token_scopes,
+    )
+    if membership is not None and membership.bypass:
+        return all_scopes()
+    held = membership.scopes if membership is not None else frozenset()
+    return frozenset(held | token_scopes)
+
+
+async def guard_target_member(
+    request: Any, async_dal: Any, dal: Any, *, community_id: int, target_user_id: int
+) -> None:
+    """403 unless the caller holds every scope the target member's role holds.
+
+    Stops a moderator (seeded with member-removal / reputation scopes) acting on an admin: an
+    admin-kind target holds the full registry, so only admin-kind callers, tenant admins and
+    global admins (full registry via `resolve_editor_scopes_async`) pass. Never a role-name check.
+    """
+    editor = await resolve_editor_scopes_async(request, async_dal, dal, community_id=community_id)
+    guard_grant(editor, member_scopes_sync(dal, community_id, target_user_id))
 
 
 def member_scopes_sync(dal: Any, community_id: int, user_id: int) -> frozenset[str]:

@@ -73,6 +73,7 @@ from quart import Blueprint, current_app, request
 from services.community_authz import require_community_admin, require_valid_community_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, forbidden
+from services.scope_registry import SCOPE_WORKFLOW_MANAGE
 from services.workflow_service import (
     ProxyResult,
     WorkflowCoreProxyClient,
@@ -112,7 +113,9 @@ def _int_arg(name: str, default: int) -> int:
 async def _require_admin(community_id: int) -> None:
     """Raise `ApiError` unless the caller admins `community_id` -- see module docstring Authz."""
     async_dal, dal = _dal()
-    await require_community_admin(async_dal, dal, request, community_id=community_id)
+    await require_community_admin(
+        async_dal, dal, request, community_id=community_id, scope=SCOPE_WORKFLOW_MANAGE
+    )
 
 
 async def _guard(raw_community_id: str) -> int | tuple[dict[str, object], int]:

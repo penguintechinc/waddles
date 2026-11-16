@@ -25,8 +25,9 @@ service RoomsService {
   // be a participant who joined the room.
   rpc ListHands(ListHandsRequest) returns (ListHandsResponse);
 
-  // Scope "streaming.rooms:write" (member-level actions).
+  // Scope "streaming.rooms:create" (its own per-action scope; a "write" token cannot create).
   rpc CreateRoom(CreateRoomRequest) returns (CreateRoomResponse);
+  // Scope "streaming.rooms:write" (member-level actions).
   rpc DeleteRoom(DeleteRoomRequest) returns (DeleteRoomResponse);
   // Scope "streaming.rooms:update" ONLY (its own scope; the moderator bundle does not carry
   // it). Replaces the room's facts (kind, closed, schedule window, allow_guests) wholesale;

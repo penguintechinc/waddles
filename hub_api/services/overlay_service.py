@@ -570,6 +570,7 @@ BROWSER_SOURCE_SURFACES: dict[str, str] = {
     "ticker": "ticker",
     "media": "media",
     "general": "full_screen",
+    "scene": "scene",
 }
 
 

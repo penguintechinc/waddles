@@ -49,6 +49,7 @@ COPY svc_process/Cargo.toml svc_process/Cargo.lock ./svc_process/
 COPY svc_process/src ./svc_process/src
 COPY bundle_active_set ./bundle_active_set
 COPY bundle_host_kv ./bundle_host_kv
+COPY bundle_host_crypto ./bundle_host_crypto
 COPY bundle_host_db ./bundle_host_db
 COPY bundle_host_reputation ./bundle_host_reputation
 COPY bundle_host_economy ./bundle_host_economy
@@ -56,6 +57,8 @@ COPY bundle_host_http ./bundle_host_http
 COPY bundle_host_credentials ./bundle_host_credentials
 COPY connection_resolver ./connection_resolver
 COPY bundle_host_media ./bundle_host_media
+# Surface gRPC stubs + delivery host (`crate::surface`); its build.rs reads `/proto` like hub_client's.
+COPY bundle_host_surface ./bundle_host_surface
 COPY bundle_host_platform_table ./bundle_host_platform_table
 COPY bundle_host_storage ./bundle_host_storage
 COPY bundle_host_gameserver_net ./bundle_host_gameserver_net

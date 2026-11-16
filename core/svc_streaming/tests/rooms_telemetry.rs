@@ -11,7 +11,7 @@ use std::collections::BTreeMap;
 
 use serde_json::json;
 use svc_streaming::rooms::grpc::pb::*;
-use svc_streaming::rooms::grpc_auth::{SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE};
+use svc_streaming::rooms::grpc_auth::{SCOPE_CREATE, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE};
 
 use otel_common::OtelSink;
 use rooms_common::*;
@@ -52,7 +52,7 @@ async fn rpc_spans_carry_numeric_ids_op_and_outcome_and_no_names() {
     let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
     let read = jwt(&h.signing_pem, SCOPE_READ, |_| {});
     let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
-    let tenant_write = jwt(&h.signing_pem, SCOPE_WRITE, |c| c["tenant"] = json!("12"));
+    let tenant_create = jwt(&h.signing_pem, SCOPE_CREATE, |c| c["tenant"] = json!("12"));
     let named_tenant = jwt(&h.signing_pem, SCOPE_READ, |c| {
         c["tenant"] = json!("system")
     });
@@ -67,7 +67,7 @@ async fn rpc_spans_carry_numeric_ids_op_and_outcome_and_no_names() {
                 label: Some(label.into()),
                 ..Default::default()
             },
-            &tenant_write,
+            &tenant_create,
         ))
         .await
         .unwrap()

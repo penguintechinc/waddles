@@ -55,7 +55,7 @@ pub const COUNT_BUCKETS: [f64; 12] = [
 /// against the emitted data in tests and mirrored in
 /// `docs/observability/data-plane-metrics.md`, so a rename is a conscious,
 /// documented act.
-pub const METRIC_NAMES: [&str; 20] = [
+pub const METRIC_NAMES: [&str; 21] = [
     "waddles_stage_latency_seconds",
     "waddles_executor_call_seconds",
     "waddles_host_call_latency_seconds",
@@ -73,6 +73,7 @@ pub const METRIC_NAMES: [&str; 20] = [
     "waddles_group_pending",
     "waddles_insecure_transport",
     "waddles_tenant_boundary_violations_total",
+    "waddles_floor_ban_enqueue_total",
     "waddles_identity_decrypt_failures_total",
     "waddles_process_tokenize_memo_total",
     "waddles_process_tokenize_mint_calls_total",
@@ -265,10 +266,12 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    floor_ban_enqueue: Counter<u64>,
     load_inflight: Gauge<u64>,
     queue_wait: Histogram<f64>,
     pool_exhausted: Counter<u64>,
     slot_owner_changes: Counter<u64>,
+    partition_unroutable: Counter<u64>,
     identity_decrypt_failures: Counter<u64>,
     tokenize_memo: Counter<u64>,
     tokenize_mint_calls: Counter<u64>,
@@ -372,6 +375,10 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            floor_ban_enqueue: counter(
+                "waddles_floor_ban_enqueue_total",
+                "Automated floor-ban outbox enqueues, by scope and result",
+            ),
             load_inflight: meter
                 .u64_gauge(instrument_name("stage_load_inflight"))
                 .with_description("Bundle Loads this stage has sent and not yet seen answered")
@@ -387,6 +394,10 @@ impl StageMetrics {
             slot_owner_changes: counter(
                 "executor_slot_owner_changes_total",
                 "Hash slots whose owner executor set changed after a membership change",
+            ),
+            partition_unroutable: counter(
+                "executor_partition_unroutable_total",
+                "Active bundles, per reconcile tick, that no live executor of the right language class can host (class = compiled|scripted|unknown_language)",
             ),
             identity_decrypt_failures: counter(
                 "waddles_identity_decrypt_failures_total",
@@ -422,6 +433,18 @@ impl StageMetrics {
     /// Counts one `pool_exhausted` executor refusal (`pool_exhausted_total`).
     pub fn record_pool_exhausted(&self, app_id: &str) {
         self.pool_exhausted.add(1, &scale_labels(app_id));
+    }
+
+    /// Adds `n` bundles that no live executor of their language class can host
+    /// (`executor_partition_unroutable_total`); `class` is the closed
+    /// `Placement::label` vocabulary (`compiled`, `scripted`, `unknown_language`).
+    pub fn record_partition_unroutable(&self, class: &'static str, n: u64) {
+        if n > 0 {
+            self.partition_unroutable.add(
+                n,
+                &[KeyValue::new("stage", STAGE), KeyValue::new("class", class)],
+            );
+        }
     }
 
     /// Adds `changed` slot-owner changes (`executor_slot_owner_changes_total`).
@@ -524,6 +547,20 @@ impl StageMetrics {
                 KeyValue::new("stage", STAGE),
                 KeyValue::new("capability", capability),
                 KeyValue::new("op", op),
+                KeyValue::new("result", result),
+            ],
+        );
+    }
+
+    /// Records one automated floor-ban enqueue (`waddles_floor_ban_enqueue_total`). `scope` is
+    /// `community_hard_floor` / `tenant_floor`; `result` is `queued`, `known`, `rate_limited`,
+    /// `refused` or `error` (all host-derived constants, never guest strings).
+    pub fn record_floor_ban_enqueue(&self, scope: &'static str, result: &'static str) {
+        self.floor_ban_enqueue.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("scope", scope),
                 KeyValue::new("result", result),
             ],
         );
@@ -974,6 +1011,8 @@ mod tests {
         m.set_load_inflight(3);
         m.record_slot_owner_changes(0);
         m.record_slot_owner_changes(7);
+        m.record_partition_unroutable("scripted", 0);
+        m.record_partition_unroutable("scripted", 3);
         let pool = [("stage", "process"), ("executor_pool", executor_pool())];
         assert_eq!(h.count("queue_wait_seconds", &pool), 1.0);
         assert_eq!(h.count("pool_exhausted_total", &pool), 1.0);
@@ -985,6 +1024,13 @@ mod tests {
         assert_eq!(
             h.count("executor_slot_owner_changes_total", &[("stage", "process")]),
             7.0
+        );
+        assert_eq!(
+            h.count(
+                "executor_partition_unroutable_total",
+                &[("stage", "process"), ("class", "scripted")]
+            ),
+            3.0
         );
     }
 
@@ -1228,6 +1274,7 @@ mod tests {
         m.group_pending("a", "s", 1);
         m.insecure_transport("valkey", "tls", false);
         m.tenant_boundary_violation("process", "unknown_kid");
+        m.record_floor_ban_enqueue("tenant_floor", "queued");
         m.identity_decrypt_failure("dek_unavailable");
         m.tokenize_memo("hit");
         m.tokenize_mint_call("ok");
@@ -1242,7 +1289,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 20);
+        assert_eq!(METRIC_NAMES.len(), 21);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",
