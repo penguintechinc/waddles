@@ -1,4 +1,4 @@
-.PHONY: platform-secrets-rotate backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: webui-api-coverage platform-secrets-rotate backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -147,6 +147,13 @@ check-bundle-hygiene:
 	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
 
+# webui <-> hub-api REST coverage report (A uncovered, B webui->nonexistent,
+# C spec<->code drift, B-proxy calls proxy->svc-streaming). Report-only;
+# STRICT=1 exits non-zero on any gap. OUT=path writes markdown.
+webui-api-coverage:
+	@python3 -m pytest scripts/ci/tests/test_webui_api_coverage.py -q -p no:cacheprovider
+	@python3 scripts/ci/webui_api_coverage.py $(if $(OUT),--out $(OUT)) $(if $(STRICT),--strict)
+
 # Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
 # goldens (svc_ingest), every corpus event through svc_process's closed-schema pii_tokenize
 # classifier, then the connector-overlay expected/ freshness check. Real paths, no mocked
@@ -184,6 +191,15 @@ test-scripts:
 command-latency-report:
 	@test -n "$(strip $(METRICS_URLS)$(METRICS_FILES))" || { echo 'usage: make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics ..." [METRICS_FILES="a.txt ..."]' >&2; exit 2; }
 	@python3 -I scripts/ops/command_latency_report.py $(foreach u,$(METRICS_URLS),--url $(u)) $(foreach f,$(METRICS_FILES),--file $(f))
+
+# Alpha-only, idempotent: create/find the latency-canary community bound to the testing guild via the
+# hub-api control plane, activate the Rust !ping bundle, ensure no reputation/economy bundle is active,
+# print the community id for helm `latencyCanary.communityId`. Token only from $WADDLES_ADMIN_TOKEN.
+#   make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]
+.PHONY: seed-latency-canary
+seed-latency-canary:
+	@test -n "$(HUB_API_URL)" -a -n "$(CANARY_GUILD_ID)" || { echo 'usage: make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]' >&2; exit 2; }
+	@python3 -I scripts/ops/seed_latency_canary.py --hub-api-url "$(HUB_API_URL)" --guild-id "$(CANARY_GUILD_ID)" --confirm-alpha $(if $(DRY),--dry-run,)
 
 # Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
 release-merge:

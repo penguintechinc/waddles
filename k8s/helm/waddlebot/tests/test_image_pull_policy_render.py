@@ -105,7 +105,7 @@ def _formerly_hardcoded(
     matched: dict[tuple[str, str], dict[str, Any]] = {}
     for workload, name, container in _containers(docs):
         for suffix, cname in _FORMERLY_HARDCODED:
-            if name == cname and workload.endswith(suffix):
+            if name == cname and workload.endswith((suffix, suffix + "-native", suffix + "-script")):
                 matched[(suffix, cname)] = container
     return matched
 

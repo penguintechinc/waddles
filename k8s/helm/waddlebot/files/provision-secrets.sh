@@ -58,6 +58,9 @@ MARKER_ANN="waddles.penguintech.io/root-marker"
 CERT_ID_ANN="waddlebot.io/cert-identity"
 CERT_SANS_ANN="waddlebot.io/cert-sans-sha256"
 MARKER_MSG="waddles-root-check"
+# Built at runtime: Helm's renderer rewrites the two-word kubectl sentinel to "" if it appears
+# literally anywhere in a chart file (it would turn the strip below into a no-op).
+NOVAL='<no'; NOVAL="${NOVAL} value>"
 URLSAFE_RE='^[A-Za-z0-9._~-]+$'
 
 WORK="$(mktemp -d "${WORK_PARENT:-${TMPDIR:-/tmp}}/provision-XXXXXX")"
@@ -181,10 +184,10 @@ fetch_secret() { # <name> <dest dir> -> sets F_EXISTS F_RV F_KEEP F_MARK F_CID F
     die "kubectl get secret/${name} failed: $(errhead "${err}")"
   fi
   F_EXISTS=1
-  # kubectl's go-template prints the literal "<no value>" for a missing key inside a NON-empty
+  # kubectl's go-template prints the literal '<no' + ' value>' sentinel for a missing key inside a NON-empty
   # annotations map (a nil map skips `with`, hence ""). Treat it as absent, or an existing Secret
   # that has other annotations but no marker/cert annotation looks like a mismatching stamp.
-  out="${out//'<no value>'/}"
+  out="${out//"${NOVAL}"/}"
   while IFS=' ' read -r tag a b; do
     case "${tag}" in
       RV) F_RV="${a}" ;;
@@ -347,10 +350,8 @@ resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WO
             elif [ "${tls_kept}" -eq 1 ]; then
               fin="${cur}"
             else
-              case "${DEPLOYMENT_TIER}" in
-                alpha|local) ;;
-                *) die "secret/${CUR_NAME}: key ${ca_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
-              esac
+              # Owner policy: internal identities are generated create-if-absent in EVERY tier
+              # (a present key is kept above and never overwritten).
               ca_dir="${WORK}/tls_ca/${ca_tag}"
               gen_p256_ca "${ca_dir}" "${ca_cn}" "${days}" || die "secret/${CUR_NAME}: P-256 CA generation failed"
               fin="$(base64 < "${ca_dir}/ca.crt" | tr -d '\n')"
@@ -377,10 +378,8 @@ resolve_block() { # <block file> ; fills ${WORK}/fin (all final values) and ${WO
               printf '%s' "${cur}" > "${WORK}/fin/${cert_key}"
               printf '%s' "${cur_k}" > "${WORK}/fin/${key_key}"
             else
-              case "${DEPLOYMENT_TIER}" in
-                alpha|local) ;;
-                *) die "secret/${CUR_NAME}: keys ${cert_key},${key_key} not found and DEPLOYMENT_TIER=${DEPLOYMENT_TIER} is outside alpha/local -- auto-generation is alpha/local only" ;;
-              esac
+              # Owner policy: internal identities are generated create-if-absent in EVERY tier
+              # (a present key is kept above and never overwritten).
               ca_dir="${WORK}/tls_ca/${ca_tag}"
               gen_p256_ca "${ca_dir}" "${ca_tag}" "${days:-365}" || die "secret/${CUR_NAME}: P-256 CA init failed"
               local tmp_leaf="${WORK}/tls_leaf_${CUR_NAME}_${cert_key}"

@@ -66,10 +66,12 @@ DO NOT BUILD in v1 -- clean, documented extension points, never a silent
 stub:
 
 - **Actual playback / external music-service integration** (e.g. resolving
-  a YouTube/Spotify link, driving an overlay). This bundle is a request
+  a YouTube/Spotify link). This bundle is a request
   QUEUE only -- `!music next`/`!music skip` advance the *data structure*;
   nothing here calls out to any player or external API, and no `http`/
-  egress capability is declared in `bundle.yaml`.
+  egress capability is declared in `bundle.yaml`. The queue IS published (text only, no
+  requester) to this bundle's own overlay surfaces `<app_id>.now_playing` / `<app_id>.queue`
+  through `overlay.publish-surface` after every change (world `stage-next`).
 - **Cross-community anything.** Every queue/sequence/config key here is
   scoped by `community_id` only (`waddle_sdk.community_kv` -- reputation/
   user-details are the platform's only two cross-community exceptions, and
@@ -116,6 +118,15 @@ MAX_REQUEST_TEXT_LEN = 300
 
 #: How many queue entries `!music`/`!music list` renders at once.
 SHOW_LIMIT = 10
+
+#: Overlay surfaces this bundle OWNS (`<app_id>.<name>`, declared in `owned_surfaces`); the
+#: payloads are the contract's `public_track` shapes (`bundles/contracts/surfaces.v1.json`).
+_SURFACE_NOW_PLAYING = "waddles.core.example.music.now_playing"
+_SURFACE_QUEUE = "waddles.core.example.music.queue"
+
+#: Longest track title / queue length the contract accepts.
+_SURFACE_TITLE_MAX = 200
+_SURFACE_QUEUE_MAX = 50
 
 #: Durable per-community state -- never expires (`ttl_seconds=0`).
 _QUEUE_KEY = "music.queue"
@@ -390,6 +401,49 @@ async def _save_queue(
         provider=provider,
         channel_id=channel_id,
     )
+    await _publish_overlay(entries)
+
+
+def _public_track(entry: QueueEntry) -> dict[str, Any]:
+    """One queue entry as the contract's `public_track`: text only, no requester, no URLs."""
+    title = "".join(ch for ch in entry.text if ch.isprintable())[:_SURFACE_TITLE_MAX]
+    return {
+        "id": entry.id,
+        "provider": "request",
+        "track_id": str(entry.id),
+        "title": title,
+        "artist": "",
+        "duration_s": 0,
+    }
+
+
+def _surface_payloads(entries: list[QueueEntry], now_ms: int) -> list[tuple[str, dict[str, Any]]]:
+    """The two surface frames for `entries` (head = now playing, the rest = up next)."""
+    now = _public_track(entries[0]) if entries else None
+    upcoming = [_public_track(e) for e in entries[1 : 1 + _SURFACE_QUEUE_MAX]]
+    return [
+        (_SURFACE_NOW_PLAYING, {"now_playing": now, "updated_ms": now_ms}),
+        (_SURFACE_QUEUE, {"queue": upcoming, "updated_ms": now_ms}),
+    ]
+
+
+async def _publish_overlay(entries: list[QueueEntry]) -> None:
+    """Publish the queue to this bundle's own overlay surfaces via `overlay.publish-surface`.
+
+    The queue is already persisted, so a refused or failed publish must not fail the chat command;
+    it is logged loudly (surface + error type only, never the payload) and the next queue change
+    republishes the full state.
+    """
+    import wit_world
+
+    now_ms = int(clock.now_millis())
+    for surface_id, payload in _surface_payloads(entries, now_ms):
+        try:
+            wit_world.imports.overlay.publish_surface(surface_id, json.dumps(payload))
+        except Exception as exc:  # noqa: BLE001 -- loud log, never a silent drop
+            wit_error = getattr(exc, "value", exc)
+            code = getattr(wit_error, "code", type(wit_error).__name__)
+            log.error("music.surface_publish_failed", surface=surface_id, error=str(code))
 
 
 async def _get_max_per_user(community: str, *, provider: str, channel_id: str) -> int:
@@ -439,9 +493,7 @@ async def _handle_add(
     return f"added to the queue at position {len(queue)} (#{next_id})"
 
 
-async def _handle_show(
-    *, community: str, actor: str | None, provider: str, channel_id: str
-) -> str:
+async def _handle_show(*, community: str, actor: str | None, provider: str, channel_id: str) -> str:
     """Render the first `SHOW_LIMIT` queue entries, marking the caller's own `(yours)`."""
     queue = await _load_queue(community, provider=provider, channel_id=channel_id)
     if not queue:

@@ -61,6 +61,7 @@ pub mod scope_names;
 pub mod source_supervisor;
 pub mod spine;
 pub mod stage_metrics;
+pub mod surface;
 pub mod telemetry;
 pub mod tokenize_memo;
 
@@ -501,6 +502,16 @@ where
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Executor language partition: parse EXECUTOR_LANGUAGE_CLASSES now and refuse to start on a
+    // malformed table -- a silent default would route bundles to the wrong executor class.
+    bundle_active_set::concurrent::init_tuning_from_env()
+        .map_err(|e| anyhow::anyhow!("invalid drain tuning: {e}"))?;
+    bundle_active_set::init_table_from_env().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid {}: {e}",
+            bundle_active_set::partition::ENV_LANGUAGE_CLASSES
+        )
+    })?;
     // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
     command_latency::switch::init_from_env();
     let _ = command_latency::metrics::metrics();
@@ -1060,6 +1071,9 @@ async fn try_build_reputation_wiring(
                 flag: Arc::new(license::BundleReputationCapabilityGate::new(Arc::clone(
                     license_client,
                 ))),
+                auto_ban_flag: Some(Arc::new(license::ReputationAutoBanGate::new(Arc::clone(
+                    license_client,
+                )))),
             })
         }
         Err(err) => {
@@ -1581,6 +1595,7 @@ fn try_start_process_loop(
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
@@ -1787,6 +1802,7 @@ fn try_start_process_loop(
                 // denies every non-platform permission (`ai.generate` included).
                 ai_wiring: None,
                 media_wiring: None,
+                surface_wiring: None,
                 // Env-only legacy mode has no `BUNDLE_SCOPE_TENANT_ID`/DB
                 // reader to resolve a real tenant from -- `(0, 0)` fails
                 // closed (denies every non-platform permission) rather than
@@ -2352,6 +2368,16 @@ fn try_start_changelog_consumer(
                             None
                         }
                     };
+                    // `overlay.publish-surface` host capability: gRPC delivery to svc-presentation
+                    // with a community-bound JWT, behind the default-OFF flag
+                    // `waddles.overlay-surfaces`. Unwired (loud log) without
+                    // PRESENTATION_GRPC_ENDPOINT or a license client -> `not_implemented`.
+                    deps.surface_wiring = bundle_db_license_client.as_ref().and_then(|client| {
+                        surface::build_surface_wiring(
+                            &config.cli,
+                            std::sync::Arc::new(license::OverlaySurfacesGate::new(client.clone())),
+                        )
+                    });
                     // Live per-community bundle config (`get-context().config_json`): hub-api
                     // gRPC + Valkey version-key invalidation; non-fatal when unconfigured.
                     // The version key lives on hub-api's own (durable spine) Valkey, not the
@@ -2382,6 +2408,13 @@ fn try_start_changelog_consumer(
                             bundle_db_license_client.clone(),
                         )));
                     }
+                    // `command` latency label: registered commands from the read REPLICA only
+                    // (never the primary, never an env list); seed + periodic + lazy-on-miss.
+                    let _latency_labels =
+                        bundle_config_db::labels::start(command_latency::labels::Wanted {
+                            commands: true,
+                            bundles: false,
+                        });
                     let deps = Arc::new(deps);
                     start_bundle_admin_consumer(&deps).await;
                     Some(
@@ -2573,6 +2606,7 @@ async fn build_source_supervisor_deps(
         identity_wiring: None,
         ai_wiring: None,
         media_wiring: None,
+        surface_wiring: None,
         // The shared, once-built tenant stream-DEK source (`build_dek_provider`); `None`
         // only before `run_with_shutdown` has installed it, in which case every event that
         // carries an encrypted identity field is dead-lettered (fail closed).

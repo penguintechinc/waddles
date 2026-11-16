@@ -331,6 +331,77 @@ async fn moderation_flows_through_the_real_connector_pinned_to_the_binding_guild
     }
 }
 
+/// The automated floor ban's outbound command exactly as the ACTION stage emits it
+/// (`svc_action::capabilities::floor_ban::emit_floor_ban`; the producer's own test pins this same
+/// file, so neither side can drift): a signed-envelope body minus the volatile op id / deadline /
+/// MAC, addressed by the community's binding (`guild:-`) to a tokenized user.
+const FLOOR_BAN_COMMAND: &str =
+    include_str!("../../svc_action/tests/fixtures/floor_ban_mod_ban.json");
+
+#[tokio::test]
+async fn an_automated_floor_ban_command_bans_the_right_user_in_the_bindings_guild() {
+    let r = rig().await;
+    let golden: Value = serde_json::from_str(FLOOR_BAN_COMMAND).unwrap();
+    let mut keys: Vec<&str> = golden
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    keys.sort_unstable();
+    assert_eq!(
+        keys,
+        [
+            "community_id",
+            "op",
+            "origin_channel",
+            "platform",
+            "tenant_id",
+            "user_id",
+            "v"
+        ],
+        "the producer's command shape changed: update this consumer test with it"
+    );
+    assert_eq!(golden["op"], "mod.ban");
+    assert_eq!(golden["origin_channel"], "guild:-");
+    // Address the command at a user the fake directory knows (the fixture's user token is the
+    // producer's own test uuid).
+    let wire_user = golden["user_id"].as_str().unwrap();
+    let token = wire_user
+        .strip_prefix("{user:")
+        .and_then(|u| u.strip_suffix('}'))
+        .expect("the producer sends the {user:<uuid>} placeholder");
+    let a = entry(
+        "mod.ban",
+        json!({
+            "community_id": COMMUNITY,
+            "origin_channel": golden["origin_channel"],
+            "user_id": wire_user.replace(token, UUID_LOW),
+        }),
+    );
+    let before = write_count(&r.dc).await;
+    r.exec
+        .execute(&rq(&a))
+        .await
+        .unwrap_or_else(|e| panic!("floor ban command: {e}"));
+    assert_eq!(write_count(&r.dc).await, before + 1, "exactly one write");
+    let (m, p, body, auth) = last_write(&r.dc).await;
+    // The binding's guild (never caller-named) and the detokenized member, as the bot.
+    assert_eq!(m, "PUT");
+    assert_eq!(p, format!("/api/v10/guilds/{GUILD}/bans/{RAW_LOW}"));
+    assert_eq!(auth, format!("Bot {TOKEN}"));
+    if !body.is_empty() {
+        let b: Value = serde_json::from_slice(&body).unwrap();
+        assert!(
+            b.as_object()
+                .unwrap()
+                .keys()
+                .all(|k| k == "delete_message_seconds"),
+            "the ban carries no caller-chosen fields: {b}"
+        );
+    }
+}
+
 #[tokio::test]
 async fn hierarchy_and_argument_refusals_send_nothing() {
     let r = rig().await;

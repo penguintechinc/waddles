@@ -997,8 +997,9 @@ def test_0115_reason_codes_ledger_and_anchor(real_chain: PgTestDatabase) -> None
         with pytest.raises(psycopg2.errors.IntegrityConstraintViolation):  # same gen, new digest
             cur.execute(anchor, (2, psycopg2.Binary(b"\x09" * 32), _KEK, mac))
     owner.rollback()
-    with owner.cursor() as cur, pytest.raises(psycopg2.errors.CheckViolation):  # half-set anchor
-        cur.execute("UPDATE platform_vault.root_marker SET escrow_generation = 3")
+    # a half-set anchor (a generation with a malformed key id) is refused by the check
+    with owner.cursor() as cur, pytest.raises(psycopg2.errors.CheckViolation):
+        cur.execute("UPDATE platform_vault.root_marker SET escrow_anchor_kek_id = 'not-a-kek-id'")
     owner.close()
     # hub-api can advance the anchor (UPDATE on the marker), nobody else can
     hub = _as(real_chain, "waddles_hub_api")

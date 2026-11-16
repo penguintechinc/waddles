@@ -317,6 +317,7 @@ impl AdminExecutor for E2eExecutor {
         .with_reputation(ReputationWiring {
             store: Arc::clone(&h.store) as Arc<dyn ReputationStore>,
             flag: Arc::new(StaticGate(true)),
+            auto_ban_flag: None,
         })
         .with_tool(ToolContext {
             connections: Arc::clone(&h.rig.registry),
@@ -381,6 +382,7 @@ fn rep_row() -> ActiveBundleRow {
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         tools: ToolManifestInfo {
             is_tool_service: true,

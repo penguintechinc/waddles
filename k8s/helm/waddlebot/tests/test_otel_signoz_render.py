@@ -121,8 +121,16 @@ def _workloads(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def _emitter(docs: list[dict[str, Any]], suffix: str) -> dict[str, Any]:
     """The single workload whose name ends with the suffix (release prefix ignored)."""
-    hits = [d for d in _workloads(docs) if d["metadata"]["name"].endswith("-" + suffix)]
-    assert len(hits) == 1, f"expected exactly one workload *-{suffix}, got {len(hits)}"
+    hits = [
+        d
+        for d in _workloads(docs)
+        if d["metadata"]["name"].endswith("-" + suffix)
+        or (suffix == "svc-bundles-executor" and d["metadata"]["name"].endswith(("-" + suffix + "-native", "-" + suffix + "-script")))
+    ]
+    # The executor renders one pool per language class; the first stands for it.
+    assert hits and (len(hits) == 1 or suffix == "svc-bundles-executor"), (
+        f"expected exactly one workload *-{suffix}, got {len(hits)}"
+    )
     return hits[0]
 
 
@@ -226,7 +234,10 @@ def test_enabled_exactly_one_service_name_per_emitter(env: str) -> None:
 def test_non_emitters_never_get_otel_env_when_enabled() -> None:
     """Databases, caches, webui, jobs and cronjobs stay free of OTEL_* env even when enabled."""
     docs = _render("dal2alpha")
-    emitter_names = {"waddlebot-" + s for s in _EMITTERS}
+    emitter_names = {"waddlebot-" + s for s in _EMITTERS} | {
+        "waddlebot-svc-bundles-executor-native",
+        "waddlebot-svc-bundles-executor-script",
+    }
     examined = 0
     for w in _workloads(docs):
         if w["metadata"]["name"] in emitter_names:

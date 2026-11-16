@@ -372,7 +372,11 @@ jobs:
           CREATE TABLE communities (
               id SERIAL PRIMARY KEY,
               name TEXT,
-              tenant_id INTEGER  -- 0045 trigger reads it (legacy NOT NULL column)
+              tenant_id INTEGER,  -- 0045 trigger reads it (legacy NOT NULL column)
+              -- the live-community predicate (0114 reputation_tenant_communities, identity
+              -- resolution): 000_create_base_schema.sql. Mirrors pg_docker.py -- keep in sync.
+              is_active BOOLEAN DEFAULT TRUE,
+              deleted_at TIMESTAMP
           );
           CREATE TABLE hub_users (
               id SERIAL PRIMARY KEY,
@@ -729,6 +733,19 @@ jobs:
         uses: azure/setup-helm@dda3372f752e03dde6b3237bc9431cdc2f7a02a2  # v5
         with:
           version: 'v3.13.0'
+
+      # The chart render tests that prove BOTH helm majors (test_interactions_gateway_render.py) need a
+      # helm 4 next to the helm 3 above; a missing major is a CI FAILURE there, never a skip. Exact
+      # version, sha256-verified, exposed as HELM4_BIN (never replaces `helm`).
+      - name: Install Helm 4 (second major for dual-major render tests)
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/helm4.tgz https://get.helm.sh/helm-v4.0.0-linux-amd64.tar.gz
+          echo "c77e9e7c1cc96e066bd240d190d1beed9a6b08060b2043ef0862c4f865eca08f  /tmp/helm4.tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/helm4"
+          tar -xzf /tmp/helm4.tgz -C "$RUNNER_TEMP/helm4" --strip-components=1 linux-amd64/helm
+          "$RUNNER_TEMP/helm4/helm" version --short
+          echo "HELM4_BIN=$RUNNER_TEMP/helm4/helm" >> "$GITHUB_ENV"
 
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0

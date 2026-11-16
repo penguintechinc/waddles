@@ -32,7 +32,9 @@ mod component {
     use super::bindings::waddle::bundle::types::{
         PlatformEvent, StageEnvelope, TransportError, TransportResult, UnsupportedStage,
     };
-    use super::bindings::waddle::bundle::{clock, context, flags, identity, kv, log, relay, tool};
+    use super::bindings::waddle::bundle::{
+        clock, context, flags, identity, kv, log, overlay, relay, tool,
+    };
     use super::chat;
     use super::engine::{Ctx, Engine};
     use super::host::{Host, Level, ToolErr};
@@ -55,6 +57,11 @@ mod component {
         }
         fn now_ms(&self) -> u64 {
             clock::now_millis()
+        }
+        fn publish_surface(&self, surface_id: &str, payload_json: &str) -> Result<(), String> {
+            overlay::publish_surface(surface_id, payload_json)
+                .map(|_| ())
+                .map_err(|e| e.code)
         }
         fn invoke(
             &self,

@@ -33,7 +33,7 @@ Downgrade drops the ledger and restores the 1..7 checks, and refuses when a row 
 code above 7 (a replay of the chain must not silently rewrite audit history).
 
 Revision ID: 0115_platform_vault_rotation
-Revises: 0110_merge_precompile_vault
+Revises: 0114_reputation_floor_ban
 Create Date: 2026-11-14
 """
 
@@ -42,9 +42,9 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0115_platform_vault_rotation"
-#: A plain revision on top of `0110_merge_precompile_vault` (PR #1354), the merge that joins the
-#: two 0108 heads; 0111-0114 are claimed by other in-flight PRs, hence 0115.
-down_revision = "0110_merge_precompile_vault"
+#: A plain revision chained after the release head at merge time (`0114_reputation_floor_ban`); if
+#: another migration lands first, re-chain this so the graph keeps a single head.
+down_revision = "0114_reputation_floor_ban"
 branch_labels = None
 depends_on = None
 

@@ -1564,4 +1564,51 @@ mod tests {
         // domain separation: a bundle-approval payload is not a cwasm payload
         assert_ne!(CWASM_DOMAIN_SEPARATOR, crate::signing::DOMAIN_SEPARATOR);
     }
+
+    fn temp_key_file(name: &str, contents: &str) -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!(
+            "waddles-precompile-key-{}-{name}",
+            std::process::id()
+        ));
+        std::fs::write(&p, contents).unwrap();
+        p
+    }
+
+    #[test]
+    fn signer_from_file_reads_a_base64_seed_and_names_the_path_on_every_failure() {
+        let seed = BASE64.encode([7u8; 32]);
+        let ok = temp_key_file("ok", &format!("{seed}\n"));
+        let signer = PrecompileSigner::from_file("k1", &ok).expect("valid seed file");
+        assert_eq!(signer.key_id(), "k1");
+
+        let not_b64 = temp_key_file("b64", "!!! not base64 !!!");
+        let e = PrecompileSigner::from_file("k1", &not_b64)
+            .err()
+            .unwrap_or_else(|| panic!("bad base64"));
+        assert!(e.to_string().contains("not valid base64"), "{e}");
+
+        let short = temp_key_file("short", &BASE64.encode([1u8; 8]));
+        let e = PrecompileSigner::from_file("k1", &short)
+            .err()
+            .unwrap_or_else(|| panic!("wrong length"));
+        assert!(e.to_string().contains("exactly 32 bytes"), "{e}");
+
+        let missing = std::env::temp_dir().join("waddles-precompile-key-does-not-exist");
+        let e = PrecompileSigner::from_file("k1", &missing)
+            .err()
+            .unwrap_or_else(|| panic!("missing file"));
+        assert!(
+            e.to_string()
+                .contains("cannot read precompile signing key file"),
+            "{e}"
+        );
+
+        let e = PrecompileSigner::from_file("bad id!", &ok)
+            .err()
+            .unwrap_or_else(|| panic!("bad key id"));
+        assert!(e.to_string().contains("PRECOMPILE_SIGNING_KEY_ID"), "{e}");
+        for p in [ok, not_b64, short] {
+            let _ = std::fs::remove_file(p);
+        }
+    }
 }

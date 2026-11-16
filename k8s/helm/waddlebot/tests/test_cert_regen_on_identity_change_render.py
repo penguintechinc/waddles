@@ -41,6 +41,7 @@ failure here, never a silent pass (critical-rules.md Verification Integrity).
 
 from __future__ import annotations
 
+import re
 import base64
 import subprocess
 import sys
@@ -217,7 +218,7 @@ class TestAlphaRenderAnnotationsAndChecksum:
             if doc.get("kind") not in ("Deployment", "StatefulSet"):
                 continue
             name = doc.get("metadata", {}).get("name", "")
-            matched = next((s for s in suffixes if name.endswith(s)), None)
+            matched = next((s for s in suffixes if re.search(re.escape(s) + r"(-native|-script)?$", name)), None)
             if not matched:
                 continue
             annotations = doc.get("spec", {}).get("template", {}).get("metadata", {}).get("annotations", {}) or {}

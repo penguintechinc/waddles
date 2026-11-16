@@ -64,9 +64,11 @@ use crate::stage_metrics::{self, StageMetrics};
 use crate::usage::UsageBatcher;
 
 mod event_sync;
+mod floor_ban;
 mod host_tools;
 pub use event_sync::{run_event_sync_consumer, EVENT_SYNC_REQUEST_QUEUE, EVENT_SYNC_RESULT_PREFIX};
 mod tool;
+pub use floor_ban::{FloorBanCommand, FloorSendError, FloorSendFailure};
 pub use tool::ToolWiring;
 
 /// A raw platform account id held host-side. A newtype so the id can never reach a log line or
@@ -1088,6 +1090,8 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Connectio
     /// other unimplemented-seam capability's fail-closed default in
     /// [`Self::handle`]).
     db: Option<DbWiring>,
+    /// `overlay.publish-surface` wiring (`crate::surface`); `None` denies `not_implemented`.
+    surface: Option<crate::surface::SurfaceWiring>,
     /// The OTel instruments every `host-call` served by this value is timed
     /// into (`waddles_host_call_latency_seconds`). Always the process-wide
     /// set in production; tests swap it via `with_stage_metrics` so they can
@@ -1148,6 +1152,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             kv: None,
             gate,
             db: None,
+            surface: None,
             stage_metrics: stage_metrics::stage_metrics(),
             bundle_config: None,
             egress_dispatcher_flag: None,
@@ -1362,6 +1367,35 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     pub fn with_db(mut self, db: DbWiring) -> Self {
         self.db = Some(db);
         self
+    }
+
+    /// Attaches the `overlay.publish-surface` wiring (delivery host + default-OFF flag).
+    #[must_use]
+    pub fn with_surface(mut self, surface: crate::surface::SurfaceWiring) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
+    /// `surface.publish`: community and app id come from the host-verified scope, never args.
+    async fn handle_surface(
+        &self,
+        scope: &InvokeScope,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        if call.op != "surface.publish" {
+            return Err(denied(
+                "unknown_op",
+                format!("surface op {:?} not supported", call.op),
+            ));
+        }
+        let gate_scope = scope.gate_scope();
+        crate::surface::publish(
+            self.surface.as_ref(),
+            gate_scope.app_id(),
+            i64::from(gate_scope.community_id()),
+            &call.args,
+        )
+        .await
     }
 
     async fn handle_relay(
@@ -3439,6 +3473,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             CapabilityKind::Db if call.op.starts_with("tool.") => {
                 self.handle_tool(scope, &call).await
             }
+            // `surface.publish`: own handler (namespace ownership + flag + gRPC delivery), never
+            // the `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("surface.") => {
+                self.handle_surface(scope, &call).await
+            }
             // `platform_table.*` is hosted by the PROCESS stage only (like
             // `reputation`/`economy`/`identity`/`ai`: community-scoped, stage-next
             // process-world capabilities). The action stage fails LOUD rather than
@@ -5489,6 +5528,7 @@ mod tests {
                     "CANARY_COMMUNITY_ID" => "1",
                     "CANARY_GUILD_ID" => "1000000000000000001",
                     "CANARY_CHANNEL_ID" => "123456789012345678",
+                    "CANARY_ENVIRONMENT" => "alpha",
                     _ => return None,
                 }
                 .to_string(),
