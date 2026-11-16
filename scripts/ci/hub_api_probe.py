@@ -20,9 +20,9 @@ from collections.abc import Callable
 def build_ssl_context(insecure: bool) -> ssl.SSLContext | None:
     """Return an SSL context for the GETs, or None to use urllib's default verifying context.
 
-    insecure=True returns a context that skips certificate and hostname verification -- the
-    equivalent of `curl -k`. The smoke gate port-forwards to 127.0.0.1 while hub-api serves a
-    cert whose SAN is the in-cluster service FQDN only, so verification can never match the
+    When insecure is set, the returned context skips certificate and hostname verification --
+    the equivalent of `curl -k`. The smoke gate port-forwards to 127.0.0.1 while hub-api serves
+    a cert whose SAN is the in-cluster service FQDN only, so verification can never match the
     loopback host; this is an alpha liveness smoke check (endpoint returns 200), not TLS
     validation. Status handling is unchanged, so a real non-200 still fails the gate.
     """
