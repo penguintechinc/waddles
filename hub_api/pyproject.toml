@@ -72,6 +72,8 @@ convention = "google"
 "blueprints/v1/passkey.py" = ["N815"]
 "blueprints/v1/profile.py" = ["N815"]
 "blueprints/v1/marketplace_vendor.py" = ["N815"]  # wire DTOs are camelCase by API contract
+"blueprints/v1/step_up.py" = ["N815"]  # wire DTOs are camelCase by API contract
+"blueprints/v1/platform_secrets.py" = ["N815"]  # wire DTOs are camelCase by API contract
 "blueprints/v1/user_management.py" = ["N815"]
 # M3 Platform-admin group -- same rationale as the M1 entries above:
 # camelCase DTO fields are wire-contract-pinned to api.js, and
@@ -150,13 +152,6 @@ convention = "google"
 "blueprints/v1/join_request.py" = ["N815"]
 "services/community_profile_service.py" = ["S101"]
 "services/join_request_service.py" = ["N815"]
-# Music Station queue feature (new API surface, not a port) -- DTO field
-# names are camelCase by convention with every other v1 blueprint's own
-# JSON contract (see services/community_music_queue_service.py's "DTO
-# casing" note); S101 for community_music_queue.py already covered by the
-# "blueprints/v1/community_*.py" glob above.
-"blueprints/v1/community_music_queue.py" = ["N815"]
-"services/community_music_queue_service.py" = ["N815"]
 # Analytics module port (M9) -- same tenant_middleware postcondition
 # assert as blueprints/v2/platform.py above (`get_tenant_context` always
 # non-None on the success path for Scenario 2/4 routes).
@@ -174,6 +169,10 @@ convention = "google"
 # `block_anonymization`) from `tests/test_data_privacy_erasure.py`; a pytest fixture used as a
 # test parameter is, to ruff, a redefinition of the imported name.
 "tests/test_ban_suppression.py" = ["F811"]
+# Calls (RTC) suites import the shared in-process RoomsService fixtures (`fake`, `app`,
+# `client`) from `tests/test_calls_support.py`; same F811 rationale as the entry above.
+"tests/test_calls_*.py" = ["F811"]
+"tests/test_v1_calls_blueprint.py" = ["F811"]
 # Provider/connection framework (migration 0058) -- request/response DTO fields are camelCase to
 # match every other v1 blueprint's JSON contract (security.md Output Validation: the JSON key IS
 # the field name); S101 is the standard tenant_middleware postcondition assert.

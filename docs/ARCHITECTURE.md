@@ -234,7 +234,7 @@ Read this before assuming a container is production-ready:
   its own `Dockerfile`.
 - **Helm chart wiring lags the code**: every pipeline container's Deployment template still pins
   `image:` to a shared placeholder base digest (`pipeline.pythonBaseImage` /
-  `pipeline.nodeBaseImage` in `values.yaml`) — no CI build publishes a per-container image yet.
+  formerly `pipeline.nodeBaseImage`, removed) — no CI build publishes a per-container image yet.
 - **`svc-core` is the exception** — no consolidated container exists. Identity, security, and
   credential logic still run as three separate module services (`core/identity_core_module`,
   `core/security_core_module`, `core/credential_manager_module`); `svc-core.yaml` is a Helm

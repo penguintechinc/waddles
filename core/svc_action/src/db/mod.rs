@@ -24,13 +24,18 @@ pub mod entities;
 /// through `CliConfig`, matching `core/svc_streaming`'s documented
 /// `DB_TYPE` behavior.
 fn connection_url(config: &Config) -> String {
-    let cli = &config.cli;
+    url_for(&config.cli, &config.db_password)
+}
+
+/// [`connection_url`] from the two parts it needs, so a caller holding only the CLI config and
+/// the password secret (the stage-capabilities builder) can connect too.
+fn url_for(cli: &crate::config::CliConfig, db_password: &crate::config::Secret) -> String {
     match std::env::var("DB_TYPE").as_deref() {
         Ok("sqlite") => format!("sqlite://{name}?mode=rwc", name = cli.db_name),
         _ => format!(
             "postgres://{user}:{password}@{host}:{port}/{name}",
             user = cli.db_user,
-            password = config.db_password.expose(),
+            password = db_password.expose(),
             host = cli.db_host,
             port = cli.db_port,
             name = cli.db_name,
@@ -45,6 +50,19 @@ fn connection_url(config: &Config) -> String {
 pub async fn connect(config: &Config) -> Result<DatabaseConnection, DbErr> {
     let mut opts = ConnectOptions::new(connection_url(config));
     opts.max_connections(10)
+        .min_connections(1)
+        .sqlx_logging(false);
+    Database::connect(opts).await
+}
+
+/// Opens a small dedicated pool to the service's own database from the CLI config and password
+/// secret (used by the floor-ban outbox dispatcher, which runs outside `run`'s `Config`).
+pub async fn connect_with(
+    cli: &crate::config::CliConfig,
+    db_password: &crate::config::Secret,
+) -> Result<DatabaseConnection, DbErr> {
+    let mut opts = ConnectOptions::new(url_for(cli, db_password));
+    opts.max_connections(4)
         .min_connections(1)
         .sqlx_logging(false);
     Database::connect(opts).await

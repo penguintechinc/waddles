@@ -164,3 +164,18 @@ class TestDiffVersionsUnit:
         old = {"anyhow": ["1.0.104"]}
         new = {"anyhow": ["1.0.99"]}
         assert mod.diff_versions(old, new) == [("anyhow", "1.0.104", "1.0.99")]
+
+    def test_extra_version_of_existing_package_is_an_addition(self) -> None:
+        old = {"hashbrown": ["0.16.1"], "foldhash": ["0.2.0"]}
+        new = {"hashbrown": ["0.15.5", "0.16.1"], "foldhash": ["0.1.5", "0.2.0"]}
+        assert mod.diff_versions(old, new) == []
+
+    def test_replaced_version_alongside_an_addition_is_still_flagged(self) -> None:
+        old = {"hashbrown": ["0.16.1"]}
+        new = {"hashbrown": ["0.15.5", "0.17.1"]}
+        assert mod.diff_versions(old, new) == [("hashbrown", "0.16.1", "0.15.5"), ("hashbrown", "(none)", "0.17.1")]
+
+    def test_removed_version_is_flagged(self) -> None:
+        old = {"hashbrown": ["0.15.5", "0.16.1"]}
+        new = {"hashbrown": ["0.16.1"]}
+        assert mod.diff_versions(old, new) == [("hashbrown", "0.15.5", "(removed)")]

@@ -147,7 +147,14 @@ def test_the_allowed_modules_exist() -> None:
 VAULT = "services/provider_connections/vault.py"
 #: The only top-level functions of the vault allowed to run the platform primitives.
 PLATFORM_PRIMITIVE_FUNCTIONS = frozenset(
-    {"seal_platform_secret", "open_platform_secret", "_platform_key", "_platform_mac"}
+    {
+        "seal_platform_secret",
+        "open_platform_secret",
+        "seal_escrow_object",
+        "open_escrow_object",
+        "_platform_key",
+        "_platform_mac",
+    }
 )
 #: Callables that ARE the platform primitives (AEAD, KEK-subkey derivation, keyed MAC).
 PLATFORM_PRIMITIVES = frozenset({"AESGCM", "derive_key", "derive_kek_subkey"})

@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -46,7 +47,7 @@ def _test_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -100,8 +101,14 @@ def _seed_community(auth_db: Any, *, join_mode: str = "approval") -> int:
 
 
 def _seed_role(auth_db: Any, *, community_id: int, name: str, scopes: list[str]) -> int:
+    kind = {"community-admin": 1, "community-owner": 1, "moderator": 2}.get(name, 0)
     role_id: int = auth_db.dal.community_roles.insert(
-        community_id=community_id, name=name, priority=0, base_claims={"scopes": scopes}
+        community_id=community_id,
+        name=name,
+        is_system=kind != 0,
+        role_kind=kind,
+        priority=0,
+        base_claims={"scopes": scopes},
     )
     auth_db.dal.commit()
     return role_id
@@ -229,6 +236,24 @@ class TestListRequests:
 
         response = await client.get(
             f"/api/v1/admin/{community_id}/join-requests", headers=_auth_header(user_id=outsider_id)
+        )
+        assert response.status_code == 403
+
+    async def test_broad_moderator_scopes_cannot_list_requests(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        """`community:manage_members` is not the dedicated `community.members:manage` scope."""
+        community_id = _seed_community(auth_db)
+        mod_id = _seed_user(auth_db, email="modjr@example.com", username="modjr")
+        role_id = _seed_role(
+            auth_db,
+            community_id=community_id,
+            name="moderator",
+            scopes=["community:manage_members", "community:manage_channels"],
+        )
+        _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=role_id)
+        response = await client.get(
+            f"/api/v1/admin/{community_id}/join-requests", headers=_auth_header(user_id=mod_id)
         )
         assert response.status_code == 403
 

@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -22,7 +23,7 @@ from blueprints.v1.streaming import streaming_bp
 from config import HubAPIConfig
 from services import stream_keys_service as svc
 from services.platform_integrations_crypto import decrypt_value, stream_destination_aad
-from tests.conftest import TENANT_SLUG, make_user_token
+from tests.conftest import TENANT_SLUG, make_user_token, role_kind_fields
 
 _ENC_KEY = "11" * 32
 _DEST = {
@@ -45,7 +46,7 @@ def _test_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -93,6 +94,7 @@ def _admin(db: Any, *, community_id: int, user_id: int = 1) -> dict[str, str]:
         community_id=community_id,
         name="community-admin",
         base_claims={"scopes": ["community:manage_members"]},
+        **role_kind_fields("community-admin"),
     )
     db.dal.community_members.insert(
         community_id=community_id,
@@ -440,6 +442,7 @@ class TestDestinations:
             community_id=b,
             name="community-admin",
             base_claims={"scopes": ["community:manage_members"]},
+            **role_kind_fields("community-admin"),
         )
         streaming_db.dal.community_members.insert(
             community_id=b,

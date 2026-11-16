@@ -143,7 +143,6 @@ The following table lists the main configurable parameters of the WaddleBot char
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
 | `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `svc-bundles-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
-| `global.storageClass` | Global storage class for PVCs | `standard` |
 
 #### Image pull policy
 
@@ -162,23 +161,6 @@ Set `--set global.imagePullPolicy=Always` per deployment only when deploying a m
 |-----------|-------------|---------|
 | `namespace.create` | Create namespace automatically | `true` |
 | `namespace.name` | Namespace name | `waddlebot` |
-
-### Resource Presets
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `resourcePresets.small.cpu` | Small preset CPU request | `100m` |
-| `resourcePresets.small.memory` | Small preset memory request | `128Mi` |
-| `resourcePresets.small.cpuLimit` | Small preset CPU limit | `500m` |
-| `resourcePresets.small.memoryLimit` | Small preset memory limit | `512Mi` |
-| `resourcePresets.medium.cpu` | Medium preset CPU request | `250m` |
-| `resourcePresets.medium.memory` | Medium preset memory request | `256Mi` |
-| `resourcePresets.medium.cpuLimit` | Medium preset CPU limit | `1000m` |
-| `resourcePresets.medium.memoryLimit` | Medium preset memory limit | `1Gi` |
-| `resourcePresets.large.cpu` | Large preset CPU request | `500m` |
-| `resourcePresets.large.memory` | Large preset memory request | `512Mi` |
-| `resourcePresets.large.cpuLimit` | Large preset CPU limit | `2000m` |
-| `resourcePresets.large.memoryLimit` | Large preset memory limit | `2Gi` |
 
 ### Infrastructure Services
 
@@ -280,8 +262,7 @@ MinIO's own KMS backend configuration.
 |-----------|-------------|---------|
 | `infrastructure.qdrant.enabled` | Enable Qdrant vector DB | `true` |
 | `infrastructure.qdrant.image` | Qdrant image | `qdrant/qdrant:latest` |
-| `infrastructure.qdrant.port` | Qdrant HTTP port | `6333` |
-| `infrastructure.qdrant.grpcPort` | Qdrant gRPC port | `6334` |
+| `infrastructure.qdrant.service.port` | Qdrant HTTP port | `6333` |
 | `infrastructure.qdrant.persistence.size` | PVC size | `10Gi` |
 
 ### Processing Module (Router)
@@ -361,20 +342,6 @@ MinIO's own KMS backend configuration.
 | `ingress.annotations` | Ingress annotations | See values.yaml |
 | `ingress.hosts` | Ingress hosts configuration | See values.yaml |
 | `ingress.tls` | TLS configuration | See values.yaml |
-
-### Shared Environment Variables
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `sharedEnv.DB_HOST` | Database host | `postgresql` |
-| `sharedEnv.DB_PORT` | Database port | `5432` |
-| `sharedEnv.DB_NAME` | Database name | `waddlebot` |
-| `sharedEnv.REDIS_HOST` | Redis host | `redis` |
-| `sharedEnv.REDIS_PORT` | Redis port | `6379` |
-| `sharedEnv.ROUTER_URL` | Router service URL | `http://router:8000` |
-| `sharedEnv.HUB_URL` | Hub service URL | `http://hub:8060` |
-| `sharedEnv.LOG_LEVEL` | Logging level | `INFO` |
-| `sharedEnv.RELEASE_MODE` | Enable license enforcement | `false` |
 
 ### Security
 
@@ -1061,9 +1028,29 @@ pipeline:
   otherwise). Adding a scripted language (for example `ruby`) is a values change only.
 - A pool has `languageClass: compiled | scripted | any` (default `any`). Each executor pod gets
   `EXECUTOR_LANGUAGE_CLASS` and `EXECUTOR_LANGUAGES` (comma-separated; `any` = union of both
-  classes). The executor binary does not read them yet: they are the contract the
-  language-partition layer (router + executor) will consume. Nothing else changes for the default
-  single `any` pool.
+  classes). The executor validates them at startup (a typo or an empty list for a partitioned
+  pool refuses to start) and reports a class-qualified `executor_id` (`compiled:<pod>` /
+  `scripted:<pod>`) in `hello`; the stages (`bundle_active_set::partition`) read the same table
+  from `EXECUTOR_LANGUAGE_CLASSES` (rendered from `languageClasses`) and only ever load/dispatch
+  a bundle onto an executor whose class accepts its `app_versions.language`. A bundle whose
+  language is in no class, or whose class has no live executor, is placed nowhere: the stage
+  logs ERROR and counts `executor_partition_unroutable_total` (never a fallback to the other
+  class). Nothing else changes for the default single `any` pool.
+- alpha and dal2alpha ship both pools (`native` compiled, `script` scripted) with their own
+  replicas, resources, PDB, `warmPoolSize` and memory budget; beta/gamma/production keep one `any`
+  pool until their values opt in.
+- **Warm instance pool** (`warmPoolSize`, `warmPoolMaxTotal`, `warmPoolIdleSecs`, per pool): the
+  executor keeps up to `warmPoolSize` one-shot pre-instantiated guests per digest so an invoke
+  skips instantiation. `0` = off (default). Each guest serves exactly one invocation, so no state
+  crosses tenants. Worst-case warm memory is `warmPoolMaxTotal x EXECUTOR_MEMORY_LIMIT_MB`; keep it
+  inside `limit - memoryBudgetMb` (a render test enforces this for the shipped envs). Kill switch:
+  `FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL=true`.
+- **Drain concurrency** (`pipeline.rustDataPlane.drainConcurrency`, `drainOrdering`): svc-process and
+  svc-action handle up to N ordering groups of a drained batch at once. Bundle kv/db/economy have no
+  atomic compare-and-set, so the default key is the app scope `(tenant, community, app)`: a stateful
+  app is strictly serial per scope and concurrency exists only across scopes. `drainOrdering: actor`
+  additionally lets a provably stateless bundle (manifest declares only context/flags/log/clock/http/
+  relay) overlap per actor; stateful or unknown bundles stay scope-serial. `1` = the old serial loop.
 - **Coverage rule:** every stage must be served by exactly one pool **per language class**; an
   `any` pool covers both classes. So the same stage may be listed by a compiled pool and a
   scripted pool, but not by two pools of the same class, and never by none. The rule lives in one

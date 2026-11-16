@@ -24,15 +24,14 @@ pass (critical-rules.md Verification Integrity). Helm binaries: every distinct m
 
 from __future__ import annotations
 
-import base64
 import functools
 import json
 import os
 import shutil
 import subprocess
-import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -203,6 +202,11 @@ def test_container_ports_are_declared_exactly(helm: str, env: str) -> None:
     c = _container(dep)
     got = {(p["name"], p["containerPort"], p["protocol"]) for p in c["ports"]}
     expected = _FIXED_PORTS | {("webrtc-media", _ENVS[env]["udp"], "UDP")}
+    # F6 transit TLS (release): the TLS control-plane listener is declared iff STREAMING_TLS_PORT
+    # is rendered, and the declared port must be exactly that value.
+    tls_port = _env(c).get("STREAMING_TLS_PORT", {}).get("value")
+    if tls_port:
+        expected = expected | {("https", int(tls_port), "TCP")}
     assert got == expected, f"{env}: {got ^ expected}"
     assert len(c["ports"]) == len(expected), "duplicate containerPort entries"
     assert not any("hostPort" in p for p in c["ports"]), "hostPort is forbidden"
@@ -320,7 +324,11 @@ def test_cnp_rules_are_exact(helm: str, env: str) -> None:
     assert "fromEndpoints" not in ing[0] and "fromCIDR" not in ing[0]
     # The generic policy admits neither the gRPC port nor the media port, to anyone.
     admitted = {p for r in policy[0]["spec"]["ingress"] for p in _ports(r)}
-    assert admitted == {"8208/TCP", "9090/TCP", "1935/TCP", "9000/UDP"}, admitted
+    expected_admitted = {"8208/TCP", "9090/TCP", "1935/TCP", "9000/UDP"}
+    tls_port = _env(_container(_streaming_deployment(docs))).get("STREAMING_TLS_PORT", {}).get("value")
+    if tls_port:
+        expected_admitted.add(f"{tls_port}/TCP")  # F6 TLS control-plane port (hub-facing)
+    assert admitted == expected_admitted, admitted
     # default-deny egress profile unchanged (`world` carve-outs): DNS + namespace + CIDR set.
     assert "egress" in policy[0]["spec"]
     for c in (grpc[0], media[0]):
@@ -431,23 +439,15 @@ def _cert_sans(docs: tuple[dict[str, Any], ...]) -> set[str]:
             "-host-api-tls"
         ):
             return set(d["spec"]["dnsNames"])
+    # alpha/local: the pre-install provisioner (templates/provision-secrets.yaml) owns the cert; its
+    # spec row `tls_leaf|host-api|tls.crt|tls.key|<cn>|<dnsCsv>|<uriCsv>|<days>` carries the SANs.
     for d in docs:
-        if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-host-api-tls"):
-            raw = d["stringData"]["tls.crt"] if "stringData" in d else None
-            pem = raw.encode() if raw else base64.b64decode(d["data"]["tls.crt"])
-            with tempfile.NamedTemporaryFile(suffix=".pem") as f:
-                f.write(pem)
-                f.flush()
-                out = subprocess.run(
-                    ["openssl", "x509", "-in", f.name, "-noout", "-ext", "subjectAltName"],
-                    capture_output=True, text=True, check=True,
-                ).stdout  # fmt: skip
-            return {
-                tok.strip().split("DNS:", 1)[1]
-                for tok in out.replace("\n", ",").split(",")
-                if tok.strip().startswith("DNS:")
-            }
-    pytest.fail("no host-api-tls Certificate/Secret rendered")
+        if d["kind"] == "ConfigMap" and d["metadata"]["name"].endswith("-provision-secrets"):
+            for line in d["data"]["spec.psv"].splitlines():
+                parts = line.strip().split("|")
+                if parts[:3] == ["tls_leaf", "host-api", "tls.crt"]:
+                    return {n for n in parts[5].split(",") if n}
+    pytest.fail("no host-api-tls Certificate or provisioner tls_leaf row rendered")
 
 
 @pytest.mark.parametrize("env", _ENABLED_ENVS)
@@ -465,24 +465,31 @@ def test_hub_api_rooms_client_env(helm: str, env: str) -> None:
         assert "ROOMS_GRPC_PORT" not in _env(_container(_streaming_deployment(docs)))
         assert "STREAMING_RTC_URL" not in env_
         return
-    assert env_["STREAMING_RTC_GRPC_TARGET"]["value"] == f"{name}:50208"
+    # FQDN only: the internal CA's nameConstraints do not permit the bare Service name as a SAN
+    # (regression: NameConstraintViolation, alpha 2026-11-16).
+    fqdn = f"{name}.waddlebot.svc.cluster.local"
+    assert env_["STREAMING_RTC_GRPC_TARGET"]["value"] == f"{fqdn}:50208"
     assert "STREAMING_RTC_URL" not in env_, "the REST proxy env is retired"
-    assert env_["STREAMING_RTC_GRPC_SERVER_NAME"]["value"] == name
+    assert env_["STREAMING_RTC_GRPC_SERVER_NAME"]["value"] == fqdn
     assert env_["STREAMING_RTC_TIMEOUT_SECONDS"]["value"] == "10"
     assert env_["STREAMING_RTC_GRPC_CA_FILE"]["value"].endswith("/ca.crt")
     sans = _cert_sans(docs)
-    assert name in sans, (name, sans)
+    assert fqdn in sans, (fqdn, sans)
+    assert name not in sans, f"bare SAN {name} violates the internal CA's nameConstraints"
     # service identity: the hub-api SPIFFE id (the minted JWT `sub`), allow-listed with exactly the
-    # three RoomsService scopes, and pinned on the server side.
+    # four RoomsService scopes (read/create/write/moderate), and pinned on the server side.
     sid = env_["STREAMING_RTC_SERVICE_ID"]["value"]
-    assert sid.startswith("spiffe://penguintech.io/") and sid.endswith("/hub-api")
+    parsed = urlparse(sid)
+    assert (parsed.scheme, parsed.netloc) == ("spiffe", "penguintech.io")
+    assert parsed.path.endswith("/hub-api")
     srv = _env(_container(_streaming_deployment(docs)))
     assert srv["ROOMS_GRPC_ALLOWED_SUBJECTS"]["value"] == sid
     idents = json.loads(env_["SERVICE_JWT_IDENTITIES"]["value"])
     hub_ident = next(i for i in (idents if isinstance(idents, list) else idents.values())
                      if sid in json.dumps(i))  # fmt: skip
     assert set(hub_ident.get("allowedScopes", hub_ident.get("allowed_scopes", []))) == {
-        "streaming.rooms:read", "streaming.rooms:write", "streaming.rooms:moderate",
+        "streaming.rooms:read", "streaming.rooms:create", "streaming.rooms:write",
+        "streaming.rooms:moderate",
     }  # fmt: skip
     # no secret value anywhere in these two workloads' env, and the mTLS material is a mount.
     for e in [*env_.values(), *srv.values()]:
@@ -617,3 +624,18 @@ def test_kubeconform(helm: str, env: str) -> None:
     ), summary
     assert summary["invalid"] == 0 and summary["errors"] == 0, summary
     print(f"{env}: kubeconform valid={summary['valid']} skipped={summary['skipped']}")
+
+
+@pytest.mark.parametrize("env", _ENABLED_ENVS)
+def test_rooms_idle_expiry_env_is_rendered_and_overridable(helm: str, env: str) -> None:
+    """The idle-room expiry policy reaches the pod under the env names the binary reads."""
+    got = _env(_container(_streaming_deployment(_render(helm, env))))
+    assert got["ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS"]["value"] == "300"
+    assert got["ROOMS_EMPTY_TIMEOUT_MAX_SECS"]["value"] == "86400"
+    extra = (
+        "pipeline.svcStreaming.rooms.emptyTimeoutDefaultSecs=60",
+        "pipeline.svcStreaming.rooms.emptyTimeoutMaxSecs=3600",
+    )
+    over = _env(_container(_streaming_deployment(_render(helm, env, extra))))
+    assert over["ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS"]["value"] == "60"
+    assert over["ROOMS_EMPTY_TIMEOUT_MAX_SECS"]["value"] == "3600"

@@ -30,7 +30,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import InMemorySpanE
 
 from services.envelope.platform_kek import PlatformKekAdapter
 from services.platform_secrets import bootstrap as vault_bootstrap
-from services.platform_secrets import registry, telemetry
+from services.platform_secrets import importer, refresher, registry, telemetry
 from services.platform_secrets.bootstrap import (
     PlatformVaultRefusedError,
     bootstrap_platform_secrets,
@@ -46,9 +46,10 @@ from services.platform_secrets.cache import (
 )
 from services.platform_secrets.event_chain import append_event, verify_chain
 from services.platform_secrets.importer import import_candidate
-from services.platform_secrets.refresher import CacheRefresher
+from services.platform_secrets.refresher import CacheRefresher, PgNotifyWaiter
 from services.platform_secrets.registry import REGISTRY, SecretType
 from services.platform_secrets.repository import (
+    AnchorRow,
     EventRow,
     MarkerRow,
     NewSecret,
@@ -59,6 +60,7 @@ from services.provider_connections.vault import (
     PLATFORM_ALG_ES256,
     PLATFORM_ALG_PASSWORD,
     PLATFORM_ALG_RANDOM_256,
+    PlatformSecretInputError,
     generate_platform_key_material,
     platform_key_material_from_private,
 )
@@ -79,6 +81,8 @@ class FakeRepo:
         self.secrets: list[SecretRow] = []
         self.event_rows: list[EventRow] = []
         self.notifies = 0
+        self.claimed: set[uuid.UUID] = set()
+        self.anchor: AnchorRow | None = None
         self.before_insert: Any = None
         self._lock = threading.RLock()
 
@@ -144,6 +148,48 @@ class FakeRepo:
             )
             self.secrets.append(row)
             return row
+
+    def update_state(
+        self, secret_id: int, state: int, *, at: datetime, reason: int, actor_uuid: uuid.UUID | None
+    ) -> bool:
+        """Forward-only move of an active / verify-only row (mirrors the SQL WHERE clause)."""
+        with self._lock:
+            for index, row in enumerate(self.secrets):
+                if row.id == secret_id:
+                    if not (row.state < state and row.state in (2, 3)):
+                        return False
+                    self.secrets[index] = replace(
+                        row,
+                        state=state,
+                        rotated_at=row.rotated_at or at,
+                        retired_at=at if state == 4 else row.retired_at,
+                    )
+                    return True
+        return False
+
+    def read_anchor(self) -> AnchorRow | None:
+        """The escrow anchor (None until a manifest was written)."""
+        return self.anchor
+
+    def advance_anchor(
+        self, generation: int, manifest_digest: bytes, kek_id: str, mac: bytes
+    ) -> bool:
+        """Strictly-forward anchor move (mirrors the SQL WHERE and the trigger)."""
+        with self._lock:
+            if self.anchor is not None and self.anchor.generation >= generation:
+                return False
+            self.anchor = AnchorRow(generation, manifest_digest, kek_id, mac)
+            return True
+
+    def claim_request(
+        self, idempotency_key: uuid.UUID, *, secret_type: int, action: int, actor_uuid: uuid.UUID
+    ) -> bool:
+        """Unique-key semantics of the replay ledger."""
+        with self._lock:
+            if idempotency_key in self.claimed:
+                return False
+            self.claimed.add(idempotency_key)
+            return True
 
     def chain_tip(self) -> bytes | None:
         """Newest chain hash."""
@@ -328,6 +374,37 @@ def test_importer_drops_a_placeholder_kid_instead_of_trusting_it() -> None:
     )
     assert decision.usable and decision.material is not None
     assert decision.material.kid is not None and decision.material.kid.startswith("k")
+
+
+def test_importer_logs_rejection_of_unparsable_key_material_without_the_value(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """A key the builder refuses is `rejected_invalid` AND logged (name + type), never silent."""
+
+    def _refuse(*_a: Any, **_k: Any) -> Any:
+        raise PlatformSecretInputError("secret-detail-must-not-leak")
+
+    monkeypatch.setattr(importer, "platform_key_material_from_private", _refuse)
+    with caplog.at_level(logging.WARNING, logger=importer.logger.name):
+        decision = import_candidate(REGISTRY[SecretType.BUNDLE_SIGNING], _env(_b64(GOOD_SEED)))
+    assert decision.outcome == "rejected_invalid" and not decision.usable
+    text = caplog.text
+    assert "BUNDLE_SIGNING_PRIVATE_KEY" in text and "PlatformSecretInputError" in text
+    assert "secret-detail-must-not-leak" not in text and _b64(GOOD_SEED) not in text
+
+
+def test_notify_waiter_close_failure_is_logged_not_swallowed(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Closing a dead LISTEN connection is best effort but leaves a DEBUG trace (type only)."""
+    waiter = PgNotifyWaiter("postgresql://unused")
+    conn = MagicMock()
+    conn.close.side_effect = RuntimeError("dsn-secret-detail")
+    waiter._conn = conn  # noqa: SLF001 -- inject a dead connection
+    with caplog.at_level(logging.DEBUG, logger=refresher.logger.name):
+        waiter.close()
+    assert waiter._conn is None  # noqa: SLF001
+    assert "RuntimeError" in caplog.text and "dsn-secret-detail" not in caplog.text
 
 
 def test_importer_never_imports_a_type_without_a_source() -> None:
@@ -683,12 +760,21 @@ def _boot_row_for(kek: PlatformKekAdapter, secret_type: SecretType) -> SecretRow
 
 
 def test_repository_never_updates_or_deletes() -> None:
-    """Static: the repository has no UPDATE / DELETE / TRUNCATE statement (insert-only)."""
+    """Static: no DELETE / TRUNCATE; the ONE UPDATE is the forward-only, state-guarded move.
+
+    Insert-only for bootstrap; `update_state` (escrow restore, rotation) is the single UPDATE and
+    only ever moves `state` forward (`WHERE ... state < :state`), never touches a value column.
+    """
     source = (REPO_ROOT / "hub_api/services/platform_secrets/repository.py").read_text()
     sql_lines = [ln for ln in source.splitlines() if '"' in ln]
     joined = "\n".join(sql_lines).upper()
-    for forbidden in ("UPDATE PLATFORM_VAULT", "UPDATE {SCHEMA}", "DELETE FROM", "TRUNCATE"):
+    for forbidden in ("UPDATE PLATFORM_VAULT", "DELETE FROM", "TRUNCATE"):
         assert forbidden not in joined, forbidden
+    # exactly two UPDATEs, both forward-only: secret `state`, and the escrow anchor generation
+    assert joined.count("UPDATE {SCHEMA}") == 2
+    assert "STATE < :STATE" in joined
+    assert "ESCROW_GENERATION < :G" in joined
+    assert "SEALED_VALUE =" not in joined
     assert "ON CONFLICT DO NOTHING" in source
 
 

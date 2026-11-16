@@ -264,6 +264,9 @@ async def test_run_reports_nonzero_exit_when_a_row_fails(
     monkeypatch.setattr(backfill, "build_install_dal", _fake_build_install_dal)
     monkeypatch.setattr(backfill.HubAPIConfig, "from_env", staticmethod(lambda: _FakeConfig()))
     monkeypatch.setattr(install_dal, "close", AsyncMock())
+    from services.platform_secrets.bootstrap import get_process_cache
+
+    get_process_cache().seed(())
     monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("BUNDLE_SIGNING_KEY_ID", raising=False)
 

@@ -8,7 +8,9 @@
 //! registry. The media path, TURN/ICE config and the token-signing secret never
 //! enter the guest. Unknown tools fail LOUD with a typed `invalid-args`.
 #[allow(warnings)]
+#[rustfmt::skip]
 mod bindings;
+mod grants;
 mod logic;
 
 use std::sync::{Arc, OnceLock};

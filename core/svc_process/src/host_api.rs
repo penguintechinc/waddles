@@ -1118,7 +1118,11 @@ impl ConnectionRegistry {
     /// (legacy round-robin over every live session). The caller's per-
     /// connection `ensure_loaded` still loads on demand if the pick does not
     /// hold the digest yet.
-    pub fn pick_dispatch_for_app(&self, app_id: &str) -> Option<Arc<Connection>> {
+    pub fn pick_dispatch_for_app(
+        &self,
+        app_id: &str,
+        placement: bundle_active_set::Placement,
+    ) -> Option<Arc<Connection>> {
         let mut live = self.prune_and_snapshot();
         live.sort_by_key(|(id, _)| *id);
         let ids: Vec<u64> = live.iter().map(|(id, _)| *id).collect();
@@ -1132,10 +1136,15 @@ impl ConnectionRegistry {
             self.sharding_enabled(),
             bundle_active_set::DEFAULT_REPLICAS,
         );
-        if router.mode() != bundle_active_set::RoutingMode::Sharded {
+        if router.mode() != bundle_active_set::RoutingMode::Sharded
+            && placement == bundle_active_set::Placement::Unpartitioned
+        {
             return self.pick_dispatch();
         }
-        let targets = router.target_sessions(app_id);
+        // Partition: only sessions of an executor class that accepts this bundle's class are
+        // ever candidates (an unknown language / class with no live executor => none => the
+        // caller dead-letters loudly), in sharded AND broadcast modes.
+        let targets = router.target_sessions(app_id, placement);
         self.track_zero_since(!live.is_empty());
         let count = u64::try_from(targets.len()).ok().filter(|c| *c > 0)?;
         let turn = self.dispatch_rotation.fetch_add(1, Ordering::Relaxed);
@@ -2020,11 +2029,14 @@ mod tests {
             true,
             bundle_active_set::DEFAULT_REPLICAS,
         );
-        let owners = router.target_sessions("waddles.a");
+        let owners =
+            router.target_sessions("waddles.a", bundle_active_set::Placement::Unpartitioned);
         assert_eq!(owners.len(), 2);
         let mut seen = std::collections::BTreeSet::new();
         for _ in 0..8 {
-            let picked = registry.pick_dispatch_for_app("waddles.a").expect("owner");
+            let picked = registry
+                .pick_dispatch_for_app("waddles.a", bundle_active_set::Placement::Unpartitioned)
+                .expect("owner");
             let (id, _, _) = conns
                 .iter()
                 .find(|(_, c, _)| Arc::ptr_eq(c, &picked))
@@ -2039,7 +2051,9 @@ mod tests {
         assert!(!registry.sharding_enabled());
         let all: std::collections::BTreeSet<u64> = (0..8)
             .map(|_| {
-                let p = registry.pick_dispatch_for_app("waddles.a").unwrap();
+                let p = registry
+                    .pick_dispatch_for_app("waddles.a", bundle_active_set::Placement::Unpartitioned)
+                    .unwrap();
                 conns.iter().find(|(_, c, _)| Arc::ptr_eq(c, &p)).unwrap().0
             })
             .collect();
@@ -2052,7 +2066,9 @@ mod tests {
         let old_id = registry.register(Arc::clone(&old));
         let picks: std::collections::BTreeSet<u64> = (0..10)
             .map(|_| {
-                let p = registry.pick_dispatch_for_app("waddles.a").unwrap();
+                let p = registry
+                    .pick_dispatch_for_app("waddles.a", bundle_active_set::Placement::Unpartitioned)
+                    .unwrap();
                 if Arc::ptr_eq(&p, &old) {
                     old_id
                 } else {

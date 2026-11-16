@@ -18,6 +18,9 @@ pub struct ObjectMeta {
     pub size: u64,
     pub content_type: String,
     pub tags: Vec<String>,
+    /// Server-assigned last-modified time (unix seconds), when the backend reports it. Not
+    /// guest- or tag-controlled: re-writing an object can only make it NEWER. `None` = unknown.
+    pub modified_unix: Option<u64>,
 }
 
 /// Metadata + body.
@@ -53,6 +56,12 @@ pub trait ObjectBackend: Send + Sync {
     async fn presign_get(&self, key: &str, ttl: Duration) -> Result<String, StorageError>;
 }
 
+fn now_unix() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
+}
+
 /// In-memory backend (tests).
 #[derive(Default)]
 pub struct MemoryBackend {
@@ -63,6 +72,27 @@ impl MemoryBackend {
     pub fn new() -> Self {
         Self::default()
     }
+    /// Test seam: stores an object with an explicit last-modified time (simulates data written
+    /// before a cutoff, which a real backend can only report, never be told).
+    pub fn put_with_modified(
+        &self,
+        key: &str,
+        body: Bytes,
+        content_type: &str,
+        tags: &[String],
+        modified_unix: u64,
+    ) -> Result<(), StorageError> {
+        let meta = ObjectMeta {
+            key: key.into(),
+            size: body.len() as u64,
+            content_type: content_type.into(),
+            tags: tags.to_vec(),
+            modified_unix: Some(modified_unix),
+        };
+        self.lock()?.insert(key.into(), StoredObject { meta, body });
+        Ok(())
+    }
+
     fn lock(
         &self,
     ) -> Result<std::sync::MutexGuard<'_, BTreeMap<String, StoredObject>>, StorageError> {
@@ -86,6 +116,7 @@ impl ObjectBackend for MemoryBackend {
             size: body.len() as u64,
             content_type: content_type.into(),
             tags: tags.to_vec(),
+            modified_unix: Some(now_unix()),
         };
         self.lock()?.insert(key.into(), StoredObject { meta, body });
         Ok(())

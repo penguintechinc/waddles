@@ -36,7 +36,9 @@ PROC = spiffe_id("alpha", "svc-process")
 ACTION = spiffe_id("alpha", "svc-action")
 ROGUE = spiffe_id("alpha", "svc-rogue")
 APP = "waddles.socials.cfgdefaults.default"
-ADMIN = CommunityMembership("admin", frozenset({"community:manage_members"}), True, False)
+ADMIN = CommunityMembership(
+    "admin", frozenset({"community:manage_members", "bundles.admin:admin"}), True, False
+)
 _SCHEMA = {
     "type": "object",
     "properties": {

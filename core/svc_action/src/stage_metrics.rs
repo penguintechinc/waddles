@@ -59,7 +59,7 @@ pub const COUNT_BUCKETS: [f64; 12] = [
 /// against the emitted data in tests and mirrored in
 /// `docs/observability/data-plane-metrics.md`, so a rename is a conscious,
 /// documented act.
-pub const METRIC_NAMES: [&str; 18] = [
+pub const METRIC_NAMES: [&str; 19] = [
     "waddles_stage_latency_seconds",
     "waddles_executor_call_seconds",
     "waddles_host_call_latency_seconds",
@@ -78,6 +78,7 @@ pub const METRIC_NAMES: [&str; 18] = [
     "waddles_group_pending",
     "waddles_insecure_transport",
     "waddles_tenant_boundary_violations_total",
+    "waddles_floor_ban_dispatch_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -278,10 +279,12 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    floor_ban_dispatch: Counter<u64>,
     load_inflight: Gauge<u64>,
     queue_wait: Histogram<f64>,
     pool_exhausted: Counter<u64>,
     slot_owner_changes: Counter<u64>,
+    partition_unroutable: Counter<u64>,
 }
 
 impl StageMetrics {
@@ -389,6 +392,10 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            floor_ban_dispatch: counter(
+                "waddles_floor_ban_dispatch_total",
+                "Automated floor-ban outbox deliveries, by result",
+            ),
             load_inflight: meter
                 .u64_gauge(instrument_name("stage_load_inflight"))
                 .with_description("Bundle Loads this stage has sent and not yet seen answered")
@@ -404,6 +411,10 @@ impl StageMetrics {
             slot_owner_changes: counter(
                 "executor_slot_owner_changes_total",
                 "Hash slots whose owner executor set changed after a membership change",
+            ),
+            partition_unroutable: counter(
+                "executor_partition_unroutable_total",
+                "Active bundles, per reconcile tick, that no live executor of the right language class can host (class = compiled|scripted|unknown_language)",
             ),
         }
     }
@@ -429,12 +440,40 @@ impl StageMetrics {
         self.pool_exhausted.add(1, &scale_labels(app_id));
     }
 
+    /// Adds `n` bundles that no live executor of their language class can host
+    /// (`executor_partition_unroutable_total`); `class` is the closed
+    /// `Placement::label` vocabulary (`compiled`, `scripted`, `unknown_language`).
+    pub fn record_partition_unroutable(&self, class: &'static str, n: u64) {
+        if n > 0 {
+            self.partition_unroutable.add(
+                n,
+                &[KeyValue::new("stage", STAGE), KeyValue::new("class", class)],
+            );
+        }
+    }
+
     /// Adds `changed` slot-owner changes (`executor_slot_owner_changes_total`).
     pub fn record_slot_owner_changes(&self, changed: u64) {
         if changed > 0 {
             self.slot_owner_changes
                 .add(changed, &[KeyValue::new("stage", STAGE)]);
         }
+    }
+
+    /// Records one floor-ban outbox delivery outcome (`waddles_floor_ban_dispatch_total`).
+    /// `result` is a host constant: `done` (sender-confirmed), `failed` (retry scheduled),
+    /// `refused` (permanent or no longer breached), `dead` (attempts exhausted: ALERT),
+    /// `lease_lost` (another claimant owns it), `store_error` (outbox unreachable), `halted`
+    /// (durable kill switch: released), `flag_off` (sweep skipped, flag OFF), `backlog_alert`
+    /// (rows waiting past the threshold: ALERT).
+    pub fn record_floor_ban_dispatch(&self, result: &'static str) {
+        self.floor_ban_dispatch.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("result", result),
+            ],
+        );
     }
 
     /// Records one delivered entry's total handling time and terminal
@@ -950,6 +989,8 @@ mod tests {
         m.set_load_inflight(3);
         m.record_slot_owner_changes(0);
         m.record_slot_owner_changes(7);
+        m.record_partition_unroutable("scripted", 0);
+        m.record_partition_unroutable("scripted", 3);
         let pool = [("stage", "action"), ("executor_pool", executor_pool())];
         assert_eq!(h.count("queue_wait_seconds", &pool), 1.0);
         assert_eq!(h.count("pool_exhausted_total", &pool), 1.0);
@@ -961,6 +1002,13 @@ mod tests {
         assert_eq!(
             h.count("executor_slot_owner_changes_total", &[("stage", "action")]),
             7.0
+        );
+        assert_eq!(
+            h.count(
+                "executor_partition_unroutable_total",
+                &[("stage", "action"), ("class", "scripted")]
+            ),
+            3.0
         );
     }
 
@@ -1205,6 +1253,7 @@ mod tests {
         m.group_pending("a", "s", 1);
         m.insecure_transport("valkey", "tls", false);
         m.tenant_boundary_violation("action", "unknown_kid");
+        m.record_floor_ban_dispatch("done");
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1216,7 +1265,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 18);
+        assert_eq!(METRIC_NAMES.len(), 19);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",
