@@ -55,29 +55,27 @@ def test_chart_sources_have_no_literal_sentinel() -> None:
 
 
 def test_rendered_fetch_secret_strips_sentinel_from_mark() -> None:
-    """Run the rendered fetch_secret against a fake kubectl printing the sentinel for MARK."""
+    """Run the rendered fetch_secret against a fake kubectl printing the sentinel for MARK.
+
+    The rendered script text is fed to bash on stdin (never written to disk) and the harness
+    evals only the constants and the fetch_secret function body out of it.
+    """
     script = _rendered_script()
     with tempfile.TemporaryDirectory() as td:
         tmp = Path(td)
-        (tmp / "script.sh").write_text(script)
         kubectl = tmp / "kubectl"
         kubectl.write_text(
             "#!/bin/sh\n"
             f"printf 'RV 1\\nANN keep\\nMARK {_SENTINEL}\\nCID \\nCSAN \\nK a Zm9v\\n'\n"
         )
         kubectl.chmod(0o755)
-        # Source only the definitions: drop the main body by stopping before the first call site.
-        harness = tmp / "harness.sh"
-        harness.write_text(
+        harness = (
             "set -euo pipefail\n"
-            f"SCRIPT={tmp / 'script.sh'}\n"
-            "start=$(grep -n '^NAMESPACE=' \"$SCRIPT\" | head -1 | cut -d: -f1)\n"
-            "# constants + helpers, then the function bodies, without executing main\n"
-            "eval \"$(sed -n \"$((start)),\\$p\" \"$SCRIPT\" | awk '/^# -+ cluster reads/{f=1} f' "
-            "| awk '/^fetch_secret\\(\\)/{p=1} p{print} p&&/^}/{exit}')\"\n"
-            "eval \"$(grep -E '^(MARKER_MSG|KEEP_ANN|MARKER_ANN|CERT_ID_ANN|CERT_SANS_ANN)=' \"$SCRIPT\")\"\n"
-            "eval \"$(grep -E '^NOVAL=' \"$SCRIPT\")\"\n"
-            "KUBECTL=" + str(kubectl) + "\n"
+            "SRC=$(cat)\n"
+            "eval \"$(printf '%s\\n' \"$SRC\" | grep -E '^(KEEP_ANN|MARKER_ANN|CERT_ID_ANN|CERT_SANS_ANN)=')\"\n"
+            "eval \"$(printf '%s\\n' \"$SRC\" | grep -E '^NOVAL=')\"\n"
+            "eval \"$(printf '%s\\n' \"$SRC\" | awk '/^fetch_secret\\(\\)/{p=1} p{print} p&&/^}/{exit}')\"\n"
+            f"KUBECTL={kubectl}\n"
             "kc() { \"$KUBECTL\" \"$@\"; }\n"
             "die() { echo \"DIE: $*\" >&2; exit 9; }\n"
             "errhead() { :; }\n"
@@ -85,7 +83,9 @@ def test_rendered_fetch_secret_strips_sentinel_from_mark() -> None:
             f"fetch_secret x {tmp / 'dest'}\n"
             "printf 'F_MARK=[%s] F_KEEP=[%s]\\n' \"${F_MARK}\" \"${F_KEEP}\"\n"
         )
-        res = subprocess.run(["bash", str(harness)], capture_output=True, text=True,  # noqa: S603,S607
-                             env={**os.environ}, check=False)
+        res = subprocess.run(  # noqa: S603 -- fixed argv, no shell, test-only
+            ["bash", "-c", harness], input=script, capture_output=True, text=True,
+            env={**os.environ}, check=False,
+        )
         assert res.returncode == 0, f"{res.stdout}\n{res.stderr}"
         assert "F_MARK=[] F_KEEP=[keep]" in res.stdout, res.stdout
