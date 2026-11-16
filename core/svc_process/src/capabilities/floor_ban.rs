@@ -222,7 +222,9 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
     ) -> Result<serde_json::Value, ToolRefusal> {
         let forbidden = |m: &str| ToolRefusal::Forbidden(m.to_string());
         let Some(wiring) = &self.reputation else {
-            return Err(forbidden("floor_ban_unavailable: reputation backend is not configured"));
+            return Err(forbidden(
+                "floor_ban_unavailable: reputation backend is not configured",
+            ));
         };
         let flag_on = match &wiring.auto_ban_flag {
             Some(f) => f.enabled().await,

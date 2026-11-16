@@ -919,8 +919,8 @@ async fn start_floor_ban_dispatcher(
     flag: Arc<dyn flags::FeatureFlag>,
     caps: Arc<
         capabilities::StageCapabilities<
-            redis::aio::MultiplexedConnection,
-            redis::aio::MultiplexedConnection,
+            redis::aio::ConnectionManager,
+            redis::aio::ConnectionManager,
         >,
     >,
 ) {
