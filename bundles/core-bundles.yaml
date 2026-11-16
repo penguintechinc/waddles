@@ -68,7 +68,7 @@ bundles:
   # IntegrityError, caught by seed_core_bundles.py::_run()'s generic exception handler --
   # logged with type+message, nonzero exit, never a silent success with stale manifest_json).
   - app_id: waddles.core.example.ping
-    version: "1.0.5"
+    version: "1.0.6"
     language: rust
     source_dir: rust/ping
     manifest_path: ping.manifest.yaml
@@ -1474,7 +1474,7 @@ bundles:
 
   # Atomic community currency service, installed by the trusted core seeder.
   - app_id: waddles.core.service.economy
-    version: "1.0.2"
+    version: "1.0.3"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1488,7 +1488,7 @@ bundles:
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-twitch defaults OFF.
   - app_id: waddles.core.service.twitch
-    version: "1.3.0"
+    version: "1.3.1"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1548,7 +1548,7 @@ bundles:
   # webhook normalization, chat send/delete templates, `kick.live.channels`. Cutover flag
   # waddles.connector-kick defaults OFF.
   - app_id: waddles.core.service.kick
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1604,7 +1604,7 @@ bundles:
   # service bundle's twitch.clip.{create,get,list} tools. Needs those tools (twitch bundle) to be
   # ACTIVATED + granted before commands work; until then create fails loud with a viewer notice.
   - app_id: waddles.core.example.twitch-clips
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/twitch-clips
@@ -1616,7 +1616,7 @@ bundles:
   # lands (bundles/rust/gameserver/README.md "Needs from S0"). The service installs first so the app's
   # requested tools resolve.
   - app_id: waddles.core.service.gameserver
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1641,7 +1641,7 @@ bundles:
   # AI Teammates APP bundle (Rust, `stage-next-tools` world): Researcher, Receptionist, Producer --
   # each default OFF per community, configured via config_schema. Consumes the AI service tools.
   - app_id: waddles.core.example.ai-teammates
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/ai-teammates
@@ -1656,7 +1656,7 @@ bundles:
   # (sync OFF until a community admin enables it). Built by rust-bundle-builder; the world comes
   # from the crate's Cargo.toml. The Python `!event` bundle stays until parity is proven.
   - app_id: waddles.core.app.calendar
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/calendar
@@ -1698,7 +1698,7 @@ bundles:
   # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
   # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
   - app_id: waddles.core.service.music-soundcloud
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1737,7 +1737,7 @@ bundles:
   # contract music.youtube.{search,track,playlist.get,resolve} over the YouTube Data API v3.
   # Built by rust-bundle-builder; credentials are host-side secret refs.
   - app_id: waddles.core.service.music-youtube
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1752,7 +1752,7 @@ bundles:
   # history, play counters and DMCA-safe mode (db-v2 tables). The music app owns the user commands;
   # the optional AI DJ layer reads/adds through these tools. Contract: docs/music-requests-service.md.
   - app_id: waddles.core.service.music-requests
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1767,7 +1767,7 @@ bundles:
   # consuming <platform>.live.channels from the platform service bundles (live-channels contract v1).
   # Chat commands/announcements gated by PostHog flags live-now.command / live-now.announce (default OFF).
   - app_id: waddles.core.app.live-now
-    version: "1.0.1"
+    version: "1.0.2"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/live-now
@@ -1779,7 +1779,7 @@ bundles:
 
   # Stream alerts APP bundle (Rust, world stage-next-tools): follow/sub/cheer/raid/donation alerts published to its own namespaced overlay surface.
   - app_id: waddles.core.app.stream-alerts
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/stream-alerts
@@ -1791,7 +1791,7 @@ bundles:
 
   # Galactic avatars APP bundle (Rust, world stage-next-tools): anonymous faction avatars on the overlay stage strip, published to its own namespaced surface.
   - app_id: waddles.core.app.galactic-avatars
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/galactic-avatars
@@ -1805,7 +1805,7 @@ bundles:
   # metadata + Connect player tools. Credentials are host-resolved secret-refs
   # (spotify.app / spotify.oauth); built by rust-bundle-builder.
   - app_id: waddles.core.service.music-spotify
-    version: "1.0.0"
+    version: "1.0.1"
     language: rust
     wit_world: stage-tools
     kind: service

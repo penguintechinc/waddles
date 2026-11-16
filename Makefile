@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-rustls-provider check-bundle-docker-context check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
@@ -138,6 +138,25 @@ check-rustls-provider:
 # release build reads (#[path], include_*!, Cargo path deps). Prints crates/refs examined.
 check-bundle-docker-context:
 	@python3 scripts/ci/check-bundle-docker-context.py
+
+# Every core Rust service Dockerfile (images in scripts/ci/image-inputs.yaml, built with their real
+# context + --build-context) must COPY each Cargo path dep / #[path] / include_*! target to the
+# container path the crate resolves it at. Negative test first: the pre-fix svc-streaming
+# Dockerfile (platform_keys COPYed before WORKDIR, deploy runs 43859970070/43858247593) MUST fail.
+# Prints images/crates/refs examined; zero examined fails.
+check-core-docker-context:
+	@out=$$(python3 scripts/ci/check-core-docker-context.py \
+		--dockerfile-override svc-streaming=scripts/ci/tests/fixtures/core-docker-context/svc_streaming-pre-fix.dockerfile.txt 2>&1); \
+	rc=$$?; if [ "$$rc" -ne 1 ] || ! printf '%s\n' "$$out" | grep -q 'COPYed to /platform_keys, crate expects /build/platform_keys'; then \
+		printf '%s\n' "$$out" >&2; echo "FAIL: negative test (pre-fix svc-streaming) was not rejected for platform_keys (rc=$$rc)" >&2; exit 1; fi; \
+	echo "negative test: pre-fix svc-streaming Dockerfile rejected (rc=1, platform_keys misplaced) -- expected"
+	@python3 scripts/ci/check-core-docker-context.py
+
+# A catalog bundle whose build inputs changed vs BASE (own source; wit/+waddle-sdk for Python;
+# Cargo path deps, #[path] and include_*! targets for Rust) must bump its version, or the
+# seeder 409s digest_conflict. CI runs it in bundle-hygiene.yml. Zero bundles examined fails.
+check-bundle-version-bump:
+	@python3 scripts/ci/check-bundle-version-bump.py "$(or $(BASE),origin/release/v3.0.X)"
 
 # PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
 # egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its

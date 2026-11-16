@@ -1,0 +1,174 @@
+# FIXTURE (negative test for make check-core-docker-context): svc-streaming Dockerfile.rust as of
+# release/v3.0.X 6d73569b7 -- COPY platform_keys before any WORKDIR lands it at /platform_keys.
+# The gate MUST fail on this file. Never build it.
+# svc-streaming (Rust) -- Waddles A/V data-plane service.
+#
+# Named `Dockerfile.rust` (not `Dockerfile`) while the Python + ffmpeg alpha
+# at this same path (`Dockerfile`, `app.py`, ...) is still the deployed
+# build -- this becomes `Dockerfile` once that build is retired (see
+# README.md Container section and issue #287).
+#
+# Three published image variants, one Dockerfile -- select with `--target`:
+#
+#   --target  tag suffix  adds on top of runtime-base             hardware encode (h264/hevc)
+#   cpu       -cpu        nothing                                 none (libx264/libx265)
+#   amd       -amd        libva2 + libva-drm2 + mesa-va-drivers   h264_vaapi, hevc_vaapi (/dev/dri)
+#   nvidia    -nvidia     NVIDIA_DRIVER_CAPABILITIES=...,video    h264_nvenc, hevc_nvenc (NVIDIA runtime)
+#
+# AV1 is CPU-only on every variant: Debian bookworm's ffmpeg 5.1.9 has no
+# av1_nvenc / av1_vaapi. Full AV1-GPU and enhanced-RTMP need an ffmpeg 6.1
+# build -- out of scope here, tracked in core/svc_streaming/README.md.
+#
+# NVIDIA driver libraries (libnvidia-encode, libcuda) are deliberately NOT
+# baked into the nvidia target: they must match the host kernel module, and
+# nvidia-container-toolkit injects the host-matched copies when the pod runs
+# with the NVIDIA runtime and `video` in NVIDIA_DRIVER_CAPABILITIES.
+#
+# Build (context = `core/`, the sibling `platform_keys` path dependency lives beside this crate;
+# the repo-root `proto/` tree is a named build context):
+#   docker build --build-context proto=../proto -f svc_streaming/Dockerfile.rust --target cpu    -t <repo>/svc-streaming:<tag>-cpu    .
+#   docker build --build-context proto=../proto -f svc_streaming/Dockerfile.rust --target amd    -t <repo>/svc-streaming:<tag>-amd    .
+#   docker build --build-context proto=../proto -f svc_streaming/Dockerfile.rust --target nvidia -t <repo>/svc-streaming:<tag>-nvidia .
+# Docker builds the LAST stage when --target is omitted, so `cpu` stays last.
+
+# ---------------------------------------------------------------------------
+# builder -- shared by all variants; the binary is identical across variants.
+# ---------------------------------------------------------------------------
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+
+# cmake + a C/C++ compiler are required to build aws-lc-sys -- the
+# jsonwebtoken `aws_lc_rs` crypto backend (see Cargo.toml: chosen over the
+# `rust_crypto` feature specifically to avoid RUSTSEC-2023-0071 in the pure
+# -Rust `rsa` crate). `curl` + `ca-certificates` are required at *build*
+# time only -- utoipa-swagger-ui's build script downloads the Swagger UI
+# static assets over HTTPS via the system `curl` binary; this is a
+# builder-stage-only dependency and never ships in the runtime image below.
+# protobuf-compiler (protoc): build.rs compiles rooms.proto via tonic-prost-build.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        cmake=3.25.1-1 build-essential=12.9 curl=7.88.1-10+deb12u15 ca-certificates=20250419~deb12u2 \
+        protobuf-compiler=3.21.12-3+deb12u1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Build context is `core/` (the `platform-keys` path dependency lives beside this crate, like svc_action's).
+COPY platform_keys ./platform_keys
+WORKDIR /build/svc_streaming
+COPY svc_streaming/Cargo.toml svc_streaming/Cargo.lock ./
+# tests/ must exist: Cargo.toml declares [[test]] e2e_real_media with an
+# implicit path, and cargo refuses to parse the manifest without it (even for
+# `cargo build`). Tests are not compiled by the release build.
+COPY svc_streaming/tests ./tests
+COPY svc_streaming/src ./src
+COPY svc_streaming/build.rs ./build.rs
+# build.rs compiles `proto/waddles/streaming/internal/v1/rooms.proto` from
+# `CARGO_MANIFEST_DIR/../../proto` -- for `/build` that is `/proto`. The repo-root `proto/`
+# tree is outside this crate's build context, so it is supplied as the named `proto` build
+# context (`--build-context proto=./proto`; see build-svc-streaming.yml / deploy-dal2alpha.yml).
+# `proto` is a named build context (--build-context), not a FROM alias -> DL3022 false positive.
+# hadolint ignore=DL3022
+COPY --from=proto . /proto
+# Bump CACHE_EPOCH (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon every cache mount id
+# below and force a clean rebuild; the value is also part of the RUN layer cache key.
+ARG CACHE_EPOCH=1
+# BuildKit cache mounts (bounded, explicit ids; none of this reaches the image layers):
+#  - cargo registry/git: downloaded crates, PRIVATE to this image (id carries the image name, sharing=locked).
+#    Never share these between images: cargo's package-cache lock lives outside the mounted dirs, so two
+#    concurrent builds on one shared git db corrupt it ("revision ... not found", deploy run 43637937508).
+#    Content is checksum-verified against Cargo.lock, so it cannot change build output.
+#  - target dir: ONE per image (id waddles-target-<image>) so a source change recompiles only
+#    the changed first-party crates, not every third-party dependency. Lives in the BuildKit
+#    pod's local store, which the pod's GC policy caps (exec.cachemount kept 6h, 40GB total).
+#    The binary is copied out inside the same RUN because cache mounts are not in the layer.
+# `--locked` stays: a stale/poisoned cache can never change the resolved dependency set, and cargo
+# re-verifies every registry crate against the checksum in Cargo.lock. Trust boundary: only the
+# deploy-set runners (release pushes) can reach the BuildKit pod -- docs/ALPHA_CHANGED_ONLY_BUILDS.md.
+RUN --mount=type=cache,id=waddles-cargo-registry-svc-streaming-v${CACHE_EPOCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=waddles-cargo-git-svc-streaming-v${CACHE_EPOCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=waddles-target-svc-streaming-v${CACHE_EPOCH},target=/build/svc_streaming/target,sharing=locked \
+    cargo build --release --locked \
+    && install -D -m 0755 target/release/svc-streaming /out/svc-streaming
+
+# ---------------------------------------------------------------------------
+# runtime-base -- CPU software encoders only. Every variant inherits this.
+# ---------------------------------------------------------------------------
+FROM debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587 AS runtime-base
+
+# Debian bookworm's `ffmpeg` package carries libx264/libx265/libsvtav1/libaom
+# encoders out of the box -- the media engine `pipeline::ffmpeg` shells out
+# to. It also compiles in the h264/hevc nvenc and vaapi *wrappers*; the GPU
+# variants below add the missing user-space *drivers* those wrappers need.
+# `ca-certificates` for rustls (webpki/native roots) on outbound TLS
+# (reqwest, sea-orm's runtime-tokio-rustls, OTLP).
+# Full apt-get upgrade (not just libpcre2-8-0) clears every fixable
+# HIGH/CRITICAL OS-package CVE the pinned debian:bookworm-slim digest
+# still ships (perl/perl-base, libcap, libgnutls, libpcre2-8-0, ...).
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install --no-install-recommends -y \
+        ffmpeg=7:5.1.9-0+deb12u1 ca-certificates=20250419~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
+       --shell /usr/sbin/nologin appuser \
+    && mkdir -p /var/lib/svc-streaming \
+    && chown -R appuser:appuser /var/lib/svc-streaming
+
+COPY --from=builder --chown=appuser:appuser /out/svc-streaming /app/svc-streaming
+
+WORKDIR /app
+USER appuser
+
+ENV MODULE_PORT=8208 \
+    METRICS_PORT=9090 \
+    STREAM_DATA_DIR=/var/lib/svc-streaming \
+    FFMPEG_PATH=/usr/bin/ffmpeg
+
+# Native Rust healthcheck subcommand -- never curl (rules/client.md,
+# rules/general.md anti-patterns table).
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD ["/app/svc-streaming", "--healthcheck"]
+
+EXPOSE 8208 9090 1935 9000/udp
+
+ENTRYPOINT ["/app/svc-streaming"]
+
+# ---------------------------------------------------------------------------
+# amd -- VA-API user-space driver for AMD (radeonsi) GPUs. Needs /dev/dri
+# (renderD*) at runtime plus the render group in supplementalGroups; with no
+# device the trial encode fails and the service stays on libx264.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS amd
+
+USER root
+# Versions pinned to the bookworm mirror (same practice as ffmpeg above).
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y \
+        libva2=2.17.0-1 libva-drm2=2.17.0-1 mesa-va-drivers=22.3.6-1+deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
+# Mesa's shader cache writes under $HOME; the pod runs with a read-only root
+# filesystem and a no-home user, so disable it rather than emit write errors.
+ENV MESA_SHADER_CACHE_DISABLE=true
+USER appuser
+
+LABEL io.waddles.svc-streaming.variant="amd"
+
+# ---------------------------------------------------------------------------
+# nvidia -- NVENC via the NVIDIA container runtime. No driver libs are copied
+# in; the runtime injects host-matched libcuda + libnvidia-encode when the
+# `compute` and `video` capabilities are requested below.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS nvidia
+
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+
+LABEL io.waddles.svc-streaming.variant="nvidia"
+
+# ---------------------------------------------------------------------------
+# cpu -- software encoders only; the general-purpose image and the default
+# target (keep this stage LAST). Identical to runtime-base plus a label.
+# ---------------------------------------------------------------------------
+FROM runtime-base AS cpu
+
+LABEL io.waddles.svc-streaming.variant="cpu"
