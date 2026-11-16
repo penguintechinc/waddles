@@ -149,6 +149,28 @@ password => 503 `bundle_data_provisioning_unavailable`, approval refused). The t
 (`builtin` -> `app_core`, else `thirdparty` -> `app_community`) is derived from the app-id namespace
 (`waddles.core.` prefix), never from the manifest's own claim.
 
+### Role passwords (Helm chart)
+
+Both role passwords are internal secrets, ON by default in every tier, with no manual steps:
+
+```
+provision-secrets hook (pre-install/upgrade, -8)
+  -> waddlebot-bundle-migrator / BUNDLE_MIGRATOR_PASSWORD   create-if-absent, never overwritten
+  -> waddlebot-bundle-db       / BUNDLE_DB_PASSWORD
+  -> waddlebot-db-migrate-secret: BUNDLE_MIGRATOR_PASSWORD + BUNDLE_RUNTIME_PASSWORD (derived)
+db-migrate hook (-5): alembic upgrade head, then scripts/db/bundle_storage_roles.py
+  -> create role if missing (LOGIN, no elevated attribute), set password only if the stored
+     verifier differs, re-assert 0030's schema ownership/grants. Re-run = no-op.
+hub-api + core-bundle seeder  <- secretKeyRef waddlebot-bundle-migrator
+svc-process-rust / svc-action-rust <- secretKeyRef waddlebot-bundle-db
+```
+
+- `bundleStorageV2.{migrator,db}.existingSecret`: use an operator-owned Secret instead; the hook
+  never touches it and fails closed if it is missing.
+- `enabled: false` renders no env; approving a `data.schema` bundle then fails closed (503).
+- A value previously set via the retired `infrastructure.postgresql.bundle{Migrator,Runtime}Password`
+  is imported once, then scrubbed from the envFrom'd `waddlebot-secrets`.
+
 Atomicity: the migrator transaction commits only after the install-state write committed, and rolls
 back if either step fails. One residual window is reported loudly rather than hidden: the migrator
 commit failing after the state write committed raises 500 `bundle_data_commit_failed`. For an

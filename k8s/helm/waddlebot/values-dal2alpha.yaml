@@ -775,9 +775,3 @@ latencyCanary:
   commandText: "!ping"
   sinkMode: "post"
   intervalSeconds: 60
-
-# Bundle storage v2 (references only; Secrets are created out-of-band). Enable once the
-# Secrets exist -- off here so the pods keep starting without them:
-# bundleStorageV2:
-#   db: {enabled: true, existingSecret: waddlebot-bundle-db}
-#   migrator: {enabled: true, existingSecret: waddlebot-bundle-migrator}

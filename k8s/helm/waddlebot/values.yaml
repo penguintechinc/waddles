@@ -529,18 +529,8 @@ infrastructure:
     # Migrator/RuntimePassword below are: it leaves the multi-app data-plane
     # path disabled, so beta/prod must set a real value.
     readerPassword: ""
-    # Bundle app-schema roles (Phase 0, docs/superpowers/specs/2026-09-28-
-    # bundle-db-capability-and-schemas.md Sec2) -- waddles_bundle_migrator
-    # (DDL owner of app_core/app_community, hub-api only) and
-    # waddles_bundle_runtime (DML-only, those two schemas; svc_process/
-    # svc_action). Both are real LOGIN roles, unlike the NOLOGIN RBAC-matrix
-    # roles above. Empty by default: alembic/versions/0030_bundle_app_schemas.py
-    # treats an unset password as "create/keep the role LOGIN with no usable
-    # password yet", never a migration failure -- same graceful-degradation
-    # posture as readerPassword below. Set before relying on either role for
-    # real traffic.
-    bundleMigratorPassword: ""
-    bundleRuntimePassword: ""
+    # Bundle app-schema roles (waddles_bundle_migrator / waddles_bundle_runtime) are configured
+    # under `bundleStorageV2` below: their passwords are auto-provisioned Secrets, never values here.
     # Bundle platform-table capability (waddles_platform_table, alembic 0079; column-scoped to the
     # allowlisted community_members columns + audit INSERT). EXPLICIT OPT-IN, default false: the role
     # stays NOLOGIN, migrations set no password, svc-process-rust gets no BUNDLE_PLATFORM_TABLE_* env.
@@ -3452,22 +3442,28 @@ bundleStorage:
     # The operator MUST assert the external bucket has it enabled (render fails otherwise).
     serverSideEncryptionConfirmed: false
 
-# Bundle storage v2 (docs/bundle-storage-v2.md). Everything OFF by default. Passwords are NEVER set
-# here: create the Secret out-of-band (ExternalSecret/SealedSecret/kubectl) and reference it.
+# Bundle storage v2 (docs/bundle-storage-v2.md). ON by default in every tier: both role passwords are
+# INTERNAL secrets, auto-generated create-if-absent (never overwritten) by the provision-secrets hook
+# into `waddlebot-bundle-db` / `waddlebot-bundle-migrator`, and the db-migrate hook applies the same
+# values to the Postgres roles every run (scripts/db/bundle_storage_roles.py), so Secret and role
+# always match. Passwords are NEVER set here. existingSecret = an operator-owned Secret instead
+# (holding passwordKey); the hook then never touches it.
 bundleStorageV2:
   # svc-process-rust + svc-action-rust only: BUNDLE_DB_HOST|PORT|NAME|USER + BUNDLE_DB_PASSWORD
-  # (role waddles_bundle_runtime). host/port/name default to the chart's Postgres service.
+  # (role waddles_bundle_runtime). host/port/name default to the chart's Postgres service. The db
+  # host capability stays behind its PostHog flag (waddles.bundle-db-capability).
   db:
-    enabled: false
-    existingSecret: ""          # Secret holding passwordKey (required when enabled)
+    enabled: true
+    existingSecret: ""          # "" -> chart-provisioned waddlebot-bundle-db
     passwordKey: BUNDLE_DB_PASSWORD
     host: ""
     port: ""
     name: ""
     user: ""                    # default waddles_bundle_runtime
-  # hub-api + core-bundle seeder only: BUNDLE_MIGRATOR_PASSWORD (role waddles_bundle_migrator, DDL on app schemas).
+  # hub-api + core-bundle seeder only: BUNDLE_MIGRATOR_PASSWORD (role waddles_bundle_migrator, DDL on
+  # app schemas). Disabled -> approving a db-v2 bundle fails closed (bundle_data_provisioning_unavailable).
   migrator:
-    enabled: false
-    existingSecret: ""          # Secret holding passwordKey (required when enabled)
+    enabled: true
+    existingSecret: ""          # "" -> chart-provisioned waddlebot-bundle-migrator
     passwordKey: BUNDLE_MIGRATOR_PASSWORD
     user: ""                    # unset -> hub-api default
