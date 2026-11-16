@@ -490,6 +490,7 @@ def _type_name(secret_type: int) -> str:
     try:
         return get_spec(secret_type).name
     except UnknownSecretTypeError:
+        logger.warning("escrow: unregistered secret type code in telemetry label")
         return "unknown"
 
 
@@ -508,7 +509,8 @@ def _open_row(row: SecretRow, kek: PlatformKekAdapter) -> bytes | None:
             kek_id=row.kek_id,
             seal_version=row.seal_version,
         )
-    except PlatformSecretError:
+    except PlatformSecretError as exc:
+        logger.error("escrow: stored row failed to open (%s)", type(exc).__name__)
         return None
 
 
@@ -520,7 +522,8 @@ def _entry_matches(
         return False
     try:
         expected = platform_secret_fingerprint(plaintext, kek=kek, kek_id=entry.kek_id)
-    except PlatformSecretError:
+    except PlatformSecretError as exc:
+        logger.error("escrow: fingerprint recompute failed (%s)", type(exc).__name__)
         return False
     return constant_time_equal(expected, entry.fingerprint)
 

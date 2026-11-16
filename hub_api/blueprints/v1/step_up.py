@@ -78,6 +78,7 @@ async def passkey_start() -> StepUpOptionsResponse | tuple[dict[str, object], in
             current_app.config["async_dal"], current_app.config["dal"], user_id=user_id
         )
     except ApiError as exc:
+        logger.warning("step-up passkey start refused (%s)", exc.code)
         return _err(exc)
     return StepUpOptionsResponse(success=True, options=options)
 
@@ -104,6 +105,7 @@ async def passkey_finish(
             claims=claims,
         )
     except ApiError as exc:
+        logger.warning("step-up passkey finish refused (%s)", exc.code)
         return _err(exc)
     issue_session_cookie(token)
     return StepUpFinishResponse(

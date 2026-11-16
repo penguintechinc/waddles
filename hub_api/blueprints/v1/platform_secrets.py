@@ -249,6 +249,7 @@ async def _authorise(
     try:
         user_id = get_current_user_id(request)
     except ApiError as exc:
+        logger.warning("platform secrets caller identity rejected (%s)", exc.code)
         return cast(
             tuple[dict[str, object], int],
             error_response(exc.message, exc.status_code, exc.code, exc.details),
@@ -273,6 +274,7 @@ async def _authorise(
     try:
         key = uuid.UUID(request.headers.get(IDEMPOTENCY_HEADER, ""))
     except ValueError:
+        logger.warning("platform secrets rotation refused: missing or invalid Idempotency-Key")
         return await _deny(
             spec, actor, reason, "bad_request", 400, "A UUID Idempotency-Key header is required"
         )
@@ -309,6 +311,7 @@ async def status() -> StatusResponse | tuple[dict[str, object], int]:
     try:
         user_id = get_current_user_id(request)
     except ApiError as exc:
+        logger.warning("platform secrets caller identity rejected (%s)", exc.code)
         return cast(
             tuple[dict[str, object], int],
             error_response(exc.message, exc.status_code, exc.code, exc.details),
@@ -318,6 +321,7 @@ async def status() -> StatusResponse | tuple[dict[str, object], int]:
     try:
         rows = await _run(lambda repo, _kek: rotation.list_status(repo))
     except (PlatformSecretError, SQLAlchemyError, RuntimeError) as exc:
+        logger.error("platform secrets status unavailable (%s)", type(exc).__name__)
         return _unavailable(exc)
     return StatusResponse(
         success=True,
