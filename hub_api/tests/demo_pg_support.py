@@ -82,6 +82,11 @@ def prepare_database(db: PgTestDatabase) -> None:
     raw.autocommit = True
     with raw.cursor() as cur:
         cur.execute(_community_roles_ddl())
+        # 0117 skips on the minimal bootstrap (no community_roles yet); add the kind column it owns.
+        cur.execute(
+            "ALTER TABLE community_roles "
+            "ADD COLUMN IF NOT EXISTS role_kind SMALLINT NOT NULL DEFAULT 0"
+        )
         for table in _TOPUP_TABLES:
             for field in dal[table]:
                 if field.name == "id":

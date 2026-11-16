@@ -42,9 +42,6 @@ global:
   # Secrets for pulling from private registries (if needed)
   imagePullSecrets: []
 
-  # Default storage class for persistent volumes
-  storageClass: "standard"
-
   # OVERRIDE REQUIRED: override via --set or values override file
   # Security secrets (set via kubectl create secret or values override)
   # Defaults match docker-compose.yml for local development consistency
@@ -80,15 +77,12 @@ global:
   # comment -- and svc-bundles-executor retries the dial forever with capped exponential backoff,
   # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
   #
-  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
-  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
-  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
-  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
-  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
-  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
-  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
-  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
-  # alpha/local only, fails closed otherwise.
+  # The <fullname>-host-api-tls Secret is minted by the runtime provisioner
+  # (templates/provision-secrets.yaml) in EVERY tier, create-if-absent and never overwritten
+  # (owner policy: all internal identities are runtime-generated). Optional overrides, all off by
+  # default: explicit material (--set-file global.hostApiTls.ca.crt=... tls.crt=... tls.key=...),
+  # cert-manager (certManager.enabled=true), or externalSecret: true delegating to an out-of-band
+  # controller.
   hostApiTls:
     certManager:
       enabled: false
@@ -138,6 +132,26 @@ global:
     # beta/gamma/production. Alpha/local ignore this flag entirely (auto-generated instead).
     externalSecret: false
 
+  # TLS material for svc-presentation's in-cluster surface gRPC listener
+  # (waddles.presentation.internal.v1.SurfaceService on pipeline.svcPresentation.grpcPort;
+  # core/svc_presentation/src/surfaces/ingress.rs -- the listener REFUSES to start in plaintext off
+  # loopback). Generated at runtime by the provision-secrets Job IN EVERY TIER (ECDSA P-256 via
+  # OpenSSL, own CA, SANs = the svc-presentation Service DNS names; create-if-absent, a present
+  # Secret is never overwritten -- owner policy for internal identities); the
+  # callers (svc-action-rust, svc-process-rust) mount ONLY the CA (PRESENTATION_GRPC_CA_FILE).
+  # NEVER a literal cert/key in git; populate via --set-file or an out-of-git values override /
+  # ExternalSecret.
+  presentationGrpcTls:
+    ca:
+      crt: ""
+    tls:
+      crt: ""
+      key: ""
+    # OPTIONAL override (default false in every tier): true delegates provisioning of the
+    # <fullname>-presentation-grpc-tls Secret (keys ca.crt, tls.crt, tls.key) to an out-of-band
+    # ExternalSecret/SealedSecret controller instead of the runtime provisioner.
+    externalSecret: false
+
   # fix/valkey-tls-alpha -- TLS material for the Valkey (infra-redis) cache/streams
   # listener. `penguin_spine::SpineConfig::validate()` (core/svc_process, core/svc_action,
   # core/svc_ingest) fails closed when SECURITY_TRANSPORT_TLS=true (the default -- never
@@ -157,7 +171,7 @@ global:
   # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
   # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
   # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
-  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # runtime-generated in every tier by the provisioner (create-if-absent, never overwritten); material below is an optional override (never a literal in git)
   # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
   # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
   # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
@@ -199,15 +213,33 @@ global:
   # comment -- and bundle-executor retries the dial forever with capped exponential backoff,
   # so neither pod crashloops); only the executor-invoked-bundle path stays inert.
   #
-  # fix/alpha-host-api-tls -- templates/host-api-tls-secret.yaml now guarantees the
-  # <fullname>-host-api-tls Secret exists (kept, explicitly supplied, generated alpha/local,
-  # or the whole release fails to render) whenever pipeline.rustDataPlane.enabled is true,
-  # exactly mirroring global.valkeyTls's self-provisioning policy -- alpha/local no longer
-  # need real PEM material supplied out of band. beta/gamma/production still REQUIRE real
-  # material (--set-file global.hostApiTls.ca.crt=... --set-file global.hostApiTls.tls.crt=...
-  # --set-file global.hostApiTls.tls.key=...), cert-manager (certManager.enabled=true), or
-  # externalSecret: true delegating to an out-of-band controller -- auto-generation is
-  # alpha/local only, fails closed otherwise.
+  # The <fullname>-host-api-tls Secret is minted by the runtime provisioner
+  # (templates/provision-secrets.yaml) in EVERY tier, create-if-absent and never overwritten
+  # (owner policy: all internal identities are runtime-generated). Optional overrides, all off by
+  # default: explicit material (--set-file global.hostApiTls.ca.crt=... tls.crt=... tls.key=...),
+  # cert-manager (certManager.enabled=true), or externalSecret: true delegating to an out-of-band
+  # controller.
+  # In-cluster HTTP transit TLS (docs/superpowers/specs/2026-11-08-pod-transit-encryption-audit.md
+  # F3/F4/F6): hub-api, hub-webui, core-data and svc-streaming serve HTTPS with an ECDSA P-256 /
+  # SHA-256 cert minted by cert-manager from the internal CA (ClusterIssuer name below = the one
+  # k8s/dal2alpha/internal-ca.yaml and the feature/transit-tls-core PR provision). Every internal
+  # HTTP client then dials https://<svc>.<ns>.svc.cluster.local (FQDN: the CA's nameConstraints
+  # permit only that form), verifies against the CA mounted at /etc/waddlebot/internal-ca/ca.crt
+  # and REFUSES plaintext (INTERNAL_TLS_REQUIRED=true). enabled=false keeps the legacy plaintext
+  # wiring for local/CI clusters without cert-manager; it is never a runtime fallback -- a failed
+  # handshake always fails loud. Profile: TLS 1.3 preferred / 1.2 floor, X25519|P-256, AES-128-GCM
+  # or ChaCha20-Poly1305, session resumption + pooled keep-alive/HTTP2 connections; stronger
+  # protection is the CNI layer (Cilium WireGuard), not a heavier handshake.
+  internalTransitTls:
+    enabled: false
+    certManager:
+      issuerKind: "ClusterIssuer"
+      issuerName: "waddlebot-internal-ca"
+      duration: "2160h"    # 90d
+      renewBefore: "360h"  # 15d
+    # svc-streaming TLS control-plane port (hub-api -> svc-streaming); plaintext :8208 stays for
+    # the media/NodePort path only.
+    streamingTlsPort: 8448
   hostApiTls:
     certManager:
       enabled: false
@@ -276,7 +308,7 @@ global:
   # One chart-owned ECDSA P-256 / SHA-256 CA signs a server leaf for each; clients mount ONLY the CA and
   # verify (Postgres sslmode=verify-full, S3 https with the CA pinned, system roots disabled). See
   # templates/_transit_data_tls.tpl for the design, templates/transit-tls-secret.yaml for the provisioning policy.
-  # alpha/local self-generate (lookup-keep); beta/gamma/production REQUIRE material below (never a literal in git)
+  # runtime-generated in every tier by the provisioner (create-if-absent, never overwritten); material below is an optional override (never a literal in git)
   # or externalSecret: true. There is NO plaintext toggle: Postgres and SeaweedFS are TLS-only whenever enabled.
   # Negotiation: TLS 1.3 preferred / 1.2 minimum, ECDSA P-256, P-256 key exchange, AES-128-GCM or ChaCha20-Poly1305,
   # session resumption on, pooled keep-alive clients. Customers wanting stronger protection can additionally enable
@@ -435,24 +467,6 @@ serviceAccount:
   create: true
   name: "waddlebot"
   annotations: {}
-
-# Resource presets
-resourcePresets:
-  small:
-    cpu: "100m"
-    memory: "128Mi"
-    cpuLimit: "500m"
-    memoryLimit: "512Mi"
-  medium:
-    cpu: "250m"
-    memory: "256Mi"
-    cpuLimit: "1000m"
-    memoryLimit: "1Gi"
-  large:
-    cpu: "500m"
-    memory: "512Mi"
-    cpuLimit: "2000m"
-    memoryLimit: "2Gi"
 
 # Infrastructure Services
 infrastructure:
@@ -622,7 +636,6 @@ infrastructure:
       runAsGroup: 999
       capabilities:
         drop: ["ALL"]
-    port: 6379
     password: "REPLACE_ME"  # Only used for secrets, actual Redis already running
     # Module-specific Redis passwords (matches docker-compose.yml ACL setup)
     modulePasswords:
@@ -684,7 +697,6 @@ infrastructure:
       name: "infra-redis"
       port: 6379
       type: ClusterIP
-    replicas: 1
     resources:
       requests:
         cpu: "100m"
@@ -903,7 +915,6 @@ infrastructure:
       type: ClusterIP
       s3Port: 8333
       masterPort: 9333
-    replicas: 1
     resources:
       requests:
         cpu: "250m"
@@ -917,7 +928,6 @@ infrastructure:
     # too, which is cosmetic only (see README.md Migration Notes for the
     # documented rename-and-copy path if a clean name is ever wanted).
     persistence:
-      enabled: true
       name: "minio-data"
       accessMode: ReadWriteOnce
       storageClass: ""
@@ -966,13 +976,9 @@ infrastructure:
       runAsGroup: 1000
       capabilities:
         drop: ["ALL"]
-    port: 11434
-    defaultProvider: "ollama"
-    defaultModel: "tinyllama"
     service:
       name: "ai-ollama"
       port: 11434
-    replicas: 1
     resources:
       requests:
         cpu: "500m"
@@ -981,7 +987,6 @@ infrastructure:
         cpu: "2000m"
         memory: "2Gi"
     persistence:
-      enabled: true
       name: "ollama-data"   # templates/infrastructure/ollama.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
       accessMode: ReadWriteOnce
       size: 30Gi
@@ -1010,12 +1015,9 @@ infrastructure:
       runAsGroup: 1000
       capabilities:
         drop: ["ALL"]
-    port: 6333
-    grpcPort: 6334
     service:
       name: "infra-qdrant"
       port: 6333
-    replicas: 1
     resources:
       requests:
         cpu: "250m"
@@ -1024,17 +1026,9 @@ infrastructure:
         cpu: "1000m"
         memory: "1Gi"
     persistence:
-      enabled: true
       name: "qdrant-data"   # templates/infrastructure/qdrant.yaml PVC name (was unset: empty-name PVC, `helm lint` warning)
       accessMode: ReadWriteOnce
       size: 10Gi
-
-  # Apache OpenWhisk (Serverless)
-  openwhisk:
-    enabled: false
-    # OpenWhisk requires complex setup - typically deployed separately
-    apiHost: ""
-    apiKey: ""
 
 # PostHog (Community Edition, trimmed) — self-hosted feature-flag execution
 # plane. DISABLED by default; enable per-env by setting posthog.enabled: true
@@ -1255,7 +1249,6 @@ bundleAdminRequest:
 
 pipeline:
   pythonBaseImage: "python:3.13-slim-bookworm@sha256:01f42367a0a94ad4bc17111776fd66e3500c1d87c15bbd6055b7371d39c124fb"
-  nodeBaseImage: "node:20-bookworm-slim@sha256:2cf067cfed83d5ea958367df9f966191a942351a2df77d6f0193e162b5febfc0"
 
   # T10 (v3 demo) — shared runner identity across svc-ingest/svc-process/svc-action.
   # RUNNER_TENANT_SLUG scopes stage_runner.py to one tenant; deliberately NOT paired
@@ -1608,6 +1601,15 @@ pipeline:
   svcPresentation:
     enabled: true
     port: 8207
+    # In-cluster surface gRPC port (waddles.presentation.internal.v1.SurfaceService): the ONLY
+    # transport bundles' `overlay.publish-surface` publishes use. TLS (global.presentationGrpcTls)
+    # is mandatory; ingress is restricted to svc-action-rust/svc-process-rust by
+    # templates/svc-presentation-grpc-networkpolicy.yaml.
+    grpcPort: 50051
+    # Default-OFF feature flag gating the publish side: PostHog `waddles.overlay-surfaces`
+    # (checked by the stages, never by svc-presentation). The OWNER flips it (PostHog -> Feature
+    # flags). Until it is ON every `surface.publish` denies `feature_disabled`; the listener and
+    # callers' endpoints being wired is independent of it.
     # MUST stay 1. The overlay fan-out is IN-PROCESS: each pod only knows the websocket/SSE
     # clients connected to itself, so with >1 replica a pushed frame reaches only the clients on
     # the pod that received it -- frames split across pods. The chart REFUSES to render
@@ -1747,6 +1749,14 @@ pipeline:
   #   dm.send. Setting pipeline.rustDataPlane.enabled=true alone yields an INERT svc-ingest-rust
   #   pod -- the flag must also be ON in PostHog (or a domain bypass applies).
   rustDataPlane:
+    # Per-app drain concurrency of svc-process / svc-action (latency suspect #4): how many ordering
+    # groups of one drained batch run at once (1 = serial). Bundle kv/db/economy have no atomic
+    # compare-and-set, so the default key is the app scope (tenant, community, app): a stateful app is
+    # strictly serial per scope and concurrency only exists ACROSS scopes. `drainOrdering: actor` lets
+    # a PROVABLY stateless bundle (approved manifest declares only context/flags/log/clock/http/relay)
+    # also overlap per actor; stateful or unknown bundles stay scope-serial either way.
+    drainConcurrency: 4
+    drainOrdering: scope
     enabled: false
 
     # Security review fix (PR #468, MEDIUM): bundle_host_http::egress::EgressGuard's
@@ -2115,9 +2125,6 @@ pipeline:
       # BUNDLE_MAX_PRECOMPILED_BYTES: optional cap on one signed .cwasm object fetched from the
       # bucket. Empty = unset (crate default 256 MiB); oversized objects fall back (loudly) to JIT.
       maxPrecompiledBytes: ""
-      # Signed AOT artifact prefix in the bundle bucket (precompiled/<engine_fp>/<digest>.cwasm),
-      # produced by the precompile Jobs (part D, executor-precompile*.yaml).
-      precompiledPrefix: "precompiled"
       # Node-disk bound for the local .cwasm staging emptyDir (EXECUTOR_PRECOMPILE_DIR).
       precompileCacheSizeLimit: "4Gi"
       # svc-bundles-executor-autoscaling.yaml. mode: none | keda | hpa-external (see that
@@ -2160,6 +2167,16 @@ pipeline:
       # boot burst OOM-killed the pod at 16Gi.
       maxConcurrentCompiles: 0
       poolWaitMs: 500
+      # Warm instance pool (latency suspect #2, docs/observability/command-latency.md): the executor keeps
+      # up to `warmPoolSize` one-shot, pre-instantiated guests per bundle digest so an invoke skips
+      # instantiation (50-300 ms for Python). 0 = off (default, flag-style opt-in per pool; override per
+      # pool with pools[].warmPoolSize / warmPoolMaxTotal). Each guest is used exactly once (no state
+      # can leak across tenants), then dropped. Memory: worst case warmPoolMaxTotal x
+      # EXECUTOR_MEMORY_LIMIT_MB on top of the module budget, so keep it inside the pool's memory
+      # limit. Kill switch: FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL=true on the pod.
+      warmPoolSize: 0
+      warmPoolMaxTotal: 16
+      warmPoolIdleSecs: 120
       precompileDir: "/var/cache/waddles/wasm"
       wasmCollector: "drc"
       sandboxGvisor: true
@@ -2350,42 +2367,13 @@ bundleExecutor:
 
 # Module verticals + migrations image
 modules:
-  # v3.0.x Task 0.5 — Module verticals (Bot/Social/Customer/Marketing) that load into the
-  # pipeline containers above via modules.<name>.enabled. NOT per-module pods — see
-  # docs/architecture/core-boundary.md and docs/plans/2026-08-26-v3-scbm-apps-design.md
-  # "## Deployment" > "### Modules cut across stages".
-  bot:
-    enabled: true
+  # Social module: gates svc-rtc (templates/svc-rtc.yaml, with pipeline.svcRtc.enabled).
   social:
     enabled: true
-  customer:
-    enabled: false
-  marketing:
-    enabled: false
 
   migrations:
-    enabled: true
-    name: migrations
     image: migrations
     imageTag: ""
-    port: 8999
-    replicas: 1
-    resourcePreset: medium
-    service:
-      type: ClusterIP
-      port: 8999
-    env:
-      MODULE_NAME: "migrations_module"
-      MODULE_VERSION: "1.0.0"
-      PORT: "8999"
-      LOG_LEVEL: "INFO"
-    resources:
-      requests:
-        cpu: "100m"
-        memory: "128Mi"
-      limits:
-        cpu: "500m"
-        memory: "512Mi"
 
 # Ingress Configuration
 ingress:
@@ -2463,27 +2451,20 @@ waddleai:
   baseUrl: ""
 
 # Connector Configuration (svc-ingest channels and overrides)
+# Command-latency synthetic canary (alpha ONLY; runbook docs/observability/command-latency.md).
+# Default OFF. Rendering with enabled=true outside global.environment=alpha, or with any id below
+# unset, FAILS the helm render (never a silently dead canary). Nothing here is a secret.
+latencyCanary:
+  enabled: false
+  tenantId: 0        # numeric tenants.id; post mode requires the DEFAULT tenant (its env bot is in the guild)
+  communityId: 0     # numeric communities.id from scripts/ops/seed_latency_canary.py
+  guildId: ""        # QUOTED Discord guild snowflake of the dedicated testing guild
+  channelId: ""      # QUOTED Discord channel snowflake of the dedicated canary channel
+  commandText: "!ping"
+  sinkMode: "post"   # post = really reply in the channel (true e2e); swallow = ack without Discord
+  intervalSeconds: 60  # 30..600; jittered +-10%, doubles on consecutive failures
+
 config:
-  # Twitch IRC receiver — comma-separated list of channel names to monitor
-  twitchChannels: ""
-  # Kick Pusher receiver — comma-separated list of channel slugs to monitor
-  kickChannels: ""
-  # Kick Pusher PUBLIC client key (not a secret, Kick's public key for websocket)
-  kickPusherKey: ""
-  # Kick Pusher cluster (e.g. "mt1" — empty uses Kick's default)
-  kickPusherCluster: ""
-  # YouTube Live poll receiver — comma-separated list of channel IDs to monitor
-  youtubeLiveChannels: ""
-  # RSI Spectrum one-way ingest (gh #101) — comma-separated forum channel ids / lobby ids
-  spectrumForumChannels: ""
-  spectrumLobbies: ""
-  # ENV baseline for flag waddles.spectrum-integration (default OFF; PostHog overrides when connected)
-  spectrumIntegrationEnabled: false
-  # Spectrum org sync (gh #101) — comma-separated Spectrum community ids; each gets a roster + an
-  # events poller (snapshot-diffed in Valkey). Needs spectrumIntegrationEnabled AND spectrumOrgSyncEnabled.
-  spectrumOrgCommunities: ""
-  # ENV baseline for flag waddles.spectrum-org-sync (default OFF; PostHog overrides when connected)
-  spectrumOrgSyncEnabled: false
   # ENV baseline for flag waddles.calendar.event_discord_sync (default OFF; PostHog overrides when connected)
   eventDiscordSyncEnabled: false
   # ENV baseline for flag waddles.role_sync -> FLAG_WADDLES_ROLE_SYNC (default OFF;
@@ -2492,86 +2473,6 @@ config:
   # ENV baselines for waddles.community.guild_pairing / waddles.webui.role_sync_mapping (default OFF).
   guildPairingEnabled: false
   webuiRoleSyncMappingEnabled: false
-  spectrumOrgPollIntervalS: 300
-  # A roster shrinking by more than this fraction in one poll is held back as an RSI glitch, not emitted
-  spectrumRosterMaxDepartureRatio: 0.5
-  # Emit the whole current roster/event list as joined/created on the first poll (bootstrap only)
-  spectrumOrgEmitBacklog: false
-
-# Dependencies Configuration
-dependencies:
-  ollama:
-    enabled: true  # Use existing K8s daemonset/service
-    host: "ollama-service"  # K8s service name
-    port: 11434
-  qdrant:
-    enabled: true  # Use existing K8s service
-    host: "infra-qdrant"
-    port: 6333
-
-# Shared Environment Variables (applied to all modules)
-sharedEnv:
-  # Database Configuration
-  DB_HOST: "postgresql"
-  DB_PORT: "5432"
-  DB_NAME: "waddlebot"
-  DB_USER: "waddlebot"
-  # DB_PASSWORD should be set via secrets
-  DB_POOL_SIZE: "20"
-  DB_MAX_OVERFLOW: "10"
-
-  # Redis Configuration
-  REDIS_HOST: "redis"
-  REDIS_PORT: "6379"
-  REDIS_DB: "0"
-  # REDIS_PASSWORD should be set via secrets
-
-  # SeaweedFS S3 gateway configuration (was MinIO)
-  MINIO_ENDPOINT: "seaweedfs:8333"
-  MINIO_SECURE: "false"
-  # MINIO_ACCESS_KEY and MINIO_SECRET_KEY should be set via secrets
-
-  # Ollama Configuration
-  OLLAMA_HOST: "http://ollama:11434"
-  OLLAMA_MODEL: "llama3.1"
-
-  # Qdrant Configuration
-  QDRANT_HOST: "qdrant"
-  QDRANT_PORT: "6333"
-  QDRANT_GRPC_PORT: "6334"
-
-
-
-  # Logging Configuration
-  LOG_LEVEL: "INFO"
-  LOG_FORMAT: "json"
-  LOG_FILE_ENABLED: "true"
-  LOG_FILE_PATH: "/var/log/waddlebotlog"
-  LOG_FILE_MAX_BYTES: "10485760"
-  LOG_FILE_BACKUP_COUNT: "5"
-
-  # License Server
-  LICENSE_SERVER_URL: "https://license.penguintech.io"
-  RELEASE_MODE: "false"
-
-  # Feature Flags
-  ENABLE_METRICS: "true"
-  ENABLE_TRACING: "false"
-  ENABLE_PROFILING: "false"
-
-# Persistent Volume Claims
-persistence:
-  logs:
-    enabled: true
-    size: 10Gi
-    storageClass: ""
-    accessMode: ReadWriteMany
-
-# Service Account
-serviceAccount:
-  create: true
-  annotations: {}
-  name: "waddlebot"
 
 # Pod Security Context
 # Graceful shutdown (templates/_resilience.tpl), applied to EVERY Deployment: a preStop sleep
@@ -2717,19 +2618,6 @@ waitForHubApi:
   stableIntervalSeconds: 5
   maxBackoffSeconds: 30
 
-# Monitoring & Observability
-monitoring:
-  prometheus:
-    enabled: false
-    serviceMonitor:
-      enabled: false
-      interval: 30s
-
-  grafana:
-    enabled: false
-    dashboards:
-      enabled: false
-
 # HTTPRoute Configuration (Cilium Gateway API)
 httproute:
   enabled: false
@@ -2737,6 +2625,35 @@ httproute:
   gatewayNamespace: gateway
   hostnames: []
   rules: []
+  # F4 -- used only when global.internalTransitTls.enabled: the Gateway re-encrypts to hub-webui
+  # via a BackendTLSPolicy verifying the internal CA. caPem (public CA cert, optional) renders the
+  # CA ConfigMap; otherwise caConfigMapName must pre-exist (k8s/dal2alpha/APPLY.md).
+  backendTls:
+    apiVersion: gateway.networking.k8s.io/v1
+    caConfigMapName: ""
+    caPem: ""
+
+# Interactions / webhook door through the shared Gateway (templates/interactions-gateway.yaml):
+# POST /intake/webhook/{route_key} -> svc-ingest-rust, plus the edge-stamped `x-request-start` so the
+# command-latency SLA clock starts at the first door (the Cilium LB, not Cloudflare). Requires
+# `httproute.enabled` (same shared Gateway parentRef) and the Rust data plane. OFF by default;
+# supported in every environment. Enabling adds a CNP admitting the Gateway to svc-ingest's HTTP port
+# only. NOTE: the shared Gateway's listener must admit this namespace (namespaceLabels
+# `gateway-access`, already required by `httproute`).
+interactionsGateway:
+  enabled: false
+  # Defaults to httproute.hostnames.
+  hostnames: []
+  pathPrefix: /intake/webhook
+  # Discord requires an interaction response within 3 s; the route must not outlive it by much.
+  timeoutSeconds: 10
+  edgeRequestStart:
+    # Stamp the header at the Gateway AND make svc-ingest trust it (INGEST_TRUST_EDGE_REQUEST_START).
+    enabled: true
+    headerName: x-request-start
+    # Envoy command operator, evaluated per request by the Gateway's Envoy: epoch seconds.millis.
+    # RequestHeaderModifier `set` overwrites any client-supplied value.
+    value: "t=%START_TIME(%s.%3f)%"
 
 # Network Policies — namespace-level ingress isolation
 # When enabled, denies all cross-namespace ingress and allows only

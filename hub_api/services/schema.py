@@ -442,6 +442,8 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("community_id", "integer", notnull=True),
         Field("name", "string", length=50, notnull=True),
         Field("display_name", "string", length=100),
+        Field("is_system", "boolean", default=False),
+        Field("role_kind", "integer", default=0),
         Field("priority", "integer", default=0),
         Field("base_claims", "json"),
         migrate=migrate,

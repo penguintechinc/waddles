@@ -61,6 +61,8 @@ use sea_orm::{
 };
 use tracing::Instrument;
 
+pub mod labels;
+
 use hub_client::bundle_config::{
     install_global, BundleConfigCache, BundleConfigClient, CacheConfig, ConfigKey, ConfigSource,
     ConfigValue, ReadPathGate, ValkeyVersionProbe, VersionProbe,

@@ -706,6 +706,26 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         ),
     ),
     (
+        # Community admin routes gated by dedicated community scopes resolved in-handler (they
+        # used a JWT `require_scope`, which the generic admin-action rule covered).
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_ACTION),
+        (
+            ("PUT", "/api/v1/admin/<int:community_id>/settings"),
+            ("DELETE", "/api/v1/admin/<int:community_id>/members/<int:user_id>"),
+            ("POST", "/api/v1/admin/<int:community_id>/temp-password"),
+            ("PUT", "/api/v1/admin/<int:community_id>/modules/<int:module_id>/config"),
+            ("POST", "/api/v1/admin/<int:community_id>/interaction/channels"),
+            ("PUT", "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>"),
+            ("DELETE", "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>"),
+            ("PUT", "/api/v1/admin/<int:community_id>/interaction/forum/posts/<int:post_id>"),
+            ("DELETE", "/api/v1/admin/<int:community_id>/interaction/forum/replies/<int:reply_id>"),
+            (
+                "PUT",
+                "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>/permissions",
+            ),
+        ),
+    ),
+    (
         _ra(AuditCategory.PRIVACY, AuditAction.PRIVACY_CONSENT_CHANGED),
         (
             ("DELETE", f"{_P}/cookie"),

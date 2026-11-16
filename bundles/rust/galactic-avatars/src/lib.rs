@@ -56,14 +56,21 @@ mod component {
                 return Ok(None);
             }
             match logic::on_chat(&WasmKv, event.actor.as_deref(), clock::now_millis()) {
-                Ok(Some(strip)) => Ok(Some(PlatformEvent {
-                    platform: event.platform,
-                    event_type: event.event_type,
-                    // The actor is dropped: the frame never carries a user reference.
-                    actor: None,
-                    payload_json: serde_json::to_string(&strip).unwrap_or_default(),
-                    occurred_at: event.occurred_at,
-                })),
+                Ok(Some(strip)) => match serde_json::to_string(&strip) {
+                    Ok(payload_json) => Ok(Some(PlatformEvent {
+                        platform: event.platform,
+                        event_type: event.event_type,
+                        // The actor is dropped: the frame never carries a user reference.
+                        actor: None,
+                        payload_json,
+                        occurred_at: event.occurred_at,
+                    })),
+                    Err(e) => {
+                        let fields = serde_json::json!({ "error_type": "SerializeError", "error": e.to_string() }).to_string();
+                        log::write(log::Level::Error, "galactic-avatars strip serialization failed; frame dropped", &fields);
+                        Ok(None)
+                    }
+                },
                 Ok(None) => Ok(None),
                 Err(e) => {
                     let fields = serde_json::json!({ "error": e }).to_string();

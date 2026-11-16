@@ -8538,10 +8538,12 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: '`POST /api/v1/admin/<id>/interaction/roles`.'
+      summary: '`POST /api/v1/admin/<id>/interaction/roles` (requires `roles:manage`).'
   /api/v1/admin/{community_id}/interaction/roles/{role_id}:
     delete:
-      description: ''
+      description: '
+
+        Predefined roles (admin, moderator, ...) are refused with 409 `ROLE_PROTECTED`.'
       operationId: delete_admin_delete_role
       parameters:
       - in: path
@@ -8557,7 +8559,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: '`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>`.'
+      summary: '`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`).'
     put:
       description: ''
       operationId: put_admin_update_role
@@ -8575,7 +8577,22 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: '`PUT /api/v1/admin/<id>/interaction/roles/<roleId>`.'
+      summary: '`PUT /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`).'
+  /api/v1/admin/{community_id}/interaction/scopes:
+    get:
+      description: ''
+      operationId: get_admin_list_scopes
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`GET /api/v1/admin/<id>/interaction/scopes` -- the scope registry
+        for the role editor.'
   /api/v1/admin/{community_id}/inventory/available:
     get:
       description: ''
@@ -20096,7 +20113,8 @@ paths:
                 title: PricingConfigDTO
                 type: object
           description: '`marketplace_settings`-backed premium pricing configuration.'
-      summary: '`GET /pricing` -- public (matches Node: no `requireAuth`).'
+      summary: '`GET /pricing` -- public (matches Node: no `requireAuth`); replica
+        lag is fine.'
   /api/v1/marketplace/premium/status/{community_id}:
     get:
       description: ''
@@ -20156,7 +20174,7 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/marketplace/public/vendor/modules` -- unauthenticated
-        listing.'
+        listing (replica).'
   /api/v1/marketplace/public/vendor/submissions/{submission_id}:
     get:
       description: ''
@@ -21021,7 +21039,8 @@ paths:
                 title: AuditLogResponse
                 type: object
           description: Response DTO for audit log.
-      summary: Get audit log.
+      summary: 'Get audit log (append-only listing: scope-gated, no DB authz, replica
+        lag is fine).'
   /api/v1/platform/communities:
     get:
       description: ''
@@ -21242,7 +21261,8 @@ paths:
                 title: PlatformStatsResponse
                 type: object
           description: Response DTO for platform stats.
-      summary: Get platform stats.
+      summary: 'Get platform stats (aggregate dashboard: scope-gated, no DB authz,
+        replica lag is fine).'
   /api/v1/platform/users:
     get:
       description: ''

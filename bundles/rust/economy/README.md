@@ -69,3 +69,10 @@ Run `cargo test --locked --manifest-path core/tool_invoke_e2e/Cargo.toml --test
 tool_invoke_e2e economy_service`. By default the test builds the production Rust
 bundle container. `WADDLES_ECONOMY_COMPONENT` can explicitly select an artifact
 freshly built by the same pinned toolchain for local iteration.
+
+## Per-community opt-out (`accrual_enabled`)
+
+Community config accepts `accrual_enabled` (boolean, default `true`). An explicit `false` makes the minting tools
+(`adjust_balance` with a positive delta, `pay_pot`, `exchange`) fail `forbidden` for that community; debits,
+transfers and reads are unaffected. Only an explicit `false` disables; absent / `{}` / unparseable keeps minting
+ON. Added in 1.0.2 (see `docs/observability/command-latency.md`).

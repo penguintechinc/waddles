@@ -50,6 +50,7 @@ from quart_schema import validate_request, validate_response
 
 from services import platform_service as svc
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
@@ -589,9 +590,10 @@ async def get_system_health() -> tuple[SystemHealthResponse, int]:
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(AuditLogResponse)
+@reads_from_replica("platform.get_audit_log")
 async def get_audit_log() -> AuditLogResponse:
-    """Get audit log."""
-    async_dal, dal = _dal()
+    """Get audit log (append-only listing: scope-gated, no DB authz, replica lag is fine)."""
+    async_dal, dal = get_read_dals()
     page = int(request.args.get("page", "1"))
     limit = parse_limit(request.args.get("limit"), default=50)
     action = request.args.get("action")
@@ -626,9 +628,10 @@ async def get_audit_log() -> AuditLogResponse:
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(PlatformStatsResponse)
+@reads_from_replica("platform.get_stats")
 async def get_stats() -> PlatformStatsResponse:
-    """Get platform stats."""
-    async_dal, dal = _dal()
+    """Get platform stats (aggregate dashboard: scope-gated, no DB authz, replica lag is fine)."""
+    async_dal, dal = get_read_dals()
     result = await svc.get_stats(async_dal, dal)
     return PlatformStatsResponse(
         success=True,

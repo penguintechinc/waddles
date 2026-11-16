@@ -22,6 +22,12 @@ be able to starve the others. Three mechanisms enforce that:
 | `EXECUTOR_MAX_CONCURRENT_CALLS` | `32` | Process-wide ceiling on in-flight invokes (semaphore). |
 | `EXECUTOR_INSTANCES_PER_BUNDLE` | `4` | Ceiling on in-flight invokes of ONE bundle digest (per-bundle semaphore). |
 | `EXECUTOR_POOL_WAIT_MS` | `500` | How long an invoke queues for a free per-bundle AND global slot. On expiry it fails `EXECUTOR_DEADLINE` with `detail = "pool_exhausted"` (the pinned wire crate has no dedicated code). |
+| `EXECUTOR_LANGUAGE_CLASS` | `any` | `compiled`, `scripted` or `any`. A partitioned pool reports a class-qualified `executor_id` (`compiled:<pod>`) so the stages only load bundles of that class onto it. Invalid value or an empty `EXECUTOR_LANGUAGES` for a partitioned pool refuses to start. |
+| `EXECUTOR_LANGUAGES` | _(empty)_ | Comma-separated languages the pool serves (shape-validated; the chart renders it from `bundleExecutor.languageClasses`). |
+| `EXECUTOR_WARM_POOL_SIZE` | `0` (off) | One-shot pre-instantiated guests kept ready per digest (`crate::warm_pool`). Each serves exactly ONE invocation then is dropped, so no state crosses tenants; a prewarmed guest is built with no per-call state and bound at checkout (`ExecState::rebind_for_call`). |
+| `EXECUTOR_WARM_POOL_MAX_TOTAL` | `16` | Process-wide ceiling on warm guests (each holds up to `EXECUTOR_MEMORY_LIMIT_MB`). |
+| `EXECUTOR_WARM_POOL_IDLE_SECS` | `120` | Warm guests of a digest nobody invoked for this long are dropped. |
+| `FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL` | `false` | Opt-out kill switch (`waddles.disable-executor-warm-pool`): `true` = always cold. |
 | `EXECUTOR_MAX_CONCURRENT_COMPILES` | `2` | Concurrent JIT compiles. |
 | `EXECUTOR_SHUTDOWN_DRAIN_SECONDS` | `25` | Drain deadline on SIGTERM. Keep below the pod's `terminationGracePeriodSeconds` (default 30) so rollouts never reach SIGKILL. On expiry the executor logs what was abandoned and still exits 0. |
 

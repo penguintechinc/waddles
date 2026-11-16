@@ -109,7 +109,7 @@ pub trait SessionStore: Send + Sync {
 /// Valkey-backed [`SessionStore`]: a `HASH` per shard under
 /// `waddles:discord:session:{shard_key}`, TTL-refreshed on every save.
 pub struct RedisSessionStore {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl RedisSessionStore {
@@ -117,7 +117,7 @@ impl RedisSessionStore {
     /// clone per call, matching `RedisReplayGuard`/`RedisRevocationSink`'s
     /// own pattern in `crate::ingest::twitch_eventsub`).
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 
@@ -266,13 +266,13 @@ const IDENTIFY_WINDOW: Duration = Duration::from_millis(5000);
 /// (5s window) and `...{token_hash}:daily` (rolling `session_start_limit`
 /// mirror), both touched atomically by one Lua script per `acquire` call.
 pub struct RedisIdentifyBudget {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     script: redis::Script,
 }
 
 impl RedisIdentifyBudget {
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self {
             conn,
             script: redis::Script::new(IDENTIFY_BUDGET_ACQUIRE_SCRIPT),

@@ -1,0 +1,177 @@
+{{- if .Values.network.enabled }}
+{{- /*
+CiliumNetworkPolicy only (never plain NetworkPolicy). Ollama's API is unauthenticated and includes admin
+endpoints (delete/create/copy/push/blobs), so access is by allowlisted HTTP request, not by namespace:
+ - opt-in consumers: pods in network.consumerNamespaces carrying the consumer label may only
+   GET /, /api/tags, /api/version and POST /api/generate|chat|embed|embeddings
+ - the pull Job may only HEAD / (CLI heartbeat) and POST /api/pull
+ - the helm-test pod may only GET / and /api/tags
+ - everything else is denied by default (HTTP 403); unlabelled pods are dropped at L3/L4.
+Server egress: DNS limited to registry hosts + cluster-local names, then TCP 443 to the same hosts only.
+*/}}
+{{- $fullname := include "ollama.fullname" . }}
+{{- $port := .Values.service.port | int }}
+{{- if .Values.network.defaultDeny }}
+# Namespace default-deny (Cilium convention on this cluster: an empty rule selects every endpoint and
+# allows nothing).
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ $fullname }}-default-deny
+  labels:
+    {{- include "ollama.labels" (dict "root" . "component" "server") | nindent 4 }}
+spec:
+  endpointSelector: {}
+  ingress:
+    - {}
+  egress:
+    - {}
+---
+{{- end }}
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ $fullname }}-server-allow
+  labels:
+    {{- include "ollama.labels" (dict "root" . "component" "server") | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "ollama.selectorLabels" (dict "root" . "component" "server") | nindent 6 }}
+  ingress:
+    - fromEndpoints:
+        {{- range .Values.network.consumerNamespaces }}
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": {{ . }}
+            {{ $.Values.network.consumerLabel.key }}: {{ $.Values.network.consumerLabel.value | quote }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: "^/$"
+              - method: GET
+                path: "^/api/tags$"
+              - method: GET
+                path: "^/api/version$"
+              - method: POST
+                path: "^/api/(generate|chat|embed|embeddings)$"
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": {{ .Release.Namespace }}
+            {{- include "ollama.selectorLabels" (dict "root" . "component" "model-pull") | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+          rules:
+            http:
+              - method: HEAD   # the ollama CLI heartbeats with HEAD / before pulling
+                path: "^/$"
+              - method: POST
+                path: "^/api/pull$"
+    - fromEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": {{ .Release.Namespace }}
+            {{- include "ollama.selectorLabels" (dict "root" . "component" "helm-test") | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+          rules:
+            http:
+              - method: GET
+                path: "^/$"
+              - method: GET
+                path: "^/api/tags$"
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              {{- range .Values.network.registryFQDNs }}
+              - matchName: {{ . }}
+              {{- end }}
+              {{- include "ollama.clusterDnsRules" . | nindent 14 }}
+    # toFQDNs must be its own egress block (cannot share a block with other L3 selectors).
+    - toFQDNs:
+        {{- range .Values.network.registryFQDNs }}
+        - matchName: {{ . }}
+        {{- end }}
+      toPorts:
+        - ports:
+            - port: "443"
+              protocol: TCP
+---
+# Pull job: talks only to the server Service (same namespace) and cluster-local DNS names.
+# It resolves nothing external; the server does the download.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ $fullname }}-pull-allow
+  labels:
+    {{- include "ollama.labels" (dict "root" . "component" "model-pull") | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "ollama.selectorLabels" (dict "root" . "component" "model-pull") | nindent 6 }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              {{- include "ollama.clusterDnsRules" . | nindent 14 }}
+    - toEndpoints:
+        - matchLabels:
+            {{- include "ollama.selectorLabels" (dict "root" . "component" "server") | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+---
+# helm-test pod: only the server Service and cluster-local DNS.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ $fullname }}-test-allow
+  labels:
+    {{- include "ollama.labels" (dict "root" . "component" "helm-test") | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "ollama.selectorLabels" (dict "root" . "component" "helm-test") | nindent 6 }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            "k8s:io.kubernetes.pod.namespace": kube-system
+            "k8s:k8s-app": kube-dns
+      toPorts:
+        - ports:
+            - port: "53"
+              protocol: ANY
+          rules:
+            dns:
+              {{- include "ollama.clusterDnsRules" . | nindent 14 }}
+    - toEndpoints:
+        - matchLabels:
+            {{- include "ollama.selectorLabels" (dict "root" . "component" "server") | nindent 12 }}
+      toPorts:
+        - ports:
+            - port: {{ $port | quote }}
+              protocol: TCP
+{{- end }}

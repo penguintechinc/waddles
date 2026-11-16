@@ -521,7 +521,7 @@ pub struct EconomyWiring {
 /// `app_id` across every invoke, spec §8.2 step 8), built once by this
 /// stage's own startup wiring and cloned (cheap, `Arc`) into every
 /// per-invoke `StageCapabilities`.
-pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
+pub struct StageCapabilities<K: KvBackend = redis::aio::ConnectionManager> {
     tenant: String,
     community: Option<String>,
     app_id: String,
@@ -593,6 +593,8 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::MultiplexedConnection> {
     /// `None` until [`Self::with_media`] -- every `media.*` call denies
     /// `not_implemented` in that state (fail-loud, never a canned result).
     media: Option<MediaWiring>,
+    /// `None` until [`Self::with_surface`] -- `surface.publish` denies `not_implemented` then.
+    surface: Option<crate::surface::SurfaceWiring>,
     /// The instant this invocation's executor deadline expires, set with
     /// [`Self::with_media`]; bounds the synchronous image call.
     media_deadline: Option<std::time::Instant>,
@@ -733,6 +735,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             ai: None,
             ai_deadline: None,
             media: None,
+            surface: None,
             media_deadline: None,
             invocation_identity: None,
             verified_scope: None,
@@ -818,7 +821,7 @@ impl<K: KvBackend> StageCapabilities<K> {
     }
 
     /// Enables the `kv` capability over `backend` (production:
-    /// `redis::aio::MultiplexedConnection`, cloned from
+    /// `redis::aio::ConnectionManager`, cloned from
     /// `crate::spine::ProcessDeps::kv_conn` on every invoke -- a cheap
     /// handle clone over one shared connection, not a new socket).
     /// Builder-style so a deployment where the Valkey connection failed to
@@ -905,6 +908,33 @@ impl<K: KvBackend> StageCapabilities<K> {
         self.media = Some(media);
         self.media_deadline = Some(invoke_deadline);
         self
+    }
+
+    /// Attaches the `overlay.publish-surface` wiring (delivery host + default-OFF flag).
+    pub fn with_surface(mut self, surface: crate::surface::SurfaceWiring) -> Self {
+        self.surface = Some(surface);
+        self
+    }
+
+    /// `surface.publish`: community and app id come from the host-verified scope, never args.
+    async fn handle_surface(
+        &self,
+        call: &HostCallBody,
+    ) -> Result<serde_json::Value, HostResultError> {
+        if call.op != "surface.publish" {
+            return Err(denied(
+                "unknown_op",
+                format!("surface op {:?} not supported", call.op),
+            ));
+        }
+        let scope = self.gate_scope();
+        crate::surface::publish(
+            self.surface.as_ref(),
+            scope.app_id(),
+            i64::from(scope.community_id()),
+            &call.args,
+        )
+        .await
     }
 
     /// `media.generate_image` / `media.submit_music` / `media.submit_video` /
@@ -2522,6 +2552,14 @@ impl<K: KvBackend> StageCapabilities<K> {
             .op
             .strip_prefix("object_storage.")
             .ok_or_else(|| denied("unknown_op", "not an object_storage op"))?;
+        // Defence in depth: object prefixes are keyed by (tenant, community); a zero or
+        // negative scope (legacy `(0, 0)` fail-closed path) must never reach the backend.
+        if self.tenant_id <= 0 || self.community_id <= 0 {
+            return Err(denied(
+                "invalid_args",
+                "object-storage requires a resolved tenant and community scope",
+            ));
+        }
         let args = &call.args;
         let str_arg = |k: &str| -> Result<String, HostResultError> {
             args.get(k)
@@ -2567,6 +2605,23 @@ impl<K: KvBackend> StageCapabilities<K> {
                 "object-storage capability is disabled (waddles.bundle-object-storage is OFF)",
             ));
         }
+
+        // Own-prefix baseline: storage is OFF by default for a bundle -- its manifest must
+        // declare the per-action app-scoped permission (`storage.objects.read` for
+        // get/head/list/presign_get, `storage.objects.write` for put/delete/tag changes),
+        // checked on EVERY op (own prefix, cross-prefix and tag changes alike) before any
+        // host work.
+        let baseline = match op {
+            "get" | "head" | "list" | "presign_get" => PermissionId::StorageObjectsRead,
+            _ => PermissionId::StorageObjectsWrite,
+        };
+        self.gate
+            .authorize(
+                &self.gate_scope(),
+                baseline,
+                ResourceRef::AppScoped(AppScopedResource::Objects),
+            )
+            .map_err(denied_from_gate)?;
 
         // Cross-prefix data op: the gate must hold `storage.<op>:<owner>`.
         let mut grants: Vec<String> = Vec::new();
@@ -4567,6 +4622,10 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             // `media.*` ops likewise: own gate permission (`media.generate`), own
             // handler (`bundle_host_media`), never the `storage.tables` path.
             CapabilityKind::Db if call.op.starts_with("media.") => self.handle_media(&call).await,
+            // `surface.publish` (overlay.publish-surface): own handler, never `storage.tables`.
+            CapabilityKind::Db if call.op.starts_with("surface.") => {
+                self.handle_surface(&call).await
+            }
             CapabilityKind::Db => self.handle_db(&call).await,
             // `enabled` is wired to a real `penguin_licensing::
             // LicenseClient` (`crate::license::resolve_flag`) -- see
@@ -6612,3 +6671,7 @@ mod ai_tests;
 #[cfg(test)]
 #[path = "capabilities_platform_table_tests.rs"]
 mod platform_table_tests;
+
+#[cfg(test)]
+#[path = "capabilities_object_storage_tests.rs"]
+mod object_storage_tests;

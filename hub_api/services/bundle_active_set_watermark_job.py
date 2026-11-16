@@ -96,6 +96,7 @@ from penguin_dal import AsyncDB
 from sqlalchemy import text
 
 from services.bundle_telemetry import get_meter
+from services.db_routing import is_replica_dal
 
 logger = structlog.get_logger()
 
@@ -225,7 +226,15 @@ class BundleActiveSetWatermarkJob:
     """
 
     def __init__(self, dal: AsyncDB, config: WatermarkJobConfig | None = None) -> None:
-        """Bind the shared `install_dal` pool and this job's tunables (defaults per Sec7)."""
+        """Bind the shared `install_dal` pool and this job's tunables (defaults per Sec7).
+
+        Refuses a DAL tagged as the read replica (`services.db_routing.mark_replica`): this job
+        is primary-only by design, see the module docstring and `docs/hub-api-db-routing.md`.
+        """
+        if is_replica_dal(dal):
+            raise ValueError(
+                "BundleActiveSetWatermarkJob requires the PRIMARY DAL; got a read-replica DAL"
+            )
         self._dal = dal
         self._config = config or WatermarkJobConfig()
         self._task: asyncio.Task[None] | None = None

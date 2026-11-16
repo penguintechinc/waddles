@@ -83,3 +83,19 @@ CDNs, the image bucket origin, and `WIDGET_IMG_SRC_ALLOWLIST`) -- never `http:`,
 
 Metrics: `svc_presentation_surface_publishes_total{surface,outcome}`,
 `svc_presentation_surface_replays_total{surface}` (widget channels fold into the label `widget`).
+
+## Deployment (Helm) and the feature flag
+
+| Piece | Where |
+|---|---|
+| svc-presentation gRPC listener | `pipeline.svcPresentation.grpcPort` (50051), Service port `grpc`, env from `waddlebot.presentationGrpcTlsServerEnv` |
+| Server certificate | Secret `<fullname>-presentation-grpc-tls` (`ca.crt`/`tls.crt`/`tls.key`), minted at runtime by the provision-secrets Job (ECDSA P-256, own CA, SANs = the Service DNS names); `global.presentationGrpcTls` supplies explicit material / `externalSecret` |
+| Ingress | `templates/svc-presentation-grpc-networkpolicy.yaml`: ONLY svc-action-rust and svc-process-rust, port 50051 only (the generic workload policy excludes the port) |
+| Egress | the same file gives each caller a narrow allow to svc-presentation:50051 |
+| Caller env | `PRESENTATION_GRPC_ENDPOINT` (`https://<fullname>-svc-presentation:50051`) and `PRESENTATION_GRPC_CA_FILE` (CA-only mount, never the key) on svc-action-rust and svc-process-rust |
+| Stages that host `surface.publish` | svc-action (action-stage bundles) AND svc-process (process-stage bundles): both import the world that contains `overlay`, so both are wired |
+
+**Feature flag (default OFF, the owner flips it):** PostHog `waddles.overlay-surfaces`. It is read by the
+stages (svc-action, svc-process) via the license client; OFF (or unseen) denies every `surface.publish`
+with `feature_disabled` before any token is minted. Enable it in PostHog -> Feature flags for the
+environment once the Helm rollout above is live. svc-presentation itself never reads it.

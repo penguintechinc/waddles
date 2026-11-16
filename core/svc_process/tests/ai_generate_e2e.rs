@@ -128,7 +128,7 @@ fn caps(base: &str) -> StageCapabilities {
         request_timeout: Duration::from_secs(6),
     })
     .expect("loopback is a valid self-hosted endpoint");
-    StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+    StageCapabilities::<redis::aio::ConnectionManager>::new(
         "acme".to_string(),
         Some("main".to_string()),
         APP_ID.to_string(),
