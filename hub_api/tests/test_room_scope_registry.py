@@ -44,7 +44,18 @@ def test_migration_seeds_exactly_the_moderation_scopes_keyed_on_role_kind() -> N
     """Short chained revision; SQL keys on role_kind and names only the moderation scopes."""
     mod = _load_migration()
     assert len(mod.revision) <= 32
-    assert mod.down_revision == "0117_community_role_kind"
+    # The seed needs `community_roles.role_kind` (0117), but its down_revision is re-pointed to
+    # wherever the release head was at merge: assert the ancestry, not a hard-coded parent.
+    from alembic.config import Config
+    from alembic.script import ScriptDirectory
+
+    cfg = Config(str(ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(ROOT / "alembic"))
+    ancestors = {
+        rev.revision
+        for rev in ScriptDirectory.from_config(cfg).walk_revisions(base="base", head=mod.revision)
+    }
+    assert "0117_community_role_kind" in ancestors
     assert tuple(mod.MODERATOR_ROOM_SCOPES) == MODERATION
     src = (ROOT / "alembic" / "versions" / "0118_room_scopes_moderator.py").read_text()
     assert "role_kind = 2" in src
