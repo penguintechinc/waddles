@@ -99,7 +99,8 @@ jobs:
         run: |
           set -euo pipefail
           python3 -c 'import sys; assert sys.version_info[:2] == (3, 13), sys.version'
-          make --version | head -1
+          # awk drains stdin; `head` would close the pipe early and SIGPIPE make under pipefail (exit 141).
+          make --version | awk 'NR==1'
 
       - name: Install protoc toolchain (hash-locked)
         run: python3 -m pip install --no-cache-dir --require-hashes -r scripts/requirements-protoc.txt
