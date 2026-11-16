@@ -6,7 +6,7 @@
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
         check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
+        test-seaweedfs-sse-kms test-helm-pending-recover test-smoke-pod-phase publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
@@ -120,6 +120,13 @@ test-alpha-smoke:
 # stub-driven test of that recovery logic, no cluster touched.
 test-helm-pending-recover:
 	@bash scripts/test-helm-pending-recover.sh
+
+# Deploy smoke-step regression: the generic pod-phase scan must exclude precompile batch
+# pods by NAME (a pre-label CronJob pod does not carry waddlebot.io/workload, and k8s `!=`
+# selects label-less pods), and a Failed precompile batch Job must still trip the gate.
+test-smoke-pod-phase:
+	@bash scripts/ci/smoke/tests/test-pod-phase-check.sh
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/smoke/tests/test_precompile_batch_gate.py
 
 # No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
 # wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
