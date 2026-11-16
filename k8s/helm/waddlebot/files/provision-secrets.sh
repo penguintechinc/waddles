@@ -181,6 +181,10 @@ fetch_secret() { # <name> <dest dir> -> sets F_EXISTS F_RV F_KEEP F_MARK F_CID F
     die "kubectl get secret/${name} failed: $(errhead "${err}")"
   fi
   F_EXISTS=1
+  # kubectl's go-template prints the literal "<no value>" for a missing key inside a NON-empty
+  # annotations map (a nil map skips `with`, hence ""). Treat it as absent, or an existing Secret
+  # that has other annotations but no marker/cert annotation looks like a mismatching stamp.
+  out="${out//'<no value>'/}"
   while IFS=' ' read -r tag a b; do
     case "${tag}" in
       RV) F_RV="${a}" ;;

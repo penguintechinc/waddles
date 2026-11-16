@@ -41,6 +41,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use circuit_breaker::valkey_resilience::{Backoff, LogThrottle, SharedConn};
 use circuit_breaker::CircuitBreaker;
 use penguin_spine::{Grant, Scope, SpineClient, SpineConfig, SpineMetrics};
 use sea_orm::DatabaseConnection;
@@ -94,7 +95,24 @@ fn dispatch_key(t: &DispatchTarget) -> DispatchKey {
 /// dropped Valkey connection, a spine-client connect failure, ...) before
 /// reconnecting -- same constant/rationale as `core/svc_process/src/
 /// source_supervisor.rs::CONSUMER_RETRY_BACKOFF`.
-const CONSUMER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+///
+/// Superseded by capped exponential full-jitter [`Backoff`] (250ms -> 30s)
+/// after the 2026-11 Valkey connection storm; only the floor remains.
+const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Next jittered retry delay for a consumer, never below [`MIN_RETRY_DELAY`]
+/// (full jitter can otherwise draw ~0 and spin).
+fn retry_delay(backoff: &mut Backoff) -> Duration {
+    backoff.next_delay().max(MIN_RETRY_DELAY)
+}
+
+/// `true` when `err` means the shared Valkey connection itself is unusable
+/// (I/O error, dropped, timed out, refused) and must be rebuilt -- never for
+/// logical errors like `NOGROUP`/`WRONGTYPE`.
+pub(crate) fn is_connection_error(err: &penguin_spine::SpineError) -> bool {
+    matches!(err, penguin_spine::SpineError::Redis(e)
+        if e.is_io_error() || e.is_connection_dropped() || e.is_timeout() || e.is_connection_refusal())
+}
 
 /// Builds the [`Grant`] for one dispatch target -- pulled out as a pure
 /// function so stream-key parity with the writer (this module's own doc) is
@@ -158,6 +176,11 @@ pub struct SupervisorDeps {
     /// per app) -- cloned into every spawned consumer's own `DispatchDeps`,
     /// see `crate::dispatch::DispatchDeps::breaker`'s doc.
     pub breaker: Arc<CircuitBreaker>,
+    /// ONE process-shared spine client (single TLS connection + startup
+    /// probe) cloned into every consumer; see `circuit_breaker::valkey_resilience`.
+    pub shared_spine: Arc<SharedConn<SpineClient>>,
+    /// Rate-limits identical retry WARNs across all consumers.
+    pub log_throttle: Arc<LogThrottle>,
 }
 
 /// A running per-app dispatch consumer: a shutdown signal plus the
@@ -233,38 +256,50 @@ async fn run_app_consumer(
     deps: Arc<SupervisorDeps>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
+    let mut backoff = Backoff::default();
     loop {
         let (grant, stream_key) = target_grant(&target);
 
-        if let Err(err) =
-            dispatch::ensure_consumer_group(&deps.spine_cfg, &stream_key, &target.app_id).await
+        // ONE process-shared connection (probe + TLS handshake once), cloned
+        // per consumer -- never one TLS connection per stream.
+        let (spine_client, generation) = match deps
+            .shared_spine
+            .get_or_connect(|| SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone()))
+            .await
         {
-            tracing::warn!(
-                tenant_id = target.tenant_id, community_id = target.community_id,
-                app_id = %target.app_id, stream = %stream_key, error = %err,
-                "dispatch consumer: ensure consumer group failed, retrying"
-            );
-            if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
+            Ok(pair) => pair,
+            Err(err) => {
+                if let Some(suppressed) = deps.log_throttle.check("dispatch.connect") {
+                    tracing::warn!(
+                        tenant_id = target.tenant_id, community_id = target.community_id,
+                        app_id = %target.app_id, stream = %stream_key, error = %err, suppressed,
+                        "dispatch consumer: spine client connect failed, retrying"
+                    );
+                }
+                if wait_or_shutdown(&mut shutdown, retry_delay(&mut backoff)).await {
+                    return;
+                }
+                continue;
+            }
+        };
+
+        if let Err(err) = spine_client.ensure_group(&stream_key, &target.app_id).await {
+            if is_connection_error(&err) {
+                deps.shared_spine.invalidate(generation).await;
+            }
+            if let Some(suppressed) = deps.log_throttle.check("dispatch.ensure_group") {
+                tracing::warn!(
+                    tenant_id = target.tenant_id, community_id = target.community_id,
+                    app_id = %target.app_id, stream = %stream_key, error = %err, suppressed,
+                    "dispatch consumer: ensure consumer group failed, retrying"
+                );
+            }
+            if wait_or_shutdown(&mut shutdown, retry_delay(&mut backoff)).await {
                 return;
             }
             continue;
         }
-
-        let spine_client =
-            match SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone()).await {
-                Ok(c) => c,
-                Err(err) => {
-                    tracing::warn!(
-                        tenant_id = target.tenant_id, community_id = target.community_id,
-                        app_id = %target.app_id, stream = %stream_key, error = %err,
-                        "dispatch consumer: spine client connect failed, retrying"
-                    );
-                    if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
-                        return;
-                    }
-                    continue;
-                }
-            };
+        backoff.reset();
 
         let dispatch_deps = DispatchDeps {
             app_id: target.app_id.clone(),
@@ -286,19 +321,20 @@ async fn run_app_consumer(
             tenants: DbTenantResolver::new(deps.db.clone()),
             usage: Arc::clone(&deps.usage),
             consumer_id: deps.spine_cfg.consumer_id.clone(),
-            spine: spine_client,
+            spine: spine_client.clone(),
             metrics: deps.metrics.clone(),
             app_version_snapshot: deps.app_version_snapshot.clone(),
             breaker: Arc::clone(&deps.breaker),
         };
 
         let (inner_tx, inner_rx) = oneshot::channel();
-        let run_fut = dispatch::run(
+        let run_fut = dispatch::run_with_client(
             deps.spine_cfg.clone(),
             vec![grant],
             stream_key.clone(),
             dispatch_deps,
             Arc::clone(&deps.rust_data_plane),
+            spine_client,
             inner_rx,
         );
         tokio::pin!(run_fut);
@@ -313,21 +349,28 @@ async fn run_app_consumer(
                 match result {
                     Ok(()) => return,
                     Err(err) if dispatch::is_nogroup_error(&err) => {
-                        tracing::warn!(
-                            tenant_id = target.tenant_id, community_id = target.community_id,
-                            app_id = %target.app_id, stream = %stream_key,
-                            "dispatch consumer: consumer group not yet provisioned (NOGROUP), retrying"
-                        );
+                        if let Some(suppressed) = deps.log_throttle.check("dispatch.nogroup") {
+                            tracing::warn!(
+                                tenant_id = target.tenant_id, community_id = target.community_id,
+                                app_id = %target.app_id, stream = %stream_key, suppressed,
+                                "dispatch consumer: consumer group not yet provisioned (NOGROUP), retrying"
+                            );
+                        }
                     }
                     Err(err) => {
-                        tracing::error!(
-                            tenant_id = target.tenant_id, community_id = target.community_id,
-                            app_id = %target.app_id, stream = %stream_key, error = %err,
-                            "dispatch consumer exited, retrying"
-                        );
+                        if is_connection_error(&err) {
+                            deps.shared_spine.invalidate(generation).await;
+                        }
+                        if let Some(suppressed) = deps.log_throttle.check("dispatch.exited") {
+                            tracing::error!(
+                                tenant_id = target.tenant_id, community_id = target.community_id,
+                                app_id = %target.app_id, stream = %stream_key, error = %err, suppressed,
+                                "dispatch consumer exited, retrying"
+                            );
+                        }
                     }
                 }
-                if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
+                if wait_or_shutdown(&mut shutdown, retry_delay(&mut backoff)).await {
                     return;
                 }
             }

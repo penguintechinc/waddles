@@ -35,6 +35,7 @@ from services.bundle_global_state_service import version_by_id
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.scope_registry import SCOPE_BUNDLE_ACTIVATION
 
 bundle_activation_bp = Blueprint(
     "v1_bundle_activation", __name__, url_prefix="/api/v1/apps/community"
@@ -179,7 +180,14 @@ async def activation_access_grants(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_ACTIVATION,
+        )
         _, version = await svc.resolve_activation_version(
             install_dal, tenant_id=ctx.tenant_id, app_id=app_id
         )
@@ -212,7 +220,14 @@ async def activate(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_ACTIVATION,
+        )
         result = await svc.activate_for_community_with_warnings(
             install_dal,
             tenant_id=ctx.tenant_id,
@@ -246,7 +261,14 @@ async def deactivate(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_ACTIVATION,
+        )
         await svc.deactivate_for_community(
             install_dal,
             tenant_id=ctx.tenant_id,
@@ -255,6 +277,7 @@ async def deactivate(
             deactivated_by=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.debug("handled %s in bundle_activation: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message=f"{app_id} deactivated")
 

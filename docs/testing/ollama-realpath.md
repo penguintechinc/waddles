@@ -1,4 +1,7 @@
-# Real-endpoint Ollama integration tests (WaddleAI router, AI Researcher, AI Interaction)
+# Real-endpoint Ollama integration tests (hub-api AI router)
+
+The former AI Researcher / AI Interaction module suites were removed with those v2 modules;
+the hub-api router suite below is the only real-endpoint Ollama suite.
 
 Env-gated tests that drive the AI code paths against a **live local Ollama** with no mocked
 transport. They test the **integration** -- request shape, response parsing, gate verdicts being
@@ -8,8 +11,6 @@ available; nothing asserts "input X -> content Y".
 | Suite | Code under test | File |
 |---|---|---|
 | hub-api router + provider clients | `hub_api/services/ai_routing/` (`OllamaClient`, `route_completion`, OpenAI/Anthropic BYOK clients, `pii_redaction`) | `hub_api/tests/test_ai_routing_ollama_realpath.py` |
-| AI Researcher | `core/ai_researcher_module` (`AIProviderService`, `ResearchService` + `SafetyLayer`, `SummaryService`) | `core/ai_researcher_module/tests/test_ai_researcher_ollama_realpath.py` |
-| AI Interaction | `action/interactive/ai_interaction_module` (`OllamaProvider`, `WaddleAIProvider`, `AIService`) | `action/interactive/ai_interaction_module/tests/test_ai_interaction_ollama_realpath.py` |
 
 ## Run
 
@@ -20,21 +21,14 @@ cannot fail). The endpoint is LAN-only, so run from a machine that can reach it.
 ```bash
 export WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
 
-# one suite at a time -- never several in parallel (see "One query at a time")
+# never run several real-endpoint sessions in parallel (see "One query at a time")
 (cd hub_api && python3 -m pytest tests/test_ai_routing_ollama_realpath.py -v -rs)
-(cd core/ai_researcher_module && python3 -m pytest tests/test_ai_researcher_ollama_realpath.py -v -rs)
-(cd action/interactive/ai_interaction_module && python3 -m pytest tests/test_ai_interaction_ollama_realpath.py -v -rs)
 
-# or just the marked tests inside any one module directory
-python3 -m pytest -m ollama_realpath -v -rs
-
-# or all three, strictly sequentially (each module's test deps must be installed)
+# or via make
 make test-ollama-realpath WADDLE_TEST_OLLAMA_URL=http://192.168.2.105:11434/
 ```
 
-`-rs` prints the skip reasons. All three suites together are 40 tests and send about 40 requests
-(roughly 22 generations, mostly 16-128 tokens; the rest are metadata GETs or instant 404s); the three
-runs take well under two minutes on an idle box.
+`-rs` prints the skip reasons.
 
 | Env var | Default | Meaning |
 |---|---|---|
@@ -71,8 +65,8 @@ no GPU, runs in CI.
   headers, and **no `format`** for a text-only model.
 * **Parsed response**: non-empty `str`, provider/model/tier fields, input/output token counts > 0,
   `json_mode` correct, typed errors (`AI_PROVIDER_ERROR`, `EmptyCompletionError`, ...).
-* **Verdicts consumed**: the router's flag/kill-switch/entitlement refusals and the Researcher's
-  `SafetyLayer` verdicts result in **zero** requests reaching the model; premium metering debits
+* **Verdicts consumed**: the router's flag/kill-switch/entitlement refusals result in **zero**
+  requests reaching the model; premium metering debits
   exactly the usage numbers the provider reported; ambient fallback serves the *free* tier's
   capability.
 * **Errors**: unknown model -> real 404 -> typed error (no retry storm, endpoint URL not leaked).
@@ -96,15 +90,13 @@ is **configuration**, never inferred from a model name and never a hardcoded tie
 |---|---|---|---|
 | hub-api free tier | `OLLAMA_URL`, `AI_FREE_MODEL`, **`AI_FREE_SUPPORTS_JSON`**, `AI_FREE_DISABLE_THINKING` | model unchanged; `false`, `true` | text path unless the operator declares JSON support |
 | hub-api premium tier | `OLLAMA_PREMIUM_URL`, `AI_PREMIUM_MODEL`, **`AI_PREMIUM_SUPPORTS_JSON`**, `AI_PREMIUM_DISABLE_THINKING` | model unchanged; `false`, `true` | same, per tier |
-| AI Researcher | `OLLAMA_MODEL`, **`OLLAMA_SUPPORTS_JSON`**, `OLLAMA_DISABLE_THINKING` | `false`, `true` | summaries use plain labeled-text prompts/parsers unless JSON is declared |
-| AI Interaction | `OLLAMA_MODEL`, `OLLAMA_DISABLE_THINKING` | `true` | chat replies are plain text on every model; no JSON params are ever sent |
 
 Booleans are parsed strictly (`true/false/1/0/yes/no/on/off`); a typo raises at startup instead of
 silently picking a default.
 
 How it behaves:
 
-* `AIRequest.wants_json` (hub-api) / `generate(..., want_json=True)` (Researcher) is a **request**.
+* `AIRequest.wants_json` (hub-api) is a **request**.
   Ollama's `format: json` is sent **only** when the configured model `supports_json`; otherwise the
   call is plain text.
 * The reply says which one happened -- `AIResponse.json_mode` -- and in JSON mode the text has
@@ -136,18 +128,4 @@ printed; zero is a failure).
 ## Known gaps found while writing these tests (not fixed here)
 
 * **No LLM-based safety classifier is wired anywhere.** `shieldgemma` is exercised only as "the
-  safety model works on the standard text path"; the Researcher's gate is the regex/topic
-  `SafetyLayer`. A shieldgemma verdict consumer is new product work.
-* `ResearchService` still calls `rate_limiter.check_limit(key, limit_type)` and
-  `mem0_service.search(query=, community_id=, ...)` / `.add(...)`, but the real `RateLimiter.check_limit`
-  takes `(community_id, user_id, limit_type)` and returns a `RateLimitResult`, and `Mem0Service` has
-  `search(query, limit)` / `add_memory(...)`. Those errors are swallowed (rate limiting fails open;
-  semantic cache silently misses), so the rate limit is currently not enforced. Tests use stand-ins
-  for those stores; fixing the contracts is a follow-up.
-* `AI_PROVIDER=waddleai` (a documented option) makes `AIProviderService` raise at construction --
-  there is no WaddleAI branch in the Researcher's `AIProvider` enum.
-* `SummaryService` talks to the DB via `db.execute(query, [params])` (asyncpg-style) on an `AsyncDAL`
-  handle; the live path is untested.
-* `core/ai_researcher_module/tests/test_security_headers_cors.py::...::test_healthz_is_exempt_from_the_auth_gate`
-  is host-CPU-sensitive (`/healthz` returns 503 when `psutil.cpu_percent()` > 95) and flakes on a
-  loaded machine; unrelated to these changes.
+  safety model works on the standard text path". A shieldgemma verdict consumer is new product work.

@@ -944,7 +944,7 @@ fn bounded_push_pipeline(key: &str, value: &str) -> redis::Pipeline {
     pipe
 }
 
-impl RelayQueue for redis::aio::MultiplexedConnection {
+impl RelayQueue for redis::aio::ConnectionManager {
     fn lpush<'a>(
         &'a self,
         key: &'a str,
@@ -1014,7 +1014,7 @@ impl RelayQueue for redis::aio::MultiplexedConnection {
 /// The real capability implementations this stage wires today. Generic
 /// over [`RelayQueue`] so `handle_relay` is fully unit-testable against a
 /// fake queue without a live Valkey server -- production callers
-/// instantiate `StageCapabilities<redis::aio::MultiplexedConnection>`.
+/// instantiate `StageCapabilities<redis::aio::ConnectionManager>`.
 /// Also generic over [`KvBackend`] (defaulted to the same production
 /// connection type) for the identical reason: `handle_kv`'s argument-
 /// parsing/error-mapping is unit-testable against a fake implementing the
@@ -1059,7 +1059,7 @@ pub struct DbV2Wiring {
     pub capabilities: Arc<DbCapabilitySnapshot>,
 }
 
-pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::MultiplexedConnection> {
+pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::ConnectionManager> {
     relay_queue: Q,
     egress: Arc<EgressGuard>,
     /// Shared with the dispatch loop's own `DispatchDeps::usage` so a
@@ -1332,10 +1332,10 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     }
 
     /// Enables the `kv` capability over `backend` (production:
-    /// `redis::aio::MultiplexedConnection` -- the exact same direct Valkey
+    /// `redis::aio::ConnectionManager` -- the exact same direct Valkey
     /// connection `lib.rs`'s `build_stage_capabilities` already opens for
     /// `relay`/usage metering, cloned rather than opening a second
-    /// connection, since `MultiplexedConnection::clone` is a cheap handle
+    /// connection, since `ConnectionManager::clone` is a cheap handle
     /// clone over one shared TCP connection, not a new socket). Builder-
     /// style so a deployment where the Valkey connection failed to open can
     /// still construct every other capability and simply skip this call,
@@ -3449,6 +3449,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
                 "not_implemented",
                 "platform-table is hosted by the process stage only (not the action stage)",
             )),
+            // `object_storage.*` is likewise hosted by the PROCESS stage only (its S3
+            // wiring + audit sink live in `svc_process::bundle_storage`). Fail LOUD
+            // instead of falling into `handle_db`'s unrelated `storage.tables` path.
+            CapabilityKind::Db if call.op.starts_with("object_storage.") => Err(denied(
+                "not_implemented",
+                "object-storage is hosted by the process stage only (not the action stage)",
+            )),
             CapabilityKind::Db if bundle_host_db::v2::wire::is_v2_op(&call.op) => {
                 self.handle_db_v2(scope, &call).await
             }
@@ -5064,6 +5071,27 @@ mod tests {
         }
     }
 
+    /// regression: object_storage.* used to fall into `handle_db` on the action stage.
+    #[tokio::test]
+    async fn object_storage_is_refused_loudly_on_the_action_stage() {
+        let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
+        for op in [
+            "object_storage.put",
+            "object_storage.get",
+            "object_storage.list",
+        ] {
+            let err = capabilities
+                .handle(
+                    &scope(),
+                    call(CapabilityKind::Db, op, serde_json::json!({})),
+                )
+                .await
+                .unwrap_err();
+            assert_eq!(err.code, "not_implemented", "{op}");
+            assert!(err.message.contains("process stage only"), "{op}");
+        }
+    }
+
     #[tokio::test]
     async fn db_capability_rejects_an_unknown_op() {
         let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
@@ -5463,6 +5491,7 @@ mod tests {
                     "CANARY_COMMUNITY_ID" => "1",
                     "CANARY_GUILD_ID" => "1000000000000000001",
                     "CANARY_CHANNEL_ID" => "123456789012345678",
+                    "CANARY_ENVIRONMENT" => "alpha",
                     _ => return None,
                 }
                 .to_string(),

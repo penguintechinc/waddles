@@ -171,6 +171,16 @@ where
     // would bind to the no-op default provider and silently record nothing.
     // Every later `stage_metrics::stage_metrics()` call returns this same set.
     let _ = stage_metrics::stage_metrics();
+    // Executor language partition: parse EXECUTOR_LANGUAGE_CLASSES now and refuse to start on a
+    // malformed table -- a silent default would route bundles to the wrong executor class.
+    bundle_active_set::concurrent::init_tuning_from_env()
+        .map_err(|e| anyhow::anyhow!("invalid drain tuning: {e}"))?;
+    bundle_active_set::init_table_from_env().map_err(|e| {
+        anyhow::anyhow!(
+            "invalid {}: {e}",
+            bundle_active_set::partition::ENV_LANGUAGE_CLASSES
+        )
+    })?;
     // Command-latency kill switch: ENV baseline now, live PostHog value via the refresher.
     command_latency::switch::init_from_env();
     let _ = command_latency::metrics::metrics();
@@ -552,7 +562,7 @@ fn kv_degraded(reason: &str, detail: &str) {
 /// username/password/TLS/CA-file settings -- the same client-construction
 /// logic as `crate::usage::connect` (duplicated rather than shared: that
 /// function also opens the connection and returns
-/// `Result<MultiplexedConnection, UsageError>`, not the reusable
+/// `Result<ConnectionManager, UsageError>`, not the reusable
 /// `redis::Client` `grant_gate::build_production_gate`'s caller needs to
 /// hand to `run_grant_gate_refresh_loop`). `None` (logged) on a malformed
 /// `VALKEY_URL` or a TLS client-build failure.
@@ -787,7 +797,7 @@ async fn build_stage_capabilities(
             poll_interval,
         ),
     };
-    let caps = capabilities::StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+    let caps = capabilities::StageCapabilities::<_, redis::aio::ConnectionManager>::new(
         relay_conn, egress, usage, gate,
     );
     let caps = match kv_conn {
@@ -1030,8 +1040,8 @@ async fn start_event_sync_consumer(
     spine_cfg: &penguin_spine::SpineConfig,
     caps: Arc<
         capabilities::StageCapabilities<
-            redis::aio::MultiplexedConnection,
-            redis::aio::MultiplexedConnection,
+            redis::aio::ConnectionManager,
+            redis::aio::ConnectionManager,
         >,
     >,
 ) {
@@ -1539,6 +1549,12 @@ fn try_start_changelog_consumer(
                                 breaker: Arc::new(circuit_breaker::CircuitBreaker::new(
                                     Arc::clone(&breaker_metrics),
                                 )),
+                                shared_spine: Arc::new(
+                                    circuit_breaker::valkey_resilience::SharedConn::new(),
+                                ),
+                                log_throttle: Arc::new(
+                                    circuit_breaker::valkey_resilience::LogThrottle::default(),
+                                ),
                             });
                             Some(Arc::new(dispatch_supervisor::SpineConsumerSupervisor {
                                 deps,
@@ -1683,6 +1699,7 @@ fn try_start_dispatch(
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,

@@ -124,6 +124,7 @@ impl media::Host for ExecState {
 mod tests {
     #![allow(clippy::unwrap_used, clippy::expect_used)]
 
+    use super::media::Host as _;
     use super::*;
 
     fn denied(code: &str, message: &str) -> ExecutorError {
@@ -219,6 +220,113 @@ mod tests {
         assert!(matches!(
             media_error_from(ExecutorError::ConnectionUnavailable),
             media::Error::Backend(_)
+        ));
+    }
+
+    use penguin_bundle_host::wire::{
+        read_frame, write_frame, Frame, HostResultBody, HostResultError, Message,
+    };
+
+    /// Bridge to a stub stage answering every `media.*` db op from a canned table; a prompt of
+    /// `"deny"` (or job id `"deny"`) is refused with a typed `quota` error.
+    async fn media_state() -> ExecState {
+        let (exec_io, stage_io) = tokio::io::duplex(16 * 1024);
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(stage_io);
+            let hello = read_frame(&mut r).await.unwrap();
+            let ok = penguin_bundle_host::wire::HelloOkBody {
+                stage: "svc-test".to_string(),
+                protocol_version: 1,
+                limits: penguin_bundle_host::wire::HelloLimits {
+                    call_timeout_ms: 1000,
+                    memory_mb: 64,
+                    max_concurrent_calls: 4,
+                },
+            };
+            write_frame(&mut w, &Frame::new(hello.id, Message::HelloOk(ok)))
+                .await
+                .unwrap();
+            while let Ok(frame) = read_frame(&mut r).await {
+                let Message::HostCall(body) = frame.message else {
+                    continue;
+                };
+                let denied = body.args.to_string().contains("deny");
+                let reply = if denied {
+                    HostResultBody {
+                        result: None,
+                        error: Some(HostResultError {
+                            code: "quota".to_string(),
+                            message: "minute".to_string(),
+                        }),
+                    }
+                } else {
+                    let v = match body.op.as_str() {
+                        "media.generate_image" => {
+                            serde_json::json!({"handle": "media://1/2/x.png"})
+                        }
+                        "media.submit_music" | "media.submit_video" => {
+                            serde_json::json!({"job_id": "job-1"})
+                        }
+                        "media.job_status" => serde_json::json!({"state": "pending"}),
+                        "media.object_url" => serde_json::json!({"url": "https://example.test/x"}),
+                        _ => serde_json::json!({}),
+                    };
+                    HostResultBody {
+                        result: Some(v),
+                        error: None,
+                    }
+                };
+                if write_frame(&mut w, &Frame::new(frame.id, Message::HostResult(reply)))
+                    .await
+                    .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        let bridge = crate::stage_bridge::bridge_to_stage(exec_io).await.unwrap();
+        ExecState::new(Some(bridge), "waddles.test.media".to_string(), 1)
+    }
+
+    /// Every `media` host import round-trips over the real host-call path and maps typed
+    /// stage errors onto the WIT variants.
+    #[tokio::test]
+    async fn media_imports_round_trip_and_map_stage_errors() {
+        let mut st = media_state().await;
+        assert_eq!(
+            st.generate_image("a cat".into()).await.unwrap(),
+            "media://1/2/x.png"
+        );
+        assert_eq!(st.submit_music("a tune".into()).await.unwrap(), "job-1");
+        assert_eq!(st.submit_video("a clip".into()).await.unwrap(), "job-1");
+        assert!(matches!(
+            st.job_status("job-1".into()).await.unwrap(),
+            media::JobState::Pending
+        ));
+        assert_eq!(
+            st.object_url("media://1/2/x.png".into()).await.unwrap(),
+            "https://example.test/x"
+        );
+
+        assert!(matches!(
+            st.generate_image("deny".into()).await,
+            Err(media::Error::Quota(_))
+        ));
+        assert!(matches!(
+            st.submit_music("deny".into()).await,
+            Err(media::Error::Quota(_))
+        ));
+        assert!(matches!(
+            st.submit_video("deny".into()).await,
+            Err(media::Error::Quota(_))
+        ));
+        assert!(matches!(
+            st.job_status("deny".into()).await,
+            Err(media::Error::Quota(_))
+        ));
+        assert!(matches!(
+            st.object_url("deny".into()).await,
+            Err(media::Error::Quota(_))
         ));
     }
 }
