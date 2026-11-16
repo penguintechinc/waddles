@@ -56,6 +56,7 @@ from services import marketplace_billing_service as svc
 from services import paypal_service, stripe_service
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_dal, reads_from_replica
 from services.errors import ApiError
 
 premium_bp = Blueprint("v1_marketplace_premium", __name__, url_prefix="/api/v1/marketplace/premium")
@@ -130,9 +131,10 @@ def _require_community_admin(community_id: int) -> tuple[dict[str, object], int]
 
 @premium_bp.route("/pricing", methods=["GET"])
 @validate_response(svc.PricingConfigDTO)
+@reads_from_replica("marketplace_billing.get_pricing")
 async def get_pricing() -> svc.PricingConfigDTO:
-    """`GET /pricing` -- public (matches Node: no `requireAuth`)."""
-    dal = _dal()
+    """`GET /pricing` -- public (matches Node: no `requireAuth`); replica lag is fine."""
+    dal = get_read_dal()
     base_price, base_seat_limit, overage_price = svc.get_pricing_config(dal)
     community_id_raw = request.args.get("communityId")
     if community_id_raw is None:

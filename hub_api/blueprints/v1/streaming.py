@@ -34,6 +34,7 @@ from services import stream_keys_service as svc
 from services.community_authz import authorize_community
 from services.errors import ApiError, bad_request, payment_required
 from services.schema import bind_stream_keys_tables
+from services.scope_registry import SCOPE_STREAM_CONFIG
 from services.stream_keys_service import (
     StreamConfigDTO,
     StreamDestinationDTO,
@@ -123,7 +124,9 @@ def _dal() -> tuple[Any, Any]:
 async def _authorize(community_id: int, *, require_broadcast: bool = False) -> tuple[Any, Any]:
     """Tenant + community-admin gate (and optionally the broadcast flag); returns the DAL pair."""
     async_dal, dal = _dal()
-    await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+    await authorize_community(
+        request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_STREAM_CONFIG
+    )
     if require_broadcast:
         ctx = get_tenant_context(request)
         assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this

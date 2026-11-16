@@ -220,6 +220,8 @@ pub struct SupervisorDeps {
     pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
     /// See `crate::spine::ProcessDeps::platform_table_wiring`'s doc.
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// See `crate::spine::ProcessDeps::object_storage_wiring`'s doc.
+    pub object_storage_wiring: Option<crate::capabilities::ObjectStorageWiring>,
     /// See `crate::spine::ProcessDeps::gameserver_net_wiring`'s doc.
     pub gameserver_net_wiring: Option<crate::capabilities::GameServerNetWiring>,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
@@ -283,6 +285,7 @@ impl SupervisorDeps {
             reputation_wiring: self.reputation_wiring.clone(),
             economy_wiring: self.economy_wiring.clone(),
             platform_table_wiring: self.platform_table_wiring.clone(),
+            object_storage_wiring: self.object_storage_wiring.clone(),
             gameserver_net_wiring: self.gameserver_net_wiring.clone(),
             identity_wiring: self.identity_wiring.clone(),
             ai_wiring: self.ai_wiring.clone(),

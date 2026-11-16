@@ -43,6 +43,9 @@ _CATALOG = yaml.safe_load(
     )
 )
 _ROLES = list(_CATALOG["roles"])
+#: Credentials-Secret keys for roles outside the service catalog (alembic 0080 INSERT-only audit sink).
+_EXTRA_CRED_KEYS = {"PW_WADDLES_BUNDLE_STORAGE_AUDIT"}
+_EXPECTED_CRED_KEYS = {f"PW_{r.upper()}" for r in _ROLES} | _EXTRA_CRED_KEYS
 _OWNER = "waddlebot"
 _OWNER_SECRET_KEYS = {
     "POSTGRES_PASSWORD",
@@ -271,9 +274,9 @@ def test_role_passwords_are_distinct_strong_and_match_the_migrate_hook(
 ) -> None:
     docs = renders[env_name]
     creds = _secret(docs, "waddlebot-db-credentials")
-    assert set(creds) == {f"PW_{r.upper()}" for r in _ROLES}
+    assert set(creds) == _EXPECTED_CRED_KEYS
     values = list(creds.values())
-    assert len(set(values)) == len(_ROLES), "role passwords must be pairwise distinct"
+    assert len(set(values)) == len(_EXPECTED_CRED_KEYS), "role passwords must be pairwise distinct"
     for key, value in creds.items():
         assert re.fullmatch(r"[A-Za-z0-9._~-]{16,}", value), key
         assert not re.search(r"(?i)changeme|change_me|replace_me|example|password|dev_", value), key
@@ -297,8 +300,8 @@ def test_production_tier_generates_role_credentials_without_manual_steps(helm_av
     """
     docs = _render("--values", str(_CHART_DIR / "values-production.yaml"))
     creds = _secret(docs, "waddlebot-db-credentials")
-    assert set(creds) == {f"PW_{r.upper()}" for r in _ROLES}
-    assert len(set(creds.values())) == len(_ROLES)
+    assert set(creds) == _EXPECTED_CRED_KEYS
+    assert len(set(creds.values())) == len(_EXPECTED_CRED_KEYS)
     for key, value in creds.items():
         assert re.fullmatch(r"[A-Za-z0-9_-]{43}", value), key  # 256-bit base64url
     assert len(_secret(docs, "waddlebot-db-admin")["POSTGRES_PASSWORD"]) == 43

@@ -136,7 +136,8 @@ async fn relay_queues_the_token_unchanged_and_never_a_name_on_real_valkey() {
     let url = std::env::var("VALKEY_URL")
         .expect("VALKEY_URL must be set: this test needs a REAL Valkey (no silent skip)");
     let client = redis::Client::open(url).expect("valid VALKEY_URL");
-    let mut conn = redis::aio::ConnectionManager::new(client)
+    let mut conn = client
+        .get_connection_manager()
         .await
         .expect("connect to real Valkey");
     let _: () = redis::cmd("DEL")

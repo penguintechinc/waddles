@@ -27,19 +27,17 @@ global:
 # Namespace and fail install with "cannot be imported into the current release".
 namespaceCreate: false
 
-# Dummy, obviously-fake platform credentials -- CI never talks to real Discord/Twitch.
-# waddlebot-platform-credentials is created out-of-band by the workflow (kubectl create
+# CI never talks to real Discord/Twitch. The dummy tokens live in
+# waddlebot-platform-credentials, created out-of-band by the workflow (kubectl create
 # secret) BEFORE `helm install`, exactly like a real operator would before first install,
-# so the chart's lookup-then-generate-or-require hook path is exercised for real.
+# so the chart's lookup-then-generate-or-require hook path is exercised for real. Only the
+# non-secret IRC nick/channel are chart values.
 oauth:
-  discord:
-    botToken: "ci-dummy-discord-bot-token-never-real"
   twitch:
-    oauthToken: "oauth:ci-dummy-twitch-irc-token-never-real"
     nick: "waddlebot_ci"
     channels: "#waddlebot_ci_channel"
 
-# svc-ingest-rust's Discord gateway / Twitch IRC connection with the dummy token above
+# svc-ingest-rust's Discord gateway / Twitch IRC connection with the dummy tokens
 # will fail to authenticate -- that is expected and must degrade (log + retry/backoff),
 # never crashloop the Job/Deployment hard enough to fail `helm install --wait`. Tracked
 # gap: rustDataPlane has no dedicated "offline/no external connectors" flag yet; until
@@ -49,12 +47,6 @@ oauth:
 pipeline:
   rustDataPlane:
     enabled: true
-    svcIngestRust:
-      replicas: 1
-    svcProcessRust:
-      replicas: 1
-    svcActionRust:
-      replicas: 1
     # svc-bundles-executor is not in helm-chart-e2e.yml's kind-load image list (its
     # core/bundle_executor/Dockerfile.rust does exist) -- disabling it here isn't a scope-cut,
     # it's the only image reference that can't be satisfied at all right now.

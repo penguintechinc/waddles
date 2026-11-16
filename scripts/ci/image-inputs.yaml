@@ -52,6 +52,8 @@ images:
       - hub_api/app.py
       - hub_api/config.py
       - hub_api/bootstrap.py
+      - hub_api/healthcheck.py
+      - hub_api/telemetry.py
       - hub_api/blueprints/**
       - hub_api/routers/**
       - hub_api/openapi/**
@@ -71,6 +73,7 @@ images:
       - admin/hub_module/webui-server/package*.json
       - admin/hub_module/webui-server/server.js
       - admin/hub_module/webui-server/proxy.js
+      - admin/hub_module/webui-server/tls.js
 
   migrations:
     dockerfile: migrations/Dockerfile
@@ -118,6 +121,7 @@ images:
     groups: [ctx-root]
     inputs:
       - core/bundle_executor/**
+      - core/platform_keys/**
       - wit/**
 
   svc-ingest:
@@ -131,6 +135,7 @@ images:
       - core/svc_ingest/Cargo.lock
       - core/svc_ingest/src/**
       - core/bundle_host_http/**
+      - core/command_latency/**
       - core/circuit_breaker/**
       - core/connection_resolver/**
       - core/discord_mentions/**
@@ -163,6 +168,7 @@ images:
       - core/bundle_host_reputation/**
       - core/bundle_host_storage/**
       - core/bundle_tool_call/**
+      - core/command_latency/**
       - core/circuit_breaker/**
       - core/connection_resolver/**
       - core/egress_assertion/**
@@ -187,6 +193,7 @@ images:
       - core/bundle_host_http/**
       - core/bundle_host_kv/**
       - core/bundle_tool_call/**
+      - core/command_latency/**
       - core/circuit_breaker/**
       - core/connection_resolver/**
       - core/discord_mentions/**
