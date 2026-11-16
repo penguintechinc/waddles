@@ -257,6 +257,26 @@ fn note_routing(state: &mut ConsumerState, router: &bundle_active_set::SessionRo
     crate::stage_metrics::stage_metrics().record_slot_owner_changes(changed);
 }
 
+/// Fail-loud executor-partition check (see `bundle_active_set::partition`): logs at ERROR when
+/// the unroutable set changes and counts `executor_partition_unroutable_total` per tick.
+fn note_unroutable(
+    state: &mut ConsumerState,
+    router: &bundle_active_set::SessionRouter,
+    table: &bundle_active_set::LanguageTable,
+    active: &HashMap<AppScope, bundle_active_set::ActiveBundleRow>,
+) {
+    let counts = state.routing_observer.observe_unroutable(
+        router,
+        table,
+        active
+            .iter()
+            .map(|(scope, row)| (scope.2.as_str(), row.language.as_str())),
+    );
+    for (label, n) in counts {
+        crate::stage_metrics::stage_metrics().record_partition_unroutable(label, n);
+    }
+}
+
 impl ConsumerState {
     /// Updates the executor membership + kill-switch view [`apply_active_set`]
     /// routes against (called by [`run`] every iteration; tests call it to
@@ -568,11 +588,13 @@ async fn apply_active_set(
         bundle_active_set::DEFAULT_REPLICAS,
     );
     note_routing(state, &router);
+    let language_table = bundle_active_set::partition::table();
+    note_unroutable(state, &router, language_table, &active);
     let mut plan = bundle_active_set::plan_sessions_routed(
         &loaded_snapshot,
         &active,
         live_sessions,
-        |scope, _| router.target_sessions(&scope.2),
+        |scope, row| router.target_sessions(&scope.2, language_table.placement(&row.language)),
         |row| row.digest.as_str(),
     );
     // T2: never resend a Load still in flight; hold a failed/timed-out one
@@ -1544,6 +1566,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
         }
     }
 
@@ -2130,6 +2153,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,
@@ -2321,7 +2345,7 @@ mod tests {
             true,
             bundle_active_set::DEFAULT_REPLICAS,
         )
-        .target_sessions("waddles.a");
+        .target_sessions("waddles.a", bundle_active_set::Placement::Unpartitioned);
         let (sessions, picks) = run(ids.clone(), true).await;
         assert_eq!(sessions, owners);
         assert_eq!(picks.into_iter().collect::<Vec<_>>(), owners);
@@ -3073,6 +3097,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,

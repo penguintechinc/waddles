@@ -38,7 +38,7 @@ from quart_schema import document_response, validate_request, validate_response
 
 from services import admin_service as svc
 from services import community_reputation_service as reputation_svc
-from services.community_authz import resolve_editor_scopes_async
+from services.community_authz import guard_target_member, resolve_editor_scopes_async
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, forbidden
@@ -524,6 +524,9 @@ async def update_member_role(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         await svc.update_member_role(
             async_dal,
             dal,
@@ -534,6 +537,7 @@ async def update_member_role(
             caller_id=caller_id,
         )
     except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message="Role updated")
 
@@ -552,6 +556,9 @@ async def adjust_reputation(
     ctx = get_tenant_context(request)
     assert ctx is not None
     try:
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         new_score, change = await svc.adjust_reputation(
             async_dal,
             dal,
@@ -792,6 +799,9 @@ async def remove_member(
     assert ctx is not None
     caller_id = get_optional_current_user_id(request)
     try:
+        await guard_target_member(
+            request, async_dal, dal, community_id=community_id, target_user_id=user_id
+        )
         await svc.remove_member(
             async_dal,
             dal,
@@ -802,6 +812,7 @@ async def remove_member(
             reason=data.reason,
         )
     except ApiError as exc:
+        logger.debug("handled %s in admin: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message="Member removed")
 

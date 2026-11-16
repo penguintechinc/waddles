@@ -27,7 +27,11 @@ _VALUES = "values-dal2alpha.yaml"
 def _helm(extra_set: list[str], api_versions: list[str] | None = None, values: str = _VALUES) -> subprocess.CompletedProcess[str]:
     """Run `helm template` with the given values file, --set overrides and --api-versions."""
     args = ["helm", "template", "waddlebot", str(_CHART_DIR), "--kube-version", "1.30.0",
-            "--values", str(_CHART_DIR / values)]
+            "--values", str(_CHART_DIR / values),
+            # The shipped env values define the compiled/scripted pools (tested in
+            # test_executor_language_partition_render.py); these tests build their own pool layouts
+            # from the single-default-pool baseline.
+            "--set-json", "pipeline.rustDataPlane.bundleExecutor.pools=[]"]
     for kv in extra_set:
         # "json:" prefix -> --set-json (helm's --set REPLACES a list with a sparse one on index).
         args += ["--set-json", kv[5:]] if kv.startswith("json:") else ["--set", kv]
@@ -137,12 +141,10 @@ def test_policies_still_select_statefulset_pods() -> None:
         assert sel.items() <= labels.items(), sel
 
 
-_LEGACY = "global.otel.enabled=false"  # the legacy otel.exporter/otel.collector path only renders when global.otel is off
-
-
-def test_no_otel_env_without_any_collector_or_global_otel() -> None:
-    """Neither global.otel nor a legacy endpoint => no OTEL_* env on the executor or stages (no half-wired exporter)."""
-    docs = _render([_LEGACY])
+def test_otlp_endpoint_absent_without_collector_but_service_name_set() -> None:
+    # OTEL_* comes from the shared waddlebot.otel.env helper only (global.otel); with global.otel
+    # disabled the executor and both stages render no OTEL_* / K8S_POD_NAME env at all (release fix).
+    docs = _render(["global.otel.enabled=false"])
     checked = 0
     for name, container in ((_EXEC, "svc-bundles-executor"),
                             ("waddlebot-svc-process-rust", "svc-process-rust"),
@@ -154,24 +156,9 @@ def test_no_otel_env_without_any_collector_or_global_otel() -> None:
     assert checked == 3
 
 
-def test_global_otel_enabled_gives_exactly_one_otel_service_name() -> None:
-    """global.otel on => the shared helper is the only source (legacy helper must not duplicate env)."""
-    docs = _render()
-    checked = 0
-    for name, container in ((_EXEC, "svc-bundles-executor"),
-                            ("waddlebot-svc-process-rust", "svc-process-rust"),
-                            ("waddlebot-svc-action-rust", "svc-action-rust")):
-        wl = next(d for d in docs if d["kind"] in ("Deployment", "StatefulSet") and d["metadata"]["name"] == name)
-        cs = [c for c in wl["spec"]["template"]["spec"]["containers"] if c["name"] == container]
-        names = [e["name"] for e in cs[0]["env"]]
-        assert names.count("OTEL_SERVICE_NAME") == 1 and names.count("K8S_POD_NAME") == 1, names
-        assert len(names) == len(set(names)), "duplicate env names"
-        checked += 1
-    assert checked == 3
-
-
 def test_otlp_endpoint_from_values_on_executor_and_stages() -> None:
-    docs = _render([_LEGACY, "otel.exporter.endpoint=http://otel.example.svc:4317"])
+    docs = _render(["global.otel.enabled=true", "global.otel.endpoint=http://otel.example.svc:4317",
+                    "otel.exporter.endpoint=http://otel.example.svc:4317"])
     checked = 0
     for name, container in ((_EXEC, "svc-bundles-executor"),
                             ("waddlebot-svc-process-rust", "svc-process-rust"),
@@ -184,15 +171,24 @@ def test_otlp_endpoint_from_values_on_executor_and_stages() -> None:
     assert checked == 3
 
 
-def test_otlp_collector_enabled_derives_endpoint_and_cnp_egress() -> None:
-    docs = _render([_LEGACY, "otel.collector.enabled=true"])
-    env = _env(_executors(docs)[0], "svc-bundles-executor")
-    assert env["OTEL_EXPORTER_OTLP_ENDPOINT"]["value"] == "http://waddlebot-otel-collector:4317"
+def test_executor_has_no_duplicate_env_names() -> None:
+    """A duplicated env var is silently last-wins in Kubernetes; the executor must render each once."""
+    sts = _executors(_render())[0]
+    names = [e["name"] for c in sts["spec"]["template"]["spec"]["containers"] for e in c.get("env", [])]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    assert names, "no env examined"
+    assert not dupes, dupes
+
+
+def test_otlp_collector_egress_rule_is_rendered_to_the_collector_port() -> None:
+    docs = _render(["global.otel.enabled=true", "global.otel.endpoint=http://otel.example.svc:4317",
+                    "otel.collector.enabled=true"])
     cnp = _named(docs, "CiliumNetworkPolicy", _EXEC)
     otel = [r for r in cnp["spec"]["egress"]
             if r.get("toEndpoints", [{}])[0].get("matchLabels", {}).get("app.kubernetes.io/component") == "otel-collector"]
-    assert len(otel) == 1
-    assert otel[0]["toPorts"][0]["ports"] == [{"port": "4317", "protocol": "TCP"}]
+    assert otel, "no collector egress rule"
+    for rule in otel:
+        assert rule["toPorts"][0]["ports"] == [{"port": "4317", "protocol": "TCP"}]
 
 
 _KEDA = ["pipeline.rustDataPlane.bundleExecutor.autoscaling.mode=keda",

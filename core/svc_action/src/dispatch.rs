@@ -1329,10 +1329,35 @@ async fn drain_batch<R: StreamReader, A: AuditSink, T: TenantResolver, S: SpineO
 ) -> Result<usize, SpineError> {
     let batch = reader.read().await?;
     stage_metrics::stage_metrics().record_batch(batch.len());
-    for d in &batch {
-        handle_delivered(d, stream_key, deps).await?;
-    }
+    // Bounded per-app concurrency (latency suspect #4) -- same ordering contract as
+    // `core/svc_process/src/spine.rs::drain_batch`; `APP_DRAIN_CONCURRENCY=1` is the old serial loop.
+    let tuning = bundle_active_set::concurrent::tuning();
+    bundle_active_set::concurrent::run_keyed(
+        &batch,
+        tuning.concurrency,
+        |d| drain_ordering_key(d, deps, tuning.ordering),
+        |d| async move { handle_delivered(d, stream_key, deps).await.map(|_| ()) },
+    )
+    .await?;
     Ok(batch.len())
+}
+
+/// Dispatch entries are keyed by app scope `(tenant, community, app)` only: an outbound action
+/// can read-modify-write bundle state through its capabilities, and there is no per-actor
+/// overlap here (see `core/svc_process/src/spine.rs::drain_ordering_key` for the rationale).
+fn drain_ordering_key<A: AuditSink, T: TenantResolver, S: SpineOps>(
+    d: &Delivered,
+    deps: &DispatchDeps<A, T, S>,
+    _ordering: bundle_active_set::concurrent::Ordering,
+) -> bundle_active_set::concurrent::DrainKey {
+    bundle_active_set::concurrent::drain_key(
+        &format!("{:?}", d.env.tenant_id),
+        Some(&format!("{:?}", d.env.community_id)),
+        &deps.app_id,
+        None,
+        bundle_active_set::concurrent::Ordering::Scope,
+        false,
+    )
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves -- identical
@@ -2226,6 +2251,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -2685,6 +2711,7 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
