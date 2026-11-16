@@ -1,4 +1,4 @@
-.PHONY: webui-api-coverage backfill-tenant-keys backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: webui-api-coverage platform-secrets-rotate backfill-tenant-keys backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
@@ -32,6 +32,12 @@ backfill-tenant-keys:
 
 backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py
+
+# Rotate / retire a platform secret THROUGH the hub-api admin API (system-tenant global admin,
+# recent MFA, Idempotency-Key): `make platform-secrets-rotate ARGS="rotate jwt_signing --reason scheduled"`.
+# Needs WADDLES_API_URL and WADDLES_ADMIN_TOKEN in the environment (never as arguments).
+platform-secrets-rotate:
+	@python3 scripts/ops/platform_secrets_rotate.py $(ARGS)
 
 openapi-hubapi:
 	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
