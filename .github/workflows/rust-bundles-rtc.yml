@@ -55,6 +55,8 @@ jobs:
             wasm: waddle_bundle_webrtc_service.wasm
     defaults:
       run:
+        # Job containers default to `sh -e` (dash): bash keeps `set -o pipefail` working.
+        shell: bash
         working-directory: bundles/rust/${{ matrix.bundle }}
     steps:
       - name: Checkout code
