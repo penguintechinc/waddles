@@ -1452,7 +1452,8 @@ pipeline:
       timeoutSeconds: 10
       # TLS server name the client verifies -> STREAMING_RTC_GRPC_SERVER_NAME. Empty = the Service
       # name from the target, which IS a SAN of the shared host-api-tls cert
-      # (waddlebot.hostApiTlsDesiredDnsNames: <fullname>-svc-streaming[.<ns>.svc.cluster.local]).
+      # (waddlebot.hostApiTlsDesiredDnsNames: <fullname>-svc-streaming.<ns>.svc.cluster.local -- FQDN
+      # only; the internal CA's nameConstraints do not permit the bare Service name).
       # Set only when reaching svc-streaming through a different DNS name.
       serverName: ""
     # SPIFFE_PEER_TRUST / SPIFFE_PEER_ID_HEADER (hub_api/services/machine_auth.py). Default OFF.
