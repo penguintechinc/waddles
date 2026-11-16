@@ -3053,6 +3053,12 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "identity:ephemeral:mint"
+        # feature/tenant-key-provisioning -- data-plane tenant-DEK broker
+        # (`KeyService.GetTenantDek`, served by services/stream_dek_broker.py): the data plane gets the
+        # tenant's at-rest data subkey sealed to a per-call ephemeral key and does the AEAD itself. Granted
+        # ONLY to the three data-plane identities (svc-ingest/svc-process/svc-action), never to
+        # svc-presentation or anything else; hub-api additionally allow-lists the caller by SPIFFE service name.
+        - "keys:tenant-dek:read"
         # KeyService.GetStreamDek (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES): svc-process
         # decrypts every inbound event's identity fields (svc-ingest encrypts them before they
         # touch the stream, outside the PII boundary) with the tenant stream DEK it fetches here,
@@ -3094,6 +3100,12 @@ serviceJwt:
         # only svc-ingest and svc-presentation may hold true PII); relay text is queued
         # tokenized and svc-ingest's outbound drain substitutes at the platform send.
         - "egress:connect"
+        # feature/tenant-key-provisioning -- data-plane tenant-DEK broker
+        # (hub_api/blueprints/v1/internal_keys.py `POST /api/v1/internal/keys/tenant-dek`): the
+        # data plane holds the unwrapped tenant DEK in memory and does the AEAD itself. Granted
+        # ONLY to the three data-plane identities (svc-ingest/svc-process/svc-action), never to
+        # svc-presentation or anything else; hub-api additionally allow-lists the caller by name.
+        - "keys:tenant-dek:read"
         # feature/edge-reshape-chunk2-conn-store (Task 8) -- svc-action is the per-send EGRESS
         # consumer of the connection store: `connections:resolve` mints a community-bound token
         # for twitch OAuth / youtube / moderation sends and `connections:resolve:static` is the
@@ -3137,6 +3149,12 @@ serviceJwt:
       tenant: system
       allowedScopes:
         - "connections:resolve"
+        # feature/tenant-key-provisioning -- data-plane tenant-DEK broker
+        # (`KeyService.GetTenantDek`, served by services/stream_dek_broker.py): the data plane gets the
+        # tenant's at-rest data subkey sealed to a per-call ephemeral key and does the AEAD itself. Granted
+        # ONLY to the three data-plane identities (svc-ingest/svc-process/svc-action), never to
+        # svc-presentation or anything else; hub-api additionally allow-lists the caller by SPIFFE service name.
+        - "keys:tenant-dek:read"
         # KeyService.GetStreamDek (#442) -- per-tenant stream identity-field DEK (encrypt side),
         # sealed to a per-request X25519 key. Only svc-ingest + svc-process hold this scope;
         # hub-api additionally allow-lists both by SPIFFE service name.

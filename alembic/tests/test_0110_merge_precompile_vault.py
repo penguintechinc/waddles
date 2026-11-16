@@ -30,8 +30,15 @@ def test_merges_both_heads_and_id_fits() -> None:
 
 
 def test_graph_has_exactly_one_head() -> None:
-    """The full revision graph resolves to a single head (the merge itself)."""
+    """The full graph resolves to a single head, and the merge is still an ancestor of it.
+
+    The merge was the head when it landed; later revisions chain on top, so the head moves on
+    while the invariant stays: exactly one head, descended from the merge.
+    """
     cfg = Config(str(REPO_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(REPO_ROOT / "alembic"))
-    heads = ScriptDirectory.from_config(cfg).get_heads()
-    assert heads == ["0110_merge_precompile_vault"], heads
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert len(heads) == 1, heads
+    ancestors = {rev.revision for rev in script.walk_revisions(base="base", head=heads[0])}
+    assert "0110_merge_precompile_vault" in ancestors
