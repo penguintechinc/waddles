@@ -174,13 +174,14 @@ async fn pin_one<S: ComponentSource>(
     // shared verifier does the cross-checks and the Ed25519 verification.
     let sidecar: SignedSidecar = serde_json::from_slice(&sidecar_bytes)
         .map_err(|e| ExecutorError::SignatureInvalid(format!("sidecar is not valid JSON: {e}")))?;
-    crate::signing::verify_artifact_signature(
+    crate::signing::verify_artifact_signature_async(
         &sidecar_bytes,
         keys,
         platform.app_id,
         &sidecar.version,
         &target.digest,
-    )?;
+    )
+    .await?;
     let manifest = VerifiedManifest::new(
         platform.app_id,
         target.digest.clone(),

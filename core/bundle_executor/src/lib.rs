@@ -50,6 +50,7 @@ pub mod signing;
 pub mod stage_bridge;
 pub mod telemetry;
 pub mod tls;
+pub mod warm_pool;
 pub mod wire;
 
 use std::future::Future;
@@ -263,9 +264,11 @@ pub async fn run() -> Result<(), ExecutorError> {
     // `Executor::new`'s own (lenient) derivation from the same field is
     // only ever reached with an empty key set in a test that never called
     // this function. See `crate::signing::PlatformPublicKeys::from_cli_required`.
+    crate::signing::require_supported_key_source(&cfg)?;
     crate::signing::PlatformPublicKeys::from_cli_required(&cfg)?;
     cfg.validate_host_api_tls()?;
     cfg.validate_executor_id()?;
+    cfg.validate_language_partition()?;
     match cfg.validate_memory_budget()? {
         Some(warning) => tracing::warn!(%warning, "memory budget check"),
         None => tracing::info!(

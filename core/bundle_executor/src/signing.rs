@@ -54,6 +54,7 @@
 //! or bucket key derived from these fields elsewhere in this crate.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
@@ -143,9 +144,63 @@ pub fn signing_payload(
 #[derive(Debug, Clone, Default)]
 pub struct PlatformPublicKeys {
     keys: HashMap<String, VerifyingKey>,
+    /// `BUNDLE_SIGNING_KEY_SOURCE=db`: keys come from the platform key cache
+    /// (`platform_vault.public_keys`, design T5) instead of `keys`. Mutually
+    /// exclusive with the static set: when this is `Some`, `keys` is empty and
+    /// is never consulted (no silent fallback to the ConfigMap).
+    cache: Option<CachedKeys>,
+}
+
+/// The database-backed key source: the shared cache plus the registry type code of the
+/// artifact-signing key.
+#[derive(Clone)]
+struct CachedKeys {
+    cache: Arc<platform_keys::KeyCache>,
+    key_type: i16,
+}
+
+impl std::fmt::Debug for CachedKeys {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedKeys")
+            .field("key_type", &self.key_type)
+            .finish_non_exhaustive()
+    }
 }
 
 impl PlatformPublicKeys {
+    /// Database-backed key set (`BUNDLE_SIGNING_KEY_SOURCE=db`): every lookup goes through
+    /// `cache` for `key_type`, so unknown kids fail closed, verify-only keys honour their
+    /// `verify_until`, and the ConfigMap is never consulted.
+    #[must_use]
+    pub fn from_cache(cache: Arc<platform_keys::KeyCache>, key_type: i16) -> Self {
+        Self {
+            keys: HashMap::new(),
+            cache: Some(CachedKeys { cache, key_type }),
+        }
+    }
+
+    /// Resolves the verifying key for `key_id` from whichever single source is configured.
+    async fn resolve(&self, key_id: &str) -> Result<VerifyingKey, ExecutorError> {
+        let Some(db) = &self.cache else {
+            return self.get(key_id).copied().ok_or_else(|| unknown_kid(key_id));
+        };
+        let record = db.cache.get(db.key_type, key_id).await.map_err(|e| {
+            ExecutorError::SignatureInvalid(format!(
+                "artifact-signing key id {key_id:?} refused: {e}"
+            ))
+        })?;
+        let array: [u8; 32] = record.public_material.as_slice().try_into().map_err(|_| {
+            ExecutorError::SignatureInvalid(format!(
+                "artifact-signing key id {key_id:?} is not a 32-byte Ed25519 key"
+            ))
+        })?;
+        VerifyingKey::from_bytes(&array).map_err(|e| {
+            ExecutorError::SignatureInvalid(format!(
+                "artifact-signing key id {key_id:?} is not a valid Ed25519 key: {e}"
+            ))
+        })
+    }
+
     /// Parses `BUNDLE_SIGNING_PUBLIC_KEYS`'s JSON shape: an object mapping
     /// `key_id -> base64(32-byte Ed25519 public key)`. Every entry must
     /// decode to a well-formed key -- a malformed entry is a configuration
@@ -179,7 +234,7 @@ impl PlatformPublicKeys {
             })?;
             keys.insert(key_id, verifying_key);
         }
-        Ok(Self { keys })
+        Ok(Self { keys, cache: None })
     }
 
     /// `true` when any key in `self` has the same public-key bytes as a key in
@@ -234,14 +289,19 @@ impl PlatformPublicKeys {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.keys.is_empty()
+        self.cache.is_none() && self.keys.is_empty()
+    }
+
+    /// True when keys come from the database-backed cache.
+    pub fn is_db_backed(&self) -> bool {
+        self.cache.is_some()
     }
 
     /// Builds a key set from already-decoded keys -- used by
     /// `crate::precompile` to check existing artifacts against the
     /// precompiler's own verifying key.
     pub fn from_keys(keys: HashMap<String, VerifyingKey>) -> Self {
-        Self { keys }
+        Self { keys, cache: None }
     }
 
     pub(crate) fn get(&self, key_id: &str) -> Option<&VerifyingKey> {
@@ -279,6 +339,76 @@ pub fn verify_artifact_signature(
     expected_version: &str,
     expected_digest: &str,
 ) -> Result<(), ExecutorError> {
+    let sidecar = check_sidecar(
+        sidecar_bytes,
+        expected_app_id,
+        expected_version,
+        expected_digest,
+    )?;
+    if keys.is_db_backed() {
+        return Err(ExecutorError::SignatureInvalid(
+            "database-backed signing keys need verify_artifact_signature_async".to_string(),
+        ));
+    }
+    let verifying_key = keys
+        .get(&sidecar.key_id)
+        .ok_or_else(|| unknown_kid(&sidecar.key_id))?;
+    verify_with_key(&sidecar, verifying_key)
+}
+
+/// Async counterpart of [`verify_artifact_signature`] that resolves the key from whichever
+/// single source is configured (static set or the database-backed cache, which may lazy-load an
+/// unseen kid). Same checks, same fail-closed outcomes; the production load path uses this.
+pub async fn verify_artifact_signature_async(
+    sidecar_bytes: &[u8],
+    keys: &PlatformPublicKeys,
+    expected_app_id: &str,
+    expected_version: &str,
+    expected_digest: &str,
+) -> Result<(), ExecutorError> {
+    let sidecar = check_sidecar(
+        sidecar_bytes,
+        expected_app_id,
+        expected_version,
+        expected_digest,
+    )?;
+    let verifying_key = keys.resolve(&sidecar.key_id).await?;
+    verify_with_key(&sidecar, &verifying_key)
+}
+
+/// Validates `BUNDLE_SIGNING_KEY_SOURCE` for the standalone executor binary. Unset means
+/// `configmap` (this credential-less binary has no database role and its dependency policy bans
+/// sqlx, so the design's database default cannot apply here). An explicit `db` is refused LOUDLY
+/// rather than degraded to the ConfigMap: embedders that own a database-backed
+/// `platform_keys::KeyLoader` wire it in with `Executor::with_key_cache` instead.
+pub fn require_supported_key_source(cfg: &CliConfig) -> Result<(), ExecutorError> {
+    let explicit = cfg.bundle_signing_key_source.as_deref();
+    let source = platform_keys::KeySource::resolve(Some(explicit.unwrap_or("configmap")), false)
+        .map_err(|e| ExecutorError::Config(format!("BUNDLE_SIGNING_KEY_SOURCE: {e}")))?;
+    match source {
+        platform_keys::KeySource::ConfigMap => Ok(()),
+        platform_keys::KeySource::Db => Err(ExecutorError::Config(
+            "BUNDLE_SIGNING_KEY_SOURCE=db is not supported by the standalone executor binary \
+             (no database credentials, sqlx banned by its dependency policy); use `configmap` \
+             or embed the executor with Executor::with_key_cache"
+                .to_string(),
+        )),
+    }
+}
+
+/// The error for a key id no source knows.
+fn unknown_kid(key_id: &str) -> ExecutorError {
+    ExecutorError::SignatureInvalid(format!("unknown artifact-signing key id {key_id:?}"))
+}
+
+/// Parses the sidecar and runs every swap-prevention cross-check against the load frame, before
+/// any key is looked up.
+fn check_sidecar(
+    sidecar_bytes: &[u8],
+    expected_app_id: &str,
+    expected_version: &str,
+    expected_digest: &str,
+) -> Result<SignedSidecar, ExecutorError> {
     let sidecar: SignedSidecar = serde_json::from_slice(sidecar_bytes)
         .map_err(|e| ExecutorError::SignatureInvalid(format!("sidecar is not valid JSON: {e}")))?;
 
@@ -312,13 +442,14 @@ pub fn verify_artifact_signature(
         )));
     }
 
-    let verifying_key = keys.get(&sidecar.key_id).ok_or_else(|| {
-        ExecutorError::SignatureInvalid(format!(
-            "unknown artifact-signing key id {:?}",
-            sidecar.key_id
-        ))
-    })?;
+    Ok(sidecar)
+}
 
+/// Verifies the sidecar's Ed25519 signature over its signed payload with `verifying_key`.
+fn verify_with_key(
+    sidecar: &SignedSidecar,
+    verifying_key: &VerifyingKey,
+) -> Result<(), ExecutorError> {
     let signature_bytes = BASE64.decode(sidecar.signature.as_bytes()).map_err(|e| {
         ExecutorError::SignatureInvalid(format!("signature is not valid base64: {e}"))
     })?;
@@ -401,6 +532,154 @@ mod tests {
         let keys = PlatformPublicKeys::from_cli(&cfg)?;
         assert!(keys.is_empty());
         Ok(())
+    }
+
+    const KEY_TYPE: i16 = 11;
+
+    fn db_record(
+        kid: &str,
+        key: &SigningKey,
+        state: platform_keys::KeyState,
+    ) -> platform_keys::KeyRecord {
+        platform_keys::KeyRecord {
+            key_type: KEY_TYPE,
+            scope_id: None,
+            version: 1,
+            kid: kid.to_string(),
+            state,
+            public_material: key.verifying_key().to_bytes().to_vec(),
+            activated_at: None,
+            rotated_at: Some(std::time::SystemTime::now()),
+        }
+    }
+
+    fn db_keys(rows: Vec<platform_keys::KeyRecord>) -> PlatformPublicKeys {
+        let loader = Arc::new(platform_keys::MemoryKeyLoader::new(rows));
+        let cfg =
+            platform_keys::CacheConfig::new(vec![KEY_TYPE], std::time::Duration::from_secs(3600));
+        let cache = platform_keys::KeyCache::new(loader, cfg).expect("valid cache config");
+        PlatformPublicKeys::from_cache(Arc::new(cache), KEY_TYPE)
+    }
+
+    /// `db` source: a key lazy-loaded from the cache verifies, with no static set configured.
+    #[tokio::test]
+    async fn db_source_verifies_with_a_lazy_loaded_key() {
+        let key = test_signing_key();
+        let keys = db_keys(vec![db_record("k1", &key, platform_keys::KeyState::Active)]);
+        assert!(keys.is_db_backed() && !keys.is_empty());
+        let sidecar = sign_sidecar(&key, "k1", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        verify_artifact_signature_async(&sidecar, &keys, APP_ID, VERSION, DIGEST)
+            .await
+            .expect("valid signature from a db key verifies");
+    }
+
+    /// `db` source fails closed on an unknown kid, a wrong signer, and never consults a ConfigMap.
+    #[tokio::test]
+    async fn db_source_fails_closed_for_unknown_kid_and_wrong_key() {
+        let key = test_signing_key();
+        let other = SigningKey::from_bytes(&[8u8; 32]);
+        let keys = db_keys(vec![db_record("k1", &key, platform_keys::KeyState::Active)]);
+        let unknown = sign_sidecar(&key, "nope", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        assert!(matches!(
+            verify_artifact_signature_async(&unknown, &keys, APP_ID, VERSION, DIGEST).await,
+            Err(ExecutorError::SignatureInvalid(_))
+        ));
+        let wrong = sign_sidecar(&other, "k1", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        assert!(matches!(
+            verify_artifact_signature_async(&wrong, &keys, APP_ID, VERSION, DIGEST).await,
+            Err(ExecutorError::SignatureInvalid(_))
+        ));
+    }
+
+    /// A verify-only db key past its window is refused (verify_until, security review M6).
+    #[tokio::test]
+    async fn db_source_refuses_an_expired_verify_only_key() {
+        let key = test_signing_key();
+        let mut rec = db_record("old", &key, platform_keys::KeyState::VerifyOnly);
+        rec.rotated_at = Some(std::time::SystemTime::now() - std::time::Duration::from_secs(7200));
+        let keys = db_keys(vec![rec]);
+        let sidecar = sign_sidecar(&key, "old", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        assert!(matches!(
+            verify_artifact_signature_async(&sidecar, &keys, APP_ID, VERSION, DIGEST).await,
+            Err(ExecutorError::SignatureInvalid(_))
+        ));
+    }
+
+    /// A db row whose material is not a 32-byte Ed25519 key is refused, not skipped.
+    #[tokio::test]
+    async fn db_source_rejects_malformed_key_material() {
+        let key = test_signing_key();
+        let mut short = db_record("k1", &key, platform_keys::KeyState::Active);
+        short.public_material = vec![1; 5];
+        let keys = db_keys(vec![short]);
+        let sidecar = sign_sidecar(&key, "k1", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        assert!(matches!(
+            verify_artifact_signature_async(&sidecar, &keys, APP_ID, VERSION, DIGEST).await,
+            Err(ExecutorError::SignatureInvalid(_))
+        ));
+    }
+
+    /// The sync verifier refuses a db-backed set instead of pretending the key is unknown or
+    /// consulting a static set.
+    #[test]
+    fn sync_verifier_refuses_db_backed_keys() {
+        let key = test_signing_key();
+        let loader = Arc::new(platform_keys::MemoryKeyLoader::new(vec![]));
+        let cfg =
+            platform_keys::CacheConfig::new(vec![KEY_TYPE], std::time::Duration::from_secs(60));
+        let keys = PlatformPublicKeys::from_cache(
+            Arc::new(platform_keys::KeyCache::new(loader, cfg).expect("cfg")),
+            KEY_TYPE,
+        );
+        let sidecar = sign_sidecar(&key, "k1", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        assert!(verify_artifact_signature(&sidecar, &keys, APP_ID, VERSION, DIGEST).is_err());
+        assert!(format!("{keys:?}").contains("key_type"));
+    }
+
+    /// The async path over a static set behaves like the sync one.
+    #[tokio::test]
+    async fn async_verifier_matches_sync_for_static_keys() -> Result<(), ExecutorError> {
+        let key = test_signing_key();
+        let keys = PlatformPublicKeys::from_json(&test_public_keys_json("k1", &key))?;
+        let good = sign_sidecar(&key, "k1", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        verify_artifact_signature_async(&good, &keys, APP_ID, VERSION, DIGEST).await?;
+        let unknown = sign_sidecar(&key, "zz", APP_ID, VERSION, DIGEST, APPROVAL_ID);
+        assert!(
+            verify_artifact_signature_async(&unknown, &keys, APP_ID, VERSION, DIGEST)
+                .await
+                .is_err()
+        );
+        Ok(())
+    }
+
+    /// `BUNDLE_SIGNING_KEY_SOURCE`: unset/configmap pass; `db` and typos fail loud.
+    #[test]
+    fn key_source_switch_never_silently_falls_back() {
+        use clap::Parser;
+        let parse = |extra: &[&str]| {
+            let mut a = vec![
+                "bundle-executor",
+                "--stage-host-api-addr",
+                "svc-process:8301",
+            ];
+            a.extend_from_slice(extra);
+            CliConfig::try_parse_from(a).expect("static test args parse")
+        };
+        assert!(require_supported_key_source(&parse(&[])).is_ok());
+        assert!(require_supported_key_source(&parse(&[
+            "--bundle-signing-key-source",
+            "configmap"
+        ]))
+        .is_ok());
+        for bad in ["db", "DB", "dbb", "env"] {
+            assert!(
+                matches!(
+                    require_supported_key_source(&parse(&["--bundle-signing-key-source", bad])),
+                    Err(ExecutorError::Config(_))
+                ),
+                "{bad}"
+            );
+        }
     }
 
     #[test]

@@ -195,7 +195,8 @@ class TestFamilyAndRisk:
     @pytest.mark.parametrize(
         ("pid", "family"),
         [
-            ("storage.objects", "storage.objects"),
+            ("storage.objects.read", "storage.objects.read"),
+            ("storage.objects.write", "storage.objects.write"),
             ("net.http.fqdn:api.example.com", "net.http.fqdn"),
             ("chat.send:twitch", "chat.send"),
             ("moderation.discord", "moderation"),
