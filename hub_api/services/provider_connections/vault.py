@@ -369,9 +369,8 @@ def seal_platform_secret(
         + iv
         + ciphertext
     )
-    logger.debug(
-        "platform secret sealed type=%d version=%d kek_id=%s", secret_type, version, kek_id
-    )
+    type_code, version_no = int(secret_type), int(version)
+    logger.debug("platform vault sealed type=%d version=%d", type_code, version_no)
     return SealedPlatformSecret(sealed_value=envelope, kek_id=kek_id, seal_version=PLATFORM_SEAL_V1)
 
 
@@ -430,9 +429,8 @@ def open_platform_secret(
         raise
     except (InvalidTag, ValueError):
         raise _open_failure(secret_type, version) from None
-    logger.debug(
-        "platform secret opened type=%d version=%d kek_id=%s", secret_type, version, header_kek_id
-    )
+    type_code, version_no = int(secret_type), int(version)
+    logger.debug("platform vault opened type=%d version=%d", type_code, version_no)
     return plaintext
 
 
@@ -698,9 +696,9 @@ def _platform_mac(
         return hmac.new(bytes(key), message, hashlib.sha256).digest()
 
 
-def _log_open_failure(secret_type: int, version: int) -> None:
+def _log_open_failure(type_code: int, version_no: int) -> None:
     """Warn that an open failed -- ints only, never the envelope, a key or a plaintext."""
-    logger.warning("platform secret open failed type=%d version=%d", secret_type, version)
+    logger.warning("platform vault open failed type=%d version=%d", type_code, version_no)
 
 
 def _open_failure(secret_type: int, version: int) -> PlatformSecretCorruptError:

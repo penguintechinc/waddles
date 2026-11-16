@@ -188,7 +188,9 @@ class TestDefaultOffIsTheBaseline:
         config = s3_config(seaweedfs_script(render_docs(tmp_path)), {}, tmp_path)
         assert set(config) == {"identities"}
         # 5 pre-existing identities (incl. svc-bundles-precompiler) + bundled bundle-storage
-        assert len(config["identities"]) == 6
+        # + the dedicated platform-secrets escrow identity (hub-api-escrow)
+        assert len(config["identities"]) == 7
+        assert "hub-api-escrow" in {i["name"] for i in config["identities"]}
 
 
 def tenant_keys(**overrides: Any) -> dict[str, Any]:
@@ -337,8 +339,8 @@ class TestObjectStorageAws:
             "config" not in provider
         )  # nested "config" is silently ignored by SeaweedFS
         assert (
-            len(config["identities"]) == 6
-        )  # the existing least-privilege identities (+ bundle-storage) survive
+            len(config["identities"]) == 7
+        )  # the existing least-privilege identities (+ bundle-storage, + escrow) survive
 
     def test_credentials_come_only_from_the_existing_secret(
         self, tmp_path: Path
