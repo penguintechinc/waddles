@@ -160,6 +160,7 @@ images:
       - core/bundle_config_db/**
       - core/bundle_capability_gate/**
       - core/bundle_host_credentials/**
+      - core/bundle_host_crypto/**
       - core/bundle_host_db/**
       - core/bundle_host_economy/**
       - core/bundle_host_gameserver_net/**
@@ -193,6 +194,7 @@ images:
       - core/bundle_config_db/**
       - core/bundle_capability_gate/**
       - core/bundle_host_credentials/**
+      - core/bundle_host_crypto/**
       - core/bundle_host_db/**
       - core/bundle_host_http/**
       - core/bundle_host_kv/**

@@ -53,6 +53,7 @@ pub mod host_api;
 pub mod http;
 pub mod identity;
 pub mod identity_crypto;
+pub mod kv_sealing;
 pub mod license;
 pub mod media;
 pub mod metrics_facade;
@@ -1526,6 +1527,19 @@ fn try_start_process_loop(
     };
     let bundle_db_password = config.bundle_db_password.clone();
     let bundle_db_license_client = Arc::clone(&license_client);
+    // Per-tenant at-rest sealing of bundle kv values (opt-out kill-switch
+    // `waddles.disable-tenant-at-rest-encryption`; unseen/OFF = sealing ON).
+    let kv_sealing = {
+        let (sealing, dek_cache) = kv_sealing::build(&config.cli, Some(&license_client));
+        match build_redis_client(&spine_cfg) {
+            Some(client) => bundle_host_kv::grpc_wiring::spawn_dek_invalidation(client, dek_cache),
+            None => tracing::error!(
+                "kv sealing: no spine Valkey client; DEK rotation/revocation signals will not \
+                 be received (cache TTL bounds staleness)"
+            ),
+        }
+        Some(sealing)
+    };
     let bundle_reputation_cfg = bundle_host_reputation::ConnectConfig {
         host: cli.bundle_reputation_host.clone(),
         port: cli.bundle_reputation_port,
@@ -1771,6 +1785,7 @@ fn try_start_process_loop(
                 // (`bundle_host_kv::authorize`'s own module doc: "undeclared
                 // means denied").
                 kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+                kv_sealing: kv_sealing.clone(),
                 egress: Arc::clone(&egress),
                 pii_gate: Arc::clone(&pii_gate),
                 // `crate::build_hub_client`'s connected `HubClientMinter`,
@@ -2408,6 +2423,21 @@ fn try_start_changelog_consumer(
                             bundle_db_license_client.clone(),
                         )));
                     }
+                    // Per-tenant at-rest sealing of bundle kv values; see
+                    // `crate::kv_sealing`. The gate honours the opt-out
+                    // kill-switch when a license client exists, else seals.
+                    let (sealing, dek_cache) =
+                        kv_sealing::build(&config.cli, bundle_db_license_client.as_ref());
+                    match build_redis_client(&deps.spine_cfg) {
+                        Some(client) => {
+                            bundle_host_kv::grpc_wiring::spawn_dek_invalidation(client, dek_cache);
+                        }
+                        None => tracing::error!(
+                            "kv sealing: no spine Valkey client; DEK rotation/revocation \
+                             signals will not be received (cache TTL bounds staleness)"
+                        ),
+                    }
+                    deps.kv_sealing = Some(sealing);
                     // `command` latency label: registered commands from the read REPLICA only
                     // (never the primary, never an env list); seed + periodic + lazy-on-miss.
                     let _latency_labels =
@@ -2579,6 +2609,9 @@ async fn build_source_supervisor_deps(
         license: gate,
         kv_conn,
         kv_capabilities,
+        // Assigned by the caller once the license client (kill-switch) is
+        // known -- see `try_start_changelog_consumer`.
+        kv_sealing: None,
         gate: capability_gate,
         app_version_snapshot,
         egress,

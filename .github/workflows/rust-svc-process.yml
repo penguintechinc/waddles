@@ -7,6 +7,7 @@ on:
       - 'core/svc_process/**'
       - 'core/test_support/**'
       - 'core/bundle_host_kv/**'
+      - 'core/bundle_host_crypto/**'
       - 'core/bundle_host_credentials/**'
       - 'core/connection_resolver/**'
       - 'core/bundle_capability_gate/**'
@@ -67,6 +68,7 @@ jobs:
             core/svc_process/**
             core/test_support/**
             core/bundle_host_kv/**
+            core/bundle_host_crypto/**
             core/bundle_host_credentials/**
             core/connection_resolver/**
             core/bundle_capability_gate/**

@@ -415,6 +415,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             community_id,
             app_version: self.app_version,
             kv: self.kv.clone(),
+            kv_sealing: self.kv_sealing.clone(),
             egress: std::sync::Arc::clone(&self.egress),
             gate: std::sync::Arc::clone(&self.gate),
             db: self.db.clone(),

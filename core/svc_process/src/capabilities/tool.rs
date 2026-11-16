@@ -140,6 +140,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             community_id: self.community_id,
             app_version: plan.target_version,
             kv: self.kv.clone(),
+            kv_sealing: self.kv_sealing.clone(),
             egress: Arc::clone(&self.egress),
             gate: Arc::clone(&self.gate),
             db: self.db.clone(),

@@ -857,6 +857,9 @@ pub struct ProcessDeps<S: SpineOps> {
     /// [`StageCapabilities`] this loop constructs, so a capability change
     /// is visible to the very next `kv` host-call.
     pub kv_capabilities: Arc<bundle_host_kv::CapabilitySnapshot>,
+    /// Per-tenant at-rest sealing for `kv` values (`crate::kv_sealing`); one
+    /// shared handle (one DEK cache) cloned into every per-invoke capability.
+    pub kv_sealing: Option<bundle_host_kv::Sealing>,
     /// The standard enforcement gate (spec
     /// `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
     /// SS5) every per-invoke [`StageCapabilities`] this loop constructs is
@@ -1153,6 +1156,11 @@ pub(crate) fn build_stage_capabilities<S: SpineOps>(
         trace: trace.clone(),
         read_only: false,
     });
+    // Per-tenant at-rest sealing of kv values (order-independent with `with_kv`).
+    let caps = match &deps.kv_sealing {
+        Some(sealing) => caps.with_kv_sealing(sealing.clone()),
+        None => caps,
+    };
     let caps = match &deps.kv_conn {
         Some(conn) => caps.with_kv(conn.clone(), Arc::clone(&deps.kv_capabilities)),
         None => caps,
@@ -2806,6 +2814,7 @@ mod tests {
             // instead of here.
             kv_conn: None,
             kv_capabilities: Arc::new(bundle_host_kv::CapabilitySnapshot::new()),
+            kv_sealing: None,
             gate: test_gate(),
             tenant_id: 0,
             community_id: 0,

@@ -388,6 +388,20 @@ pub struct CliConfig {
     /// publicly-rooted endpoint instead.
     #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
     pub hub_api_grpc_ca_file: String,
+
+    /// Operator policy for reading pre-encryption plaintext `kv` values
+    /// (`bundle_host_kv::Sealing::with_legacy_plaintext_reads_allowed`).
+    /// Default `true` ONLY for the migration window; the planned flip to
+    /// `false` makes any non-envelope value an integrity error. Independent
+    /// of the per-scope sealed-since marker, which refuses plaintext in any
+    /// scope that already has a sealed write even while this is `true`.
+    #[arg(
+        long,
+        env = "KV_LEGACY_PLAINTEXT_READS_ALLOWED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub kv_legacy_plaintext_reads_allowed: bool,
     /// svc-presentation's in-cluster gRPC address
     /// (`waddles.presentation.internal.v1.SurfaceService`), e.g.
     /// `https://waddlebot-svc-presentation:50051`. Empty (the default) leaves the bundle

@@ -1,0 +1,6 @@
+{
+  "context": "svc-process|42|at-rest|1",
+  "shared_hex": "c9ea6a3f79a000b60b076d4afc990b272f3f0b5aaa3f0b8713c209273e363863",
+  "dek_hex": "c0c1c2c3c4c5c6c7c8c9cacbcccdcecfd0d1d2d3d4d5d6d7d8d9dadbdcdddedf",
+  "ciphertext_hex": "bc450335f994bd0436f6b09429cdb4427bc121cbd7784c25bf9915be4fb57a22dd0939d818f43684934c31c987658ccb"
+}
