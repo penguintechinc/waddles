@@ -2222,6 +2222,36 @@ components:
       - updated_at
       title: GuildPairing
       type: object
+    HandDTO:
+      description: One raised hand with the hub-api-resolved display name (UUIDs elsewhere).
+      properties:
+        acknowledged_at:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Acknowledged At
+        acknowledged_by:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Acknowledged By
+        display_name:
+          title: Display Name
+          type: string
+        participant_id:
+          title: Participant Id
+          type: string
+        raised_at:
+          title: Raised At
+          type: integer
+      required:
+      - participant_id
+      - display_name
+      - raised_at
+      - acknowledged_at
+      - acknowledged_by
+      title: HandDTO
+      type: object
     HealthChecksDTO:
       description: Health checks DTO.
       properties:
@@ -2315,6 +2345,19 @@ components:
       - duration_ms
       - played_at
       title: HistoryItemDTO
+      type: object
+    IceServerDTO:
+      description: One STUN entry for the browser's `RTCPeerConnection` (never credentials;
+        TURN is later).
+      properties:
+        urls:
+          items:
+            type: string
+          title: Urls
+          type: array
+      required:
+      - urls
+      title: IceServerDTO
       type: object
     IdentityDTO:
       description: Identity DTO.
@@ -3103,6 +3146,47 @@ components:
       - joinedAt
       title: MemberDTO
       type: object
+    MemberParticipantDTO:
+      description: 'A participant as a non-staff member sees them: same fields as
+        `ParticipantDTO` + `is_self`.
+
+
+        Ids are per-community pseudonyms; there are no publisher lists, hand internals
+        or global ids.'
+      properties:
+        display_name:
+          title: Display Name
+          type: string
+        is_self:
+          title: Is Self
+          type: boolean
+        joined_at:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Joined At
+        muted:
+          title: Muted
+          type: boolean
+        participant_id:
+          title: Participant Id
+          type: string
+        publisher:
+          title: Publisher
+          type: boolean
+        subscriber:
+          title: Subscriber
+          type: boolean
+      required:
+      - participant_id
+      - display_name
+      - publisher
+      - subscriber
+      - muted
+      - joined_at
+      - is_self
+      title: MemberParticipantDTO
+      type: object
     MetadataFieldDTO:
       description: One metadata input a provider takes.
       properties:
@@ -3394,6 +3478,39 @@ components:
       - total
       - totalPages
       title: PaginationDTO
+      type: object
+    ParticipantDTO:
+      description: 'A room participant: UUID, hub-api-resolved display name, media
+        flags.'
+      properties:
+        display_name:
+          title: Display Name
+          type: string
+        joined_at:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Joined At
+        muted:
+          title: Muted
+          type: boolean
+        participant_id:
+          title: Participant Id
+          type: string
+        publisher:
+          title: Publisher
+          type: boolean
+        subscriber:
+          title: Subscriber
+          type: boolean
+      required:
+      - participant_id
+      - display_name
+      - publisher
+      - subscriber
+      - muted
+      - joined_at
+      title: ParticipantDTO
       type: object
     PlatformBreakdownDTO:
       description: Per-platform community count DTO.
@@ -4243,6 +4360,49 @@ components:
       - created_at
       - updated_at
       title: RoleSyncBinding
+      type: object
+    RoomInfo:
+      description: 'A call room: ids and counts only, no PII. `label` is the creator-supplied
+        display name.'
+      properties:
+        community_id:
+          title: Community Id
+          type: string
+        created_at:
+          title: Created At
+          type: integer
+        label:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Label
+        locked:
+          title: Locked
+          type: boolean
+        max_publishers:
+          title: Max Publishers
+          type: integer
+        publisher_ids:
+          items:
+            type: string
+          title: Publisher Ids
+          type: array
+        room_id:
+          title: Room Id
+          type: string
+        subscriber_count:
+          title: Subscriber Count
+          type: integer
+      required:
+      - room_id
+      - community_id
+      - label
+      - max_publishers
+      - created_at
+      - publisher_ids
+      - subscriber_count
+      - locked
+      title: RoomInfo
       type: object
     SaveConsentPreferencesDTO:
       description: 'Preferences as submitted to `POST /api/v1/cookie`.
@@ -5818,6 +5978,21 @@ components:
       - artist
       - plays
       title: TopSongDTO
+      type: object
+    TownHallJoin:
+      description: 'How the caller joins the Town Hall: call this hub-api route (it
+        mints the token).'
+      properties:
+        method:
+          title: Method
+          type: string
+        path:
+          title: Path
+          type: string
+      required:
+      - method
+      - path
+      title: TownHallJoin
       type: object
     TwitchStatsDTO:
       description: Twitch stats DTO.
@@ -8209,8 +8384,26 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET .../rooms` -- every live room of the community.'
+                properties:
+                  rooms:
+                    items:
+                      $ref: '#/components/schemas/RoomInfo'
+                    title: Rooms
+                    type: array
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - rooms
+                title: RoomsListResponse
+                type: object
+          description: '`GET .../rooms` -- every live room of the community.'
       summary: Get all call rooms for a community (admin).
     post:
       description: ''
@@ -8242,8 +8435,56 @@ paths:
               title: CreateCallRoomRequest
               type: object
       responses:
-        default:
-          description: Undocumented response
+        '201':
+          content:
+            application/json:
+              schema:
+                description: 'One room (create/get): the `RoomInfo` fields plus `success`.'
+                properties:
+                  community_id:
+                    title: Community Id
+                    type: string
+                  created_at:
+                    title: Created At
+                    type: integer
+                  label:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Label
+                  locked:
+                    title: Locked
+                    type: boolean
+                  max_publishers:
+                    title: Max Publishers
+                    type: integer
+                  publisher_ids:
+                    items:
+                      type: string
+                    title: Publisher Ids
+                    type: array
+                  room_id:
+                    title: Room Id
+                    type: string
+                  subscriber_count:
+                    title: Subscriber Count
+                    type: integer
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - room_id
+                - community_id
+                - label
+                - max_publishers
+                - created_at
+                - publisher_ids
+                - subscriber_count
+                - locked
+                title: RoomResponse
+                type: object
+          description: 'One room (create/get): the `RoomInfo` fields plus `success`.'
       summary: Create a new call room (admin).
   /api/v1/admin/{community_id}/calls/rooms/{room_name}:
     delete:
@@ -8261,8 +8502,24 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Plain acknowledgement.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - message
+                title: MessageResponse
+                type: object
+          description: Plain acknowledgement.
       summary: Delete a call room (admin).
     get:
       description: ''
@@ -8279,8 +8536,56 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'One room (create/get): the `RoomInfo` fields plus `success`.'
+                properties:
+                  community_id:
+                    title: Community Id
+                    type: string
+                  created_at:
+                    title: Created At
+                    type: integer
+                  label:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Label
+                  locked:
+                    title: Locked
+                    type: boolean
+                  max_publishers:
+                    title: Max Publishers
+                    type: integer
+                  publisher_ids:
+                    items:
+                      type: string
+                    title: Publisher Ids
+                    type: array
+                  room_id:
+                    title: Room Id
+                    type: string
+                  subscriber_count:
+                    title: Subscriber Count
+                    type: integer
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - room_id
+                - community_id
+                - label
+                - max_publishers
+                - created_at
+                - publisher_ids
+                - subscriber_count
+                - locked
+                title: RoomResponse
+                type: object
+          description: 'One room (create/get): the `RoomInfo` fields plus `success`.'
       summary: Get a specific call room (admin).
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/acknowledge-hand:
     post:
@@ -8301,7 +8606,8 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for `POST .../acknowledge-hand`.
+              description: Request DTO for `POST .../acknowledge-hand` -- `user_id`
+                is the participant's UUID.
               properties:
                 user_id:
                   title: User Id
@@ -8311,9 +8617,24 @@ paths:
               title: AcknowledgeHandRequest
               type: object
       responses:
-        default:
-          description: Undocumented response
-      summary: 'Acknowledge a raised hand (admin) -- 501: not a svc-streaming concern.'
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Result of raising/acknowledging one hand.
+                properties:
+                  hand:
+                    $ref: '#/components/schemas/HandDTO'
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - hand
+                title: HandResponse
+                type: object
+          description: Result of raising/acknowledging one hand.
+      summary: Acknowledge a participant's raised hand (admin).
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/kick:
     post:
       description: ''
@@ -8333,19 +8654,35 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for `POST .../kick` -- `identity` is the participant's
-                UUID.
+              description: Request DTO for kick/mute/unmute -- `identity` is the target
+                participant's UUID.
               properties:
                 identity:
                   title: Identity
                   type: string
               required:
               - identity
-              title: KickParticipantRequest
+              title: ParticipantTargetRequest
               type: object
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Plain acknowledgement.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - message
+                title: MessageResponse
+                type: object
+          description: Plain acknowledgement.
       summary: Kick a participant from a room (admin).
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/lock:
     post:
@@ -8363,9 +8700,80 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Plain acknowledgement.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - message
+                title: MessageResponse
+                type: object
+          description: Plain acknowledgement.
       summary: Lock a call room (admin).
+  /api/v1/admin/{community_id}/calls/rooms/{room_name}/mute:
+    post:
+      description: ''
+      operationId: post_mute_call_participant
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for kick/mute/unmute -- `identity` is the target
+                participant's UUID.
+              properties:
+                identity:
+                  title: Identity
+                  type: string
+              required:
+              - identity
+              title: ParticipantTargetRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Result of a per-participant mute/unmute: the participant''s
+                  resulting muted state.'
+                properties:
+                  muted:
+                    title: Muted
+                    type: boolean
+                  participant_id:
+                    title: Participant Id
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - participant_id
+                - muted
+                title: ParticipantMuteResponse
+                type: object
+          description: 'Result of a per-participant mute/unmute: the participant''s
+            resulting muted state.'
+      summary: Mute one participant (admin).
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/mute-all:
     post:
       description: ''
@@ -8382,9 +8790,29 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
-      summary: Mute all participants in a room (admin).
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Result of `mute-all`: how many publishers were muted.'
+                properties:
+                  message:
+                    default: All participants muted
+                    title: Message
+                    type: string
+                  muted:
+                    title: Muted
+                    type: integer
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - muted
+                title: MuteAllResponse
+                type: object
+          description: 'Result of `mute-all`: how many publishers were muted.'
+      summary: Mute all publishers in a room except the acting admin (admin).
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/participants:
     get:
       description: ''
@@ -8401,9 +8829,32 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
-      summary: Get participants in a room (admin).
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET .../participants`.'
+                properties:
+                  locked:
+                    title: Locked
+                    type: boolean
+                  participants:
+                    items:
+                      $ref: '#/components/schemas/ParticipantDTO'
+                    title: Participants
+                    type: array
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - participants
+                - locked
+                title: ParticipantsResponse
+                type: object
+          description: '`GET .../participants`.'
+      summary: Get participants in a room (admin), with display names resolved by
+        hub-api.
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/raised-hands:
     get:
       description: ''
@@ -8420,10 +8871,72 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
-      summary: 'Raised-hands queue (admin) -- 501: not a svc-streaming concern, see
-        module docstring.'
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET .../raised-hands` -- the queue, oldest first.'
+                properties:
+                  count:
+                    title: Count
+                    type: integer
+                  raised_hands:
+                    items:
+                      $ref: '#/components/schemas/HandDTO'
+                    title: Raised Hands
+                    type: array
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - raised_hands
+                - count
+                title: RaisedHandsResponse
+                type: object
+          description: '`GET .../raised-hands` -- the queue, oldest first.'
+      summary: The room's raised-hand queue, oldest first, with display names (admin).
+  /api/v1/admin/{community_id}/calls/rooms/{room_name}/reset-hands:
+    post:
+      description: ''
+      operationId: post_reset_hands
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Result of clearing a room''s raised-hand queue: how
+                  many hands were cleared.'
+                properties:
+                  cleared:
+                    title: Cleared
+                    type: integer
+                  message:
+                    default: Raised hands cleared
+                    title: Message
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - cleared
+                title: ResetHandsResponse
+                type: object
+          description: 'Result of clearing a room''s raised-hand queue: how many hands
+            were cleared.'
+      summary: Clear the room's whole raised-hand queue (admin).
   /api/v1/admin/{community_id}/calls/rooms/{room_name}/unlock:
     post:
       description: ''
@@ -8440,9 +8953,80 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Plain acknowledgement.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - message
+                title: MessageResponse
+                type: object
+          description: Plain acknowledgement.
       summary: Unlock a call room (admin).
+  /api/v1/admin/{community_id}/calls/rooms/{room_name}/unmute:
+    post:
+      description: ''
+      operationId: post_unmute_call_participant
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_name
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for kick/mute/unmute -- `identity` is the target
+                participant's UUID.
+              properties:
+                identity:
+                  title: Identity
+                  type: string
+              required:
+              - identity
+              title: ParticipantTargetRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Result of a per-participant mute/unmute: the participant''s
+                  resulting muted state.'
+                properties:
+                  muted:
+                    title: Muted
+                    type: boolean
+                  participant_id:
+                    title: Participant Id
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - participant_id
+                - muted
+                title: ParticipantMuteResponse
+                type: object
+          description: 'Result of a per-participant mute/unmute: the participant''s
+            resulting muted state.'
+      summary: Lift a moderation mute from one participant (admin).
   /api/v1/admin/{community_id}/commands:
     get:
       description: ''
@@ -16202,6 +16786,117 @@ paths:
             it on.'
       summary: '`PUT /api/v1/communities/<id>/calendar/event-sync` body `{"enabled":
         bool}`.'
+  /api/v1/communities/{community_id}/calls/rooms/{room_id}/hands/mine:
+    get:
+      description: ''
+      operationId: get_get_my_hand
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'The caller''s OWN hand state only: UUID plus timestamps,
+                  nothing about anyone else.'
+                properties:
+                  acknowledged:
+                    title: Acknowledged
+                    type: boolean
+                  acknowledged_at:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Acknowledged At
+                  participant_id:
+                    title: Participant Id
+                    type: string
+                  position:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Position
+                  queue_length:
+                    title: Queue Length
+                    type: integer
+                  raised:
+                    title: Raised
+                    type: boolean
+                  raised_at:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Raised At
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - participant_id
+                - raised
+                - acknowledged
+                - raised_at
+                - acknowledged_at
+                - position
+                - queue_length
+                title: MyHandResponse
+                type: object
+          description: 'The caller''s OWN hand state only: UUID plus timestamps, nothing
+            about anyone else.'
+      summary: 'The caller''s own raised-hand state (member): their own entry only,
+        via `ListHands`.'
+  /api/v1/communities/{community_id}/calls/rooms/{room_id}/participants:
+    get:
+      description: ''
+      operationId: get_get_room_participants_as_member
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET /communities/{id}/calls/rooms/{room}/participants`
+                  (member).'
+                properties:
+                  locked:
+                    title: Locked
+                    type: boolean
+                  participants:
+                    items:
+                      $ref: '#/components/schemas/MemberParticipantDTO'
+                    title: Participants
+                    type: array
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - participants
+                - locked
+                title: MemberParticipantsResponse
+                type: object
+          description: '`GET /communities/{id}/calls/rooms/{room}/participants` (member).'
+      summary: 'Who is in a room (member): pseudonymous ids, display names, media
+        state; no internals.'
   /api/v1/communities/{community_id}/connections:
     get:
       description: ''
@@ -17466,6 +18161,104 @@ paths:
                 type: object
           description: Response DTO for `GET .../streams/<entityId>`.
       summary: Get details for a specific stream.
+  /api/v1/communities/{community_id}/town-hall:
+    get:
+      description: ''
+      operationId: get_get_town_hall
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The community's persistent Town Hall room.
+                properties:
+                  created:
+                    title: Created
+                    type: boolean
+                  join:
+                    $ref: '#/components/schemas/TownHallJoin'
+                  label:
+                    title: Label
+                    type: string
+                  locked:
+                    title: Locked
+                    type: boolean
+                  participant_count:
+                    title: Participant Count
+                    type: integer
+                  room_id:
+                    title: Room Id
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - room_id
+                - label
+                - locked
+                - participant_count
+                - created
+                - join
+                title: TownHallResponse
+                type: object
+          description: The community's persistent Town Hall room.
+      summary: 'The community''s Town Hall (member). Read-only: 404 until a POST has
+        created it.'
+    post:
+      description: ''
+      operationId: post_post_town_hall
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The community's persistent Town Hall room.
+                properties:
+                  created:
+                    title: Created
+                    type: boolean
+                  join:
+                    $ref: '#/components/schemas/TownHallJoin'
+                  label:
+                    title: Label
+                    type: string
+                  locked:
+                    title: Locked
+                    type: boolean
+                  participant_count:
+                    title: Participant Count
+                    type: integer
+                  room_id:
+                    title: Room Id
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - room_id
+                - label
+                - locked
+                - participant_count
+                - created
+                - join
+                title: TownHallResponse
+                type: object
+          description: The community's persistent Town Hall room.
+      summary: Ensure the community's Town Hall exists (member, write scope); idempotent.
   /api/v1/community/{community_id}/activity/my-stats:
     get:
       description: ''
@@ -17786,8 +18579,26 @@ paths:
         schema:
           type: integer
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET .../rooms` -- every live room of the community.'
+                properties:
+                  rooms:
+                    items:
+                      $ref: '#/components/schemas/RoomInfo'
+                    title: Rooms
+                    type: array
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - rooms
+                title: RoomsListResponse
+                type: object
+          description: '`GET .../rooms` -- every live room of the community.'
       summary: List voice rooms for a community (member).
     post:
       description: ''
@@ -17819,8 +18630,56 @@ paths:
               title: CreateCallRoomRequest
               type: object
       responses:
-        default:
-          description: Undocumented response
+        '201':
+          content:
+            application/json:
+              schema:
+                description: 'One room (create/get): the `RoomInfo` fields plus `success`.'
+                properties:
+                  community_id:
+                    title: Community Id
+                    type: string
+                  created_at:
+                    title: Created At
+                    type: integer
+                  label:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Label
+                  locked:
+                    title: Locked
+                    type: boolean
+                  max_publishers:
+                    title: Max Publishers
+                    type: integer
+                  publisher_ids:
+                    items:
+                      type: string
+                    title: Publisher Ids
+                    type: array
+                  room_id:
+                    title: Room Id
+                    type: string
+                  subscriber_count:
+                    title: Subscriber Count
+                    type: integer
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - room_id
+                - community_id
+                - label
+                - max_publishers
+                - created_at
+                - publisher_ids
+                - subscriber_count
+                - locked
+                title: RoomResponse
+                type: object
+          description: 'One room (create/get): the `RoomInfo` fields plus `success`.'
       summary: Create an ad-hoc voice room (member).
   /api/v1/community/{community_id}/interact/voice/rooms/{room_name}/join:
     post:
@@ -17838,8 +18697,88 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`POST .../join` -- everything a browser WHIP/WHEP client
+                  needs, for ONE participant.
+
+
+                  `token` is a short-lived room token to send as `Authorization: Bearer
+                  <token>` to the WHIP
+
+                  publish and WHEP subscribe endpoints; `publish` / `subscribe` say
+                  which of them the policy
+
+                  granted. The token is a credential: it is never logged and the response
+                  is `no-store`.'
+                properties:
+                  expires_at:
+                    title: Expires At
+                    type: integer
+                  ice_servers:
+                    items:
+                      $ref: '#/components/schemas/IceServerDTO'
+                    title: Ice Servers
+                    type: array
+                  participant_id:
+                    title: Participant Id
+                    type: string
+                  publish:
+                    title: Publish
+                    type: boolean
+                  subscribe:
+                    title: Subscribe
+                    type: boolean
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                  token:
+                    title: Token
+                    type: string
+                  token_id:
+                    title: Token Id
+                    type: string
+                  token_type:
+                    title: Token Type
+                    type: string
+                  url:
+                    title: Url
+                    type: string
+                  whep_url:
+                    title: Whep Url
+                    type: string
+                  whip_url:
+                    title: Whip Url
+                    type: string
+                required:
+                - token
+                - token_type
+                - url
+                - whip_url
+                - whep_url
+                - token_id
+                - participant_id
+                - expires_at
+                - publish
+                - subscribe
+                - ice_servers
+                title: JoinResponse
+                type: object
+          description: '`POST .../join` -- everything a browser WHIP/WHEP client needs,
+            for ONE participant.
+
+
+            `token` is a short-lived room token to send as `Authorization: Bearer
+            <token>` to the WHIP
+
+            publish and WHEP subscribe endpoints; `publish` / `subscribe` say which
+            of them the policy
+
+            granted. The token is a credential: it is never logged and the response
+            is `no-store`.'
       summary: Join a voice room -- mints a room token for THIS caller, THIS room,
         only if a member.
   /api/v1/community/{community_id}/interact/voice/rooms/{room_name}/leave:
@@ -17858,9 +18797,98 @@ paths:
         schema:
           type: string
       responses:
-        default:
-          description: Undocumented response
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Plain acknowledgement.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - message
+                title: MessageResponse
+                type: object
+          description: Plain acknowledgement.
       summary: Leave a voice room (member) -- always acts as oneself (actor == participant).
+  /api/v1/community/{community_id}/interact/voice/rooms/{room_name}/lower-hand:
+    post:
+      description: ''
+      operationId: post_lower_voice_hand
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Result of lowering the caller's hand; `lowered` is False
+                  when none was raised.
+                properties:
+                  lowered:
+                    title: Lowered
+                    type: boolean
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - lowered
+                title: LowerHandResponse
+                type: object
+          description: Result of lowering the caller's hand; `lowered` is False when
+            none was raised.
+      summary: 'Lower the caller''s own hand (member); a no-op (`lowered: false`)
+        when none is raised.'
+  /api/v1/community/{community_id}/interact/voice/rooms/{room_name}/raise-hand:
+    post:
+      description: ''
+      operationId: post_raise_voice_hand
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: room_name
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Result of raising/acknowledging one hand.
+                properties:
+                  hand:
+                    $ref: '#/components/schemas/HandDTO'
+                  success:
+                    default: true
+                    title: Success
+                    type: boolean
+                required:
+                - hand
+                title: HandResponse
+                type: object
+          description: Result of raising/acknowledging one hand.
+      summary: Raise the caller's own hand (member); idempotent -- the original queue
+        spot is kept.
   /api/v1/community/{community_id}/leaderboard/messages:
     get:
       description: ''
