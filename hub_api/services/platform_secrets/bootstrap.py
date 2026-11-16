@@ -65,6 +65,7 @@ from services.platform_secrets.repository import (
     OUTCOME_SUCCESS,
     REASON_GENERATED,
     REASON_IMPORTED,
+    STATE_ACTIVE,
     NewSecret,
     PlatformVaultRepository,
     SecretRow,
@@ -96,7 +97,9 @@ class PlatformVaultRefusedError(RuntimeError):
 
     `reason` is one of `kek_missing`, `root_mismatch`, `store_wiped`, `marker_missing`,
     `chain_break`, `unopenable`, `inconsistent`, `restore_blocked`, `escrow_invalid`,
-    `escrow_tampered`, `escrow_missing`, `escrow_unavailable`, `escrow_misconfigured`.
+    `escrow_tampered`, `escrow_missing`, `escrow_unavailable`, `escrow_misconfigured`, and for
+    an offline signer (`load_offline_signer_cache`) `signing_key_missing`,
+    `signing_key_unavailable` / `trust_mismatch`.
     """
 
     def __init__(self, reason: str) -> None:
@@ -146,6 +149,7 @@ def _refuse(reason: str, type_name: str = "all") -> PlatformVaultRefusedError:
         "escrow_rollback": "escrow_rollback",
         "escrow_unavailable": "unavailable",
         "escrow_misconfigured": "error",
+        "trust_mismatch": "mismatch",
     }.get(reason, "error")
     telemetry.count_drift(type_name, outcome)
     logger.error("platform vault refused to start reason=%s", reason)
@@ -518,6 +522,102 @@ def _sync_escrow_best_effort(engine: Engine, kek: PlatformKekAdapter, store: Esc
         report.written,
         report.drift,
     )
+
+
+def load_offline_signer_cache(
+    database_url: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    kill_switch: Callable[[], bool] = db_platform_keys_disabled,
+    cache: PlatformSecretCache | None = None,
+    engine: Engine | None = None,
+) -> int:
+    """Put the vault's ACTIVE bundle_signing key into THIS process's cache; returns 1 (0 = skipped).
+
+    The core-bundle seeder and the signing backfill run as their own Job pods: hub-api's bootstrap
+    seeded hub-api's cache, never theirs, so `PlatformSigner.from_vault()` found nothing there.
+    These Jobs must not hold the platform KEK (it stays inside hub-api, the PII boundary), so the
+    vault is read WITHOUT opening anything: the active row's public key and kid are public columns.
+    The private half comes from the bundle-signing Secret the Jobs already mount (the same Secret
+    hub-api imported as version 1 and the executors' `BUNDLE_SIGNING_PUBLIC_KEYS` is derived from)
+    and is accepted ONLY when its public key equals the vault's active one -- so the vault decides
+    which key signs, and what is signed here is exactly what the executors verify.
+
+    Read-only; creation stays in hub-api's bootstrap (advisory lock; the seeder waits for hub-api
+    `/ready`). Fails closed: kill-switch ON -> 0 (legacy env signer is authoritative); no active
+    row -> `signing_key_missing`; no usable Secret -> `signing_key_unavailable`; a Secret that is
+    not the active key (e.g. after a rotation the Secret did not follow) -> `trust_mismatch`
+    (drift metric). Logs and metrics carry outcome words and counts only, never key material.
+    """
+    env = os.environ if environ is None else environ
+    spec = REGISTRY[SecretType.BUNDLE_SIGNING]
+    if kill_switch():
+        logger.warning("offline signer: platform vault load skipped: %s is ON", KILL_SWITCH_FLAG)
+        telemetry.count_offline_load("skipped")
+        return 0
+    owns_engine = engine is None
+    if engine is None:
+        import sqlalchemy
+
+        engine = sqlalchemy.create_engine(
+            database_url.replace("postgresql://", "postgresql+psycopg2://", 1),
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+            hide_parameters=True,
+        )
+    with telemetry.span("offline_load", type=spec.name):
+        try:
+            with engine.connect() as conn:
+                rows = SqlRepository(conn).rows_for(int(spec.secret_type), None)
+        except SQLAlchemyError as exc:
+            telemetry.count_offline_load("error")
+            logger.error("offline signer: platform vault read failed (%s)", type(exc).__name__)
+            raise
+        finally:
+            if owns_engine:
+                engine.dispose()
+        active = [r for r in rows if r.state == STATE_ACTIVE]
+        if len(active) != 1 or active[0].public_material is None:
+            telemetry.count_offline_load("error")
+            raise _refuse("signing_key_missing", spec.name)
+        row = active[0]
+        decision = import_candidate(spec, env)
+        if not decision.usable or decision.material is None:
+            telemetry.count_offline_load("error")
+            logger.error(
+                "offline signer: bundle-signing Secret unusable source=%s outcome=%s",
+                decision.source,
+                decision.outcome,
+            )
+            raise _refuse("signing_key_unavailable", spec.name)
+        if decision.material.public_material != row.public_material:
+            telemetry.count_offline_load("mismatch")
+            raise _refuse("trust_mismatch", spec.name)
+    target = cache if cache is not None else _process_cache
+    target.seed(
+        [
+            CachedSecret(
+                secret_type=row.secret_type,
+                scope_id=None,
+                version=row.version,
+                state=row.state,
+                kid=row.kid,
+                public_id=row.public_id,
+                public_material=row.public_material,
+                activated_at=row.activated_at,
+                verify_until=None,
+                plaintext=decision.material.plaintext,
+            )
+        ]
+    )
+    telemetry.count_offline_load("ok")
+    logger.info(
+        "platform secret cache loaded for offline signing type=%s version=%d count=1",
+        spec.name,
+        row.version,
+    )
+    return 1
 
 
 def start_cache_refresher(

@@ -134,6 +134,18 @@ def count_drift(type_name: str, outcome: str) -> None:
     )
 
 
+def count_offline_load(outcome: str) -> None:
+    """`waddles_platform_secrets_offline_loads_total{type="all",outcome}`.
+
+    One per offline-signer process (core-bundle seeder, signing backfill) loading the vault cache.
+    """
+    _safe(
+        lambda: _counter("waddles_platform_secrets_offline_loads_total").add(
+            1, _labels("all", outcome)
+        )
+    )
+
+
 def count_escrow(type_name: str, outcome: str) -> None:
     """`waddles_platform_secrets_escrow_total{type,outcome}` (ok / error / restored / refusals)."""
     _safe(
