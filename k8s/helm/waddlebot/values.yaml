@@ -3434,6 +3434,12 @@ bundleStorage:
   mode: bundled
   bucketName: "waddles-bundle-storage"
   region: "us-east-1"
+  # Object bodies are sealed per tenant (AES-256-GCM under the tenant DEK from hub-api); there is no
+  # plaintext write path. Set to the unix-seconds instant sealing was first enabled to keep READING
+  # objects written before it (only objects last modified before this instant are served as legacy
+  # plaintext, with a WARN). Empty (default) = no plaintext object is ever served. A value in the
+  # future is refused at startup.
+  legacyPlaintextUntil: ""
   external:
     endpoint: ""
     bucket: ""

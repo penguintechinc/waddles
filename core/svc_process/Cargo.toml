@@ -155,6 +155,7 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # `stage.wit`'s `interface kv`. `core/svc_action` declares the identical
 # dependency so the capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
+bundle-host-crypto = { path = "../bundle_host_crypto", version = "=0.1.0", features = ["grpc"] }
 bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0", features = ["grpc"] }
 # The standard enforcement gate every host capability arm calls first
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
@@ -279,6 +280,8 @@ hmac = "=0.12.1"
 hex = "=0.4.3"
 
 [dev-dependencies]
+# `crate::bundle_storage` tests put real object bodies through the assembled `StorageHost`.
+bytes = "=1.12.1"
 # `crate::surface` tests run a real in-process tonic `SurfaceService` on loopback.
 tokio-stream = { version = "=0.1.19", features = ["net"] }
 # In-process KeyService fake (the seal contract) for the real-path decrypt tests.
