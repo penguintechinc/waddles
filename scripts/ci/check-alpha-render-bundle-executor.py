@@ -36,6 +36,18 @@ EXPECTED_RESOURCES = {
     "requests": {"cpu": "500m", "memory": "1Gi"},
     "limits": {"cpu": "4000m", "memory": "2560Mi"},
 }
+# Language-class pools (alpha "schedulable sizing"): both keep the OOM-fix memory ceiling the
+# script pool needs (2560Mi); the native pool compiles ahead of time and runs leaner.
+EXPECTED_RESOURCES_BY_POOL = {
+    "-native": {
+        "requests": {"cpu": "250m", "memory": "512Mi"},
+        "limits": {"cpu": "2000m", "memory": "1536Mi"},
+    },
+    "-script": {
+        "requests": {"cpu": "250m", "memory": "512Mi"},
+        "limits": {"cpu": "4000m", "memory": "2560Mi"},
+    },
+}
 MIN_STARTUP_FAILURE_THRESHOLD = 30  # periodSeconds=5 * 30 = 150s+initialDelay, generous floor
 LEGACY_ENV_NAMES = {
     "PROCESS_APP_ID",
@@ -116,9 +128,13 @@ def main() -> int:
         container = containers[0]
 
         resources = container.get("resources", {})
-        if resources != EXPECTED_RESOURCES:
+        expected_resources = next(
+            (r for suffix, r in EXPECTED_RESOURCES_BY_POOL.items() if name.endswith(suffix)),
+            EXPECTED_RESOURCES,
+        )
+        if resources != expected_resources:
             errors.append(
-                f"{name}: resources {resources!r} != expected {EXPECTED_RESOURCES!r}"
+                f"{name}: resources {resources!r} != expected {expected_resources!r}"
             )
 
         image = container.get("image", "")
@@ -147,9 +163,11 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
-    if executor_deployments_found != 1:
+    # One unpartitioned pool, or one pool per language class (-native, -script).
+    if executor_deployments_found not in (1, 2):
         print(
-            f"FAIL: expected exactly ONE svc-bundles-executor workload, found {executor_deployments_found}",
+            "FAIL: expected ONE svc-bundles-executor workload (or TWO language-class pools), "
+            f"found {executor_deployments_found}",
             file=sys.stderr,
         )
         return 1

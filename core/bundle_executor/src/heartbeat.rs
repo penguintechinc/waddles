@@ -395,4 +395,45 @@ mod tests {
         assert!(shared().count("waddles_executor_reconnects_total", &[]) >= reconnects + 2.0);
         assert!(shared().count("waddles_executor_heartbeat_timeouts_total", &[]) >= timeouts + 1.0);
     }
+
+    #[test]
+    fn activity_tracker_arms_only_after_a_server_ping_and_default_matches_new() {
+        let t = ActivityTracker::default();
+        assert!(!t.is_armed(), "unarmed until the stage's first ping");
+        t.mark_server_ping_seen();
+        assert!(t.is_armed());
+        t.touch();
+        assert!(t.age() < Duration::from_secs(5));
+    }
+
+    #[test]
+    fn a_poisoned_activity_lock_is_recovered_not_wedged() {
+        let m = Mutex::new(Instant::now());
+        let m = Arc::new(m);
+        let m2 = Arc::clone(&m);
+        let _ = std::thread::spawn(move || {
+            let _g = m2.lock().unwrap_or_else(|e| e.into_inner());
+            panic!("poison the lock");
+        })
+        .join();
+        assert!(m.is_poisoned());
+        let _ = *lock(&m);
+    }
+
+    #[test]
+    fn heartbeat_config_resolves_from_cli_and_disabled_is_inert() {
+        let mut cfg = CliConfig::for_healthcheck();
+        cfg.executor_heartbeat_enabled = true;
+        cfg.executor_heartbeat_interval_secs = 0;
+        cfg.executor_self_ping_enabled = true;
+        let hb = HeartbeatConfig::from_cli(&cfg);
+        assert!(hb.enabled && hb.self_ping_enabled);
+        assert_eq!(
+            hb.interval,
+            Duration::from_secs(1),
+            "interval is clamped to >= 1s"
+        );
+        let off = HeartbeatConfig::disabled();
+        assert!(!off.enabled && !off.self_ping_enabled);
+    }
 }

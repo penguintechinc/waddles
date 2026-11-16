@@ -121,6 +121,10 @@ Notes:
 | `executor_load_duration_seconds` | histogram | `source, result` | time to make one module resident; `source`: `aot` (verified `.cwasm` deserialize), `compile` (JIT) |
 | `executor_precompile_fallback_total` | counter | `reason` | AOT misses that fell back to JIT (logged at ERROR); `reason`: `fetch`, `signature`, `deserialize` |
 | `executor_module_evictions_total` | counter | — | idle unpinned modules evicted (LRU) to honour the memory budget; they reload on their next call |
+| `waddles_executor_warm_pool_total` | counter | `result` = `hit` / `miss` / `fill_failed` | warm-pool lookups per stage invoke (hit = a prewarmed one-shot guest was taken, skipping instantiation; miss = pool enabled but empty -> cold instantiate; fill_failed = a background prewarm could not instantiate and that digest now serves cold). Absent entirely when the pool is off |
+| `waddles_executor_warm_pool_size` | gauge | — | prewarmed guests ready right now across every digest |
+| `waddles_executor_prewarm_seconds` | histogram | — | OFF-request-path instantiate time of one warm-pool guest (the cost the pool moved off the path); `waddles_executor_instantiate_seconds` keeps measuring the on-path cost (near zero on a hit) |
+| `executor_partition_unroutable_total` | counter | `stage`, `class` = `compiled` / `scripted` / `unknown_language` | active bundles, per reconcile tick, that no live executor of the right language class can host (reported by svc-process / svc-action; each is also logged at ERROR when the set changes) |
 | `waddles_executor_connection_attempts_total` | counter | `result`, `stage` | `connected`, `failed` |
 | `waddles_executor_connection_up` | gauge | `stage` | `1` while that stage's host-API session is established, explicit `0` otherwise (one series per configured stage) |
 | `waddles_executor_session_seconds` | histogram | `stage` | length of each established session |

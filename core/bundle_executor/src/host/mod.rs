@@ -94,6 +94,25 @@ pub struct V2ScopeGuard {
 }
 
 impl ExecState {
+    /// Binds every per-call field of a PREWARMED (never-yet-invoked) state to this invocation:
+    /// the host bridge, `app_id`, invoke id, the v2 scope guard, and clears the cached
+    /// tenant. A prewarmed instance (`crate::warm_pool`) is built with none of these, and is
+    /// one-shot, so this is the single place per-call identity enters it -- nothing from an
+    /// earlier invocation can survive here, by construction (see the pool's isolation doc).
+    pub(crate) fn rebind_for_call(
+        &mut self,
+        bridge: Option<Arc<HostBridge>>,
+        app_id: String,
+        call_id: u64,
+        v2_scope: Option<V2ScopeGuard>,
+    ) {
+        self.bridge = bridge;
+        self.app_id = app_id;
+        self.call_id = call_id;
+        self.v2_scope = v2_scope;
+        self.identity_tenant = None;
+    }
+
     /// Builds a fresh per-call state: a new [`WasiCtx`] with the
     /// executor's fixed WASI posture (below) and a fresh [`ResourceTable`]
     /// -- spec SS7.2: "Every instance is fresh per call with respect to
@@ -301,6 +320,45 @@ mod tests {
         assert_eq!(state.app_id, "waddles.test.app");
         assert_eq!(state.call_id, 1);
         assert!(state.bridge.is_none());
+    }
+
+    /// Cross-tenant state-leak attempt at the state layer: a state that "remembers" tenant A's
+    /// invocation (bridge, app, call id, v2 scope, cached tenant) is rebound for tenant B and
+    /// must carry NONE of A's per-call identity forward. (A prewarmed guest is one-shot and
+    /// never actually reused -- this proves the one place identity enters it is a full reset.)
+    #[test]
+    fn rebind_for_call_replaces_every_per_call_field_and_clears_the_cached_tenant() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(4);
+        let conn_a = crate::wire::Connection::new(tx);
+        let mut state = ExecState::new(Some(HostBridge::new(conn_a)), "app-a".to_string(), 7);
+        state.identity_tenant = Some("tenant-a".to_string());
+        state.v2_scope = Some(V2ScopeGuard {
+            allowed: vec![(1, 0)],
+            frame: Some((1, 0)),
+        });
+        assert!(state.bridge.is_some());
+
+        state.rebind_for_call(None, "app-b".to_string(), 9, None);
+        assert_eq!(state.app_id, "app-b");
+        assert_eq!(state.call_id, 9);
+        assert!(state.bridge.is_none(), "tenant A's bridge must not survive");
+        assert!(
+            state.v2_scope.is_none(),
+            "tenant A's v2 scope must not survive"
+        );
+        assert!(
+            state.identity_tenant.is_none(),
+            "tenant A's cached tenant must not survive"
+        );
+
+        let guard_b = V2ScopeGuard {
+            allowed: vec![(2, 5)],
+            frame: Some((2, 5)),
+        };
+        state.rebind_for_call(None, "app-b".to_string(), 10, Some(guard_b));
+        let scope = state.v2_scope.as_ref().expect("B's scope bound");
+        assert_eq!(scope.allowed, vec![(2, 5)]);
+        assert_eq!(scope.frame, Some((2, 5)));
     }
 
     /// `with_memory_limit_mb` must actually deny a `memory_growing` request

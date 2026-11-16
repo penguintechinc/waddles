@@ -54,6 +54,10 @@ mod component {
         fn resolve_mention(&self, token: &str) -> Option<String> {
             identity::resolve_mention(token).ok()
         }
+        /// The live per-community config JSON from the stage context.
+        fn community_config_json(&self) -> String {
+            context::get_context().config_json
+        }
         /// Monotonic nanoseconds for duration measurement.
         fn monotonic_nanos(&self) -> u64 {
             clock::monotonic_nanos()
