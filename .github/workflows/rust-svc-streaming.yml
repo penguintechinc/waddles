@@ -84,10 +84,10 @@ jobs:
           persist-credentials: false
 
       # Verifies preinstalled cmake + C toolchain (no apt; fails loud when absent).
-      - name: Setup build deps (cmake, C toolchain for ring/aws-lc-sys)
+      - name: Setup build deps (cmake, C toolchain, protoc)
         uses: ./.github/actions/setup-build-deps
         with:
-          packages: 'cmake build-essential'
+          packages: 'cmake build-essential protobuf-compiler'
 
       - name: Install Rust 1.97.1
         uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
