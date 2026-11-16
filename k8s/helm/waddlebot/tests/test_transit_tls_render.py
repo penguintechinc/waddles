@@ -244,22 +244,25 @@ def test_certificates_are_ecdsa_p256_fqdn_only(dal2: list[dict[str, Any]]) -> No
 
 
 def test_streaming_over_tls(dal2: list[dict[str, Any]]) -> None:
-    """F6: hub-api dials svc-streaming (TLS port); the server terminates TLS (core-data was removed from the chart)."""
+    """F6: svc-streaming's TLS control-plane listener; the server terminates TLS (core-data was removed from the chart)."""
     hub = _by_component(dal2, "Deployment", "hub-api")["spec"]["template"]["spec"][
         "containers"
     ][0]
     env = _env(hub)
-    assert (
-        env["STREAMING_RTC_URL"]["value"]
-        == f"https://waddlebot-svc-streaming{_FQDN_SUFFIX}:8448"
-    )
+    # hub-api -> svc-streaming rooms control plane is gRPC over mTLS (the REST proxy env is retired).
+    assert "STREAMING_RTC_URL" not in env
 
     st = _by_component(dal2, "Deployment", "svc-streaming")["spec"]["template"]["spec"]
     senv = _env(st["containers"][0])
     assert senv["STREAMING_TLS_PORT"]["value"] == "8448"
     assert senv["TLS_CERT_FILE"]["value"].endswith("tls.crt")
     assert "INTERNAL_CA_PEM" in senv  # its own hub-api ledger client
-    svc = _by_component(dal2, "Service", "svc-streaming")
+    svc = next(
+        d
+        for d in dal2
+        if d["kind"] == "Service"
+        and d["metadata"]["name"].endswith("-svc-streaming")
+    )
     assert any(p["name"] == "https" and p["port"] == 8448 for p in svc["spec"]["ports"])
 
 

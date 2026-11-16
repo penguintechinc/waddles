@@ -28,6 +28,7 @@ RUST_PROTO = {
     "svc-action",
     "svc-presentation",
     "egress-proxy",
+    "svc-streaming",  # build.rs compiles rooms.proto from the named `proto` context
 }
 
 # path -> images that must rebuild. Every image appears in at least one row.

@@ -244,10 +244,13 @@ images:
     context: core/svc_streaming
     target: cpu
     tag_suffix: "-cpu"
+    build_contexts: ["proto=./proto"]
     lane: b
+    groups: [proto]
     inputs:
       - core/svc_streaming/Cargo.toml
       - core/svc_streaming/Cargo.lock
+      - core/svc_streaming/build.rs
       - core/svc_streaming/src/**
       - core/svc_streaming/tests/**
 
