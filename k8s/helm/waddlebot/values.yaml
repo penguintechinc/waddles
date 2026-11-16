@@ -3465,7 +3465,7 @@ bundleStorageV2:
     port: ""
     name: ""
     user: ""                    # default waddles_bundle_runtime
-  # hub-api only: BUNDLE_MIGRATOR_PASSWORD (role waddles_bundle_migrator, DDL on app schemas).
+  # hub-api + core-bundle seeder only: BUNDLE_MIGRATOR_PASSWORD (role waddles_bundle_migrator, DDL on app schemas).
   migrator:
     enabled: false
     existingSecret: ""          # Secret holding passwordKey (required when enabled)

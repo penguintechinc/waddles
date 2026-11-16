@@ -1153,7 +1153,8 @@ Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJ
 {{- end -}}
 
 {{/*
-Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api only (DDL provisioning at install/upgrade/uninstall).
+Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api and its core-bundle seeder Job (same code, same
+DDL provisioning at install/upgrade/uninstall) only -- never a data-plane workload.
 Off by default; password only ever from an operator-managed existingSecret (required when enabled).
 */}}
 {{- define "waddlebot.bundleMigratorEnv" -}}
