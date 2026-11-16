@@ -30,6 +30,10 @@ tokio-rustls = { version = "=0.26.5", default-features = false }
 rustls-pki-types = "=1.15.1"
 hyper-util = { version = "=0.1.19", default-features = false, features = ["tokio"] }
 tower = { version = "=0.5.3", default-features = false, features = ["util"] }
+# `internal_tls` (feature `rest-tls`; REST clients of core/connection_resolver, svc_ingest, svc_process) builds a pinned-CA
+# reqwest client. =0.12.28 (not 0.12.12): 0.12.12's rustls-tls chain pulls the unmaintained
+# `rustls-pemfile` (RUSTSEC-2025-0134). The hub-api machine-JWT bootstrap itself is gRPC (`grpc`).
+reqwest = { version = "=0.12.28", default-features = false, features = ["json", "rustls-tls", "http2"], optional = true }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = "=1.0.151"
 # "aws_lc_rs" (not jsonwebtoken's "rust_crypto" feature) -- security review
@@ -74,8 +78,14 @@ default = []
 # Exposes `service_auth::test_support::{Capture, MockHub}` to dependents' tests (`MockHub` is a
 # real in-process tonic `ServiceAuthService` on loopback, replacing the old wiremock REST stubs).
 test-support = ["dep:opentelemetry_sdk"]
+# In-cluster HTTPS policy for REST clients (`service_auth::internal_tls`): pinned CA, TLS>=1.2,
+# plaintext refused. Opt-in so crates that only mint/verify machine JWTs over gRPC never link
+# reqwest. Enabled by connection_resolver, svc_ingest and svc_process.
+rest-tls = ["dep:reqwest"]
 
 [dev-dependencies]
+# Self dev-dependency: `cargo test` always exercises `internal_tls` (feature `rest-tls`).
+service_auth = { path = ".", features = ["rest-tls"] }
 tokio = { version = "=1.53.3", features = ["full", "test-util"] }
 # Real-TLS tests: a throwaway ECDSA P-256 (rcgen's default) CA + server cert generated per run.
 rcgen = "=0.14.10"

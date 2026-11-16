@@ -636,6 +636,7 @@ name = "bundle-active-set"
 version = "0.1.0"
 dependencies = [
  "chrono",
+ "futures-util",
  "sea-orm",
  "serde_json",
  "sha2 0.10.9",
@@ -3421,6 +3422,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -3936,6 +3938,7 @@ dependencies = [
  "opentelemetry",
  "opentelemetry_sdk",
  "prost",
+ "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",
  "serde",

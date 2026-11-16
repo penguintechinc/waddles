@@ -2,7 +2,7 @@
 schema_version: 2
 app_id: waddles.core.app.reputation-accrual
 name: Reputation Accrual Bundle (Rust)
-version: 1.0.0
+version: 1.0.1
 feature: waddles.core.app
 module: core
 provider: builtin
@@ -65,3 +65,11 @@ platform_compatibility:
   tested_with: 1.0.0
   min_version: 1.0.0
   max_version: null
+community_config_schema:
+  type: object
+  additionalProperties: false
+  properties:
+    accrual_enabled:
+      type: boolean
+      default: true
+      description: "Set false to stop ALL accrual in this community (reputation / economy credits). Only an explicit false disables; absent keeps the default behaviour."

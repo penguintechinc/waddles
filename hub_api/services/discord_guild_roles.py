@@ -31,17 +31,20 @@ _DISCORD_MISSING_ACCESS = 50001
 _REQUEST_TIMEOUT_SECONDS = 10.0
 
 
-#: Permission bits that make a role privileged: a mirror must never grant one of these.
-#: ADMINISTRATOR, MANAGE_GUILD, MANAGE_ROLES, MANAGE_CHANNELS, MANAGE_WEBHOOKS, BAN_MEMBERS,
-#: KICK_MEMBERS, MODERATE_MEMBERS, MENTION_EVERYONE.
-PRIVILEGED_PERMISSION_MASK = (
-    0x8 | 0x20 | 0x10000000 | 0x10 | 0x20000000 | 0x4 | 0x2 | 0x10000000000 | 0x20000
-)
+#: ALLOWLIST of permission bits a mirror-granted role may carry (official Discord bit values,
+#: `1 << n`). Anything outside it -- including every present or future privileged/unknown bit --
+#: makes the role privileged. ADD_REACTIONS 6, STREAM 9, VIEW_CHANNEL 10, SEND_MESSAGES 11,
+#: EMBED_LINKS 14, ATTACH_FILES 15, READ_MESSAGE_HISTORY 16, USE_EXTERNAL_EMOJIS 18, CONNECT 20,
+#: SPEAK 21, USE_VAD 25, CHANGE_NICKNAME 26, USE_APPLICATION_COMMANDS 31,
+#: CREATE_PUBLIC_THREADS 35, USE_EXTERNAL_STICKERS 37, SEND_MESSAGES_IN_THREADS 38.
+SAFE_PERMISSION_MASK = 0
+for _bit in (6, 9, 10, 11, 14, 15, 16, 18, 20, 21, 25, 26, 31, 35, 37, 38):
+    SAFE_PERMISSION_MASK |= 1 << _bit
 
 
 def is_privileged_role(permissions: int, managed: bool) -> bool:
-    """True for a managed (bot/integration) role or one carrying any privileged permission."""
-    return bool(managed) or bool(int(permissions) & PRIVILEGED_PERMISSION_MASK)
+    """True for a managed (bot/integration) role or one with any bit outside the safe allowlist."""
+    return bool(managed) or (int(permissions) & ~SAFE_PERMISSION_MASK) != 0
 
 
 @dataclass(slots=True, frozen=True)
