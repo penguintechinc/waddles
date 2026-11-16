@@ -1108,11 +1108,26 @@ affinity:
 {{- end -}}
 
 {{/*
+Bundle storage v2 Secret names. Unset existingSecret (or the chart's own default name) = the
+chart-provisioned Secret, created-if-absent by templates/provision-secrets.yaml in every tier; any
+other name is an operator-owned Secret the hook never touches.
+Usage: include "waddlebot.bundleDbSecretName" . / include "waddlebot.bundleMigratorSecretName" .
+*/}}
+{{- define "waddlebot.bundleDbSecretName" -}}
+{{- .Values.bundleStorageV2.db.existingSecret | default "waddlebot-bundle-db" -}}
+{{- end -}}
+
+{{- define "waddlebot.bundleMigratorSecretName" -}}
+{{- .Values.bundleStorageV2.migrator.existingSecret | default "waddlebot-bundle-migrator" -}}
+{{- end -}}
+
+{{/*
 Bundle storage v2 (docs/bundle-storage-v2.md): BUNDLE_DB_* env for svc-process-rust / svc-action-rust.
-Off by default (bundleStorageV2.db.enabled=false -> renders nothing, db capability stays
-not_implemented). Enabled -> the password is read by secretKeyRef from an operator-managed
-existingSecret (required; the chart never renders or defaults a value). Host/port/name fall back to the
-chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
+On by default: the password is read by secretKeyRef from the chart-provisioned `waddlebot-bundle-db`
+Secret (or an operator-owned existingSecret); the db-migrate hook applies the same value to the
+waddles_bundle_runtime role. The db host capability itself stays behind its PostHog flag.
+enabled=false renders nothing. Host/port/name fall back to the chart's own Postgres service.
+Usage: include "waddlebot.bundleDbEnv" .
 */}}
 {{- define "waddlebot.bundleDbEnv" -}}
 {{- $v := .Values.bundleStorageV2.db -}}
@@ -1128,7 +1143,7 @@ chart's own Postgres service. Usage: include "waddlebot.bundleDbEnv" .
 - name: BUNDLE_DB_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ required "bundleStorageV2.db.existingSecret is required when bundleStorageV2.db.enabled=true" $v.existingSecret }}
+      name: {{ include "waddlebot.bundleDbSecretName" . }}
       key: {{ $v.passwordKey | default "BUNDLE_DB_PASSWORD" }}
 {{- end -}}
 {{- end -}}
@@ -1155,7 +1170,9 @@ Call: include "waddlebot.executorEffective" (dict "root" $ "pool" $pool) | fromJ
 {{/*
 Bundle storage v2: BUNDLE_MIGRATOR_* env for hub-api and its core-bundle seeder Job (same code, same
 DDL provisioning at install/upgrade/uninstall) only -- never a data-plane workload.
-Off by default; password only ever from an operator-managed existingSecret (required when enabled).
+On by default; password from the chart-provisioned `waddlebot-bundle-migrator` Secret (or an
+operator-owned existingSecret); the db-migrate hook applies the same value to the role, so the two
+always match. enabled=false renders nothing (approvals of db-v2 bundles then fail closed, 503).
 */}}
 {{- define "waddlebot.bundleMigratorEnv" -}}
 {{- $v := .Values.bundleStorageV2.migrator -}}
@@ -1167,7 +1184,7 @@ Off by default; password only ever from an operator-managed existingSecret (requ
 - name: BUNDLE_MIGRATOR_PASSWORD
   valueFrom:
     secretKeyRef:
-      name: {{ required "bundleStorageV2.migrator.existingSecret is required when bundleStorageV2.migrator.enabled=true" $v.existingSecret }}
+      name: {{ include "waddlebot.bundleMigratorSecretName" . }}
       key: {{ $v.passwordKey | default "BUNDLE_MIGRATOR_PASSWORD" }}
 {{- end -}}
 {{- end -}}

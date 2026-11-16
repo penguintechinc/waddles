@@ -232,13 +232,17 @@ final_b64() { # <secret> <key> -> base64 of the final value (this run's block, o
 }
 
 subst() { # <template> <flags> -> template with %%markers%% replaced
-  local t="$1" flags="$2" out="" pre rest ref sn sk v
+  local t="$1" flags="$2" out="" pre rest ref sn sk v b
   while [[ "${t}" == *'%%'* ]]; do
     pre="${t%%'%%'*}"; rest="${t#*'%%'}"
     [[ "${rest}" == *'%%'* ]] || die "unterminated %% marker in a derived template of secret/${CUR_NAME}"
     ref="${rest%%'%%'*}"; t="${rest#*'%%'}"
     if [[ "${ref}" == */* ]]; then sn="${ref%%/*}"; sk="${ref#*/}"; else sn="${CUR_NAME}"; sk="${ref}"; fi
-    v="$(unb64 "$(final_b64 "${sn}" "${sk}")")"
+    # Two steps, never `$(unb64 "$(final_b64 ...)")`: a die() inside the INNER substitution would
+    # be swallowed (the outer status is unb64's), silently deriving an EMPTY value from a missing
+    # or empty referenced key -- fail open. A failed lookup must fail the hook.
+    b="$(final_b64 "${sn}" "${sk}")" || die "derived ${CUR_NAME}: referenced ${sn}/${sk} unavailable"
+    v="$(unb64 "${b}")"
     if [ "${flags}" = urlsafe-values ] && ! [[ "${v}" =~ ${URLSAFE_RE} ]]; then
       die "value of ${sn}/${sk} is not URL/JSON safe [A-Za-z0-9._~-] (needed for ${CUR_NAME})"
     fi

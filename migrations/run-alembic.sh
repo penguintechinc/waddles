@@ -161,4 +161,16 @@ PY
 echo "Reconciling per-service DB roles..."
 python3 /app/scripts/db/service_roles.py reconcile --strict
 
+# ── Reconcile bundle storage v2 LOGIN roles ─────────────────────────────────
+# 0030_bundle_app_schemas sets waddles_bundle_migrator / waddles_bundle_runtime passwords only
+# the one time it runs; a database already past it (alpha: migrator created with NO password)
+# never got the value the provision-secrets hook now generates. Re-apply every run from
+# BUNDLE_MIGRATOR_ROLE_PASSWORD / BUNDLE_RUNTIME_ROLE_PASSWORD (derived by the hook from
+# waddlebot-bundle-migrator / waddlebot-bundle-db; deliberately NOT the names 0030 reads, so 0030
+# never sends a plaintext password): create-if-missing, change only when the stored verifier
+# differs, least privilege re-asserted. Only a client-computed SCRAM verifier reaches Postgres.
+# Env only -- never argv, never echoed.
+echo "Reconciling bundle storage roles..."
+python3 /app/scripts/db/bundle_storage_roles.py
+
 echo "=== All migrations complete ==="
