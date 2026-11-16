@@ -121,7 +121,7 @@ hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
 # Verifying-key cache over `platform_vault.public_keys` (Secrets T10): the platform user/session
 # JWT verifier is ES256 against these public keys, not a shared HMAC secret.
-platform-keys = { path = "../platform_keys" }
+platform-keys = { path = "../platform_keys", version = "=0.1.0" }
 
 # Direct process-group signalling (`killpg`) and non-reaping exit detection
 # (`waitid(WNOWAIT)`) for `pipeline::process_group` -- the supervisor used to
