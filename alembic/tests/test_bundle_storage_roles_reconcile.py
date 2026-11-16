@@ -201,7 +201,7 @@ def test_6_cli_never_prints_a_value_and_skips_when_disabled(db: PgTestDatabase) 
     )
     assert run.returncode == 0, run.stderr
     assert (
-        "Reconciled waddles_bundle_migrator: created=False password_changed=False"
+        "Reconciled waddles_bundle_migrator: created=no password_changed=no"
         in run.stdout
     )
     assert (

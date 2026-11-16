@@ -10,7 +10,7 @@ generates into `waddlebot-bundle-migrator` / `waddlebot-bundle-db`. `migrations/
 calls this after `alembic upgrade head`, with the values the db-migrate hook Secret derives from
 those same Secrets, so Secret and role always match.
 
-**Idempotent.** A role whose stored SCRAM/MD5 verifier already matches the password is left
+**Idempotent.** A role whose stored SCRAM-SHA-256 verifier already matches the password is left
 untouched (no `ALTER ROLE`, so a re-run is a true no-op); a different value (the Secret changed
 by design, or the role had none) is applied. A missing role is created LOGIN with no elevated
 attribute; least-privilege attributes are re-asserted every run. Schema ownership / grants are
@@ -143,18 +143,15 @@ def scram_matches(verifier: str, password: str) -> bool:
     ) and hmac.compare_digest(server, base64.b64decode(server_b64))
 
 
-def password_matches(verifier: str | None, role: str, password: str) -> bool:
-    """True when the stored verifier (SCRAM or legacy md5) already encodes `password`."""
-    if not verifier:
+def password_matches(verifier: str | None, password: str) -> bool:
+    """True when the stored SCRAM-SHA-256 verifier already encodes `password`.
+
+    A legacy md5 (or any other) verifier is deliberately treated as a mismatch: the role is
+    re-applied with a SCRAM verifier, which also upgrades it off md5.
+    """
+    if not verifier or not verifier.startswith("SCRAM-SHA-256$"):
         return False
-    if verifier.startswith("SCRAM-SHA-256$"):
-        return scram_matches(verifier, password)
-    if verifier.startswith("md5") and len(verifier) == 35:
-        digest = hashlib.md5(
-            (password + role).encode(), usedforsecurity=False
-        ).hexdigest()
-        return hmac.compare_digest(verifier, "md5" + digest)
-    return False
+    return scram_matches(verifier, password)
 
 
 def _stored_verifier(conn: Connection, role: str) -> tuple[bool, str | None, bool]:
@@ -189,7 +186,7 @@ def reconcile_role(
     """Create `role` if missing, set its password only if it differs, re-assert least privilege."""
     _validate(env_name, password)
     exists, verifier, readable = _stored_verifier(conn, role)
-    if exists and readable and password_matches(verifier, role, password):
+    if exists and readable and password_matches(verifier, password):
         conn.execute(sa.text(f"ALTER ROLE {role} WITH {_LEAST_PRIVILEGE}"))
         return RoleResult(role, created=False, password_changed=False)
     verifier_out = scram_verifier(password)
@@ -280,10 +277,12 @@ def main() -> int:
         print(
             "Bundle storage roles: no BUNDLE_*_PASSWORD supplied -- feature disabled, skipped."
         )
+    # Only fixed role names + yes/no flags are printed (never a value derived from a password).
     for r in results:
-        print(
-            f"Reconciled {r.role}: created={r.created} password_changed={r.password_changed}"
-        )
+        name = MIGRATOR_ROLE if r.role == MIGRATOR_ROLE else RUNTIME_ROLE
+        created = "yes" if r.created else "no"
+        changed = "yes" if r.password_changed else "no"
+        print(f"Reconciled {name}: created={created} password_changed={changed}")
     return 0
 
 
