@@ -188,19 +188,24 @@ async fn issued_ledger_is_capped_per_community_and_prunes_by_expiry() {
         a["room_id"].as_str().unwrap().to_string(),
         b["room_id"].as_str().unwrap().to_string(),
     );
+    // One fixed participant: the ledger counts every issuance, while distinct participants are
+    // capped per room (MAX_MEMBERS_PER_ROOM) well below the per-community ledger cap under test.
+    let participant = uuid::Uuid::new_v4().to_string();
     for _ in 0..MAX_ISSUED_PER_COMMUNITY {
-        let (st, _) = host_call(
+        let (st, body) = host_call(
             &host,
             "token.issue",
-            json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+            json!({"community_id":"7","room_id":a,"participant_id":participant,
+                   "publish":false,"subscribe":true}),
         )
         .await;
-        assert_eq!(st, StatusCode::OK);
+        assert_eq!(st, StatusCode::OK, "{body}");
     }
     let (st, body) = host_call(
         &host,
         "token.issue",
-        json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+        json!({"community_id":"7","room_id":a,"participant_id":participant,
+               "publish":false,"subscribe":true}),
     )
     .await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{body}");
