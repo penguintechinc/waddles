@@ -16,7 +16,6 @@ use webrtc::media_stream::track_local::TrackLocal;
 
 use rtc_common::*;
 use svc_streaming::egress::whep::WhepState;
-use svc_streaming::rooms::token::TokenKeys;
 use svc_streaming::rooms::{host_api, media, RoomService, MAX_REVOKED_PER_COMMUNITY};
 use svc_streaming::rtc::fanout::MediaFanouts;
 use svc_streaming::rtc::metrics::RtcMetrics;
@@ -55,7 +54,7 @@ fn service(range: (u16, u16)) -> Arc<RoomService> {
     Arc::new(RoomService::new(
         factory,
         metrics,
-        Some(TokenKeys::new(VIEWER_SECRET).unwrap()),
+        Some(rtc_common::test_token_keys()),
         "http://svc.test".into(),
     ))
 }
@@ -157,25 +156,31 @@ async fn revocation_is_scoped_bounded_and_epoch_invalidates_everything() {
     assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
 
     // Per-community quota on live revocations; another community is unaffected.
-    for _ in 0..MAX_REVOKED_PER_COMMUNITY {
-        let (_, t) = host_call(
+    let quota_pid = Uuid::new_v4();
+    for i in 0..MAX_REVOKED_PER_COMMUNITY {
+        let (st_i, t) = host_call(
             &host,
             "token.issue",
-            json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+            json!({"community_id":"7","room_id":a,"participant_id":quota_pid,"publish":false,"subscribe":true}),
         )
         .await;
-        let (st, _) = host_call(
+        assert_eq!(st_i, StatusCode::OK, "issue failed at {i}: {t}");
+        let (st, b_rev) = host_call(
             &host,
             "token.revoke",
             json!({"community_id":"7","room_id":a,"token_id":t["token_id"]}),
         )
         .await;
-        assert_eq!(st, StatusCode::OK);
+        assert_eq!(
+            st,
+            StatusCode::OK,
+            "revoke failed at {i}: {b_rev} (issued: {t})"
+        );
     }
     let (_, t) = host_call(
         &host,
         "token.issue",
-        json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+        json!({"community_id":"7","room_id":a,"participant_id":quota_pid,"publish":false,"subscribe":true}),
     )
     .await;
     let (st, b_) = host_call(
@@ -214,7 +219,7 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     let svc = Arc::new(RoomService::new(
         server,
         metrics,
-        Some(TokenKeys::new(VIEWER_SECRET).unwrap()),
+        Some(rtc_common::test_token_keys()),
         "http://svc.test".into(),
     ));
     let host = host_api::router(svc.clone());
@@ -226,7 +231,7 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     let (_, pubep) = host_call(
         &host,
         "whip.endpoint",
-        json!({"community_id":"7","room_id":room_id}),
+        json!({"community_id":"7","room_id":room_id,"ttl_secs":300}),
     )
     .await;
     let (track, _ssrc) = opus_publisher_track();
@@ -252,7 +257,7 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     let (_, sub) = host_call(
         &host,
         "whep.endpoint",
-        json!({"community_id":"7","room_id":room_id}),
+        json!({"community_id":"7","room_id":room_id,"ttl_secs":300}),
     )
     .await;
     let tok = sub["token"].as_str().unwrap().to_string();
@@ -309,21 +314,33 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     .await;
     assert_eq!(info["subscriber_count"], 2);
 
-    // Reaping. A session may not outlive its token: sweeping past the short-lived
-    // token's expiry removes exactly that session (webrtc-rs gives no reliable
-    // signal when a client silently vanishes, so the credential bounds it).
-    let _ = pc2.close().await;
-    let reaped = svc.sweep_at(chrono::Utc::now().timestamp() + 60).await;
-    assert_eq!(reaped, 1, "only the 30s-token session had expired");
+    // Reaping. Live WebRTC sessions use a 24h session lease decoupled from the
+    // short-lived join token TTL: sweeping past the 30s join token expiry does
+    // not kill the active session, while sweeping past the 24h lease reaps it.
+    let reaped_at_token_ttl = svc.sweep_at(chrono::Utc::now().timestamp() + 60).await;
+    assert_eq!(reaped_at_token_ttl, 0, "active session outlives join token");
     let (_, info) = host_call(
         &host,
         "room.get",
         json!({"community_id":"7","room_id":room_id}),
     )
     .await;
-    assert_eq!(info["subscriber_count"], 1);
-    // Nothing else is reaped while sessions are live and tokens valid.
+    assert_eq!(info["subscriber_count"], 2);
+    // Nothing else is reaped while sessions are live and within the 24h lease.
     assert_eq!(svc.sweep().await, 0);
+    let _ = pc2.close().await;
+    let reaped_at_lease = svc.sweep_at(chrono::Utc::now().timestamp() + 86_401).await;
+    assert_eq!(
+        reaped_at_lease, 3,
+        "publisher + 2 subscribers reaped after 24h lease"
+    );
+    let (_, info) = host_call(
+        &host,
+        "room.get",
+        json!({"community_id":"7","room_id":room_id}),
+    )
+    .await;
+    assert_eq!(info["subscriber_count"], 0);
     let _ = ppc.close().await;
     for v in viewers {
         let _ = v.close().await;
@@ -335,7 +352,7 @@ async fn pipeline_viewer_tokens_only_for_streams_the_community_owns() {
     let factory =
         Arc::new(PeerConnectionFactory::new(loopback_rtc_config((42170, 42179))).unwrap());
     let metrics = RtcMetrics::register(&prometheus::Registry::new()).unwrap();
-    let keys = TokenKeys::new(VIEWER_SECRET).unwrap();
+    let keys = rtc_common::test_token_keys();
     let whep = Arc::new(
         WhepState::new(factory.clone(), metrics.clone(), 5).with_viewer_auth(keys.clone()),
     );

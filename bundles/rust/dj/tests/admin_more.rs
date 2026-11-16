@@ -7,7 +7,7 @@ use common::*;
 use serde_json::json;
 use waddle_bundle_dj_app::engine::{Ctx, Engine};
 use waddle_bundle_dj_app::host::ToolErr;
-use waddle_bundle_dj_app::model::{Mode, Outcome, Status, Track};
+use waddle_bundle_dj_app::model::{Mode, Track};
 use waddle_bundle_dj_app::music;
 use waddle_bundle_dj_app::policy::Config;
 
@@ -52,7 +52,7 @@ fn cfg(h: &FakeHost) -> Config {
 fn usage_and_unknown_branches_reply_helpfully() {
     let h = host();
     for (cmd, needle) in [
-        ("!dj", "requests"),
+        ("!dj", "providers"),
         ("!dj bogus", "usage: !dj"),
         ("!dj set", "usage: !dj set"),
         ("!dj list", "usage: !dj list"),
@@ -60,7 +60,7 @@ fn usage_and_unknown_branches_reply_helpfully() {
         ("!dj list nonsense add xx", "list must be"),
         ("!dj list deny-artist add x", "too short"),
         ("!dj mode", "usage: !dj mode"),
-        ("!dj ai", "usage: !dj ai"),
+        ("!dj ai bogus", "usage: !dj ai"),
         ("!dj ai genre", "usage: !dj ai genre"),
         ("!dj ai instructions", "usage: !dj ai instructions"),
         ("!dj policy show", "active: none | pending: none"),
@@ -69,19 +69,13 @@ fn usage_and_unknown_branches_reply_helpfully() {
         ("!dj audit", "no audit rows"),
         ("!dj unban", "usage: !dj unban"),
         ("!dj unban youtube/none", "not banned"),
-        ("!music bogus", "usage: !music"),
-        ("!music now", "nothing is playing"),
-        ("!music remove", "usage: !music remove"),
-        ("!music remove 9", "no request #9"),
-        ("!music approve", "usage: !music approve"),
-        ("!music approve 9", "no pending request #9"),
-        ("!music ban", "usage: !music ban"),
-        ("!music ban 9", "no request #9"),
-        ("!music restore", "usage: !music restore"),
-        ("!music restore 9", "no removed request #9"),
-        ("!music move", "usage: !music move"),
-        ("!music move 9 1", "no request #9"),
         ("!dj fill", "AI DJ is off"),
+        ("!dj next", "AI DJ is off"),
+        ("!dj ai", "AI DJ is off"),
+        ("!dj ban", "usage: !dj ban"),
+        ("!dj ban nope/x", "usage: !dj ban"),
+        ("!dj ban youtube/zzz", "banned for DJ picks"),
+        ("!dj unban youtube/zzz", "unbanned"),
         ("!dj playlist", "usage: !dj playlist"),
         ("!dj playlist list", "no playlists"),
         ("!dj playlist show nope", "no such playlist"),
@@ -102,15 +96,11 @@ fn usage_and_unknown_branches_reply_helpfully() {
 fn settings_lists_modes_and_ai_toggles_round_trip() {
     let h = host();
     for (k, v) in [
-        ("requests", "off"),
         ("explicit", "off"),
-        ("dmca_safe", "on"),
-        ("approval", "on"),
-        ("auto_remove", "on"),
+        ("dj_min_queue", "5"),
+        ("dj_requests_per_pick", "4"),
         ("max_duration_s", "300"),
-        ("max_queue", "20"),
         ("replay_cooldown_s", "10"),
-        ("cost", "5"),
         ("ai_hourly_cap", "3"),
         ("ai_batch", "2"),
         ("providers", "youtube,spotify"),
@@ -119,23 +109,37 @@ fn settings_lists_modes_and_ai_toggles_round_trip() {
     }
     assert!(m(&h, "!dj set explicit maybe").contains("expected on|off"));
     let c = cfg(&h);
-    assert!(!c.requests_enabled && !c.explicit_allowed && c.dmca_safe && c.approval_required);
+    assert!(!c.explicit_allowed);
     assert_eq!(
         (
             c.max_duration_s,
-            c.max_queue,
-            c.request_cost,
+            c.dj_min_queue,
+            c.dj_requests_per_pick,
             c.ai.hourly_cap,
             c.ai.batch
         ),
-        (300, 20, 5, 3, 2)
+        (300, 5, 4, 3, 2)
     );
+    // removed request-era settings are rejected, not silently accepted
+    for gone in [
+        "dmca_safe",
+        "requests",
+        "approval",
+        "auto_remove",
+        "max_per_user",
+        "cooldown_s",
+        "max_queue",
+        "cost",
+    ] {
+        assert!(
+            m(&h, &format!("!dj set {gone} 1")).contains("unknown setting"),
+            "{gone}"
+        );
+    }
+    assert!(m(&h, "!dj set dj_min_queue 0").contains("between"));
+    assert!(m(&h, "!dj set dj_requests_per_pick 99").contains("between"));
     assert_eq!(c.providers, vec!["youtube", "spotify"]);
-    assert!(m(&h, "!dj config").contains("requests off"));
-    assert_eq!(
-        say(&h, &user(USER_A, false, "x"), "!sr alpha"),
-        "song requests are closed"
-    );
+    assert!(m(&h, "!dj config").contains("dj_min_queue 5 | dj_requests_per_pick 4"));
 
     for l in [
         "allow-channel",
@@ -153,9 +157,12 @@ fn settings_lists_modes_and_ai_toggles_round_trip() {
 
     assert!(m(&h, "!dj ai genre synthwave").contains("genre saved"));
     assert!(m(&h, "!dj ai on").contains("AI DJ is on"));
+    assert_eq!(m(&h, "!dj ai"), "AI DJ is on");
+    assert!(h.svc(|s| s.ai_on), "the SERVICE stores the single switch");
     assert!(m(&h, "!dj mode ai").contains("mode set"));
     assert_eq!(cfg(&h).mode, Mode::Ai);
     assert!(m(&h, "!dj ai off").contains("off"));
+    assert!(!h.svc(|s| s.ai_on));
     assert_eq!(cfg(&h).mode, Mode::Requests);
     assert!(m(&h, "!dj mode playlist").contains("mode set"));
     assert!(m(&h, "!dj mode requests").contains("mode set"));
@@ -181,12 +188,7 @@ fn policy_show_discard_and_clear() {
     m(&h, "!dj ai instructions again");
     m(&h, "!dj policy confirm");
     assert!(m(&h, "!dj audit 3").contains("policy_confirmed"));
-    assert_eq!(
-        say(&h, &user(USER_A, false, "x"), "!sr alpha song"),
-        "request #1 removed: that artist is not allowed here"
-    );
     assert_eq!(m(&h, "!dj policy clear"), "active policy cleared");
-    assert!(say(&h, &user(USER_A, false, "y"), "!sr alpha song").starts_with("queued"));
 }
 
 #[test]
@@ -194,107 +196,6 @@ fn ai_compile_failure_modes_surface_the_cause() {
     let h = host();
     h.fail_tools.borrow_mut().push("ai.".into());
     assert!(m(&h, "!dj ai instructions x y").contains("unavailable"));
-}
-
-#[test]
-fn queue_moderation_move_clear_restore_and_ban_edge_cases() {
-    let h = host();
-    h.add(track(
-        "youtube",
-        "yt3",
-        "Long One",
-        "Artist Four",
-        "UC_C",
-        400,
-    ));
-    let mut c = cfg(&h);
-    c.cooldown_s = 0;
-    c.max_per_user = 5;
-    c.max_duration_s = 300;
-    h.kv.borrow_mut()
-        .insert("dj.config".into(), serde_json::to_vec(&c).unwrap());
-    let u = |id: &str| user(USER_A, false, id);
-    say(&h, &u("1"), "!sr alpha");
-    say(&h, &u("2"), "!sr https://www.youtube.com/watch?v=yt2");
-    assert!(say(&h, &u("3"), "!sr long one").contains("removed: songs must be at most"));
-    assert!(m(&h, "!music move 1 2").contains("position 2"));
-    assert!(m(&h, "!music list").contains("next: #2"));
-    // a moderator override restores the removed request, even though it violates policy
-    assert_eq!(m(&h, "!music restore 3"), "restored #3");
-    assert!(m(&h, "!music ban 3").starts_with("banned"));
-    assert!(m(&h, "!dj audit 10").contains("mod_ban"));
-    assert_eq!(m(&h, "!music clear"), "cleared 2 requests");
-    assert!(m(&h, "!music list").contains("queue is empty"));
-    // a banned song cannot be restored
-    let mut st = Engine::new(&h, &Ctx::default()).state().unwrap();
-    st.banned.push("youtube/yt2".into());
-    h.kv.borrow_mut()
-        .insert("dj.state".into(), serde_json::to_vec(&st).unwrap());
-    let r = say(&h, &u("4"), "!sr https://www.youtube.com/watch?v=yt2");
-    assert!(r.contains("banned"), "{r}");
-    assert!(m(&h, "!music restore 4").contains("banned"));
-}
-
-#[test]
-fn the_skip_audits_and_ai_mode_without_ai_fails_loud() {
-    let h = host();
-    let u = user(USER_A, false, "1");
-    say(&h, &u, "!sr alpha");
-    m(&h, "!music skip");
-    m(&h, "!music skip");
-    let rows: Vec<waddle_bundle_dj_app::model::AuditRow> =
-        serde_json::from_slice(&h.kv.borrow()["dj.audit"]).unwrap();
-    assert!(rows.iter().any(|r| r.outcome == Outcome::Skipped));
-    // Mode::Ai with the AI DJ disabled (config edited behind our back) must say so, not idle silently.
-    let mut c = cfg(&h);
-    c.mode = Mode::Ai;
-    h.kv.borrow_mut()
-        .insert("dj.config".into(), serde_json::to_vec(&c).unwrap());
-    assert!(m(&h, "!music skip").contains("AI DJ is off"));
-}
-
-#[test]
-fn spotify_handoff_uses_the_player_tool_with_an_idempotency_key_and_failure_is_reported() {
-    let h = host();
-    m(&h, "!dj set providers spotify");
-    say(&h, &user(USER_A, false, "1"), "!sr gamma");
-    let r = m(&h, "!music skip");
-    assert!(r.starts_with("now playing: Gamma Song"), "{r}");
-    let calls = h.calls.borrow();
-    let c = calls
-        .iter()
-        .find(|c| c.1 == "music.spotify.player.play")
-        .expect("player.play called");
-    assert_eq!(c.2, json!({"uris": ["spotify:track:sp1"]}));
-    assert_eq!(c.3.as_deref(), Some("dj.play.1"));
-    drop(calls);
-    h.add(track(
-        "spotify",
-        "sp2",
-        "Delta Song",
-        "Artist Five",
-        "",
-        200,
-    ));
-    say(&h, &user(USER_B, false, "2"), "!sr delta");
-    h.fail_tools
-        .borrow_mut()
-        .push("music.spotify.player".into());
-    let r = m(&h, "!music skip");
-    assert!(
-        r.contains("player handoff unavailable"),
-        "a failed handoff must be reported: {r}"
-    );
-}
-
-#[test]
-fn providers_without_a_player_tool_make_no_handoff_call() {
-    let h = host();
-    say(&h, &user(USER_A, false, "1"), "!sr alpha");
-    let r = m(&h, "!music skip");
-    assert!(r.starts_with("now playing: Alpha Song"), "{r}");
-    assert_eq!(h.calls_to("music.youtube.player.play"), 0);
-    assert!(h.calls.borrow().iter().all(|c| !c.1.contains("playback")));
 }
 
 #[test]
@@ -329,10 +230,10 @@ fn playlist_import_follows_next_page_token() {
 #[test]
 fn unresolvable_urls_read_as_not_found_not_as_an_outage() {
     let h = host();
-    let r = say(
+    m(&h, "!dj playlist create one");
+    let r = m(
         &h,
-        &user(USER_A, false, "1"),
-        "!sr https://www.youtube.com/watch?v=nothere",
+        "!dj playlist add one https://www.youtube.com/watch?v=nothere",
     );
     assert!(r.contains("could not find"), "{r}");
 }
@@ -343,9 +244,11 @@ fn unknown_explicit_status_fails_closed_when_explicit_is_disallowed() {
     let mut t = track("youtube", "unk", "Unknown Flag", "Someone", "UC_Z", 100);
     t["explicit"] = serde_json::Value::Null;
     h.add(t);
-    assert!(say(&h, &user(USER_A, false, "1"), "!sr unknown flag").starts_with("queued"));
+    m(&h, "!dj playlist create one");
+    assert!(m(&h, "!dj playlist add one unknown flag").contains("added"));
     m(&h, "!dj set explicit off");
-    let r = say(&h, &user(USER_B, false, "2"), "!sr unknown flag");
+    m(&h, "!dj playlist create two");
+    let r = m(&h, "!dj playlist add two unknown flag");
     assert!(r.contains("cannot confirm"), "{r}");
 }
 
@@ -376,9 +279,6 @@ fn provider_error_mapping_and_invalid_responses() {
         }
         fn now_ms(&self) -> u64 {
             0
-        }
-        fn publish_surface(&self, _: &str, _: &str) -> Result<(), String> {
-            Ok(())
         }
         fn invoke(
             &self,
@@ -443,42 +343,10 @@ fn sanitization_and_int_enum_codes() {
         license: None,
     };
     assert!(t.sanitized("youtube").is_none());
-    assert_eq!(serde_json::to_string(&Status::Pending).unwrap(), "1");
-    assert!(serde_json::from_str::<Status>("9").is_err());
     assert_eq!(serde_json::from_str::<Mode>("2").unwrap(), Mode::Ai);
     assert_eq!(
         waddle_bundle_dj_app::model::clean_text("a\n\t b   c", 3),
         "a b"
-    );
-}
-
-#[test]
-fn disabled_provider_links_and_unsupported_sites_are_refused() {
-    let h = host();
-    let u = user(USER_A, false, "1");
-    assert!(
-        say(&h, &u, "!sr https://open.spotify.com/track/sp1")
-            .contains("spotify is not enabled here")
-    );
-    assert!(say(&h, &u, "!sr").contains("usage: !sr"));
-    assert!(say(&h, &user(USER_B, false, "2"), "!sr zzzzzz nothing").contains("no songs found"));
-    m(&h, "!dj set providers youtube,spotify");
-    m(&h, "!dj set cooldown_s 0");
-    assert!(
-        say(
-            &h,
-            &user(USER_B, false, "3"),
-            "!sr https://open.spotify.com/track/sp1"
-        )
-        .starts_with("queued")
-    );
-    assert!(
-        say(
-            &h,
-            &user(USER_B, false, "4"),
-            "!sr https://www.youtube.com/watch?v=missing"
-        )
-        .contains("could not find")
     );
 }
 
@@ -513,19 +381,13 @@ fn playlist_errors_and_limits() {
     m(&h, "!dj playlist use one");
     m(&h, "!dj mode playlist");
     m(&h, "!dj list deny-artist add artist one");
-    assert!(m(&h, "!music skip").starts_with("the queue is empty"));
+    // DJ on, empty queue, but nothing in the playlist passes policy: no pick, no spin
+    m(&h, "!dj ai on");
+    h.ai_complete
+        .borrow_mut()
+        .push(r#"{"suggestions":[]}"#.into());
+    let r = m(&h, "!dj fill");
+    assert!(r.contains("found nothing to add"), "{r}");
+    assert_eq!(h.calls_to("requests.add"), 0);
     assert_eq!(cfg(&h).active_playlist.as_deref(), Some("one"));
-}
-
-#[test]
-fn policy_records_pending_status_and_roundtrips_state() {
-    let h = host();
-    m(&h, "!dj set approval on");
-    say(&h, &user(USER_A, false, "1"), "!sr alpha");
-    let st = Engine::new(&h, &Ctx::default()).state().unwrap();
-    assert_eq!(st.queue[0].status, Status::Pending);
-    assert_eq!(
-        st.queue[0].reason.as_deref(),
-        Some("waiting for moderator approval")
-    );
 }

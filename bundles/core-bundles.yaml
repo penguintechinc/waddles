@@ -218,9 +218,9 @@ bundles:
       - tenant_slug: default
         community_id: null
   - app_id: waddles.core.example.music
-    version: "1.0.9"
+    version: "1.1.0"
     language: python
-    wit_world: stage-next
+    wit_world: stage-next-tools
     source_dir: python/music
     manifest_path: music.manifest.yaml
     artifact_path: music.wasm
@@ -1345,7 +1345,7 @@ bundles:
   #
   # 8 bundles on the default `stage` world:
   - app_id: waddles.core.example.customcommand
-    version: "1.0.4"
+    version: "1.0.5"
     language: python
     source_dir: python/customcommand
     manifest_path: customcommand.manifest.yaml
@@ -1533,7 +1533,7 @@ bundles:
   # the crate's own Cargo.toml `[package.metadata.component.target] world`. The seeder installs
   # it with trusted_source=True (the only path allowed to declare `kind: service`).
   - app_id: waddles.core.service.reputation
-    version: "1.1.2"
+    version: "1.1.3"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1666,10 +1666,11 @@ bundles:
       - tenant_slug: default
         community_id: null
 
-  # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
-  # deterministic song policy + optional AI DJ. Flag waddles.command-dj defaults OFF.
+  # DJ app bundle (Rust, `stage-next-tools`): OPTIONAL AI DJ layer over the shared
+  # music-requests queue (picks, playlists, policy, `!dj` only; no request commands).
+  # Flag waddles.command-dj defaults OFF.
   - app_id: waddles.core.example.dj
-    version: "1.0.1"
+    version: "1.1.0"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/dj
@@ -1711,7 +1712,7 @@ bundles:
   # WebRTC control-plane SERVICE bundle (Rust `kind: service`, `stage-tools-webrtc` world): tools over
   # svc-streaming's rooms/SFU. Host seams for the `webrtc` capability are pending (see PR body).
   - app_id: waddles.core.service.webrtc
-    version: "1.0.0"
+    version: "1.1.0"
     language: rust
     wit_world: stage-tools-webrtc
     kind: service
@@ -1725,7 +1726,7 @@ bundles:
   # Rooms APP bundle (Rust, `stage-next-tools` world): per-community / per-event / virtual rooms over
   # the webrtc service's tools. Replaces hub_api calls.py + calls_proxy.py and Go module_rtc.
   - app_id: waddles.core.app.rooms
-    version: "1.0.1"
+    version: "1.1.0"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/rooms
@@ -1743,6 +1744,21 @@ bundles:
     source_dir: rust/music-youtube
     manifest_path: music-youtube.manifest.yaml
     artifact_path: music-youtube.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
+  # music-requests SERVICE bundle (Rust, stage-tools): the single per-community song-request queue,
+  # history, play counters and DMCA-safe mode (db-v2 tables). The music app owns the user commands;
+  # the optional AI DJ layer reads/adds through these tools. Contract: docs/music-requests-service.md.
+  - app_id: waddles.core.service.music-requests
+    version: "1.0.0"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-requests
+    manifest_path: music-requests.manifest.yaml
+    artifact_path: music-requests.wasm
     activation_targets:
       - tenant_slug: default
         community_id: null

@@ -372,7 +372,11 @@ jobs:
           CREATE TABLE communities (
               id SERIAL PRIMARY KEY,
               name TEXT,
-              tenant_id INTEGER  -- 0045 trigger reads it (legacy NOT NULL column)
+              tenant_id INTEGER,  -- 0045 trigger reads it (legacy NOT NULL column)
+              -- the live-community predicate (0114 reputation_tenant_communities, identity
+              -- resolution): 000_create_base_schema.sql. Mirrors pg_docker.py -- keep in sync.
+              is_active BOOLEAN DEFAULT TRUE,
+              deleted_at TIMESTAMP
           );
           CREATE TABLE hub_users (
               id SERIAL PRIMARY KEY,
