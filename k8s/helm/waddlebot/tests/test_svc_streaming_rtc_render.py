@@ -31,6 +31,7 @@ import shutil
 import subprocess
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import pytest
 import yaml
@@ -472,9 +473,11 @@ def test_hub_api_rooms_client_env(helm: str, env: str) -> None:
     sans = _cert_sans(docs)
     assert name in sans, (name, sans)
     # service identity: the hub-api SPIFFE id (the minted JWT `sub`), allow-listed with exactly the
-    # three RoomsService scopes, and pinned on the server side.
+    # four RoomsService scopes (read/create/write/moderate), and pinned on the server side.
     sid = env_["STREAMING_RTC_SERVICE_ID"]["value"]
-    assert sid.startswith("spiffe://penguintech.io/") and sid.endswith("/hub-api")
+    parsed = urlparse(sid)
+    assert (parsed.scheme, parsed.netloc) == ("spiffe", "penguintech.io")
+    assert parsed.path.endswith("/hub-api")
     srv = _env(_container(_streaming_deployment(docs)))
     assert srv["ROOMS_GRPC_ALLOWED_SUBJECTS"]["value"] == sid
     idents = json.loads(env_["SERVICE_JWT_IDENTITIES"]["value"])
