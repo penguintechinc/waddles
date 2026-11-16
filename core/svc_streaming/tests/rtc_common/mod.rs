@@ -311,8 +311,19 @@ pub const TEST_BOOT: u64 = 0x5EED5;
 /// The pipeline epoch of a never-revoked pipeline under [`TEST_BOOT`].
 pub const TEST_EPOCH0: u64 = TEST_BOOT << svc_streaming::egress::whep::EPOCH_COUNTER_BITS;
 
-/// Test signing secret shared by every WHEP viewer-token test (>= 32 bytes).
-pub const VIEWER_SECRET: &str = "0123456789abcdef0123456789abcdef";
+/// The ES256 (P-256) room-token key pair shared by every token test in one test binary: a
+/// throwaway key generated once per process (no key material in git), so a server built with
+/// [`test_token_keys`] verifies tokens that [`viewer_token`] signs with it.
+pub fn test_token_keys() -> svc_streaming::rooms::token::TokenKeys {
+    static PEM: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    let pem = PEM.get_or_init(|| {
+        rcgen::KeyPair::generate()
+            .expect("generating a P-256 test key")
+            .serialize_pem()
+    });
+    svc_streaming::rooms::token::TokenKeys::from_ec_pem("room-test", pem)
+        .expect("a generated P-256 key is a valid room token key")
+}
 
 /// A signed WHEP viewer token for `community`/`pipeline` valid for `ttl` seconds
 /// (negative = already expired), with the given `scope`.
@@ -329,12 +340,9 @@ pub fn viewer_token_epoch(
     sub: Uuid,
     epoch: u64,
 ) -> String {
-    use svc_streaming::rooms::token::{
-        RoomClaims, TokenKeys, ROOM_TOKEN_AUDIENCE, ROOM_TOKEN_ISSUER,
-    };
+    use svc_streaming::rooms::token::{RoomClaims, ROOM_TOKEN_AUDIENCE, ROOM_TOKEN_ISSUER};
     let now = chrono::Utc::now().timestamp();
-    TokenKeys::new(VIEWER_SECRET)
-        .unwrap()
+    test_token_keys()
         .sign(&RoomClaims {
             iss: ROOM_TOKEN_ISSUER.into(),
             aud: ROOM_TOKEN_AUDIENCE.into(),
@@ -374,7 +382,7 @@ pub fn delete_auth(path: &str, token: &str) -> Request<Body> {
         .unwrap()
 }
 
-/// A `WhepState` with viewer authentication enabled using [`VIEWER_SECRET`].
+/// A `WhepState` with viewer authentication enabled using [`test_token_keys`].
 pub fn whep_with_auth(
     factory: std::sync::Arc<PeerConnectionFactory>,
     metrics: svc_streaming::rtc::metrics::RtcMetrics,
@@ -382,5 +390,5 @@ pub fn whep_with_auth(
 ) -> svc_streaming::egress::whep::WhepState {
     svc_streaming::egress::whep::WhepState::new(factory, metrics, max_viewers)
         .with_boot_id(TEST_BOOT)
-        .with_viewer_auth(svc_streaming::rooms::token::TokenKeys::new(VIEWER_SECRET).unwrap())
+        .with_viewer_auth(test_token_keys())
 }

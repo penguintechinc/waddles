@@ -29,6 +29,8 @@ use crate::platform_user::{BoxFuture as UserFuture, PlatformUserResolver, Resolv
 
 #[path = "host_tools_discord_manifest_tests.rs"]
 mod discord_manifest_tests;
+#[path = "floor_ban_tests.rs"]
+mod floor_ban_tests;
 #[path = "host_tools_twitch_manifest_tests.rs"]
 mod twitch_manifest_tests;
 #[path = "host_tools_youtube_manifest_tests.rs"]
@@ -141,6 +143,7 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,

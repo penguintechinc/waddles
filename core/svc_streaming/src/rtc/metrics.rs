@@ -11,7 +11,9 @@
 //! one-line follow-up (`rtc::metrics::RtcMetrics::register(&metrics)`
 //! alongside the existing `register_request_metrics` call) -- not done here.
 
-use prometheus::{HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry};
+use prometheus::{
+    Histogram, HistogramOpts, HistogramVec, IntCounter, IntCounterVec, IntGaugeVec, Opts, Registry,
+};
 
 /// Registered WHIP/WHEP metric handles, cheap to clone (each inner type is
 /// itself a cheap `Arc`-backed handle per the `prometheus` crate).
@@ -38,6 +40,17 @@ pub struct RtcMetrics {
     pub grpc_requests_total: IntCounterVec,
     /// RoomsService gRPC call latency in seconds, labeled `rpc`.
     pub grpc_request_seconds: HistogramVec,
+    /// Hands newly raised (an idempotent re-raise is not counted).
+    pub hands_raised_total: IntCounter,
+    /// Hands acknowledged by a moderator (first acknowledgement only).
+    pub hands_acknowledged_total: IntCounter,
+    /// Hands dropped from a queue, labeled `reason` = `lower` | `leave` | `kick` | `reset` |
+    /// `delete` | `expiry`.
+    pub hands_cleared_total: IntCounterVec,
+    /// Seconds a hand waited between being raised and being acknowledged.
+    pub hand_ack_wait_seconds: Histogram,
+    /// Rooms deleted by the idle-room reaper (empty for their `empty_timeout_secs`).
+    pub rooms_expired_total: IntCounter,
 }
 
 impl RtcMetrics {
@@ -87,6 +100,39 @@ impl RtcMetrics {
             ),
             &["rpc"],
         )?;
+        let hands_raised_total = IntCounter::new(
+            "rooms_hands_raised_total",
+            "Raised hands newly added to a room queue",
+        )?;
+        let hands_acknowledged_total = IntCounter::new(
+            "rooms_hands_acknowledged_total",
+            "Raised hands acknowledged by a moderator",
+        )?;
+        let hands_cleared_total = IntCounterVec::new(
+            Opts::new(
+                "rooms_hands_cleared_total",
+                "Raised hands dropped from a room queue by reason",
+            ),
+            &["reason"],
+        )?;
+        let hand_ack_wait_seconds = Histogram::with_opts(
+            HistogramOpts::new(
+                "rooms_hand_ack_wait_seconds",
+                "Seconds between a hand being raised and acknowledged",
+            )
+            .buckets(vec![
+                1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0, 1800.0,
+            ]),
+        )?;
+        let rooms_expired_total = IntCounter::new(
+            "rooms_expired_total",
+            "Rooms deleted after staying empty for their empty_timeout_secs",
+        )?;
+        registry.register(Box::new(hands_raised_total.clone()))?;
+        registry.register(Box::new(hands_acknowledged_total.clone()))?;
+        registry.register(Box::new(hands_cleared_total.clone()))?;
+        registry.register(Box::new(hand_ack_wait_seconds.clone()))?;
+        registry.register(Box::new(rooms_expired_total.clone()))?;
         registry.register(Box::new(grpc_requests_total.clone()))?;
         registry.register(Box::new(grpc_request_seconds.clone()))?;
         registry.register(Box::new(moderation_ops_total.clone()))?;
@@ -105,6 +151,11 @@ impl RtcMetrics {
             moderation_sessions_closed_total,
             grpc_requests_total,
             grpc_request_seconds,
+            hands_raised_total,
+            hands_acknowledged_total,
+            hands_cleared_total,
+            hand_ack_wait_seconds,
+            rooms_expired_total,
         })
     }
 }

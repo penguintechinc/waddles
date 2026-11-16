@@ -76,6 +76,7 @@ fn row(app: &str, version_id: i64, digest: &str, tools: ToolManifestInfo) -> Act
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,
@@ -735,7 +736,8 @@ fn plan_as(actor: &ActorContext, tool: &str) -> Result<ToolPlan, ToolRefusal> {
 
 #[test]
 fn role_scope_map_is_cumulative_and_fails_closed() {
-    assert_eq!(scopes_for_role("member"), ["community:member"]);
+    assert!(scopes_for_role("member").contains(&"community:member"));
+    assert!(!scopes_for_role("member").contains(&"community:moderate"));
     assert!(scopes_for_role("community-owner").contains(&"community:admin"));
     assert_eq!(scopes_for_role("owner"), scopes_for_role("community-owner"));
     assert!(scopes_for_role("community-admin").contains(&"community:moderate"));
@@ -743,6 +745,54 @@ fn role_scope_map_is_cumulative_and_fails_closed() {
     assert!(!scopes_for_role("vip").contains(&"community:moderate"));
     for bad in ["", "admin", "COMMUNITY-ADMIN", "root"] {
         assert!(scopes_for_role(bad).is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn music_scopes_follow_the_role_bundles() {
+    let viewer = [
+        "music:requests.read",
+        "music:history.read",
+        "music:requests.write",
+        "music:stats.read",
+    ];
+    let staff = [
+        "music:requests.manage",
+        "music:dj.manage",
+        "music:settings.write",
+    ];
+    for role in [
+        "member",
+        "vip",
+        "moderator",
+        "community-admin",
+        "community-owner",
+        "owner",
+    ] {
+        for s in viewer {
+            assert!(scopes_for_role(role).contains(&s), "{role} lacks {s}");
+        }
+    }
+    for role in ["moderator", "community-admin", "community-owner", "owner"] {
+        for s in staff {
+            assert!(scopes_for_role(role).contains(&s), "{role} lacks {s}");
+        }
+    }
+    for role in ["member", "vip"] {
+        for s in staff {
+            assert!(
+                !scopes_for_role(role).contains(&s),
+                "{role} must not have {s}"
+            );
+        }
+    }
+    for bad in ["", "admin", "root"] {
+        assert!(
+            scopes_for_role(bad)
+                .iter()
+                .all(|s| !s.starts_with("music:")),
+            "{bad:?}"
+        );
     }
 }
 

@@ -1,0 +1,60 @@
+{{- /*
+One-shot, idempotent model pull (`ollama pull` skips layers already on the PVC). A plain Job, not a
+Helm hook, so it never blocks `helm upgrade` (do not use --wait-for-jobs). The name carries a hash of
+the pod template: any change (model, image, resources, ...) yields a new Job, so the immutable pod
+template is never patched, and Helm prunes the previous Job. Progress: kubectl logs job/<name>.
+Model policy: gemma4:e4b is the approved JSON-capable model. Never Qwen/PRC models.
+*/}}
+{{- define "ollama.pullPodTemplate" -}}
+metadata:
+  labels:
+    {{- include "ollama.labels" (dict "root" . "component" "model-pull") | nindent 4 }}
+spec:
+  restartPolicy: OnFailure
+  automountServiceAccountToken: false
+  enableServiceLinks: false
+  {{- with .Values.nodeSelector }}
+  nodeSelector:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  {{- with .Values.tolerations }}
+  tolerations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+  securityContext:
+    {{- include "ollama.podSecurityContext" . | nindent 4 }}
+  containers:
+    - name: pull
+      image: {{ include "ollama.image" . }}
+      imagePullPolicy: {{ .Values.image.pullPolicy }}
+      command: ["/bin/ollama", "pull", {{ required "model is required" .Values.model | quote }}]
+      env:
+        - name: OLLAMA_HOST
+          value: {{ include "ollama.url" . | quote }}
+        - name: HOME
+          value: /tmp
+      resources:
+        {{- toYaml .Values.pullJob.resources | nindent 8 }}
+      securityContext:
+        {{- include "ollama.containerSecurityContext" . | nindent 8 }}
+      volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+  volumes:
+    - name: tmp
+      emptyDir:
+        sizeLimit: 64Mi
+{{- end -}}
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ printf "%s-pull-%s" (include "ollama.fullname" .) (include "ollama.pullPodTemplate" . | sha256sum | trunc 8) }}
+  labels:
+    {{- include "ollama.labels" (dict "root" . "component" "model-pull") | nindent 4 }}
+  annotations:
+    ollama/model: {{ .Values.model | quote }}
+spec:
+  backoffLimit: {{ .Values.pullJob.backoffLimit }}
+  activeDeadlineSeconds: {{ .Values.pullJob.activeDeadlineSeconds }}
+  template:
+    {{- include "ollama.pullPodTemplate" . | nindent 4 }}

@@ -10,6 +10,7 @@
 #[allow(warnings)]
 #[rustfmt::skip]
 mod bindings;
+mod grants;
 mod logic;
 
 use std::sync::{Arc, OnceLock};

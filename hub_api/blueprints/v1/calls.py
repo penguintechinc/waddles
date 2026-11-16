@@ -35,6 +35,7 @@ for the same reason `event.py` skips them (Output Validation guards an OWNED row
 
 from __future__ import annotations
 
+import logging
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -56,6 +57,9 @@ from services import community_access
 from services.calls_proxy import RoomsClient, RoomsRpcError
 from services.current_user import get_current_user_id
 from services.errors import ApiError, payment_required
+from services.scope_registry import SCOPE_CALLS_MANAGE
+
+logger = logging.getLogger(__name__)
 
 calls_admin_bp = Blueprint("v1_calls_admin", __name__, url_prefix="/api/v1/admin")
 member_voice_bp = Blueprint("v1_member_voice", __name__, url_prefix="/api/v1/community")
@@ -110,6 +114,7 @@ async def _guarded(op: Callable[[], Awaitable[tuple[dict[str, Any], int]]]) -> A
     try:
         return await op()
     except RoomsRpcError as exc:
+        logger.warning("rooms rpc failed: %s %s", type(exc).__name__, exc.message)
         return _rpc_error(exc)
 
 
@@ -135,7 +140,13 @@ async def _require_admin(community_id: int) -> str:
     assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
     user_id = get_current_user_id(request)
     await community_access.require_community_admin(
-        async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
+        async_dal,
+        dal,
+        request,
+        ctx,
+        community_id=community_id,
+        user_id=user_id,
+        scope=SCOPE_CALLS_MANAGE,
     )
     return _person_uuid(ctx, community_id, user_id)
 
@@ -191,6 +202,7 @@ async def get_call_rooms(community_id: int) -> Any:
         if not await feature_enabled(FEATURE_STREAMING_RTC, tenant=ctx.tenant_slug):
             raise payment_required("Calls / RTC is not enabled for this plan")
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
     return await _guarded(lambda: _list_rooms(community_id))
 
@@ -204,6 +216,7 @@ async def create_call_room(community_id: int, data: CreateCallRoomRequest) -> An
     try:
         await _require_admin(community_id)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
     return await _guarded(
         lambda: _create_room(
@@ -221,6 +234,7 @@ async def get_call_room(community_id: int, room_name: str) -> Any:
         await _require_admin(community_id)
         room_id = _room_id(room_name)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:
@@ -238,6 +252,7 @@ async def delete_call_room(community_id: int, room_name: str) -> Any:
         await _require_admin(community_id)
         room_id = _room_id(room_name)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:
@@ -252,6 +267,7 @@ async def _set_locked(community_id: int, room_name: str, locked: bool) -> Any:
         actor = await _require_admin(community_id)
         room_id = _room_id(room_name)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:
@@ -292,6 +308,7 @@ async def get_call_participants(community_id: int, room_name: str) -> Any:
         await _require_admin(community_id)
         room_id = _room_id(room_name)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:
@@ -332,6 +349,7 @@ async def kick_call_participant(
                 code="INVALID_IDENTITY",
             ) from exc
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:
@@ -356,6 +374,7 @@ async def mute_all_call_participants(community_id: int, room_name: str) -> Any:
         actor = await _require_admin(community_id)
         room_id = _room_id(room_name)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:
@@ -375,6 +394,7 @@ async def get_raised_hands(community_id: int, room_name: str) -> Any:
     try:
         await _require_admin(community_id)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
     return {"success": False, "error": HAND_RAISE_UNSUPPORTED}, 501
 
@@ -397,6 +417,7 @@ async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeH
     try:
         await _require_admin(community_id)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
     return {"success": False, "error": HAND_RAISE_UNSUPPORTED}, 501
 
@@ -415,6 +436,7 @@ async def list_voice_rooms(community_id: int) -> Any:
     try:
         await _require_member(community_id)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
     return await _guarded(lambda: _list_rooms(community_id))
 
@@ -428,6 +450,7 @@ async def create_ad_hoc_voice_room(community_id: int, data: CreateCallRoomReques
     try:
         await _require_member(community_id)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
     return await _guarded(
         lambda: _create_room(
@@ -448,6 +471,7 @@ async def join_voice_room(community_id: int, room_name: str) -> Any:
         participant = await _require_member(community_id)
         room_id = _room_id(room_name)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:
@@ -477,6 +501,7 @@ async def leave_voice_room(community_id: int, room_name: str) -> Any:
         participant = await _require_member(community_id)
         room_id = _room_id(room_name)
     except ApiError as exc:
+        logger.debug("calls request rejected: %s %s", type(exc).__name__, exc.message)
         return _err(exc)
 
     async def op() -> tuple[dict[str, Any], int]:

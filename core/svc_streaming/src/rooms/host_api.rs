@@ -33,7 +33,7 @@ use serde_json::{json, Value};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
-use super::{ActorRole, IssueRequest, RoomError, RoomService, RouteMode};
+use super::{ActorRole, HandView, IssueRequest, RoomError, RoomService, RouteMode};
 
 /// Errors building/running the listener.
 #[derive(Debug, thiserror::Error)]
@@ -203,6 +203,45 @@ struct RouteReq {
     mode: RouteMode,
 }
 
+/// The contract version every `room.hand.*` / `room.staff.*` op must state.
+const HAND_API_VERSION: &str = "v1";
+
+/// Refuses a missing or unknown `api_version` (a missing one is the empty string) with
+/// `not_implemented`, before any other field is acted on.
+fn check_api_version(v: &str) -> Result<(), RoomError> {
+    if v == HAND_API_VERSION {
+        Ok(())
+    } else {
+        Err(RoomError::Unsupported(format!(
+            "api_version {v} not supported"
+        )))
+    }
+}
+
+/// `room.hand.raise|lower|ack`: a participant and the actor. There is NO role field (and
+/// unknown fields are refused): authority comes from the server-side member table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandParticipantReq {
+    #[serde(default)]
+    api_version: String,
+    community_id: String,
+    room_id: Uuid,
+    participant_id: Uuid,
+    actor_id: Uuid,
+}
+
+/// `room.hand.list|reset`, `room.staff.register`: just the actor.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandActorReq {
+    #[serde(default)]
+    api_version: String,
+    community_id: String,
+    room_id: Uuid,
+    actor_id: Uuid,
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct CommunityReq {
@@ -265,6 +304,8 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                         subscribe: r.subscribe,
                         source: r.source,
                         ttl_secs: r.ttl_secs,
+                        // Staff is never claimable through a token op (see `room.staff.register`).
+                        staff: false,
                     },
                 )
                 .await?;
@@ -317,6 +358,8 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                         subscribe: !publish,
                         source: r.source,
                         ttl_secs: r.ttl_secs,
+                        // Staff is never claimable through a token op (see `room.staff.register`).
+                        staff: false,
                     },
                 )
                 .await?;
@@ -381,6 +424,62 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
             let locked = op == "room.lock";
             svc.set_locked(&r.community_id, r.room_id, locked, r.actor_role).await?;
             Ok(json!({"room_id": r.room_id, "locked": locked}))
+        }
+        "room.hand.raise" => {
+            let r: HandParticipantReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let hand = svc
+                .raise_hand(&r.community_id, r.room_id, r.participant_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "hand": hand}))
+        }
+        "room.hand.lower" => {
+            let r: HandParticipantReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let lowered = svc
+                .lower_hand(&r.community_id, r.room_id, r.participant_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id,
+                      "lowered": lowered}))
+        }
+        "room.hand.list" => {
+            let r: HandActorReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            // Staff see the whole queue, everyone else only their own entry: decided by the
+            // member table, not by anything the caller says.
+            let list = svc
+                .list_hands(&r.community_id, r.room_id, r.actor_id, HandView::Auto)
+                .await?;
+            let mut v = serde_json::to_value(list)
+                .map_err(|e| RoomError::Backend(format!("encoding hands: {e}")))?;
+            v["room_id"] = json!(r.room_id);
+            Ok(v)
+        }
+        "room.hand.ack" => {
+            let r: HandParticipantReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let hand = svc
+                .acknowledge_hand(&r.community_id, r.room_id, r.participant_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "hand": hand}))
+        }
+        "room.hand.reset" => {
+            let r: HandActorReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let cleared = svc
+                .reset_hands(&r.community_id, r.room_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "cleared": cleared}))
+        }
+        // The host-side way to establish room staff. The caller must gate the tool that
+        // reaches this op with the manifest scope `community:moderate`, which the host
+        // verifies BEFORE dispatch -- the body carries no role.
+        "room.staff.register" => {
+            let r: HandActorReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            svc.register_staff(&r.community_id, r.room_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "actor_id": r.actor_id, "staff": true}))
         }
         "recording.start" | "recording.stop" => Err(RoomError::Unsupported(
             "room recording is unavailable: room publishers have no ffmpeg bridge/RecordSink path yet"

@@ -9,6 +9,10 @@
 #[allow(warnings)]
 #[rustfmt::skip]
 mod bindings;
+// The webrtc service's canonical access policy, compiled into this bundle from the
+// same source file (no copy to drift); see bundles/rust/webrtc/contract/grants.json.
+#[path = "../../webrtc/src/grants.rs"]
+mod grants;
 mod logic;
 mod moderation;
 

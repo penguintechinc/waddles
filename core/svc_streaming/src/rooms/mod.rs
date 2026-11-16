@@ -8,6 +8,12 @@
 //!
 //! Every lookup is community-scoped: a room is only visible to the community that
 //! created it (a mismatch is indistinguishable from "not found").
+//!
+//! Lifecycle state kept per room, all in memory (like rooms and locks; a restart
+//! drops it): the raised-hand queue ([`HandInfo`]), the member table ([`Member`]: who
+//! joined and whether they are staff), join times, and the idle-expiry clock. A room that stays empty (no publishers, no subscribers) for its
+//! `empty_timeout_secs` is deleted by [`RoomService::expire_idle_at`] -- the Go-era
+//! `EmptyTimeout` -- which also drops its hands, lock and issued-token ledger rows.
 
 pub mod grpc;
 pub mod grpc_auth;
@@ -55,6 +61,103 @@ pub const MAX_PIPELINE_TOKEN_TTL_SECS: i64 = 300;
 /// Most participants one room may blocklist (kick) or hold muted.
 pub const MAX_MODERATED_PER_ROOM: usize = 1_024;
 
+/// Most raised hands one room's queue may hold.
+pub const MAX_HANDS_PER_ROOM: usize = 256;
+
+/// Most joined participants (token holders) one room's member table may hold.
+pub const MAX_MEMBERS_PER_ROOM: usize = 1_000;
+
+/// Default empty-room expiry (seconds): the Go-era LiveKit `EmptyTimeout`.
+pub const DEFAULT_EMPTY_TIMEOUT_SECS: u32 = 300;
+/// Default upper bound a client-requested `empty_timeout_secs` is clamped to (24 h).
+pub const DEFAULT_EMPTY_TIMEOUT_MAX_SECS: u32 = 86_400;
+/// Absolute ceiling an operator may configure the bound to (7 days).
+pub const EMPTY_TIMEOUT_HARD_MAX_SECS: u32 = 604_800;
+
+/// Idle-room expiry policy: the default applied when a create request names none, and
+/// the bound every requested value is clamped to. `0` as a default (or as a request)
+/// means "never expire".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct IdlePolicy {
+    /// Applied to rooms created without an explicit `empty_timeout_secs`.
+    pub default_secs: u32,
+    /// Largest non-zero timeout a room may have; larger requests are clamped to it.
+    pub max_secs: u32,
+}
+
+impl Default for IdlePolicy {
+    fn default() -> Self {
+        Self {
+            default_secs: DEFAULT_EMPTY_TIMEOUT_SECS,
+            max_secs: DEFAULT_EMPTY_TIMEOUT_MAX_SECS,
+        }
+    }
+}
+
+impl IdlePolicy {
+    /// Env var holding the default timeout in seconds (`0` = rooms never expire by default).
+    pub const ENV_DEFAULT: &'static str = "ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS";
+    /// Env var holding the clamp bound in seconds (1..=[`EMPTY_TIMEOUT_HARD_MAX_SECS`]).
+    pub const ENV_MAX: &'static str = "ROOMS_EMPTY_TIMEOUT_MAX_SECS";
+
+    /// Builds a validated policy: `1 <= max_secs <= EMPTY_TIMEOUT_HARD_MAX_SECS` and
+    /// `default_secs <= max_secs`.
+    pub fn new(default_secs: u32, max_secs: u32) -> Result<Self, String> {
+        if max_secs == 0 || max_secs > EMPTY_TIMEOUT_HARD_MAX_SECS {
+            return Err(format!(
+                "{} must be 1..={EMPTY_TIMEOUT_HARD_MAX_SECS}, got {max_secs}",
+                Self::ENV_MAX
+            ));
+        }
+        if default_secs > max_secs {
+            return Err(format!(
+                "{} ({default_secs}) must not exceed {} ({max_secs})",
+                Self::ENV_DEFAULT,
+                Self::ENV_MAX
+            ));
+        }
+        Ok(Self {
+            default_secs,
+            max_secs,
+        })
+    }
+
+    /// Reads the policy through `get` (an env lookup); unset vars take the defaults, a
+    /// present-but-invalid value is an error (never silently ignored).
+    pub fn from_lookup(get: impl Fn(&str) -> Option<String>) -> Result<Self, String> {
+        let read = |key: &str, default: u32| -> Result<u32, String> {
+            match get(key)
+                .map(|v| v.trim().to_string())
+                .filter(|v| !v.is_empty())
+            {
+                None => Ok(default),
+                Some(v) => v
+                    .parse::<u32>()
+                    .map_err(|_| format!("{key} must be a non-negative integer, got {v:?}")),
+            }
+        };
+        Self::new(
+            read(Self::ENV_DEFAULT, DEFAULT_EMPTY_TIMEOUT_SECS)?,
+            read(Self::ENV_MAX, DEFAULT_EMPTY_TIMEOUT_MAX_SECS)?,
+        )
+    }
+
+    /// Reads the policy from the process environment ([`Self::from_lookup`]).
+    pub fn from_env() -> Result<Self, String> {
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// The effective timeout for a create request: unset -> the default, `0` -> never,
+    /// anything else clamped to [`Self::max_secs`].
+    pub fn resolve(&self, requested: Option<u32>) -> u32 {
+        match requested {
+            None => self.default_secs,
+            Some(0) => 0,
+            Some(n) => n.min(self.max_secs),
+        }
+    }
+}
+
 /// The acting participant's room role as resolved by the rooms app from its
 /// per-room ACL (`bundles/rust/rooms` `Role`). Interim authorization input:
 /// migrates to the SDK `caller_can` check once that lands.
@@ -82,6 +185,43 @@ pub struct ParticipantInfo {
     pub publisher: bool,
     pub subscriber: bool,
     pub muted: bool,
+    /// Unix seconds the participant's first live session opened; kept while any of
+    /// their sessions stays up. `None` is never reported for a listed participant
+    /// (a participant is only listed while they hold a session), but the type stays
+    /// optional so a missing record can never be rendered as `0`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub joined_at: Option<i64>,
+}
+
+/// One raised hand as listed by [`RoomService::list_hands`]: UUID and timestamps only.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandInfo {
+    pub participant_id: Uuid,
+    pub raised_at: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_at: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub acknowledged_by: Option<Uuid>,
+}
+
+/// A raised-hand queue entry (FIFO; `raised_at` never decreases along the queue).
+#[derive(Debug, Clone)]
+struct HandEntry {
+    participant: Uuid,
+    raised_at: i64,
+    acknowledged_at: Option<i64>,
+    acknowledged_by: Option<Uuid>,
+}
+
+impl HandEntry {
+    fn info(&self) -> HandInfo {
+        HandInfo {
+            participant_id: self.participant,
+            raised_at: self.raised_at,
+            acknowledged_at: self.acknowledged_at,
+            acknowledged_by: self.acknowledged_by,
+        }
+    }
 }
 
 /// How a room's publisher media reaches subscribers.
@@ -155,7 +295,34 @@ impl Ledger {
         self.by_exp.insert((exp, jti));
         *self.per_community.entry(community.to_string()).or_insert(0) += 1;
     }
+
+    /// Drops every entry issued for `room` (it no longer exists), freeing the owning
+    /// community's live-token quota.
+    fn forget_room(&mut self, room: Uuid) {
+        let doomed: Vec<Uuid> = self
+            .by_jti
+            .iter()
+            .filter(|(_, (_, r, _))| *r == room)
+            .map(|(jti, _)| *jti)
+            .collect();
+        for jti in doomed {
+            if let Some((community, _, exp)) = self.by_jti.remove(&jti) {
+                self.by_exp.remove(&(exp, jti));
+                if let Some(n) = self.per_community.get_mut(&community) {
+                    *n -= 1;
+                    if *n == 0 {
+                        self.per_community.remove(&community);
+                    }
+                }
+            }
+        }
+    }
 }
+
+/// Default live-session lease once a WebRTC peer connection is established,
+/// decoupled from the short-lived join token TTL (revocation/kick still
+/// tears down the session immediately).
+const DEFAULT_SESSION_LEASE_SECS: i64 = 86_400;
 
 /// Revoked jti -> (community, expiry), plus insertion order for eviction.
 type RevokedSet = (HashMap<Uuid, (String, i64)>, VecDeque<Uuid>);
@@ -196,6 +363,36 @@ struct Room {
     muted: HashSet<Uuid>,
     /// Kicked participants: their tokens no longer authorize in this room.
     kicked: HashSet<Uuid>,
+    /// Raised-hand queue, oldest first. Authoritative here (in memory, like locks).
+    hands: Vec<HandEntry>,
+    /// Participant -> unix seconds their first live session opened; pruned when their
+    /// last session goes away.
+    joined: HashMap<Uuid, i64>,
+    /// Joined participants (token holders) and their server-recorded staff flag; the ACL
+    /// hand operations are checked against. Dropped on leave/kick and with the room.
+    members: HashMap<Uuid, Member>,
+    /// Seconds the room may stay empty before it expires; 0 = never.
+    empty_timeout_secs: u32,
+    /// When the room last became (observed) empty; `None` while it has sessions.
+    empty_since: Option<i64>,
+}
+
+impl Room {
+    /// True while any publisher or subscriber session is registered.
+    fn occupied(&self) -> bool {
+        !self.publishers.is_empty() || !self.subscribers.is_empty()
+    }
+
+    /// Forgets join times of participants with no live session left.
+    fn prune_joined(&mut self) {
+        let live: HashSet<Uuid> = self
+            .publishers
+            .keys()
+            .copied()
+            .chain(self.subscribers.values().map(|s| s.participant))
+            .collect();
+        self.joined.retain(|p, _| live.contains(p));
+    }
 }
 
 /// Snapshot of a room for API responses. Carries ids and counts only.
@@ -211,12 +408,20 @@ pub struct RoomInfo {
     pub subscriber_count: usize,
     #[serde(default)]
     pub locked: bool,
+    /// Effective empty-room expiry in seconds (0 = never).
+    #[serde(default)]
+    pub empty_timeout_secs: u32,
+    #[serde(default)]
+    pub participant_count: usize,
+    #[serde(default)]
+    pub hand_count: usize,
 }
 
 /// The credential a live session was opened with: bounds its lifetime and lets
 /// token revocation find and close it.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct SessionGrant {
+    #[allow(dead_code)]
     pub expires_at: i64,
     pub jti: Uuid,
 }
@@ -229,6 +434,43 @@ pub struct IssueRequest {
     pub subscribe: bool,
     pub source: Option<Uuid>,
     pub ttl_secs: Option<i64>,
+    /// Registers the participant as room STAFF in the server-side member table. Only a
+    /// transport that has VERIFIED moderation authority may set it (the gRPC `JoinRoom` with a
+    /// `streaming.rooms:moderate` service JWT); every other issuance path leaves it `false`.
+    /// Sticky: a later non-staff issuance never demotes (leave/kick/expiry does).
+    pub staff: bool,
+}
+
+/// A participant who joined a room (was issued a token for it): the server-side ACL the
+/// raised-hand operations are checked against, instead of any role the caller claims.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Member {
+    /// Staff may acknowledge/reset hands and lower or list everyone's.
+    pub staff: bool,
+}
+
+/// Which raised hands a [`RoomService::list_hands`] caller wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HandView {
+    /// Only the actor's own entry (members).
+    Own,
+    /// The whole queue; refused unless the actor is staff.
+    All,
+    /// Whole queue for staff, own entry for everyone else.
+    Auto,
+}
+
+/// The result of [`RoomService::list_hands`]: the visible hands plus queue facts that never
+/// reveal who else is waiting.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct HandList {
+    /// Visible hands, oldest first.
+    pub hands: Vec<HandInfo>,
+    /// Total hands in the room's queue.
+    pub count: usize,
+    /// The actor's 1-based position in the queue, when their hand is raised.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub position: Option<usize>,
 }
 
 /// An issued token plus its handle/expiry.
@@ -255,10 +497,26 @@ pub struct RoomService {
     public_base_url: String,
     /// `rooms.moderation` flag (env baseline `FEATURE_ROOMS_MODERATION`), default OFF.
     moderation_enabled: bool,
+    /// Idle-room expiry defaults and bound.
+    idle: IdlePolicy,
 }
 
 fn now() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// The community id as a span attribute: the digits when it is a plain numeric id, else `-`,
+/// so request text can never become telemetry (a bare `community_id` span field would record
+/// nothing at all -- tracing only records a field that has a value).
+fn span_cid(community_id: &str) -> &str {
+    if !community_id.is_empty()
+        && community_id.len() <= 20
+        && community_id.bytes().all(|b| b.is_ascii_digit())
+    {
+        community_id
+    } else {
+        "-"
+    }
 }
 
 impl RoomService {
@@ -280,6 +538,28 @@ impl RoomService {
             metrics,
             public_base_url,
             moderation_enabled: false,
+            idle: IdlePolicy::default(),
+        }
+    }
+
+    /// Sets the idle-room expiry policy (defaults to [`IdlePolicy::default`]).
+    pub fn with_idle_policy(mut self, idle: IdlePolicy) -> Self {
+        self.idle = idle;
+        self
+    }
+
+    /// The active idle-room expiry policy.
+    pub fn idle_policy(&self) -> IdlePolicy {
+        self.idle
+    }
+
+    /// Readiness for `grpc.health.v1`: `Err(reason)` when the service cannot do its job
+    /// (room tokens cannot be issued or verified without the configured secret).
+    pub fn readiness(&self) -> Result<(), &'static str> {
+        if self.keys.is_none() {
+            Err("WEBRTC_ROOM_TOKEN_SIGNING_KEY is not set: room tokens cannot be issued")
+        } else {
+            Ok(())
         }
     }
 
@@ -329,7 +609,7 @@ impl RoomService {
 
     fn keys(&self) -> Result<&TokenKeys, RoomError> {
         self.keys.as_ref().ok_or(RoomError::Unconfigured(
-            "WEBRTC_ROOM_TOKEN_SECRET is not set",
+            "WEBRTC_ROOM_TOKEN_SIGNING_KEY is not set",
         ))
     }
 
@@ -346,16 +626,34 @@ impl RoomService {
             publisher_ids,
             subscriber_count: r.subscribers.len(),
             locked: r.locked,
+            empty_timeout_secs: r.empty_timeout_secs,
+            participant_count: r.members.len(),
+            hand_count: r.hands.len(),
         }
     }
 
-    /// Creates a room for `community_id`.
+    /// Creates a room for `community_id` with the default idle-expiry policy.
     pub async fn create(
         &self,
         community_id: &str,
         label: Option<String>,
         max_publishers: Option<usize>,
         route: RouteMode,
+    ) -> Result<RoomInfo, RoomError> {
+        self.create_with(community_id, label, max_publishers, route, None)
+            .await
+    }
+
+    /// Creates a room for `community_id`. `empty_timeout_secs`: unset = the policy
+    /// default, `0` = never expire, otherwise clamped to the policy maximum; an empty room
+    /// older than that is deleted by [`Self::expire_idle_at`].
+    pub async fn create_with(
+        &self,
+        community_id: &str,
+        label: Option<String>,
+        max_publishers: Option<usize>,
+        route: RouteMode,
+        empty_timeout_secs: Option<u32>,
     ) -> Result<RoomInfo, RoomError> {
         if community_id.is_empty() || !community_id.bytes().all(|b| b.is_ascii_digit()) {
             return Err(RoomError::Invalid("community_id must be numeric".into()));
@@ -386,22 +684,28 @@ impl RoomService {
             )));
         }
         let id = Uuid::new_v4();
+        let created_at = now();
         let room = Room {
             community_id: community_id.to_string(),
             label,
             max_publishers,
             route,
-            created_at: now(),
+            created_at,
             epoch: 0,
             publishers: HashMap::new(),
             subscribers: HashMap::new(),
             locked: false,
             muted: HashSet::new(),
             kicked: HashSet::new(),
+            hands: Vec::new(),
+            joined: HashMap::new(),
+            members: HashMap::new(),
+            empty_timeout_secs: self.idle.resolve(empty_timeout_secs),
+            empty_since: Some(created_at),
         };
         let info = Self::info(id, &room);
         rooms.insert(id, room);
-        tracing::info!(room_id = %id, community_id, "rooms: created");
+        tracing::info!(room_id = %id, community_id, empty_timeout_secs = info.empty_timeout_secs, "rooms: created");
         Ok(info)
     }
 
@@ -431,6 +735,8 @@ impl RoomService {
         for pc in pcs {
             let _ = pc.close().await;
         }
+        self.count_hands_cleared("delete", room.hands.len());
+        self.issued.lock().await.forget_room(room_id);
         tracing::info!(%room_id, community_id, "rooms: closed");
         Ok(info)
     }
@@ -443,18 +749,6 @@ impl RoomService {
         req: IssueRequest,
     ) -> Result<IssuedToken, RoomError> {
         let keys = self.keys()?;
-        let epoch = {
-            let rooms = self.rooms.read().await;
-            match rooms.get(&room_id) {
-                Some(r) if r.community_id == community_id => {
-                    if r.locked {
-                        return Err(RoomError::Forbidden("room is locked"));
-                    }
-                    r.epoch
-                }
-                _ => return Err(RoomError::NotFound),
-            }
-        };
         if !req.publish && !req.subscribe {
             return Err(RoomError::Invalid(
                 "token must grant publish and/or subscribe".into(),
@@ -473,6 +767,40 @@ impl RoomService {
                 token::MAX_TTL_SECS
             )));
         }
+        let epoch = {
+            let mut rooms = self.rooms.write().await;
+            match rooms.get_mut(&room_id) {
+                Some(r) if r.community_id == community_id => {
+                    if r.locked && !req.staff {
+                        return Err(RoomError::Forbidden("room is locked"));
+                    }
+                    if r.kicked.contains(&req.participant) {
+                        return Err(RoomError::Forbidden(
+                            "participant was removed from this room",
+                        ));
+                    }
+                    if !r.members.contains_key(&req.participant)
+                        && r.members.len() >= MAX_MEMBERS_PER_ROOM
+                    {
+                        return Err(RoomError::LimitReached(format!(
+                            "{MAX_MEMBERS_PER_ROOM} participants per room"
+                        )));
+                    }
+                    // Joining is recorded server-side; staff is sticky (never demoted by a
+                    // later ordinary issuance) and only a verified-authority caller sets it.
+                    let staff =
+                        req.staff || r.members.get(&req.participant).is_some_and(|m| m.staff);
+                    r.members.insert(req.participant, Member { staff });
+                    // A join in flight counts as activity: an empty room must not expire
+                    // between a participant receiving a token and opening their session.
+                    if r.empty_since.is_some() {
+                        r.empty_since = Some(now());
+                    }
+                    r.epoch
+                }
+                _ => return Err(RoomError::NotFound),
+            }
+        };
         let iat = now();
         let jti = Uuid::new_v4();
         let claims = RoomClaims {
@@ -692,6 +1020,8 @@ impl RoomService {
                 return Err(RoomError::LimitReached("room publisher limit".into()));
             }
             let session = Uuid::new_v4();
+            room.joined.entry(participant).or_insert_with(now);
+            room.empty_since = None;
             let stale = room.publishers.insert(
                 participant,
                 PublisherEntry {
@@ -699,7 +1029,7 @@ impl RoomService {
                     pc,
                     session,
                     ended,
-                    expires_at: grant.expires_at,
+                    expires_at: now().saturating_add(DEFAULT_SESSION_LEASE_SECS),
                     jti: grant.jti,
                 },
             );
@@ -758,13 +1088,15 @@ impl RoomService {
                 .filter_map(|k| room.subscribers.remove(k).map(|s| s.pc))
                 .collect();
             let session = Uuid::new_v4();
+            room.joined.entry(participant).or_insert_with(now);
+            room.empty_since = None;
             room.subscribers.insert(
                 session,
                 SubscriberEntry {
                     pc,
                     participant,
                     ended,
-                    expires_at: grant.expires_at,
+                    expires_at: now().saturating_add(DEFAULT_SESSION_LEASE_SECS),
                     jti: grant.jti,
                 },
             );
@@ -814,7 +1146,8 @@ impl RoomService {
         dead.len()
     }
 
-    /// Spawns the periodic [`Self::sweep`] (every `every`).
+    /// Spawns the periodic reaper (every `every`): [`Self::sweep`] dead sessions first, so a
+    /// room whose last peer just died is seen as empty, then [`Self::expire_idle`].
     pub fn spawn_sweeper(self: &Arc<Self>, every: Duration) {
         let svc = Arc::clone(self);
         tokio::spawn(async move {
@@ -825,8 +1158,76 @@ impl RoomService {
                 if n > 0 {
                     tracing::info!(reaped = n, "rooms: swept dead peer connections");
                 }
+                svc.expire_idle().await;
             }
         });
+    }
+
+    /// [`Self::expire_idle_at`] as of now.
+    pub async fn expire_idle(&self) -> usize {
+        self.expire_idle_at(now()).await
+    }
+
+    /// Deletes every room that has been empty for its `empty_timeout_secs` as of `at` (unix
+    /// seconds; tests pass a controlled clock). A room is empty while it has no publisher and
+    /// no subscriber session; the clock starts at creation, or at the first pass that observes
+    /// it empty after its last session went away, and restarts on a join. `0` never expires.
+    /// Hands, lock state and issued-token ledger rows go with the room. Returns how many
+    /// rooms were expired; each emits an INFO log (numeric ids only) and the
+    /// `rooms_expired_total` counter.
+    pub async fn expire_idle_at(&self, at: i64) -> usize {
+        let expired: Vec<(Uuid, Room)> = {
+            let mut rooms = self.rooms.write().await;
+            let mut doomed: Vec<Uuid> = Vec::new();
+            for (id, room) in rooms.iter_mut() {
+                if room.occupied() {
+                    room.empty_since = None;
+                    continue;
+                }
+                let since = *room.empty_since.get_or_insert(at);
+                if room.empty_timeout_secs > 0
+                    && at.saturating_sub(since) >= i64::from(room.empty_timeout_secs)
+                {
+                    doomed.push(*id);
+                }
+            }
+            doomed
+                .into_iter()
+                .filter_map(|id| rooms.remove(&id).map(|r| (id, r)))
+                .collect()
+        };
+        if expired.is_empty() {
+            return 0;
+        }
+        {
+            let mut issued = self.issued.lock().await;
+            for (id, _) in &expired {
+                issued.forget_room(*id);
+            }
+        }
+        for (id, room) in &expired {
+            self.count_hands_cleared("expiry", room.hands.len());
+            self.metrics.rooms_expired_total.inc();
+            tracing::info!(
+                room_id = %id,
+                community_id = %room.community_id,
+                empty_timeout_secs = room.empty_timeout_secs,
+                locked = room.locked,
+                hands_dropped = room.hands.len(),
+                "rooms: expired idle room"
+            );
+        }
+        expired.len()
+    }
+
+    /// Adds `n` to the cleared-hands counter under `reason` (no-op for 0).
+    fn count_hands_cleared(&self, reason: &'static str, n: usize) {
+        if n > 0 {
+            self.metrics
+                .hands_cleared_total
+                .with_label_values(&[reason])
+                .inc_by(n as u64);
+        }
     }
 
     /// Removes a session whose peer connection ended (Failed/Closed/Disconnected)
@@ -837,7 +1238,7 @@ impl RoomService {
             let Some(room) = rooms.get_mut(&room_id) else {
                 return;
             };
-            if let Some(s) = room.subscribers.remove(&session) {
+            let removed = if let Some(s) = room.subscribers.remove(&session) {
                 Some((s.pc, "room_whep"))
             } else {
                 let pid = room
@@ -846,7 +1247,9 @@ impl RoomService {
                     .find(|(_, p)| p.session == session)
                     .map(|(k, _)| *k);
                 pid.and_then(|k| room.publishers.remove(&k).map(|p| (p.pc, "room_whip")))
-            }
+            };
+            room.prune_joined();
+            removed
         };
         if let Some((pc, kind)) = removed {
             self.metrics
@@ -894,7 +1297,7 @@ impl RoomService {
         let pc = {
             let mut rooms = self.rooms.write().await;
             let room = rooms.get_mut(&room_id).ok_or(RoomError::NotFound)?;
-            if room
+            let removed = if room
                 .subscribers
                 .get(&session)
                 .is_some_and(|s| s.participant == participant)
@@ -912,7 +1315,9 @@ impl RoomService {
                     .map(|p| (p.pc, "room_whip"))
             } else {
                 None
-            }
+            };
+            room.prune_joined();
+            removed
         };
         match pc {
             Some((pc, kind)) => {
@@ -973,7 +1378,7 @@ impl RoomService {
 
     /// Refuses a join into a locked room or by a kicked participant.
     fn join_allowed(room: &Room, participant: Uuid) -> Result<(), RoomError> {
-        if room.locked {
+        if room.locked && !room.members.get(&participant).is_some_and(|m| m.staff) {
             return Err(RoomError::Forbidden("room is locked"));
         }
         if room.kicked.contains(&participant) {
@@ -1015,6 +1420,7 @@ impl RoomService {
                     v.push((p.pc, "room_whip"));
                 }
             }
+            room.prune_joined();
             v
         };
         let n = doomed.len();
@@ -1030,7 +1436,7 @@ impl RoomService {
     }
 
     /// Lists every live room `community_id` owns (ids and counts only).
-    #[tracing::instrument(skip_all, fields(op = "list", community_id))]
+    #[tracing::instrument(skip_all, fields(op = "list", community_id = span_cid(community_id)))]
     pub async fn list_rooms(&self, community_id: &str) -> Result<Vec<RoomInfo>, RoomError> {
         let rooms = self.rooms.read().await;
         let mut v: Vec<RoomInfo> = rooms
@@ -1043,7 +1449,7 @@ impl RoomService {
     }
 
     /// Lists a room's participants by UUID (publisher/subscriber/muted flags).
-    #[tracing::instrument(skip_all, fields(op = "participants", %room_id, community_id))]
+    #[tracing::instrument(skip_all, fields(op = "participants", %room_id, community_id = span_cid(community_id)))]
     pub async fn participants(
         &self,
         community_id: &str,
@@ -1061,6 +1467,7 @@ impl RoomService {
                             publisher: true,
                             subscriber: false,
                             muted: p.fanouts.is_muted() || r.muted.contains(id),
+                            joined_at: r.joined.get(id).copied(),
                         },
                     );
                 }
@@ -1072,6 +1479,7 @@ impl RoomService {
                             publisher: false,
                             subscriber: true,
                             muted: r.muted.contains(&s.participant),
+                            joined_at: r.joined.get(&s.participant).copied(),
                         });
                 }
                 Ok(m.into_values().collect())
@@ -1083,7 +1491,7 @@ impl RoomService {
 
     /// Ends a participant's live sessions. Self-service, or by a moderator
     /// (`actor_id != participant`); does not blocklist. Returns sessions closed.
-    #[tracing::instrument(skip_all, fields(op = "leave", %room_id, community_id))]
+    #[tracing::instrument(skip_all, fields(op = "leave", %room_id, community_id = span_cid(community_id)))]
     pub async fn leave(
         &self,
         community_id: &str,
@@ -1097,7 +1505,10 @@ impl RoomService {
             if actor_id != participant {
                 self.require_moderator(actor_role)?;
             }
-            Ok(self.close_matching(room_id, |p, _| p == participant).await)
+            let closed = self.close_matching(room_id, |p, _| p == participant).await;
+            self.clear_hand(room_id, participant, "leave").await;
+            self.drop_member(room_id, participant).await;
+            Ok(closed)
         }
         .await;
         self.observe("leave", r)
@@ -1105,7 +1516,7 @@ impl RoomService {
 
     /// Removes a participant: closes their live peers and blocklists them for
     /// this room so their tokens stop authorizing. Moderator only; not self.
-    #[tracing::instrument(skip_all, fields(op = "kick", %room_id, community_id))]
+    #[tracing::instrument(skip_all, fields(op = "kick", %room_id, community_id = span_cid(community_id)))]
     pub async fn kick(
         &self,
         community_id: &str,
@@ -1134,6 +1545,10 @@ impl RoomService {
                         }
                         room.kicked.insert(participant);
                         room.muted.remove(&participant);
+                        room.members.remove(&participant);
+                        let before = room.hands.len();
+                        room.hands.retain(|h| h.participant != participant);
+                        self.count_hands_cleared("kick", before - room.hands.len());
                     }
                     _ => return Err(RoomError::NotFound),
                 }
@@ -1146,7 +1561,7 @@ impl RoomService {
 
     /// Server-side mutes (or unmutes) one participant: their fanout stops
     /// forwarding, enforced in the SFU rather than trusting the client.
-    #[tracing::instrument(skip_all, fields(op = "mute", %room_id, community_id))]
+    #[tracing::instrument(skip_all, fields(op = "mute", %room_id, community_id = span_cid(community_id)))]
     pub async fn set_muted(
         &self,
         community_id: &str,
@@ -1184,7 +1599,7 @@ impl RoomService {
     }
 
     /// Mutes every current publisher except `actor_id`; returns how many.
-    #[tracing::instrument(skip_all, fields(op = "mute_all", %room_id, community_id))]
+    #[tracing::instrument(skip_all, fields(op = "mute_all", %room_id, community_id = span_cid(community_id)))]
     pub async fn mute_all(
         &self,
         community_id: &str,
@@ -1218,7 +1633,7 @@ impl RoomService {
     }
 
     /// Locks or unlocks a room: locked refuses token issuance and new joins.
-    #[tracing::instrument(skip_all, fields(op = "lock", %room_id, community_id))]
+    #[tracing::instrument(skip_all, fields(op = "lock", %room_id, community_id = span_cid(community_id)))]
     pub async fn set_locked(
         &self,
         community_id: &str,
@@ -1243,6 +1658,302 @@ impl RoomService {
     }
 }
 
+/// The raised-hand queue (Go `call_features.go` parity, authoritative here).
+///
+/// Authorization is NEVER taken from a role the caller states. Every operation names an
+/// `actor` (the end user acting, UUID) and is checked against the server-side member table
+/// ([`Member`]), which is filled when a participant is issued a join token and whose `staff`
+/// flag only a verified-authority issuer can set ([`IssueRequest::staff`]):
+///
+/// * raise / lower-own / list-own: the actor must have joined this room, and for raise and
+///   lower-own `participant == actor`;
+/// * lower-other / list-all / acknowledge / reset: the actor must be recorded STAFF (and the
+///   `rooms.moderation` flag on). The transport additionally demands the moderate scope
+///   (gRPC: the verified service JWT; host API: the tool's manifest scope).
+///
+/// Participant ids are UUIDs, never names. The queue is cleared per participant on
+/// leave/kick and wholesale on room delete/expiry/reset.
+impl RoomService {
+    /// The member record of `actor` in `room`, or `Forbidden` when they never joined.
+    fn member_of(room: &Room, actor: Uuid) -> Result<Member, RoomError> {
+        room.members
+            .get(&actor)
+            .copied()
+            .ok_or(RoomError::Forbidden("actor has not joined this room"))
+    }
+
+    /// Staff gate: the `rooms.moderation` flag is on and `actor` is recorded staff.
+    fn require_staff(&self, room: &Room, actor: Uuid) -> Result<(), RoomError> {
+        self.require_enabled()?;
+        if Self::member_of(room, actor)?.staff {
+            Ok(())
+        } else {
+            Err(RoomError::Forbidden("moderator role required"))
+        }
+    }
+
+    /// Drops `participant` from the member table of `room_id` (they left).
+    async fn drop_member(&self, room_id: Uuid, participant: Uuid) {
+        if let Some(room) = self.rooms.write().await.get_mut(&room_id) {
+            room.members.remove(&participant);
+        }
+    }
+
+    /// Registers `actor` as room STAFF. Only for a caller that has VERIFIED moderation
+    /// authority (the host API's `room.staff.register`, gated by the tool's manifest scope
+    /// `community:moderate`); never reachable from a participant-supplied field.
+    #[tracing::instrument(skip_all, fields(op = "staff_register", %room_id, community_id = span_cid(community_id)))]
+    pub async fn register_staff(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        actor: Uuid,
+    ) -> Result<(), RoomError> {
+        let r = async {
+            self.require_enabled()?;
+            let mut rooms = self.rooms.write().await;
+            let room = match rooms.get_mut(&room_id) {
+                Some(r) if r.community_id == community_id => r,
+                _ => return Err(RoomError::NotFound),
+            };
+            if room.kicked.contains(&actor) {
+                return Err(RoomError::Forbidden(
+                    "participant was removed from this room",
+                ));
+            }
+            if !room.members.contains_key(&actor) && room.members.len() >= MAX_MEMBERS_PER_ROOM {
+                return Err(RoomError::LimitReached(format!(
+                    "{MAX_MEMBERS_PER_ROOM} participants per room"
+                )));
+            }
+            room.members.insert(actor, Member { staff: true });
+            Ok(())
+        }
+        .await;
+        self.observe("staff_register", r)
+    }
+
+    /// Drops `participant`'s raised hand from `room_id` (if any), counting `reason`.
+    async fn clear_hand(&self, room_id: Uuid, participant: Uuid, reason: &'static str) {
+        let removed = {
+            let mut rooms = self.rooms.write().await;
+            rooms.get_mut(&room_id).map_or(0, |room| {
+                let before = room.hands.len();
+                room.hands.retain(|h| h.participant != participant);
+                before - room.hands.len()
+            })
+        };
+        self.count_hands_cleared(reason, removed);
+    }
+
+    /// Raises the actor's OWN hand (`participant` must equal `actor`, who must have joined).
+    /// Idempotent: an already-raised hand keeps its original position and time. Kicked
+    /// participants are refused; the queue is bounded.
+    #[tracing::instrument(skip_all, fields(op = "hand_raise", %room_id, community_id = span_cid(community_id)))]
+    pub async fn raise_hand(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        participant: Uuid,
+        actor: Uuid,
+    ) -> Result<HandInfo, RoomError> {
+        let r = async {
+            let mut rooms = self.rooms.write().await;
+            let room = match rooms.get_mut(&room_id) {
+                Some(r) if r.community_id == community_id => r,
+                _ => return Err(RoomError::NotFound),
+            };
+            if actor != participant {
+                return Err(RoomError::Forbidden(
+                    "a hand can only be raised by its own participant",
+                ));
+            }
+            Self::member_of(room, actor)?;
+            if room.kicked.contains(&participant) {
+                return Err(RoomError::Forbidden(
+                    "participant was removed from this room",
+                ));
+            }
+            if let Some(h) = room.hands.iter().find(|h| h.participant == participant) {
+                return Ok(h.info());
+            }
+            if room.hands.len() >= MAX_HANDS_PER_ROOM {
+                return Err(RoomError::LimitReached(format!(
+                    "{MAX_HANDS_PER_ROOM} raised hands per room"
+                )));
+            }
+            // Never earlier than the previous hand, so queue order == raised_at order
+            // even if the wall clock steps backwards.
+            let raised_at = room
+                .hands
+                .last()
+                .map_or_else(now, |last| now().max(last.raised_at));
+            let hand = HandEntry {
+                participant,
+                raised_at,
+                acknowledged_at: None,
+                acknowledged_by: None,
+            };
+            let info = hand.info();
+            room.hands.push(hand);
+            self.metrics.hands_raised_total.inc();
+            Ok(info)
+        }
+        .await;
+        self.observe("hand_raise", r)
+    }
+
+    /// Lowers `participant`'s hand; returns whether one was raised (lowering a hand that is
+    /// not raised is a no-op, not an error). Lowering your own needs only to have joined;
+    /// lowering someone else's needs staff.
+    #[tracing::instrument(skip_all, fields(op = "hand_lower", %room_id, community_id = span_cid(community_id)))]
+    pub async fn lower_hand(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        participant: Uuid,
+        actor: Uuid,
+    ) -> Result<bool, RoomError> {
+        let r = async {
+            let removed = {
+                let mut rooms = self.rooms.write().await;
+                let room = match rooms.get_mut(&room_id) {
+                    Some(r) if r.community_id == community_id => r,
+                    _ => return Err(RoomError::NotFound),
+                };
+                if actor == participant {
+                    Self::member_of(room, actor)?;
+                } else {
+                    self.require_staff(room, actor)?;
+                }
+                let before = room.hands.len();
+                room.hands.retain(|h| h.participant != participant);
+                before - room.hands.len()
+            };
+            self.count_hands_cleared("lower", removed);
+            Ok(removed > 0)
+        }
+        .await;
+        self.observe("hand_lower", r)
+    }
+
+    /// Lists raised hands (oldest first) as `view` allows. The actor must have joined; the
+    /// whole queue ([`HandView::All`], or [`HandView::Auto`] for staff) is staff-only,
+    /// everyone else sees only their own entry plus the queue length and their position.
+    #[tracing::instrument(skip_all, fields(op = "hand_list", %room_id, community_id = span_cid(community_id)))]
+    pub async fn list_hands(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        actor: Uuid,
+        view: HandView,
+    ) -> Result<HandList, RoomError> {
+        let r = async {
+            let rooms = self.rooms.read().await;
+            let room = match rooms.get(&room_id) {
+                Some(r) if r.community_id == community_id => r,
+                _ => return Err(RoomError::NotFound),
+            };
+            let member = Self::member_of(room, actor)?;
+            let all = match view {
+                HandView::Own => false,
+                HandView::All => {
+                    self.require_staff(room, actor)?;
+                    true
+                }
+                HandView::Auto => member.staff && self.require_enabled().is_ok(),
+            };
+            let mut queue: Vec<HandInfo> = room.hands.iter().map(HandEntry::info).collect();
+            queue.sort_by_key(|h| h.raised_at);
+            let position = queue
+                .iter()
+                .position(|h| h.participant_id == actor)
+                .map(|i| i + 1);
+            let count = queue.len();
+            let hands = if all {
+                queue
+            } else {
+                queue
+                    .into_iter()
+                    .filter(|h| h.participant_id == actor)
+                    .collect()
+            };
+            Ok(HandList {
+                hands,
+                count,
+                position,
+            })
+        }
+        .await;
+        self.observe("hand_list", r)
+    }
+
+    /// Marks `participant`'s raised hand acknowledged by staff `actor`. Idempotent (the
+    /// first acknowledgement is kept); a participant with no raised hand is `Invalid`
+    /// (nothing to acknowledge), never a silent success.
+    #[tracing::instrument(skip_all, fields(op = "hand_ack", %room_id, community_id = span_cid(community_id)))]
+    pub async fn acknowledge_hand(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        participant: Uuid,
+        actor: Uuid,
+    ) -> Result<HandInfo, RoomError> {
+        let r = async {
+            let mut rooms = self.rooms.write().await;
+            let room = match rooms.get_mut(&room_id) {
+                Some(r) if r.community_id == community_id => r,
+                _ => return Err(RoomError::NotFound),
+            };
+            self.require_staff(room, actor)?;
+            let hand = room
+                .hands
+                .iter_mut()
+                .find(|h| h.participant == participant)
+                .ok_or_else(|| RoomError::Invalid("participant has no raised hand".into()))?;
+            if hand.acknowledged_at.is_none() {
+                let t = now();
+                hand.acknowledged_at = Some(t);
+                hand.acknowledged_by = Some(actor);
+                self.metrics.hands_acknowledged_total.inc();
+                self.metrics
+                    .hand_ack_wait_seconds
+                    .observe((t - hand.raised_at).max(0) as f64);
+            }
+            Ok(hand.info())
+        }
+        .await;
+        self.observe("hand_ack", r)
+    }
+
+    /// Clears the whole raised-hand queue; returns how many hands were cleared. Staff only.
+    #[tracing::instrument(skip_all, fields(op = "hand_reset", %room_id, community_id = span_cid(community_id)))]
+    pub async fn reset_hands(
+        &self,
+        community_id: &str,
+        room_id: Uuid,
+        actor: Uuid,
+    ) -> Result<usize, RoomError> {
+        let r = async {
+            let cleared = {
+                let mut rooms = self.rooms.write().await;
+                let room = match rooms.get_mut(&room_id) {
+                    Some(r) if r.community_id == community_id => r,
+                    _ => return Err(RoomError::NotFound),
+                };
+                self.require_staff(room, actor)?;
+                let n = room.hands.len();
+                room.hands.clear();
+                n
+            };
+            self.count_hands_cleared("reset", cleared);
+            Ok(cleared)
+        }
+        .await;
+        self.observe("hand_reset", r)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1261,7 +1972,7 @@ mod tests {
         RoomService::new(
             factory,
             metrics,
-            secret.map(|s| TokenKeys::new(s).unwrap()),
+            secret.map(|_| TokenKeys::generate_for_tests("room-test")),
             "http://localhost".into(),
         )
     }
@@ -1275,6 +1986,7 @@ mod tests {
             subscribe: s,
             source: None,
             ttl_secs: Some(60),
+            staff: false,
         }
     }
 
@@ -1377,5 +2089,454 @@ mod tests {
             s.authorize("x", r.room_id).await,
             Err(RoomError::Unconfigured(_))
         ));
+    }
+
+    fn moderated() -> RoomService {
+        svc(Some(SECRET)).with_moderation(true)
+    }
+
+    async fn new_room(s: &RoomService, community: &str) -> RoomInfo {
+        s.create(community, None, None, RouteMode::Sfu)
+            .await
+            .unwrap()
+    }
+
+    #[test]
+    fn idle_policy_validates_and_resolves() {
+        let p = IdlePolicy::default();
+        assert_eq!((p.default_secs, p.max_secs), (300, 86_400));
+        assert_eq!(p.resolve(None), 300, "unset takes the default");
+        assert_eq!(p.resolve(Some(0)), 0, "0 means never expire");
+        assert_eq!(p.resolve(Some(45)), 45);
+        assert_eq!(p.resolve(Some(u32::MAX)), 86_400, "clamped to the maximum");
+        assert!(
+            IdlePolicy::new(0, 10).is_ok(),
+            "default 0 = never is allowed"
+        );
+        for (d, m) in [(5, 0), (11, 10), (1, EMPTY_TIMEOUT_HARD_MAX_SECS + 1)] {
+            assert!(IdlePolicy::new(d, m).is_err(), "({d}, {m}) must be refused");
+        }
+    }
+
+    #[test]
+    fn idle_policy_env_lookup_is_strict() {
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            IdlePolicy::from_lookup(move |k| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == k)
+                    .map(|(_, v)| v.to_string())
+            })
+        };
+        assert_eq!(env(&[]).unwrap(), IdlePolicy::default());
+        let p = env(&[
+            ("ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS", "60"),
+            ("ROOMS_EMPTY_TIMEOUT_MAX_SECS", "600"),
+        ])
+        .unwrap();
+        assert_eq!((p.default_secs, p.max_secs), (60, 600));
+        // A present-but-invalid value is an error, never silently the default.
+        assert!(env(&[("ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS", "soon")]).is_err());
+        assert!(env(&[("ROOMS_EMPTY_TIMEOUT_MAX_SECS", "-1")]).is_err());
+        assert!(env(&[("ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS", "99999999")]).is_err());
+    }
+
+    #[tokio::test]
+    async fn idle_room_expires_exactly_at_its_timeout_on_a_controlled_clock() {
+        let s = svc(Some(SECRET));
+        let r = new_room(&s, "7").await;
+        assert_eq!(r.empty_timeout_secs, 300);
+        let t0 = r.created_at;
+        assert_eq!(s.expire_idle_at(t0 + 299).await, 0, "one second early");
+        assert!(s.get("7", r.room_id).await.is_ok());
+        assert_eq!(s.expire_idle_at(t0 + 300).await, 1);
+        assert!(matches!(
+            s.get("7", r.room_id).await,
+            Err(RoomError::NotFound)
+        ));
+        assert_eq!(s.expire_idle_at(t0 + 301).await, 0, "already gone");
+        assert_eq!(s.metrics.rooms_expired_total.get(), 1);
+    }
+
+    #[tokio::test]
+    async fn zero_timeout_never_expires_and_requests_are_clamped() {
+        let s = svc(Some(SECRET)).with_idle_policy(IdlePolicy::new(60, 120).unwrap());
+        let never = s
+            .create_with("7", None, None, RouteMode::Sfu, Some(0))
+            .await
+            .unwrap();
+        let clamped = s
+            .create_with("7", None, None, RouteMode::Sfu, Some(10_000))
+            .await
+            .unwrap();
+        let dflt = new_room(&s, "7").await;
+        assert_eq!(never.empty_timeout_secs, 0);
+        assert_eq!(clamped.empty_timeout_secs, 120);
+        assert_eq!(dflt.empty_timeout_secs, 60);
+        let far = never.created_at + 10_000_000;
+        assert_eq!(s.expire_idle_at(far).await, 2, "only the two timed rooms");
+        assert!(s.get("7", never.room_id).await.is_ok());
+        assert_eq!(s.expire_idle_at(far * 2).await, 0);
+    }
+
+    /// Registers `who` as a joined member (and optionally staff) the way the gRPC `JoinRoom`
+    /// does: by being issued a join token.
+    async fn join(s: &RoomService, community: &str, room: Uuid, who: Uuid, staff: bool) {
+        s.issue_token(
+            community,
+            room,
+            IssueRequest {
+                participant: who,
+                publish: false,
+                subscribe: true,
+                source: None,
+                ttl_secs: Some(60),
+                staff,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn expiry_drops_hands_locks_and_issued_tokens() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        let who = Uuid::new_v4();
+        join(&s, "7", r.room_id, who, true).await;
+        s.raise_hand("7", r.room_id, who, who).await.unwrap();
+        s.set_locked("7", r.room_id, true, ActorRole::Admin)
+            .await
+            .unwrap();
+        // A sibling room supplies a ledger row of a different room.
+        let other = new_room(&s, "7").await;
+        s.issue_token("7", other.room_id, issue(true, true))
+            .await
+            .unwrap();
+        assert_eq!(s.issued.lock().await.per_community.get("7"), Some(&2));
+        let doomed = s
+            .create_with("7", None, None, RouteMode::Sfu, Some(10))
+            .await
+            .unwrap();
+        // A never-expire room survives the same pass that takes the other three.
+        let keep = s
+            .create_with("7", None, None, RouteMode::Sfu, Some(0))
+            .await
+            .unwrap();
+        let at = r.created_at + 400;
+        let expired = s.expire_idle_at(at).await;
+        assert_eq!(expired, 3, "r, other and doomed; keep (0) survives");
+        assert!(s.get("7", keep.room_id).await.is_ok());
+        for gone in [r.room_id, other.room_id, doomed.room_id] {
+            assert!(matches!(
+                s.list_hands("7", gone, who, HandView::Own).await,
+                Err(RoomError::NotFound)
+            ));
+        }
+        assert_eq!(
+            s.issued.lock().await.per_community.get("7"),
+            None,
+            "expired rooms release their token-ledger quota"
+        );
+        assert_eq!(
+            s.metrics
+                .hands_cleared_total
+                .with_label_values(&["expiry"])
+                .get(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn hands_are_fifo_idempotent_and_community_scoped() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        let (a, b, staff) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        for (p, st) in [(a, false), (b, false), (staff, true)] {
+            join(&s, "7", r.room_id, p, st).await;
+        }
+        let first = s.raise_hand("7", r.room_id, a, a).await.unwrap();
+        s.raise_hand("7", r.room_id, b, b).await.unwrap();
+        let again = s.raise_hand("7", r.room_id, a, a).await.unwrap();
+        assert_eq!(
+            first, again,
+            "raising twice is a no-op that keeps position and time"
+        );
+        let all = s
+            .list_hands("7", r.room_id, staff, HandView::All)
+            .await
+            .unwrap();
+        assert_eq!(
+            all.hands
+                .iter()
+                .map(|h| h.participant_id)
+                .collect::<Vec<_>>(),
+            vec![a, b]
+        );
+        assert_eq!(all.count, 2);
+        assert!(all
+            .hands
+            .windows(2)
+            .all(|w| w[0].raised_at <= w[1].raised_at));
+        assert_eq!(
+            s.metrics.hands_raised_total.get(),
+            2,
+            "re-raise not counted"
+        );
+
+        // Another community can neither see nor touch the room's hands: NotFound everywhere,
+        // even for staff of the real room.
+        for r in [
+            s.raise_hand("8", r.room_id, a, a).await.map(|_| ()),
+            s.list_hands("8", r.room_id, staff, HandView::All)
+                .await
+                .map(|_| ()),
+            s.lower_hand("8", r.room_id, a, staff).await.map(|_| ()),
+            s.acknowledge_hand("8", r.room_id, a, staff)
+                .await
+                .map(|_| ()),
+            s.reset_hands("8", r.room_id, staff).await.map(|_| ()),
+        ] {
+            assert!(matches!(r, Err(RoomError::NotFound)), "{r:?}");
+        }
+        assert_eq!(
+            s.list_hands("7", r.room_id, staff, HandView::All)
+                .await
+                .unwrap()
+                .count,
+            2
+        );
+    }
+
+    #[tokio::test]
+    async fn hand_actions_need_a_joined_actor_matching_the_participant() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        let (a, b, stranger) = (Uuid::new_v4(), Uuid::new_v4(), Uuid::new_v4());
+        join(&s, "7", r.room_id, a, false).await;
+        join(&s, "7", r.room_id, b, false).await;
+        // Mismatched actor (b raising a's hand) and a non-participant are refused.
+        assert!(matches!(
+            s.raise_hand("7", r.room_id, a, b).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.raise_hand("7", r.room_id, stranger, stranger).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.lower_hand("7", r.room_id, stranger, stranger).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.list_hands("7", r.room_id, stranger, HandView::Own).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        s.raise_hand("7", r.room_id, a, a).await.unwrap();
+        // A joined non-staff member cannot lower another's hand, list the queue, ack or reset;
+        // there is no role field to assert: the member table is the only authority.
+        assert!(matches!(
+            s.lower_hand("7", r.room_id, a, b).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.list_hands("7", r.room_id, b, HandView::All).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.acknowledge_hand("7", r.room_id, a, b).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.reset_hands("7", r.room_id, b).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        // Own view: a sees only their entry, b sees no entry but the queue length.
+        let mine = s
+            .list_hands("7", r.room_id, a, HandView::Own)
+            .await
+            .unwrap();
+        assert_eq!(
+            (mine.hands.len(), mine.count, mine.position),
+            (1, 1, Some(1))
+        );
+        let theirs = s
+            .list_hands("7", r.room_id, b, HandView::Auto)
+            .await
+            .unwrap();
+        assert_eq!(
+            (theirs.hands.len(), theirs.count, theirs.position),
+            (0, 1, None),
+            "Auto for a non-staff member is the own view"
+        );
+        // Lower-own works; lower-own is a no-op when nothing is raised.
+        assert!(s.lower_hand("7", r.room_id, a, a).await.unwrap());
+        assert!(!s.lower_hand("7", r.room_id, a, a).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn staff_is_recorded_server_side_sticky_and_never_claimed() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        let (a, m) = (Uuid::new_v4(), Uuid::new_v4());
+        join(&s, "7", r.room_id, a, false).await;
+        join(&s, "7", r.room_id, m, true).await;
+        s.raise_hand("7", r.room_id, a, a).await.unwrap();
+        // Staff may lower another's hand, ack, list all, reset.
+        let ack = s.acknowledge_hand("7", r.room_id, a, m).await.unwrap();
+        assert_eq!(ack.acknowledged_by, Some(m));
+        assert!(ack.acknowledged_at.is_some());
+        let again = s.acknowledge_hand("7", r.room_id, a, m).await.unwrap();
+        assert_eq!(again, ack, "the first acknowledgement is kept");
+        assert_eq!(s.metrics.hands_acknowledged_total.get(), 1);
+        assert!(matches!(
+            s.acknowledge_hand("7", r.room_id, Uuid::new_v4(), m).await,
+            Err(RoomError::Invalid(_))
+        ));
+        let auto = s
+            .list_hands("7", r.room_id, m, HandView::Auto)
+            .await
+            .unwrap();
+        assert_eq!(auto.hands.len(), 1, "Auto = whole queue for staff");
+        // An ordinary re-issue for a staff participant never demotes them.
+        join(&s, "7", r.room_id, m, false).await;
+        assert_eq!(s.reset_hands("7", r.room_id, m).await.unwrap(), 1);
+        assert_eq!(s.reset_hands("7", r.room_id, m).await.unwrap(), 0);
+        // register_staff promotes a participant who only ever got an ordinary token.
+        assert!(matches!(
+            s.reset_hands("7", r.room_id, a).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        s.register_staff("7", r.room_id, a).await.unwrap();
+        assert_eq!(s.reset_hands("7", r.room_id, a).await.unwrap(), 0);
+        // ...but not in another community's room.
+        assert!(matches!(
+            s.register_staff("8", r.room_id, a).await,
+            Err(RoomError::NotFound)
+        ));
+    }
+
+    #[tokio::test]
+    async fn staff_hand_ops_follow_the_moderation_flag() {
+        let s = svc(Some(SECRET)); // flag OFF
+        let r = new_room(&s, "7").await;
+        let (a, m) = (Uuid::new_v4(), Uuid::new_v4());
+        join(&s, "7", r.room_id, a, false).await;
+        join(&s, "7", r.room_id, m, true).await;
+        // Participant-level raise/lower-own/list-own need no flag...
+        s.raise_hand("7", r.room_id, a, a).await.unwrap();
+        s.list_hands("7", r.room_id, a, HandView::Own)
+            .await
+            .unwrap();
+        // ...staff actions fail loud while the flag is off, even for a recorded staff member.
+        for r in [
+            s.acknowledge_hand("7", r.room_id, a, m).await.map(|_| ()),
+            s.reset_hands("7", r.room_id, m).await.map(|_| ()),
+            s.lower_hand("7", r.room_id, a, m).await.map(|_| ()),
+            s.list_hands("7", r.room_id, m, HandView::All)
+                .await
+                .map(|_| ()),
+            s.register_staff("7", r.room_id, m).await.map(|_| ()),
+        ] {
+            assert!(matches!(r, Err(RoomError::Unsupported(_))), "{r:?}");
+        }
+        // Auto degrades to the own view rather than failing.
+        let auto = s
+            .list_hands("7", r.room_id, m, HandView::Auto)
+            .await
+            .unwrap();
+        assert_eq!(auto.hands.len(), 0);
+        assert_eq!(auto.count, 1);
+    }
+
+    #[tokio::test]
+    async fn hands_and_membership_clear_on_leave_kick_and_close() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        let (leaver, kicked, stays, actor) = (
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+        );
+        for p in [leaver, kicked, stays] {
+            join(&s, "7", r.room_id, p, false).await;
+            s.raise_hand("7", r.room_id, p, p).await.unwrap();
+        }
+        join(&s, "7", r.room_id, actor, true).await;
+        s.leave("7", r.room_id, leaver, leaver, ActorRole::Member)
+            .await
+            .unwrap();
+        s.kick("7", r.room_id, kicked, actor, ActorRole::Moderator)
+            .await
+            .unwrap();
+        let left: Vec<Uuid> = s
+            .list_hands("7", r.room_id, actor, HandView::All)
+            .await
+            .unwrap()
+            .hands
+            .into_iter()
+            .map(|h| h.participant_id)
+            .collect();
+        assert_eq!(
+            left,
+            vec![stays],
+            "leave and kick drop exactly their own hand"
+        );
+        // Having left, the participant is no longer a member; a kicked one cannot rejoin.
+        assert!(matches!(
+            s.raise_hand("7", r.room_id, leaver, leaver).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.raise_hand("7", r.room_id, kicked, kicked).await,
+            Err(RoomError::Forbidden(_))
+        ));
+        assert!(matches!(
+            s.issue_token(
+                "7",
+                r.room_id,
+                IssueRequest {
+                    participant: kicked,
+                    ..issue(true, true)
+                }
+            )
+            .await,
+            Err(RoomError::Forbidden(_))
+        ));
+        s.close("7", r.room_id).await.unwrap();
+        for reason in ["leave", "kick", "delete"] {
+            assert_eq!(
+                s.metrics
+                    .hands_cleared_total
+                    .with_label_values(&[reason])
+                    .get(),
+                1,
+                "{reason}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hand_queue_and_member_table_are_bounded() {
+        let s = moderated();
+        let r = new_room(&s, "7").await;
+        for _ in 0..MAX_HANDS_PER_ROOM {
+            let p = Uuid::new_v4();
+            join(&s, "7", r.room_id, p, false).await;
+            s.raise_hand("7", r.room_id, p, p).await.unwrap();
+        }
+        let p = Uuid::new_v4();
+        join(&s, "7", r.room_id, p, false).await;
+        assert!(matches!(
+            s.raise_hand("7", r.room_id, p, p).await,
+            Err(RoomError::LimitReached(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn readiness_requires_the_token_secret() {
+        assert!(svc(Some(SECRET)).readiness().is_ok());
+        assert!(svc(None).readiness().is_err());
     }
 }

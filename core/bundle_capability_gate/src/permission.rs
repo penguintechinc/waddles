@@ -227,7 +227,10 @@ pub enum Quota {
 pub enum PermissionFamily {
     StorageKv,
     StorageTables,
-    StorageObjects,
+    /// `storage.objects.read` -- get/head/list/presign-get on own prefix.
+    StorageObjectsRead,
+    /// `storage.objects.write` -- put/delete/tag/presign-put on own prefix.
+    StorageObjectsWrite,
     /// `net.http.fqdn:<host>` -- the preferred, `Normal`-risk outbound-HTTP
     /// family (2026-09-28 decision). A bundle should reach for this family
     /// first; `NetHttpPublicIp`/`NetHttpPrivateIp` exist for the exceptional
@@ -393,7 +396,8 @@ impl PermissionFamily {
     pub const ALL: &'static [PermissionFamily] = &[
         Self::StorageKv,
         Self::StorageTables,
-        Self::StorageObjects,
+        Self::StorageObjectsRead,
+        Self::StorageObjectsWrite,
         Self::NetHttpFqdn,
         Self::NetHttpPublicIp,
         Self::NetHttpPrivateIp,
@@ -455,7 +459,8 @@ impl PermissionFamily {
         match self {
             Self::StorageKv => "storage.kv",
             Self::StorageTables => "storage.tables",
-            Self::StorageObjects => "storage.objects",
+            Self::StorageObjectsRead => "storage.objects.read",
+            Self::StorageObjectsWrite => "storage.objects.write",
             Self::NetHttpFqdn => "net.http.fqdn",
             Self::NetHttpPublicIp => "net.http.public-ip",
             Self::NetHttpPrivateIp => "net.http.private-ip",
@@ -604,7 +609,7 @@ impl PermissionFamily {
         match self {
             Self::StorageKv => AppScopedResource::KvState,
             Self::StorageTables => AppScopedResource::Table,
-            Self::StorageObjects => AppScopedResource::Objects,
+            Self::StorageObjectsRead | Self::StorageObjectsWrite => AppScopedResource::Objects,
             Self::OverlayMedia => AppScopedResource::Overlay,
             _ => AppScopedResource::None,
         }
@@ -655,12 +660,19 @@ impl PermissionFamily {
                 default_quota: Quota::Descriptive("100k rows / 50 MB per (tenant, app)"),
                 notes: "Exactly one table, in a server-derived schema (spec SS1.1)",
             },
-            Self::StorageObjects => CatalogEntry {
+            Self::StorageObjectsRead => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
                 capability_kind: CapabilityKind::Objects,
                 default_quota: Quota::Descriptive("1k objects / 500 MB per (tenant, app)"),
-                notes: "Tiered bucket/prefix topology, spec SS6",
+                notes: "Read (get/head/list/presign-get) on the bundle's own object prefix, spec SS6",
+            },
+            Self::StorageObjectsWrite => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Objects,
+                default_quota: Quota::Descriptive("1k objects / 500 MB per (tenant, app)"),
+                notes: "Write (put/delete/tag) on the bundle's own object prefix, spec SS6",
             },
             Self::NetHttpFqdn => CatalogEntry {
                 family: *self,
@@ -1177,7 +1189,10 @@ impl fmt::Display for PermissionFamily {
 pub enum PermissionId {
     StorageKv,
     StorageTables,
-    StorageObjects,
+    /// `storage.objects.read` -- get/head/list/presign-get on own prefix.
+    StorageObjectsRead,
+    /// `storage.objects.write` -- put/delete/tag/presign-put on own prefix.
+    StorageObjectsWrite,
     NetHttpFqdn(String),
     NetHttpPublicIp(String),
     NetHttpPrivateIp(String),
@@ -1279,7 +1294,8 @@ impl PermissionId {
         match self {
             Self::StorageKv => PermissionFamily::StorageKv,
             Self::StorageTables => PermissionFamily::StorageTables,
-            Self::StorageObjects => PermissionFamily::StorageObjects,
+            Self::StorageObjectsRead => PermissionFamily::StorageObjectsRead,
+            Self::StorageObjectsWrite => PermissionFamily::StorageObjectsWrite,
             Self::NetHttpFqdn(_) => PermissionFamily::NetHttpFqdn,
             Self::NetHttpPublicIp(_) => PermissionFamily::NetHttpPublicIp,
             Self::NetHttpPrivateIp(_) => PermissionFamily::NetHttpPrivateIp,
@@ -1630,7 +1646,8 @@ impl PermissionId {
         match raw {
             "storage.kv" => Ok(Self::StorageKv),
             "storage.tables" => Ok(Self::StorageTables),
-            "storage.objects" => Ok(Self::StorageObjects),
+            "storage.objects.read" => Ok(Self::StorageObjectsRead),
+            "storage.objects.write" => Ok(Self::StorageObjectsWrite),
             "overlay.media" => Ok(Self::OverlayMedia),
             "ai.generate" => Ok(Self::AiGenerate),
             "media.generate" => Ok(Self::MediaGenerate),
@@ -2082,7 +2099,11 @@ mod tests {
             AppScopedResource::Table
         );
         assert_eq!(
-            PermissionFamily::StorageObjects.expected_app_scoped_resource(),
+            PermissionFamily::StorageObjectsRead.expected_app_scoped_resource(),
+            AppScopedResource::Objects
+        );
+        assert_eq!(
+            PermissionFamily::StorageObjectsWrite.expected_app_scoped_resource(),
             AppScopedResource::Objects
         );
         assert_eq!(
@@ -2165,6 +2186,31 @@ mod tests {
         }
         let long = format!("tool.call:waddles.core.economy.default:a{}", "b".repeat(64));
         assert!(PermissionId::parse(&long).is_err());
+    }
+
+    #[test]
+    fn storage_objects_is_split_per_action_and_the_old_id_is_gone() {
+        assert_eq!(
+            PermissionId::parse("storage.objects.read").unwrap(),
+            PermissionId::StorageObjectsRead
+        );
+        assert_eq!(
+            PermissionId::parse("storage.objects.write").unwrap(),
+            PermissionId::StorageObjectsWrite
+        );
+        assert_ne!(
+            PermissionId::StorageObjectsRead.family(),
+            PermissionId::StorageObjectsWrite.family()
+        );
+        // The blanket id must not silently keep working.
+        assert!(PermissionId::parse("storage.objects").is_err());
+        for f in [
+            PermissionFamily::StorageObjectsRead,
+            PermissionFamily::StorageObjectsWrite,
+        ] {
+            assert!(PermissionFamily::ALL.contains(&f));
+            assert_eq!(f.catalog_entry().capability_kind, CapabilityKind::Objects);
+        }
     }
 
     #[test]

@@ -39,9 +39,11 @@ FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcb
 # time only -- utoipa-swagger-ui's build script downloads the Swagger UI
 # static assets over HTTPS via the system `curl` binary; this is a
 # builder-stage-only dependency and never ships in the runtime image below.
+# protobuf-compiler (protoc): build.rs compiles rooms.proto via tonic-prost-build.
 RUN apt-get update \
     && apt-get install --no-install-recommends -y \
         cmake=3.25.1-1 build-essential=12.9 curl=7.88.1-10+deb12u15 ca-certificates=20250419~deb12u2 \
+        protobuf-compiler=3.21.12-3+deb12u1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /build

@@ -113,6 +113,7 @@ from services import (
     bundle_audit,
     bundle_precompile_service,
     bundle_signing_service,
+    music_legacy_migration,
     reputation_logic_exclusivity,
     valkey_admin_client,
 )
@@ -135,6 +136,7 @@ from services.bundle_manifest_v2 import (
     parse_config_schema,
     parse_exported_tools,
     parse_permission_declarations,
+    parse_presentation_widgets,
     parse_requested_tools,
     parse_schedule,
     requested_tool_declarations,
@@ -264,6 +266,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         schedule=parse_schedule(raw.get("schedule")),
         community_config_schema=parse_config_schema(raw.get("community_config_schema")),
         admin_tools=parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"]),
+        overlay_widgets=parse_presentation_widgets(stages.get("presentation"), raw["app_id"]),
     )
 
 
@@ -745,6 +748,18 @@ async def _live_install_schema(
     return schema_from_manifest(upload.manifest_json), True
 
 
+async def _run_music_legacy_import(install_dal: AsyncDB) -> None:
+    """Post-commit hook: import the retired Music Station queue into the fresh service tables.
+
+    Idempotent and retry-safe (see `services.music_legacy_migration`); a failure is logged
+    and never fails the install -- `python3 -m cli.migrate_legacy_music_queue` re-runs it.
+    """
+    try:
+        await music_legacy_migration.migrate_all(install_dal)
+    except Exception:  # noqa: BLE001 - the install already committed; the job is retryable
+        logger.exception("bundle install: legacy music import failed; rerun the CLI job")
+
+
 async def install_version_globally(
     install_dal: AsyncDB,
     *,
@@ -859,6 +874,8 @@ async def install_version_globally(
         "bundle install: version installed into the platform catalog",
         extra={"app_id": app_id, "version": version, "install_source": install_source},
     )
+    if app_id == music_legacy_migration.MUSIC_REQUESTS_APP_ID:
+        await _run_music_legacy_import(install_dal)
     return (await install_dal(install_dal.app_global_installs.id == new_id).select()).first()
 
 

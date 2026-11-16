@@ -21,8 +21,8 @@ Configuration (all from the environment, rendered by the Helm chart into hub-api
 - `STREAMING_RTC_GRPC_SERVER_NAME` -- optional TLS server-name override.
 
 Every call mints a short-lived (60s) ES256 JWT for hub-api's own SPIFFE identity with the
-single scope the RPC needs (`streaming.rooms:read|write|moderate`) via the app's
-`ServiceJwtIssuer`; the downstream verifies it before parsing anything.
+single scope the RPC needs (`streaming.rooms:read|create|write|moderate`; CreateRoom has its
+own `create`) via the app's `ServiceJwtIssuer`; the downstream verifies it before parsing anything.
 
 Raw gRPC failures are translated to `RoomsRpcError(http_status, message)` so the blueprint
 keeps its `{success: false, error}` envelope; `ROUTE_RPCS` is the route -> RPC table the
@@ -56,6 +56,7 @@ HUB_API_SERVICE = "hub-api"
 API_VERSION = "v1"
 
 SCOPE_READ = "streaming.rooms:read"
+SCOPE_CREATE = "streaming.rooms:create"
 SCOPE_WRITE = "streaming.rooms:write"
 SCOPE_MODERATE = "streaming.rooms:moderate"
 
@@ -337,7 +338,7 @@ class RoomsClient:
         """`CreateRoom` -- `label` carries the caller-supplied room name."""
         resp = await self._call(
             "CreateRoom",
-            SCOPE_WRITE,
+            SCOPE_CREATE,
             rooms_pb2.CreateRoomRequest(
                 api_version=API_VERSION,
                 community_id=str(community_id),
