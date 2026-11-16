@@ -224,7 +224,6 @@ async def test_a_hand_made_old_auth_time_is_refused(
         username="root",
         email="root@example.com",
         roles=["viewer"],
-        secret_key=SECRET_KEY,
         tenant="system",
         scope="platform_secrets:admin",
         amr=["hwk", "user", "mfa"],

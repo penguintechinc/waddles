@@ -120,7 +120,7 @@ class TestDecodeCaller:
     def test_token_missing_subject_claim_is_401(self, monkeypatch: pytest.MonkeyPatch) -> None:
         import services.community_authz as module
 
-        monkeypatch.setattr(module, "verify_jwt_token", lambda token, key: {"roles": []})
+        monkeypatch.setattr(module, "verify_jwt_token", lambda token: {"roles": []})
         with pytest.raises(ApiError) as exc_info:
             _decode_caller(_FakeRequest(headers={"Authorization": "Bearer x"}))
         assert exc_info.value.status_code == 401

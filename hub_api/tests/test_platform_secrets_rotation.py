@@ -41,7 +41,7 @@ from services.platform_secrets.rotation import (
     retire_secret,
     rotate_secret,
 )
-from tests.conftest import SECRET_KEY, TENANT_SLUG, insert_global_admin
+from tests.conftest import TENANT_SLUG, insert_global_admin
 from tests.test_platform_secrets_bootstrap import KEK_A, FakeRepo
 from tests.test_platform_secrets_escrow import MemStore
 
@@ -372,7 +372,6 @@ def _token(
         username="u",
         email="u@example.invalid",
         roles=["viewer"],
-        secret_key=SECRET_KEY,
         tenant=tenant,
         scope=scope,
         amr=amr if amr is not None else (["pwd", "otp"] if mfa_age is not None else ["pwd"]),

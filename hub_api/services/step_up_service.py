@@ -126,7 +126,6 @@ async def finish(
             username=str(claims.get("username") or ""),
             email=str(claims.get("email") or ""),
             roles=list(claims.get("roles") or []),
-            secret_key=cfg.secret_key,
             tenant=str(claims["tenant"]),
             scope=str(claims.get("scope") or ""),
             teams=list(claims.get("teams") or []),

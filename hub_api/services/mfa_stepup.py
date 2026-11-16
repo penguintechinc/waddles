@@ -18,7 +18,6 @@ from collections.abc import Mapping
 from typing import Any, Final
 
 from flask_core.auth import verify_jwt_token
-from flask_core.secrets import require_secret_key
 from quart import Request
 
 #: How fresh the authentication event must be (5 minutes, security review H7).
@@ -57,5 +56,5 @@ def request_claims(request: Request) -> dict[str, Any] | None:
     header = request.headers.get("Authorization")
     if not header or not header.startswith("Bearer "):
         return None
-    payload = verify_jwt_token(header[7:], require_secret_key())
+    payload = verify_jwt_token(header[7:])
     return dict(payload) if payload is not None else None
