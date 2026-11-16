@@ -24,6 +24,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -37,6 +38,7 @@ from tests.conftest import (
     make_user_token,
     seed_community,
     seed_membership,
+    seed_scoped_member,
     seed_super_admin,
 )
 
@@ -54,7 +56,7 @@ def _test_config() -> HubAPIConfig:
         db_retry_delay=1,
         secret_key="change-me-in-production",
         jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -98,6 +100,48 @@ def _owner_headers(
     seed_membership(overlay_db, community_id=community_id, user_id=user_id)
     token = make_user_token(user_id=user_id, scope=SCOPE_ADMIN, tenant=tenant)
     return {"Authorization": f"Bearer {token}"}, community_id, user_id
+
+
+class TestOverlayDedicatedScope:
+    """Overlay admin needs `overlay:manage`; broad or other-action scopes do not satisfy it."""
+
+    @pytest.mark.parametrize("method", ["GET", "POST"])
+    async def test_other_scopes_cannot_use_overlay_admin(
+        self, client: Any, overlay_db: Any, method: str
+    ) -> None:
+        community_id = seed_community(overlay_db)
+        seed_scoped_member(
+            overlay_db,
+            community_id=community_id,
+            user_id=611,
+            scopes=[
+                "community:manage_members",
+                "community:manage_channels",
+                "calls:manage",
+                "billing:manage",
+            ],
+        )
+        token = make_user_token(user_id=611, scope=SCOPE_ADMIN)
+        path = f"/api/v1/admin/{community_id}/overlay"
+        if method == "POST":
+            path += "/rotate"
+        response = await client.open(
+            path, method=method, headers={"Authorization": f"Bearer {token}"}, json={}
+        )
+        assert response.status_code in (403, 404)
+        assert response.status_code != 200
+
+    async def test_overlay_manage_scope_is_sufficient(self, client: Any, overlay_db: Any) -> None:
+        community_id = seed_community(overlay_db)
+        seed_scoped_member(
+            overlay_db, community_id=community_id, user_id=612, scopes=["overlay:manage"]
+        )
+        token = make_user_token(user_id=612, scope=SCOPE_ADMIN)
+        response = await client.get(
+            f"/api/v1/admin/{community_id}/overlay",
+            headers={"Authorization": f"Bearer {token}"},
+        )
+        assert response.status_code == 200
 
 
 class TestGetOverlay:
@@ -235,9 +279,7 @@ class TestUpdateOverlay:
 
 
 class TestRotateOverlayKey:
-    async def test_rotate_overlay_key_not_found_is_404(
-        self, client: Any, overlay_db: Any
-    ) -> None:
+    async def test_rotate_overlay_key_not_found_is_404(self, client: Any, overlay_db: Any) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
         response = await client.post(
             f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers
@@ -261,9 +303,7 @@ class TestRotateOverlayKey:
 
 
 class TestGetOverlayStats:
-    async def test_get_overlay_stats_non_member_is_403(
-        self, client: Any, overlay_db: Any
-    ) -> None:
+    async def test_get_overlay_stats_non_member_is_403(self, client: Any, overlay_db: Any) -> None:
         community_id = seed_community(overlay_db)
         token = make_user_token(user_id=123, scope=SCOPE_ADMIN)
         response = await client.get(

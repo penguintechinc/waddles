@@ -7,7 +7,7 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "node --test proxy.test.js"
+    "test": "node --test proxy.test.js tls.test.js"
   },
   "dependencies": {
     "express": "4.22.3"

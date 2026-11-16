@@ -148,7 +148,7 @@ class TestInteractionsAndForumsGateOnDistinctFlags:
 
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
 
         assert response.status_code == 402
@@ -185,7 +185,7 @@ class TestInteractionsAndForumsGateOnDistinctFlags:
 
         response = await client.get(
             f"/api/v1/admin/{community_id}/interaction/channels",
-            headers=auth_headers(scope="community.interaction:read"),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
 
         assert response.status_code == 200

@@ -290,7 +290,7 @@ async fn cross_writer_object_is_auto_tagged_and_free_tags_refused() {
 async fn cross_tenant_and_community_isolated() {
     let (h, _, _) = rig();
     seed(&h, "k.mp4", &[&format!("app-bundle:{CONSUMER}")]).await;
-    for (t, c) in [(2u64, 7u64), (1, 8), (1, 0)] {
+    for (t, c) in [(2u64, 7u64), (1, 8), (1, 9)] {
         let s = scope(
             CONSUMER,
             t,

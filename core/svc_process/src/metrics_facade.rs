@@ -443,7 +443,7 @@ mod tests {
             .expect("valid metric definition"),
             bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
         ));
-        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+        let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
             "acme".to_string(),
             Some("main".to_string()),
             "waddles.test.gatebridge".to_string(),

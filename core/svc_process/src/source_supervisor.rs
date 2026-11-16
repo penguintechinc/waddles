@@ -35,6 +35,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
+use circuit_breaker::valkey_resilience::{Backoff, LogThrottle, SharedConn};
 use circuit_breaker::CircuitBreaker;
 use penguin_spine::{Grant, Scope, SpineClient, SpineConfig, SpineError, SpineMetrics};
 use tokio::sync::oneshot;
@@ -92,7 +93,24 @@ fn binding_key(b: &ResolvedBinding) -> BindingKey {
 /// (NOGROUP, a dropped Valkey connection, ...) before reconnecting --
 /// applies uniformly regardless of the failure reason; see this module's
 /// doc for the NOGROUP case specifically.
-const CONSUMER_RETRY_BACKOFF: Duration = Duration::from_secs(5);
+///
+/// Superseded by capped exponential full-jitter [`Backoff`] (250ms -> 30s)
+/// after the 2026-11 Valkey connection storm; only the floor remains.
+const MIN_RETRY_DELAY: Duration = Duration::from_millis(100);
+
+/// Next jittered retry delay for a consumer, never below [`MIN_RETRY_DELAY`]
+/// (full jitter can otherwise draw ~0 and spin).
+fn retry_delay(backoff: &mut Backoff) -> Duration {
+    backoff.next_delay().max(MIN_RETRY_DELAY)
+}
+
+/// `true` when `err` means the shared Valkey connection itself is unusable
+/// (I/O error, dropped, timed out, refused) and must be rebuilt -- never for
+/// logical errors like `NOGROUP`.
+fn is_connection_error(err: &SpineError) -> bool {
+    matches!(err, SpineError::Redis(e)
+        if e.is_io_error() || e.is_connection_dropped() || e.is_timeout() || e.is_connection_refusal())
+}
 
 /// True when `err` is Valkey's `NOGROUP` reply -- the bound stream's
 /// consumer group hasn't been provisioned yet (hub-api owns `XGROUP
@@ -138,7 +156,7 @@ pub struct SupervisorDeps {
     /// since opening it is async) and cloned into every binding consumer's
     /// own `ProcessDeps` in [`run_binding_consumer`] below, rather than
     /// reopened per consumer or per reconnect attempt.
-    pub kv_conn: Option<redis::aio::MultiplexedConnection>,
+    pub kv_conn: Option<redis::aio::ConnectionManager>,
     /// See `spine::ProcessDeps::kv_capabilities`'s doc -- the same shared
     /// snapshot `crate::lib::try_start_changelog_consumer`'s
     /// `changelog_consumer::run` poll writes to, cloned (the `Arc`, not the
@@ -189,6 +207,11 @@ pub struct SupervisorDeps {
     /// consumer's own `ProcessDeps`, see `crate::spine::ProcessDeps::
     /// breaker`'s doc for why pod-wide sharing is the correct scope.
     pub breaker: Arc<CircuitBreaker>,
+    /// ONE process-shared spine client cloned into every binding consumer;
+    /// see `circuit_breaker::valkey_resilience`.
+    pub shared_spine: Arc<SharedConn<SpineClient>>,
+    /// Rate-limits identical retry WARNs across all consumers.
+    pub log_throttle: Arc<LogThrottle>,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
     /// see `crate::spine::ProcessDeps::reputation_wiring`'s doc.
     pub reputation_wiring: Option<crate::capabilities::ReputationWiring>,
@@ -197,6 +220,8 @@ pub struct SupervisorDeps {
     pub economy_wiring: Option<crate::capabilities::EconomyWiring>,
     /// See `crate::spine::ProcessDeps::platform_table_wiring`'s doc.
     pub platform_table_wiring: Option<crate::capabilities::PlatformTableWiring>,
+    /// See `crate::spine::ProcessDeps::object_storage_wiring`'s doc.
+    pub object_storage_wiring: Option<crate::capabilities::ObjectStorageWiring>,
     /// See `crate::spine::ProcessDeps::gameserver_net_wiring`'s doc.
     pub gameserver_net_wiring: Option<crate::capabilities::GameServerNetWiring>,
     /// Cloned into every spawned binding consumer's own `ProcessDeps` --
@@ -262,6 +287,7 @@ impl SupervisorDeps {
             reputation_wiring: self.reputation_wiring.clone(),
             economy_wiring: self.economy_wiring.clone(),
             platform_table_wiring: self.platform_table_wiring.clone(),
+            object_storage_wiring: self.object_storage_wiring.clone(),
             gameserver_net_wiring: self.gameserver_net_wiring.clone(),
             identity_wiring: self.identity_wiring.clone(),
             ai_wiring: self.ai_wiring.clone(),
@@ -363,37 +389,50 @@ async fn run_binding_consumer(
     deps: Arc<SupervisorDeps>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
+    let mut backoff = Backoff::default();
     loop {
         let grant = binding_grant(&binding);
 
-        let spine_client = match SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone())
+        // ONE process-shared spine connection (single TLS handshake + startup
+        // probe), cloned per binding -- never one connection per (app, source).
+        let (spine_client, generation) = match deps
+            .shared_spine
+            .get_or_connect(|| SpineClient::connect(deps.spine_cfg.clone(), deps.metrics.clone()))
             .await
         {
-            Ok(c) => c,
+            Ok(pair) => pair,
             Err(err) => {
-                tracing::warn!(
-                    tenant_id = binding.tenant_id, community_id = binding.community_id,
-                    app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
-                    error = %err,
-                    "source-binding consumer: spine client connect failed, retrying"
-                );
-                if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
+                if let Some(suppressed) = deps.log_throttle.check("process.connect") {
+                    tracing::warn!(
+                        tenant_id = binding.tenant_id, community_id = binding.community_id,
+                        app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
+                        error = %err, suppressed,
+                        "source-binding consumer: spine client connect failed, retrying"
+                    );
+                }
+                if wait_or_shutdown(&mut shutdown, retry_delay(&mut backoff)).await {
                     return;
                 }
                 continue;
             }
         };
+        backoff.reset();
 
         let process_deps = deps.process_deps(
             &binding.app_id,
             binding.tenant_id,
             binding.community_id,
-            spine_client,
+            spine_client.clone(),
         );
 
         let (inner_tx, inner_rx) = oneshot::channel();
-        let run_fut =
-            crate::spine::run(deps.spine_cfg.clone(), vec![grant], process_deps, inner_rx);
+        let run_fut = crate::spine::run_with_client(
+            deps.spine_cfg.clone(),
+            vec![grant],
+            process_deps,
+            spine_client,
+            inner_rx,
+        );
         tokio::pin!(run_fut);
 
         tokio::select! {
@@ -414,22 +453,30 @@ async fn run_binding_consumer(
                     // handled the same way (return) rather than looping.
                     Ok(()) => return,
                     Err(err) if is_nogroup_error(&err) => {
-                        tracing::warn!(
-                            tenant_id = binding.tenant_id, community_id = binding.community_id,
-                            app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
-                            "source-binding consumer: consumer group not yet provisioned (NOGROUP), retrying"
-                        );
+                        if let Some(suppressed) = deps.log_throttle.check("process.nogroup") {
+                            tracing::warn!(
+                                tenant_id = binding.tenant_id, community_id = binding.community_id,
+                                app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
+                                suppressed,
+                                "source-binding consumer: consumer group not yet provisioned (NOGROUP), retrying"
+                            );
+                        }
                     }
                     Err(err) => {
-                        tracing::error!(
-                            tenant_id = binding.tenant_id, community_id = binding.community_id,
-                            app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
-                            error = %err,
-                            "source-binding consumer exited, retrying"
-                        );
+                        if is_connection_error(&err) {
+                            deps.shared_spine.invalidate(generation).await;
+                        }
+                        if let Some(suppressed) = deps.log_throttle.check("process.exited") {
+                            tracing::error!(
+                                tenant_id = binding.tenant_id, community_id = binding.community_id,
+                                app_id = %binding.app_id, platform = %binding.platform, source_id = %binding.source_id,
+                                error = %err, suppressed,
+                                "source-binding consumer exited, retrying"
+                            );
+                        }
                     }
                 }
-                if wait_or_shutdown(&mut shutdown, CONSUMER_RETRY_BACKOFF).await {
+                if wait_or_shutdown(&mut shutdown, retry_delay(&mut backoff)).await {
                     return;
                 }
             }
