@@ -93,7 +93,7 @@ spec:
           # both consumers expect their bucket to already exist; previously
           # only bucketName + "recordings" were created here, leaving
           # "waddles-bundles" as a pre-existing gap.
-          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"{{ if eq .Values.bundleStorage.mode "bundled" }} "{{ .Values.bundleStorage.bucketName }}"{{ end }}; do
+          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}" "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}"{{ if eq .Values.bundleStorage.mode "bundled" }} "{{ .Values.bundleStorage.bucketName }}"{{ end }}; do
             aws --endpoint-url "$ENDPOINT" s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already" && true || true
             aws --endpoint-url "$ENDPOINT" s3api head-bucket --bucket "${bucket}" 2>/dev/null \
               || aws --endpoint-url "$ENDPOINT" s3api create-bucket --bucket "${bucket}" --region us-east-1
@@ -107,6 +107,13 @@ spec:
               --server-side-encryption-configuration '{{ include "waddlebot.kms.bucketEncryptionConfig" . }}'
           {{- end }}
           done
+          {{- if .Values.infrastructure.seaweedfs.escrow.versioning }}
+          # Platform-secret escrow bucket: versioning keeps every prior object/manifest version so a
+          # poisoned or mistaken overwrite is recoverable. Loud (not fatal) if unsupported.
+          aws --endpoint-url "$ENDPOINT" s3api put-bucket-versioning --bucket "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}" \
+            --versioning-configuration Status=Enabled \
+            || echo "WARNING: could not enable versioning on {{ .Values.infrastructure.seaweedfs.escrow.bucketName }} -- escrow history is NOT retained" >&2
+          {{- end }}
           aws --endpoint-url "$ENDPOINT" s3 ls
           echo "Buckets {{ .Values.infrastructure.seaweedfs.bucketName }}, recordings, {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }} initialized successfully"
         env:
@@ -240,6 +247,17 @@ spec:
                 ]
               },
               {
+                "name": "hub-api-escrow",
+                "credentials": [
+                  {"accessKey": "${ESCROW_S3_ACCESS_KEY_ID}", "secretKey": "${ESCROW_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}",
+                  "Write:{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}",
+                  "List:{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}"
+                ]
+              },
+              {
                 "name": "bucket-init",
                 "credentials": [
                   {"accessKey": "${BUCKET_INIT_S3_ACCESS_KEY_ID}", "secretKey": "${BUCKET_INIT_S3_SECRET_ACCESS_KEY}"}
@@ -302,6 +320,16 @@ spec:
             secretKeyRef:
               name: waddlebot-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        - name: ESCROW_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_ACCESS_KEY_ID
+        - name: ESCROW_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_SECRET_ACCESS_KEY
         - name: DATAPLANE_S3_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:

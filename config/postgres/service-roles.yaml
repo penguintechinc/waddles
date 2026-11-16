@@ -116,6 +116,7 @@ legacy_deny_tables:
   - platform_vault.secrets
   - platform_vault.secret_events
   - platform_vault.root_marker
+  - platform_vault.rotation_requests
 
 # Always read-only for application roles: schema-state bookkeeping.
 read_only_tables:
