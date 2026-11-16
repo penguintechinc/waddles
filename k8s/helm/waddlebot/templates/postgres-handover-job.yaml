@@ -1,0 +1,163 @@
+{{- /*
+Safe Deployment -> StatefulSet hand-over for the in-chart Postgres (pre-install + pre-upgrade hook).
+
+Releases before the primary+replica topology ran Postgres as `Deployment/postgres` on the standalone PVC
+`postgres-data`. Helm creates the new StatefulSet BEFORE it deletes the removed Deployment, so without this hook
+the old pod could still hold PGDATA when `postgres-0` starts. This Job scales the legacy Deployment to 0 and
+waits (bounded) until its pods are gone; it FAILS the release loudly on timeout or any API error. It is a no-op
+when the Deployment is absent (fresh install, or already migrated). Never touches the PVC.
+*/ -}}
+{{- if .Values.infrastructure.postgresql.enabled }}
+{{- $fn := include "waddlebot.fullname" . }}
+{{- $ns := .Values.namespace }}
+{{- $ho := .Values.infrastructure.postgresql.handover }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $fn }}-postgres-handover
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-handover
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+automountServiceAccountToken: false
+---
+# Least privilege: get/scale ONLY Deployment `postgres`; read-only pod list/watch (RBAC cannot filter pods by
+# label, so the namespace's pods are listable by this identity for the seconds the hook lives).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $fn }}-postgres-handover
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-handover
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+rules:
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["postgres"]
+    verbs: ["get", "patch"]
+  - apiGroups: ["apps"]
+    resources: ["deployments/scale"]
+    resourceNames: ["postgres"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $fn }}-postgres-handover
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-handover
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $fn }}-postgres-handover
+subjects:
+  - kind: ServiceAccount
+    name: {{ $fn }}-postgres-handover
+    namespace: {{ $ns }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $fn }}-postgres-handover
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-handover
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-10"
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+data:
+  handover.sh: |
+    {{- include "waddlebot.postgres.handoverScript" . | nindent 4 }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $fn }}-postgres-handover
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgres-handover
+  annotations:
+    "helm.sh/hook": pre-install,pre-upgrade
+    "helm.sh/hook-weight": "-6"
+    # A failed Job + logs are kept for inspection and replaced on the next attempt; success deletes it.
+    "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: {{ add (int $ho.timeoutSeconds) 60 }}
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: postgres-handover
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ $fn }}-postgres-handover
+      automountServiceAccountToken: true
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        fsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: handover
+          image: {{ .Values.autoProvisionedKeys.hookImage | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/bin/bash", "/scripts/handover.sh"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+            seccompProfile:
+              type: RuntimeDefault
+          env:
+            - name: NAMESPACE
+              value: {{ $ns | quote }}
+            - name: TIMEOUT_SECONDS
+              value: {{ $ho.timeoutSeconds | quote }}
+          volumeMounts:
+            - name: scripts
+              mountPath: /scripts
+              readOnly: true
+            - name: tmp
+              mountPath: /tmp
+          resources:
+            requests:
+              cpu: 20m
+              memory: 32Mi
+            limits:
+              cpu: 200m
+              memory: 128Mi
+      volumes:
+        - name: scripts
+          configMap:
+            name: {{ $fn }}-postgres-handover
+            defaultMode: 0555
+        - name: tmp
+          emptyDir: {}
+{{- end }}

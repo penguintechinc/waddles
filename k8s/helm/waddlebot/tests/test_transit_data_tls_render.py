@@ -52,7 +52,8 @@ def _docs(values, extra=()):
 
 def _svc(docs, selector_name):
     """Return the Service whose selector targets app.kubernetes.io/name=<selector_name>."""
-    hits = [d for d in docs if d["kind"] == "Service" and d["spec"].get("selector", {}).get("app.kubernetes.io/name") == selector_name]
+    hits = [d for d in docs if d["kind"] == "Service" and d["spec"].get("selector", {}).get("app.kubernetes.io/name") == selector_name
+            and d["spec"]["selector"].get("app.kubernetes.io/role") != "replica"]  # the -ro/headless replica Services are asserted in test_postgres_primary_replicas_render.py
     assert len(hits) == 1, (selector_name, len(hits))
     return hits[0]
 
@@ -121,13 +122,20 @@ def test_transit_secret_is_ecdsa_p256_sha256_and_chains(values):
     secs = [d for d in docs if d["kind"] == "Secret" and d["metadata"]["name"].endswith("-transit-tls")]
     assert len(secs) == 1, "exactly one transit-tls Secret expected"
     data = secs[0]["stringData"]
-    assert sorted(data) == ["ca.crt", "postgres.crt", "postgres.key", "seaweedfs.crt", "seaweedfs.key"]
+    assert sorted(data) == ["ca.crt", "postgres-replica.crt", "postgres-replica.key", "postgres.crt", "postgres.key", "seaweedfs.crt", "seaweedfs.key"]
     ec_marker = "BEGIN EC " + "PRIVATE" + " KEY"  # split so secret scanners do not flag the test source
     assert ec_marker in data["postgres.key"] and ec_marker in data["seaweedfs.key"]
-    assert "".join(data.values()).count(ec_marker) == 2, "only the two server keys may be stored (never the CA key)"
+    assert "".join(data.values()).count(ec_marker) == 3, "only the three server keys (postgres, postgres-replica, seaweedfs) may be stored (never the CA key)"
+    assert ec_marker in data["postgres-replica.key"]
     ca_txt = _openssl_text(data["ca.crt"])
     assert "CA:TRUE" in ca_txt and "ecdsa-with-SHA256" in ca_txt and "prime256v1" in ca_txt
-    for leaf, fqdn in (("postgres.crt", _fqdn(docs, "postgres")), ("seaweedfs.crt", _fqdn(docs, "seaweedfs"))):
+    ro_fqdn = "infra-postgres-ro.waddlebot.svc.cluster.local"
+    rtxt = _openssl_text(data["postgres-replica.crt"])
+    assert f"DNS:{ro_fqdn}" in rtxt and f"DNS:{_fqdn(docs, 'postgres')}," not in rtxt + ","
+    assert f"DNS:{_fqdn(docs, 'postgres')}" not in rtxt.replace(ro_fqdn, ""), "replica cert must not name the writer"
+    ptxt = _openssl_text(data["postgres.crt"])
+    assert ro_fqdn not in ptxt, "primary cert must not carry the -ro/replica names"
+    for leaf, fqdn in (("postgres.crt", _fqdn(docs, "postgres")), ("seaweedfs.crt", _fqdn(docs, "seaweedfs")), ("postgres-replica.crt", ro_fqdn)):
         txt = _openssl_text(data[leaf])
         assert "ecdsa-with-SHA256" in txt and "prime256v1" in txt, leaf
         assert f"DNS:{fqdn}" in txt, (leaf, txt)
@@ -153,7 +161,7 @@ def test_secret_is_a_pre_hook_so_migration_hooks_can_mount_it(values):
 @pytest.mark.parametrize("values", _ENVS)
 def test_postgres_is_tls_only(values):
     docs = _docs(values)
-    dep = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
+    dep = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "postgres")
     args = dep["spec"]["template"]["spec"]["containers"][0]["args"]
     for want in ("ssl=on", "ssl_cert_file=/etc/postgres-tls/tls.crt", "ssl_key_file=/etc/postgres-tls/tls.key",
                  "ssl_min_protocol_version=TLSv1.2", "hba_file=/etc/postgres-hba/pg_hba.conf"):
@@ -340,7 +348,7 @@ def test_cert_manager_mode_uses_a_dedicated_namespaced_transit_root(values):
     assert _fqdn(docs, "seaweedfs") in next(s["dnsNames"] for n, s in certs.items() if n.endswith("-seaweedfs-tls"))
     valkey_sans = next(s["dnsNames"] for n, s in certs.items() if n.endswith("-valkey-tls"))
     assert sum(1 for n in valkey_sans if n.startswith("valkey-durable-")) >= 1, valkey_sans
-    pg = next(d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"] == "postgres")
+    pg = next(d for d in docs if d["kind"] == "StatefulSet" and d["metadata"]["name"] == "postgres")
     vol = next(v for v in pg["spec"]["template"]["spec"]["volumes"] if v["name"] == "transit-tls")
     assert vol["secret"]["secretName"] in certs and [i["key"] for i in vol["secret"]["items"]] == ["tls.crt", "tls.key"]
 
