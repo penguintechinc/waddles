@@ -835,10 +835,12 @@ pub(crate) mod tests {
         assert_eq!(w("", None).effective_config_json(), "{}");
         assert_eq!(w("{\"a\":2}", None).effective_config_json(), "{\"a\":2}");
         let v: serde_json::Value =
-            serde_json::from_str(&w("", Some("https://a.example")).effective_config_json()).unwrap();
+            serde_json::from_str(&w("", Some("https://a.example")).effective_config_json())
+                .unwrap();
         assert_eq!(v, serde_json::json!({"web_base_url": "https://a.example"}));
         let v: serde_json::Value =
-            serde_json::from_str(&w("not json", Some("https://a.example")).effective_config_json()).unwrap();
+            serde_json::from_str(&w("not json", Some("https://a.example")).effective_config_json())
+                .unwrap();
         assert_eq!(v, serde_json::json!({"web_base_url": "https://a.example"}));
         assert_eq!(w("", Some("")).effective_config_json(), "{}");
         // Host-reserved key: a community-supplied value never reaches the guest, whatever the
@@ -864,7 +866,8 @@ pub(crate) mod tests {
             );
         }
         // Nested occurrences are stripped too.
-        let nested = r#"{"a":{"web_base_url":"https://evil.example","b":2},"l":[{"web_base_url":1}]}"#;
+        let nested =
+            r#"{"a":{"web_base_url":"https://evil.example","b":2},"l":[{"web_base_url":1}]}"#;
         let out: serde_json::Value =
             serde_json::from_str(&w(nested, None).effective_config_json()).unwrap();
         assert_eq!(out, serde_json::json!({"a": {"b": 2}, "l": [{}]}));
@@ -880,11 +883,17 @@ pub(crate) mod tests {
             assert_eq!(w(bad, None).effective_config_json(), "{}", "{bad}");
         }
         let out: serde_json::Value = serde_json::from_str(
-            &w(r#"{"web_base_url":"https://evil.example""#, Some("https://app.example.org"))
-                .effective_config_json(),
+            &w(
+                r#"{"web_base_url":"https://evil.example""#,
+                Some("https://app.example.org"),
+            )
+            .effective_config_json(),
         )
         .unwrap();
-        assert_eq!(out, serde_json::json!({"web_base_url": "https://app.example.org"}));
+        assert_eq!(
+            out,
+            serde_json::json!({"web_base_url": "https://app.example.org"})
+        );
     }
 
     #[tokio::test]

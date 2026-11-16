@@ -756,8 +756,19 @@ fn music_scopes_follow_the_role_bundles() {
         "music:requests.write",
         "music:stats.read",
     ];
-    let staff = ["music:requests.manage", "music:dj.manage", "music:settings.write"];
-    for role in ["member", "vip", "moderator", "community-admin", "community-owner", "owner"] {
+    let staff = [
+        "music:requests.manage",
+        "music:dj.manage",
+        "music:settings.write",
+    ];
+    for role in [
+        "member",
+        "vip",
+        "moderator",
+        "community-admin",
+        "community-owner",
+        "owner",
+    ] {
         for s in viewer {
             assert!(scopes_for_role(role).contains(&s), "{role} lacks {s}");
         }
@@ -769,11 +780,19 @@ fn music_scopes_follow_the_role_bundles() {
     }
     for role in ["member", "vip"] {
         for s in staff {
-            assert!(!scopes_for_role(role).contains(&s), "{role} must not have {s}");
+            assert!(
+                !scopes_for_role(role).contains(&s),
+                "{role} must not have {s}"
+            );
         }
     }
     for bad in ["", "admin", "root"] {
-        assert!(scopes_for_role(bad).iter().all(|s| !s.starts_with("music:")), "{bad:?}");
+        assert!(
+            scopes_for_role(bad)
+                .iter()
+                .all(|s| !s.starts_with("music:")),
+            "{bad:?}"
+        );
     }
 }
 

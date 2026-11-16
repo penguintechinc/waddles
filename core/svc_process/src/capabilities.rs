@@ -4948,15 +4948,36 @@ mod tests {
     #[test]
     fn web_base_url_is_normalised_or_omitted() {
         for (raw, want) in [
-            (Some("https://app.example.org"), Some("https://app.example.org")),
-            (Some("  https://app.example.org/// "), Some("https://app.example.org")),
-            (Some("http://localhost:8080/"), Some("http://localhost:8080")),
-            (Some("https://app.example.org/sub"), Some("https://app.example.org/sub")),
+            (
+                Some("https://app.example.org"),
+                Some("https://app.example.org"),
+            ),
+            (
+                Some("  https://app.example.org/// "),
+                Some("https://app.example.org"),
+            ),
+            (
+                Some("http://localhost:8080/"),
+                Some("http://localhost:8080"),
+            ),
+            (
+                Some("https://app.example.org/sub"),
+                Some("https://app.example.org/sub"),
+            ),
         ] {
             assert_eq!(normalize_web_base_url(raw).as_deref(), want, "{raw:?}");
         }
-        for bad in [None, Some(""), Some("   "), Some("ftp://x.example"), Some("javascript:1"),
-            Some("https://"), Some("https:///x"), Some("app.example.org"), Some("https://a b.example")] {
+        for bad in [
+            None,
+            Some(""),
+            Some("   "),
+            Some("ftp://x.example"),
+            Some("javascript:1"),
+            Some("https://"),
+            Some("https:///x"),
+            Some("app.example.org"),
+            Some("https://a b.example"),
+        ] {
             assert_eq!(normalize_web_base_url(bad), None, "{bad:?}");
         }
     }
@@ -4965,7 +4986,9 @@ mod tests {
     #[test]
     fn get_context_carries_web_base_url_only_when_set() {
         let h = caps();
-        let with = h.handle_context_with_base(Some("https://app.example.org/")).expect("context");
+        let with = h
+            .handle_context_with_base(Some("https://app.example.org/"))
+            .expect("context");
         assert_eq!(with["web_base_url"], "https://app.example.org");
         for unset in [None, Some(""), Some("ftp://nope")] {
             let ctx = h.handle_context_with_base(unset).expect("context");
