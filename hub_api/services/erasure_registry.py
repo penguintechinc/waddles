@@ -483,6 +483,17 @@ RULES: tuple[Rule, ...] = (
         "ip_address",
         reason="anonymous overlay viewer log (overlay key + IP), no user id",
     ),
+    exempt(
+        "overlay_scene_components",
+        "display_name",
+        reason="widget label copied from the bundle manifest declaration at placement; no person "
+        "input, table has no user-keyed or *_by column",
+    ),
+    exempt(
+        "overlay_widget_registry",
+        "display_name",
+        reason="widget label declared by the bundle manifest (overlay_widgets), not a person",
+    ),
     exempt("permission_scopes", "display_name", reason=_ORG_NAME),
     exempt("server_link_requests", "initiated_by", reason="enum: community | platform"),
     exempt("server_status_configs", "display_name", reason=_ORG_NAME),
