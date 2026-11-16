@@ -19,7 +19,7 @@ mod component {
     use super::bindings::exports::waddle::bundle::streaming_lifecycle::{
         Guest as StreamingGuest, RecordingInfo, SegmentInfo, StreamInfo,
     };
-    use super::bindings::waddle::bundle::overlay;
+    use super::bindings::waddle::bundle::{log, overlay};
     use super::bindings::waddle::bundle::types::{
         PlatformEvent, StageEnvelope, TransportError, TransportResult, UnsupportedStage,
     };
@@ -42,14 +42,24 @@ mod component {
         /// Maps one inbound event to an alert frame event (or none).
         fn transform(event: PlatformEvent) -> Result<Option<PlatformEvent>, UnsupportedStage> {
             let payload: Value = serde_json::from_str(&event.payload_json).unwrap_or(Value::Null);
-            Ok(logic::build_alert(&event.event_type, &payload).map(|alert| PlatformEvent {
-                platform: event.platform,
-                event_type: event.event_type,
-                // The actor is dropped: alerts never carry a user reference.
-                actor: None,
-                payload_json: serde_json::to_string(&alert).unwrap_or_default(),
-                occurred_at: event.occurred_at,
-            }))
+            match logic::build_alert(&event.event_type, &payload) {
+                None => Ok(None),
+                Some(alert) => match serde_json::to_string(&alert) {
+                    Ok(payload_json) => Ok(Some(PlatformEvent {
+                        platform: event.platform,
+                        event_type: event.event_type,
+                        // The actor is dropped: alerts never carry a user reference.
+                        actor: None,
+                        payload_json,
+                        occurred_at: event.occurred_at,
+                    })),
+                    Err(e) => {
+                        let fields = serde_json::json!({ "error_type": "SerializeError", "error": e.to_string() }).to_string();
+                        log::write(log::Level::Error, "stream-alerts alert serialization failed; alert dropped", &fields);
+                        Ok(None)
+                    }
+                },
+            }
         }
     }
 
