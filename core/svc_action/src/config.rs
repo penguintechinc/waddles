@@ -402,6 +402,17 @@ pub struct CliConfig {
         action = clap::ArgAction::Set
     )]
     pub kv_legacy_plaintext_reads_allowed: bool,
+    /// svc-presentation's in-cluster gRPC address
+    /// (`waddles.presentation.internal.v1.SurfaceService`), e.g.
+    /// `https://waddlebot-svc-presentation:50051`. Empty (the default) leaves the bundle
+    /// `overlay.publish-surface` capability unwired: `surface.publish` then denies
+    /// `not_implemented`. `https://` needs [`Self::presentation_grpc_ca_file`]; plaintext is
+    /// accepted on loopback only.
+    #[arg(long, env = "PRESENTATION_GRPC_ENDPOINT", default_value = "")]
+    pub presentation_grpc_endpoint: String,
+    /// PEM CA bundle that signed svc-presentation's gRPC server certificate.
+    #[arg(long, env = "PRESENTATION_GRPC_CA_FILE", default_value = "")]
+    pub presentation_grpc_ca_file: String,
 }
 
 impl CliConfig {

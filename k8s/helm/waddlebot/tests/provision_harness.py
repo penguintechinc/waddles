@@ -72,7 +72,9 @@ def spec_keys(docs: list[dict[str, Any]]) -> dict[str, list[str]]:
 
 
 def run_hook(
-    docs: list[dict[str, Any]], existing: dict[str, dict[str, str]] | None = None
+    docs: list[dict[str, Any]],
+    existing: dict[str, dict[str, str]] | None = None,
+    existing_annotations: dict[str, dict[str, str]] | None = None,
 ) -> tuple[subprocess.CompletedProcess[str], dict[str, dict[str, Any]]]:
     """Run the real hook script against a fake cluster; return (process, final cluster state)."""
     with tempfile.TemporaryDirectory() as td:
@@ -84,7 +86,9 @@ def run_hook(
         for name, data in (existing or {}).items():
             obj = {
                 "rv": 1,
-                "annotations": {},
+                # `existing_annotations` carries the cert identity/SANs metadata a previous run
+                # stamped; without it a TLS Secret is (correctly) judged stale and regenerated.
+                "annotations": dict((existing_annotations or {}).get(name, {})),
                 "data": {
                     k: base64.b64encode(v.encode()).decode() for k, v in data.items()
                 },
@@ -137,10 +141,12 @@ def run_hook(
 
 
 def materialize(
-    docs: list[dict[str, Any]], existing: dict[str, dict[str, str]] | None = None
+    docs: list[dict[str, Any]],
+    existing: dict[str, dict[str, str]] | None = None,
+    existing_annotations: dict[str, dict[str, str]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Run the hook (must succeed); return {name: {"data": {k: plaintext}, "annotations": {...}}}."""
-    res, out = run_hook(docs, existing)
+    res, out = run_hook(docs, existing, existing_annotations)
     assert res.returncode == 0, (
         f"provision-secrets hook failed:\n{res.stdout}\n{res.stderr}"
     )
@@ -159,7 +165,9 @@ def hook_failure(
 
 
 def with_provisioned(
-    docs: list[dict[str, Any]], existing: dict[str, dict[str, str]] | None = None
+    docs: list[dict[str, Any]],
+    existing: dict[str, dict[str, str]] | None = None,
+    existing_annotations: dict[str, dict[str, str]] | None = None,
 ) -> list[dict[str, Any]]:
     """Rendered docs + one synthetic Secret per runtime-provisioned Secret (see module docstring)."""
     extra = [
@@ -170,6 +178,6 @@ def with_provisioned(
             "stringData": obj["data"],
             "x-provisioned": True,
         }
-        for name, obj in sorted(materialize(docs, existing).items())
+        for name, obj in sorted(materialize(docs, existing, existing_annotations).items())
     ]
     return docs + extra

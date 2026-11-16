@@ -88,6 +88,7 @@ pub mod platform_user;
 pub mod retry;
 pub mod senders;
 pub mod stage_metrics;
+pub mod surface;
 pub mod telemetry;
 pub mod usage;
 pub mod wiring;
@@ -840,6 +841,12 @@ async fn build_stage_capabilities(
         cache.set_read_path_gate(Arc::new(flags::DbConfigReadsGate(license.clone())));
     }
     let caps = caps.with_bundle_config(bundle_config);
+    // `bundle` / `bundle_lang` latency labels: registered bundles from the read REPLICA only (never
+    // the primary, never an env list); seed + periodic + lazy-on-miss refresh.
+    let _latency_labels = bundle_config_db::labels::start(command_latency::labels::Wanted {
+        commands: false,
+        bundles: true,
+    });
     // `db` host capability (v1 + v2 `db2.*`): see `try_build_db_wiring`'s doc for
     // its two distinct unwired outcomes.
     let bundle_db_cfg = bundle_host_db::ConnectConfig {
@@ -856,6 +863,15 @@ async fn build_stage_capabilities(
     .await
     {
         Some(db) => caps.with_db(db),
+        None => caps,
+    };
+    // `overlay.publish-surface` (`surface.publish`): gRPC to svc-presentation with a
+    // community-bound JWT; default-OFF flag, unwired without PRESENTATION_GRPC_ENDPOINT.
+    let caps = match surface::build_surface_wiring(
+        cli,
+        flag_or_closed(&license, flags::OVERLAY_SURFACES_FLAG),
+    ) {
+        Some(wiring) => caps.with_surface(wiring),
         None => caps,
     };
     // Dispatcher egress toggle (`flags::EGRESS_VIA_DISPATCHER_FLAG`) --

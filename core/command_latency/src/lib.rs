@@ -9,7 +9,8 @@
 //! | [`stamp`] | the non-PII stamps in the W3C `tracestate` `waddles` member (t0 + per-hop instants) |
 //! | [`first_door`] | task-local "the clock started here" for the single publish funnel; proxy request-start header parsing |
 //! | [`metrics`] | per-hop + end-to-end histograms, the over-budget counter, the hop breakdown for the WARN |
-//! | [`registry`] | bounded `command` / `bundle_lang` label vocabularies (never user text) |
+//! | [`registry`] | bounded `command` / `bundle` / `bundle_lang` label vocabularies (never user text) |
+//! | [`labels`] | database-replica fed seed / periodic / lazy-on-miss refresh of those vocabularies |
 //! | [`switch`] | the opt-out kill switch `waddles.disable-command-latency-telemetry` |
 //! | [`span`] | W3C trace-context parenting + error recording for the per-hop spans |
 //! | [`canary`] | synthetic-canary configuration and the exact-match sink rule |
@@ -20,6 +21,7 @@
 
 pub mod canary;
 pub mod first_door;
+pub mod labels;
 pub mod metrics;
 pub mod registry;
 pub mod span;
