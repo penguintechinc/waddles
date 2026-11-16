@@ -1,5 +1,5 @@
 #!/bin/bash
-# Regenerates Python stubs for proto/waddles/{hub,streaming}/internal/v1/*.proto.
+# Regenerates Python stubs for proto/waddles/{hub,streaming,presentation}/internal/v1/*.proto.
 #
 # Rust does NOT use this script -- core/hub_client/build.rs runs
 # tonic-build directly against the same .proto files at `cargo build`
@@ -35,7 +35,8 @@ python3 -m grpc_tools.protoc \
   --pyi_out="$OUT_DIR" \
   --grpc_python_out="$OUT_DIR" \
   "$PROTO_DIR"/waddles/hub/internal/v1/*.proto \
-  "$PROTO_DIR"/waddles/streaming/internal/v1/*.proto
+  "$PROTO_DIR"/waddles/streaming/internal/v1/*.proto \
+  "$PROTO_DIR"/waddles/presentation/internal/v1/*.proto
 
 # Match the committed stubs: the repo's ruff hook strips unused imports (protoc's grpc plugin emits
 # `import warnings` unconditionally) and formats hub_api/**. Skipped only when ruff is absent; the
