@@ -377,6 +377,63 @@ class TestMembers:
         )
         assert adjusted.status_code == 403
 
+    async def test_moderator_cannot_act_on_admin_member(self, client: Any, admin_db: Any) -> None:
+        """Regression: moderator remove/reputation scopes must not reach an admin-kind target."""
+        from services.scope_registry import MODERATOR_SEED_SCOPES
+
+        community_id = _seed_community(admin_db)
+        mod_role = self._seed_role(
+            admin_db,
+            community_id,
+            "moderator",
+            2,
+            ["community:manage_channels", *MODERATOR_SEED_SCOPES],
+        )
+        admin_role = self._seed_role(admin_db, community_id, "community-admin", 1, [])
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=7,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=42,
+            role="community-admin",
+            community_role_id=admin_role,
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=8,
+            role="community-admin",
+            community_role_id=admin_role,
+        )
+        mod = _headers(user_id=7, scope="community:admin")
+        removed = await client.delete(
+            f"/api/v1/admin/{community_id}/members/42", headers=mod, json={"reason": "x"}
+        )
+        assert removed.status_code == 403
+        adjusted = await client.put(
+            f"/api/v1/admin/{community_id}/members/42/reputation",
+            headers=mod,
+            json={"amount": 5},
+        )
+        assert adjusted.status_code == 403
+        demoted = await client.put(
+            f"/api/v1/admin/{community_id}/members/42/role", headers=mod, json={"role": "member"}
+        )
+        assert demoted.status_code == 403
+        # An admin-kind caller may still act on another admin.
+        allowed = await client.delete(
+            f"/api/v1/admin/{community_id}/members/42",
+            headers=_headers(user_id=8, scope="community:admin"),
+            json={"reason": "x"},
+        )
+        assert allowed.status_code == 200
+
     async def test_update_member_role_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
