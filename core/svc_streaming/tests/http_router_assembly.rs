@@ -19,7 +19,6 @@ use axum::http::header::{AUTHORIZATION, CONTENT_TYPE};
 use axum::http::{Request, StatusCode};
 use clap::Parser;
 use http_body_util::BodyExt;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use sea_orm::ConnectionTrait;
 use tower::ServiceExt;
 
@@ -27,7 +26,7 @@ use svc_streaming::config::{CliConfig, Config, Secret};
 use svc_streaming::http::auth::{Claims, SERVICE_KEY_HEADER};
 use svc_streaming::http::{router, AppState};
 
-const HMAC_SECRET: &str = "test-hmac-secret";
+mod jwt_common;
 const SERVICE_KEY: &str = "test-service-key";
 
 async fn seed_db_singleton(config: &Config) {
@@ -76,17 +75,12 @@ fn test_config() -> Config {
         db_password: Secret::new("db-pass"),
         cache_password: None,
         service_api_key: Secret::new(SERVICE_KEY),
-        jwt_hmac_secret: Some(Secret::new(HMAC_SECRET)),
+        jwt_keys: jwt_common::keys(),
     }
 }
 
 fn sign_token(claims: &Claims) -> String {
-    encode(
-        &Header::new(Algorithm::HS256),
-        claims,
-        &EncodingKey::from_secret(HMAC_SECRET.as_bytes()),
-    )
-    .unwrap()
+    jwt_common::sign(claims)
 }
 
 fn valid_claims(config: &Config) -> Claims {

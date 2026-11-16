@@ -55,7 +55,6 @@ def _test_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
         default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
@@ -242,7 +241,7 @@ class TestLogin:
         )
         assert response.status_code == 200
         body = await response.get_json()
-        payload = verify_jwt_token(body["token"], "change-me-in-production")
+        payload = verify_jwt_token(body["token"])
         assert payload is not None
         assert "analytics:read" in payload["scope"].split()
 
@@ -257,7 +256,7 @@ class TestLogin:
         )
         assert response.status_code == 200
         body = await response.get_json()
-        payload = verify_jwt_token(body["token"], "change-me-in-production")
+        payload = verify_jwt_token(body["token"])
         assert payload is not None
         assert "analytics:read" not in payload["scope"].split()
 

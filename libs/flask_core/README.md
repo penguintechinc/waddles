@@ -219,7 +219,7 @@ token = create_jwt_token(
 payload = verify_jwt_token(token, app.config['SECRET_KEY'])
 ```
 
-`verify_jwt_token` pins one algorithm (HS256), rejects `alg: none` and `jku`/`jwk`/`x5u`/`x5c`
+`verify_jwt_token` pins one algorithm (ES256, key chosen by `kid` from the installed `jwt_keyring`), rejects `alg: none` and `jku`/`jwk`/`x5u`/`x5c`
 headers, and requires `sub iss aud iat exp scope tenant`; each call emits
 `waddles_jwt_verifications_total{verifier,alg,outcome}`. See
 [`docs/JWT_VERIFICATION.md`](../../docs/JWT_VERIFICATION.md).

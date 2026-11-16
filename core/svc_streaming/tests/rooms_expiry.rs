@@ -86,26 +86,36 @@ async fn empty_room_is_reaped_at_its_timeout_with_hands_locks_and_an_info_log() 
         .room
         .unwrap();
     assert_eq!(room.empty_timeout_secs, 300);
-    let t0 = room.created_at;
 
     // State that must be cleaned up with the room: a raised hand and a lock.
+    //
+    // A join in flight restarts the idle clock at the WALL-CLOCK second it lands in (it counts as
+    // activity), so the controlled-clock baseline `t0` must be that exact second. Joining again
+    // is idempotent; repeat until one join provably started and ended inside a single second,
+    // which pins the server's idle start to `t0` however slow the machine is (coverage builds).
     let hand_owner = uid();
-    h.client
-        .join_room(req(
-            JoinRoomRequest {
-                api_version: "v1".into(),
-                community_id: "7771".into(),
-                room_id: room.room_id.clone(),
-                participant_id: hand_owner.clone(),
-                publish: false,
-                subscribe: true,
-                ttl_secs: None,
-                ..Default::default()
-            },
-            &write,
-        ))
-        .await
-        .unwrap();
+    let t0 = loop {
+        let before = chrono::Utc::now().timestamp();
+        h.client
+            .join_room(req(
+                JoinRoomRequest {
+                    api_version: "v1".into(),
+                    community_id: "7771".into(),
+                    room_id: room.room_id.clone(),
+                    participant_id: hand_owner.clone(),
+                    publish: false,
+                    subscribe: true,
+                    ttl_secs: None,
+                    ..Default::default()
+                },
+                &write,
+            ))
+            .await
+            .unwrap();
+        if chrono::Utc::now().timestamp() == before {
+            break before;
+        }
+    };
     h.client
         .raise_hand(req(
             RaiseHandRequest {

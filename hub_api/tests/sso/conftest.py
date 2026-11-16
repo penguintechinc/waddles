@@ -290,7 +290,6 @@ def hub_config(*, callback_base: str = "https://hub.example.com") -> HubAPIConfi
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
         default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",

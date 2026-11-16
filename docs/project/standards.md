@@ -676,7 +676,7 @@ ROUTER_API_KEY=<from-secret>
 
 # Security
 API_KEY_SECRET=<from-secret>
-JWT_SECRET=<from-secret>
+# (no JWT secret: platform JWTs are ES256, keys live in platform_vault)
 
 # Features
 ENABLE_AI=true

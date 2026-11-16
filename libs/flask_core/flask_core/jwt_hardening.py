@@ -8,7 +8,7 @@ through, and makes algorithm usage observable ahead of the ES256 cutover:
 * **One algorithm per verifier** (RFC 8725 section 3.1). The JOSE header ``alg`` is
   checked against the verifier's own allow-list *before* any cryptography
   runs, so an attacker-chosen ``alg`` (``none``, an HMAC variant presented to
-  an asymmetric verifier, an RSA/EC algorithm presented to the HS256 verifier)
+  an asymmetric verifier, an HMAC or RSA algorithm presented to the ES256 verifier)
   is rejected on its own named reason instead of relying on the JWT library's
   behaviour alone.
 * **``alg: none`` is a hard reject**, in any letter case.
@@ -48,7 +48,7 @@ from opentelemetry import metrics
 logger = logging.getLogger(__name__)
 
 #: Verifier identities -- the ``verifier`` metric label (closed set).
-VERIFIER_PLATFORM_HS256: Final = "platform_hs256"
+VERIFIER_PLATFORM_ES256: Final = "platform_es256"
 VERIFIER_SERVICE_EDDSA: Final = "service_eddsa"
 VERIFIER_OIDC_ID_TOKEN: Final = "oidc_id_token"  # noqa: S105 - metric label, not a secret
 
@@ -281,7 +281,7 @@ def _build_instruments(meter_provider: Any = None) -> _Instruments:
             unit="{verification}",
             description=(
                 "JWT verifications by verifier, header algorithm label and outcome. Watch "
-                "alg=hs256 drain and alg=es256 rise across the asymmetric cutover; any "
+                "alg=hs* must stay at zero after the ES256 cutover; any "
                 "alg=none/other or outcome=alg_*/forbidden_header is a probe."
             ),
         ),

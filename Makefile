@@ -26,6 +26,10 @@ docker-push:
 lint:
 	@bash scripts/lint.sh
 
+# Secrets T10 gate: no shared JWT secret / HMAC JWT (see scripts/ci/jwt-hs256-allowlist.txt)
+check-no-shared-jwt-secret:
+	@bash scripts/ci/check-no-shared-jwt-secret.sh
+
 # Idempotent: ensure every existing tenant owns an at-rest DEK (needs DATABASE_URL + the KEK env).
 backfill-tenant-keys:
 	@cd hub_api && PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 -m cli.backfill_tenant_keys

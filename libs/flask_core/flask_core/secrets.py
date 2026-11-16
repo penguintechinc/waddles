@@ -4,8 +4,8 @@ Fail-Closed Secret Loading
 
 Security audit finding C1 (A02:2021 Cryptographic Failures / CWE-798
 Hardcoded Credentials): ~47 services across this monorepo read
-``SECRET_KEY`` (the HS256 key that signs and verifies every JWT --
-``auth.create_jwt_token``/``verify_jwt_token``) via
+``SECRET_KEY`` (then the symmetric key that signed and verified every JWT; platform JWTs are
+ES256 now and ``SECRET_KEY`` only keys sessions / refresh-token MACs) via
 ``os.getenv("SECRET_KEY", "change-me-in-production")``. Any deploy that
 forgets to set ``SECRET_KEY`` silently boots with a public, hardcoded
 signing key -- anyone can forge a token, including a ``global:admin``
@@ -46,7 +46,7 @@ import sys
 from .workload_identity import is_production
 
 #: Every literal placeholder value that has shipped as a `SECRET_KEY` /
-#: `MODULE_SECRET_KEY` / `JWT_SECRET` / `JWT_SECRET_KEY` fallback somewhere
+#: `MODULE_SECRET_KEY` / legacy JWT-secret fallback somewhere
 #: in this repo (grep audit, C1) -- centralized here so a new module can't
 #: reintroduce yet another spelling of "insecure default" that this check
 #: doesn't know about.

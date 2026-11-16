@@ -358,7 +358,7 @@ mod tests {
             db_password: crate::config::Secret::new("db-pass"),
             cache_password: None,
             service_api_key: crate::config::Secret::new("svc-key"),
-            jwt_hmac_secret: Some(crate::config::Secret::new("jwt-secret")),
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
         let state = AppState::new(cfg, prometheus::Registry::new());
         let app = router(state);

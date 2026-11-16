@@ -243,7 +243,7 @@ images:
   # Chart appends -<variant> to the tag; only the cpu variant is built for alpha.
   svc-streaming:
     dockerfile: core/svc_streaming/Dockerfile.rust
-    context: core/svc_streaming
+    context: core
     target: cpu
     tag_suffix: "-cpu"
     build_contexts: ["proto=./proto"]
@@ -253,6 +253,7 @@ images:
       - core/svc_streaming/Cargo.toml
       - core/svc_streaming/Cargo.lock
       - core/svc_streaming/build.rs
+      - core/platform_keys/**
       - core/svc_streaming/src/**
       - core/svc_streaming/tests/**
 

@@ -63,7 +63,7 @@ async def _login(client: Any, email: str, tenant: str = TENANT_SLUG) -> dict[str
 
 
 def _scopes(body: dict[str, Any]) -> set[str]:
-    claims = verify_jwt_token(body["token"], SECRET)
+    claims = verify_jwt_token(body["token"])
     assert claims is not None
     return set(claims["scope"].split())
 
@@ -155,7 +155,7 @@ class TestTokenIssuance:
         body = await _login(client, "root@example.com")
         scopes = _scopes(body)
         assert {"users:admin", "*:admin", "settings:write"} <= scopes
-        claims = verify_jwt_token(body["token"], SECRET)
+        claims = verify_jwt_token(body["token"])
         assert claims is not None and "super_admin" in claims["roles"]
         assert body["user"]["isSuperAdmin"] is True
 
@@ -259,5 +259,5 @@ class TestDefaultTenantSlug:
             "/api/v1/auth/login", json={"email": "d@example.com", "password": "hunter22"}
         )
         assert response.status_code == 200
-        claims = verify_jwt_token((await response.get_json())["token"], SECRET)
+        claims = verify_jwt_token((await response.get_json())["token"])
         assert claims is not None and claims["tenant"] == "default"

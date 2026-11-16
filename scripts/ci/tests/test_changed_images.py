@@ -271,7 +271,8 @@ def test_matrix_rows_carry_build_inputs() -> None:
     }
     assert rows["svc-streaming"]["target"] == "cpu"
     assert rows["svc-streaming"]["suffix"] == "-cpu"
-    assert rows["svc-streaming"]["context"] == "core/svc_streaming"
+    assert rows["svc-streaming"]["context"] == "core"  # sibling platform_keys path dep
+    assert rows["svc-streaming"]["extra_ctx"] == "proto=./proto"
     assert rows["svc-ingest"]["extra_ctx"] == "proto=./proto"
     assert rows["svc-ingest"]["context"] == "core"
 

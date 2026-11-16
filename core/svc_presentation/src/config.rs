@@ -8,7 +8,7 @@
 //! never `Debug`/`Display`-printed.
 //!
 //! Unlike `core/svc_streaming/src/config.rs`, there is no static
-//! `SERVICE_API_KEY`/`JWT_HMAC_SECRET` here: the overlay PUSH credential
+//! `SERVICE_API_KEY` or shared JWT secret here: the overlay PUSH credential
 //! (`overlay_auth::require_push_credential`) is a hub-api-issued machine
 //! JWT verified against hub-api's JWKS endpoint (`PUSH_JWKS_ENDPOINT` below),
 //! replacing the Python alpha's static `PRESENTATION_PUSH_TOKEN` bearer

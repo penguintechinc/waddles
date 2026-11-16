@@ -34,7 +34,7 @@ def _secret(monkeypatch):
 
 
 def token(sub="1", roles=None, tenant="acme") -> str:
-    return create_jwt_token(sub, "alice", "a@e.invalid", roles or [], SECRET, tenant=tenant)
+    return create_jwt_token(sub, "alice", "a@e.invalid", roles or [], tenant=tenant)
 
 
 def req(authorization: str | None = None):

@@ -39,7 +39,6 @@ def test_constructed_directly_also_defaults_to_enabled() -> None:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="s",
-        jwt_algorithm="HS256",
         default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",

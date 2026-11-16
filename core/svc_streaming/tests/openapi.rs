@@ -8,14 +8,13 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use clap::Parser;
 use http_body_util::BodyExt;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use tower::ServiceExt;
 
 use svc_streaming::config::{CliConfig, Config, Secret};
 use svc_streaming::http::auth::Claims;
 use svc_streaming::http::{router, AppState};
 
-const HMAC_SECRET: &str = "test-hmac-secret";
+mod jwt_common;
 
 fn test_state() -> AppState {
     let cli = CliConfig::try_parse_from(["svc-streaming"]).expect("defaults parse");
@@ -24,7 +23,7 @@ fn test_state() -> AppState {
         db_password: Secret::new("db-pass"),
         cache_password: None,
         service_api_key: Secret::new("service-key"),
-        jwt_hmac_secret: Some(Secret::new(HMAC_SECRET)),
+        jwt_keys: jwt_common::keys(),
     };
     AppState::new(config, prometheus::Registry::new())
 }
@@ -42,12 +41,7 @@ fn signed_token(state: &AppState) -> String {
         teams: vec![],
         roles: vec![],
     };
-    encode(
-        &Header::new(Algorithm::HS256),
-        &claims,
-        &EncodingKey::from_secret(HMAC_SECRET.as_bytes()),
-    )
-    .unwrap()
+    jwt_common::sign(&claims)
 }
 
 #[tokio::test]

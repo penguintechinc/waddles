@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from flask_core.auth import create_jwt_token, verify_jwt_token
 
-SECRET = "x" * 48  # throwaway test key
-
 
 def _mint(**extra: object) -> dict[str, object]:
     token = create_jwt_token(
@@ -13,11 +11,10 @@ def _mint(**extra: object) -> dict[str, object]:
         username="u",
         email="u@example.invalid",
         roles=["viewer"],
-        secret_key=SECRET,
         tenant="system",
         **extra,  # type: ignore[arg-type]
     )
-    payload = verify_jwt_token(token, SECRET)
+    payload = verify_jwt_token(token)
     assert payload is not None
     return payload
 
