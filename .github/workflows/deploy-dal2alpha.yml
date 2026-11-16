@@ -357,11 +357,54 @@ jobs:
           [ "${TOTAL}" -gt 0 ] || { echo "::error::zero Deployments examined" >&2; exit 1; }
           [ "${BAD}" -eq 0 ] || exit 1
 
-          # 2. no non-Running/non-Succeeded pods; examine count > 0.
-          PODS="$(kubectl -n "${NAMESPACE}" get pods --no-headers | wc -l)"
-          PBAD="$(kubectl -n "${NAMESPACE}" get pods --no-headers --field-selector=status.phase!=Running,status.phase!=Succeeded | wc -l)"
+          # 2. no non-Running/non-Succeeded pods; examine count > 0. Precompile pods are
+          #    checked explicitly in step 2b: an in-flight compile batch is legitimately
+          #    Pending (init containers) for minutes and must not fail this check.
+          NOT_PC='waddlebot.io/workload!=executor-precompile'
+          PODS="$(kubectl -n "${NAMESPACE}" get pods --no-headers -l "${NOT_PC}" | wc -l)"
+          PBAD="$(kubectl -n "${NAMESPACE}" get pods --no-headers -l "${NOT_PC}" --field-selector=status.phase!=Running,status.phase!=Succeeded | wc -l)"
           echo "pods examined=${PODS} bad=${PBAD}"
           [ "${PODS}" -gt 0 ] && [ "${PBAD}" -eq 0 ] || exit 1
+
+          # 2b. bundle AOT precompile readiness, explicit (it never gates helm: no hook).
+          #     Bundles do not need an artifact to serve (the executor JIT-compiles from the
+          #     signed source and counts executor_precompile_fallback_total), so the gate is:
+          #     this release's enqueue Job completed (every active version is queued), the
+          #     CronJob exists with Forbid and is not suspended, and no precompile Job created
+          #     by this release has failed. Counts are printed; zero enqueue Jobs = FAIL.
+          REV="$(helm status "${RELEASE}" -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          [ -n "${REV}" ] || { echo "::error::helm revision not found" >&2; exit 1; }
+          ENQ_SEL="app.kubernetes.io/component=executor-precompile-enqueue,waddlebot.io/helm-revision=${REV}"
+          ENQ_STATE=""
+          for _ in $(seq 1 60); do
+            ENQ_STATE="$(kubectl -n "${NAMESPACE}" get jobs -l "${ENQ_SEL}" -o jsonpath='{range .items[*]}{.metadata.name} {.status.succeeded} {.status.failed}{"\n"}{end}')"
+            ENQ_COUNT="$(printf '%s\n' "${ENQ_STATE}" | awk 'NF{n++} END{print n+0}')"
+            [ "${ENQ_COUNT}" -eq 1 ] || { echo "::error::expected 1 precompile enqueue Job for revision ${REV}, found ${ENQ_COUNT}" >&2; exit 1; }
+            read -r ENQ_NAME ENQ_OK ENQ_FAILED <<< "${ENQ_STATE}"
+            [ "${ENQ_OK:-0}" -ge 1 ] && break
+            sleep 10
+          done
+          echo "precompile enqueue job=${ENQ_NAME} revision=${REV} succeeded=${ENQ_OK:-0} failed_attempts=${ENQ_FAILED:-0}"
+          [ "${ENQ_OK:-0}" -ge 1 ] || { echo "::error::precompile enqueue Job ${ENQ_NAME} did not complete within 10m" >&2; kubectl -n "${NAMESPACE}" logs "job/${ENQ_NAME}" --tail=50 >&2 || echo "(enqueue logs unavailable)" >&2; exit 1; }
+          CJ="$(kubectl -n "${NAMESPACE}" get cronjob "${RELEASE}-executor-precompile" -o jsonpath='{.spec.concurrencyPolicy} {.spec.suspend}')"
+          read -r CJ_POLICY CJ_SUSPEND <<< "${CJ}"
+          echo "precompile cronjob concurrencyPolicy=${CJ_POLICY} suspend=${CJ_SUSPEND:-false}"
+          [ "${CJ_POLICY}" = "Forbid" ] && [ "${CJ_SUSPEND:-false}" != "true" ] || { echo "::error::precompile CronJob must be Forbid and not suspended" >&2; exit 1; }
+          ENQ_CREATED="$(kubectl -n "${NAMESPACE}" get job "${ENQ_NAME}" -o jsonpath='{.metadata.creationTimestamp}')"
+          kubectl -n "${NAMESPACE}" get jobs -l 'app.kubernetes.io/component=executor-precompile' -o json > "${RUNNER_TEMP}/precompile-jobs.json"
+          python3 - "${RUNNER_TEMP}/precompile-jobs.json" "${ENQ_CREATED}" <<'PY'
+          import json, sys
+          jobs = json.load(open(sys.argv[1]))["items"]
+          since = sys.argv[2]
+          mine = [j for j in jobs if j["metadata"]["creationTimestamp"] >= since]
+          failed = [j["metadata"]["name"] for j in mine
+                    if any(c["type"] == "Failed" and c["status"] == "True" for c in j["status"].get("conditions", []))]
+          done = sum(1 for j in mine if (j["status"].get("succeeded") or 0) >= 1)
+          print(f"precompile batch jobs examined={len(mine)} succeeded={done} active={len(mine) - done - len(failed)} failed={len(failed)}")
+          if failed:
+              print(f"::error::precompile batch Job(s) failed since this release: {failed}", file=sys.stderr)
+              sys.exit(1)
+          PY
 
           # 3. every long-lived Deployment runs exactly its planned image (rebuilt -> new tag,
           #    reused -> its old tag); examined count must equal the planned set, > 0.

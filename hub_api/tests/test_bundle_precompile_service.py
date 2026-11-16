@@ -148,20 +148,71 @@ async def test_ack_rejects_malformed_reports(queue: FakeQueue, report: dict[str,
         await svc.ack_report(None, report)
 
 
-async def test_backfill_export_lists_every_active_signed_version(
-    queue: FakeQueue, tmp_path: Path
+async def test_enqueue_all_active_queues_every_active_signed_version_once(
+    queue: FakeQueue,
 ) -> None:
+    """The per-release enqueue Job only INSERTs queue rows; a re-run queues nothing new."""
     _signed(queue)
-    out = tmp_path / "m.json"
-    assert await precompile_queue._export(None, out, all_active=True, limit=1) == 0
-    assert json.loads(out.read_text())[0]["app_id"] == "waddles.test"
+    other = "cd" * 32
+    queue.signed[("waddles.other", "2.0.0", other)] = _Row(
+        app_id="waddles.other",
+        version="2.0.0",
+        artifact_digest=other,
+        component_key="bundles/o.wasm",
+        sidecar_key="bundles/o.json",
+    )
+    first = await svc.enqueue_all_active(None)
+    assert (first.examined, first.queued, first.already_pending) == (2, 2, 0)
+    assert set(queue.pending) == {DIGEST, other}
+    again = await svc.enqueue_all_active(None)
+    assert (again.examined, again.queued, again.already_pending) == (2, 0, 2)
+    # Never compiles or claims: only INSERT statements were issued.
+    assert all("INSERT INTO bundle_precompile_requests" in sql for sql, _ in queue.writes)
 
 
-async def test_cli_ack_backfill_fails_on_any_failure(tmp_path: Path) -> None:
-    ok = {"examined": 1, "compiled": 1, "skipped": 0, "failed": 0, "results": []}
-    bad = {**ok, "failed": 1}
-    assert await precompile_queue._ack(None, ok) == 0
-    assert await precompile_queue._ack(None, bad) == 1
+async def test_enqueue_all_active_with_nothing_active_reports_zero(queue: FakeQueue) -> None:
+    summary = await svc.enqueue_all_active(None)
+    assert (summary.examined, summary.queued) == (0, 0)
+
+
+def test_cli_enqueue_all_active_command_runs_with_minimal_config(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`enqueue-all-active` builds its DAL from DATABASE_URL alone and closes it."""
+    import asyncio
+
+    seen: list[str] = []
+
+    class _Dal:
+        async def close(self) -> None:
+            seen.append("closed")
+
+    async def _build(url: str, pool_size: int) -> _Dal:
+        seen.append(url)
+        return _Dal()
+
+    async def _enqueue(_dal: Any) -> svc.EnqueueSummary:
+        seen.append("enqueued")
+        return svc.EnqueueSummary(examined=3, queued=1, already_pending=2)
+
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://r:p@h:5432/d")
+    monkeypatch.setattr(precompile_queue, "build_install_dal", _build)
+    monkeypatch.setattr(precompile_queue.svc, "enqueue_all_active", _enqueue)
+    rc = asyncio.run(
+        precompile_queue._run(precompile_queue._parser().parse_args(["enqueue-all-active"]))
+    )
+    assert rc == 0
+    assert seen == ["postgresql://r:p@h:5432/d", "enqueued", "closed"]
+
+
+@pytest.mark.parametrize(
+    "flag", [["export", "--out", "m", "--all-active"], ["ack", "--report", "r", "--backfill"]]
+)
+def test_cli_compile_in_helm_hook_modes_are_gone(flag: list[str]) -> None:
+    """Regression (alpha 43868192527): the in-hook full backfill compile path no longer exists."""
+    with pytest.raises(SystemExit):
+        precompile_queue._parser().parse_args(flag)
 
 
 def test_cli_denominator_mismatch_is_an_error(tmp_path: Path) -> None:

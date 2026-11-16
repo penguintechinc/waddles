@@ -1,9 +1,22 @@
 # executor-scale task 4 -- AOT precompile queue consumer. hub-api enqueues an approved+signed
-# digest into bundle_precompile_requests (services/bundle_precompile_service.py); this CronJob
-# leases a batch, runs `bundle-executor --precompile-compile-only` then `--precompile-sign` (same image as svc-bundles-executor), and
-# acks. Pod spec: executor-precompile-pod.tpl.
+# digest into bundle_precompile_requests (services/bundle_precompile_service.py; the per-release
+# executor-precompile-enqueue Job queues every active version); this CronJob leases a batch,
+# runs `bundle-executor --precompile-compile-only` (bounded parallel) then `--precompile-sign`
+# (same image as svc-bundles-executor), and acks. Pod spec: executor-precompile-pod.tpl.
+#
+# Never a Helm hook. concurrencyPolicy is hard-coded Forbid: runs never overlap (alpha deploy
+# 43868192527 had 5-6 overlapping runs plus the hook all compiling the same digests).
+# Render-time guards (fail loud):
+#   - activeDeadlineSeconds < the 1800 s queue lease, so a killed run is dead before its rows
+#     are re-offered (no double compile);
+#   - compileConcurrency fits the compile container's CPU and memory limits.
 {{- if .Values.pipeline.hubApi.executorPrecompile.enabled }}
 {{- $cfg := .Values.pipeline.hubApi.executorPrecompile }}
+{{- $leaseSeconds := 1800 }}
+{{- if ge (int $cfg.activeDeadlineSeconds) $leaseSeconds }}
+{{- fail (printf "pipeline.hubApi.executorPrecompile.activeDeadlineSeconds (%v) must be < the %d s precompile queue lease" $cfg.activeDeadlineSeconds $leaseSeconds) }}
+{{- end }}
+{{- include "waddlebot.executorPrecompile.validateConcurrency" . }}
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -15,10 +28,16 @@ metadata:
     app.kubernetes.io/component: executor-precompile
 spec:
   schedule: {{ $cfg.schedule | quote }}
-  concurrencyPolicy: {{ $cfg.concurrencyPolicy }}
-  successfulJobsHistoryLimit: 3
-  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: {{ $cfg.startingDeadlineSeconds }}
+  successfulJobsHistoryLimit: {{ $cfg.successfulJobsHistoryLimit }}
+  failedJobsHistoryLimit: {{ $cfg.failedJobsHistoryLimit }}
   jobTemplate:
+    metadata:
+      labels:
+        # Lets the release smoke step select this CronJob's Jobs (not just their pods).
+        app.kubernetes.io/component: executor-precompile
+        waddlebot.io/workload: executor-precompile
     spec:
       backoffLimit: {{ $cfg.backoffLimit }}
       activeDeadlineSeconds: {{ $cfg.activeDeadlineSeconds }}
@@ -29,5 +48,5 @@ spec:
             waddlebot.io/workload: executor-precompile
             app.kubernetes.io/component: executor-precompile
         spec:
-          {{- include "waddlebot.executorPrecompile.podSpec" (dict "root" . "mode" "queue") | nindent 10 }}
+          {{- include "waddlebot.executorPrecompile.podSpec" (dict "root" .) | nindent 10 }}
 {{- end }}
