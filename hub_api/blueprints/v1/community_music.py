@@ -13,6 +13,7 @@ never carries requester identity -- see the DTOs in the service module.
 
 from __future__ import annotations
 
+import logging
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
@@ -24,6 +25,8 @@ from quart_schema import validate_response
 from services import community_music_service as svc
 from services.community_authz import authorize_community
 from services.errors import ApiError, not_found
+
+logger = logging.getLogger(__name__)
 
 #: PostHog flag gating the whole page; default OFF until validated.
 FEATURE_MUSIC_QUEUE_PAGE = "waddles.music.queue-page"
@@ -68,6 +71,7 @@ async def get_music(community_id: int) -> svc.MusicPageDTO | tuple[dict[str, obj
             community_id=community_id,
         )
     except ApiError as exc:
+        logger.debug("handled %s in community_music: %s", type(exc).__name__, exc)
         return _err(exc)
 
 

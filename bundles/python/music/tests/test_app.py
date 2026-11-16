@@ -40,7 +40,6 @@ class Host:
         self.relayed: list[dict[str, Any]] = []
         self.surfaces: list[tuple[str, dict[str, Any]]] = []
         self.logs: list[str] = []
-        self.flag = False
         self.queue: list[dict[str, Any]] = []
         self.now: dict[str, Any] | None = None
 
@@ -100,7 +99,6 @@ def host(monkeypatch: pytest.MonkeyPatch) -> Iterator[Host]:
         kv=types.SimpleNamespace(
             get=lambda k: h.kv.get(k), set=kv_set, delete=lambda k: h.kv.pop(k, None)
         ),
-        flags=types.SimpleNamespace(enabled=lambda k, d: h.flag if k == app.FLAG_QUEUE_PAGE else d),
         relay=types.SimpleNamespace(
             push=GUARD.action_only("relay.push", lambda p, m: h.relayed.append(json.loads(m)))
         ),
@@ -268,11 +266,8 @@ def test_top_output_formatting(host: Host) -> None:
     assert reply("!music top") == "no plays recorded yet."
 
 
-def test_songqueue_flag_off_link_and_not_configured(host: Host) -> None:
-    """Flag OFF -> silent; ON -> link; link_not_configured -> plain notice."""
-    assert run("!songqueue") is None and run("!sq") is None
-    assert host.calls == []
-    host.flag = True
+def test_songqueue_link_and_not_configured(host: Host) -> None:
+    """Activation is the only gate: link when configured, plain notice when not."""
     host.results["page.link"] = {"url": "https://w.example/community/7/music"}
     assert reply("!sq") == "Song queue: https://w.example/community/7/music"
     del host.results["page.link"]

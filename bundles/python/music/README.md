@@ -34,7 +34,7 @@ becomes "only moderators can do that".
 | `!music next` / `!music skip` | `requests.advance` | Moderator (service-enforced). |
 | `!music set max-per-user <n>` | `config.set` | Moderator, 1-10. |
 | `!music set dmca-safe on\|off`, `!music dmca` | `settings.set`, `config.get` | Moderator set; anyone reads status. |
-| `!songqueue` / `!sq` | `page.link` | Link `{base}/community/{community_id}/music`; `song queue page is not configured` when unset. Behind PostHog flag `waddles.music.queue-page` (default OFF; silent when off). |
+| `!songqueue` / `!sq` | `page.link` | Link `{base}/community/{community_id}/music`; `song queue page is not configured` when unset. |
 
 Replies never include who requested a song. Logs carry command/tool/code/counts only.
 

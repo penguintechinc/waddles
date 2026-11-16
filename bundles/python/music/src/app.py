@@ -36,15 +36,11 @@ from waddle_sdk import clock, community_kv, event_dedupe, log, relay, tool
 from waddle_sdk.command import CommandSpec, CommandUsageError, ParsedCommand, parse_command
 from waddle_sdk.community_kv import TENANT_WIDE_SENTINEL
 from waddle_sdk.flask_core.bundle_runtime import get_bundle_context
-from waddle_sdk.flask_core.feature_flags import feature_enabled
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
 #: The shared queue service every command delegates to.
 SERVICE = "waddles.core.service.music-requests"
-
-#: PostHog flag gating the `!songqueue`/`!sq` link command (default OFF).
-FLAG_QUEUE_PAGE = "waddles.music.queue-page"
 
 _REQUEST_HEADS = frozenset({"!sr", "!songrequest"})
 _QUEUE_HEADS = frozenset({"!music", "!queue"})
@@ -544,8 +540,6 @@ async def transform(event: PlatformEvent) -> PlatformEvent | None:
     elif head_lower in _QUEUE_HEADS:
         command, arg = _resolve(rest.strip())
     elif head_lower in _LINK_HEADS:
-        if not await feature_enabled(FLAG_QUEUE_PAGE, default=False):
-            return None
         command = "link"
     else:
         return None

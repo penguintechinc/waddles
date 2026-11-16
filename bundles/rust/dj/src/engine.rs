@@ -473,17 +473,33 @@ impl<'a> Engine<'a> {
     /// Community history as DJ hints: top artists and songs (aggregate counts only).
     /// A missing grant or outage just means no weighting.
     fn load_stats(&self) -> Stats {
-        let artists = requests::stats_top(self.host, "artist", 10)
-            .map(|r| r.into_iter().map(|a| policy::norm(&a.artist)).collect())
-            .unwrap_or_default();
-        let songs = requests::stats_top(self.host, "song", 10)
-            .map(|r| {
-                r.into_iter()
-                    .filter_map(|s| Some((s.title?, s.artist)))
-                    .collect()
-            })
-            .unwrap_or_default();
+        let artists = match requests::stats_top(self.host, "artist", 10) {
+            Ok(r) => r.into_iter().map(|a| policy::norm(&a.artist)).collect(),
+            Err(e) => {
+                self.log_stats_unavailable("artist", &e);
+                Default::default()
+            }
+        };
+        let songs = match requests::stats_top(self.host, "song", 10) {
+            Ok(r) => r
+                .into_iter()
+                .filter_map(|s| Some((s.title?, s.artist)))
+                .collect(),
+            Err(e) => {
+                self.log_stats_unavailable("song", &e);
+                Default::default()
+            }
+        };
         Stats { artists, songs }
+    }
+
+    /// Logs a failed history lookup (type + message); the plan proceeds without weighting.
+    fn log_stats_unavailable(&self, kind: &str, e: &requests::ReqError) {
+        self.host.log(
+            Level::Warn,
+            "dj history stats unavailable; picking without weighting",
+            json!({"kind": kind, "error_type": "ReqError", "error": e.to_string()}),
+        );
     }
 
     /// Adds one policy-approved track to the shared queue as `kind: "dj"`.
