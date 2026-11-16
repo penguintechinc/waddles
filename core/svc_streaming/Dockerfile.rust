@@ -48,6 +48,10 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 # Build context is `core/` (the `platform-keys` path dependency lives beside this crate, like svc_action's).
+# Cargo.toml's `path = "../platform_keys"` resolves from /build/svc_streaming, so it MUST land at
+# /build/platform_keys (WORKDIR first; deploy runs 43859970070/43858247593 copied it to /platform_keys).
+# Gate: make check-core-docker-context.
+WORKDIR /build
 COPY platform_keys ./platform_keys
 WORKDIR /build/svc_streaming
 COPY svc_streaming/Cargo.toml svc_streaming/Cargo.lock ./
