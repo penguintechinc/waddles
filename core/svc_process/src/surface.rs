@@ -94,7 +94,7 @@ pub async fn publish(
     let wiring = wiring.ok_or_else(|| {
         denied(
             "not_implemented",
-            "surface publishing is not wired on this stage (PRESENTATION_GRPC_ENDPOINT)",
+            "surface publishing is unavailable: PRESENTATION_GRPC_ENDPOINT is not configured on this stage",
         )
     })?;
     if !wiring.flag.enabled().await {

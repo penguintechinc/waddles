@@ -68,17 +68,31 @@ impl SurfaceHub {
     }
 
     fn lock_channels(&self) -> std::sync::MutexGuard<'_, Channels> {
-        self.channels.lock().unwrap_or_else(|p| {
-            tracing::warn!("surface hub channel lock poisoned; recovering");
-            p.into_inner()
-        })
+        match self.channels.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!(
+                    error_type = "PoisonError",
+                    error = %poisoned,
+                    "surface hub channel lock poisoned by a panicked holder; continuing with its last state"
+                );
+                poisoned.into_inner()
+            }
+        }
     }
 
     fn lock_cache(&self) -> std::sync::MutexGuard<'_, HashMap<Key, Cached>> {
-        self.cache.lock().unwrap_or_else(|p| {
-            tracing::warn!("surface hub replay lock poisoned; recovering");
-            p.into_inner()
-        })
+        match self.cache.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => {
+                tracing::error!(
+                    error_type = "PoisonError",
+                    error = %poisoned,
+                    "surface hub replay lock poisoned by a panicked holder; continuing with its last state"
+                );
+                poisoned.into_inner()
+            }
+        }
     }
 
     /// Publishes `payload` for `(community_id, surface)`: caches it when
@@ -231,6 +245,21 @@ mod tests {
 
     fn hub() -> SurfaceHub {
         SurfaceHub::new(3, Duration::from_secs(60))
+    }
+
+    #[test]
+    fn a_poisoned_lock_is_logged_and_the_hub_keeps_serving() {
+        let h = std::sync::Arc::new(hub());
+        let h2 = h.clone();
+        let _ = std::thread::spawn(move || {
+            let _guard = h2.channels.lock().unwrap();
+            panic!("poison the channels lock");
+        })
+        .join();
+        assert!(h.channels.is_poisoned());
+        // Locking through the hub still works and does not panic.
+        drop(h.lock_channels());
+        h.publish(1, "waddles.core.example.music.queue", false, json!({}));
     }
 
     #[tokio::test]
