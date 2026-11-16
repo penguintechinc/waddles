@@ -69,8 +69,8 @@ jobs:
     needs: changes
     if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
     name: rooms gRPC + moderation tests (counted)
-    # Canonical runner-routing expression (github-actions-workflows skill).
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # bare dal2-alpha-ci image has no cc/make/cmake and sudo is blocked (no-new-privileges): C-toolchain jobs stay on hosted ubuntu-latest until a custom runner image bakes them in (same exception as rust-crate-ci.yml lint-test)
+    runs-on: ubuntu-latest
     timeout-minutes: 45
     permissions:
       contents: read
