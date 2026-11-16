@@ -506,7 +506,8 @@ BEGIN
             TO waddles_svc_action;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hub_api') THEN
-        GRANT SELECT ON bundle_reputation_floor_bans TO hub_api;
+        -- DELETE: GDPR erasure (hub_api/services/erasure_registry.py deletes the subject's rows).
+        GRANT SELECT, DELETE ON bundle_reputation_floor_bans TO hub_api;
         GRANT SELECT ON bundle_reputation_floor_ban_control TO hub_api;
         GRANT EXECUTE ON FUNCTION reputation_floor_ban_set_halted(boolean, text),
                                   reputation_floor_ban_halted() TO hub_api;

@@ -237,6 +237,15 @@ RULES: tuple[Rule, ...] = (
         "terms-of-service acceptance evidence (Art. 17(3)(e) legal claims), like cookie_consent",
     ),
     # --- subject-owned rows: DELETE ---------------------------------------------------------------
+    # Automated hard-ban outbox (alembic 0114): rows keyed by the ban target's uuid token are the
+    # subject's data -- erased on request (hub_api holds DELETE on the table for exactly this);
+    # `actor` is the CHECK-pinned constant 'system:reputation_floor', never a user.
+    delete("bundle_reputation_floor_bans", uuid("user_uuid")),
+    exempt(
+        "bundle_reputation_floor_bans",
+        "actor",
+        reason="constant system actor label (CHECK-enforced), not a person",
+    ),
     delete("activity_logs", hub("user_id")),
     delete("activity_stats_daily", hub("hub_user_id")),
     # The live feed row holds the raw handle (`actor`) + message text; the platform-native id
