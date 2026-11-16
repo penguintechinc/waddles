@@ -29,6 +29,8 @@ use crate::platform_user::{BoxFuture as UserFuture, PlatformUserResolver, Resolv
 
 #[path = "host_tools_discord_manifest_tests.rs"]
 mod discord_manifest_tests;
+#[path = "floor_ban_tests.rs"]
+mod floor_ban_tests;
 #[path = "host_tools_twitch_manifest_tests.rs"]
 mod twitch_manifest_tests;
 #[path = "host_tools_youtube_manifest_tests.rs"]
