@@ -93,14 +93,16 @@ jobs:
           key: cargo-tools-cargo-component-0.21.1-wasm-tools-1.259.0-${{ runner.os }}
 
       # Exact pins as in bundles/Dockerfile.core-bundles; --locked resolves transitive deps.
+      # --force: only reached when the binary on PATH is NOT the pinned version (the hosted image ships
+      # a different wasm-tools in ~/.cargo/bin, and a plain `cargo install` refuses to overwrite it).
       - name: Install cargo-component 0.21.1 + wasm-tools 1.259.0 (if not cached)
         run: |
           set -euo pipefail
           if ! cargo component --version 2>/dev/null | grep -q ' 0\.21\.1$'; then
-            cargo install cargo-component --version 0.21.1 --locked
+            cargo install cargo-component --version 0.21.1 --locked --force
           fi
           if ! wasm-tools --version 2>/dev/null | grep -q '^wasm-tools 1\.259\.0 '; then
-            cargo install wasm-tools --version 1.259.0 --locked
+            cargo install wasm-tools --version 1.259.0 --locked --force
           fi
           cargo component --version
           wasm-tools --version
