@@ -47,7 +47,7 @@ import bcrypt
 from flask_core.db_errors import describe_db_error, log_db_error
 from opentelemetry import trace
 
-from services import ban_suppression, mem0_privacy, session_service
+from services import ban_suppression, floor_ban_erasure, mem0_privacy, session_service
 from services.audit_events import AuditAction, AuditCategory
 from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
@@ -82,11 +82,17 @@ _NON_DELETE_COUNT_KEYS: frozenset[str] = frozenset(
     {"hub_users_anonymized", "suppression_records_written"}
 )
 _SCRUBBED_SUFFIX = "__scrubbed"
+#: Rows deliberately KEPT (an undelivered automated ban survives erasure) -- reported, not deleted.
+_KEPT_SUFFIX = "__pending_kept"
 
 
 def _is_delete_count_key(key: str) -> bool:
     """Is `deletion_scope[key]` a count of hard-deleted rows (vs an anonymize/scrub/write count)?"""
-    return key not in _NON_DELETE_COUNT_KEYS and not key.endswith(_SCRUBBED_SUFFIX)
+    return (
+        key not in _NON_DELETE_COUNT_KEYS
+        and not key.endswith(_SCRUBBED_SUFFIX)
+        and not key.endswith(_KEPT_SUFFIX)
+    )
 
 
 def _iso(value: Any) -> str | None:
@@ -628,10 +634,10 @@ def _collect_erasure_scope(dal: Any, *, user_id: int) -> _ErasureScope:
     """
     identities = ban_suppression.identities_of(dal, user_id)
     members = ban_suppression.subject_member_rows(dal, hub_user_id=user_id, identities=identities)
-    restrictions = ban_suppression.collect_active_restrictions(
-        dal, hub_user_id=user_id, identities=identities, members=members
-    )
     uuids = _subject_uuids(dal, user_id=user_id, identities=identities, members=members)
+    restrictions = ban_suppression.collect_active_restrictions(
+        dal, hub_user_id=user_id, identities=identities, members=members, user_uuids=uuids
+    )
     return _ErasureScope(
         identities=tuple(identities),
         member_rows=tuple(members),
@@ -839,6 +845,13 @@ def _sync_erase(
         # every erased user, banned or not.
         counts["community_members"] = _delete_memberships(dal, scope, now=now)
         counts.update(_delete_reputation_and_identity(dal, scope, user_id=user_id))
+        # Automated hard-ban outbox: refused rows deleted, confirmed bans pseudonymised (never
+        # deleted), undelivered bans left in place -- via the SQL function, hub-api has no DELETE.
+        counts.update(
+            floor_ban_erasure.erase_floor_ban_rows(
+                dal, user_uuids=scope.user_uuids, restrictions=scope.restrictions, keys=keys
+            )
+        )
         # Every OTHER user-keyed table (~100: activity, content, tokens, balances, SSO subjects,
         # bookings, economy ledgers, ...) -- driven by the declarative registry so a table added
         # later cannot be forgotten (`services/erasure_registry.py`, pinned by its coverage test).

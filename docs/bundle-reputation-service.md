@@ -72,6 +72,23 @@ The result carries `floors:{community,tenant}` (`disabled|none|ban|soft_ban|soft
 failed ban never fails the already-applied score change and is never silent (`floors.community` reports the
 enqueue result; delivery is asynchronous on the action stage). Kill switch: `waddles.disable-bundle-reputation`.
 
+#### Erasure (GDPR Art. 17) of automated hard-ban rows
+
+`bundle_reputation_floor_bans` is both the audit trail of enforced automated bans and the durable queue of
+undelivered ones, so hub-api (SELECT only on the table) erases a subject through the SECURITY DEFINER function
+`reputation_floor_ban_erase_subject(uuid, bigint, text, bytea)` and nothing else:
+
+| Status | Erasure |
+|---|---|
+| 6 refused (never enforced) | deleted |
+| 2 done (sender-confirmed ban) | **never deleted**; `user_uuid` replaced by `sha256(suppression code ‖ row id)` so the row no longer names the person |
+| 1 queued, 3 retry, 4 dead, 5 rate limited, 7 dispatched | untouched -- erasure never cancels an unsent ban |
+
+Before any row is touched, `ban_suppression.collect_active_restrictions` counts every row with status 1-5 or 7 as an
+active `AUTO_BAN` restriction, so the keyed suppression code is written (same transaction) and the erased user cannot
+re-join. A confirmed ban with no suppression code (no linked identity on that platform) fails the whole erasure
+(rolled back) instead of leaving the identifier behind.
+
 ### Soft ban
 
 Cannot WIN anything in that community (games, raffles, giveaways, economy payouts). State lives in the

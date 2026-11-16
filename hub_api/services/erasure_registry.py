@@ -222,6 +222,10 @@ RULES: tuple[Rule, ...] = (
     core("bundle_reputation_tenant_scores"),
     core("bundle_reputation_soft_bans"),
     core("bundle_reputation_adjustments"),
+    # Automated hard-ban outbox (alembic 0114): refused rows deleted, confirmed bans pseudonymised
+    # (never deleted), undelivered bans kept -- `floor_ban_erasure` via the SECURITY DEFINER
+    # function `reputation_floor_ban_erase_subject` (hub-api has no DELETE/UPDATE on the table).
+    core("bundle_reputation_floor_bans"),
     core("ephemeral_pseudonyms"),
     # --- retained: Art. 5(2) / 17(3)(e) evidence -------------------------------------------------
     retain("cookie_consent", "consent record (Art. 5(2)); ERASURE_RETAINED_TABLES"),
@@ -237,15 +241,6 @@ RULES: tuple[Rule, ...] = (
         "terms-of-service acceptance evidence (Art. 17(3)(e) legal claims), like cookie_consent",
     ),
     # --- subject-owned rows: DELETE ---------------------------------------------------------------
-    # Automated hard-ban outbox (alembic 0114): rows keyed by the ban target's uuid token are the
-    # subject's data -- erased on request (hub_api holds DELETE on the table for exactly this);
-    # `actor` is the CHECK-pinned constant 'system:reputation_floor', never a user.
-    delete("bundle_reputation_floor_bans", uuid("user_uuid")),
-    exempt(
-        "bundle_reputation_floor_bans",
-        "actor",
-        reason="constant system actor label (CHECK-enforced), not a person",
-    ),
     delete("activity_logs", hub("user_id")),
     delete("activity_stats_daily", hub("hub_user_id")),
     # The live feed row holds the raw handle (`actor`) + message text; the platform-native id

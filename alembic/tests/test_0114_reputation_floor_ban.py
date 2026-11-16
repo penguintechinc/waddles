@@ -41,9 +41,7 @@ _CLAIM = (
     "SELECT r_id, r_tenant_id, r_community_id, r_user_uuid, r_scope, r_platform, r_attempt, "
     "r_lease_token FROM reputation_floor_ban_claim(%s, %s)"
 )
-_COMPLETE = (
-    "SELECT reputation_floor_ban_complete(%s, %s::uuid, %s::smallint, %s, %s)"
-)
+_COMPLETE = "SELECT reputation_floor_ban_complete(%s, %s::uuid, %s::smallint, %s, %s)"
 
 
 def _load():  # type: ignore[no-untyped-def]
@@ -609,11 +607,16 @@ class TestFloorBanOutbox:
             )
             mine = self._mine(self._claim(pg_db), row_id)
             assert mine[6] == attempt
-            outcome = self._complete(pg_db, row_id, str(mine[7]), 2, "relay_unconfirmed")
+            outcome = self._complete(
+                pg_db, row_id, str(mine[7]), 2, "relay_unconfirmed"
+            )
         assert outcome == 4, "the 8th failure is DEAD"
         assert self._row(pg_db, row_id)[:3] == (4, 8, "relay_unconfirmed")
         assert self._claim(pg_db) == []
-        assert _q(pg_db, "SELECT * FROM reputation_floor_ban_reap(10)", (), _ACTION_LOGIN) == []
+        assert (
+            _q(pg_db, "SELECT * FROM reputation_floor_ban_reap(10)", (), _ACTION_LOGIN)
+            == []
+        )
 
     def test_m2_a_crashed_final_attempt_is_reaped_dead_and_returned_for_the_alert(
         self, pg_db: PgTestDatabase
@@ -628,7 +631,9 @@ class TestFloorBanOutbox:
             (row_id,),
         )
         assert self._claim(pg_db) == [], "attempts exhausted: not leased again"
-        reaped = _q(pg_db, "SELECT * FROM reputation_floor_ban_reap(10)", (), _ACTION_LOGIN)
+        reaped = _q(
+            pg_db, "SELECT * FROM reputation_floor_ban_reap(10)", (), _ACTION_LOGIN
+        )
         assert [(r[0], r[1], r[2]) for r in reaped] == [(row_id, tid, cid)]
         assert self._row(pg_db, row_id)[:3] == (4, 8, "attempts_exhausted")
 
@@ -671,9 +676,7 @@ class TestFloorBanOutbox:
 
     # --- review fixes: quota at claim, kill switch, per-user cap, backlog ------------------
 
-    def _queue_many(
-        self, db: PgTestDatabase, tid: int, cid: int, n: int
-    ) -> list[int]:
+    def _queue_many(self, db: PgTestDatabase, tid: int, cid: int, n: int) -> list[int]:
         ids = []
         for i in range(n):
             user = str(uuid.uuid4())
@@ -709,7 +712,9 @@ class TestFloorBanOutbox:
         assert rows == [(5, "rate_limited", True, True)] * 3, (
             "over-quota rows are NOT leased: status 5 with a jittered future retry"
         )
-        assert self._claim(pg_db) == [], "nothing more until the window or the retry passes"
+        assert self._claim(pg_db) == [], (
+            "nothing more until the window or the retry passes"
+        )
         # The retry time passes but the window is still full: still not promoted (a retry or a
         # status-5/3 row can never bypass the quota).
         _q(
@@ -759,7 +764,9 @@ class TestFloorBanOutbox:
             "WHERE status = 3",
         )
         retried = self._claim(pg_db)
-        assert [r[0] for r in retried] == [first[0][0]], "only the retry of the same row"
+        assert [r[0] for r in retried] == [first[0][0]], (
+            "only the retry of the same row"
+        )
         other = b if first[0][0] == a else a
         assert self._row(pg_db, other)[0] in (1, 5), "the other row stays waiting"
         assert (
@@ -772,7 +779,9 @@ class TestFloorBanOutbox:
             == 1
         )
 
-    def test_a_concurrent_claim_never_exceeds_the_quota(self, pg_db: PgTestDatabase) -> None:
+    def test_a_concurrent_claim_never_exceeds_the_quota(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         tid, cid, _u = self._slot(pg_db, "t-ob-claimconc")
         self._queue_many(pg_db, tid, cid, 8)
         _q(
@@ -841,7 +850,9 @@ class TestFloorBanOutbox:
         assert self._enqueue(pg_db, tid, cid, user, key="fb:a")[0] == 0
         assert self._enqueue(pg_db, tid, cid, user, key="fb:b")[0] == 0
         state, rid = self._enqueue(pg_db, tid, cid, user, key="fb:c")
-        assert (state, rid) == (4, 0), "third distinct event for the same user is capped"
+        assert (state, rid) == (4, 0), (
+            "third distinct event for the same user is capped"
+        )
         n = _q(
             pg_db,
             "SELECT COUNT(*) FROM bundle_reputation_floor_bans WHERE user_uuid=%s",
@@ -854,7 +865,9 @@ class TestFloorBanOutbox:
         _score(pg_db, tid, cid, other, 300)
         assert self._enqueue(pg_db, tid, cid, other, key="fb:d")[0] == 0
 
-    def test_backlog_reports_waiting_rows_for_the_alert(self, pg_db: PgTestDatabase) -> None:
+    def test_backlog_reports_waiting_rows_for_the_alert(
+        self, pg_db: PgTestDatabase
+    ) -> None:
         tid, cid, _u = self._slot(pg_db, "t-ob-backlog")
         ids = self._queue_many(pg_db, tid, cid, 3)
         _q(
@@ -893,7 +906,9 @@ class TestFloorBanOutbox:
     def test_invalid_input_is_22023(
         self, pg_db: PgTestDatabase, kwargs: dict[str, Any]
     ) -> None:
-        tid, cid, user = self._slot(pg_db, f"t-ob-inval-{abs(hash(str(kwargs))) % 10**8}")
+        tid, cid, user = self._slot(
+            pg_db, f"t-ob-inval-{abs(hash(str(kwargs))) % 10**8}"
+        )
         with pytest.raises(psycopg2.errors.InvalidParameterValue):
             self._enqueue(pg_db, tid, cid, user, **kwargs)
 
@@ -970,3 +985,171 @@ class TestFloorBanOutbox:
             _BUNDLE_LOGIN,
         )
         assert [r[0] for r in got] == [a, b]
+
+
+_HUB_LOGIN = "hub_api"
+_ERASE = (
+    "SELECT r_deleted, r_pseudonymised, r_pending "
+    "FROM reputation_floor_ban_erase_subject(%s::uuid, %s::bigint, %s, %s::bytea)"
+)
+_SQL_SCRIPT = _ROOT / "scripts" / "db" / "bundle_reputation_floor_ban.sql"
+
+
+@requires_docker
+class TestEraseSubject:
+    """GDPR erasure of one subject's outbox rows via the SECURITY DEFINER function (real Postgres).
+
+    hub-api holds SELECT on the table and EXECUTE on the function, never DELETE/UPDATE: refused rows
+    (6) are deleted, confirmed bans (2) are pseudonymised from the suppression code and never
+    deleted, pending rows (1/3/4/5/7) are untouched, and a confirmed ban without a code is refused.
+    """
+
+    _CODE = bytes.fromhex("ab" * 32)
+
+    @pytest.fixture(autouse=True)
+    def _hub_api_role(self, pg_db: PgTestDatabase) -> None:
+        """A `hub_api` login holding exactly the grants the (idempotent) script gives that role."""
+        _q(pg_db, "TRUNCATE bundle_reputation_floor_bans")
+        if not _q(pg_db, "SELECT 1 FROM pg_roles WHERE rolname = 'hub_api'"):
+            _q(pg_db, "CREATE ROLE hub_api")
+        _q(pg_db, "ALTER ROLE hub_api LOGIN PASSWORD %s", (_LOGIN_PW,))
+        # The grant block is conditional on the role existing at apply time: re-apply the script.
+        _q(pg_db, _SQL_SCRIPT.read_text(encoding="utf-8"))
+
+    def _row(
+        self,
+        db: PgTestDatabase,
+        tid: int,
+        cid: int,
+        user: str,
+        status: int,
+        *,
+        key: str = "k1",
+    ) -> int:
+        return _q(
+            db,
+            "INSERT INTO bundle_reputation_floor_bans (tenant_id, community_id, "
+            "origin_community_id, user_uuid, scope, idempotency_key, reason, platform, status) "
+            "VALUES (%s, %s, %s, %s, 1, %s, 'community_hard_floor', 'discord', %s) RETURNING id",
+            (tid, cid, cid, user, key, status),
+        )[0][0]
+
+    def _erase(self, db: PgTestDatabase, tid: int, user: str, code: bytes | None):  # type: ignore[no-untyped-def]
+        return _q(db, _ERASE, (user, tid, "discord", code), _HUB_LOGIN)[0]
+
+    def _slot(self, db: PgTestDatabase, name: str) -> tuple[int, int, str]:
+        tid = _tenant(db, name)
+        return tid, _community(db, tid, "c1"), str(uuid.uuid4())
+
+    def test_hub_api_cannot_delete_or_update_the_table_directly(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-er-grants")
+        self._row(pg_db, tid, cid, user, 2)
+        count = _q(
+            pg_db, "SELECT count(*) FROM bundle_reputation_floor_bans", login=_HUB_LOGIN
+        )
+        assert count[0][0] == 1  # SELECT is granted
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            _q(pg_db, "DELETE FROM bundle_reputation_floor_bans", login=_HUB_LOGIN)
+        with pytest.raises(psycopg2.errors.InsufficientPrivilege):
+            _q(
+                pg_db,
+                "UPDATE bundle_reputation_floor_bans SET user_uuid = gen_random_uuid()",
+                login=_HUB_LOGIN,
+            )
+        sql = "SELECT has_function_privilege(%s, %s, 'EXECUTE')"
+        fn = "reputation_floor_ban_erase_subject(uuid,bigint,text,bytea)"
+        assert _q(pg_db, sql, (_HUB_LOGIN, fn))[0][0] is True
+        for stage in (_BUNDLE_LOGIN, _ACTION_LOGIN):
+            assert _q(pg_db, sql, (stage, fn))[0][0] is False
+
+    def test_a_refused_row_is_deleted(self, pg_db: PgTestDatabase) -> None:
+        tid, cid, user = self._slot(pg_db, "t-er-refused")
+        self._row(pg_db, tid, cid, user, 6)
+        other = str(uuid.uuid4())
+        kept = self._row(pg_db, tid, cid, other, 6)
+
+        assert tuple(self._erase(pg_db, tid, user, None)) == (1, 0, 0)  # no code needed
+
+        left = _q(pg_db, "SELECT id FROM bundle_reputation_floor_bans")
+        assert [r[0] for r in left] == [kept]  # another subject's refused row untouched
+
+    def test_a_confirmed_ban_is_pseudonymised_never_deleted(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-er-done")
+        first = self._row(pg_db, tid, cid, user, 2, key="k1")
+        second = self._row(pg_db, tid, cid, user, 2, key="k2")
+
+        assert tuple(self._erase(pg_db, tid, user, self._CODE)) == (0, 2, 0)
+
+        rows = _q(
+            pg_db,
+            "SELECT id, user_uuid::text, status FROM bundle_reputation_floor_bans ORDER BY id",
+        )
+        assert [r[0] for r in rows] == [first, second]
+        assert all(r[2] == 2 for r in rows)
+        assert user not in {r[1] for r in rows}
+        assert rows[0][1] != rows[1][1], "a per-row pseudonym, so rows cannot be linked"
+        for row_id, pseudonym, _status in rows:
+            expected = _q(
+                pg_db,
+                "SELECT substr(encode(sha256(%s::bytea || int8send(%s::bigint)), 'hex'), 1, 32)"
+                "::uuid::text",
+                (self._CODE, row_id),
+            )[0][0]
+            assert pseudonym == expected
+        # a replay finds nothing left to rewrite for the original token
+        assert tuple(self._erase(pg_db, tid, user, self._CODE)) == (0, 0, 0)
+
+    @pytest.mark.parametrize("status", [1, 3, 4, 5, 7])
+    def test_a_pending_ban_survives_untouched(
+        self, pg_db: PgTestDatabase, status: int
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, f"t-er-pending-{status}")
+        row_id = self._row(pg_db, tid, cid, user, status)
+
+        assert tuple(self._erase(pg_db, tid, user, self._CODE)) == (0, 0, 1)
+
+        kept = _q(
+            pg_db,
+            "SELECT user_uuid::text, status FROM bundle_reputation_floor_bans WHERE id=%s",
+            (row_id,),
+        )[0]
+        assert tuple(kept) == (user, status)
+
+    def test_a_confirmed_ban_without_a_suppression_code_is_refused_and_nothing_changes(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = self._slot(pg_db, "t-er-nocode")
+        refused = self._row(pg_db, tid, cid, user, 6, key="k1")
+        done = self._row(pg_db, tid, cid, user, 2, key="k2")
+        for bad in (None, b"short"):
+            with pytest.raises(psycopg2.errors.InvalidParameterValue):
+                self._erase(pg_db, tid, user, bad)
+        ids = {r[0] for r in _q(pg_db, "SELECT id FROM bundle_reputation_floor_bans")}
+        assert ids == {refused, done}, (
+            "the failed call rolled back its refused-row delete too"
+        )
+        still = _q(
+            pg_db,
+            "SELECT user_uuid::text FROM bundle_reputation_floor_bans WHERE id=%s",
+            (done,),
+        )
+        assert still[0][0] == user
+
+    @pytest.mark.parametrize(
+        "args",
+        [
+            (None, 1, "discord"),
+            (str(uuid.uuid4()), None, "discord"),
+            (str(uuid.uuid4()), 1, None),
+            (str(uuid.uuid4()), 1, "Not A Platform"),
+        ],
+    )
+    def test_invalid_input_is_22023(
+        self, pg_db: PgTestDatabase, args: tuple[Any, ...]
+    ) -> None:
+        with pytest.raises(psycopg2.errors.InvalidParameterValue):
+            _q(pg_db, _ERASE, (*args, self._CODE), _HUB_LOGIN)

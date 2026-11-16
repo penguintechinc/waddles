@@ -45,6 +45,7 @@ import asyncio
 import logging
 import os
 import time
+import uuid as uuid_module
 from collections.abc import Callable, Collection, Iterable, Mapping
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
@@ -301,12 +302,119 @@ def _was_auto_banned(
     return bool(dal(query).count())
 
 
+#: The table the automated reputation hard-ban outbox lives in (alembic 0114).
+FLOOR_BAN_TABLE: Final = "bundle_reputation_floor_bans"
+
+#: `bundle_reputation_floor_bans.status` values for which a ban is enforced or WILL be:
+#: 1 queued, 2 done (sender-confirmed), 3 failed-retrying, 4 dead (undelivered, alerting),
+#: 5 rate limited, 7 dispatched. Only 6 (refused: the floor was never breached, no ban sent)
+#: is not a restriction. Erasure must capture these BEFORE it touches the rows so the
+#: suppression code gets written and a queued/active ban is never silently forgotten.
+FLOOR_BAN_ACTIVE_STATUSES: Final = (1, 2, 3, 4, 5, 7)
+
+
+@dataclass(slots=True, frozen=True)
+class FloorBanRow:
+    """One floor-ban outbox row of the subject (ids only -- no raw platform identity)."""
+
+    tenant_id: int
+    platform: str
+    user_uuid: str
+    status: int
+
+
+def floor_ban_rows(dal: Any, user_uuids: Collection[str]) -> list[FloorBanRow]:
+    """The floor-ban rows keyed by the subject's uuid tokens (empty when the table is absent).
+
+    A deployment that never ran alembic 0114 has no such table (and no rows to protect or
+    erase); that is the only silent empty -- a read error propagates and aborts the erasure.
+    """
+    tokens = _well_formed_uuids(user_uuids)
+    if not tokens:
+        return []
+    from services.erasure_executor import table_catalog  # noqa: PLC0415 -- avoid import cycle
+
+    if FLOOR_BAN_TABLE not in table_catalog(dal):
+        return []
+    _bind(dal)
+    table = dal[FLOOR_BAN_TABLE]
+    rows = dal(table.user_uuid.belongs(tokens)).select(
+        table.tenant_id, table.platform, table.user_uuid, table.status
+    )
+    return [
+        FloorBanRow(
+            tenant_id=int(r.tenant_id),
+            platform=str(r.platform),
+            user_uuid=str(r.user_uuid),
+            status=int(r.status),
+        )
+        for r in rows
+    ]
+
+
+def _well_formed_uuids(values: Collection[str]) -> list[str]:
+    """Canonical uuids among `values`; a malformed token is dropped (and logged value-free)."""
+    tokens: list[str] = []
+    for value in values:
+        try:
+            token = str(uuid_module.UUID(str(value)))
+        except ValueError:
+            logger.warning("suppression.uuid_token_skipped")
+            continue
+        if token not in tokens:
+            tokens.append(token)
+    return tokens
+
+
+def _floor_ban_restrictions(
+    rows: Iterable[FloorBanRow], identities: Collection[Identity]
+) -> list[ActiveRestriction]:
+    """AUTO_BAN restrictions for every active floor-ban row, per subject identity on its platform.
+
+    The outbox row names the platform and the subject's uuid token but not the raw platform
+    id, so the subject's own linked identities on that platform supply it (held in memory
+    only, exactly like the member-row path). A row whose platform has no linked identity
+    cannot be coded: it is skipped with a value-free WARNING -- the row itself is never
+    deleted (see `floor_ban_erasure`), so the ban is not lost, only its suppression code.
+    """
+    found: dict[tuple[int, str, str], ActiveRestriction] = {}
+    for row in rows:
+        if row.status not in FLOOR_BAN_ACTIVE_STATUSES:
+            continue
+        matched = False
+        for raw_platform, raw_platform_user_id in identities:
+            try:
+                platform, platform_user_id = normalize_identity(raw_platform, raw_platform_user_id)
+            except SuppressionInputError:
+                continue
+            if platform != row.platform.strip().lower():
+                continue
+            matched = True
+            found.setdefault(
+                (row.tenant_id, platform, platform_user_id),
+                ActiveRestriction(
+                    tenant_id=row.tenant_id,
+                    platform=platform,
+                    platform_user_id=platform_user_id,
+                    reason=RestrictionReason.AUTO_BAN,
+                    expires_at=None,
+                ),
+            )
+        if not matched:
+            logger.warning(
+                "suppression.floor_ban_identity_missing",
+                extra={"action": "suppression_identity", "result": "no_identity_on_platform"},
+            )
+    return list(found.values())
+
+
 def collect_active_restrictions(
     dal: Any,
     *,
     hub_user_id: int,
     identities: Collection[Identity],
     members: Iterable[Any],
+    user_uuids: Collection[str] = (),
 ) -> list[ActiveRestriction]:
     """Find the subject's active bans BEFORE anything is deleted.
 
@@ -315,12 +423,15 @@ def collect_active_restrictions(
     the same identity. Holds raw platform ids in memory only -- they are turned into keyed
     codes by :func:`record_suppressions` and never persisted or logged. An identity that
     cannot be normalised cannot be coded and is skipped with a (value-free) WARNING.
+
+    Automated hard-ban outbox rows (`bundle_reputation_floor_bans`, keyed by `user_uuids`) with
+    status queued/done/retrying/dead/rate-limited/dispatched count as active `AUTO_BAN`
+    restrictions too, so erasing a user with a queued or enforced automated ban writes the
+    suppression code instead of silently cancelling the ban.
     """
     _bind(dal)
     banned = [m for m in members if _is_banned_role(m.role)]
-    if not banned:
-        return []
-    tenant_by_community = tenants_of(dal, (m.community_id for m in banned))
+    tenant_by_community = tenants_of(dal, (m.community_id for m in banned)) if banned else {}
     merged: dict[tuple[int, str, str], ActiveRestriction] = {}
     for member in banned:
         tenant_id = tenant_by_community.get(int(member.community_id))
@@ -362,6 +473,20 @@ def collect_active_restrictions(
                 reason=reason if previous is None else _stronger(previous.reason, reason),
                 expires_at=None,
             )
+    for restriction in _floor_ban_restrictions(floor_ban_rows(dal, user_uuids), identities):
+        key = (restriction.tenant_id, restriction.platform, restriction.platform_user_id)
+        previous = merged.get(key)
+        merged[key] = (
+            restriction
+            if previous is None
+            else ActiveRestriction(
+                tenant_id=previous.tenant_id,
+                platform=previous.platform,
+                platform_user_id=previous.platform_user_id,
+                reason=_stronger(previous.reason, restriction.reason),
+                expires_at=previous.expires_at,
+            )
+        )
     return list(merged.values())
 
 

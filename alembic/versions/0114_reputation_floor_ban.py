@@ -50,6 +50,7 @@ def downgrade() -> None:
         "reputation_floor_ban_set_halted(boolean, text)",
         "reputation_floor_ban_recheck(bigint, uuid)",
         "reputation_floor_ban_complete(bigint, uuid, smallint, text, text)",
+        "reputation_floor_ban_erase_subject(uuid, bigint, text, bytea)",
         "reputation_tenant_communities(bigint)",
     ):
         op.execute(f"DROP FUNCTION IF EXISTS {sig}")

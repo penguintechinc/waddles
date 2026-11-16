@@ -472,6 +472,59 @@ AS $tc$
      ORDER BY c.id LIMIT 1001;
 $tc$;
 
+-- 10. GDPR Art. 17 erasure of ONE subject's rows for ONE (tenant, platform) -- the only write path
+-- hub-api has to this table (it holds SELECT and EXECUTE here, never DELETE/UPDATE):
+--   * refused rows (status 6: the floor was never breached, no ban was ever sent) are DELETED;
+--   * done rows (status 2: a ban the sender confirmed) are NEVER deleted -- they are the audit
+--     trail of an enforced sanction (Art. 17(3)(e)); the subject's `user_uuid` is replaced by a
+--     pseudonym derived (sha256, one way) from the keyed SUPPRESSION code the caller computed for
+--     this subject (`suppression_records`) and the row id, so the row no longer names the person;
+--   * pending rows (1 queued, 3 retry, 4 dead, 5 rate limited, 7 dispatched) are left UNTOUCHED:
+--     erasure must never silently cancel an unsent ban (the dispatcher still needs the token).
+-- Without a suppression code the done rows cannot be pseudonymised, so the call FAILS (the erasure
+-- transaction rolls back) rather than leaving the identifier behind or deleting the evidence.
+-- Returns (deleted, pseudonymised, pending_left).
+CREATE OR REPLACE FUNCTION reputation_floor_ban_erase_subject(
+    p_user_uuid uuid, p_tenant bigint, p_platform text, p_suppression_code bytea
+) RETURNS TABLE(r_deleted int, r_pseudonymised int, r_pending int)
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
+AS $fe$
+DECLARE
+    v_deleted int := 0;
+    v_done int := 0;
+    v_pseudonymised int := 0;
+    v_pending int := 0;
+BEGIN
+    IF p_user_uuid IS NULL OR p_tenant IS NULL OR p_platform IS NULL
+       OR p_platform !~ '^[a-z][a-z0-9]{1,31}$' THEN
+        RAISE EXCEPTION 'invalid_input' USING ERRCODE = '22023';
+    END IF;
+    DELETE FROM bundle_reputation_floor_bans
+     WHERE user_uuid = p_user_uuid AND tenant_id = p_tenant AND platform = p_platform
+       AND status = 6;
+    GET DIAGNOSTICS v_deleted = ROW_COUNT;
+    SELECT count(*) INTO v_done FROM bundle_reputation_floor_bans
+     WHERE user_uuid = p_user_uuid AND tenant_id = p_tenant AND platform = p_platform
+       AND status = 2;
+    IF v_done > 0 THEN
+        IF p_suppression_code IS NULL OR octet_length(p_suppression_code) < 16 THEN
+            RAISE EXCEPTION 'suppression_code_required' USING ERRCODE = '22023';
+        END IF;
+        UPDATE bundle_reputation_floor_bans b
+           SET user_uuid = substr(
+                   encode(sha256(p_suppression_code || int8send(b.id)), 'hex'), 1, 32)::uuid,
+               updated_at = NOW()
+         WHERE b.user_uuid = p_user_uuid AND b.tenant_id = p_tenant AND b.platform = p_platform
+           AND b.status = 2;
+        GET DIAGNOSTICS v_pseudonymised = ROW_COUNT;
+    END IF;
+    SELECT count(*) INTO v_pending FROM bundle_reputation_floor_bans
+     WHERE user_uuid = p_user_uuid AND tenant_id = p_tenant AND platform = p_platform
+       AND status IN (1, 3, 4, 5, 7);
+    RETURN QUERY SELECT v_deleted, v_pseudonymised, v_pending;
+END
+$fe$;
+
 REVOKE ALL ON FUNCTION
     reputation_verify_floor_breach(bigint, bigint, uuid, smallint),
     reputation_floor_ban_enqueue(bigint, bigint, bigint, uuid, smallint, text, text),
@@ -482,6 +535,7 @@ REVOKE ALL ON FUNCTION
     reputation_floor_ban_complete(bigint, uuid, smallint, text, text),
     reputation_floor_ban_halted(),
     reputation_floor_ban_set_halted(boolean, text),
+    reputation_floor_ban_erase_subject(uuid, bigint, text, bytea),
     reputation_tenant_communities(bigint)
     FROM PUBLIC;
 
@@ -506,11 +560,12 @@ BEGIN
             TO waddles_svc_action;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hub_api') THEN
-        -- DELETE: GDPR erasure (hub_api/services/erasure_registry.py deletes the subject's rows).
-        GRANT SELECT, DELETE ON bundle_reputation_floor_bans TO hub_api;
+        GRANT SELECT ON bundle_reputation_floor_bans TO hub_api;
         GRANT SELECT ON bundle_reputation_floor_ban_control TO hub_api;
         GRANT EXECUTE ON FUNCTION reputation_floor_ban_set_halted(boolean, text),
-                                  reputation_floor_ban_halted() TO hub_api;
+                                  reputation_floor_ban_halted(),
+                                  reputation_floor_ban_erase_subject(uuid, bigint, text, bytea)
+            TO hub_api;
         GRANT SELECT, INSERT, UPDATE ON bundle_reputation_policy TO hub_api;
     END IF;
 END
