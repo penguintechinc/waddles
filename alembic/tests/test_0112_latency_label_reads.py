@@ -38,7 +38,7 @@ _MIGRATION = (
     Path(__file__).resolve().parent.parent / "versions" / "0112_latency_label_reads.py"
 )
 _RUST_SOURCE = REPO_ROOT / "core" / "bundle_config_db" / "src" / "labels.rs"
-_PRIOR = "0110_merge_precompile_vault"
+_PRIOR = "0113_overlay_scene_components"
 _PROC, _ACT = "waddles_svc_process", "waddles_svc_action"
 APP = "waddles.core.app.ping"
 

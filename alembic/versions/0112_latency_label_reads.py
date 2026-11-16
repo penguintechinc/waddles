@@ -19,7 +19,7 @@ missing role or table is a no-op. Downgrade revokes exactly these column grants 
 entry is left behind, so a later `DROP ROLE` works).
 
 Revision ID: 0112_latency_label_reads
-Revises: 0110_merge_precompile_vault
+Revises: 0113_overlay_scene_components
 Create Date: 2026-11-15
 """
 
@@ -28,7 +28,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0112_latency_label_reads"
-down_revision = "0110_merge_precompile_vault"
+down_revision = "0113_overlay_scene_components"
 branch_labels = None
 depends_on = None
 
