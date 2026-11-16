@@ -12,6 +12,12 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3
+  # Bounded so this post-install/post-upgrade HOOK can never hang `helm --wait`
+  # past the deploy timeout (#1391 class): SPIFFE registration-entry creation is
+  # fast, 5m is ample and well under every env's helm --timeout (beta 10m,
+  # alpha/dal2alpha 60m). Enforced statically by
+  # scripts/ci/check-helm-hook-job-timeouts.py.
+  activeDeadlineSeconds: 300
   template:
     metadata:
       labels:

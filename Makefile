@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-cert-name-constraints check-helm-hook-timeouts check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
@@ -151,6 +151,24 @@ check-core-docker-context:
 		printf '%s\n' "$$out" >&2; echo "FAIL: negative test (pre-fix svc-streaming) was not rejected for platform_keys (rc=$$rc)" >&2; exit 1; fi; \
 	echo "negative test: pre-fix svc-streaming Dockerfile rejected (rc=1, platform_keys misplaced) -- expected"
 	@python3 scripts/ci/check-core-docker-context.py
+
+# #1382: every rendered cert-manager leaf Certificate's SAN must fall inside its CA's X.509
+# nameConstraint subtrees, for EVERY environment. Cryptographic (mint CA+leaf, `openssl verify`),
+# not a string compare. Fails loud if helm/openssl is missing (a skip examines zero leaves).
+check-cert-name-constraints:
+	@bash scripts/ci/check-cert-name-constraints.sh
+
+# #1391: every helm hook Job must carry a bounded activeDeadlineSeconds below the deploy's helm
+# --timeout, and long/serial work (precompile) must NOT be a blocking hook -- else it can hang
+# `helm --wait` past the timeout and time the release out. Renders each env and pipes to the
+# checker. HOOK_DEPLOY_TIMEOUT defaults to the alpha/dal2alpha deploy timeout (60m = 3600s).
+check-helm-hook-timeouts:
+	@bash -euo pipefail -c 'for v in values-alpha.yaml values-beta.yaml; do \
+		echo "== $$v =="; \
+		helm template waddlebot k8s/helm/waddlebot --kube-version 1.30.0 \
+			--values k8s/helm/waddlebot/$$v --set global.deploymentTier=alpha \
+		| python3 scripts/ci/check-helm-hook-job-timeouts.py --deploy-timeout $(or $(HOOK_DEPLOY_TIMEOUT),3600); \
+	done'
 
 # A catalog bundle whose build inputs changed vs BASE (own source; wit/+waddle-sdk for Python;
 # Cargo path deps, #[path] and include_*! targets for Rust) must bump its version, or the

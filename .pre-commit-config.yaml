@@ -8,8 +8,10 @@
 #
 # Two stages:
 #   pre-commit (<30s, blocks commit) — secrets, changed-file linters,
-#     Dockerfile rootless check, GitHub Actions scan
-#   pre-push (heavier, blocks push) — SAST (bandit)
+#     Dockerfile rootless check, GitHub Actions scan, two cheap static walks
+#     (rustls provider, core Docker context)
+#   pre-push (heavier, blocks push) — SAST (bandit), bundle version-bump gate,
+#     helm no-value render regression gate
 #
 # The noisier, repo-wide linters (shellcheck: 4078 warnings/109 files,
 # hadolint: 120/69 files as of 2026-09-01) stay in `make lint`
@@ -115,6 +117,29 @@ repos:
         pass_filenames: false
         files: '^(core|hub_api|sdk|bundles|admin/hub_module/frontend/src)/.*\.(rs|py|ts|tsx|js|jsx)$|^\.ci/(stub-allowlist\.yml|silent-fallback-baseline\.json)$'
 
+  # ── Cheap static gates (pre-commit stage, <30s budget) ──────────────────
+  #    Both are sub-second repo-wide static walks that CI also runs
+  #    (pr-validation.yml no-stubs-gate job). Moving them local catches the
+  #    regression at commit time instead of a full CI round-trip. Neither
+  #    takes filenames (they scan the whole tree), so pass_filenames: false +
+  #    always_run so a commit that doesn't touch the matched files still runs
+  #    them -- a rustls/Cargo edit elsewhere can still break the invariant.
+  - repo: local
+    hooks:
+      - id: check-rustls-provider
+        name: rustls CryptoProvider installed in every core bin crate
+        entry: scripts/ci/check-rustls-provider.sh
+        language: script
+        pass_filenames: false
+        always_run: true
+      - id: check-core-docker-context
+        name: core image Docker build context covers every crate ref
+        entry: scripts/ci/check-core-docker-context.py
+        language: python
+        additional_dependencies: ["PyYAML==6.0.2"]
+        pass_filenames: false
+        always_run: true
+
   # ── GitHub Actions workflow scan (devops.md pre-commit stage) ───────────
   # zizmor --min-severity high. 5 of 35 workflow files carry pre-existing
   # high findings (build-container.yml, ci-cd.yml, containers.yml,
@@ -140,3 +165,23 @@ repos:
         # the whole repo via `make test-security`; this pre-push hook mirrors
         # that severity floor but only against files actually being pushed.
         args: [-lll, -iii, --quiet]
+
+  # ── Deploy-safety gates (pre-push — need git history / helm, too heavy for
+  #    the <30s commit budget). Both mirror a pr-validation.yml gate so a
+  #    deploy-breaking change is caught before the push round-trip. ─────────
+  - repo: local
+    hooks:
+      - id: bundle-version-bump
+        name: core bundle build-input change bumps its catalog version
+        entry: scripts/hooks/prepush-bundle-version-bump.sh
+        language: script
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
+      - id: helm-novalue-render
+        name: provision-secrets keeps its no-value sentinel strip (rendered)
+        entry: scripts/hooks/prepush-helm-novalue-render.sh
+        language: script
+        stages: [pre-push]
+        pass_filenames: false
+        always_run: true
