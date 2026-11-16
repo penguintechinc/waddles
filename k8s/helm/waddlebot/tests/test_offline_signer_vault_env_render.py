@@ -84,23 +84,16 @@ def test_offline_signers_mount_the_signing_secret_but_never_the_kek(suffix: str)
     assert "TENANT_KEK_HEX" not in env
 
 
-def test_seeder_gets_bundle_migrator_password_when_migrator_enabled() -> None:
-    """Same BUNDLE_MIGRATOR_* wiring as hub-api: db-v2 service bundles can be approved."""
-    env = _job_env(
-        _render(
-            _ENABLE
-            + [
-                "bundleStorageV2.migrator.enabled=true",
-                "bundleStorageV2.migrator.existingSecret=waddlebot-bundle-migrator",
-            ]
-        ),
-        "-core-bundle-seeder",
-    )
+def test_seeder_gets_bundle_migrator_password_by_default() -> None:
+    """Same BUNDLE_MIGRATOR_* wiring as hub-api, ON by default from the chart-provisioned Secret."""
+    env = _job_env(_render(_ENABLE), "-core-bundle-seeder")
     ref = env["BUNDLE_MIGRATOR_PASSWORD"]["valueFrom"]["secretKeyRef"]
     assert ref == {"name": "waddlebot-bundle-migrator", "key": "BUNDLE_MIGRATOR_PASSWORD"}
 
 
 def test_seeder_has_no_migrator_env_while_migrator_disabled() -> None:
-    """Disabled (the default) renders nothing -- no dangling secretKeyRef to a missing Secret."""
-    env = _job_env(_render(_ENABLE), "-core-bundle-seeder")
+    """Explicitly disabled renders nothing -- no dangling secretKeyRef to a missing Secret."""
+    env = _job_env(
+        _render(_ENABLE + ["bundleStorageV2.migrator.enabled=false"]), "-core-bundle-seeder"
+    )
     assert "BUNDLE_MIGRATOR_PASSWORD" not in env
