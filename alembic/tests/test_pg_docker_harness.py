@@ -82,3 +82,5 @@ def test_wait_ready_probes_over_tcp_not_the_unix_socket(monkeypatch: pytest.Monk
     probe = calls[0]
     assert probe[:3] == ["docker", "exec", "c-test"]
     assert probe[probe.index("-h") + 1] == "127.0.0.1"
+
+# CI probe (throwaway, do not merge): exercises alembic-migration-chain on dal2-alpha-ci.
