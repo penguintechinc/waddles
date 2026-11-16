@@ -1,11 +1,11 @@
 import { CallsApiError } from '../services/callsApi';
-import { useCallRooms, useRoomParticipants } from './useCalls';
+import { useMemberParticipants, useRoomParticipants } from './useCalls';
 
 /** Who is in a room, as far as the caller is allowed to know. */
 export interface CallPresence {
   /** Participants currently publishing (what to subscribe to); `undefined` until the first successful read. */
   publisherIds: string[] | undefined;
-  /** Display names by participant id: moderators only (hub-api exposes names on the admin route alone). */
+  /** Display names by participant id, resolved by hub-api ("guest" when unknown). */
   names: ReadonlyMap<string, string>;
   total: number | undefined;
   speaking: number | undefined;
@@ -15,38 +15,23 @@ export interface CallPresence {
   updatedAt: number;
 }
 
-const GONE = new CallsApiError('This room no longer exists.', 404, 'ROOM_NOT_FOUND', false);
-
 /**
- * Polled presence for the call view. Moderators read the admin participants route (names, mute state).
- * Members have no participants route today, so they read the member room list: publisher ids (enough to subscribe)
- * and head counts, without names. `enabled` is false until the call is connected.
+ * Polled presence for the call view. Moderators read the admin participants route (names, mute state); members
+ * read the member participants route (names + media state, no moderation internals). `enabled` is false until
+ * the call is connected.
  */
 export function useCallPresence(communityId: number, roomId: string, moderator: boolean, enabled: boolean): CallPresence {
   const admin = useRoomParticipants(communityId, roomId, enabled && moderator);
-  const member = useCallRooms('member', communityId, enabled && !moderator);
-
-  if (moderator) {
-    const participants = admin.data?.participants;
-    return {
-      publisherIds: participants?.filter((p) => p.publisher).map((p) => p.participantId),
-      names: new Map((participants ?? []).map((p) => [p.participantId, p.displayName])),
-      total: participants?.length,
-      speaking: participants?.filter((p) => p.publisher).length,
-      error: admin.isError ? admin.error : null,
-      refetch: () => void admin.refetch(),
-      updatedAt: admin.dataUpdatedAt,
-    };
-  }
-  const room = member.data?.find((candidate) => candidate.roomId === roomId);
-  const missing = member.data !== undefined && room === undefined;
+  const member = useMemberParticipants(communityId, roomId, enabled && !moderator);
+  const source = moderator ? admin : member;
+  const participants = source.data?.participants;
   return {
-    publisherIds: room?.publisherIds,
-    names: new Map(),
-    total: room ? room.publisherIds.length + room.subscriberCount : undefined,
-    speaking: room?.publisherIds.length,
-    error: member.isError ? member.error : missing ? GONE : null,
-    refetch: () => void member.refetch(),
-    updatedAt: member.dataUpdatedAt,
+    publisherIds: participants?.filter((p) => p.publisher).map((p) => p.participantId),
+    names: new Map((participants ?? []).map((p) => [p.participantId, p.displayName])),
+    total: participants?.length,
+    speaking: participants?.filter((p) => p.publisher).length,
+    error: source.isError ? source.error : null,
+    refetch: () => void source.refetch(),
+    updatedAt: source.dataUpdatedAt,
   };
 }

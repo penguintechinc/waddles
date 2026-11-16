@@ -22,6 +22,7 @@ import {
   deleteRoom,
   ensureTownHall,
   fetchMyHand,
+  fetchMemberParticipants,
   fetchParticipants,
   fetchTownHall,
   fetchRaisedHands,
@@ -79,6 +80,7 @@ const ROWS: readonly Row[] = [
   { name: 'raiseHand', method: 'POST', template: `${MEMBER}/{room_name}/raise-hand`, call: () => raiseHand(COMMUNITY, ROOM) },
   { name: 'lowerHand', method: 'POST', template: `${MEMBER}/{room_name}/lower-hand`, call: () => lowerHand(COMMUNITY, ROOM) },
   { name: 'fetchMyHand', method: 'GET', template: '/api/v1/communities/{community_id}/calls/rooms/{room_id}/hands/mine', call: () => fetchMyHand(COMMUNITY, ROOM) },
+  { name: 'fetchMemberParticipants', method: 'GET', template: '/api/v1/communities/{community_id}/calls/rooms/{room_id}/participants', call: () => fetchMemberParticipants(COMMUNITY, ROOM) },
   { name: 'fetchTownHall', method: 'GET', template: '/api/v1/communities/{community_id}/town-hall', call: () => fetchTownHall(COMMUNITY) },
   { name: 'ensureTownHall', method: 'POST', template: '/api/v1/communities/{community_id}/town-hall', call: () => ensureTownHall(COMMUNITY) },
 ];

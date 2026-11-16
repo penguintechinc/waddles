@@ -315,6 +315,21 @@ export function fetchParticipants(communityId: number, roomId: string): Promise<
   });
 }
 
+/** `GET /communities/:id/calls/rooms/:room/participants` (member): names + media state, no moderation internals. */
+export function fetchMemberParticipants(communityId: number, roomId: string): Promise<CallParticipantList> {
+  return run(async () => {
+    const id = uuid(roomId, 'Room id');
+    const body = expectRecord(
+      (await apiClient.get<unknown>(`/api/v1/communities/${communityId}/calls/rooms/${id}/participants`)).data,
+      'participants',
+    );
+    return {
+      participants: readArray(body, 'participants', 'participants').map(parseParticipant),
+      locked: readBool(body, 'locked'),
+    };
+  });
+}
+
 /** `POST /admin/.../rooms/:id/kick` with the participant UUID. */
 export function kickParticipant(communityId: number, roomId: string, participantId: string): Promise<void> {
   return run(async () => {

@@ -11,6 +11,7 @@ import {
   createRoom,
   deleteRoom,
   fetchMyHand,
+  fetchMemberParticipants,
   fetchParticipants,
   fetchTownHall,
   fetchRaisedHands,
@@ -42,6 +43,7 @@ export const CALLS_POLL_MS = 5000;
 export const callKeys = {
   rooms: (scope: CallsScope, communityId: number) => ['calls', scope, communityId, 'rooms'] as const,
   participants: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'participants'] as const,
+  memberParticipants: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'participants'] as const,
   hands: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'hands'] as const,
   townHall: (communityId: number) => ['calls', 'member', communityId, 'town-hall'] as const,
   myHand: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'my-hand'] as const,
@@ -68,6 +70,17 @@ export function useRoomParticipants(communityId: number, roomId: string | null, 
   return useQuery<CallParticipantList, CallsApiError>({
     queryKey: callKeys.participants(communityId, roomId ?? ''),
     queryFn: () => fetchParticipants(communityId, roomId ?? ''),
+    enabled: roomId !== null && enabled,
+    retry: false,
+    refetchInterval: (query) => pollUnlessFailed(query.state),
+  });
+}
+
+/** Participants of a room as a member sees them (names + media state, no moderation internals), polled. */
+export function useMemberParticipants(communityId: number, roomId: string | null, enabled = true): UseQueryResult<CallParticipantList, CallsApiError> {
+  return useQuery<CallParticipantList, CallsApiError>({
+    queryKey: callKeys.memberParticipants(communityId, roomId ?? ''),
+    queryFn: () => fetchMemberParticipants(communityId, roomId ?? ''),
     enabled: roomId !== null && enabled,
     retry: false,
     refetchInterval: (query) => pollUnlessFailed(query.state),

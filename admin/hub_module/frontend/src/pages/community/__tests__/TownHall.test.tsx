@@ -26,6 +26,7 @@ const hall = {
   join: { method: 'POST', path: `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}/join` },
 };
 const MEMBER_ROOMS = '/api/v1/community/7/interact/voice/rooms';
+const MEMBER_PARTICIPANTS = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/participants`;
 const MY_HAND = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`;
 const handIdle = { success: true, participant_id: SELF, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null };
 const joinOk = {
@@ -66,6 +67,7 @@ describe('TownHall', () => {
       [`GET ${TOWN_HALL}`]: hall,
       [`POST ${MEMBER}/join`]: joinOk,
       [`GET ${MEMBER_ROOMS}`]: memberRooms,
+      [`GET ${MEMBER_PARTICIPANTS}`]: roster,
       [`GET ${MY_HAND}`]: handIdle,
     });
     const { container } = renderPage();
@@ -84,6 +86,7 @@ describe('TownHall', () => {
       [`GET ${TOWN_HALL}`]: hall,
       [`POST ${MEMBER}/join`]: joinOk,
       [`GET ${MEMBER_ROOMS}`]: memberRooms,
+      [`GET ${MEMBER_PARTICIPANTS}`]: roster,
       [`GET ${MY_HAND}`]: handIdle,
       [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/participants`]: roster,
       [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/raised-hands`]: { success: true, count: 0, raised_hands: [] },

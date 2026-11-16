@@ -9,6 +9,7 @@ import {
   acknowledgeHand,
   CallsApiError,
   createRoom,
+  fetchMemberParticipants,
   fetchParticipants,
   fetchRaisedHands,
   fetchRooms,
@@ -159,6 +160,23 @@ describe('parsing', () => {
     expect(list.participants.map((p) => p.displayName)).toEqual(['Ada', GUEST_LABEL]);
     expect(list.participants[1]).toMatchObject({ muted: true, joinedAt: null });
     expect(personName('Grace')).toBe('Grace');
+  });
+
+  it('parses the member participants list (names resolved by hub-api, no moderation fields)', async () => {
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue(
+      ok({
+        participants: [
+          { participant_id: PERSON, display_name: 'Ada', publisher: true, subscriber: true, muted: false, joined_at: 5, is_self: true },
+          { participant_id: ROOM, display_name: '  ', publisher: false, subscriber: true, muted: false, joined_at: null, is_self: false },
+        ],
+        locked: false,
+      }),
+    );
+    const list = await fetchMemberParticipants(7, ROOM);
+    expect(get).toHaveBeenCalledWith(`/api/v1/communities/7/calls/rooms/${ROOM}/participants`);
+    expect(list.locked).toBe(false);
+    expect(list.participants.map((p) => p.displayName)).toEqual(['Ada', GUEST_LABEL]);
+    expect(list.participants[0]).toMatchObject({ publisher: true, joinedAt: 5 });
   });
 
   it('parses the ordered hands queue with acknowledgement state', async () => {

@@ -14,6 +14,7 @@ import { FakePeerConnection, answerResponse, fakeDevices, fakeMediaDeps, resetFa
 const TOKEN = 'room-token-SECRET-value';
 const MEMBER = `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}`;
 const MEMBER_ROOMS = '/api/v1/community/7/interact/voice/rooms';
+const MEMBER_PARTICIPANTS = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/participants`;
 const MY_HAND = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`;
 const ADMIN = `/api/v1/admin/7/calls/rooms/${ROOM_ID}`;
 const SELF = '11111111-1111-4111-8111-111111111111';
@@ -65,6 +66,7 @@ function memberRoutes(extra: Record<string, unknown> = {}) {
     [`POST ${MEMBER}/join`]: joinOk,
     [`POST ${MEMBER}/leave`]: { success: true, message: 'Left room' },
     [`GET ${MEMBER_ROOMS}`]: memberRoomList,
+    [`GET ${MEMBER_PARTICIPANTS}`]: roster,
     [`GET ${MY_HAND}`]: myHand(),
     [`POST ${MEMBER}/raise-hand`]: { success: true, hand: handWire(SELF, 'Me Myself', 100) },
     [`POST ${MEMBER}/lower-hand`]: { success: true, lowered: true },
@@ -118,8 +120,8 @@ describe('CallRoomView', () => {
     expect(posts(fetchImpl, '/whip')).toEqual(['https://media.example/rtc/rooms/r/whip']);
     await waitFor(() => expect(posts(fetchImpl, '/whep')).toEqual([`https://media.example/rtc/rooms/r/whep?source=${ADA}`]));
     const tiles = await within(connected).findAllByTestId('media-tile');
-    // Members get no names from hub-api (no member participants route): remote tiles are numbered, never an id.
-    expect(tiles.map((t) => t.getAttribute('aria-label'))).toEqual(['You', 'Participant 1']);
+    // Members read names from the member participants route; a remote tile never shows an id.
+    expect(tiles.map((t) => t.getAttribute('aria-label'))).toEqual(['You', 'Ada Lovelace']);
     expect(within(connected).getByTestId('room-presence')).toHaveTextContent('3 people, 2 speaking');
     expect(FakePeerConnection.instances[0]?.config).toEqual({ iceServers: [{ urls: ['stun:stun.example:3478'] }] });
     for (const secret of [TOKEN, SELF, ADA, GRACE, ROOM_ID]) expect(container.textContent).not.toContain(secret);
@@ -371,11 +373,11 @@ describe('CallRoomView', () => {
       expect(screen.queryByRole('button', { name: /microphone/i })).not.toBeInTheDocument();
     });
 
-    it('a room that disappears from the list while connected is shown as an error, not an empty room', async () => {
-      serve(memberRoutes({ [`GET ${MEMBER_ROOMS}`]: { success: true, rooms: [] } }));
+    it('a room that disappears while connected is shown as an error, not an empty room', async () => {
+      serve(memberRoutes({ [`GET ${MEMBER_PARTICIPANTS}`]: httpError(404, envelope('ROOM_NOT_FOUND', 'Room not found')) }));
       renderRoom();
       const connected = await joinWithMic();
-      expect(await within(connected).findByTestId('calls-error')).toHaveTextContent('This room no longer exists.');
+      expect(await within(connected).findByTestId('calls-error')).toHaveTextContent('That room no longer exists');
     });
 
     it('without a publish grant (403) the member listens, with a notice', async () => {
@@ -387,7 +389,7 @@ describe('CallRoomView', () => {
 
     it('a failing presence read keeps the call up and shows the error with retry in the side panel', async () => {
       let healthy = false;
-      serve(memberRoutes({ [`GET ${MEMBER_ROOMS}`]: () => (healthy ? memberRoomList : httpError(503, envelope('UNAVAILABLE', 'Roster unavailable', { retryable: true }))) }));
+      serve(memberRoutes({ [`GET ${MEMBER_PARTICIPANTS}`]: () => (healthy ? roster : httpError(503, envelope('UNAVAILABLE', 'Roster unavailable', { retryable: true }))) }));
       renderRoom();
       const connected = await joinWithMic();
       const state = await within(connected).findByTestId('calls-unavailable');
