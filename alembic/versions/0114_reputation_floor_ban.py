@@ -7,10 +7,10 @@ fan-out set) and the per-community `floor_ban_hourly_quota` policy column. DDL l
 `scripts/db/bundle_reputation_floor_ban.sql` (shared with the Rust crate's integration test).
 
 Revision ID: 0114_reputation_floor_ban
-Revises: 0110_merge_precompile_vault
+Revises: 0112_latency_label_reads
 
-Chain note: chained after 0110_merge_precompile_vault (PR #1354, which merges the 0108/0109 heads); 0111-0113 are
-claimed by other PRs. If another migration lands first, re-chain `down_revision` so the graph keeps a single head.
+Chain note: plain revision chained after the release head at merge time (0112_latency_label_reads);
+If another migration lands first, re-chain `down_revision` so the graph keeps a single head.
 Create Date: 2026-11-11
 """
 
@@ -21,7 +21,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0114_reputation_floor_ban"
-down_revision = "0110_merge_precompile_vault"
+down_revision = "0112_latency_label_reads"
 branch_labels = None
 depends_on = None
 

@@ -55,11 +55,11 @@ def _load():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_id_fits_varchar32_and_chains_after_0110_merge(self) -> None:
+    def test_id_fits_varchar32_and_chains_after_the_release_head(self) -> None:
         m = _load()
         assert m.revision == "0114_reputation_floor_ban"
         assert len(m.revision) <= 32
-        assert m.down_revision == "0110_merge_precompile_vault"
+        assert m.down_revision == "0112_latency_label_reads"
 
     def test_single_head(self) -> None:
         cfg = Config(str(_ROOT / "alembic.ini"))
