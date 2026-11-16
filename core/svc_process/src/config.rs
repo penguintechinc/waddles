@@ -382,6 +382,17 @@ pub struct CliConfig {
         default_value = "http://seaweedfs:8333"
     )]
     pub media_bucket_endpoint: String,
+    /// svc-presentation's in-cluster gRPC address
+    /// (`waddles.presentation.internal.v1.SurfaceService`), e.g.
+    /// `https://waddlebot-svc-presentation:50051`. Empty (the default) leaves the bundle
+    /// `overlay.publish-surface` capability unwired: `surface.publish` then denies
+    /// `not_implemented`. `https://` needs [`Self::presentation_grpc_ca_file`]; plaintext is
+    /// accepted on loopback only.
+    #[arg(long, env = "PRESENTATION_GRPC_ENDPOINT", default_value = "")]
+    pub presentation_grpc_endpoint: String,
+    /// PEM CA bundle that signed svc-presentation's gRPC server certificate.
+    #[arg(long, env = "PRESENTATION_GRPC_CA_FILE", default_value = "")]
+    pub presentation_grpc_ca_file: String,
     /// Bundle bucket name for `media` outputs.
     #[arg(long, env = "MEDIA_BUCKET_NAME", default_value = "waddlebot-bundles")]
     pub media_bucket_name: String,

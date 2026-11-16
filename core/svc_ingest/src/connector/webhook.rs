@@ -389,9 +389,16 @@ impl WebhookOutcome {
     }
 }
 
+/// One verified frame in a route's queue, with the command-latency first-door instant the HTTP layer
+/// resolved for it (`None` for a caller that has none, e.g. a test or a non-HTTP path).
+struct Queued {
+    bytes: Vec<u8>,
+    first_door_ms: Option<u64>,
+}
+
 struct Bound {
     owner: String,
-    tx: mpsc::Sender<Vec<u8>>,
+    tx: mpsc::Sender<Queued>,
 }
 
 /// The generic webhook ingress: registry + secret source + dedup + the
@@ -531,6 +538,7 @@ impl WebhookIngress {
             platform: platform.to_string(),
             source_id: opaque_source_id(route_key),
             rx,
+            last_first_door_ms: None,
         })
     }
 
@@ -561,8 +569,25 @@ impl WebhookIngress {
         body: &[u8],
         now_unix: i64,
     ) -> WebhookOutcome {
+        self.handle_from_at(route_key, source, headers, body, now_unix, None)
+            .await
+    }
+
+    /// [`Self::handle_from`] carrying the command-latency first-door instant (epoch ms) the HTTP
+    /// layer resolved for this request (the edge stamp when trusted, else the handler entry). The
+    /// transport hands it to the driver with the frame so the e2e clock starts at the HTTP door,
+    /// not at the driver's later frame receipt. Metadata only; never used for any decision.
+    pub async fn handle_from_at(
+        &self,
+        route_key: &str,
+        source: Option<&str>,
+        headers: &HeaderMap,
+        body: &[u8],
+        now_unix: i64,
+        first_door_ms: Option<u64>,
+    ) -> WebhookOutcome {
         let outcome = self
-            .handle_inner(route_key, source, headers, body, now_unix)
+            .handle_inner(route_key, source, headers, body, now_unix, first_door_ms)
             .await;
         if let Some(c) = &self.requests {
             c.with_label_values(&[outcome.label()]).inc();
@@ -579,6 +604,7 @@ impl WebhookIngress {
         headers: &HeaderMap,
         body: &[u8],
         now_unix: i64,
+        first_door_ms: Option<u64>,
     ) -> WebhookOutcome {
         let Some(entry) = self.entry(route_key) else {
             return WebhookOutcome::NotFound;
@@ -710,7 +736,10 @@ impl WebhookIngress {
                 .get(route_key)
                 .is_some_and(|c| Arc::ptr_eq(c, &entry))
             {
-                permit.send(frame);
+                permit.send(Queued {
+                    bytes: frame,
+                    first_door_ms,
+                });
                 true
             } else {
                 false
@@ -763,7 +792,9 @@ pub fn opaque_source_id(route_key: &str) -> String {
 pub struct WebhookTransport {
     platform: String,
     source_id: String,
-    rx: mpsc::Receiver<Vec<u8>>,
+    rx: mpsc::Receiver<Queued>,
+    /// First-door instant of the frame `next_frame` returned last; taken by the driver.
+    last_first_door_ms: Option<u64>,
 }
 
 impl Transport for WebhookTransport {
@@ -793,7 +824,16 @@ impl Transport for WebhookTransport {
     }
 
     async fn next_frame(&mut self) -> Result<Option<Vec<u8>>, TransportError> {
-        Ok(self.rx.recv().await)
+        Ok(self.rx.recv().await.map(|q| {
+            self.last_first_door_ms = q.first_door_ms;
+            q.bytes
+        }))
+    }
+
+    fn frame_first_door(&mut self) -> Option<(u64, command_latency::Door)> {
+        self.last_first_door_ms
+            .take()
+            .map(|t0| (t0, command_latency::Door::Http))
     }
 
     async fn close(&mut self, _reason: &str) {
@@ -939,6 +979,37 @@ mod tests {
         assert!(!dump.contains(KEY));
         assert!(ctx.source_id.starts_with("wh-"));
         assert_eq!(ctx.session_token, None);
+    }
+
+    /// The HTTP layer's first-door instant rides the queue with the frame and is handed to the
+    /// driver once, labelled `http`; a caller without one yields `None` (driver stamps its own).
+    #[tokio::test]
+    async fn first_door_instant_travels_with_the_frame_once() {
+        let (ing, _) = ingress(Some(SECRET));
+        ing.register(route(KEY, "acme", generic_hmac()), 7).unwrap();
+        let mut t = ing.bind_transport(KEY, "acme").unwrap();
+        let body = b"{\"a\":1}";
+        let out = ing
+            .handle_from_at(KEY, None, &signed_headers(body), body, NOW, Some(1_234))
+            .await;
+        assert_eq!(out, WebhookOutcome::Accepted);
+        assert_eq!(t.frame_first_door(), None, "nothing before next_frame");
+        t.next_frame().await.unwrap().unwrap();
+        assert_eq!(
+            t.frame_first_door(),
+            Some((1_234, command_latency::Door::Http))
+        );
+        assert_eq!(t.frame_first_door(), None, "taken exactly once");
+
+        let body2 = b"{\"a\":2}";
+        let out = ing.handle(KEY, &signed_headers(body2), body2, NOW).await;
+        assert_eq!(out, WebhookOutcome::Accepted);
+        t.next_frame().await.unwrap().unwrap();
+        assert_eq!(
+            t.frame_first_door(),
+            None,
+            "no instant -> driver stamps its own"
+        );
     }
 
     #[tokio::test]
