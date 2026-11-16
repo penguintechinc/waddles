@@ -267,6 +267,40 @@ pub(crate) fn tool_err(e: ToolFail) -> RoomsError {
     RoomsError::Tool(e)
 }
 
+/// The svc-streaming room kind a rooms-app kind creates (event and breakout rooms are
+/// ordinary community rooms there; only stage and green room change the grants).
+fn svc_kind(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Stage => "stage",
+        Kind::GreenRoom => "green_room",
+        Kind::Community | Kind::Event | Kind::Breakout => "community",
+    }
+}
+
+/// Pushes the room's current facts (kind, closed, guests, schedule) to svc-streaming through
+/// the staff-only `room.update` tool, so live and future joins follow the rooms-app state. The
+/// local copy is only saved after this succeeds (a refused push changes nothing).
+fn push_facts(tools: &dyn Tools, msg: &str, r: &Room) -> Result<(), RoomsError> {
+    let mut args = json!({
+        "room_id": r.id,
+        "kind": svc_kind(r.kind),
+        "closed": r.closed,
+        "allow_guests": r.allow_guests,
+    });
+    if let Some(sc) = r.schedule {
+        args["starts_at"] = json!(sc.open_at);
+        args["ends_at"] = json!(sc.close_at);
+    }
+    tools
+        .invoke(
+            "room.update",
+            &args,
+            Some(&idem_key(&format!("{msg}|{}", r.id), "room.update")),
+        )
+        .map_err(tool_err)?;
+    Ok(())
+}
+
 fn whitelist_room(v: &Value) -> Result<String, RoomsError> {
     v.get("room_id")
         .and_then(Value::as_str)
@@ -315,7 +349,12 @@ fn create_room(
     let out = tools
         .invoke(
             "room.create",
-            &json!({"label": label}),
+            &json!({
+                "label": label,
+                "kind": svc_kind(kind),
+                "closed": false,
+                "allow_guests": false,
+            }),
             Some(&idem_key(msg, "room.create")),
         )
         .map_err(tool_err)?;
@@ -549,6 +588,7 @@ fn admin_inner(
                 .get("allow_guests")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| RoomsError::Usage("allow_guests (bool) is required".into()))?;
+            push_facts(tools, msg, &r)?;
             save(store, &r)?;
             Ok(view(&r))
         }
@@ -579,6 +619,7 @@ fn admin_inner(
                     ));
                 }
             };
+            push_facts(tools, msg, &r)?;
             save(store, &r)?;
             Ok(view(&r))
         }
@@ -958,6 +999,7 @@ mod tests {
                     )
                 }
                 "room.close" => Ok(json!({"room_id": args["room_id"]})),
+                "room.update" => Ok(json!({"room_id": args["room_id"]})),
                 "room.list" => Ok(
                     json!({"rooms": [{"room_id": "00000000-0000-0000-0000-000000000001", "subscriber_count": 2, "locked": false}]}),
                 ),
@@ -990,6 +1032,7 @@ mod tests {
                     json!({"room_id": args["room_id"], "hand": {"participant_id": args["participant_id"], "raised_at": 1, "acknowledged_at": 2, "acknowledged_by": args["actor_id"]}}),
                 ),
                 "room.hand.reset" => Ok(json!({"room_id": args["room_id"], "cleared": 1})),
+                "participant.self" => Ok(json!({"participant": USER})),
                 other => panic!("unexpected tool {other}"),
             }
         }
@@ -1046,7 +1089,10 @@ mod tests {
         let (tool, args, idem) = s.calls.borrow()[0].clone();
         assert_eq!(
             (tool.as_str(), args),
-            ("room.create", json!({"label": "Game Night"}))
+            (
+                "room.create",
+                json!({"label": "Game Night", "kind": "community", "closed": false, "allow_guests": false})
+            )
         );
         assert_eq!(
             idem.unwrap(),
@@ -1455,6 +1501,27 @@ mod tests {
                 "{text}: {r}"
             );
         }
+        admin(
+            "room.set_schedule",
+            &json!({"room_id": id, "open_at": 5, "close_at": 9}),
+            &s,
+            &k,
+            "m4",
+            0,
+        )
+        .unwrap();
+        admin(
+            "room.set_access",
+            &json!({"room_id": id, "allow_guests": true}),
+            &s,
+            &k,
+            "m5",
+            0,
+        )
+        .unwrap();
+        // `WasmIdent` (lib.rs, wasm-only) resolves the actor through this tool; the logic tests
+        // use a fake identity, so the call is made here to keep the fixture exhaustive.
+        s.invoke("participant.self", &json!({}), None).unwrap();
         chat(&format!("!room close {id}"), &s, &k, ADMIN);
         let mut seen: HashMap<String, Value> = HashMap::new();
         for (tool, args, _) in s.calls.borrow().iter() {
@@ -1470,6 +1537,63 @@ mod tests {
         for (tool, args) in want {
             assert_eq!(seen.get(tool), Some(args), "{tool}");
         }
+    }
+
+    /// Access and schedule changes are pushed to svc-streaming (`room.update`) with the whole
+    /// fact set; a refused push (the tool is staff-only) leaves the local state unchanged.
+    #[test]
+    fn set_access_and_schedule_push_room_facts_and_a_refusal_changes_nothing() {
+        let (s, k) = (Svc::default(), Kv::default());
+        chat("!room create Game Night", &s, &k, ADMIN);
+        let id = "00000000-0000-0000-0000-000000000001";
+        admin(
+            "room.set_access",
+            &json!({"room_id": id, "allow_guests": true}),
+            &s,
+            &k,
+            "a1",
+            0,
+        )
+        .unwrap();
+        admin(
+            "room.set_schedule",
+            &json!({"room_id": id, "open_at": 5, "close_at": 9}),
+            &s,
+            &k,
+            "a2",
+            0,
+        )
+        .unwrap();
+        let pushes: Vec<Value> = s
+            .calls
+            .borrow()
+            .iter()
+            .filter(|(t, _, _)| t == "room.update")
+            .map(|(_, a, _)| a.clone())
+            .collect();
+        assert_eq!(
+            pushes,
+            vec![
+                json!({"room_id": id, "kind": "community", "closed": false, "allow_guests": true}),
+                json!({"room_id": id, "kind": "community", "closed": false,
+                       "allow_guests": true, "starts_at": 5, "ends_at": 9}),
+            ]
+        );
+        // The host refuses the push: the error surfaces and nothing is saved locally.
+        *s.fail.borrow_mut() = Some(ToolFail::Forbidden);
+        for (op, args) in [
+            (
+                "room.set_access",
+                json!({"room_id": id, "allow_guests": false}),
+            ),
+            ("room.set_schedule", json!({"room_id": id})),
+        ] {
+            assert!(admin(op, &args, &s, &k, "a3", 0).is_err(), "{op}");
+        }
+        *s.fail.borrow_mut() = None;
+        let v = admin("room.get", &json!({"room_id": id}), &s, &k, "a4", 0).unwrap();
+        assert_eq!(v["allow_guests"], true);
+        assert_eq!(v["schedule"]["close_at"], 9);
     }
 
     /// The shared policy contract the webrtc bundle and hub-api are held to.

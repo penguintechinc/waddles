@@ -51,7 +51,9 @@ def test_role_column_is_appended_last_nullable_and_readable_by_the_reader() -> N
                     (_VIEW,),
                 )
                 cols = [r[0] for r in cur.fetchall()]
-                assert cols[-1] == "role"
+                # 0070 appended `role`; the only later change is 0116's trailing `hub_user_id`
+                # (the per-community participant-identity input), never a reorder of `role`.
+                assert cols[-2:] == ["role", "hub_user_id"]
                 assert cols.count("role") == 1
                 assert "display_name" not in cols  # still PII-free
                 cur.execute(

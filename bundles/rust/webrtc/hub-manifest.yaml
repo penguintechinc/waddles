@@ -4,7 +4,7 @@
 schema_version: 2
 app_id: waddles.core.service.webrtc
 name: WebRTC Service Bundle (Rust)
-version: 1.2.1
+version: 1.4.0
 feature: waddles.core.service
 module: core
 provider: builtin
@@ -32,7 +32,7 @@ routes_to: []
 exported_tools:
 - name: room.create
   access: write
-  risk: normal
+  risk: dangerous
   input_schema:
     type: object
     properties:
@@ -46,6 +46,21 @@ exported_tools:
       route:
         enum:
         - sfu
+      kind:
+        enum:
+        - community
+        - stage
+        - green_room
+      closed:
+        type: boolean
+      allow_guests:
+        type: boolean
+      starts_at:
+        type: integer
+        minimum: 0
+      ends_at:
+        type: integer
+        minimum: 0
     required: []
     additionalProperties: false
   output_schema:
@@ -72,7 +87,63 @@ exported_tools:
           format: uuid
       subscriber_count:
         type: integer
-  required_scope: community:admin
+  required_scope: rooms:create
+- name: room.update
+  access: write
+  risk: dangerous
+  input_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      kind:
+        enum:
+        - community
+        - stage
+        - green_room
+      closed:
+        type: boolean
+      allow_guests:
+        type: boolean
+      starts_at:
+        type:
+        - integer
+        - 'null'
+        minimum: 0
+      ends_at:
+        type:
+        - integer
+        - 'null'
+        minimum: 0
+    required:
+    - room_id
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      room_id:
+        type: string
+        format: uuid
+      label:
+        type:
+        - string
+        - 'null'
+      route:
+        enum:
+        - sfu
+      max_publishers:
+        type: integer
+      created_at:
+        type: integer
+      publisher_ids:
+        type: array
+        items:
+          type: string
+          format: uuid
+      subscriber_count:
+        type: integer
+  required_scope: rooms:update
 - name: room.get
   access: read
   risk: normal
@@ -145,7 +216,7 @@ exported_tools:
           format: uuid
       subscriber_count:
         type: integer
-  required_scope: community:admin
+  required_scope: rooms:close
 - name: token.issue
   access: write
   risk: dangerous
@@ -367,6 +438,21 @@ exported_tools:
       verified:
         type: boolean
   required_scope: community:admin
+- name: participant.self
+  access: read
+  risk: normal
+  input_schema:
+    type: object
+    properties: {}
+    required: []
+    additionalProperties: false
+  output_schema:
+    type: object
+    properties:
+      participant:
+        type: string
+        format: uuid
+  required_scope: community:member
 - name: recording.stop
   access: write
   risk: normal
@@ -513,7 +599,7 @@ exported_tools:
         format: uuid
       sessions_closed:
         type: integer
-  required_scope: community:moderate
+  required_scope: rooms:kick
 - name: room.mute
   access: write
   risk: normal
@@ -541,7 +627,7 @@ exported_tools:
         format: uuid
       muted:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:mute
 - name: room.unmute
   access: write
   risk: normal
@@ -569,7 +655,7 @@ exported_tools:
         format: uuid
       muted:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:mute
 - name: room.mute_all
   access: write
   risk: normal
@@ -590,7 +676,7 @@ exported_tools:
         format: uuid
       muted:
         type: integer
-  required_scope: community:moderate
+  required_scope: rooms:mute
 - name: room.lock
   access: write
   risk: normal
@@ -611,7 +697,7 @@ exported_tools:
         format: uuid
       locked:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:lock
 - name: room.unlock
   access: write
   risk: normal
@@ -632,7 +718,7 @@ exported_tools:
         format: uuid
       locked:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:lock
 - name: room.hand.raise
   access: write
   risk: normal
@@ -725,7 +811,7 @@ exported_tools:
         format: uuid
       lowered:
         type: boolean
-  required_scope: community:moderate
+  required_scope: rooms:hands
 - name: room.hand.list
   access: read
   risk: normal
@@ -807,7 +893,7 @@ exported_tools:
             format: uuid
             position:
               type: integer
-  required_scope: community:moderate
+  required_scope: rooms:hands
 - name: room.hand.ack
   access: write
   risk: normal
@@ -846,7 +932,7 @@ exported_tools:
           acknowledged_by:
             type: string
             format: uuid
-  required_scope: community:moderate
+  required_scope: rooms:hands
 - name: room.hand.reset
   access: write
   risk: normal
@@ -870,7 +956,7 @@ exported_tools:
         format: uuid
       cleared:
         type: integer
-  required_scope: community:moderate
+  required_scope: rooms:hands
 config_schema: {}
 compatible_with: []
 incompatible_with: []

@@ -87,6 +87,8 @@ pub(super) fn floor_actor() -> ActorContext {
     ActorContext {
         actor: Some(FLOOR_ACTOR.to_string()),
         scopes: vec![REPUTATION_MODERATE_SCOPE.to_string()],
+        // The system actor is never a call participant (fail closed: no per-community pseudonym).
+        participant: None,
     }
 }
 

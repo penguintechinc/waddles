@@ -29,7 +29,7 @@ use webrtc::rtp_transceiver::{RTCRtpTransceiverDirection, RTCRtpTransceiverInit}
 use webrtc::runtime::Runtime;
 
 use super::token::RoomClaims;
-use super::{RoomError, RoomService, SessionGrant};
+use super::{RoomError, RoomService, SessionActivity, SessionGrant};
 use crate::egress::whep::{h264_codec, opus_codec, viewer_track};
 use crate::error::ApiError;
 use crate::rtc::fanout::{MediaFanouts, TrackFanout};
@@ -106,6 +106,8 @@ struct PublishHandler {
     gather: Arc<Notify>,
     metrics: RtcMetrics,
     runtime: Arc<dyn Runtime>,
+    /// Ingress RTP counter the room sweeper watches for the publisher idle timeout.
+    packets: Arc<std::sync::atomic::AtomicU64>,
 }
 
 #[async_trait]
@@ -127,11 +129,13 @@ impl PeerConnectionEventHandler for PublishHandler {
         let kind = track.kind().await;
         let fanouts = self.fanouts.clone();
         let metrics = self.metrics.clone();
+        let packets = self.packets.clone();
         self.runtime.spawn(Box::pin(async move {
             while let Some(ev) = track.poll().await {
                 let TrackRemoteEvent::OnRtpPacket(p) = ev else {
                     continue;
                 };
+                packets.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 metrics
                     .rtp_packets_total
                     .with_label_values(&["ingress"])
@@ -169,6 +173,14 @@ impl PeerConnectionEventHandler for ViewerHandler {
     }
 }
 
+/// What a viewer forwarder reports back: an egress counter (viewer liveness timeout) and the
+/// session's `ended` flag, set when a write to the viewer fails.
+#[derive(Clone)]
+struct ForwardLiveness {
+    packets: Arc<std::sync::atomic::AtomicU64>,
+    ended: Arc<std::sync::atomic::AtomicBool>,
+}
+
 /// Forwards one fanout to one viewer track, rewriting SSRC and payload type to
 /// what the viewer's own negotiation produced.
 fn spawn_forward(
@@ -178,6 +190,7 @@ fn spawn_forward(
     ssrc: u32,
     pt: Option<u8>,
     metrics: RtcMetrics,
+    liveness: ForwardLiveness,
 ) {
     runtime.spawn(Box::pin(async move {
         let mut sub = fanout.subscribe();
@@ -191,8 +204,15 @@ fn spawn_forward(
                 .with_label_values(&["egress"])
                 .inc();
             if track.write_rtp(p).await.is_err() {
+                // The viewer's transport is gone: flag it for the sweeper to reap.
+                liveness
+                    .ended
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
                 break;
             }
+            liveness
+                .packets
+                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
     }));
 }
@@ -266,12 +286,14 @@ async fn publish(
     let gather = Arc::new(Notify::new());
     let runtime = svc.factory.runtime();
     let reap = ReapSlot::default();
+    let packets = Arc::new(std::sync::atomic::AtomicU64::new(0));
     let handler = Arc::new(PublishHandler {
         reap: reap.clone(),
         fanouts: fanouts.clone(),
         gather: gather.clone(),
         metrics: svc.metrics.clone(),
         runtime,
+        packets: packets.clone(),
     });
     let pc = svc
         .factory
@@ -317,6 +339,10 @@ async fn publish(
             SessionGrant {
                 expires_at: claims.exp,
                 jti,
+                epoch: claims.epoch,
+            },
+            SessionActivity {
+                packets: Some(packets),
             },
         )
         .await
@@ -438,6 +464,11 @@ async fn subscribe(
         }
     }
     let runtime = svc.factory.runtime();
+    let egress_packets = Arc::new(std::sync::atomic::AtomicU64::new(0));
+    let liveness = ForwardLiveness {
+        packets: egress_packets.clone(),
+        ended: reap.ended.clone(),
+    };
     spawn_forward(
         &*runtime,
         fanouts.video,
@@ -445,6 +476,7 @@ async fn subscribe(
         vssrc,
         video_pt,
         svc.metrics.clone(),
+        liveness.clone(),
     );
     spawn_forward(
         &*runtime,
@@ -453,6 +485,7 @@ async fn subscribe(
         assrc,
         audio_pt,
         svc.metrics.clone(),
+        liveness,
     );
 
     let session = match svc
@@ -464,6 +497,10 @@ async fn subscribe(
             SessionGrant {
                 expires_at: claims.exp,
                 jti,
+                epoch: claims.epoch,
+            },
+            SessionActivity {
+                packets: Some(egress_packets),
             },
         )
         .await
@@ -493,8 +530,9 @@ async fn end_session(
     Path((room_id, session)): Path<(Uuid, Uuid)>,
     headers: HeaderMap,
 ) -> Result<StatusCode, ApiError> {
+    // The token gated admission only: its holder may end their session after it expired.
     let claims = svc
-        .authorize(bearer(&headers)?, room_id)
+        .authorize_established(bearer(&headers)?, room_id)
         .await
         .map_err(api_error)?;
     let participant = claims_participant(&claims)?;

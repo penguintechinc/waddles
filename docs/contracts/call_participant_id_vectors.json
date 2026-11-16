@@ -1,0 +1,9 @@
+{
+  "_comment": "Shared vectors: uuid5(namespace, \"<tenant>:<community>:<user>\"). Pinned by core/svc_process (Rust host) and scripts/ci/tests/test_call_participant_vectors.py (matches hub_api/services/call_participants.py).",
+  "namespace": "6f3c1c1e-5b8e-4a67-9d3b-2f0c8f3f6a11",
+  "vectors": [
+    {"tenant": "acme", "community_id": 7, "user_id": 42, "participant": "6ddfed17-53e3-52f4-9b38-62458f713e4a"},
+    {"tenant": "default", "community_id": 1, "user_id": 1, "participant": "03928d8c-0c63-5c10-b0ba-7293ac08c6f3"},
+    {"tenant": "waddles-demo", "community_id": 123, "user_id": 9007199254740993, "participant": "80686ab6-b26c-54a5-a3ff-7e0e610d4d54"}
+  ]
+}

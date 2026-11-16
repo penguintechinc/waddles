@@ -51,6 +51,7 @@ fn admin() -> ToolContext {
         idempotency_key: None,
         actor: Some("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa".to_string()),
         actor_scopes: vec![ADMIN_SCOPE.to_string()],
+        ..ToolContext::default()
     }
 }
 

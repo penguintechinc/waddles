@@ -71,3 +71,21 @@ State is community-scoped kv (`room.<uuid>`, `acl.<room>.<actor>`,
 
 Contract with the service: `tests/contract_calls.json` is pinned by a unit test here and by
 `scripts/ci/tests/test_rooms_webrtc_contract.py` against the webrtc manifest.
+
+## Identity (per-community pseudonym)
+
+The app's actor is the caller's per-community call-participant pseudonym, obtained through the webrtc
+tool `participant.self` (host-derived `__ctx.participant`), never the global community `user_uuid`. ACL keys,
+`created_by`, join-token participants and every svc-streaming id therefore use the same id hub-api's REST layer
+uses. Unresolvable => the command is refused (fail closed). Note: ACL entries / rooms created before this
+change were keyed by the old id and must be recreated (alpha only; nothing is migrated).
+
+Room facts: `room.create` now sets `kind` (community, or stage / green_room for virtual rooms),
+`closed=false` and `allow_guests=false` on svc-streaming's `CreateRoom` (webrtc tool args -> host `room.create`),
+so svc-streaming enforces them on join and hub-api can read them from the Room (T2b). Later fact changes
+(close, set_access, set_schedule) still only update the app's kv; pushing them through `UpdateRoom` needs a webrtc
+`room.update` tool (not built).
+
+`room.set_access` and `room.set_schedule` push the full fact set to svc-streaming through the webrtc `room.update`
+tool (staff-only) before saving locally, so a refused push changes nothing. `!room close` still deletes the room
+via `room.close`.

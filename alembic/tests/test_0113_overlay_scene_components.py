@@ -57,12 +57,14 @@ def _community(conn: sqlalchemy.Connection, name: str) -> tuple[int, int]:
 
 
 def test_chain_is_single_headed() -> None:
-    """The merge revision leaves exactly one alembic head."""
+    """The chain has exactly one alembic head, and 0113 is an ancestor of it."""
     cfg = Config(str(_ROOT / "alembic.ini"))
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
-    assert ScriptDirectory.from_config(cfg).get_heads() == [
-        "0113_overlay_scene_components"
-    ]
+    script = ScriptDirectory.from_config(cfg)
+    heads = script.get_heads()
+    assert len(heads) == 1, heads
+    ancestors = {rev.revision for rev in script.walk_revisions(base="base", head=heads[0])}
+    assert "0113_overlay_scene_components" in ancestors
 
 
 @requires_docker

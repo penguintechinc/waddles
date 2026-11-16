@@ -85,6 +85,7 @@ async fn rpc_spans_carry_numeric_ids_op_and_outcome_and_no_names() {
                 publish: false,
                 subscribe: true,
                 ttl_secs: None,
+                ..Default::default()
             },
             &write,
         ))

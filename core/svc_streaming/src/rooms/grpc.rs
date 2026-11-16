@@ -37,12 +37,13 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use super::grpc_auth::{
-    ServiceClaims, ServiceJwtVerifier, SCOPE_CREATE, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE,
+    ServiceClaims, ServiceJwtVerifier, SCOPE_CREATE, SCOPE_HANDS, SCOPE_KICK, SCOPE_LOCK,
+    SCOPE_MODERATE, SCOPE_MUTE, SCOPE_READ, SCOPE_UPDATE, SCOPE_WRITE,
 };
 use super::host_api::{build_server_config, serve_router, HostApiError, HostApiTls};
 use super::{
-    ActorRole, HandInfo, HandList, HandView, IssueRequest, ParticipantInfo, RoomError, RoomInfo,
-    RoomService, RouteMode,
+    ActorRole, HandInfo, HandList, HandView, IssueRequest, ParticipantInfo, RoomError, RoomFacts,
+    RoomInfo, RoomKind as DomainKind, RoomService, RouteMode,
 };
 
 /// Generated protobuf/tonic types for `waddles.streaming.internal.v1`.
@@ -91,6 +92,7 @@ versioned!(
     ListHandsRequest,
     CreateRoomRequest,
     DeleteRoomRequest,
+    UpdateRoomRequest,
     JoinRoomRequest,
     LeaveRoomRequest,
     RaiseHandRequest,
@@ -118,12 +120,13 @@ fn check_api_version(v: &str) -> Result<(), Status> {
 
 /// Every RPC name in `RoomsService`, kept in lockstep with the proto by the
 /// contract test (`tests/rooms_grpc.rs`) and used as the metric `rpc` label.
-pub const RPC_NAMES: [&str; 18] = [
+pub const RPC_NAMES: [&str; 19] = [
     "ListRooms",
     "GetRoom",
     "ListParticipants",
     "CreateRoom",
     "DeleteRoom",
+    "UpdateRoom",
     "JoinRoom",
     "LeaveRoom",
     "KickParticipant",
@@ -198,6 +201,23 @@ impl RoomsGrpc {
         Fut: Future<Output = Result<T, RoomError>>,
     {
         self.run_scoped(rpc, &[scope], req, |s, r, _claims| f(s, r))
+            .await
+    }
+
+    /// Runs one RPC that any of `scopes` authorizes (a per-action scope or the bundle that
+    /// contains it); the closure does not need to know which one was presented.
+    async fn run_any<R, T, Fut>(
+        &self,
+        rpc: &'static str,
+        scopes: &[&'static str],
+        req: Request<R>,
+        f: impl FnOnce(Arc<RoomService>, R) -> Fut,
+    ) -> Result<Response<T>, Status>
+    where
+        R: Versioned,
+        Fut: Future<Output = Result<T, RoomError>>,
+    {
+        self.run_scoped(rpc, scopes, req, |s, r, _claims| f(s, r))
             .await
     }
 
@@ -282,18 +302,49 @@ fn uuid(field: &str, v: &str) -> Result<Uuid, RoomError> {
     Uuid::parse_str(v).map_err(|_| RoomError::Invalid(format!("{field} must be a UUID")))
 }
 
-fn role(v: i32) -> ActorRole {
-    match RoomRole::try_from(v).unwrap_or(RoomRole::Unspecified) {
-        RoomRole::Admin => ActorRole::Admin,
-        RoomRole::Moderator => ActorRole::Moderator,
-        RoomRole::Member => ActorRole::Member,
-        // Unspecified/unknown is the least-privileged role, never an implicit grant.
-        RoomRole::Guest | RoomRole::Unspecified => ActorRole::Guest,
+/// Wire kind -> domain kind; unspecified is COMMUNITY, an unknown value is refused.
+fn kind_of(v: i32) -> Result<DomainKind, RoomError> {
+    match RoomKind::try_from(v) {
+        Ok(RoomKind::Unspecified | RoomKind::Community) => Ok(DomainKind::Community),
+        Ok(RoomKind::TownHall) => Ok(DomainKind::TownHall),
+        Ok(RoomKind::Stage) => Ok(DomainKind::Stage),
+        Ok(RoomKind::GreenRoom) => Ok(DomainKind::GreenRoom),
+        Err(_) => Err(RoomError::Invalid("unknown room kind".into())),
     }
+}
+
+fn kind_pb(k: DomainKind) -> RoomKind {
+    match k {
+        DomainKind::Community => RoomKind::Community,
+        DomainKind::TownHall => RoomKind::TownHall,
+        DomainKind::Stage => RoomKind::Stage,
+        DomainKind::GreenRoom => RoomKind::GreenRoom,
+    }
+}
+
+fn facts_of(
+    kind: i32,
+    closed: bool,
+    starts_at: Option<i64>,
+    ends_at: Option<i64>,
+    allow_guests: bool,
+) -> Result<RoomFacts, RoomError> {
+    Ok(RoomFacts {
+        kind: kind_of(kind)?,
+        closed,
+        starts_at,
+        ends_at,
+        allow_guests,
+    })
 }
 
 fn room_pb(r: RoomInfo) -> Room {
     Room {
+        kind: kind_pb(r.facts.kind) as i32,
+        closed: r.facts.closed,
+        starts_at: r.facts.starts_at,
+        ends_at: r.facts.ends_at,
+        allow_guests: r.facts.allow_guests,
         room_id: r.room_id.to_string(),
         community_id: r.community_id,
         label: r.label,
@@ -377,17 +428,33 @@ impl RoomsService for RoomsGrpc {
         req: Request<CreateRoomRequest>,
     ) -> Result<Response<CreateRoomResponse>, Status> {
         self.run("CreateRoom", SCOPE_CREATE, req, |s, r| async move {
+            let facts = facts_of(r.kind, r.closed, r.starts_at, r.ends_at, r.allow_guests)?;
             let info = s
-                .create_with(
+                .create_with_facts(
                     &r.community_id,
                     r.label,
                     r.max_publishers.map(|n| n as usize),
                     RouteMode::Sfu,
                     r.empty_timeout_secs,
+                    facts,
                 )
                 .await?;
             Ok(CreateRoomResponse {
                 room: Some(room_pb(info)),
+            })
+        })
+        .await
+    }
+
+    async fn update_room(
+        &self,
+        req: Request<UpdateRoomRequest>,
+    ) -> Result<Response<UpdateRoomResponse>, Status> {
+        self.run("UpdateRoom", SCOPE_UPDATE, req, |s, r| async move {
+            let id = uuid("room_id", &r.room_id)?;
+            let facts = facts_of(r.kind, r.closed, r.starts_at, r.ends_at, r.allow_guests)?;
+            Ok(UpdateRoomResponse {
+                room: Some(room_pb(s.update_facts(&r.community_id, id, facts).await?)),
             })
         })
         .await
@@ -440,6 +507,7 @@ impl RoomsService for RoomsGrpc {
                             // Staff only ever comes from VERIFIED authority: the moderate-scoped
                             // service JWT. No request field can claim it.
                             staff: c.scope == SCOPE_MODERATE,
+                            guest: r.guest,
                         },
                     )
                     .await?;
@@ -462,25 +530,31 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<LeaveRoomRequest>,
     ) -> Result<Response<LeaveRoomResponse>, Status> {
-        self.run("LeaveRoom", SCOPE_WRITE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let participant = uuid("participant_id", &r.participant_id)?;
-            let actor = uuid("actor_id", &r.actor_id)?;
-            let n = s
-                .leave(
-                    &r.community_id,
-                    room_id,
-                    participant,
-                    actor,
-                    role(r.actor_role),
-                )
-                .await?;
-            Ok(LeaveRoomResponse {
-                room_id: room_id.to_string(),
-                participant_id: participant.to_string(),
-                sessions_closed: n as u32,
-            })
-        })
+        self.run_scoped(
+            "LeaveRoom",
+            &[SCOPE_WRITE, SCOPE_KICK, SCOPE_MODERATE],
+            req,
+            |s, r, c| async move {
+                // Removing someone ELSE needs the kick scope (or the moderator bundle that holds it);
+                // the request's actor_role is display/audit only and never read.
+                let role = if c.scope == SCOPE_KICK || c.scope == SCOPE_MODERATE {
+                    ActorRole::Moderator
+                } else {
+                    ActorRole::Member
+                };
+                let room_id = uuid("room_id", &r.room_id)?;
+                let participant = uuid("participant_id", &r.participant_id)?;
+                let actor = uuid("actor_id", &r.actor_id)?;
+                let n = s
+                    .leave(&r.community_id, room_id, participant, actor, role)
+                    .await?;
+                Ok(LeaveRoomResponse {
+                    room_id: room_id.to_string(),
+                    participant_id: participant.to_string(),
+                    sessions_closed: n as u32,
+                })
+            },
+        )
         .await
     }
 
@@ -488,25 +562,30 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<KickParticipantRequest>,
     ) -> Result<Response<KickParticipantResponse>, Status> {
-        self.run("KickParticipant", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let participant = uuid("participant_id", &r.participant_id)?;
-            let actor = uuid("actor_id", &r.actor_id)?;
-            let n = s
-                .kick(
-                    &r.community_id,
-                    room_id,
-                    participant,
-                    actor,
-                    role(r.actor_role),
-                )
-                .await?;
-            Ok(KickParticipantResponse {
-                room_id: room_id.to_string(),
-                participant_id: participant.to_string(),
-                sessions_closed: n as u32,
-            })
-        })
+        self.run_any(
+            "KickParticipant",
+            &[SCOPE_KICK, SCOPE_MODERATE],
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let participant = uuid("participant_id", &r.participant_id)?;
+                let actor = uuid("actor_id", &r.actor_id)?;
+                let n = s
+                    .kick(
+                        &r.community_id,
+                        room_id,
+                        participant,
+                        actor,
+                        ActorRole::Moderator,
+                    )
+                    .await?;
+                Ok(KickParticipantResponse {
+                    room_id: room_id.to_string(),
+                    participant_id: participant.to_string(),
+                    sessions_closed: n as u32,
+                })
+            },
+        )
         .await
     }
 
@@ -514,24 +593,29 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<MuteParticipantRequest>,
     ) -> Result<Response<MuteParticipantResponse>, Status> {
-        self.run("MuteParticipant", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let participant = uuid("participant_id", &r.participant_id)?;
-            uuid("actor_id", &r.actor_id)?;
-            s.set_muted(
-                &r.community_id,
-                room_id,
-                participant,
-                true,
-                role(r.actor_role),
-            )
-            .await?;
-            Ok(MuteParticipantResponse {
-                room_id: room_id.to_string(),
-                participant_id: participant.to_string(),
-                muted: true,
-            })
-        })
+        self.run_any(
+            "MuteParticipant",
+            &[SCOPE_MUTE, SCOPE_MODERATE],
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let participant = uuid("participant_id", &r.participant_id)?;
+                uuid("actor_id", &r.actor_id)?;
+                s.set_muted(
+                    &r.community_id,
+                    room_id,
+                    participant,
+                    true,
+                    ActorRole::Moderator,
+                )
+                .await?;
+                Ok(MuteParticipantResponse {
+                    room_id: room_id.to_string(),
+                    participant_id: participant.to_string(),
+                    muted: true,
+                })
+            },
+        )
         .await
     }
 
@@ -539,9 +623,9 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<UnmuteParticipantRequest>,
     ) -> Result<Response<UnmuteParticipantResponse>, Status> {
-        self.run(
+        self.run_any(
             "UnmuteParticipant",
-            SCOPE_MODERATE,
+            &[SCOPE_MUTE, SCOPE_MODERATE],
             req,
             |s, r| async move {
                 let room_id = uuid("room_id", &r.room_id)?;
@@ -552,7 +636,7 @@ impl RoomsService for RoomsGrpc {
                     room_id,
                     participant,
                     false,
-                    role(r.actor_role),
+                    ActorRole::Moderator,
                 )
                 .await?;
                 Ok(UnmuteParticipantResponse {
@@ -569,17 +653,22 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<MuteAllRequest>,
     ) -> Result<Response<MuteAllResponse>, Status> {
-        self.run("MuteAll", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let actor = uuid("actor_id", &r.actor_id)?;
-            let n = s
-                .mute_all(&r.community_id, room_id, actor, role(r.actor_role))
-                .await?;
-            Ok(MuteAllResponse {
-                room_id: room_id.to_string(),
-                muted: n as u32,
-            })
-        })
+        self.run_any(
+            "MuteAll",
+            &[SCOPE_MUTE, SCOPE_MODERATE],
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let actor = uuid("actor_id", &r.actor_id)?;
+                let n = s
+                    .mute_all(&r.community_id, room_id, actor, ActorRole::Moderator)
+                    .await?;
+                Ok(MuteAllResponse {
+                    room_id: room_id.to_string(),
+                    muted: n as u32,
+                })
+            },
+        )
         .await
     }
 
@@ -587,16 +676,21 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<LockRoomRequest>,
     ) -> Result<Response<LockRoomResponse>, Status> {
-        self.run("LockRoom", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            uuid("actor_id", &r.actor_id)?;
-            s.set_locked(&r.community_id, room_id, true, role(r.actor_role))
-                .await?;
-            Ok(LockRoomResponse {
-                room_id: room_id.to_string(),
-                locked: true,
-            })
-        })
+        self.run_any(
+            "LockRoom",
+            &[SCOPE_LOCK, SCOPE_MODERATE],
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                uuid("actor_id", &r.actor_id)?;
+                s.set_locked(&r.community_id, room_id, true, ActorRole::Moderator)
+                    .await?;
+                Ok(LockRoomResponse {
+                    room_id: room_id.to_string(),
+                    locked: true,
+                })
+            },
+        )
         .await
     }
 
@@ -604,16 +698,21 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<UnlockRoomRequest>,
     ) -> Result<Response<UnlockRoomResponse>, Status> {
-        self.run("UnlockRoom", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            uuid("actor_id", &r.actor_id)?;
-            s.set_locked(&r.community_id, room_id, false, role(r.actor_role))
-                .await?;
-            Ok(UnlockRoomResponse {
-                room_id: room_id.to_string(),
-                locked: false,
-            })
-        })
+        self.run_any(
+            "UnlockRoom",
+            &[SCOPE_LOCK, SCOPE_MODERATE],
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                uuid("actor_id", &r.actor_id)?;
+                s.set_locked(&r.community_id, room_id, false, ActorRole::Moderator)
+                    .await?;
+                Ok(UnlockRoomResponse {
+                    room_id: room_id.to_string(),
+                    locked: false,
+                })
+            },
+        )
         .await
     }
 
@@ -623,14 +722,14 @@ impl RoomsService for RoomsGrpc {
     ) -> Result<Response<ListHandsResponse>, Status> {
         self.run_scoped(
             "ListHands",
-            &[SCOPE_READ, SCOPE_MODERATE],
+            &[SCOPE_READ, SCOPE_HANDS, SCOPE_MODERATE],
             req,
             |s, r, c| async move {
                 let id = uuid("room_id", &r.room_id)?;
                 let actor = uuid("actor_id", &r.actor_id)?;
                 // The whole queue is reachable only with the moderate scope (and a staff actor);
                 // the read scope sees the actor's own entry, queue length and position.
-                let view = if c.scope == SCOPE_MODERATE {
+                let view = if c.scope == SCOPE_MODERATE || c.scope == SCOPE_HANDS {
                     HandView::All
                 } else {
                     HandView::Own
@@ -675,7 +774,7 @@ impl RoomsService for RoomsGrpc {
     ) -> Result<Response<LowerHandResponse>, Status> {
         self.run_scoped(
             "LowerHand",
-            &[SCOPE_WRITE, SCOPE_MODERATE],
+            &[SCOPE_WRITE, SCOPE_HANDS, SCOPE_MODERATE],
             req,
             |s, r, c| async move {
                 let room_id = uuid("room_id", &r.room_id)?;
@@ -683,7 +782,7 @@ impl RoomsService for RoomsGrpc {
                 let actor = uuid("actor_id", &r.actor_id)?;
                 // Lowering someone else's hand needs the VERIFIED moderate scope on top of the
                 // staff ACL the service checks; `actor_role` is never read.
-                if actor != participant && c.scope != SCOPE_MODERATE {
+                if actor != participant && c.scope != SCOPE_MODERATE && c.scope != SCOPE_HANDS {
                     return Err(RoomError::Forbidden(
                         "lowering another participant's hand needs the moderate scope",
                     ));
@@ -705,17 +804,22 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<AcknowledgeHandRequest>,
     ) -> Result<Response<AcknowledgeHandResponse>, Status> {
-        self.run("AcknowledgeHand", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let participant = uuid("participant_id", &r.participant_id)?;
-            let actor = uuid("actor_id", &r.actor_id)?;
-            let hand = s
-                .acknowledge_hand(&r.community_id, room_id, participant, actor)
-                .await?;
-            Ok(AcknowledgeHandResponse {
-                hand: Some(hand_pb(hand)),
-            })
-        })
+        self.run_any(
+            "AcknowledgeHand",
+            &[SCOPE_HANDS, SCOPE_MODERATE],
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let participant = uuid("participant_id", &r.participant_id)?;
+                let actor = uuid("actor_id", &r.actor_id)?;
+                let hand = s
+                    .acknowledge_hand(&r.community_id, room_id, participant, actor)
+                    .await?;
+                Ok(AcknowledgeHandResponse {
+                    hand: Some(hand_pb(hand)),
+                })
+            },
+        )
         .await
     }
 
@@ -723,15 +827,20 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<ResetHandsRequest>,
     ) -> Result<Response<ResetHandsResponse>, Status> {
-        self.run("ResetHands", SCOPE_MODERATE, req, |s, r| async move {
-            let room_id = uuid("room_id", &r.room_id)?;
-            let actor = uuid("actor_id", &r.actor_id)?;
-            let cleared = s.reset_hands(&r.community_id, room_id, actor).await?;
-            Ok(ResetHandsResponse {
-                room_id: room_id.to_string(),
-                cleared: cleared as u32,
-            })
-        })
+        self.run_any(
+            "ResetHands",
+            &[SCOPE_HANDS, SCOPE_MODERATE],
+            req,
+            |s, r| async move {
+                let room_id = uuid("room_id", &r.room_id)?;
+                let actor = uuid("actor_id", &r.actor_id)?;
+                let cleared = s.reset_hands(&r.community_id, room_id, actor).await?;
+                Ok(ResetHandsResponse {
+                    room_id: room_id.to_string(),
+                    cleared: cleared as u32,
+                })
+            },
+        )
         .await
     }
 }
