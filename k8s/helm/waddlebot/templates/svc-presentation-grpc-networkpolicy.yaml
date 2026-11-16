@@ -1,0 +1,81 @@
+# svc-presentation's in-cluster surface gRPC port (waddles.presentation.internal.v1.SurfaceService,
+# pipeline.svcPresentation.grpcPort): the ONLY path bundles' `overlay.publish-surface` publishes use.
+#
+# Ingress: the port is deliberately NOT in the generic svc-presentation workload policy
+# (templates/svc-presentation-rust.yaml passes it as excludePorts), because that policy admits
+# every same-namespace pod on its declared ports. Cilium unions allow rules, so this dedicated
+# policy is the only grant: the two stage workloads that host the capability -- svc-action-rust and
+# svc-process-rust (Rust data plane; the executor itself never dials presentation) -- and nothing
+# else, port 50051 only. The app layer is the second boundary: every Publish carries a hub-api
+# machine JWT bound to exactly one community, verified before the payload is read.
+#
+# Egress: the dataplane is "managed" egress (default-deny + explicit allows,
+# templates/network-policies-egress.yaml), so each caller needs its own narrow allow to
+# svc-presentation on this one port. Same component set as the ingress side.
+{{- if eq (include "waddlebot.presentationGrpcEnabled" .) "true" }}
+{{- $callers := list }}
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcAction.enabled }}
+{{- $callers = append $callers "svc-action-rust" }}
+{{- end }}
+{{- if and .Values.pipeline.rustDataPlane.enabled .Values.pipeline.rustDataPlane.svcProcess.enabled }}
+{{- $callers = append $callers "svc-process-rust" }}
+{{- end }}
+{{- if $callers }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-presentation-grpc
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-presentation
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-presentation
+  ingress:
+    - fromEndpoints:
+        - matchExpressions:
+            - key: app.kubernetes.io/component
+              operator: In
+              values:
+                {{- range $callers }}
+                - {{ . }}
+                {{- end }}
+            - key: app.kubernetes.io/instance
+              operator: In
+              values:
+                - {{ .Release.Name }}
+      toPorts:
+        - ports:
+            - port: {{ .Values.pipeline.svcPresentation.grpcPort | quote }}
+              protocol: TCP
+{{- range $callers }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" $ }}-{{ . }}-presentation-grpc-egress
+  namespace: {{ $.Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ . }}
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" $ | nindent 6 }}
+      app.kubernetes.io/component: {{ . }}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" $ | nindent 12 }}
+            app.kubernetes.io/component: svc-presentation
+      toPorts:
+        - ports:
+            - port: {{ $.Values.pipeline.svcPresentation.grpcPort | quote }}
+              protocol: TCP
+{{- end }}
+{{- end }}
+{{- end }}

@@ -75,3 +75,98 @@ where
     });
     Ok(HostBridge::new(connection))
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+    use super::*;
+    use penguin_bundle_host::wire::{CapabilityKind, HelloLimits, HelloOkBody, HostResultBody};
+
+    fn hello_ok() -> Message {
+        Message::HelloOk(HelloOkBody {
+            stage: "svc-test".to_string(),
+            protocol_version: u32::from(PROTOCOL_VERSION),
+            limits: HelloLimits {
+                call_timeout_ms: 1000,
+                memory_mb: 64,
+                max_concurrent_calls: 4,
+            },
+        })
+    }
+
+    /// A stage that answers `hello` with `reply`, then (if it was `hello-ok`) serves host calls
+    /// by echoing the op name back as the result.
+    fn spawn_stage(io: tokio::io::DuplexStream, reply: Message) {
+        tokio::spawn(async move {
+            let (mut r, mut w) = tokio::io::split(io);
+            let hello = read_frame(&mut r).await.unwrap();
+            assert!(matches!(hello.message, Message::Hello(_)));
+            let ok = matches!(reply, Message::HelloOk(_));
+            write_frame(&mut w, &Frame::new(hello.id, reply))
+                .await
+                .unwrap();
+            if !ok {
+                return;
+            }
+            while let Ok(frame) = read_frame(&mut r).await {
+                if let Message::HostCall(body) = frame.message {
+                    let result = HostResultBody {
+                        result: Some(serde_json::json!({ "echo": body.op })),
+                        error: None,
+                    };
+                    if write_frame(&mut w, &Frame::new(frame.id, Message::HostResult(result)))
+                        .await
+                        .is_err()
+                    {
+                        break;
+                    }
+                }
+            }
+        });
+    }
+
+    #[tokio::test]
+    async fn a_hello_ok_stage_yields_a_bridge_that_round_trips_host_calls() {
+        let (exec_io, stage_io) = tokio::io::duplex(16 * 1024);
+        spawn_stage(stage_io, hello_ok());
+        let bridge = bridge_to_stage(exec_io).await.expect("handshake ok");
+        let out = bridge
+            .call(
+                "app",
+                7,
+                CapabilityKind::Context,
+                "get-context",
+                serde_json::json!({}),
+            )
+            .await
+            .expect("host call answered by the stage");
+        assert_eq!(out["echo"], "get-context");
+    }
+
+    #[tokio::test]
+    async fn a_stage_that_does_not_answer_hello_ok_is_refused() {
+        let (exec_io, stage_io) = tokio::io::duplex(16 * 1024);
+        let wrong = Message::HostResult(HostResultBody {
+            result: Some(serde_json::json!({})),
+            error: None,
+        });
+        spawn_stage(stage_io, wrong);
+        let err = bridge_to_stage(exec_io).await.err().expect("refused");
+        assert!(
+            err.to_string()
+                .contains("did not answer hello with hello-ok"),
+            "{err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn a_stage_that_hangs_up_fails_the_handshake() {
+        let (exec_io, stage_io) = tokio::io::duplex(16 * 1024);
+        drop(stage_io);
+        let err = bridge_to_stage(exec_io)
+            .await
+            .err()
+            .expect("handshake fails");
+        assert!(err.to_string().contains("stage-bridge hello"), "{err}");
+    }
+}

@@ -44,6 +44,7 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,
@@ -1418,3 +1419,6 @@ async fn write_actor_directory_outage_fails_closed_but_actorless_events_proceed(
         .unwrap();
     assert_eq!(recorded(&exec).len(), 1);
 }
+
+#[path = "floor_ban_tests.rs"]
+mod floor_ban_tests;

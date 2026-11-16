@@ -344,3 +344,60 @@ describe('AdminCommunityRoles panel switching', () => {
     expect(screen.getByRole('heading', { name: 'Create Role' })).toBeInTheDocument();
   });
 });
+
+describe('AdminCommunityRoles predefined-role protections', () => {
+  const PROTECTED = () => [
+    {
+      id: 10, name: 'community-admin', displayName: 'Admin', priority: 40, is_system: true,
+      scopes: ['community:read', 'roles:manage'], scopes_editable: false, deletable: false,
+    },
+    {
+      id: 11, name: 'moderator', displayName: 'Moderator', priority: 30, is_system: true,
+      scopes: ['channels:moderate'], scopes_editable: true, deletable: false,
+    },
+    {
+      id: 12, name: 'vip', displayName: 'VIP', priority: 5, is_system: false,
+      scopes: [], scopes_editable: true, deletable: true,
+    },
+  ];
+
+  beforeEach(() => {
+    rolesApi.list.mockResolvedValue({ data: { roles: PROTECTED() } });
+  });
+
+  it('locks the admin role: no edit, no delete, a Locked marker', async () => {
+    mount();
+    await screen.findByText('Admin');
+    const admin = rowOf('Admin');
+    expect(admin.queryByTitle('Edit role')).not.toBeInTheDocument();
+    expect(admin.queryByTitle('Delete role')).not.toBeInTheDocument();
+    expect(admin.getByText('Locked')).toBeInTheDocument();
+  });
+
+  it('lets the moderator role be edited but never deleted', async () => {
+    mount();
+    await screen.findByText('Moderator');
+    const mod = rowOf('Moderator');
+    expect(mod.getByTitle('Edit role')).toBeInTheDocument();
+    expect(mod.queryByTitle('Delete role')).not.toBeInTheDocument();
+    expect(mod.queryByText('Locked')).not.toBeInTheDocument();
+  });
+
+  it('keeps full controls on custom roles', async () => {
+    mount();
+    await screen.findByText('VIP');
+    expect(rowOf('VIP').getByTitle('Edit role')).toBeInTheDocument();
+    expect(rowOf('VIP').getByTitle('Delete role')).toBeInTheDocument();
+  });
+
+  it('surfaces the server guard message when an edit is refused', async () => {
+    rolesApi.update.mockRejectedValue({
+      response: { data: { success: false, error: 'Cannot grant scopes you do not hold: x:y' } },
+    });
+    mount();
+    await screen.findByText('Moderator');
+    fireEvent.click(rowOf('Moderator').getByTitle('Edit role'));
+    fireEvent.submit(screen.getByRole('heading', { name: 'Edit Role' }).closest('form'));
+    expect(await screen.findByText(/Cannot grant scopes you do not hold/)).toBeInTheDocument();
+  });
+});

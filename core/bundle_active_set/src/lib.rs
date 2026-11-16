@@ -61,11 +61,13 @@
 
 pub mod bindings;
 pub mod changelog;
+pub mod concurrent;
 pub mod diff;
 pub mod entities;
 pub mod full_sync;
 pub mod load_tracker;
 pub mod multi_tenant;
+pub mod partition;
 pub mod query;
 pub mod reader;
 pub mod scope;
@@ -88,6 +90,10 @@ pub use load_tracker::{full_jitter_delay, jitter_unit, LoadAdmission, LoadBackof
 pub use multi_tenant::{
     read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
     AppScope, ScopeKey,
+};
+pub use partition::{
+    init_table_from_env, parse_executor_id, qualify_executor_id, table as language_table,
+    ExecutorClass, LanguageClass, LanguageTable, PartitionError, Placement,
 };
 pub use query::{
     canonical_digest, derive_component_keys, read_active_set, read_watermark, ActiveBundleRow,

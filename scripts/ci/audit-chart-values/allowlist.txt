@@ -1,0 +1,7 @@
+# Intentionally kept values keys / helpers that audit_chart_values.py would flag.
+# One per line: <dotted.values.path or helper name>  # <reason>. Remove an entry once its reason is gone.
+waddlebot.otel.enabled  # used by open PR #1357 (provision-secrets root marker)
+waddlebot.connectorTrustSecrets  # still included on older open PR branches (e.g. #1169, #1286, #1295)
+waddlebot.stageCaPem  # still included on older open PR branches (e.g. #1169, #1286, #1295)
+waddlebot.stageHostApiGenerates  # still included on older open PR branches (e.g. #1169, #1286, #1295)
+waddlebot.transitTls.secretHead  # still included on older open PR branches (e.g. #1169, #1286)

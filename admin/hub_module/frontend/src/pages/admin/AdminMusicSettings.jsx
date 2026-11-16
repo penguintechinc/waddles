@@ -8,16 +8,7 @@ import {
   ExclamationTriangleIcon,
   TrashIcon,
   PlusIcon,
-  TagIcon,
-  XMarkIcon,
 } from '@heroicons/react/24/outline';
-
-const YOUTUBE_LABELS_MAX_COUNT = 32;
-const YOUTUBE_LABELS_MAX_LENGTH = 64;
-
-function normalizeLabel(raw) {
-  return raw.trim().toLowerCase();
-}
 
 function AdminMusicSettings() {
   const { communityId } = useParams();
@@ -29,100 +20,9 @@ function AdminMusicSettings() {
   const [blacklistType, setBlacklistType] = useState('word');
   const [blacklistItems, setBlacklistItems] = useState([]);
 
-  // Music Station policy (`youtube_allowed_labels`) -- separate endpoint/state
-  // from module config above, loaded and saved independently.
-  const [policy, setPolicy] = useState(null);
-  const [policyLoading, setPolicyLoading] = useState(true);
-  const [policySaving, setPolicySaving] = useState(false);
-  const [policyMessage, setPolicyMessage] = useState(null);
-  const [youtubeLabels, setYoutubeLabels] = useState([]);
-  const [youtubeLabelInput, setYoutubeLabelInput] = useState('');
-  const [youtubeLabelError, setYoutubeLabelError] = useState(null);
-
   useEffect(() => {
     loadConfig();
-    loadPolicy();
   }, [communityId]);
-
-  async function loadPolicy() {
-    setPolicyLoading(true);
-    try {
-      const response = await adminApi.getMusicStationPolicy(communityId);
-      const policyData = response.data?.data || {};
-      setPolicy(policyData);
-      setYoutubeLabels(policyData.youtube_allowed_labels || []);
-    } catch (err) {
-      console.error('[AdminMusicSettings] Load policy failed', { communityId, status: err.response?.status });
-      setPolicy({});
-      setYoutubeLabels([]);
-    } finally {
-      setPolicyLoading(false);
-    }
-  }
-
-  function addYoutubeLabel(raw) {
-    const label = normalizeLabel(raw);
-    if (!label) return;
-    if (label.length > YOUTUBE_LABELS_MAX_LENGTH) {
-      setYoutubeLabelError(`Label must be ${YOUTUBE_LABELS_MAX_LENGTH} characters or fewer`);
-      return;
-    }
-    if (youtubeLabels.includes(label)) {
-      setYoutubeLabelInput('');
-      setYoutubeLabelError(null);
-      return;
-    }
-    if (youtubeLabels.length >= YOUTUBE_LABELS_MAX_COUNT) {
-      setYoutubeLabelError(`Maximum ${YOUTUBE_LABELS_MAX_COUNT} labels allowed`);
-      return;
-    }
-    setYoutubeLabels([...youtubeLabels, label]);
-    setYoutubeLabelInput('');
-    setYoutubeLabelError(null);
-  }
-
-  function handleYoutubeLabelInputChange(e) {
-    const value = e.target.value;
-    if (value.includes(',')) {
-      value.split(',').forEach((part) => addYoutubeLabel(part));
-      return;
-    }
-    setYoutubeLabelInput(value);
-  }
-
-  function handleYoutubeLabelInputKeyDown(e) {
-    if (e.key === 'Enter' || e.key === ',') {
-      e.preventDefault();
-      addYoutubeLabel(youtubeLabelInput);
-    } else if (e.key === 'Backspace' && !youtubeLabelInput && youtubeLabels.length > 0) {
-      setYoutubeLabels(youtubeLabels.slice(0, -1));
-    }
-  }
-
-  function handleRemoveYoutubeLabel(label) {
-    setYoutubeLabels(youtubeLabels.filter((item) => item !== label));
-  }
-
-  function handleClearYoutubeLabels() {
-    setYoutubeLabels([]);
-    setYoutubeLabelError(null);
-  }
-
-  async function handleSavePolicy() {
-    setPolicySaving(true);
-    setPolicyMessage(null);
-    try {
-      const payload = { ...policy, youtube_allowed_labels: youtubeLabels };
-      await adminApi.updateMusicStationPolicy(communityId, payload);
-      setPolicyMessage({ type: 'success', text: 'YouTube allowed labels saved successfully' });
-    } catch (err) {
-      console.error('[AdminMusicSettings] Save policy failed', { communityId, status: err.response?.status });
-      const errorMsg = err.response?.data?.error?.message || 'Failed to save YouTube allowed labels';
-      setPolicyMessage({ type: 'error', text: errorMsg });
-    } finally {
-      setPolicySaving(false);
-    }
-  }
 
   async function loadConfig() {
     setLoading(true);
@@ -483,102 +383,6 @@ function AdminMusicSettings() {
               <p className="text-navy-400">No blacklist items configured</p>
               <p className="text-xs text-navy-500 mt-1">Add words or artists to block them from the music player</p>
             </div>
-          )}
-        </div>
-
-        {/* YouTube Allowed Labels (Music Station policy) */}
-        <div className="card p-6" data-testid="youtube-labels-section">
-          <h2 className="text-lg font-semibold text-sky-100 mb-4 flex items-center gap-2">
-            <TagIcon className="w-5 h-5" />
-            YouTube Allowed Labels
-          </h2>
-
-          {policyLoading ? (
-            <div className="flex justify-center py-6">
-              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-gold-400"></div>
-            </div>
-          ) : (
-            <>
-              {policyMessage && (
-                <div
-                  data-testid="youtube-labels-feedback"
-                  className={`mb-4 p-3 rounded-lg border text-sm ${
-                    policyMessage.type === 'success'
-                      ? 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30'
-                      : 'bg-red-500/20 text-red-300 border-red-500/30'
-                  }`}
-                >
-                  {policyMessage.text}
-                </div>
-              )}
-
-              <label className="block text-sm font-medium text-navy-300 mb-2">
-                Allowed YouTube labels — leave empty to allow any video
-              </label>
-
-              <div className="flex flex-wrap items-center gap-2 p-3 bg-navy-800 border border-navy-600 rounded-lg focus-within:border-sky-500 focus-within:ring-1 focus-within:ring-sky-500">
-                {youtubeLabels.map((label) => (
-                  <span
-                    key={label}
-                    data-testid={`youtube-label-chip-${label}`}
-                    className="flex items-center gap-1 px-2 py-1 text-xs font-semibold rounded-full bg-navy-700 text-sky-300 border border-navy-600"
-                  >
-                    {label}
-                    <button
-                      type="button"
-                      onClick={() => handleRemoveYoutubeLabel(label)}
-                      aria-label={`Remove ${label}`}
-                      data-testid={`remove-youtube-label-${label}`}
-                      className="text-navy-400 hover:text-red-300 focus:outline-none focus:ring-2 focus:ring-sky-500 rounded"
-                    >
-                      <XMarkIcon className="w-3.5 h-3.5" />
-                    </button>
-                  </span>
-                ))}
-                <input
-                  type="text"
-                  value={youtubeLabelInput}
-                  onChange={handleYoutubeLabelInputChange}
-                  onKeyDown={handleYoutubeLabelInputKeyDown}
-                  onBlur={() => youtubeLabelInput && addYoutubeLabel(youtubeLabelInput)}
-                  placeholder={youtubeLabels.length === 0 ? 'e.g. music, lofi' : ''}
-                  aria-label="Add YouTube allowed label"
-                  data-testid="youtube-label-input"
-                  className="flex-1 min-w-[8rem] bg-transparent text-sky-100 placeholder-navy-500 py-1"
-                />
-              </div>
-
-              {youtubeLabelError && (
-                <p data-testid="youtube-labels-error" className="text-xs text-red-400 mt-2">
-                  {youtubeLabelError}
-                </p>
-              )}
-
-              <p className="text-xs text-navy-500 mt-2">
-                Matches the video&apos;s category (e.g. music), tags, and topics. Chat: <code>!sr set youtube-labels music,lofi</code>
-              </p>
-
-              <div className="flex items-center justify-between mt-4">
-                <button
-                  type="button"
-                  onClick={handleClearYoutubeLabels}
-                  disabled={youtubeLabels.length === 0}
-                  data-testid="youtube-labels-clear"
-                  className="btn btn-secondary disabled:opacity-50"
-                >
-                  Clear (allow all)
-                </button>
-                <button
-                  type="button"
-                  onClick={handleSavePolicy}
-                  disabled={policySaving}
-                  data-testid="youtube-labels-save"
-                  className="btn btn-primary disabled:opacity-50"
-                >
-                  {policySaving ? 'Saving...' : 'Save'}
-                </button>
-              </div>
-            </>
           )}
         </div>
 

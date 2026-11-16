@@ -40,6 +40,7 @@ from quart_schema import validate_request
 from services import support_service as svc
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_dal, reads_from_replica
 from services.errors import ApiError
 
 support_admin_bp = Blueprint("v1_support_admin", __name__, url_prefix="/api/v1/admin")
@@ -492,11 +493,12 @@ async def add_comment(
 @support_admin_bp.route("/<int:community_id>/support/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@reads_from_replica("support.get_ticket_stats")
 async def get_ticket_stats(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/stats`."""
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
-    dal = current_app.config["dal"]
+    dal = get_read_dal()  # aggregate counts: scope + tenant checked above, replica lag is fine
     stats = svc.get_ticket_stats(dal, community_id)
     return {
         "stats": {

@@ -165,7 +165,6 @@ Configure the core system components:
 ### 4. Feature Modules
 Enable the features your community needs:
 
-- **[AI Chat Integration](../ai_interaction_module/CONFIGURATION.md)**
 - **[Music Integration](../youtube_music_interaction_module/CONFIGURATION.md)**
 - **[Community Management](../interaction-modules/inventory.md)**
 

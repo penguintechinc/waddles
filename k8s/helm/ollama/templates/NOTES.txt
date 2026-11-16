@@ -1,0 +1,11 @@
+Ollama ({{ .Values.model }}) release {{ .Release.Name }} in namespace {{ .Release.Namespace }}.
+
+Endpoint (in-cluster only): {{ include "ollama.url" . }}
+
+Consumers must run in namespace {{ join " / " .Values.network.consumerNamespaces }} and carry the label
+  {{ .Values.network.consumerLabel.key }}: {{ .Values.network.consumerLabel.value | quote }}
+Allowed calls: GET /, /api/tags, /api/version; POST /api/generate|chat|embed|embeddings.
+Gemma 4 is a thinking model: send "think": false with format=json.
+
+Model pull progress:  kubectl -n {{ .Release.Namespace }} logs -f job/{{ printf "%s-pull-%s" (include "ollama.fullname" .) (include "ollama.pullPodTemplate" . | sha256sum | trunc 8) }}
+Verify:               helm test {{ .Release.Name }} -n {{ .Release.Namespace }}

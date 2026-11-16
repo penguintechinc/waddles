@@ -53,10 +53,11 @@ def test_every_calls_route_is_mapped_and_nothing_stale() -> None:
 
 def test_every_mapped_rpc_exists_in_the_proto() -> None:
     rpcs = _descriptor_rpcs()
-    assert len(rpcs) == 17
+    assert len(rpcs) == 18
     mapped = {r for r in ROUTE_RPCS.values() if r != NOT_IMPLEMENTED}
     assert mapped <= rpcs, mapped - rpcs
-    # RPCs with no hub-api route/client yet (plan T4): the raised-hand RPCs are new contract (T1);
+    # RPCs with no hub-api route/client yet (plan T4): the raised-hand RPCs (incl. ResetHands)
+    # are new contract (T1);
     # per-participant mute/unmute were never routed by the imported WIP. Pins the gap so it cannot
     # grow silently.
     assert rpcs - mapped == {
@@ -64,6 +65,7 @@ def test_every_mapped_rpc_exists_in_the_proto() -> None:
         "LowerHand",
         "ListHands",
         "AcknowledgeHand",
+        "ResetHands",
         "MuteParticipant",
         "UnmuteParticipant",
     }

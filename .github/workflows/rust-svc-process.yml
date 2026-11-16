@@ -18,6 +18,8 @@ on:
       - 'core/bundle_host_media/**'
       - 'core/bundle_host_http/**'
       - 'core/hub_client/**'
+      - 'core/bundle_host_surface/**'
+      - 'proto/waddles/presentation/**'
       - 'core/bundle_config_db/**'
       - 'scripts/db/bundle_identity_resolve.sql'
       - 'scripts/db/bundle_economy_store.sql'
@@ -75,6 +77,8 @@ jobs:
             core/bundle_host_economy/**
             core/bundle_host_media/**
             core/hub_client/**
+            core/bundle_host_surface/**
+            proto/waddles/presentation/**
             core/bundle_config_db/**
             scripts/db/bundle_identity_resolve.sql
             scripts/db/bundle_economy_store.sql
