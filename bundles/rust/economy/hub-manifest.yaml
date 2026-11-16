@@ -1,7 +1,7 @@
 schema_version: 2
 app_id: waddles.core.service.economy
 name: Economy Service Bundle (Rust)
-version: 1.0.2
+version: 1.0.3
 feature: waddles.core.service
 module: core
 provider: builtin
