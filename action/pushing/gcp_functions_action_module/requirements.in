@@ -11,7 +11,7 @@ psycopg2-binary>=2.9.0
 # GCP Libraries
 google-cloud-functions>=1.16.0
 google-auth>=2.28.0
-aiohttp>=3.10.0,<4.0.0
+aiohttp>=3.14.4,<4.0.0
 # Authentication
 pyjwt>=2.8.0
 # Logging
