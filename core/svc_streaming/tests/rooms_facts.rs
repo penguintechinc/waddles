@@ -6,13 +6,14 @@ mod rooms_common;
 
 use rooms_common::*;
 use svc_streaming::rooms::grpc::pb::*;
-use svc_streaming::rooms::grpc_auth::{SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE};
+use svc_streaming::rooms::grpc_auth::{SCOPE_CREATE, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE};
 use tonic::Code;
 
 const API: &str = "v1";
 
 struct Tok {
     read: String,
+    create: String,
     write: String,
     moderate: String,
     update: String,
@@ -21,6 +22,7 @@ struct Tok {
 fn tokens(h: &Harness) -> Tok {
     Tok {
         read: jwt(&h.signing_pem, SCOPE_READ, |_| {}),
+        create: jwt(&h.signing_pem, SCOPE_CREATE, |_| {}),
         write: jwt(&h.signing_pem, SCOPE_WRITE, |_| {}),
         moderate: jwt(&h.signing_pem, SCOPE_MODERATE, |_| {}),
         update: jwt(&h.signing_pem, "streaming.rooms:update", |_| {}),
@@ -38,7 +40,7 @@ fn facts_create(kind: RoomKind) -> CreateRoomRequest {
 
 async fn create(h: &mut Harness, t: &Tok, r: CreateRoomRequest) -> Room {
     h.client
-        .create_room(req(r, &t.write))
+        .create_room(req(r, &t.create))
         .await
         .unwrap()
         .into_inner()
@@ -169,7 +171,7 @@ async fn facts_are_validated_and_scope_gated() {
                 kind: 99,
                 ..facts_create(RoomKind::Community)
             },
-            &t.write,
+            &t.create,
         ))
         .await
         .unwrap_err();
