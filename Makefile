@@ -5,7 +5,7 @@
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-rustls-provider check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        check-no-stubs check-rustls-provider check-bundle-docker-context check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
         test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
@@ -125,6 +125,11 @@ check-no-stubs:
 # Every core/ bin crate that uses rustls must install a process-level CryptoProvider.
 check-rustls-provider:
 	@bash scripts/ci/check-rustls-provider.sh
+
+# Every bundle-<crate> stage in bundles/Dockerfile.core-bundles must COPY each out-of-crate file the
+# release build reads (#[path], include_*!, Cargo path deps). Prints crates/refs examined.
+check-bundle-docker-context:
+	@python3 scripts/ci/check-bundle-docker-context.py
 
 # PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
 # egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its

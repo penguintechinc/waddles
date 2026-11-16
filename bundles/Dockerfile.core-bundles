@@ -212,6 +212,10 @@ RUN cargo component build --release --target wasm32-wasip2 --locked
 
 # --- rooms
 FROM rust-bundle-base AS bundle-rooms
+# rooms compiles webrtc's access policy in place via `#[path = "../../webrtc/src/grants.rs"]`
+# (src/lib.rs); grants.rs's include_str! of contract/grants.json is #[cfg(test)]-only.
+# Gate: `make check-bundle-docker-context`.
+COPY bundles/rust/webrtc/src/grants.rs /repo/bundles/rust/webrtc/src/grants.rs
 COPY bundles/rust/rooms /repo/bundles/rust/rooms
 WORKDIR /repo/bundles/rust/rooms
 RUN cargo component build --release --target wasm32-wasip2 --locked
