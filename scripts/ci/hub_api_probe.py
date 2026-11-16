@@ -35,13 +35,19 @@ def build_ssl_context(insecure: bool) -> ssl.SSLContext | None:
 
 
 def probe_once(url: str, timeout: float, context: ssl.SSLContext | None = None) -> int:
-    """Return the HTTP status of one GET, or 0 when the connection itself fails or times out."""
+    """Return the HTTP status of one GET, or 0 when the connection itself fails or times out.
+
+    A transport failure (no listener, TLS error, timeout) is reported as status 0 but its
+    exception class and message are printed to stderr first -- a swallowed 0 is undiagnosable,
+    e.g. a cert verify failure and a dead port-forward both look identical without it.
+    """
     try:
         with urllib.request.urlopen(url, timeout=timeout, context=context) as resp:  # noqa: S310 - URL is caller-supplied local port-forward
             return int(resp.status)
     except urllib.error.HTTPError as exc:  # must precede URLError (HTTPError subclasses it)
         return int(exc.code)
-    except (urllib.error.URLError, OSError, TimeoutError):
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        print(f"  transport error on {url}: {type(exc).__name__}: {exc}", file=sys.stderr)
         return 0
 
 

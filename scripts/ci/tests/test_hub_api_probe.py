@@ -51,6 +51,14 @@ def _run(argv: list[str]) -> tuple[int, str]:
     return rc, buf.getvalue()
 
 
+def _run_with_stderr(argv: list[str]) -> tuple[int, str, str]:
+    """Run probe.main capturing stdout and stderr; return (exit code, stdout, stderr)."""
+    out, err = io.StringIO(), io.StringIO()
+    with contextlib.redirect_stdout(out), contextlib.redirect_stderr(err):
+        rc = probe.main(argv)
+    return rc, out.getvalue(), err.getvalue()
+
+
 @pytest.fixture
 def stub() -> object:
     """Yield a started server; shut it down after the test."""
@@ -216,3 +224,17 @@ def test_https_without_insecure_fails_verification(tls_stub: object) -> None:
     rc, out = _run(["--base-url", base, "--paths", "/health", "--attempts", "2", "--delay", "0"])
     assert rc == 1
     assert "GET /health status=0 attempts=2 FAIL" in out
+
+
+def test_transport_error_logs_exception_class_to_stderr() -> None:
+    """A swallowed status-0 still prints the exception class+message to stderr (diagnosable)."""
+    with socket.socket() as s:
+        s.bind(("127.0.0.1", 0))
+        port = s.getsockname()[1]
+    rc, out, err = _run_with_stderr(
+        ["--base-url", f"http://127.0.0.1:{port}", "--paths", "/health", "--attempts", "1", "--delay", "0"]
+    )
+    assert rc == 1
+    assert "GET /health status=0 attempts=1 FAIL" in out
+    assert "transport error" in err
+    assert "URLError" in err  # connection refused surfaces as a URLError, class named in the log
