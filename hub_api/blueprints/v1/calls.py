@@ -81,6 +81,7 @@ from services.calls_proxy import (
 )
 from services.current_user import get_current_user_id
 from services.errors import ApiError, payment_required
+from services.scope_registry import SCOPE_CALLS_MANAGE
 
 logger = logging.getLogger(__name__)
 
@@ -412,7 +413,13 @@ async def _require_admin(community_id: int) -> int:
     assert ctx is not None  # nosec B101 - tenant_middleware already ran (outermost decorator)
     user_id = get_current_user_id(request)
     await community_access.require_community_admin(
-        async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
+        async_dal,
+        dal,
+        request,
+        ctx,
+        community_id=community_id,
+        user_id=user_id,
+        scope=SCOPE_CALLS_MANAGE,
     )
     return user_id
 

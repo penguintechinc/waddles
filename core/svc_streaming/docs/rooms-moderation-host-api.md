@@ -75,7 +75,7 @@ hub-api's `/api/v1/admin/<c>/calls/rooms*` and `/api/v1/community/<c>/interact/v
   Listener off + logged when `ROOMS_GRPC_PORT` is unset; set with missing TLS files or JWT keys = startup error.
 - AuthN: ES256 machine JWT (`authorization: Bearer`) on every RPC; trust keys `SERVICE_JWT_ACTIVE_KID`+`SERVICE_JWT_PUBLIC_KEY`
   (+`SERVICE_JWT_PUBLIC_KEY_<kid>`), `SERVICE_JWT_AUDIENCE`, optional `ROOMS_GRPC_ALLOWED_SUBJECTS` (SPIFFE ids).
-  Scopes: `streaming.rooms:read` (ListRooms/GetRoom/ListParticipants), `:write` (Create/Delete/Join/Leave), `:moderate` (Kick/Mute/Unmute/MuteAll/Lock/Unlock).
+  Scopes: `streaming.rooms:read` (ListRooms/GetRoom/ListParticipants), `:create` (Create), `:write` (Delete/Join/Leave), `:moderate` (Kick/Mute/Unmute/MuteAll/Lock/Unlock).
 - AuthZ/flag/telemetry: identical to the host-API ops (actor role -> moderator/admin; `rooms.moderation`; `rooms_moderation_ops_total`, spans),
   plus `rooms_grpc_requests_total{rpc,code}` and `rooms_grpc_request_seconds{rpc}`.
 - Errors: NotFound->`NOT_FOUND`, Invalid->`INVALID_ARGUMENT`, LimitReached->`RESOURCE_EXHAUSTED`, Forbidden->`PERMISSION_DENIED`,

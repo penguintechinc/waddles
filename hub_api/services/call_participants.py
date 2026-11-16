@@ -46,28 +46,21 @@ def identity_uuid(*, tenant_slug: str, community_id: int, user_id: int) -> str:
 
 
 async def is_community_staff(async_dal: Any, dal: Any, *, community_id: int, user_id: int) -> bool:
-    """True when `user_id` is a community owner/admin (or a global admin): room-access staff.
+    """True when `user_id` may manage calls in `community_id` (or is a global admin): staff.
 
-    Staff are never refused by a room lock or schedule (`services/call_access.py`). Reuses the
-    same two definitions of "admin" the admin routes authorise with.
+    Staff are never refused by a room lock or schedule (`services/call_access.py`). Authorised
+    on the `calls:manage` SCOPE the community role carries -- the same scope the admin routes
+    gate on (`blueprints/v1/calls.py::_require_admin`) -- never on a role-name match.
     """
-    from services.community_access import _ADMIN_ROLES
-    from services.community_authz import is_super_admin
+    from services.community_authz import get_caller_community_role, is_super_admin
+    from services.scope_registry import SCOPE_CALLS_MANAGE
 
     if await is_super_admin(async_dal, dal, user_id=user_id):
         return True
-    members = dal.community_members
-    rows = await _select(
-        async_dal,
-        dal(
-            (members.community_id == community_id)
-            & (members.user_id == str(user_id))
-            & (members.is_active == True)  # noqa: E712 - pydal query operator
-            & (members.role.belongs(_ADMIN_ROLES))
-        ),
-        members.id,
+    role = await get_caller_community_role(
+        async_dal, dal, community_id=community_id, user_id=user_id
     )
-    return bool(rows)
+    return role is not None and SCOPE_CALLS_MANAGE in role.scopes
 
 
 def _canonical(participant_id: str) -> str | None:

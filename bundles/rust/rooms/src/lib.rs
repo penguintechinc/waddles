@@ -7,6 +7,7 @@
 //! process-stage does the work (identity + tools run there, as in the other
 //! tool-calling apps) and emits a reply event; action-stage only relays it.
 #[allow(warnings)]
+#[rustfmt::skip]
 mod bindings;
 // The webrtc service's canonical access policy, compiled into this bundle from the
 // same source file (no copy to drift); see bundles/rust/webrtc/contract/grants.json.

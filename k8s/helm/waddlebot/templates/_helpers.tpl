@@ -79,22 +79,6 @@ Returns the namespace where resources should be created.
 {{- end }}
 
 {{/*
-Image path with registry prefix
-Constructs the full image path including registry, repository, and tag.
-Usage: {{ include "waddlebot.image" (dict "image" .Values.modules.router "global" .Values.global "defaultTag" .Chart.AppVersion) }}
-*/}}
-{{- define "waddlebot.image" -}}
-{{- $registry := .global.imageRegistry | default "" }}
-{{- $repository := .image.repository | required "image.repository is required" }}
-{{- $tag := .image.tag | default .defaultTag | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
 Service Account name
 Returns the name of the service account to use.
 */}}
@@ -223,54 +207,6 @@ Usage: {{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_svc_p
 {{- end }}
 
 {{/*
-Redis connection URL
-Constructs the Redis connection URL from values.
-Supports both external and internal Redis instances.
-Format: redis://[:password@]host:port[/database]
-*/}}
-{{- define "waddlebot.redis.url" -}}
-{{- if .Values.redis.enabled }}
-{{- $host := printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- $port := .Values.redis.master.service.port | default 6379 }}
-{{- $password := .Values.redis.auth.password | default "" }}
-{{- $database := .Values.redis.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- else }}
-{{- $host := .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- $port := .Values.redis.external.port | default 6379 }}
-{{- $password := .Values.redis.external.password | default "" }}
-{{- $database := .Values.redis.external.database | default 0 }}
-{{- if $password }}
-{{- printf "redis://:%s@%s:%v/%v" $password $host $port $database }}
-{{- else }}
-{{- printf "redis://%s:%v/%v" $host $port $database }}
-{{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-Module image helper
-Simplified image helper for module-specific images.
-Uses global registry and chart version as defaults.
-Handles both bare module names and legacy patterns with properly scoped registry.
-Usage: {{ include "waddlebot.moduleImage" (dict "root" . "module" "router" "tag" .Values.modules.router.imageTag) }}
-*/}}
-{{- define "waddlebot.moduleImage" -}}
-{{- $registry := .root.Values.global.imageRegistry | default "" }}
-{{- $repository := .module | required "module name is required" }}
-{{- $tag := .tag | default .root.Chart.AppVersion | default "latest" | toString }}
-{{- if $registry }}
-{{- printf "%s/%s:%s" $registry $repository $tag }}
-{{- else }}
-{{- printf "%s:%s" $repository $tag }}
-{{- end }}
-{{- end }}
-
-{{/*
 Per-image tag resolution
 Precedence: explicit per-component tag > global.imageTags[<image>] > global.imageTag > "latest".
 global.imageTags (default empty) lets a deploy pin each image independently, so an image that
@@ -298,44 +234,6 @@ Usage: {{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "action-
 {{- else }}
 {{- printf "%s:%s" $repository $tag }}
 {{- end }}
-{{- end }}
-
-{{/*
-Redis host
-Returns the Redis host name.
-*/}}
-{{- define "waddlebot.redis.host" -}}
-{{- if .Values.redis.enabled }}
-{{- printf "%s-redis-master" (include "waddlebot.fullname" .) }}
-{{- else }}
-{{- .Values.redis.external.host | required "redis.external.host is required when redis.enabled is false" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Redis port
-Returns the Redis port.
-*/}}
-{{- define "waddlebot.redis.port" -}}
-{{- if .Values.redis.enabled }}
-{{- .Values.redis.master.service.port | default 6379 }}
-{{- else }}
-{{- .Values.redis.external.port | default 6379 }}
-{{- end }}
-{{- end }}
-
-{{/*
-Create the name of the config map for common configuration
-*/}}
-{{- define "waddlebot.commonConfigName" -}}
-{{- printf "%s-config" (include "waddlebot.fullname" .) }}
-{{- end }}
-
-{{/*
-Create the name of the secret for common secrets
-*/}}
-{{- define "waddlebot.commonSecretName" -}}
-{{- printf "%s-secrets" (include "waddlebot.fullname" .) }}
 {{- end }}
 
 {{/*
@@ -372,64 +270,6 @@ a rendered Secret. Call as:
 {{- if regexMatch "(?i)(REPLACE_ME|CHANGE_ME|changeme|example)" $v }}
 {{- fail (printf "refusing to render placeholder value for %q -- set a real value or remove the key (see docs/PLATFORM_CREDENTIALS.md)" .key) }}
 {{- end }}
-{{- end }}
-{{- end }}
-
-{{/*
-API Key Secret Name
-Returns the name of the secret containing API keys.
-*/}}
-{{- define "waddlebot.apiKeySecretName" -}}
-{{- if .Values.apiKeys.existingSecret }}
-{{- .Values.apiKeys.existingSecret }}
-{{- else }}
-{{- printf "%s-api-keys" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-License Key Secret Name
-Returns the name of the secret containing license keys.
-*/}}
-{{- define "waddlebot.licenseSecretName" -}}
-{{- if .Values.license.existingSecret }}
-{{- .Values.license.existingSecret }}
-{{- else }}
-{{- printf "%s-license" (include "waddlebot.fullname" .) }}
-{{- end }}
-{{- end }}
-
-{{/*
-Ingress API Version
-Returns the appropriate API version for Ingress based on Kubernetes version.
-*/}}
-{{- define "waddlebot.ingress.apiVersion" -}}
-{{- if .Capabilities.APIVersions.Has "networking.k8s.io/v1" }}
-{{- print "networking.k8s.io/v1" }}
-{{- else if .Capabilities.APIVersions.Has "networking.k8s.io/v1beta1" }}
-{{- print "networking.k8s.io/v1beta1" }}
-{{- else }}
-{{- print "extensions/v1beta1" }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return true if cert-manager is enabled
-*/}}
-{{- define "waddlebot.certManager.enabled" -}}
-{{- if and .Values.ingress.enabled .Values.ingress.certManager.enabled }}
-{{- true }}
-{{- end }}
-{{- end }}
-
-{{/*
-Return the appropriate cert-manager annotation
-*/}}
-{{- define "waddlebot.certManager.annotation" -}}
-{{- if eq .Values.ingress.certManager.issuer.kind "ClusterIssuer" }}
-cert-manager.io/cluster-issuer: {{ .Values.ingress.certManager.issuer.name }}
-{{- else }}
-cert-manager.io/issuer: {{ .Values.ingress.certManager.issuer.name }}
 {{- end }}
 {{- end }}
 
@@ -471,7 +311,8 @@ and excluded on that basis) -- stdlib `urllib.request` only, no extra dependency
 Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
 */}}
 {{- define "waddlebot.waitForHubApiInitContainer" -}}
-{{- $url := printf "http://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
+{{- $scheme := ternary "https" "http" (not (not (include "waddlebot.transitTlsEnabled" .))) }}
+{{- $url := printf "%s://%s-hub-api-v3.%s.svc.cluster.local:%v/ready" $scheme (include "waddlebot.fullname" .) .Values.namespace .Values.pipeline.hubApi.port }}
 - name: wait-for-hub-api
   image: "{{ .Values.waitForHubApi.image }}"
   imagePullPolicy: IfNotPresent
@@ -493,10 +334,23 @@ Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
     value: {{ .Values.waitForHubApi.stableIntervalSeconds | quote }}
   - name: MAX_BACKOFF_SECONDS
     value: {{ .Values.waitForHubApi.maxBackoffSeconds | quote }}
+  {{- include "waddlebot.transitCaEnv" . | nindent 2 }}
   command: ["python3", "-c"]
   args:
     - |
-      import os, time, random, sys, urllib.request, urllib.error
+      import os, ssl, time, random, sys, urllib.request, urllib.error
+
+      # F3 -- under global.internalTransitTls the probe VERIFIES hub-api against the internal CA
+      # (INTERNAL_CA_PEM from the Secret); a bad/missing CA is a hard error, never an unverified
+      # or plaintext fallback.
+      ctx = None
+      if os.environ["HUB_API_READY_URL"].startswith("https://"):
+          pem = os.environ.get("INTERNAL_CA_PEM", "").strip()
+          if not pem:
+              print("wait-for-hub-api: https URL but INTERNAL_CA_PEM is empty", file=sys.stderr)
+              sys.exit(1)
+          ctx = ssl.create_default_context(cadata=pem)
+          ctx.minimum_version = ssl.TLSVersion.TLSv1_2
 
       url = os.environ["HUB_API_READY_URL"]
       need = int(os.environ["STABLE_CHECKS"])
@@ -512,7 +366,7 @@ Usage: {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       while consecutive < need:
           attempt += 1
           try:
-              with urllib.request.urlopen(url, timeout=3) as resp:
+              with urllib.request.urlopen(url, timeout=3, context=ctx) as resp:
                   ok = resp.status == 200
           except (urllib.error.URLError, OSError) as exc:
               ok = False
@@ -624,6 +478,29 @@ waddlebot.hostApiTlsMaterialAvailable) -- the Secret template guarantees real ma
 whenever hub-api itself is enabled.
 */}}
 
+{{/*
+Single trust root (global.internalTransitTls.enabled): hub-api's gRPC listener serves the SAME
+cert-manager certificate (internal CA, FQDN SAN) as its HTTPS listener, and every gRPC client's
+HUB_API_GRPC_CA_FILE is that Secret's ca.crt -- one issuer, one CA, no self-generated gRPC CA.
+Off: the legacy self-generated/ExternalSecret `<fullname>-hub-api-grpc-tls` Secret.
+*/}}
+{{- define "waddlebot.hubApiGrpcTlsSecretName" -}}
+{{- if include "waddlebot.transitTlsEnabled" . -}}
+{{- include "waddlebot.transitTlsSecretName" (dict "root" . "component" "hub-api") -}}
+{{- else -}}
+{{- printf "%s-hub-api-grpc-tls" (include "waddlebot.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
+{{/* Host clients dial for hub-api's gRPC port: the FQDN under transit TLS (the CA's nameConstraints and the cert SAN permit only that form), else the bare Service name. */}}
+{{- define "waddlebot.hubApiGrpcHost" -}}
+{{- if include "waddlebot.transitTlsEnabled" . -}}
+{{- include "waddlebot.svcFqdn" (dict "root" . "name" "hub-api-v3") -}}
+{{- else -}}
+{{- printf "%s-hub-api-v3" (include "waddlebot.fullname" .) -}}
+{{- end -}}
+{{- end }}
+
 {{- define "waddlebot.hubApiGrpcTlsDesiredDnsNames" -}}
 {{- $svcName := printf "%s-hub-api-v3" (include "waddlebot.fullname" .) -}}
 {{- $ns := .Values.namespace -}}
@@ -632,12 +509,6 @@ whenever hub-api itself is enabled.
 
 {{- define "waddlebot.hubApiGrpcTlsSansSha256" -}}
 {{- include "waddlebot.hubApiGrpcTlsDesiredDnsNames" . | sha256sum -}}
-{{- end }}
-
-{{- define "waddlebot.hubApiGrpcTlsMaterialAvailable" -}}
-{{- if .Values.pipeline.hubApi.enabled -}}
-true
-{{- end -}}
 {{- end }}
 
 {{/* Server-role env for hub-api's own container -- matches hub_api/grpc_internal/
@@ -654,7 +525,7 @@ end state, see that function's own docstring). */}}
 {{- define "waddlebot.hubApiGrpcTlsVolume" -}}
 - name: hub-api-grpc-tls
   secret:
-    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    secretName: {{ include "waddlebot.hubApiGrpcTlsSecretName" . }}
     defaultMode: 0440
 {{- end }}
 
@@ -675,7 +546,7 @@ hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FIL
 {{- define "waddlebot.hubApiGrpcCaVolume" -}}
 - name: hub-api-grpc-ca
   secret:
-    secretName: {{ include "waddlebot.fullname" . }}-hub-api-grpc-tls
+    secretName: {{ include "waddlebot.hubApiGrpcTlsSecretName" . }}
     items:
       - key: ca.crt
         path: ca.crt
@@ -685,6 +556,86 @@ hub-api's gRPC server cert, consumed by HubClient::connect's HUB_API_GRPC_CA_FIL
 {{- define "waddlebot.hubApiGrpcCaVolumeMount" -}}
 - name: hub-api-grpc-ca
   mountPath: /etc/waddlebot/hub-api-grpc-ca
+  readOnly: true
+{{- end }}
+
+{{/*
+svc-presentation's in-cluster surface gRPC listener (waddles.presentation.internal.v1.SurfaceService,
+core/svc_presentation/src/surfaces/ingress.rs): its OWN identity Secret `<fullname>-presentation-grpc-tls`
+(keys ca.crt/tls.crt/tls.key), minted at runtime by templates/provision-secrets.yaml (ECDSA P-256,
+own CA) like hub-api's gRPC identity. SANs are the svc-presentation Service's DNS names so
+`bundle_host_surface::SurfaceHost` verifies the server by hostname. Callers mount ONLY the CA.
+*/}}
+{{- define "waddlebot.presentationGrpcEnabled" -}}
+{{- if and .Values.pipeline.svcPresentation.enabled .Values.presentation.rust.enabled -}}
+true
+{{- end -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcSvcName" -}}
+{{- printf "%s-svc-presentation" (include "waddlebot.fullname" .) -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsDesiredDnsNames" -}}
+{{- $svcName := include "waddlebot.presentationGrpcSvcName" . -}}
+{{- $ns := .Values.namespace -}}
+{{- list $svcName (printf "%s.%s" $svcName $ns) (printf "%s.%s.svc" $svcName $ns) (printf "%s.%s.svc.cluster.local" $svcName $ns) | sortAlpha | join "," -}}
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsSansSha256" -}}
+{{- include "waddlebot.presentationGrpcTlsDesiredDnsNames" . | sha256sum -}}
+{{- end }}
+
+{{/* Endpoint the stages dial (https, the Service DNS name the cert's SANs cover). */}}
+{{- define "waddlebot.presentationGrpcEndpoint" -}}
+{{- printf "https://%s:%v" (include "waddlebot.presentationGrpcSvcName" .) .Values.pipeline.svcPresentation.grpcPort -}}
+{{- end }}
+
+{{/* Server-role env for svc-presentation (core/svc_presentation/src/config.rs). */}}
+{{- define "waddlebot.presentationGrpcTlsServerEnv" -}}
+- name: SURFACE_GRPC_PORT
+  value: {{ .Values.pipeline.svcPresentation.grpcPort | quote }}
+- name: SURFACE_GRPC_TLS_CERT_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.crt
+- name: SURFACE_GRPC_TLS_KEY_FILE
+  value: /etc/waddlebot/presentation-grpc-tls/tls.key
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolume" -}}
+- name: presentation-grpc-tls
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcTlsVolumeMount" -}}
+- name: presentation-grpc-tls
+  mountPath: /etc/waddlebot/presentation-grpc-tls
+  readOnly: true
+{{- end }}
+
+{{/* Caller-role env + CA-only mount (svc-action-rust, svc-process-rust): `overlay.publish-surface`
+delivery (`bundle_host_surface::SurfaceHost`). Never the server's tls.crt/tls.key. */}}
+{{- define "waddlebot.presentationGrpcClientEnv" -}}
+- name: PRESENTATION_GRPC_ENDPOINT
+  value: {{ include "waddlebot.presentationGrpcEndpoint" . | quote }}
+- name: PRESENTATION_GRPC_CA_FILE
+  value: /etc/waddlebot/presentation-grpc-ca/ca.crt
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolume" -}}
+- name: presentation-grpc-ca
+  secret:
+    secretName: {{ include "waddlebot.fullname" . }}-presentation-grpc-tls
+    items:
+      - key: ca.crt
+        path: ca.crt
+    defaultMode: 0440
+{{- end }}
+
+{{- define "waddlebot.presentationGrpcCaVolumeMount" -}}
+- name: presentation-grpc-ca
+  mountPath: /etc/waddlebot/presentation-grpc-ca
   readOnly: true
 {{- end }}
 
@@ -1026,6 +977,9 @@ existingSecret (SSE assertion mandatory). Fails the render on any inconsistency.
 {{- define "waddlebot.bundleStorage.env" -}}
 {{- include "waddlebot.bundleStorage.validate" . -}}
 {{- if eq .Values.bundleStorage.mode "bundled" }}
+{{- /* Bundled SeaweedFS is signed by the runtime-generated transit CA: pin it as the ONLY trust anchor for THIS client. External S3 renders no CA var, so the host crate verifies with the system roots (public CA) -- never the private transit CA. */}}
+- name: BUNDLE_STORAGE_CA_FILE
+  value: {{ include "waddlebot.transitTls.caPath" . | quote }}
 - name: BUNDLE_STORAGE_ENDPOINT
   value: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
 - name: BUNDLE_STORAGE_BUCKET

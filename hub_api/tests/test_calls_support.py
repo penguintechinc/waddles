@@ -5,7 +5,7 @@ contract rules svc-streaming enforces, so the real `RoomsClient`, protobuf marsh
 per-call JWT metadata and status-code mapping all run end to end:
 
 - `api_version` must be `"v1"` (else UNIMPLEMENTED, exactly like `rooms/grpc.rs`);
-- the bearer token must carry the scope the RPC needs (`streaming.rooms:read|write|moderate`,
+- the bearer token must carry the scope the RPC needs (`streaming.rooms:read|create|write|moderate`,
   see the proto) -- the test issuer mints `jwt-for-<scope>` tokens and the server compares;
 - moderation RPCs require a moderator/admin actor role;
 - every lookup is `(community_id, room_id)`-scoped: a room addressed through another community
@@ -53,9 +53,9 @@ _SCOPES_BY_RPC: dict[str, tuple[str, ...]] = {
     **dict.fromkeys(("ListRooms", "GetRoom", "ListParticipants"), ("read",)),
     # ListHands: read = the actor's own entry; moderate = the whole queue for room staff.
     "ListHands": ("read", "moderate"),
-    **dict.fromkeys(
-        ("CreateRoom", "DeleteRoom", "LeaveRoom", "RaiseHand", "LowerHand"), ("write",)
-    ),
+    # CreateRoom has its own per-action scope; a `write` token can never create a room.
+    "CreateRoom": ("create",),
+    **dict.fromkeys(("DeleteRoom", "LeaveRoom", "RaiseHand", "LowerHand"), ("write",)),
     # JoinRoom: a moderate-scope token additionally registers the participant as room STAFF.
     "JoinRoom": ("write", "moderate"),
     **dict.fromkeys(

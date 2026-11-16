@@ -4,6 +4,7 @@
 
 pub mod audit_chain;
 pub mod audit_cli;
+pub mod crypto;
 pub mod db;
 pub mod pyjson;
 pub mod pystr;

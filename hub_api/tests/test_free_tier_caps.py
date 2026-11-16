@@ -19,6 +19,7 @@ import flask_core.feature_flags as feature_flags_module
 import pytest
 from flask_core.entitlement import EntitlementClient
 from flask_core.feature_registry import FeatureRegistry
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -81,13 +82,19 @@ def gates(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeFlagGate, FakeLicenseGat
 
 
 @pytest.fixture
-def app(admin_db: Any) -> Quart:
+def app(admin_db: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
+    async def _no_key_store(dal: Any, service: Any, *, tenant_id: int, slug: str) -> None:
+        """Key provisioning needs the Postgres key store (see test_tenant_key_provisioning)."""
+
+    monkeypatch.setattr("blueprints.v1.superadmin.provision_new_tenant", _no_key_store)
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(superadmin_bp)
     quart_app.register_blueprint(user_management_bp)
     quart_app.config["dal"] = admin_db.dal
     quart_app.config["async_dal"] = admin_db
+    quart_app.config["envelope_runtime"] = type("R", (), {"service": object()})()
+    quart_app.config["install_dal"] = object()
     return quart_app
 
 
@@ -278,11 +285,13 @@ class TestTenantCap:
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
         # Free deployment whose only tenant is the catch-all: already at the cap.
-        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="global", is_global=True)
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(
+            slug=DEFAULT_TENANT_SLUG, is_global=True
+        )
         admin_db.dal.commit()
         headers = {
             "Authorization": "Bearer "
-            + make_user_token(user_id=1, scope="*:admin", tenant="global")
+            + make_user_token(user_id=1, scope="*:admin", tenant=DEFAULT_TENANT_SLUG)
         }
         blocked = await client.post(
             "/api/v1/superadmin/tenants", headers=headers, json={"slug": "t1", "displayName": "t1"}
@@ -290,7 +299,7 @@ class TestTenantCap:
         assert blocked.status_code == 402
         _assert_upgrade_block(await blocked.get_json(), "tenant")
         slugs = {r.slug for r in admin_db.dal(admin_db.dal.tenants.id > 0).select()}
-        assert slugs == {"global"}  # nothing created, nothing mutated
+        assert slugs == {DEFAULT_TENANT_SLUG}  # nothing created, nothing mutated
 
     async def test_only_system_inactive_excluded_from_count(
         self, admin_db: Any, gates: Any
@@ -300,8 +309,10 @@ class TestTenantCap:
         dal.tenants.insert(slug="gone", display_name="X", is_active=False)
         dal.commit()
         assert free_tier_caps.count_user_created_tenants(dal) == 1  # acme only
-        dal.tenants.insert(slug="global", display_name="G", is_global=True, is_active=True)
-        dal.tenants.insert(slug="default", display_name="D", is_active=True)
+        dal.tenants.insert(
+            slug=DEFAULT_TENANT_SLUG, display_name="D", is_global=True, is_active=True
+        )
+        dal.tenants.insert(slug="beta-corp", display_name="B", is_active=True)
         dal.commit()
         assert free_tier_caps.count_user_created_tenants(dal) == 3
 

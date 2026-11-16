@@ -27,8 +27,14 @@ from pathlib import Path
 
 import pytest
 
+from services import (
+    ban_suppression,
+    erasure_executor,
+    erasure_external,
+    erasure_registry,
+    floor_ban_erasure,
+)
 from services import data_privacy_service as privacy
-from services import erasure_executor, erasure_external, erasure_registry
 from services.erasure_registry import Action
 from tests.erasure_schema_scan import SchemaScan, scan_schema
 
@@ -239,9 +245,22 @@ class TestRegistryIntegrity:
             + inspect.getsource(privacy._delete_reputation_and_identity)
             + inspect.getsource(privacy._collect_erasure_scope)
         )
+        # Tables erased by a dedicated step module (SQL-function path): the module must name the
+        # table and `_sync_erase()` must call it.
+        delegated = {
+            "bundle_reputation_floor_bans": (
+                inspect.getsource(ban_suppression) + inspect.getsource(floor_ban_erasure),
+                "floor_ban_erasure.erase_floor_ban_rows(",
+            )
+        }
         core = [r.table for r in erasure_registry.RULES if r.action is Action.CORE]
         assert len(core) >= 15
         for table in core:
+            if table in delegated:
+                module_source, call = delegated[table]
+                assert f'"{table}"' in module_source, f"{table}: the step module never names it"
+                assert call in source, f"{table} is CORE but _sync_erase() never calls {call}"
+                continue
             assert (
                 f"dal.{table}" in source or f".{table}\n" in source
             ), f"{table} is classified CORE but _sync_erase() never touches it"

@@ -37,7 +37,7 @@ use tracing::Instrument;
 use uuid::Uuid;
 
 use super::grpc_auth::{
-    ServiceClaims, ServiceJwtVerifier, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE,
+    ServiceClaims, ServiceJwtVerifier, SCOPE_CREATE, SCOPE_MODERATE, SCOPE_READ, SCOPE_WRITE,
 };
 use super::host_api::{build_server_config, serve_router, HostApiError, HostApiTls};
 use super::{
@@ -376,7 +376,7 @@ impl RoomsService for RoomsGrpc {
         &self,
         req: Request<CreateRoomRequest>,
     ) -> Result<Response<CreateRoomResponse>, Status> {
-        self.run("CreateRoom", SCOPE_WRITE, req, |s, r| async move {
+        self.run("CreateRoom", SCOPE_CREATE, req, |s, r| async move {
             let info = s
                 .create_with(
                     &r.community_id,

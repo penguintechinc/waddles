@@ -5,7 +5,6 @@
 global:
   imageRegistry: "localhost:32000/waddlebot"
   imagePullPolicy: Always
-  storageClass: "microk8s-hostpath"
   # feature/helm-auto-provision-keys -- was unset here, silently inheriting values.yaml's
   # "production" default (values.yaml global.deploymentTier comment), which would have
   # blocked auto-provisioned-secrets.yaml/auto-provisioned-keys-job.yaml's alpha/local
@@ -18,44 +17,6 @@ global:
   # `kubectl -n waddlebot get secret waddlebot-hub-admin-bootstrap -o jsonpath='{.data.INITIAL_ADMIN_PASSWORD}' | base64 -d`.
   initialAdmin:
     email: "admin@waddlebot.localhost.local"
-
-# Top-level infrastructure for template compatibility
-redis:
-  enabled: false
-  replicas: 1
-  image:
-    repository: redis
-    tag: 7-bookworm@sha256:33d7c9a245edd95e6703a0addbeaa48fe40c3b3b4783627a72085155462ebfdb
-    pullPolicy: IfNotPresent
-  maxMemory: "256mb"
-  maxMemoryPolicy: "allkeys-lru"
-  resources:
-    requests:
-      memory: "128Mi"
-      cpu: "100m"
-    limits:
-      memory: "512Mi"
-      cpu: "500m"
-
-postgresql:
-  enabled: false
-  replicas: 1
-
-postgres:
-  enabled: false
-  replicas: 1
-
-seaweedfs:
-  enabled: false
-  replicas: 1
-
-ollama:
-  enabled: false
-  replicas: 1
-
-qdrant:
-  enabled: false
-  replicas: 1
 
 # Namespace configuration
 # feature/helm-auto-provision-keys -- pre-existing bug fix: this was a nested
@@ -78,7 +39,6 @@ infrastructure:
   # Redis - Single instance for local
   redis:
     enabled: false
-    replicas: 1
     tls:
       enabled: false
 
@@ -93,7 +53,6 @@ infrastructure:
   seaweedfs:
     # Bundled SeaweedFS holds the bundle-object-storage bucket by default.
     enabled: true
-    replicas: 1
     # Pre-create via `make generate-seaweedfs-sse-key` (at-rest encryption is mandatory).
     encryption:
       secretName: "seaweedfs-sse-kek"
@@ -101,15 +60,9 @@ infrastructure:
   # Ollama - With GPU support if available
   ollama:
     enabled: false
-    replicas: 1
 
   # Qdrant - Single instance for local
   qdrant:
-    enabled: false
-    replicas: 1
-
-  # OpenWhisk - Disabled for local
-  openwhisk:
     enabled: false
 
 # Ingress Configuration - Local/MicroK8s
@@ -129,18 +82,6 @@ ingress:
           service: hub-webui-v3
           port: 8080
   tls: []  # No TLS for local development
-
-# Database credentials for secrets
-postgres:
-  password: "postgres"
-
-redis:
-  password: "redis-password"
-
-# SeaweedFS S3 credentials
-seaweedfs:
-  rootUser: "REPLACE_ME"
-  rootPassword: "REPLACE_ME"
 
 # fix/helm-platform-credentials -- AWS/GCP/OpenWhisk/WaddleAI/OAuth
 # CREDENTIALS removed from here; they belong only in the operator-managed
@@ -166,90 +107,6 @@ waddleai:
 oauth:
   youtube:
     webhookCallbackUrl: ""
-
-# Shared Environment Variables - Local Overrides
-sharedEnv:
-  # Database Configuration
-  DB_HOST: "postgresql"
-  DB_PORT: "5432"
-  DB_NAME: "waddlebot"
-  DB_USER: "waddlebot"
-  DB_POOL_SIZE: "10"
-  DB_MAX_OVERFLOW: "5"
-
-  # Redis Configuration
-  REDIS_HOST: "redis"
-  REDIS_PORT: "6379"
-  REDIS_DB: "0"
-
-  # SeaweedFS S3 gateway configuration (was MinIO)
-  MINIO_ENDPOINT: "seaweedfs:8333"
-  MINIO_SECURE: "false"
-
-  # Ollama Configuration
-  OLLAMA_HOST: "http://ollama:11434"
-  OLLAMA_MODEL: "llama3.1"
-
-  # Qdrant Configuration
-  QDRANT_HOST: "qdrant"
-  QDRANT_PORT: "6333"
-  QDRANT_GRPC_PORT: "6334"
-
-
-
-  # Logging Configuration
-  LOG_LEVEL: "DEBUG"
-  LOG_FORMAT: "json"
-  LOG_FILE_ENABLED: "true"
-  LOG_FILE_PATH: "/var/log/waddlebotlog"
-  LOG_FILE_MAX_BYTES: "5242880"
-  LOG_FILE_BACKUP_COUNT: "3"
-
-  # License Server
-  LICENSE_SERVER_URL: "https://license.penguintech.io"
-  RELEASE_MODE: "false"
-
-  # Feature Flags
-  ENABLE_METRICS: "false"
-  ENABLE_TRACING: "false"
-  ENABLE_PROFILING: "false"
-
-  # Development mode
-  DEBUG: "true"
-  DEVELOPMENT_MODE: "true"
-
-# Persistent Volume Claims - Smaller for local
-persistence:
-  logs:
-    enabled: true
-    size: 2Gi
-    storageClass: "microk8s-hostpath"
-    accessMode: ReadWriteMany
-
-# Resource presets - Reduced for local development
-resourcePresets:
-  small:
-    cpu: "50m"
-    memory: "64Mi"
-    cpuLimit: "200m"
-    memoryLimit: "256Mi"
-  medium:
-    cpu: "100m"
-    memory: "128Mi"
-    cpuLimit: "500m"
-    memoryLimit: "512Mi"
-  large:
-    cpu: "200m"
-    memory: "256Mi"
-    cpuLimit: "1000m"
-    memoryLimit: "1Gi"
-
-# Monitoring - Disabled for local
-monitoring:
-  prometheus:
-    enabled: false
-  grafana:
-    enabled: false
 
 # Network Policies - Disabled for local
 networkPolicy:

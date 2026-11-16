@@ -37,7 +37,10 @@ use crate::http::auth::hardening::{
 pub const SERVICE_JWT_ALGORITHM: &str = "ES256";
 /// Scope for read RPCs (list/get/participants/hands) and the `grpc.health.v1` check.
 pub const SCOPE_READ: &str = "streaming.rooms:read";
-/// Scope for member-level write RPCs (create/delete/join/leave, raise/lower hand).
+/// Per-action scope for `CreateRoom` alone: minting rooms is its own privileged action, so a
+/// `write` token (join/leave/delete/raise-hand) can never create one.
+pub const SCOPE_CREATE: &str = "streaming.rooms:create";
+/// Scope for member-level write RPCs (delete/join/leave, raise/lower hand).
 pub const SCOPE_WRITE: &str = "streaming.rooms:write";
 /// Scope for moderation RPCs (kick/mute/lock, hand acknowledge/reset).
 pub const SCOPE_MODERATE: &str = "streaming.rooms:moderate";
@@ -152,14 +155,16 @@ impl ServiceJwtVerifier {
         let keys = Self::keys_from_pem(pems.iter().map(|(k, v)| (k.as_str(), v.as_str())))?;
         let audience = get("SERVICE_JWT_AUDIENCE").unwrap_or_else(|| DEFAULT_AUDIENCE.into());
         let issuer = get("SERVICE_JWT_ISSUER").unwrap_or_else(|| DEFAULT_ISSUER.into());
-        let subjects = get("ROOMS_GRPC_ALLOWED_SUBJECTS")
-            .map(|v| {
-                v.split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default();
+        let subjects: Vec<String> = match get("ROOMS_GRPC_ALLOWED_SUBJECTS") {
+            Some(v) => v
+                .split(',')
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect(),
+            // Documented-optional: unset = no subject pin (the verifier then accepts any `sub`
+            // that carries a valid, scope-matched JWT); the chart always sets it.
+            None => Vec::new(),
+        };
         Ok(Some(Self::new(keys, audience, vec![issuer], subjects)))
     }
 
@@ -203,7 +208,10 @@ impl ServiceJwtVerifier {
         let header = inspect_header(token, &[SERVICE_JWT_ALGORITHM], KidPolicy::Require)
             .inspect_err(|r| *alg = r.alg)?;
         *alg = "es256";
-        let kid = header.kid.unwrap_or_default();
+        // `KidPolicy::Require` above guarantees a kid; a missing one is still a rejection.
+        let kid = header
+            .kid
+            .ok_or(JwtRejection::new(REASON_UNKNOWN_KID, "es256"))?;
         let key = self
             .keys
             .get(&kid)

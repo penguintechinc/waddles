@@ -32,6 +32,8 @@ class Room(_message.Message):
         "subscriber_count",
         "locked",
         "empty_timeout_secs",
+        "participant_count",
+        "hand_count",
     )
     ROOM_ID_FIELD_NUMBER: _ClassVar[int]
     COMMUNITY_ID_FIELD_NUMBER: _ClassVar[int]
@@ -42,6 +44,8 @@ class Room(_message.Message):
     SUBSCRIBER_COUNT_FIELD_NUMBER: _ClassVar[int]
     LOCKED_FIELD_NUMBER: _ClassVar[int]
     EMPTY_TIMEOUT_SECS_FIELD_NUMBER: _ClassVar[int]
+    PARTICIPANT_COUNT_FIELD_NUMBER: _ClassVar[int]
+    HAND_COUNT_FIELD_NUMBER: _ClassVar[int]
     room_id: str
     community_id: str
     label: str
@@ -51,6 +55,8 @@ class Room(_message.Message):
     subscriber_count: int
     locked: bool
     empty_timeout_secs: int
+    participant_count: int
+    hand_count: int
     def __init__(
         self,
         room_id: _Optional[str] = ...,
@@ -62,6 +68,8 @@ class Room(_message.Message):
         subscriber_count: _Optional[int] = ...,
         locked: _Optional[bool] = ...,
         empty_timeout_secs: _Optional[int] = ...,
+        participant_count: _Optional[int] = ...,
+        hand_count: _Optional[int] = ...,
     ) -> None: ...
 
 class Participant(_message.Message):

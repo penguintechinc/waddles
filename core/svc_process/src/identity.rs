@@ -54,7 +54,7 @@
 //! `waddles_bundle_reader` role the stage already holds for the grant tables --
 //! no new role, password or privilege.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
@@ -275,6 +275,11 @@ pub struct InvocationIdentity {
     /// `None` until [`Self::with_event_id`]: an invocation without one cannot
     /// make a money-moving call (it could not be made idempotent).
     event_id: Option<String>,
+    /// The ROOT spine envelope's hop-verified `event_id`, preserved UNCHANGED across every tool hop
+    /// ([`Self::for_tool_call`] replaces `event_id` with a per-hop mutation namespace that derives
+    /// from a guest retry token; this one never changes). The automated floor ban derives its
+    /// idempotency key from it, so no guest value can steer which slot a ban lands in.
+    root_event_id: Option<String>,
     /// Next ordinal per economy mutation kind (`wager` | `transfer`); see
     /// [`Self::reserve_mutation`]. Never held across an `.await`.
     mutation_seq: Mutex<HashMap<&'static str, u32>>,
@@ -291,6 +296,13 @@ pub struct InvocationIdentity {
     /// reputation ops from a system-originated invocation need no human actor
     /// scope (the automatic floor evaluation), every other caller does.
     system_originated: bool,
+    /// HOST-tracked: the `(user, community)` pairs whose reputation apply really APPLIED
+    /// (`applied == true`, never an idempotent replay) in THIS invocation's capability set, set by
+    /// the `reputation.apply*` host handler and never by guest input. The automated floor-ban gate
+    /// requires the banned user and community to be in this set, so a floor ban can only follow a
+    /// real score change of THAT user in THAT community in the same invocation. Bounded
+    /// ([`MAX_APPLIED_TRACKED`]); empty on every tool hop ([`Self::for_tool_call`]): never inherited.
+    reputation_applied: Mutex<HashSet<(Uuid, i32)>>,
 }
 
 impl fmt::Debug for InvocationIdentity {
@@ -303,6 +315,9 @@ impl fmt::Debug for InvocationIdentity {
             .finish()
     }
 }
+
+/// Most `(user, community)` applies tracked per invocation for the floor-ban gate.
+const MAX_APPLIED_TRACKED: usize = 1024;
 
 /// First-party (core) bundle app ids.
 pub(crate) fn is_first_party(app_id: &str) -> bool {
@@ -385,10 +400,12 @@ impl InvocationIdentity {
             mentions,
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
+            root_event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: None,
             system_originated: false,
+            reputation_applied: Mutex::new(HashSet::new()),
         }
     }
 
@@ -441,10 +458,12 @@ impl InvocationIdentity {
             mentions: table,
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
+            root_event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: None,
             system_originated: false,
+            reputation_applied: Mutex::new(HashSet::new()),
         }
     }
 
@@ -458,10 +477,12 @@ impl InvocationIdentity {
             mentions: HashMap::new(),
             resolved: Mutex::new(HashMap::new()),
             event_id: None,
+            root_event_id: None,
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: Some(actor),
             system_originated: false,
+            reputation_applied: Mutex::new(HashSet::new()),
         }
     }
 
@@ -469,7 +490,9 @@ impl InvocationIdentity {
     /// handles. `event_id` is the hop-verified spine envelope id, never guest
     /// input. Without it every money-moving economy call is refused.
     pub fn with_event_id(mut self, event_id: impl Into<String>) -> Self {
-        self.event_id = Some(event_id.into());
+        let event_id = event_id.into();
+        self.root_event_id = Some(event_id.clone());
+        self.event_id = Some(event_id);
         self
     }
 
@@ -491,6 +514,12 @@ impl InvocationIdentity {
         self.event_id.as_deref()
     }
 
+    /// The root spine event id, unchanged across tool hops (see the field docs). `None` for an
+    /// invocation that never had a hop-verified event id (e.g. a bundle-admin call).
+    pub(crate) fn root_event_id(&self) -> Option<&str> {
+        self.root_event_id.as_deref()
+    }
+
     /// Forks verified actor/mention facts with a fresh mutation sequence for one
     /// nested tool call. The host supplies a domain-separated retry namespace
     /// for writes; reads receive `None` and cannot mutate economy/reputation.
@@ -506,6 +535,7 @@ impl InvocationIdentity {
             mentions: self.mentions.clone(),
             resolved: Mutex::new(HashMap::new()),
             event_id: mutation_event_id,
+            root_event_id: self.root_event_id.clone(),
             mutation_seq: Mutex::new(HashMap::new()),
             actor_role: Mutex::new(None),
             preverified: self.preverified.clone(),
@@ -514,7 +544,31 @@ impl InvocationIdentity {
             system_originated: self.system_originated
                 && is_first_party(caller_app_id)
                 && is_first_party(target_app_id),
+            // Never inherited across ANY hop: each hop must see its own successful apply.
+            reputation_applied: Mutex::new(HashSet::new()),
         }
+    }
+
+    /// Records that a reputation apply of `user` in `community_id` really applied in this
+    /// invocation (host handler only). Past the bound nothing more is recorded: the floor-ban
+    /// gate then fails closed for the overflow, never open.
+    pub(crate) fn mark_reputation_applied(&self, user: Uuid, community_id: i32) {
+        let mut set = self
+            .reputation_applied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        if set.len() < MAX_APPLIED_TRACKED {
+            set.insert((user, community_id));
+        }
+    }
+
+    /// Whether a reputation apply of exactly `user` in exactly `community_id` applied in this
+    /// invocation (see the field docs).
+    pub(crate) fn reputation_applied_for(&self, user: Uuid, community_id: i32) -> bool {
+        self.reputation_applied
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .contains(&(user, community_id))
     }
 
     /// Claims the next ordinal for a `kind` (`wager` | `transfer`) economy

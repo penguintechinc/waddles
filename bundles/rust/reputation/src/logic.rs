@@ -168,6 +168,31 @@ pub trait Platform: Send + Sync {
     /// Bans `user` on `platform` through that platform bundle's
     /// `<platform>.moderation.ban` tool. `Err` carries the stable code only.
     fn ban(&self, platform: &str, user: &str, reason: &str, key: &str) -> Result<(), String>;
+    /// The live per-community config (`get-context().config_json`: the manifest
+    /// `community_config_schema` merged over its defaults); absent or unreadable = `{}`.
+    fn community_config_json(&self) -> String {
+        "{}".to_string()
+    }
+}
+
+/// Community-scoped accrual switch (`accrual_enabled`, manifest default `true`). ONLY an explicit
+/// JSON `false` disables accrual for the community; an absent key, empty/`{}` config or anything
+/// unparseable keeps it ON, so real communities behave exactly as before this switch existed.
+pub fn accrual_enabled(config_json: &str) -> bool {
+    serde_json::from_str::<Value>(config_json)
+        .ok()
+        .and_then(|v| v.get("accrual_enabled").and_then(Value::as_bool))
+        .unwrap_or(true)
+}
+
+/// Refuses an accrual write (`adjust` / `apply_moderation`) in a community that opted out. The
+/// refusal is loud (`Forbidden`), never a silent success, so a misrouted caller is visible.
+fn require_accrual_enabled(env: &Env) -> Result<(), ToolError> {
+    if accrual_enabled(&env.platform.community_config_json()) {
+        Ok(())
+    } else {
+        Err(ToolError::Forbidden)
+    }
 }
 
 /// Everything a tool handler needs.
@@ -493,8 +518,11 @@ fn try_ban(env: &Env, platform: Option<&str>, user: &str, reason: &str, key: &st
 ///   (`community_soft_floor`); else a floor-triggered soft ban is lifted
 ///   (a manual soft ban, recorded under another reason, is never cleared);
 /// * tenant: the user's tenant aggregate `< tenant floor` (policy enabled)
-///   -> ban (`tenant_floor`). The ban runs through the current community's
-///   platform tool; fan-out to the tenant's other communities is a follow-up.
+///   -> ban (`tenant_floor`). Both bans go through the platform ban tool with the
+///   host-asserted `system:reputation_floor` actor (svc_process `floor_ban`): the HOST
+///   re-verifies the breach in SQL, enforces the per-scope switches, idempotency and
+///   rate limit, audits every attempt, and fans a tenant ban out across every community
+///   of the tenant with a durable retry record for failures.
 ///
 /// A failed host/ban call never fails the score change that already applied:
 /// it is reported in the result (`ban_failed:<code>`) so it is never silent.
@@ -660,6 +688,7 @@ fn apply_result(
 /// idempotently (event + ordinal key), then the floors are enforced.
 pub fn adjust(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
     only_fields(&args, &["user", "delta", "reason", "platform"])?;
+    require_accrual_enabled(env)?;
     let key = require_key(ctx)?;
     let user = uuid_field(&args, "user")?;
     let delta = delta_field(&args, ACTIVITY_CAP)?;
@@ -679,6 +708,7 @@ pub fn adjust(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolEr
 /// logic bundle cannot make moderation-size moves unless granted.
 pub fn apply_moderation(env: &Env, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
     only_fields(&args, &["user", "delta", "reason", "platform"])?;
+    require_accrual_enabled(env)?;
     let key = require_key(ctx)?;
     let user = uuid_field(&args, "user")?;
     let delta = delta_field(&args, MODERATION_CAP)?;

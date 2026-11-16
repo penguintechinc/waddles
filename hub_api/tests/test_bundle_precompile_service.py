@@ -182,3 +182,48 @@ async def test_cli_queue_ack_exit_code_reflects_failures(queue: FakeQueue) -> No
         object(), {"results": [{"digest": DIGEST, "status": "skipped"}]}
     )
     assert rc == 0
+
+
+def test_cli_config_needs_only_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression (alpha 43797026024): export/ack must not require SECRET_KEY / HubAPIConfig."""
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://role:pw@db:5432/waddlebot")
+    assert precompile_queue.database_url_from_env() == "postgresql://role:pw@db:5432/waddlebot"
+
+
+@pytest.mark.parametrize("env", [{}, {"DATABASE_URL": ""}, {"DATABASE_URL": "   "}])
+def test_cli_config_fails_closed_without_database_url(env: dict[str, str]) -> None:
+    """A missing/blank DATABASE_URL raises -- never a guessed default DSN."""
+    with pytest.raises(precompile_queue.PrecompileConfigError):
+        precompile_queue.database_url_from_env(env)
+
+
+def test_cli_run_uses_minimal_config_not_hub_api_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`export` builds its DAL from DATABASE_URL alone; SECRET_KEY unset must not matter."""
+    import asyncio
+
+    seen: list[str] = []
+
+    class _Dal:
+        async def close(self) -> None:
+            seen.append("closed")
+
+    async def _build(url: str, pool_size: int) -> _Dal:
+        seen.append(url)
+        return _Dal()
+
+    async def _claim(_dal: Any, limit: int) -> list[Any]:
+        return []
+
+    monkeypatch.delenv("SECRET_KEY", raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://r:p@h:5432/d")
+    monkeypatch.setattr(precompile_queue, "build_install_dal", _build)
+    monkeypatch.setattr(precompile_queue.svc, "claim_pending", _claim)
+    out = tmp_path / "m.json"
+    rc = asyncio.run(
+        precompile_queue._run(precompile_queue._parser().parse_args(["export", "--out", str(out)]))
+    )
+    assert rc == 0 and json.loads(out.read_text()) == []
+    assert seen == ["postgresql://r:p@h:5432/d", "closed"]

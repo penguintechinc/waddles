@@ -179,6 +179,18 @@ impl StorageHost {
     }
 
     /// Flag, owner/key validation, grant, rate limit; builds the host-scoped key.
+    /// Defence in depth: a zero tenant/community is the fail-closed "unresolved" scope
+    /// and must never address a real prefix, on ANY op.
+    fn require_scope(s: &StorageScope) -> Result<(), StorageError> {
+        if s.tenant == 0 || s.community == 0 {
+            metrics::denied("unscoped");
+            return Err(StorageError::Invalid(
+                "tenant and community scope required".into(),
+            ));
+        }
+        Ok(())
+    }
+
     async fn resolve(
         &self,
         s: &StorageScope,
@@ -190,6 +202,7 @@ impl StorageHost {
             metrics::denied("flag_off");
             return Err(StorageError::NotImplemented);
         }
+        Self::require_scope(s)?;
         let owner = owner.unwrap_or(&s.app_id).to_string();
         validate_owner(&owner)?;
         validate_key(key).inspect_err(|_| metrics::denied("invalid_key"))?;
@@ -455,6 +468,7 @@ impl StorageHost {
             metrics::denied("flag_off");
             return Err(StorageError::NotImplemented);
         }
+        Self::require_scope(s)?;
         validate_key_prefix(key_prefix)?;
         let owner_s = owner.unwrap_or(&s.app_id).to_string();
         validate_owner(&owner_s)?;
@@ -619,6 +633,7 @@ impl StorageHost {
         if !s.enabled {
             return Err(StorageError::NotImplemented);
         }
+        Self::require_scope(s)?;
         validate_key(key)?;
         validate_owner(consumer)?;
         let owner_s = owner.unwrap_or(&s.app_id);

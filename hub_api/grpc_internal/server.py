@@ -80,6 +80,8 @@ MAX_MESSAGE_BYTES = 4 * 1024 * 1024
 
 #: Full gRPC method name of the detokenizing RPC (its own, tighter rate-limit bucket).
 _PLATFORM_USER_METHOD = "/waddles.hub.internal.v1.IdentityService/ResolvePlatformUser"
+#: The one RPC that releases an unwrapped tenant DEK (tight per-caller bucket).
+_TENANT_DEK_METHOD = "/waddles.hub.internal.v1.KeyService/GetTenantDek"
 
 
 def _load_server_credentials() -> grpc.ServerCredentials:
@@ -135,6 +137,10 @@ def build_interceptor_chain(issuer: ServiceJwtIssuer) -> list[grpc.aio.ServerInt
                 _PLATFORM_USER_METHOD: (
                     float(os.getenv("GRPC_PLATFORM_USER_RPS", "20")),
                     float(os.getenv("GRPC_PLATFORM_USER_BURST", "40")),
+                ),
+                _TENANT_DEK_METHOD: (
+                    float(os.getenv("GRPC_TENANT_DEK_RPS", "5")),
+                    float(os.getenv("GRPC_TENANT_DEK_BURST", "30")),
                 ),
                 # Bootstrap RPCs have no verified caller identity: each gets its own bucket,
                 # keyed per peer host, so a flood on one neither drains the other nor any

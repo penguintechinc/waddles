@@ -36,6 +36,7 @@ from tests.conftest import (
     make_user_token,
     seed_community,
     seed_membership,
+    seed_scoped_member,
     seed_super_admin,
 )
 from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by name)
@@ -134,6 +135,31 @@ class TestAdminRouteAuth:
         assert fake.calls == []
 
     @pytest.mark.parametrize("method,path_fn,body", _ADMIN_ROUTES)
+    async def test_admin_route_requires_calls_manage_scope(
+        self,
+        client: Any,
+        overlay_db: Any,
+        fake: FakeRooms,
+        method: str,
+        path_fn: Any,
+        body: dict[str, Any] | None,
+    ) -> None:
+        """Admin routes need `calls:manage`; broad or other-action scopes do not satisfy it."""
+        community_id = seed_community(overlay_db)
+        seed_scoped_member(
+            overlay_db,
+            community_id=community_id,
+            user_id=703,
+            scopes=["community:manage_members", "community:manage_channels", "overlay:manage"],
+        )
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=703, scope=SCOPE_ADMIN)}"}
+        response = await client.open(
+            path_fn(community_id), method=method, headers=headers, json=body
+        )
+        assert response.status_code == 403
+        assert fake.calls == []
+
+    @pytest.mark.parametrize("method,path_fn,body", _ADMIN_ROUTES)
     async def test_admin_route_non_member_is_403(
         self,
         client: Any,
@@ -185,7 +211,8 @@ class TestAdminRoutes:
         _, request, metadata = fake.calls[0]
         assert request.label == "room1"
         assert request.max_publishers == 8
-        assert metadata["authorization"].endswith("streaming.rooms:write")
+        # CreateRoom mints its own per-action scope, never the coarse member-level `write`.
+        assert metadata["authorization"].endswith("streaming.rooms:create")
 
     async def test_downstream_error_is_relayed_with_status(
         self, client: Any, overlay_db: Any, fake: FakeRooms

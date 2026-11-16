@@ -27,6 +27,7 @@ from penguin_dal import AsyncDB
 
 from services.bundle_install_dal import raw_sql_rows
 from services.envelope.gate import ExternalKmsEntitlement, ExternalKmsGate
+from services.envelope.invalidation import publish_dek_invalidation
 from services.envelope.platform_kek import LazyPlatformKek
 from services.envelope.providers import KmsProviders, ProviderSettings, build_providers
 from services.envelope.repository import PURPOSE_INGEST_STREAM, PenguinDalEnvelopeRepository
@@ -97,6 +98,7 @@ def build_envelope_runtime(
         gate=entitlement,
         settings=envelope_settings,
         slug_resolver=slugs,
+        invalidation_publisher=publish_dek_invalidation,
         sibling_keys=(stream_repository,),
     )
     # Stream identity-field DEKs (KeyService.GetStreamDek): own lineage + subkey domain, same

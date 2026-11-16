@@ -77,6 +77,26 @@ class TestPrecompileIsolation:
         specs = _pod_specs(_render(values))
         assert sorted(k for k, _ in specs) == ["CronJob", "Job"], f"examined {len(specs)} pod specs"
 
+    def test_hub_api_steps_have_database_env_and_no_secret_key(self, values: str) -> None:
+        """export/ack read ONLY DATABASE_URL (+ DB role secretKeyRef); SECRET_KEY is never injected.
+
+        Regression (alpha deploy 43797026024): the CLI used the full HubAPIConfig and died with
+        InsecureSecretError on a missing SECRET_KEY. It now needs only the DSN, so the pod must carry
+        DATABASE_URL (fail closed otherwise) and must not receive the session secret (M2).
+        """
+        specs = _pod_specs(_render(values))
+        assert len(specs) == 2
+        examined = 0
+        for kind, spec in specs:
+            cs = _containers(spec)
+            for name in ("export", "ack"):
+                env = {e["name"]: e for e in cs[name]["env"]}
+                examined += 1
+                assert env["DATABASE_URL"].get("value"), f"{kind}/{name}: DATABASE_URL missing/empty"
+                assert "secretKeyRef" in env["DB_PASS"]["valueFrom"], f"{kind}/{name}: DB_PASS"
+                assert "SECRET_KEY" not in env, f"{kind}/{name}: SECRET_KEY must not be injected"
+        assert examined == 4, f"examined {examined} hub-api containers"
+
     def test_compile_has_no_key_and_sign_mounts_key_0400(self, values: str) -> None:
         specs = _pod_specs(_render(values))
         assert len(specs) == 2

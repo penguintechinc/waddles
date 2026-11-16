@@ -25,6 +25,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 from werkzeug.datastructures import FileStorage
@@ -49,7 +50,7 @@ def _test_config() -> HubAPIConfig:
         db_retry_delay=1,
         secret_key="change-me-in-production",
         jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -108,8 +109,14 @@ def _seed_community(
 
 
 def _seed_role(auth_db: Any, *, community_id: int, name: str, scopes: list[str]) -> int:
+    kind = {"community-admin": 1, "community-owner": 1, "moderator": 2}.get(name, 0)
     role_id: int = auth_db.dal.community_roles.insert(
-        community_id=community_id, name=name, priority=0, base_claims={"scopes": scopes}
+        community_id=community_id,
+        name=name,
+        is_system=kind != 0,
+        role_kind=kind,
+        priority=0,
+        base_claims={"scopes": scopes},
     )
     auth_db.dal.commit()
     return role_id
@@ -289,19 +296,14 @@ class TestCommunityLogo:
     async def test_delete_no_logo_set_by_moderator_succeeds(
         self, client: Any, auth_db: Any
     ) -> None:
-        """Moderator (`community:manage_channels` only) CAN manage logo/banner.
-
-        Looser than the text-profile-field gate (matches Node's
-        route-level-only `requireCommunityAdmin` check for logo/banner, no
-        extra controller check).
-        """
+        """A moderator-kind role granted `community.branding:manage` CAN manage logo/banner."""
         community_id = _seed_community(auth_db)
         mod_id = _seed_user(auth_db, email="mod2@example.com", username="mod2")
         mod_role = _seed_role(
             auth_db,
             community_id=community_id,
             name="moderator",
-            scopes=["community:manage_channels"],
+            scopes=["community.branding:manage"],
         )
         _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=mod_role)
 
@@ -311,6 +313,30 @@ class TestCommunityLogo:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["success"] is True
+
+    @pytest.mark.parametrize(
+        "method,path",
+        [("DELETE", "logo"), ("DELETE", "banner")],
+    )
+    async def test_broad_moderator_scopes_cannot_manage_branding(
+        self, client: Any, auth_db: Any, method: str, path: str
+    ) -> None:
+        """`community:manage_channels`/`manage_members` are not `community.branding:manage`."""
+        community_id = _seed_community(auth_db)
+        mod_id = _seed_user(auth_db, email="mod9@example.com", username="mod9")
+        mod_role = _seed_role(
+            auth_db,
+            community_id=community_id,
+            name="moderator",
+            scopes=["community:manage_channels", "community:manage_members"],
+        )
+        _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=mod_role)
+        response = await client.open(
+            f"/api/v1/admin/{community_id}/{path}",
+            method=method,
+            headers=_auth_header(user_id=mod_id),
+        )
+        assert response.status_code == 403
 
     async def test_upload_no_file_is_400(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
