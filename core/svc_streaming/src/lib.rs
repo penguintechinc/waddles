@@ -411,14 +411,17 @@ mod record_status_tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt as _;
 
-    async fn readyz(readiness: http::RecordReadiness) -> serde_json::Value {
+    async fn readyz(
+        readiness: http::RecordReadiness,
+        jwt_keys: crate::jwt_keys::JwtKeys,
+    ) -> serde_json::Value {
         let cli = config::CliConfig::parse_from(["svc-streaming"]);
         let cfg = config::Config {
             cli,
             db_password: config::Secret::new("x"),
             cache_password: None,
             service_api_key: config::Secret::new("x"),
-            jwt_keys: crate::jwt_keys::JwtKeys::None,
+            jwt_keys,
         };
         let mut state = http::AppState::new(cfg, prometheus::Registry::new());
         state.record = readiness;
@@ -439,7 +442,7 @@ mod record_status_tests {
     async fn disabled_sink_reports_degraded_with_the_reason() {
         let (sink, readiness) = record_status(Err(anyhow::anyhow!("S3_ENDPOINT is not set")));
         assert!(sink.is_none());
-        let body = readyz(readiness).await;
+        let body = readyz(readiness, crate::jwt_keys::JwtKeys::None).await;
         assert_eq!(body["status"], "degraded");
         let record = &body["dependencies"][3];
         assert_eq!(record["name"], "record");
@@ -461,7 +464,14 @@ mod record_status_tests {
         );
         let (got, readiness) = record_status(Ok(sink));
         assert!(got.is_some());
-        let body = readyz(readiness).await;
+        // `ok` also needs a loaded JWT key set (readiness gates on both), so give it one.
+        use crate::jwt_keys::{test_support::TestKey, JwtKeys};
+        let keys = JwtKeys::in_memory(vec![TestKey::generate().active_row("k1")]);
+        let JwtKeys::Cache(cache) = &keys else {
+            panic!("in_memory builds a cache");
+        };
+        cache.refresh().await.unwrap();
+        let body = readyz(readiness, keys).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["dependencies"][3]["configured"], true);
     }

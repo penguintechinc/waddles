@@ -763,7 +763,7 @@ mod tests {
         assert_refused(&token, &config, REASON_BAD_SIGNATURE, "es256", false).await;
         let header = json!({"alg": "HS256", "typ": "JWT", "kid": "hs256-v1"});
         let token = raw_hs256(&header, &good_claims(&config), b"old-shared-secret");
-        assert_refused(&token, &config, REASON_ALG_MISMATCH, "es256", false).await;
+        assert_refused(&token, &config, REASON_ALG_MISMATCH, "hs256", false).await;
     }
 
     #[tokio::test]
