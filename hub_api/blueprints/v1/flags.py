@@ -67,6 +67,7 @@ CLIENT_FLAG_KEYS: tuple[str, ...] = (
     "waddles.tenant.discord_install",
     "waddles.secret-messaging",
     "waddles.community.chat-realtime",
+    "waddles.music.queue-page",
 )
 
 _meter = metrics.get_meter("waddles.hub_api.flags")

@@ -9,7 +9,7 @@ use serde::Deserialize;
 use serde_json::json;
 
 /// Chat prefixes this bundle claims (mirrors `consumes.filters.command_prefix`).
-pub const COMMANDS: [&str; 5] = ["!sr", "!songrequest", "!music", "!queue", "!dj"];
+pub const COMMANDS: [&str; 1] = ["!dj"];
 /// Replies are capped so one line fits every platform's chat limit.
 pub const MAX_REPLY_CHARS: usize = 400;
 
@@ -68,10 +68,14 @@ mod tests {
 
     #[test]
     fn only_dj_commands_parse() {
-        assert!(parse(r#"{"text":"!sr never gonna","channel_id":"1"}"#).is_some());
-        assert!(parse(r#"{"text":"  !MUSIC next"}"#).is_some());
-        assert!(parse(r#"{"text":"!srx"}"#).is_none());
-        assert!(parse(r#"{"text":"hello !sr"}"#).is_none());
+        assert!(parse(r#"{"text":"!dj fill","channel_id":"1"}"#).is_some());
+        assert!(parse(r#"{"text":"  !DJ ai on"}"#).is_some());
+        // Viewer request commands belong to the music bundle, never to the DJ.
+        for c in ["!sr x", "!songrequest x", "!music", "!queue", "!songqueue"] {
+            assert!(parse(&format!(r#"{{"text":"{c}"}}"#)).is_none(), "{c}");
+        }
+        assert!(parse(r#"{"text":"!djx"}"#).is_none());
+        assert!(parse(r#"{"text":"hello !dj"}"#).is_none());
         assert!(parse(r#"{"text":7}"#).is_none());
         assert!(parse("[]").is_none());
     }

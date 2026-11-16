@@ -543,7 +543,9 @@ class TestEveryAdminGateHasDedicatedScope:
                     gates += 1
                     if "scope" not in kw:
                         missing.append(f"{path.name}:{node.lineno}")
-        assert gates >= 30, gates
+        # Denominator floor (a sweep that finds ~nothing must fail, not pass). 26 after the
+        # community music-queue blueprint (admin gates) moved into the music-requests bundle.
+        assert gates >= 26, gates
         assert not missing, missing
 
 

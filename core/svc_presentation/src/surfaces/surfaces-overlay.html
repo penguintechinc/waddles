@@ -31,8 +31,7 @@
 </div>
 <script>
 /* Structured frames only: every server string goes into the DOM via textContent, never innerHTML. */
-var KNOWN = ['waddles.core.example.music.now_playing', 'waddles.core.example.music.queue', 'live.channels', 'clip.alert', 'alert', 'waddles.core.app.stream-alerts.alerts', 'waddles.core.app.galactic-avatars.stage_strip',
-  'waddles.core.example.dj.now_playing', 'waddles.core.example.dj.queue'];
+var KNOWN = ['waddles.core.example.music.now_playing', 'waddles.core.example.music.queue', 'live.channels', 'clip.alert', 'alert', 'waddles.core.app.stream-alerts.alerts', 'waddles.core.app.galactic-avatars.stage_strip'];
 function el(tag, cls, text) {
   var node = document.createElement(tag);
   if (cls) { node.className = cls; }
@@ -128,7 +127,7 @@ function renderStrip(p) {
 }
 var RENDER = {
   'waddles.core.example.music.now_playing': renderNow, 'waddles.core.example.music.queue': renderQueue,
-  'waddles.core.example.dj.now_playing': renderNow, 'waddles.core.example.dj.queue': renderQueue, 'live.channels': renderLive,
+  'live.channels': renderLive,
   'clip.alert': renderClip, 'alert': renderAlert,
   'waddles.core.app.stream-alerts.alerts': renderStreamAlert,
   'waddles.core.app.galactic-avatars.stage_strip': renderStrip
