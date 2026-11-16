@@ -34,7 +34,7 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
         .map(|l| l.split('(').next().unwrap().trim().to_string())
         .collect();
     let constant: BTreeSet<String> = RPC_NAMES.iter().map(|s| s.to_string()).collect();
-    assert_eq!(declared.len(), 18, "denominator: {declared:?}");
+    assert_eq!(declared.len(), 19, "denominator: {declared:?}");
     assert_eq!(declared, constant, "RPC_NAMES drifted from rooms.proto");
 
     // 2. Each one is routed and demands a token: no token -> Unauthenticated, never
@@ -63,6 +63,7 @@ async fn every_proto_rpc_is_declared_served_and_auth_gated() {
     );
     gate!(create_room, CreateRoomRequest::default(), "CreateRoom");
     gate!(delete_room, DeleteRoomRequest::default(), "DeleteRoom");
+    gate!(update_room, UpdateRoomRequest::default(), "UpdateRoom");
     gate!(join_room, JoinRoomRequest::default(), "JoinRoom");
     gate!(leave_room, LeaveRoomRequest::default(), "LeaveRoom");
     gate!(
@@ -116,6 +117,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
                 label: Some("standup".into()),
                 max_publishers: Some(4),
                 empty_timeout_secs: None,
+                ..Default::default()
             },
             &create,
         ))
@@ -180,6 +182,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
                 publish: true,
                 subscribe: true,
                 ttl_secs: None,
+                ..Default::default()
             },
             &write,
         ))
@@ -215,6 +218,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
         publish: false,
         subscribe: true,
         ttl_secs: None,
+        ..Default::default()
     };
     let e = h
         .client
@@ -381,6 +385,7 @@ async fn full_room_lifecycle_over_mtls_with_service_jwt() {
 async fn moderation_enforces_actor_role_and_feature_flag() {
     let mut h = harness(42140, true).await;
     let create = jwt(&h.signing_pem, SCOPE_CREATE, |_| {});
+    let write = jwt(&h.signing_pem, SCOPE_WRITE, |_| {});
     let moderate = jwt(&h.signing_pem, SCOPE_MODERATE, |_| {});
     let room = h
         .client
@@ -405,18 +410,31 @@ async fn moderation_enforces_actor_role_and_feature_flag() {
         actor_id: uuid::Uuid::new_v4().to_string(),
         actor_role: role as i32,
     };
-    for role in [RoomRole::Member, RoomRole::Guest, RoomRole::Unspecified] {
-        let e = h
-            .client
+    // The stated role is a display label: with the verified moderation scope ANY stated role
+    // works, without it NONE does (even a claimed admin).
+    for role in [
+        RoomRole::Member,
+        RoomRole::Guest,
+        RoomRole::Unspecified,
+        RoomRole::Moderator,
+    ] {
+        h.client
             .kick_participant(req(kick(role), &moderate))
             .await
-            .unwrap_err();
-        assert_eq!(e.code(), Code::PermissionDenied, "{role:?}");
+            .unwrap_or_else(|e| panic!("{role:?}: {e}"));
     }
-    h.client
-        .kick_participant(req(kick(RoomRole::Moderator), &moderate))
-        .await
-        .unwrap();
+    for role in [RoomRole::Admin, RoomRole::Moderator] {
+        let e = h
+            .client
+            .kick_participant(req(kick(role), &write))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e.code(),
+            Code::PermissionDenied,
+            "{role:?} without the scope"
+        );
+    }
 
     // Flag OFF: moderation refused loudly (Unimplemented), not silently ignored.
     let mut off = harness(42160, false).await;

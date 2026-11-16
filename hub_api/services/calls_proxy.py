@@ -111,7 +111,13 @@ ROUTE_RPCS: dict[tuple[str, str], str] = {
 #: Proto RPCs deliberately without a hub-api route, each with the reason. The contract test
 #: fails when a proto RPC is neither routed nor listed here, so a future RPC cannot be left
 #: unmapped silently.
-UNROUTED_RPCS: dict[str, str] = {}
+UNROUTED_RPCS: dict[str, str] = {
+    "UpdateRoom": (
+        "room facts (kind, schedule, closed, guests) are changed by the rooms app bundle's "
+        "`room.update` tool over the host seam with the `streaming.rooms:update` scope; hub-api "
+        "exposes no REST route and never calls it"
+    ),
+}
 
 #: gRPC status -> (HTTP status, machine code) surfaced to hub-api's caller.
 _HTTP_STATUS: dict[grpc.StatusCode, tuple[int, str]] = {

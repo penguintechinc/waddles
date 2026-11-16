@@ -176,6 +176,12 @@ def bundle_signing_test_env(monkeypatch: Any) -> Any:
 
     monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
     monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+    # The CLIs (seeder, backfill) load the vault from the database at start; the cache is seeded
+    # directly below instead, so stub the DB load. Tests of the real loader capture the function
+    # at import time (tests/test_platform_secrets_offline_signer.py).
+    from services.platform_secrets import bootstrap as vault_bootstrap
+
+    monkeypatch.setattr(vault_bootstrap, "load_offline_signer_cache", lambda *_a, **_k: 1)
     cache = get_process_cache()
     cache.seed(
         [

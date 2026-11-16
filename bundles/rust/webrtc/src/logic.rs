@@ -19,8 +19,9 @@ use waddle_sdk::tool::{ToolContext, ToolError, ToolRegistry};
 use crate::grants::{GrantRole, HandOp, LEAVE_TOOL, moderation_scope};
 
 /// Every tool name this bundle exposes (also the only labels ever logged).
-pub const TOOL_NAMES: [&str; 28] = [
+pub const TOOL_NAMES: [&str; 30] = [
     "room.create",
+    "room.update",
     "room.get",
     "room.close",
     "token.issue",
@@ -48,6 +49,7 @@ pub const TOOL_NAMES: [&str; 28] = [
     "room.hand.list_all",
     "room.hand.ack",
     "room.hand.reset",
+    "participant.self",
 ];
 
 /// Largest room label (display text, never a key).
@@ -186,8 +188,107 @@ fn room_view(v: &Value) -> Result<Value, ToolError> {
     Ok(r)
 }
 
-fn room_create(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
-    let o = object(&args, &["label", "max_publishers", "route"])?;
+/// The dedicated room-management scopes (a role is only a predefined bundle of these).
+const SCOPE_ROOMS_CREATE: &str = "rooms:create";
+const SCOPE_ROOMS_UPDATE: &str = "rooms:update";
+const SCOPE_ROOMS_GUESTS: &str = "rooms:guests";
+
+/// The room-management scopes the HOST verified for this caller, in a fixed order. This is
+/// what is forwarded to svc-streaming (which re-checks the specific scope it needs); role
+/// names never travel.
+fn room_scopes(ctx: &ToolContext) -> Vec<&'static str> {
+    [
+        SCOPE_ROOMS_CREATE,
+        SCOPE_ROOMS_UPDATE,
+        "rooms:close",
+        SCOPE_ROOMS_GUESTS,
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
+    ]
+    .into_iter()
+    .filter(|s| ctx.has_scope(s))
+    .collect()
+}
+
+/// The scopes the facts in `req` need beyond the base tool scope: `rooms:update` for a stage /
+/// green-room kind or a schedule window, `rooms:guests` for enabling guests.
+fn fact_scopes(req: &Map<String, Value>) -> Vec<&'static str> {
+    let mut need = Vec::new();
+    let kind_set = req
+        .get("kind")
+        .and_then(Value::as_str)
+        .is_some_and(|k| k != "community");
+    let window = ["starts_at", "ends_at"]
+        .iter()
+        .any(|b| req.get(*b).is_some_and(|v| !v.is_null()));
+    if kind_set || window {
+        need.push(SCOPE_ROOMS_UPDATE);
+    }
+    if req.get("allow_guests") == Some(&Value::Bool(true)) {
+        need.push(SCOPE_ROOMS_GUESTS);
+    }
+    need
+}
+
+/// Parses the room-facts arguments shared by `room.create` and `room.update` into `req`
+/// (closed set, bounds-checked). Returns true when any fact is NOT the open-community
+/// default, i.e. needs staff authority to set.
+fn facts_args(o: &Map<String, Value>, req: &mut Map<String, Value>) -> Result<bool, ToolError> {
+    let mut non_default = false;
+    // A town hall is created by hub-api only, never through this tool.
+    match o.get("kind") {
+        None | Some(Value::Null) => {}
+        Some(Value::String(k)) if ["community", "stage", "green_room"].contains(&k.as_str()) => {
+            non_default |= k != "community";
+            req.insert("kind".into(), json!(k));
+        }
+        _ => return Err(bad("kind must be community, stage or green_room")),
+    }
+    for flag in ["closed", "allow_guests"] {
+        match o.get(flag) {
+            None | Some(Value::Null) => {}
+            Some(Value::Bool(b)) => {
+                non_default |= flag == "allow_guests" && *b;
+                req.insert(flag.into(), json!(b));
+            }
+            _ => return Err(ToolError::InvalidArgs(format!("{flag} must be a boolean"))),
+        }
+    }
+    for bound in ["starts_at", "ends_at"] {
+        match o.get(bound) {
+            None | Some(Value::Null) => {}
+            Some(v) => match v.as_i64() {
+                Some(n) if n >= 0 => {
+                    non_default = true;
+                    req.insert(bound.into(), json!(n));
+                }
+                _ => {
+                    return Err(ToolError::InvalidArgs(format!(
+                        "{bound} must be a non-negative unix time"
+                    )));
+                }
+            },
+        }
+    }
+    Ok(non_default)
+}
+
+fn room_create(m: &dyn Media, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    let o = object(
+        &args,
+        &[
+            "label",
+            "max_publishers",
+            "route",
+            "kind",
+            "closed",
+            "allow_guests",
+            "starts_at",
+            "ends_at",
+        ],
+    )?;
     let mut req = Map::new();
     match o.get("label") {
         None | Some(Value::Null) => {}
@@ -220,8 +321,63 @@ fn room_create(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, Too
         }
         _ => return Err(bad("route must be \"sfu\"")),
     }
+    // Room facts svc-streaming enforces on join. A non-default fact needs its specific scope
+    // (`rooms:update` for kind/schedule, `rooms:guests` for guests) on top of the tool's
+    // `rooms:create` -- defence in depth; the host re-checks the verified scopes we forward.
+    facts_args(o, &mut req)?;
+    for need in fact_scopes(&req) {
+        if !ctx.has_scope(need) {
+            return Err(ToolError::NotGranted);
+        }
+    }
+    let held = room_scopes(ctx);
+    if !held.is_empty() {
+        req.insert("actor_scopes".into(), json!(held));
+    }
     room_view(
         &m.call("room.create", &Value::Object(req))
+            .map_err(tool_err)?,
+    )
+}
+
+/// `room.update`: replaces a room's facts on svc-streaming so later rooms-app changes (close,
+/// set_access, set_schedule) take effect on live and future joins. Admin-only, PATCH.
+fn room_update(m: &dyn Media, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    reject_actor_args(&args)?;
+    let o = object(
+        &args,
+        &[
+            "room_id",
+            "kind",
+            "closed",
+            "allow_guests",
+            "starts_at",
+            "ends_at",
+        ],
+    )?;
+    let room = uuid_arg(o, "room_id", true)?.ok_or_else(|| bad("room_id required"))?;
+    // Needs the dedicated `rooms:update` scope (moderators do not hold it); enabling guests also
+    // needs `rooms:guests`. PATCH semantics: only named facts are sent (omitted = unchanged); an
+    // explicit null clears a schedule bound.
+    let actor = verified_actor_scope(ctx, SCOPE_ROOMS_UPDATE)?;
+    let mut req = Map::new();
+    facts_args(o, &mut req)?;
+    if req.get("allow_guests") == Some(&Value::Bool(true)) && !ctx.has_scope(SCOPE_ROOMS_GUESTS) {
+        return Err(ToolError::NotGranted);
+    }
+    for bound in ["starts_at", "ends_at"] {
+        if matches!(o.get(bound), Some(Value::Null)) {
+            req.insert(bound.into(), Value::Null);
+        }
+    }
+    if req.is_empty() {
+        return Err(bad("room.update needs at least one fact to change"));
+    }
+    req.insert("room_id".into(), json!(room));
+    req.insert("actor_id".into(), json!(actor.id));
+    req.insert("actor_scopes".into(), json!(room_scopes(ctx)));
+    room_view(
+        &m.call("room.update", &Value::Object(req))
             .map_err(tool_err)?,
     )
 }
@@ -284,6 +440,23 @@ fn token_revoke_all(m: &dyn Media, _: &ToolContext, args: Value) -> Result<Value
 /// actor holds `community:admin` (the manifest's `required_scope` is enforced
 /// before dispatch, so reaching this handler IS the proof). Takes no arguments
 /// and never reads actor/scope data from the caller.
+/// `participant.self`: the caller's host-derived per-community call-participant id (the same
+/// pseudonym hub-api's REST layer uses), so a front-end app can compare it with the
+/// participant ids svc-streaming reports without ever holding the global user uuid.
+fn participant_self(_: &dyn Media, ctx: &ToolContext, args: Value) -> Result<Value, ToolError> {
+    object(&args, &[])?;
+    let id = ctx
+        .participant
+        .as_deref()
+        .map(str::to_ascii_lowercase)
+        .filter(|p| is_uuid(p))
+        .ok_or(ToolError::Forbidden)?;
+    if !ctx.has_scope("community:member") {
+        return Err(ToolError::NotGranted);
+    }
+    Ok(json!({"participant": id}))
+}
+
 fn admin_verify(_: &dyn Media, _: &ToolContext, args: Value) -> Result<Value, ToolError> {
     object(&args, &[])?;
     Ok(json!({"verified": true}))
@@ -422,7 +595,8 @@ fn reject_actor_args(args: &Value) -> Result<(), ToolError> {
 /// The actor is the host-verified context and its role comes from its host-derived
 /// scopes; `actor_id`/`actor_role` arguments are refused. Which scope is required
 /// follows from the tool (see [`moderation_scope`]): `room.leave` removes only the
-/// verified caller (member scope), everything else needs `community:moderate`,
+/// verified caller (member scope), everything else needs its own dedicated scope (`rooms:kick`,
+/// `rooms:mute`, `rooms:lock`),
 /// verified by the host before dispatch and again here on the verified context.
 /// `actor_id` and the scope-derived `actor_role` ride on every host op so
 /// svc-streaming can bind and re-check them.
@@ -452,6 +626,12 @@ fn moderation_call(
     let mut req = json!({
         "room_id": room, "actor_id": actor.id, "actor_role": role_wire(actor.role),
     });
+    // The verified per-action scopes ride along so the host re-checks the one it needs
+    // (`actor_role` is a display/audit label only); nothing is sent for a plain member.
+    let held = room_scopes(ctx);
+    if !held.is_empty() {
+        req["actor_scopes"] = json!(held);
+    }
     // `room.leave` acts on the verified caller only; the others name their target.
     match (&target, tool == LEAVE_TOOL) {
         (Some(t), _) => req["participant_id"] = json!(t),
@@ -492,8 +672,10 @@ fn verified_actor(ctx: &ToolContext, op: HandOp) -> Result<Actor, ToolError> {
 
 /// [`verified_actor`] for any tool, given the scope it declares in its manifest.
 fn verified_actor_scope(ctx: &ToolContext, scope: &str) -> Result<Actor, ToolError> {
+    // The id sent to svc-streaming is the HOST-derived per-community pseudonym, never
+    // the global `actor` user uuid; no pseudonym => forbidden (fail closed, no fallback).
     let id = ctx
-        .actor
+        .participant
         .as_deref()
         .map(str::to_ascii_lowercase)
         .filter(|a| is_uuid(a))
@@ -501,9 +683,11 @@ fn verified_actor_scope(ctx: &ToolContext, scope: &str) -> Result<Actor, ToolErr
     if !ctx.has_scope(scope) {
         return Err(ToolError::NotGranted);
     }
+    // The role is only a label derived from verified scopes: holding any dedicated staff scope
+    // (not just the member scope) makes the caller at least a moderator for the host's check.
     let role = if ctx.has_scope("community:admin") {
         GrantRole::Admin
-    } else if ctx.has_scope("community:moderate") {
+    } else if ctx.has_scope("community:moderate") || scope != "community:member" {
         GrantRole::Moderator
     } else {
         GrantRole::Member
@@ -667,6 +851,7 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
         r.register(name, move |ctx, args| f(m.as_ref(), ctx, args));
     };
     reg(&mut r, "room.create", Box::new(room_create));
+    reg(&mut r, "room.update", Box::new(room_update));
     reg(&mut r, "room.get", Box::new(room_only("room.get")));
     reg(&mut r, "room.close", Box::new(room_only("room.close")));
     reg(&mut r, "token.issue", Box::new(token_issue));
@@ -686,6 +871,7 @@ pub fn build_registry(media: Arc<dyn Media>) -> ToolRegistry {
     );
     reg(&mut r, "token.revoke_all", Box::new(token_revoke_all));
     reg(&mut r, "admin.verify", Box::new(admin_verify));
+    reg(&mut r, "participant.self", Box::new(participant_self));
     reg(&mut r, "room.list", Box::new(rooms_list));
     reg(&mut r, "room.participants", Box::new(participants));
     let gone: &'static [&'static str] = &["room_id", "participant_id", "sessions_closed"];
@@ -813,6 +999,252 @@ mod tests {
             "community stays host-side"
         );
         assert_eq!(out["room_id"], ROOM);
+    }
+
+    #[test]
+    fn room_create_forwards_room_facts_and_refuses_bad_ones() {
+        let f = Fake::ok(room_json());
+        let facts = json!({"kind": "stage", "closed": false, "allow_guests": true,
+                           "starts_at": 10, "ends_at": 20});
+        call(
+            &f,
+            "room.create",
+            ctx(USER, &ROOM_ADMIN_SCOPES, facts.clone()),
+        )
+        .unwrap();
+        let mut sent = facts.clone();
+        sent["actor_scopes"] = json!([
+            "rooms:create",
+            "rooms:update",
+            "rooms:close",
+            "rooms:guests"
+        ]);
+        assert_eq!(
+            f.calls()[0].1,
+            sent,
+            "facts + verified scopes reach the host"
+        );
+        for bad in [
+            json!({"kind": "town_hall"}),
+            json!({"kind": "nope"}),
+            json!({"closed": "yes"}),
+            json!({"allow_guests": 1}),
+            json!({"starts_at": -1}),
+            json!({"ends_at": "x"}),
+        ] {
+            let g = Fake::ok(room_json());
+            assert!(matches!(
+                call(&g, "room.create", ctx(USER, &ROOM_ADMIN_SCOPES, bad)),
+                Err(ToolError::InvalidArgs(_))
+            ),);
+            assert!(g.calls().is_empty());
+        }
+    }
+
+    #[test]
+    fn non_default_room_facts_need_their_specific_scope() {
+        // (facts, the one scope that unlocks it)
+        let cases = [
+            (json!({"allow_guests": true}), "rooms:guests"),
+            (json!({"kind": "stage"}), "rooms:update"),
+            (json!({"kind": "green_room"}), "rooms:update"),
+            (json!({"starts_at": 5}), "rooms:update"),
+            (json!({"ends_at": 9}), "rooms:update"),
+        ];
+        for (facts, scope) in cases {
+            // Member, moderator, no scopes and no context: refused before any host call.
+            for args in [
+                ctx(USER, &MEMBER_SCOPES, facts.clone()),
+                ctx(USER, &MOD_SCOPES, facts.clone()),
+                facts.clone(),
+                ctx(USER, &[], facts.clone()),
+                // A DIFFERENT room scope does not unlock it.
+                ctx(USER, &["rooms:create", "rooms:close"], facts.clone()),
+            ] {
+                let f = Fake::ok(room_json());
+                assert!(
+                    matches!(call(&f, "room.create", args), Err(ToolError::NotGranted)),
+                    "{facts}"
+                );
+                assert!(f.calls().is_empty(), "{facts}: no host call");
+            }
+            // The specific scope ALONE (no admin, no moderate) is enough, and is forwarded.
+            let f = Fake::ok(room_json());
+            call(&f, "room.create", ctx(USER, &[scope], facts.clone())).unwrap();
+            assert_eq!(f.calls()[0].1["actor_scopes"], json!([scope]));
+        }
+        // Default facts (and an explicit closed room) stay open to any caller the host lets in.
+        for facts in [
+            json!({}),
+            json!({"kind": "community", "allow_guests": false}),
+            json!({"closed": true}),
+        ] {
+            let f = Fake::ok(room_json());
+            call(&f, "room.create", ctx(USER, &MEMBER_SCOPES, facts)).unwrap();
+            assert!(f.calls()[0].1.get("actor_scopes").is_none());
+        }
+    }
+
+    #[test]
+    fn room_update_needs_rooms_update_and_forwards_the_verified_actor() {
+        let f = Fake::ok(room_json());
+        let facts = json!({"room_id": ROOM, "kind": "stage", "closed": false,
+                           "allow_guests": true, "starts_at": 10, "ends_at": 20});
+        // Members, MODERATORS (no rooms:update), an absent context, rooms scopes other than
+        // update, and a caller with no pseudonym are all refused.
+        for args in [
+            ctx(USER, &MEMBER_SCOPES, facts.clone()),
+            ctx(USER, &MOD_SCOPES, facts.clone()),
+            ctx(
+                USER,
+                &["rooms:create", "rooms:close", "rooms:guests"],
+                facts.clone(),
+            ),
+            facts.clone(),
+            json!({"__ctx": {"actor": GLOBAL, "scopes": ROOM_ADMIN_SCOPES}, "room_id": ROOM,
+                   "kind": "stage"}),
+        ] {
+            assert!(matches!(
+                call(&f, "room.update", args),
+                Err(ToolError::NotGranted | ToolError::Forbidden)
+            ));
+        }
+        assert!(f.calls().is_empty(), "nothing reached the host");
+        // A caller cannot name an actor or a community.
+        for extra in [
+            json!({"actor_id": USER}),
+            json!({"actor_role": "admin"}),
+            json!({"community_id": "8"}),
+        ] {
+            let mut a = facts.clone();
+            a.as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
+            assert!(call(&f, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES, a)).is_err());
+        }
+        assert!(f.calls().is_empty());
+        // Bad facts / missing room id never reach the host.
+        for bad in [
+            json!({"kind": "town_hall"}),
+            json!({"starts_at": -1}),
+            json!({"allow_guests": "y"}),
+            json!({}),
+        ] {
+            let mut a = json!({"room_id": ROOM});
+            a.as_object_mut()
+                .unwrap()
+                .extend(bad.as_object().unwrap().clone());
+            if bad.as_object().unwrap().is_empty() {
+                a = json!({});
+            }
+            assert!(matches!(
+                call(&f, "room.update", ctx(USER, &ROOM_ADMIN_SCOPES, a)),
+                Err(ToolError::InvalidArgs(_))
+            ));
+        }
+        assert!(f.calls().is_empty());
+        // An update naming no fact is refused (nothing to change).
+        assert!(matches!(
+            call(
+                &f,
+                "room.update",
+                ctx(USER, &ROOM_ADMIN_SCOPES, json!({"room_id": ROOM}))
+            ),
+            Err(ToolError::InvalidArgs(_))
+        ));
+        assert!(f.calls().is_empty());
+        // Admin: forwarded with the pseudonym as actor, never the global uuid.
+        let out = call(
+            &f,
+            "room.update",
+            ctx(USER, &ROOM_ADMIN_SCOPES, facts.clone()),
+        )
+        .unwrap();
+        assert_eq!(out["room_id"], ROOM);
+        let (op, sent) = f.calls()[0].clone();
+        assert_eq!(op, "room.update");
+        assert_eq!(sent["actor_id"], USER);
+        assert_eq!(
+            sent["actor_scopes"],
+            json!([
+                "rooms:create",
+                "rooms:update",
+                "rooms:close",
+                "rooms:guests"
+            ])
+        );
+        assert!(sent.get("actor_role").is_none());
+        // rooms:update ALONE (no admin) is enough for a non-guest patch; enabling guests then
+        // additionally needs rooms:guests.
+        let only = Fake::ok(room_json());
+        call(
+            &only,
+            "room.update",
+            ctx(
+                USER,
+                &["rooms:update"],
+                json!({"room_id": ROOM, "kind": "stage"}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(only.calls()[0].1["actor_scopes"], json!(["rooms:update"]));
+        assert!(matches!(
+            call(
+                &only,
+                "room.update",
+                ctx(
+                    USER,
+                    &["rooms:update"],
+                    json!({"room_id": ROOM, "allow_guests": true})
+                )
+            ),
+            Err(ToolError::NotGranted)
+        ));
+        assert_eq!(only.calls().len(), 1);
+        assert_eq!(sent["kind"], "stage");
+        assert!(!format!("{sent}").contains(GLOBAL));
+        // PATCH: omitted facts are not sent; an explicit null clears a bound.
+        let g = Fake::ok(room_json());
+        call(
+            &g,
+            "room.update",
+            ctx(
+                USER,
+                &ROOM_ADMIN_SCOPES,
+                json!({"room_id": ROOM, "closed": true}),
+            ),
+        )
+        .unwrap();
+        let sent = g.calls()[0].1.clone();
+        for k in ["kind", "allow_guests", "starts_at", "ends_at"] {
+            assert!(sent.get(k).is_none(), "{k} must stay omitted: {sent}");
+        }
+        assert_eq!(sent["closed"], true);
+        let h = Fake::ok(room_json());
+        call(
+            &h,
+            "room.update",
+            ctx(
+                USER,
+                &ROOM_ADMIN_SCOPES,
+                json!({"room_id": ROOM, "ends_at": null}),
+            ),
+        )
+        .unwrap();
+        assert_eq!(h.calls()[0].1["ends_at"], Value::Null);
+        // A town hall is never settable through the tool.
+        assert!(
+            call(
+                &h,
+                "room.update",
+                ctx(
+                    USER,
+                    &ROOM_ADMIN_SCOPES,
+                    json!({"room_id": ROOM, "kind": "town_hall"})
+                )
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1017,7 +1449,8 @@ mod tests {
             (
                 "room.kick".to_string(),
                 json!({"room_id": ROOM, "participant_id": USER, "actor_id": MOD,
-                       "actor_role": "moderator"})
+                       "actor_role": "moderator",
+                       "actor_scopes": ["rooms:kick", "rooms:mute", "rooms:lock", "rooms:hands"]})
             )
         );
         let f = Fake::ok(json!({"room_id": ROOM, "muted": 3, "x": 1}));
@@ -1030,7 +1463,8 @@ mod tests {
         assert_eq!(out, json!({"room_id": ROOM, "muted": 3}));
         assert_eq!(
             f.calls()[0].1,
-            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin"}),
+            json!({"room_id": ROOM, "actor_id": MOD, "actor_role": "admin",
+                   "actor_scopes": ["rooms:kick", "rooms:mute", "rooms:lock", "rooms:hands"]}),
             "mute_all names the caller so the server can exclude them"
         );
         let f = Fake::ok(json!({"room_id": ROOM, "locked": true}));
@@ -1099,7 +1533,7 @@ mod tests {
             } else {
                 assert!(
                     matches!(member, Err(ToolError::NotGranted)),
-                    "{tool} must need community:moderate"
+                    "{tool} must need its dedicated scope"
                 );
             }
         }
@@ -1234,14 +1668,70 @@ mod tests {
 
     const OTHER: &str = "44444444-4444-4444-4444-444444444444";
     const MEMBER_SCOPES: [&str; 1] = ["community:member"];
-    const MOD_SCOPES: [&str; 2] = ["community:member", "community:moderate"];
-    const ADMIN_SCOPES: [&str; 3] = ["community:member", "community:moderate", "community:admin"];
+    /// The moderator bundle: exactly the moderation scopes (no room-management scopes).
+    const MOD_SCOPES: [&str; 6] = [
+        "community:member",
+        "community:moderate",
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
+    ];
+    const ADMIN_SCOPES: [&str; 7] = [
+        "community:member",
+        "community:moderate",
+        "community:admin",
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
+    ];
+    /// The admin bundle including the dedicated room-management scopes.
+    const ROOM_ADMIN_SCOPES: [&str; 7] = [
+        "community:member",
+        "community:moderate",
+        "community:admin",
+        "rooms:create",
+        "rooms:update",
+        "rooms:close",
+        "rooms:guests",
+    ];
 
     /// `args` as the host would deliver them: with the verified actor and its
     /// host-derived scopes injected under the reserved context key.
     fn ctx(who: &str, scopes: &[&str], mut args: Value) -> Value {
-        args["__ctx"] = json!({"actor": who, "scopes": scopes});
+        args["__ctx"] = json!({"actor": GLOBAL, "scopes": scopes, "participant": who});
         args
+    }
+
+    /// The caller's GLOBAL user uuid: must never appear in a host request.
+    const GLOBAL: &str = "99999999-9999-9999-9999-999999999999";
+
+    #[test]
+    fn participant_self_returns_the_host_pseudonym_and_fails_closed() {
+        let f = Fake::ok(json!({}));
+        let out = call(&f, "participant.self", ctx(USER, &MEMBER_SCOPES, json!({}))).unwrap();
+        assert_eq!(out, json!({"participant": USER}));
+        assert!(f.calls().is_empty());
+        // No pseudonym (host could not derive it): forbidden, never the global uuid.
+        let no_p = json!({"__ctx": {"actor": GLOBAL, "scopes": MEMBER_SCOPES}});
+        assert!(matches!(
+            call(&f, "participant.self", no_p),
+            Err(ToolError::Forbidden)
+        ));
+        assert!(matches!(
+            call(&f, "participant.self", ctx(USER, &[], json!({}))),
+            Err(ToolError::Forbidden | ToolError::NotGranted)
+        ));
+    }
+
+    #[test]
+    fn hand_calls_send_the_pseudonym_and_never_the_global_uuid() {
+        let f = Fake::ok(json!({"room_id": ROOM, "hands": []}));
+        let _ = call(&f, "room.hand.list", ctx(USER, &MEMBER_SCOPES, room_args()));
+        let sent = format!("{:?}", f.calls());
+        assert!(sent.contains(USER), "pseudonym is the actor id: {sent}");
+        assert!(!sent.contains(GLOBAL), "global uuid leaked: {sent}");
     }
 
     fn room_args() -> Value {
@@ -1582,6 +2072,6 @@ mod tests {
         for op in HandOp::ALL {
             assert!(TOOL_NAMES.contains(&op.tool()), "{}", op.tool());
         }
-        assert_eq!(TOOL_NAMES.len(), 21 + HandOp::ALL.len());
+        assert_eq!(TOOL_NAMES.len(), 23 + HandOp::ALL.len());
     }
 }

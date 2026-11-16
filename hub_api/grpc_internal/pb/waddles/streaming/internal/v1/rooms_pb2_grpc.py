@@ -73,6 +73,12 @@ class RoomsServiceStub:
             response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.DeleteRoomResponse.FromString,
             _registered_method=True,
         )
+        self.UpdateRoom = channel.unary_unary(
+            "/waddles.streaming.internal.v1.RoomsService/UpdateRoom",
+            request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UpdateRoomRequest.SerializeToString,
+            response_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UpdateRoomResponse.FromString,
+            _registered_method=True,
+        )
         self.JoinRoom = channel.unary_unary(
             "/waddles.streaming.internal.v1.RoomsService/JoinRoom",
             request_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.JoinRoomRequest.SerializeToString,
@@ -185,6 +191,15 @@ class RoomsServiceServicer:
 
     def DeleteRoom(self, request, context):
         """Scope "streaming.rooms:write" (member-level actions)."""
+        context.set_code(grpc.StatusCode.UNIMPLEMENTED)
+        context.set_details("Method not implemented!")
+        raise NotImplementedError("Method not implemented!")
+
+    def UpdateRoom(self, request, context):
+        """Scope "streaming.rooms:update" ONLY (its own scope; the moderator bundle does not carry
+        it). Replaces the room's facts (kind, closed, schedule window, allow_guests) wholesale;
+        the facts are authoritative here and enforced on JoinRoom.
+        """
         context.set_code(grpc.StatusCode.UNIMPLEMENTED)
         context.set_details("Method not implemented!")
         raise NotImplementedError("Method not implemented!")
@@ -306,6 +321,11 @@ def add_RoomsServiceServicer_to_server(servicer, server):
             servicer.DeleteRoom,
             request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.DeleteRoomRequest.FromString,
             response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.DeleteRoomResponse.SerializeToString,
+        ),
+        "UpdateRoom": grpc.unary_unary_rpc_method_handler(
+            servicer.UpdateRoom,
+            request_deserializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UpdateRoomRequest.FromString,
+            response_serializer=waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UpdateRoomResponse.SerializeToString,
         ),
         "JoinRoom": grpc.unary_unary_rpc_method_handler(
             servicer.JoinRoom,
@@ -550,6 +570,36 @@ class RoomsService:
             "/waddles.streaming.internal.v1.RoomsService/DeleteRoom",
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.DeleteRoomRequest.SerializeToString,
             waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.DeleteRoomResponse.FromString,
+            options,
+            channel_credentials,
+            insecure,
+            call_credentials,
+            compression,
+            wait_for_ready,
+            timeout,
+            metadata,
+            _registered_method=True,
+        )
+
+    @staticmethod
+    def UpdateRoom(
+        request,
+        target,
+        options=(),
+        channel_credentials=None,
+        call_credentials=None,
+        insecure=False,
+        compression=None,
+        wait_for_ready=None,
+        timeout=None,
+        metadata=None,
+    ):
+        return grpc.experimental.unary_unary(
+            request,
+            target,
+            "/waddles.streaming.internal.v1.RoomsService/UpdateRoom",
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UpdateRoomRequest.SerializeToString,
+            waddles_dot_streaming_dot_internal_dot_v1_dot_rooms__pb2.UpdateRoomResponse.FromString,
             options,
             channel_credentials,
             insecure,

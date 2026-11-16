@@ -55,6 +55,8 @@ _SCOPES_BY_RPC: dict[str, tuple[str, ...]] = {
     "ListHands": ("read", "moderate"),
     # CreateRoom has its own per-action scope; a `write` token can never create a room.
     "CreateRoom": ("create",),
+    # UpdateRoom: its own scope; hub-api itself never calls it (the rooms app bundle does).
+    "UpdateRoom": ("update",),
     **dict.fromkeys(("DeleteRoom", "LeaveRoom", "RaiseHand", "LowerHand"), ("write",)),
     # JoinRoom: a moderate-scope token additionally registers the participant as room STAFF.
     "JoinRoom": ("write", "moderate"),
@@ -289,6 +291,18 @@ class FakeRooms(rooms_pb2_grpc.RoomsServiceServicer):
             room=self._msg(
                 request.community_id, room_id, self.rooms[(request.community_id, room_id)]
             )
+        )
+
+    async def UpdateRoom(self, request: Any, context: Any) -> Any:  # noqa: N802
+        await self._guard("UpdateRoom", request, context)
+        state = await self._room(request, context)
+        state["facts"] = {
+            "kind": request.kind,
+            "closed": request.closed,
+            "allow_guests": request.allow_guests,
+        }
+        return rooms_pb2.UpdateRoomResponse(
+            room=self._msg(request.community_id, request.room_id, state)
         )
 
     async def DeleteRoom(self, request: Any, context: Any) -> Any:  # noqa: N802

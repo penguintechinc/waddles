@@ -48,8 +48,9 @@ _EXPECTED_COLUMNS = [
 ]
 #: The view as 0048 left it (and as this migration's downgrade must restore it).
 _COLUMNS_AT_0048 = _EXPECTED_COLUMNS[:7]
-#: 0070_identity_view_role appends `role`; `head` therefore carries it.
-_COLUMNS_AT_HEAD = [*_EXPECTED_COLUMNS, "role"]
+#: 0070_identity_view_role appends `role`, 0116_identity_view_hub_uid appends `hub_user_id`;
+#: `head` therefore carries both, in that order.
+_COLUMNS_AT_HEAD = [*_EXPECTED_COLUMNS, "role", "hub_user_id"]
 _PII_COLUMNS = {
     "display_name",
     "username",
@@ -232,10 +233,13 @@ class TestViewShape:
     def test_ddl_is_idempotent_a_second_application_succeeds(
         self, pg_db: PgTestDatabase
     ) -> None:
-        # At head the view's owner is 0069's SQL (a superset: it appends `role`);
-        # 0052's own file cannot be re-applied over it (a view cannot drop columns).
+        # At head the view's owner is 0116's SQL (a superset: it appends `role` then
+        # `hub_user_id`); 0052's own file cannot be re-applied over it (a view cannot drop columns).
         sql = (
-            _MIGRATION_PATH.parents[2] / "scripts" / "db" / "bundle_identity_role.sql"
+            _MIGRATION_PATH.parents[2]
+            / "scripts"
+            / "db"
+            / "bundle_identity_hub_user_id.sql"
         ).read_text(encoding="utf-8")
         with _cursor(pg_db) as cur:
             cur.execute(sql)

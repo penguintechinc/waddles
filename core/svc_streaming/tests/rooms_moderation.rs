@@ -94,6 +94,261 @@ async fn new_room(h: &Harness) -> String {
     r["room_id"].as_str().unwrap().to_string()
 }
 
+/// `room.create` carries the room facts through the host API and `room.get` reads them back.
+#[tokio::test]
+async fn host_room_create_applies_room_facts() {
+    let h = harness(42900, false);
+    let (st, r) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "kind": "stage", "allow_guests": true, "closed": false,
+               "actor_scopes": ["rooms:update", "rooms:guests"]}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["kind"], "stage", "{r}");
+    assert_eq!(r["allow_guests"], true, "{r}");
+    let (st, r) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "kind": "bogus"}),
+    )
+    .await;
+    assert_ne!(
+        st,
+        StatusCode::OK,
+        "an unknown kind is refused, never coerced: {r}"
+    );
+    let (st, r) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "starts_at": 20, "ends_at": 10,
+               "actor_scopes": ["rooms:update"]}),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK, "an inverted window is refused: {r}");
+}
+
+/// Defence in depth: any non-default fact needs a verified moderator/admin role on the call.
+#[tokio::test]
+async fn host_room_create_refuses_non_default_facts_without_a_staff_role() {
+    let h = harness(42920, false);
+    for facts in [
+        json!({"kind": "stage"}),
+        json!({"kind": "green_room"}),
+        json!({"allow_guests": true}),
+        json!({"starts_at": 5}),
+        json!({"ends_at": 9}),
+    ] {
+        // No scopes, role-like strings, and the WRONG room scope never unlock a fact.
+        let wrong = if facts.get("allow_guests").is_some() {
+            "rooms:update"
+        } else {
+            "rooms:guests"
+        };
+        for scopes in [
+            json!([]),
+            json!([
+                "community:admin",
+                "community:moderate",
+                "moderator",
+                "admin"
+            ]),
+            json!(["rooms:create", "rooms:close", wrong]),
+        ] {
+            let mut body = json!({"community_id": "7", "actor_scopes": scopes});
+            body.as_object_mut()
+                .unwrap()
+                .extend(facts.as_object().unwrap().clone());
+            let (st, r) = call(&h.host, "room.create", body).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{facts} scopes={scopes}: {r}");
+        }
+        // The one specific scope ALONE is enough (no admin role involved).
+        let need = if facts.get("allow_guests").is_some() {
+            "rooms:guests"
+        } else {
+            "rooms:update"
+        };
+        let mut body = json!({"community_id": "7", "actor_scopes": [need]});
+        body.as_object_mut()
+            .unwrap()
+            .extend(facts.as_object().unwrap().clone());
+        let (st, r) = call(&h.host, "room.create", body).await;
+        assert_eq!(st, StatusCode::OK, "{facts} with {need}: {r}");
+    }
+    // Nothing was created by the refused calls; the default room still needs no role.
+    let (st, _) = call(&h.host, "room.create", json!({"community_id": "7"})).await;
+    assert_eq!(st, StatusCode::OK);
+    let (st, _) = call(
+        &h.host,
+        "room.create",
+        json!({"community_id": "7", "kind": "community", "allow_guests": false}),
+    )
+    .await;
+    assert_eq!(
+        st,
+        StatusCode::OK,
+        "default facts stay open to a member-role caller"
+    );
+}
+
+/// `room.update` replaces the facts for a verified moderator/admin only.
+#[tokio::test]
+async fn host_room_update_sets_facts_for_staff_only() {
+    let h = harness(42940, false);
+    let room = new_room(&h).await;
+    let actor = uuid::Uuid::new_v4().to_string();
+    let update = |who: &str, extra: Value| {
+        let scopes = match who {
+            "admin" => json!(["rooms:update", "rooms:guests"]),
+            "updater" => json!(["rooms:update"]),
+            "moderator" => json!(["community:moderate", "moderator"]),
+            "member" => json!(["community:member"]),
+            _ => json!([]),
+        };
+        let mut b = json!({"community_id": "7", "room_id": room, "actor_id": actor,
+                           "actor_scopes": scopes});
+        b.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
+        b
+    };
+    for role in ["member", "guest", "moderator"] {
+        // (a moderator bundle carries no rooms:update)
+        let (st, r) = call(
+            &h.host,
+            "room.update",
+            update(role, json!({"kind": "stage"})),
+        )
+        .await;
+        assert_eq!(st, StatusCode::FORBIDDEN, "{role}: {r}");
+    }
+    // A missing actor or role is refused before anything changes.
+    let (st, _) = call(
+        &h.host,
+        "room.update",
+        json!({"community_id": "7", "room_id": room, "kind": "stage"}),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK);
+    let (st, r) = call(
+        &h.host,
+        "room.get",
+        json!({"community_id": "7", "room_id": room}),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK);
+    assert_eq!(
+        r["kind"], "community",
+        "refused updates changed nothing: {r}"
+    );
+    // rooms:update alone is enough for non-guest facts; enabling guests needs rooms:guests too.
+    let (st, r) = call(
+        &h.host,
+        "room.update",
+        update("updater", json!({"kind": "stage"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    let (st, r) = call(
+        &h.host,
+        "room.update",
+        update("updater", json!({"allow_guests": true})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+    // A full-scope caller succeeds.
+    let (st, r) = call(
+        &h.host,
+        "room.update",
+        update(
+            "admin",
+            json!({"kind": "stage", "allow_guests": true, "closed": true}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        (
+            r["kind"].as_str(),
+            r["allow_guests"].as_bool(),
+            r["closed"].as_bool()
+        ),
+        (Some("stage"), Some(true), Some(true))
+    );
+    // PATCH: omitted facts are unchanged; an explicit null clears one bound.
+    let (st, r) = call(
+        &h.host,
+        "room.update",
+        update(
+            "admin",
+            json!({"closed": false, "starts_at": 5, "ends_at": 50}),
+        ),
+    )
+    .await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(
+        (r["kind"].as_str(), r["allow_guests"].as_bool()),
+        (Some("stage"), Some(true)),
+        "omitted kind/allow_guests stay as they were: {r}"
+    );
+    let (_, r) = call(
+        &h.host,
+        "room.update",
+        update("admin", json!({"ends_at": null})),
+    )
+    .await;
+    assert_eq!(
+        (r["starts_at"].as_i64(), r["ends_at"].as_i64()),
+        (Some(5), None),
+        "{r}"
+    );
+    // Nothing becomes a town hall here, and a town hall's kind is immutable.
+    let (st, r) = call(
+        &h.host,
+        "room.update",
+        update("admin", json!({"kind": "town_hall"})),
+    )
+    .await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+    let th = h
+        .svc
+        .create_with_facts(
+            "7",
+            None,
+            None,
+            svc_streaming::rooms::RouteMode::Sfu,
+            None,
+            svc_streaming::rooms::RoomFacts {
+                kind: svc_streaming::rooms::RoomKind::TownHall,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    let mut b = update("admin", json!({"kind": "community"}));
+    b["room_id"] = json!(th.room_id.to_string());
+    let (st, r) = call(&h.host, "room.update", b).await;
+    assert_eq!(st, StatusCode::FORBIDDEN, "{r}");
+    let mut b = update("admin", json!({"allow_guests": true}));
+    b["room_id"] = json!(th.room_id.to_string());
+    let (st, r) = call(&h.host, "room.update", b).await;
+    assert_eq!(st, StatusCode::OK, "{r}");
+    assert_eq!(r["kind"], "town_hall");
+    // Another community cannot reach the room; a bad resulting window is refused.
+    let mut other = update("admin", json!({"closed": true}));
+    other["community_id"] = json!("8");
+    let (st, _) = call(&h.host, "room.update", other).await;
+    assert_eq!(st, StatusCode::NOT_FOUND);
+    let (st, _) = call(
+        &h.host,
+        "room.update",
+        update("admin", json!({"starts_at": 20, "ends_at": 10})),
+    )
+    .await;
+    assert_ne!(st, StatusCode::OK);
+}
+
 async fn endpoint(h: &Harness, op: &str, room: &str, extra: Value) -> (StatusCode, Value) {
     let mut body = json!({"community_id": "7", "room_id": room});
     for (k, v) in extra.as_object().unwrap() {
@@ -189,7 +444,8 @@ async fn pump(p: &Publisher, from: u16, n: u16) -> u16 {
 
 fn mod_body(room: &str, extra: Value) -> Value {
     let mut b = json!({"community_id": "7", "room_id": room,
-        "actor_id": Uuid::new_v4(), "actor_role": "moderator"});
+        "actor_id": Uuid::new_v4(), "actor_role": "moderator",
+        "actor_scopes": ["rooms:kick", "rooms:mute", "rooms:lock"]});
     for (k, v) in extra.as_object().unwrap() {
         b[k] = v.clone();
     }
@@ -232,14 +488,11 @@ async fn muted_publisher_is_not_forwarded_until_unmuted() {
     let before = v.handler.packets_received.load(Ordering::SeqCst);
     assert!(before >= 5, "baseline media should flow, got {before}");
 
-    // Non-moderators are refused.
+    // A caller without the action's scope is refused (a role label is never read).
     let (st, _) = call(
         &h.host,
         "room.mute",
-        mod_body(
-            &room,
-            json!({"participant_id": p.id, "actor_role": "member"}),
-        ),
+        mod_body(&room, json!({"participant_id": p.id, "actor_scopes": []})),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -315,10 +568,7 @@ async fn kick_closes_live_peers_and_blocks_rejoin() {
     let (st, _) = call(
         &h.host,
         "room.kick",
-        mod_body(
-            &room,
-            json!({"participant_id": v.id, "actor_role": "guest"}),
-        ),
+        mod_body(&room, json!({"participant_id": v.id, "actor_scopes": []})),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -396,10 +646,7 @@ async fn leave_closes_own_sessions_without_blocklisting() {
     let (st, _) = call(
         &h.host,
         "room.leave",
-        mod_body(
-            &room,
-            json!({"participant_id": p.id, "actor_role": "member"}),
-        ),
+        mod_body(&room, json!({"participant_id": p.id, "actor_scopes": []})),
     )
     .await;
     assert_eq!(st, StatusCode::FORBIDDEN);
@@ -522,4 +769,55 @@ async fn list_and_participants_are_community_scoped_and_ids_only() {
         );
     }
     let _ = (p.pc.close().await, v.pc.close().await);
+}
+
+/// Each moderation action needs ITS OWN verified scope: the moderator role alone, and another
+/// action's scope, never suffice; the specific scope alone does.
+#[tokio::test]
+async fn host_moderation_ops_need_their_own_scope() {
+    let h = harness(43100, true);
+    let room = new_room(&h).await;
+    let victim = Uuid::new_v4().to_string();
+    let cases = [
+        ("room.kick", "rooms:kick", json!({"participant_id": victim})),
+        ("room.mute", "rooms:mute", json!({"participant_id": victim})),
+        (
+            "room.unmute",
+            "rooms:mute",
+            json!({"participant_id": victim}),
+        ),
+        ("room.mute_all", "rooms:mute", json!({})),
+        ("room.lock", "rooms:lock", json!({})),
+        ("room.unlock", "rooms:lock", json!({})),
+    ];
+    for (op, scope, extra) in cases {
+        let others: Vec<&str> = [
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
+            "rooms:update",
+        ]
+        .into_iter()
+        .filter(|s| *s != scope)
+        .collect();
+        for scopes in [
+            json!([]),
+            json!([
+                "community:moderate",
+                "moderator",
+                "streaming.rooms:moderate"
+            ]),
+            json!(others),
+        ] {
+            let mut b = mod_body(&room, extra.clone());
+            b["actor_scopes"] = scopes.clone();
+            let (st, r) = call(&h.host, op, b).await;
+            assert_eq!(st, StatusCode::FORBIDDEN, "{op} with {scopes}: {r}");
+        }
+        let mut b = mod_body(&room, extra.clone());
+        b["actor_scopes"] = json!([scope]);
+        let (st, r) = call(&h.host, op, b).await;
+        assert_ne!(st, StatusCode::FORBIDDEN, "{op} with only {scope}: {r}");
+    }
 }

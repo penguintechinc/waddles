@@ -21,6 +21,7 @@ from waddles.streaming.internal.v1 import rooms_pb2, rooms_pb2_grpc
 
 from services import calls_proxy
 from services.calls_proxy import (
+    UNROUTED_RPCS,
     RoomsClient,
     RoomsClientConfig,
     RoomsRpcError,
@@ -250,7 +251,10 @@ async def test_every_client_method_stamps_api_version_v1(fake: FakeRooms) -> Non
     await c.kick_participant(1, ROOM, PARTICIPANT, **admin)
     await c.leave_room(1, ROOM, PARTICIPANT, **admin)
     seen = {name for name, _, _ in fake.calls}
-    descriptor = set(rooms_pb2.DESCRIPTOR.services_by_name["RoomsService"].methods_by_name)
+    # every RPC hub-api has a client method for (UpdateRoom belongs to the rooms bundle)
+    descriptor = set(rooms_pb2.DESCRIPTOR.services_by_name["RoomsService"].methods_by_name) - set(
+        UNROUTED_RPCS
+    )
     assert seen == descriptor, descriptor ^ seen  # every RPC examined
     assert all(req.api_version == "v1" for _, req, _ in fake.calls)
     assert len(fake.calls) == len(descriptor)  # one call per RPC, none repeated

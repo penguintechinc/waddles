@@ -139,6 +139,29 @@ POST /api/v1/auth/step-up/passkey/finish   {"credential": <navigator.credentials
 
 `finish` verifies the assertion (challenge bound to the user and single-use, credential owned by the user, signature, counter, UV flag) and re-issues the caller's own token (same session, tenant, scopes, roles; nothing added) with `amr=[hwk|swk,user,mfa]`, `auth_time=now`; the session cookie is refreshed too. The rotate/retire gate accepts only `mfa`/`otp` in `amr` (a bare `hwk`/`swk`/`pwd` is not enough) and `auth_time` <= 5 min. Prerequisite: the operator has registered a passkey (`/api/v1/user/passkey/register/*`); there is no TOTP in hub-api. Caveat: challenges are in-process (same as passkey login), so start and finish must hit the same replica; otherwise `finish` answers 400 and the operator retries. The CLI takes the token from `WADDLES_ADMIN_TOKEN` / `--token-stdin` (the browser performs the step-up, the CLI never holds a passkey).
 
+## Offline signers (core-bundle seeder, signing backfill)
+
+The seeder (`cli/seed_core_bundles.py`) and the backfill (`cli/sign_approved_bundles.py`) are their
+own Job pods, so hub-api's bootstrap never seeds THEIR process cache. They must not hold the
+platform KEK (it stays inside hub-api), so each calls `load_offline_signer_cache(DATABASE_URL)`
+before any signing: it reads the ACTIVE `bundle_signing` row's public key + kid (public columns,
+nothing is opened) and accepts the Job's bundle-signing Secret (`BUNDLE_SIGNING_PRIVATE_KEY`) only
+when its public key equals that row's. The vault decides which key signs; creation stays with
+hub-api's bootstrap (advisory lock; the seeder waits for hub-api `/ready`).
+
+| Condition | Result |
+|---|---|
+| kill-switch `waddles.disable-db-platform-keys` ON | skipped, legacy env signer authoritative |
+| no active `bundle_signing` row | refuse `signing_key_missing` (never generates) |
+| Secret absent / placeholder / invalid | refuse `signing_key_unavailable` |
+| Secret's public key != active vault key (e.g. rotated, Secret not updated) | refuse `trust_mismatch`, drift metric `outcome=mismatch` |
+| otherwise | `waddles_platform_secrets_offline_loads_total{outcome="ok"}`, log type/version/count |
+
+Executor trust: hub-api imports that Secret's key as `bundle_signing` v1 on first run, and the
+executors' `BUNDLE_SIGNING_PUBLIC_KEYS` ConfigMap is derived from the same Secret, so what the
+offline signers sign is exactly what the executors verify. A rotation must update the Secret (and
+so the ConfigMap) too; until it does, the offline signers refuse rather than sign unverifiably.
+
 ## Data-plane verifying keys (`core/platform_keys`, design T5)
 
 Data-plane services verify signatures against the PUBLIC keys in the view `public_keys`, read with

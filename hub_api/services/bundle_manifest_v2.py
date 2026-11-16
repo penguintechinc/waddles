@@ -589,6 +589,16 @@ TOOL_REQUIRED_SCOPES = frozenset(
         "community:moderate",
         "community:admin",
         "community:owner",
+        # Dedicated room-management scopes (admin/owner bundles carry them; a moderator
+        # does not yet) -- mirrors `scopes_for_role` in `core/bundle_tool_call`.
+        "rooms:create",
+        "rooms:update",
+        "rooms:close",
+        "rooms:guests",
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
         # waddles.core.service.music-requests (see `docs/music-requests-service.md`);
         # mirrors the music entries in `core/bundle_tool_call::scopes_for_role`.
         "music:requests.read",
