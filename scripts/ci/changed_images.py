@@ -35,6 +35,12 @@ import yaml  # type: ignore[import-untyped]
 DEFAULT_MAP = Path(__file__).with_name("image-inputs.yaml")
 ZERO_SHA = "0" * 40
 
+# Workload kinds that run a long-lived container whose image the deploy must
+# verify is on the planned tag. "job" is one-shot (migrations/seeder) and is
+# intentionally excluded from that verification.
+LONG_LIVED_WORKLOADS = ("deployment", "statefulset")
+VALID_WORKLOADS = (*LONG_LIVED_WORKLOADS, "job")
+
 
 class MapError(Exception):
     """The image-input map is malformed."""
@@ -146,8 +152,10 @@ def load_map(path: Path | str = DEFAULT_MAP) -> ImageMap:
         lane = spec.get("lane", "a")
         if lane not in lanes:
             raise MapError(f"image {name}: unknown lane {lane!r}")
-        if spec.get("workload", "deployment") not in ("deployment", "job"):
-            raise MapError(f"image {name}: workload must be deployment|job")
+        if spec.get("workload", "deployment") not in VALID_WORKLOADS:
+            raise MapError(
+                f"image {name}: workload must be {'|'.join(VALID_WORKLOADS)}"
+            )
         for key in ("dockerfile", "context"):
             if key not in spec:
                 raise MapError(f"image {name}: missing {key}")

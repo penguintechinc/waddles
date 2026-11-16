@@ -7,7 +7,7 @@ Subcommands
   retag       For every REUSED image, copy the deployed manifest to the new alpha tag
               by digest (no rebuild) and verify digest equality.
   helm-values Write the Helm values file (global.imageTag + per-image global.imageTags).
-  verify      Assert every long-lived Deployment runs exactly its planned image.
+  verify      Assert every long-lived Deployment and StatefulSet runs its planned image.
 
 Sources of truth (no new secrets, no new permissions):
   * what is deployed  -> `helm get values` of the release (the runner already needs
@@ -356,11 +356,17 @@ def cmd_helm_values(args: argparse.Namespace) -> int:
 def expected_deployment_images(
     plan: dict[str, Any], registry: str, imap: ci.ImageMap
 ) -> dict[str, str]:
-    """image name -> exact image ref the long-lived Deployments must run."""
+    """image name -> exact image ref each long-lived workload must run.
+
+    Covers Deployments and StatefulSets (``ci.LONG_LIVED_WORKLOADS``); one-shot
+    Jobs (migrations, seeder) are excluded. The executor runs as StatefulSets
+    (compiled/scripted pools), so verify must gate StatefulSet images too — the
+    caller feeds `kubectl get deploy,statefulset` main-container images.
+    """
     return {
         n: f"{registry}/{n}:{plan['helm_tags'][n]}{imap.images[n].tag_suffix}"
         for n in sorted(imap.images)
-        if imap.images[n].workload == "deployment"
+        if imap.images[n].workload in ci.LONG_LIVED_WORKLOADS
     }
 
 
