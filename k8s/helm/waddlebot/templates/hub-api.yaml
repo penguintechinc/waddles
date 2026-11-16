@@ -60,6 +60,22 @@ spec:
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        # F3 -- HTTPS-only HTTP listener (the plaintext bind is replaced, not supplemented). hypercorn
+        # floors TLS at 1.2 (1.3 negotiated when offered); ECDSA P-256 cert from the internal CA;
+        # AES-GCM/ChaCha20 suites; HTTP/2 via ALPN (hypercorn h2). A bad cert/key fails startup loud.
+        command:
+        - hypercorn
+        - app:app
+        - --bind
+        - 0.0.0.0:{{ .Values.pipeline.hubApi.port }}
+        - --certfile
+        - /etc/waddlebot/tls/tls.crt
+        - --keyfile
+        - /etc/waddlebot/tls/tls.key
+        - --ciphers
+        - ECDHE+AESGCM:ECDHE+CHACHA20
+        {{- end }}
         ports:
         - name: http
           containerPort: {{ .Values.pipeline.hubApi.port }}
@@ -168,7 +184,12 @@ spec:
         # from the same Service name/port templates/svc-streaming.yaml creates; hub-api has NO
         # in-code default and fails loud on the first proxied call when this is absent.
         - name: STREAMING_RTC_URL
+          {{- if include "waddlebot.transitTlsEnabled" . }}
+          # F6 -- svc-streaming's TLS control-plane listener (STREAMING_TLS_PORT), dialed by FQDN.
+          value: "https://{{ include "waddlebot.svcFqdn" (dict "root" . "name" "svc-streaming") }}:{{ .Values.global.internalTransitTls.streamingTlsPort }}"
+          {{- else }}
           value: "http://{{ include "waddlebot.fullname" . }}-svc-streaming:{{ .Values.pipeline.svcStreaming.port }}"
+          {{- end }}
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
@@ -207,8 +228,6 @@ spec:
         {{- end }}
         - name: MODULE_NAME
           value: "hub-api"
-        - name: PIPELINE_STAGE
-          value: "hub-api"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.hubApi.port | quote }}
         - name: GRPC_PORT
@@ -229,6 +248,10 @@ spec:
         # above (shared -config/-secrets objects) -- same whole-object envFrom pattern
         # svc-action.yaml/svc-ingest.yaml use for the same keys; no per-key duplicates
         # added here.
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerEnv" . | nindent 8 }}
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
+        {{- end }}
         - name: CONNECTIONS_STATE_TTL_S
           value: {{ .Values.pipeline.hubApi.connectionsStateTtlS | quote }}
         # feature/seaweedfs-object-storage -- least-privilege "hub-api" S3 identity
@@ -314,22 +337,6 @@ spec:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: VALKEY_DURABLE_PASSWORD
         {{- end }}
-        {{- if .Values.modules.bot.enabled }}
-        - name: MODULE_LOAD_BOT
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.social.enabled }}
-        - name: MODULE_LOAD_SOCIAL
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.customer.enabled }}
-        - name: MODULE_LOAD_CUSTOMER
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.marketing.enabled }}
-        - name: MODULE_LOAD_MARKETING
-          value: "true"
-        {{- end }}
         # Per-environment env baseline (e.g. FLAG_<KEY> feature-flag fallbacks honoured by
         # flask_core when PostHog is unresolved). Free-tier flags only -- license flags are
         # never env-bypassable. Rendered last so an explicit entry here wins on collision.
@@ -337,11 +344,12 @@ spec:
         - name: {{ $key }}
           value: {{ $value | quote }}
         {{- end }}
-        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http") | nindent 8 }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http" "scheme" (include "waddlebot.transitProbeScheme" .)) | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -355,6 +363,7 @@ spec:
           httpGet:
             path: /ready
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
@@ -371,6 +380,9 @@ spec:
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
         - name: credential-manager-ca
           mountPath: /etc/waddlebot/credential-manager
@@ -386,6 +398,9 @@ spec:
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
+      {{- if include "waddlebot.transitTlsEnabled" . }}
+      {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-api") | nindent 6 }}
+      {{- end }}
       {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
       - name: credential-manager-ca
         secret:

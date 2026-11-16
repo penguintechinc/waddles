@@ -60,6 +60,7 @@ from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.marketplace_author import AuthorDTO, to_author_dto
+from services.scope_registry import SCOPE_MARKETPLACE_LIFECYCLE
 from services.tenant_service import require_matching_tenant
 
 logger = logging.getLogger(__name__)
@@ -635,7 +636,14 @@ async def activate_bundle(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MARKETPLACE_LIFECYCLE,
+        )
         caller_id = get_current_user_id(request)
         await svc.activate_bundle(
             async_dal,
@@ -670,9 +678,17 @@ async def deactivate_bundle(
     """Deactivate a bundle for this community (soft-disable). Requires community-admin."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MARKETPLACE_LIFECYCLE,
+        )
         await svc.deactivate_bundle(async_dal, dal, community_id=community_id, app_id=app_id)
     except ApiError as exc:
+        logger.debug("handled %s in marketplace_lifecycle: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message=f"Bundle {app_id} deactivated")
 

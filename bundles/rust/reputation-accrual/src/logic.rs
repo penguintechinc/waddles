@@ -95,6 +95,21 @@ pub trait Host {
     fn log(&self, level: Level, message: &str, fields: Value);
     /// Records the outcome counter and duration histogram.
     fn metric(&self, outcome: &str, reason_class: &str, elapsed_ms: f64);
+    /// The live per-community config (`get-context().config_json`, the manifest
+    /// `community_config_schema` merged over its defaults). Absent or unreadable = `{}`.
+    fn community_config_json(&self) -> String {
+        "{}".to_string()
+    }
+}
+
+/// Community-scoped accrual switch (`accrual_enabled`, manifest default `true`). ONLY an explicit
+/// JSON `false` turns accrual off for the community; an absent key, empty/`{}` config or anything
+/// unparseable keeps accrual ON, so real communities behave exactly as before this switch existed.
+pub fn accrual_enabled(config_json: &str) -> bool {
+    serde_json::from_str::<Value>(config_json)
+        .ok()
+        .and_then(|v| v.get("accrual_enabled").and_then(Value::as_bool))
+        .unwrap_or(true)
 }
 
 /// One inbound event as seen by the process stage.
@@ -538,6 +553,10 @@ fn run<H: Host>(host: &H, input: &Input) -> Outcome {
     }
     if !host.flag(FLAG_ENABLE) {
         return done("flag_off", "none");
+    }
+    if !accrual_enabled(&host.community_config_json()) {
+        // Per-community opt-out (e.g. the synthetic latency-canary community): no accrual, no calls.
+        return done("community_disabled", "none");
     }
     let payload: Value = match serde_json::from_str(input.payload_json) {
         Ok(v @ Value::Object(_)) => v,

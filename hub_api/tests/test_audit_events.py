@@ -255,7 +255,12 @@ class TestClassifyRequest:
         assert classify_request(_facts(method="GET")) is None
 
     def test_unscoped_mutation_without_a_semantic_entry_is_not_audited(self) -> None:
-        assert classify_request(_facts(scope_checked=False)) is None
+        assert (
+            classify_request(
+                _facts(scope_checked=False, rule="/api/v1/admin/<int:community_id>/not-classified")
+            )
+            is None
+        )
 
     @pytest.mark.parametrize("rule", ["/api/v1/internal/activity/batch", "/mcp/v1"])
     def test_service_plumbing_is_never_classified(self, rule: str) -> None:

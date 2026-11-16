@@ -123,10 +123,28 @@ pub fn keys_for_widget(
     surface_id: Option<&str>,
 ) -> Vec<String> {
     if kind == WidgetOutputKind::Surface {
-        surface_id
-            .filter(|s| state.surfaces.contract.get(s).is_some())
-            .map(|s| vec![s.to_string()])
-            .unwrap_or_default()
+        match surface_id {
+            Some(s) if state.surfaces.contract.get(s).is_some() => vec![s.to_string()],
+            Some(s) => {
+                tracing::error!(
+                    error_type = "UndeclaredSurface",
+                    surface = s,
+                    bundle_app_id,
+                    widget_id,
+                    "widget names a surface the contract does not declare; not subscribing"
+                );
+                Vec::new()
+            }
+            None => {
+                tracing::error!(
+                    error_type = "MissingSurfaceId",
+                    bundle_app_id,
+                    widget_id,
+                    "surface-kind widget carries no surface id; not subscribing"
+                );
+                Vec::new()
+            }
+        }
     } else {
         vec![widget_key(bundle_app_id, widget_id)]
     }

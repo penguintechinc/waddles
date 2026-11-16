@@ -8,6 +8,7 @@ Discord connector must fail the render. Zero rendered documents / zero matches i
 
 from __future__ import annotations
 
+import re
 import os
 import subprocess
 from pathlib import Path
@@ -50,8 +51,16 @@ def _docs(extra: list[str], values: str = "values-alpha.yaml") -> list[dict[str,
 
 
 def _dep(docs: list[dict[str, Any]], suffix: str) -> dict[str, Any]:
-    found = [d for d in docs if d.get("kind") in ("Deployment", "StatefulSet") and d["metadata"]["name"].endswith(suffix)]
-    assert len(found) == 1, f"expected exactly one *{suffix} Deployment, got {len(found)}"
+    found = [
+        d
+        for d in docs
+        if d.get("kind") in ("Deployment", "StatefulSet")
+        and re.search(re.escape(suffix) + r"(-native|-script)?$", d["metadata"]["name"])
+    ]
+    # The executor renders one pool per language class (-native, -script); both carry the same
+    # connector env/volumes, so the first pool stands for the executor.
+    assert found, f"expected a *{suffix} workload, got none"
+    assert len(found) == 1 or suffix == "-svc-bundles-executor", f"ambiguous *{suffix}: {len(found)}"
     return found[0]
 
 
@@ -126,7 +135,12 @@ def test_executor_env_and_distinct_client_secret_mounted_only_there() -> None:
     # Existing stage secret stays; the connector client secret is a SECOND, separate volume.
     assert any(n.endswith("-host-api-tls") and "ingest" not in n for n in _secret_vols(ex))
     owners = {d["metadata"]["name"] for d in docs if d.get("kind") in ("Deployment", "StatefulSet") and cli[0] in _secret_vols(d)}
-    assert owners == {ex["metadata"]["name"]}
+    pools = {
+        d["metadata"]["name"]
+        for d in docs
+        if d.get("kind") in ("Deployment", "StatefulSet") and d["metadata"]["name"].split("-svc-bundles-executor")[-1] in ("", "-native", "-script") and "-svc-bundles-executor" in d["metadata"]["name"]
+    }
+    assert owners == pools  # every executor pool (language class) mounts it, nothing else does
     ingest_secret = [d for d in docs if d.get("kind") in ("Deployment", "StatefulSet") and
                      any(n.endswith("-svc-ingest-host-api-tls") for n in _secret_vols(d))]
     assert [d["metadata"]["name"] for d in ingest_secret] == [_dep(docs, "-svc-ingest-rust")["metadata"]["name"]]

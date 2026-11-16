@@ -353,6 +353,23 @@ impl SurfaceHost {
     }
 }
 
+/// The stage-neutral core of the `surface.publish` host call, shared by every stage that hosts it
+/// (svc-action, svc-process): parses the guest's two words, derives the policy from the
+/// host-verified `app_id` (a bundle owns exactly its own `<app_id>.` namespace) and delivers for
+/// the host-verified `community_id`. The stage owns wiring and the feature flag; this owns
+/// everything that decides what may be published and where.
+pub async fn publish_for_app(
+    host: &SurfaceHost,
+    app_id: &str,
+    community_id: i64,
+    args: &serde_json::Value,
+) -> Result<(), SurfaceError> {
+    let args = PublishArgs::parse(args)?;
+    let policy = SurfacePolicy::for_app(app_id, std::iter::empty());
+    host.publish(&policy, community_id, &args.surface_id, &args.payload_json)
+        .await
+}
+
 /// Maps a svc-presentation refusal onto the stable guest-facing vocabulary. The
 /// message is reduced to its first 200 characters: the server only ever sends
 /// `path:rule` locations, but nothing longer is forwarded to a guest.

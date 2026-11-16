@@ -216,6 +216,8 @@ struct FakePlatform {
     flag: bool,
     bans: Mutex<Vec<String>>,
     ban_err: Option<String>,
+    /// Live community config JSON (`None` = the trait default `{}`).
+    community_config: Option<String>,
 }
 impl FakePlatform {
     fn new(flag: bool) -> Arc<Self> {
@@ -223,6 +225,7 @@ impl FakePlatform {
             flag,
             bans: Mutex::new(vec![]),
             ban_err: None,
+            community_config: None,
         })
     }
     fn failing_ban(code: &str) -> Arc<Self> {
@@ -230,10 +233,16 @@ impl FakePlatform {
             flag: true,
             bans: Mutex::new(vec![]),
             ban_err: Some(code.into()),
+            community_config: None,
         })
     }
 }
 impl Platform for FakePlatform {
+    fn community_config_json(&self) -> String {
+        self.community_config
+            .clone()
+            .unwrap_or_else(|| "{}".to_string())
+    }
     fn flag_enabled(&self, key: &str) -> bool {
         assert_eq!(key, FLAG_AUTO_BAN, "only the auto-ban flag is read");
         self.flag
@@ -1224,4 +1233,69 @@ fn a_positive_moderation_delta_needs_the_admin_scope() {
         )
         .is_ok()
     );
+}
+
+/// A platform whose community config is `cfg`.
+fn platform_with_config(cfg: &str) -> Arc<FakePlatform> {
+    Arc::new(FakePlatform {
+        flag: false,
+        bans: Mutex::new(vec![]),
+        ban_err: None,
+        community_config: Some(cfg.to_string()),
+    })
+}
+
+#[test]
+fn community_opt_out_refuses_every_accrual_write_without_touching_the_host() {
+    let r = rig(
+        FakeHost::with(&[(U1, 600)]),
+        FakeCfg::with(&[]),
+        platform_with_config(r#"{"accrual_enabled":false}"#),
+    );
+    assert!(matches!(
+        write(
+            &r,
+            "adjust",
+            json!({"user": U1, "delta": 3, "reason": "activity.follow"})
+        ),
+        Err(ToolError::Forbidden)
+    ));
+    assert!(matches!(
+        write(
+            &r,
+            "apply_moderation",
+            json!({"user": U1, "delta": -10, "reason": "moderation.warn"})
+        ),
+        Err(ToolError::Forbidden)
+    ));
+    assert!(
+        r.host.log().is_empty(),
+        "no host apply for a disabled community"
+    );
+}
+
+#[test]
+fn community_default_config_keeps_accrual_on_for_real_communities() {
+    for cfg in [
+        "{}",
+        "",
+        "garbage",
+        r#"{"accrual_enabled":true}"#,
+        r#"{"accrual_enabled":"no"}"#,
+    ] {
+        assert!(accrual_enabled(cfg), "{cfg:?}");
+        let r = rig(
+            FakeHost::with(&[(U1, 600)]),
+            FakeCfg::with(&[]),
+            platform_with_config(cfg),
+        );
+        let out = write(
+            &r,
+            "adjust",
+            json!({"user": U1, "delta": 1, "reason": "activity.follow"}),
+        )
+        .unwrap();
+        assert_eq!(out["applied"], true, "{cfg:?}");
+    }
+    assert!(!accrual_enabled(r#"{"accrual_enabled":false}"#));
 }

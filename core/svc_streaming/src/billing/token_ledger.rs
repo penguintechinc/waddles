@@ -124,15 +124,18 @@ impl Default for TokenLedgerClient {
 }
 
 impl TokenLedgerClient {
-    /// Builds a client with the fixed 5s admission timeout. Infallible:
-    /// `reqwest::Client::builder()` with only a timeout set never fails to
-    /// build (no TLS/proxy config that could error).
+    /// Builds the ONE pooled client (5s admission timeout) honouring the chart's
+    /// internal-TLS policy (`INTERNAL_CA_FILE` / `INTERNAL_TLS_REQUIRED`, see
+    /// [`crate::tls::internal_client`]). `AppState` holds this in an `Arc`, so every
+    /// debit reuses the same keep-alive/HTTP2 connection instead of re-handshaking.
+    ///
+    /// # Panics
+    /// On an invalid internal-TLS policy (unreadable CA, `REQUIRED` without a CA): a
+    /// misconfigured pod must crash at boot rather than debit over plaintext.
     pub fn new() -> Self {
         Self {
-            http: reqwest::Client::builder()
-                .timeout(TIMEOUT)
-                .build()
-                .expect("reqwest::Client::builder with only a timeout cannot fail"),
+            http: crate::tls::internal_client(TIMEOUT)
+                .expect("internal TLS policy invalid for the hub-api ledger client"),
             metrics: StreamMetrics::shared(),
         }
     }
