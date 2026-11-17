@@ -237,15 +237,9 @@ Key schema fields in `server_link_requests`:
 - `link_type`: `'standard'`, `'read_only'`, or `'announcement_only'`
 - `status`: `'pending'`, `'approved'`, `'rejected'`
 
-### Shared Platform Library (`libs/platform_receiver`)
+### Platform Ingestion (`core/svc_ingest/`)
 
-All bot receiver modules share a common library at `libs/platform_receiver/`:
-
-- `base.py` — `PlatformReceiverBase` abstract class with `dispatch()`, `is_broadcaster()`, `build_chat_event()` etc.
-- `schema.py` — `build_event()` validator, message type constants
-- `response.py` — `split_for_chat()`, `get_response_content()`, `format_error()` utilities
-
-To add a new platform: extend `PlatformReceiverBase`, implement `start()` / `stop()` / `is_broadcaster()`, copy `libs/platform_receiver` in the Dockerfile, and `pip install` it.
+> Note: The legacy v2 `platform_receiver` Python library has been retired. Platform ingestion now runs in Rust via `core/svc_ingest/` and connector bundles under `bundles/`.
 
 📚 See [docs/platform-commands.md](platform-commands.md) for the full command reference.
 📚 See [docs/server-linking.md](server-linking.md) for the server linking step-by-step guide.

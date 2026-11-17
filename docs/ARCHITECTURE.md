@@ -235,14 +235,8 @@ Read this before assuming a container is production-ready:
 - **Helm chart wiring lags the code**: every pipeline container's Deployment template still pins
   `image:` to a shared placeholder base digest (`pipeline.pythonBaseImage` /
   formerly `pipeline.nodeBaseImage`, removed) — no CI build publishes a per-container image yet.
-- **`svc-core` is the exception** — no consolidated container exists. Identity, security, and
-  credential logic still run as three separate module services (`core/identity_core_module`,
-  `core/security_core_module`, `core/credential_manager_module`); `svc-core.yaml` is a Helm
-  skeleton with no backing app code.
-- **The 8-container Helm templates coexist with ~31 legacy per-module Deployments** carried over
-  from v2.2.x (router, per-platform collectors, action-platforms, etc.) — nothing has been deleted.
-  The legacy set still serves most live functionality during cutover. Full 31→8 mapping:
-  [`k8s/helm/waddlebot/PIPELINE_MAPPING.md`](../k8s/helm/waddlebot/PIPELINE_MAPPING.md).
+- **`svc-core` is folded into `hub-api`**: identity, security, and credential logic live in `hub_api/` rather than separate module containers; `svc-core.yaml` is a retired Helm skeleton.
+- **v2.2.x legacy per-module Deployments have been retired** (full historical 31→8 mapping: [`k8s/helm/waddlebot/PIPELINE_MAPPING.md`](../k8s/helm/waddlebot/PIPELINE_MAPPING.md)).
 - **`svc-streaming` fronts external engines**, it does not implement its own media transport: an
   internal RTMP/AV1 transcode proxy and LiveKit (SFU) sit behind it today. A native Rust data
   plane is a documented future direction (`docs/plans/2026-08-31-svc-streaming-design.md`).

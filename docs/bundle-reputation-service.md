@@ -137,7 +137,7 @@ A third-party bundle may replace the default logic. Contract:
 * Every cap still applies: per-call, per user/day, per community/day (host, durable), idempotency by event id,
   membership, floors (the service enforces them after your delta), and the kill switch.
 
-## Default logic spec (from legacy v2: `core/reputation_module`, `svc_process/services/activity_accrual.py`)
+## Default logic spec (from legacy v2 `reputation_module`, `core/svc_process/`)
 
 The accrual bundle reproduces the legacy BEHAVIOR (values configurable per community in the bundle's kv key
 `accrual`; absent = defaults, present-but-invalid = loud skip):

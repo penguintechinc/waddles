@@ -209,7 +209,7 @@ All modules have **restricted column access** on the user identity table:
 
 ## 6. Database Access by Service Type
 
-### Flask Backend (`services/flask_backend`)
+### Hub API (`hub_api/`)
 - **Role**: `hub_admin` (or dynamically created per-module role via Alembic)
 - **Access**: All tables
 - **Pattern**: SQLAlchemy for schema initialization, PyDAL for runtime queries
