@@ -177,3 +177,38 @@ async def test_pending_upgrade_reports_installed_version(app: Quart, install_dal
     body = await response.get_json()
     assert body["versions"][0]["version"] == "1.1.0"
     assert body["versions"][0]["installedVersion"] == "1.0.0"
+
+
+async def test_pending_excludes_already_installed_versions(app: Quart, install_dal: Any) -> None:
+    """Seeded or approved versions in app_global_installs must not linger in Pending."""
+    app_id = "waddles.core.ping"
+    version_id = await install_dal.app_versions.async_insert(
+        app_id=app_id,
+        version="1.0.0",
+        artifact_digest="sha256:" + "c" * 64,
+        language="python",
+        artifact_kind="prebuilt",
+        scan_status="scanned",
+    )
+    await _insert_upload(install_dal, app_id=app_id, version="1.0.0", status="PUBLISHED")
+    await install_dal.app_global_installs.async_insert(
+        app_id=app_id,
+        version="1.0.0",
+        version_id=version_id,
+        permission_hash="sha256:" + "d" * 64,
+        summary_json={},
+        install_source="system:core-seeder",
+        installed_at=datetime.now(UTC),
+    )
+    # A second, unapproved vendor bundle should still appear with total=1.
+    await _insert_upload(
+        install_dal, app_id="waddles.integrations.vendor-1.new", version="1.0.0", status="PUBLISHED"
+    )
+    token = make_token(scope="platform:admin")
+    response = await app.test_client().get(
+        "/api/v1/admin/bundle-versions", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+    body = await response.get_json()
+    assert [v["appId"] for v in body["versions"]] == ["waddles.integrations.vendor-1.new"]
+    assert body["pagination"]["total"] == 1
