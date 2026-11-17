@@ -2333,23 +2333,24 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
 
     # Gotcha #4 note (1) above -- `module_url` is not defined by
     # `002_add_commands_table.sql` or any later migration.
-    dal.define_table(
-        "commands",
-        Field("command", "string", length=100, notnull=True),
-        Field("module_name", "string", length=255, notnull=True),
-        Field("module_url", "string", length=500),
-        Field("description", "text"),
-        Field("usage", "text"),
-        Field("category", "string", length=100, default="general"),
-        Field("permission_level", "string", length=50, default="everyone"),
-        Field("cooldown_seconds", "integer", default=0),
-        Field("community_id", "integer"),
-        Field("is_enabled", "boolean", default=True),
-        Field("is_active", "boolean", default=True),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        migrate=migrate,
-    )
+    if "commands" not in dal.tables:
+        dal.define_table(
+            "commands",
+            Field("command", "string", length=100, notnull=True),
+            Field("module_name", "string", length=255, notnull=True),
+            Field("module_url", "string", length=500),
+            Field("description", "text"),
+            Field("usage", "text"),
+            Field("category", "string", length=100, default="general"),
+            Field("permission_level", "string", length=50, default="everyone"),
+            Field("cooldown_seconds", "integer", default=0),
+            Field("community_id", "integer"),
+            Field("is_enabled", "boolean", default=True),
+            Field("is_active", "boolean", default=True),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
 
 
 def bind_marketplace_billing_tables(dal: Any, *, migrate: bool = False) -> None:
