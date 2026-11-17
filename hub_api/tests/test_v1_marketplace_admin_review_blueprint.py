@@ -395,3 +395,18 @@ class TestVendorSubmissionsAdminPipeline:
             headers=_admin_headers(admin_id),
         )
         assert response.status_code == 400
+
+
+def test_bind_marketplace_vendor_tables_when_commands_already_defined(tmp_path: Any) -> None:
+    """`commands` already bound by another group must not 500 `bind_marketplace_vendor_tables`."""
+    from pydal import DAL, Field
+
+    from services.schema import bind_marketplace_vendor_tables
+
+    dal = DAL(f"sqlite://{tmp_path / 'shared.sqlite'}", auto_import=False)
+    try:
+        dal.define_table("commands", Field("command", "string"))
+        bind_marketplace_vendor_tables(dal, migrate=True)
+        assert "vendor_role_requests" in dal.tables
+    finally:
+        dal.close()
