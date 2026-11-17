@@ -137,11 +137,7 @@ CRITICAL (`no_key`). The token, its claims, header values and the JWT library's 
   `alg: none` and `jku`/`jwk`/`x5u`/`x5c`/`crit`, enforce `iss`/`aud`/required claims, drop any
   default-tenant fallback, and emit the same per-algorithm metric (identical metric and label
   names so the dashboards line up).
-- Module-local Python verifiers that call `jwt.decode` directly with their own secret
-  (`action/pushing/*_action_module`, `core/{engagement,video_proxy,reputation,workflow_core,
-  browser_source_core}_module`, `libs/module_sdk/security/scoped_tokens.py`,
-  `services/action-platforms`) already pin `algorithms=[...]` but do not use these primitives;
-  migrate them onto `inspect_header` / `record_verification` module by module.
+- Legacy v2 module-local Python verifiers (`*_action_module`, `*_core_module`, `action-platforms`) were retired; active Python verification lives in `hub_api/` and `libs/flask_core/` (`inspect_header` / `record_verification`) alongside `libs/module_sdk/security/scoped_tokens.py`.
 - Done (T10): ES256 minting with real `kid`s; HS256 retired with no fallback.
 
 ## Service JWT ES256 cut-over (EdDSA legacy window)

@@ -187,12 +187,7 @@ These commands manage platform ↔ community connections. They require **server 
 
 To add a new platform (e.g., Guilded, Matrix, Telegram):
 
-1. Create `trigger/receiver/<platform>_module/` with a receiver bot
-2. Extend `PlatformReceiverBase` from `libs/platform_receiver/`
-3. Implement `start()`, `stop()`, `is_broadcaster()`, and register command handlers
-4. Call `self.dispatch(build_event(...))` for each message/command received
-5. Add a Dockerfile that `COPY libs/platform_receiver` and `pip install`
-6. Register the platform in `hub_settings.supported_platforms`
-7. Add OAuth2 provider in the hub auth module
+1. Implement a connector bundle under `bundles/` and wire its receiver in `core/svc_ingest/`
+2. Register the platform in `hub_api/` (`supported_platforms`) and add OAuth2 provider support if applicable
 
 No router or module changes are needed — the `commands` table's `community_id = NULL` rows apply globally.

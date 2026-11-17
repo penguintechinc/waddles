@@ -362,7 +362,7 @@ All database drivers are built in via PyDAL. It "just works."
 
 ### Q: Do I have to use Kubernetes?
 
-**A:** Yes! All local development uses Kubernetes via Kustomize, and production uses Helm. Docker Compose is deprecated. See `k8s/kustomize/overlays/alpha/` for local setup and `k8s/helm/{service}/` for production deployment.
+**A:** Yes! All environments use Kubernetes via Helm (Docker Compose and Kustomize are retired). See `k8s/helm/waddlebot/` (`values-local.yaml`, `values-dal2alpha.yaml`, `values-production.yaml`).
 
 ### Q: How do I know which protocol to use between services?
 

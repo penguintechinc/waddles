@@ -4,8 +4,8 @@ Single source of truth: [`docs/LICENSE.md`](LICENSE.md) (custom AGPL-3.0 text).
 
 | Component | License | Where |
 |---|---|---|
-| Platform (core services, bundles, hub, libs) | Custom AGPL-3.0 — `docs/LICENSE.md` canonical | `/LICENSE`, `libs/LICENSE`, `sdk/libs/LICENSE`, `services/core-community/libs/LICENSE` (verbatim copies), Rust `Cargo.toml` `license = "AGPL-3.0-or-later"` |
-| SDK / client libraries | MIT | `sdk/LICENSE`, `sdk/waddle-sdk-rs`, `libs/flask_core` twin, `admin/marketplace_module/backend` |
+| Platform (core services, bundles, hub, libs) | Custom AGPL-3.0 — `docs/LICENSE.md` canonical | `/LICENSE`, `libs/LICENSE`, `sdk/libs/LICENSE` (verbatim copies), Rust `Cargo.toml` `license = "AGPL-3.0-or-later"` |
+| SDK / client libraries | MIT | `sdk/LICENSE`, `sdk/waddle-sdk-rs`, `libs/flask_core` twin |
 | Commercial / Premium | Proprietary commercial counterpart to the AGPL | `Premium/LICENSE`, `Premium/PREMIUM_LICENSE.md` |
 
 ## Custom Terms (summary)

@@ -1557,8 +1557,7 @@ share `scripts/lib/checks.sh`. Rules, enforced by
   finding fails, ceilings only move down, and a run under its ceiling prints a
   `RATCHET` line to lower it in the same PR.
 - Zero applicable checks, or a missing tool for files that exist, fails the suite.
-- Python unit suites (`hub_api`, `core/workflow_core_module`, `core/community_module`,
-  `libs/*`, `core/svc_ingest|presentation|streaming`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
+- Python unit suites (`hub_api`, `libs/*`, `core/svc_presentation`, `core/svc_streaming`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
   and `addopts = --cov ...` in `pytest.ini`, so `make test-unit` / CI fail below 90%
   line coverage. Use `pytest --no-cov <file>` when iterating on a single test file.
   `core/svc_action` and `core/svc_process` are not yet wired: touching their directory triggers the Rust
