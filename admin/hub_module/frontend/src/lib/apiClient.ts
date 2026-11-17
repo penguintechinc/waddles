@@ -1,4 +1,5 @@
 import axios, { type AxiosError, type AxiosInstance, type InternalAxiosRequestConfig } from 'axios';
+import { redirectToLoginIfProtected, shouldSkipAuthRefresh } from './authRedirect';
 
 // SECURITY (security.md C4 / OWASP A07): mirrors `services/api.js` exactly --
 // the session JWT lives ONLY in the HttpOnly `wb_session` cookie hub-api
@@ -43,7 +44,13 @@ apiClient.interceptors.response.use(
     // the request that triggered it (-> /login) instead of re-entering here and
     // refreshing without bound.
     const isRefreshCall = originalRequest?.url === REFRESH_URL;
-    if (error.response?.status === 401 && originalRequest && !originalRequest._retry && !isRefreshCall) {
+    if (
+      error.response?.status === 401 &&
+      originalRequest &&
+      !originalRequest._retry &&
+      !isRefreshCall &&
+      !shouldSkipAuthRefresh(originalRequest.url)
+    ) {
       originalRequest._retry = true;
 
       try {
@@ -52,7 +59,7 @@ apiClient.interceptors.response.use(
           return apiClient(originalRequest);
         }
       } catch (refreshError) {
-        window.location.href = '/login';
+        redirectToLoginIfProtected();
         return Promise.reject(refreshError);
       }
     }

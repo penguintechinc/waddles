@@ -156,6 +156,27 @@ describe.each(CLIENTS)('%s session handling', (_label, client) => {
     await expect(client.get('/api/v1/user/profile')).rejects.toMatchObject({ code: AxiosError.ERR_NETWORK });
     expect(log).toHaveLength(1);
   });
+
+  it.each(['/', '/login', '/login/acme', '/communities', '/live'])(
+    'does not redirect to /login on 401 when already on public/auth route %s',
+    async (route) => {
+      vi.stubGlobal('location', { href: route, pathname: route });
+      const { log } = script(client, () => ({ status: 401 }));
+
+      await expect(client.get('/api/v1/user/profile')).rejects.toMatchObject({ response: { status: 401 } });
+      expect(log).toEqual(['GET /api/v1/user/profile', 'POST /api/v1/auth/refresh']);
+      expect(window.location.href).toBe(route);
+    },
+  );
+
+  it.each(['/', '/login'])('skips /auth/refresh for /api/v1/flags on %s', async (route) => {
+    vi.stubGlobal('location', { href: route, pathname: route });
+    const { log } = script(client, () => ({ status: 401 }));
+
+    await expect(client.get('/api/v1/flags')).rejects.toMatchObject({ response: { status: 401 } });
+    expect(log).toEqual(['GET /api/v1/flags']);
+    expect(window.location.href).toBe(route);
+  });
 });
 
 describe('lib/apiClient.ts', () => {
