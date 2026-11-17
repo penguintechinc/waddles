@@ -348,6 +348,8 @@ def test_handover_hook_scales_legacy_deployment_with_minimal_rbac(helm: str) -> 
     ann = job["metadata"]["annotations"]
     assert ann["helm.sh/hook"] == "pre-install,pre-upgrade"
     assert "before-hook-creation" in ann["helm.sh/hook-delete-policy"]
+    migrate_job = next(d for d in _kind(docs, "Job") if d["metadata"]["name"].endswith("-db-migrate"))
+    assert int(ann["helm.sh/hook-weight"]) > int(migrate_job["metadata"]["annotations"]["helm.sh/hook-weight"])
     assert job["spec"]["backoffLimit"] == 0 and job["spec"]["activeDeadlineSeconds"] > 300
     role = next(d for d in _kind(docs, "Role") if d["metadata"]["name"].endswith("-postgres-handover"))
     by_res = {tuple(r["resources"]): r for r in role["rules"]}
