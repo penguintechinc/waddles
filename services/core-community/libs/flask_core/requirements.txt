@@ -38,7 +38,7 @@ python-dotenv>=1.0.0
 psutil>=5.9.0  # System metrics for health/metrics endpoints
 
 # Observability - OpenTelemetry (pinned to avoid resolution-too-deep)
-opentelemetry-api==1.39.1
+opentelemetry-api==1.45.2
 opentelemetry-sdk==1.39.1
 opentelemetry-instrumentation==0.60b1
 opentelemetry-instrumentation-flask==0.60b1
