@@ -9,8 +9,9 @@ hub-api's side of `bundle-executor --precompile`:
 - `claim_pending()` -- the `executor-precompile` CronJob's export step: leases up to `limit`
   rows (`claimed_at`, `attempts += 1`) that are unclaimed or whose lease expired and that are
   under the attempt cap, joined to `app_versions` for the bucket keys the precompiler fetches.
-- `select_all_active()` -- the backfill Job's export step: every signed, currently-active
-  version (run with a NEW executor image before rollout so its engine fingerprint is warm).
+- `select_all_active()` / `enqueue_all_active()` -- the per-release `executor-precompile-enqueue`
+  Job: queue every signed, currently-active version (a new executor image = new engine
+  fingerprint). It never compiles, so it never gates `helm upgrade`; the CronJob drains it.
 - `ack_report()` -- deletes rows the precompiler reports `compiled`/`skipped`; records
   `last_error` on `failed` rows (they retry after the lease, up to the cap).
 
@@ -209,6 +210,45 @@ async def select_all_active(install_dal: Any) -> list[PrecompileItem]:
     items = [_item(r) for r in rows]
     logger.info("bundle precompile: backfill export", extra={"examined": len(items)})
     return items
+
+
+@dataclass(slots=True, frozen=True)
+class EnqueueSummary:
+    """Counts from one `enqueue_all_active()` call; `examined` is the denominator."""
+
+    examined: int
+    queued: int
+    already_pending: int
+
+
+async def enqueue_all_active(install_dal: Any) -> EnqueueSummary:
+    """Queue every signed, currently-active version for the precompile CronJob to drain.
+
+    Run once per Helm release by the (non-hook) `executor-precompile-enqueue` Job: a new
+    executor image has a new engine fingerprint, so every active digest needs a look. It only
+    INSERTs queue rows (ON CONFLICT DO NOTHING) -- seconds, never hours -- and the CronJob
+    compiles them in bounded batches, skipping digests that already have a valid signed artifact
+    for the current fingerprint. Raises on any DB failure (fail loud, never a partial "ok").
+    """
+    items = await select_all_active(install_dal)
+    queued = 0
+    for item in items:
+        if await enqueue_precompile(
+            install_dal, app_id=item.app_id, version=item.version, digest=item.digest
+        ):
+            queued += 1
+    summary = EnqueueSummary(
+        examined=len(items), queued=queued, already_pending=len(items) - queued
+    )
+    logger.info(
+        "bundle precompile: enqueue all active",
+        extra={
+            "examined": summary.examined,
+            "queued": summary.queued,
+            "already_pending": summary.already_pending,
+        },
+    )
+    return summary
 
 
 async def ack_report(install_dal: Any, report: dict[str, Any]) -> AckSummary:

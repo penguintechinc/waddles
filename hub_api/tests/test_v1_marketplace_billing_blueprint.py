@@ -59,7 +59,6 @@ def _cfg() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
         default_tenant_slug=TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="",
@@ -105,8 +104,19 @@ def _make_admin_user(dal: Any, *, super_admin: bool = True) -> int:
 def _make_member(
     dal: Any, *, community_id: int, user_id: int, role: str = "community-owner"
 ) -> None:
+    role_id = dal.community_roles.insert(
+        community_id=community_id,
+        name=role,
+        is_system=True,
+        role_kind=1,
+        base_claims={"scopes": []},
+    )
     dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role=role, is_active=True
+        community_id=community_id,
+        user_id=str(user_id),
+        role=role,
+        is_active=True,
+        community_role_id=role_id,
     )
     dal.commit()
 

@@ -37,6 +37,7 @@ function buildPages({ communityId, tenantSlug }) {
   { name: 'vendor-request', path: '/vendor/request' },
   // ── Community Member ───────────────────────────────────────────────
   { name: 'community-dashboard', path: `/dashboard/community/${communityId}` },
+  { name: 'community-town-hall', path: `/community/${communityId}/town-hall` },
   { name: 'community-settings', path: `/dashboard/community/${communityId}/settings` },
   { name: 'community-chat', path: `/dashboard/community/${communityId}/chat` },
   { name: 'community-leaderboard', path: `/dashboard/community/${communityId}/leaderboard` },

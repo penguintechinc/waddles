@@ -33,7 +33,6 @@ from pydal.objects import Field, Query, Table
 
 from .auth import DEFAULT_TENANT_SLUG, verify_jwt_token
 from .database import db_operation
-from .secrets import require_secret_key
 
 logger = logging.getLogger(__name__)
 
@@ -181,8 +180,7 @@ def tenant_middleware(f):
             return error_response("Authentication required", status_code=401)
 
         token = auth_header[7:]
-        secret_key = require_secret_key()
-        payload = verify_jwt_token(token, secret_key)
+        payload = verify_jwt_token(token)
         if payload is None:
             _log_auth_rejection("invalid_or_expired_token", request.path)
             return error_response("Invalid or expired token", status_code=401)

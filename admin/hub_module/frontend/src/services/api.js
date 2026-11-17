@@ -80,7 +80,6 @@ export const publicApi = {
   getSignupSettings: () => api.get('/api/v1/signup-settings'),
   getBanner: () => api.get('/api/v1/public/banner'),
   // Public song-queue page (no auth required) -- chat users land here via !sq
-  getMusicQueue: (communityId) => api.get(`/api/v1/public/communities/${communityId}/music-station/queue`),
 };
 
 export const communityApi = {
@@ -367,14 +366,6 @@ export const adminApi = {
     api.get(`/api/v1/admin/${communityId}/music/dashboard`),
   controlPlayback: (communityId, action) =>
     api.post(`/api/v1/admin/${communityId}/music/playback/control`, { action }),
-  // Moderation from the public queue page (admin/moderator only, server-enforced)
-  removeMusicQueueItem: (communityId, itemId) =>
-    api.delete(`/api/v1/admin/${communityId}/music-station/queue/${itemId}`),
-  // Music Station policy (YouTube allowed labels, etc.)
-  getMusicStationPolicy: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/music-station/policy`),
-  updateMusicStationPolicy: (communityId, policy) =>
-    api.put(`/api/v1/admin/${communityId}/music-station/policy`, policy),
 
   // Calendar Events
   getCalendarEvents: (communityId, params) =>
@@ -471,29 +462,7 @@ export const adminApi = {
   getStreamStatus: (communityId) =>
     api.get(`/api/v1/admin/${communityId}/streams/status`),
 
-  // ===== Community Calls (WebRTC) =====
-  getCallRooms: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms`),
-  getCallRoom: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}`),
-  createCallRoom: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms`, data),
-  deleteCallRoom: (communityId, roomName) =>
-    api.delete(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}`),
-  lockCallRoom: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/lock`),
-  unlockCallRoom: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/unlock`),
-  getCallParticipants: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/participants`),
-  kickCallParticipant: (communityId, roomName, identity) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/kick`, { identity }),
-  muteAllCallParticipants: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/mute-all`),
-  getRaisedHands: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/raised-hands`),
-  acknowledgeHand: (communityId, roomName, userId) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/acknowledge-hand`, { user_id: userId }),
+  // Community calls (admin) moved to the typed `services/callsApi.ts` (UUID room ids, hands, mute).
 
   // ===== Polls =====
   getPolls: (communityId) =>
@@ -952,15 +921,7 @@ export const interactionApi = {
   deleteReply: (communityId, replyId) =>
     api.delete(`/api/v1/admin/${communityId}/interaction/forum/replies/${replyId}`),
 
-  // Voice rooms (proxied to module_rtc via calls controller)
-  getVoiceRooms: (communityId) =>
-    api.get(`/api/v1/community/${communityId}/interact/voice/rooms`),
-  joinVoiceRoom: (communityId, roomName) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms/${encodeURIComponent(roomName)}/join`),
-  leaveVoiceRoom: (communityId, roomName) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms/${encodeURIComponent(roomName)}/leave`),
-  createAdHocVoiceRoom: (communityId, data) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms`, data),
+  // Member voice rooms moved to the typed `services/callsApi.ts`.
 };
 
 // ─── Server Manager (RCON / Voice) API ──────────────────────────────────────

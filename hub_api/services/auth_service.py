@@ -35,6 +35,7 @@ from urllib.parse import urlencode
 import bcrypt
 import httpx
 from flask_core.auth import (
+    DEFAULT_TENANT_SLUG,
     JWT_CLOCK_SKEW_SECONDS,
     SCOPE_BUNDLES,
     create_jwt_token,
@@ -199,8 +200,14 @@ def _mint_access_token(
     tenant: str,
     session_id: int | None,
     issued_at: int | None = None,
+    amr: list[str] | None = None,
+    auth_time: int | None = None,
 ) -> str:
-    """Mint the short-lived (15 min) access JWT: `jti` always, `sid` when in a session."""
+    """Mint the short-lived (15 min) access JWT: `jti` always, `sid` when in a session.
+
+    `amr` / `auth_time` (OIDC) describe the authentication EVENT that opened this token; a
+    refresh re-mints without them, so a step-up never outlives its own 5-minute window.
+    """
     # flask_core is `follow_imports = "skip"` -- create_jwt_token() is typed Any from mypy's
     # perspective; cast to the real, stable return type.
     return cast(
@@ -210,11 +217,12 @@ def _mint_access_token(
             username=(user.username if user is not None else username_override) or "",
             email=(user.email if user is not None else None) or "",
             roles=roles,
-            secret_key=cfg.secret_key,
             tenant=tenant,
             scope=" ".join(sorted(scopes)),
             session_id=str(session_id) if session_id is not None else None,
             issued_at=issued_at,
+            amr=amr,
+            auth_time=auth_time,
         ),
     )
 
@@ -230,6 +238,7 @@ async def create_session_token(
     tenant_slug: str | None = None,
     requires_oauth_link: bool = False,
     auth_method: str = "unspecified",
+    amr: list[str] | None = None,
 ) -> str:
     """Open a login session and mint its first access JWT (`flask_core.auth.create_jwt_token`).
 
@@ -253,7 +262,7 @@ async def create_session_token(
     session the audit log cannot account for is never issued (entitled tenants only).
     """
     roles, scopes = await _scopes_for(async_dal, dal, user=user, tenant_id=tenant_id)
-    resolved_tenant = tenant_slug or "default"
+    resolved_tenant = tenant_slug or DEFAULT_TENANT_SLUG
 
     await record_session_issued(
         user_id=user.id if user is not None else None,
@@ -289,6 +298,8 @@ async def create_session_token(
         tenant=resolved_tenant,
         session_id=session_id,
         issued_at=await _issued_at_after_revocations(user),
+        amr=amr,
+        auth_time=int(time.time()) if amr is not None else None,
     )
 
 
@@ -488,7 +499,7 @@ async def login(
     *,
     email: str,
     password: str,
-    tenant_slug: str = "default",
+    tenant_slug: str = DEFAULT_TENANT_SLUG,
 ) -> LoginResult:
     """Login."""
     if not email or not password:
@@ -538,6 +549,7 @@ async def login(
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
         auth_method="password",
+        amr=["pwd"],
     )
     return LoginResult(
         token=token,
@@ -738,7 +750,7 @@ async def logout(
         tenant_slug = parsed.tenant_slug
 
     if access_token:
-        payload = verify_jwt_token(access_token, cfg.secret_key)
+        payload = verify_jwt_token(access_token)
         if payload is not None:
             jti = payload.get("jti")
             if isinstance(jti, str):

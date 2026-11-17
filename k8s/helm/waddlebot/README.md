@@ -143,7 +143,6 @@ The following table lists the main configurable parameters of the WaddleBot char
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
 | `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `svc-bundles-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
-| `global.storageClass` | Global storage class for PVCs | `standard` |
 
 #### Image pull policy
 
@@ -163,23 +162,6 @@ Set `--set global.imagePullPolicy=Always` per deployment only when deploying a m
 | `namespace.create` | Create namespace automatically | `true` |
 | `namespace.name` | Namespace name | `waddlebot` |
 
-### Resource Presets
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `resourcePresets.small.cpu` | Small preset CPU request | `100m` |
-| `resourcePresets.small.memory` | Small preset memory request | `128Mi` |
-| `resourcePresets.small.cpuLimit` | Small preset CPU limit | `500m` |
-| `resourcePresets.small.memoryLimit` | Small preset memory limit | `512Mi` |
-| `resourcePresets.medium.cpu` | Medium preset CPU request | `250m` |
-| `resourcePresets.medium.memory` | Medium preset memory request | `256Mi` |
-| `resourcePresets.medium.cpuLimit` | Medium preset CPU limit | `1000m` |
-| `resourcePresets.medium.memoryLimit` | Medium preset memory limit | `1Gi` |
-| `resourcePresets.large.cpu` | Large preset CPU request | `500m` |
-| `resourcePresets.large.memory` | Large preset memory request | `512Mi` |
-| `resourcePresets.large.cpuLimit` | Large preset CPU limit | `2000m` |
-| `resourcePresets.large.memoryLimit` | Large preset memory limit | `2Gi` |
-
 ### Infrastructure Services
 
 #### PostgreSQL
@@ -192,8 +174,53 @@ Set `--set global.imagePullPolicy=Always` per deployment only when deploying a m
 | `infrastructure.postgresql.replicas` | Number of replicas | `1` |
 | `infrastructure.postgresql.persistence.enabled` | Enable persistence | `true` |
 | `infrastructure.postgresql.persistence.size` | PVC size | `20Gi` |
-| `infrastructure.postgresql.readReplicas.enabled` | Enable read replicas | `false` |
+| `infrastructure.postgresql.readReplicas.enabled` | Enable read replicas | `true` |
+| `infrastructure.postgresql.readReplicas.optOut` | Required `true` to run with no replicas (enabled=false or count=0); otherwise the render fails | `false` |
+| `infrastructure.postgresql.readReplicas.maxLagSeconds` | Replica readiness lag threshold | `30` |
 | `infrastructure.postgresql.readReplicas.count` | Number of read replicas | `2` |
+
+#### PostgreSQL topology
+
+Default = **primary + read replicas** (physical streaming replication, TLS verify-full, one slot per replica).
+
+```
+ writers (hub-api DATABASE_URL, svc-* DATABASE_URL, migrations)
+        |                                      readers (hub-api DATABASE_READ_REPLICA_URL,
+        v                                       svc-process/svc-action DATABASE_REPLICA_URL + DB_READER_HOST)
+ Service infra-postgres (rw)                          |
+        |                                             v
+ StatefulSet postgres (1 pod, PVC postgres-data)   Service infra-postgres-ro  (ready replicas only)
+   + replication-bootstrap sidecar                     |        |
+        ^   WAL stream (slot replica_0..N-1)           v        v
+        +------------------------------------ postgres-replica-0 .. N-1 (own PVC each)
+```
+
+| Item | Default / behaviour |
+|------|---------------------|
+| Primary | StatefulSet `postgres`, replicas 1, RollingUpdate (delete-then-create, never two postmasters); mounts the standalone PVC `postgres-data` by `claimName` (`helm.sh/resource-policy: keep`) |
+| Replicas | StatefulSet `postgres-replica`, `readReplicas.count` = 2 (one per node via preferred anti-affinity, HA for reads); PDB minAvailable 1 when count >= 2; seeded by `pg_basebackup -R -S replica_<ordinal>` only when PGDATA is empty |
+| Replication role | `waddles_replicator` (REPLICATION LOGIN), password `PW_WADDLES_REPLICATOR` in Secret `<fullname>-db-replication` (generated create-if-absent by the provision-secrets hook, mounted only into postgres pods); role + slots (re)asserted every 5 min by the primary sidecar |
+| Readiness (replica) | in recovery AND WAL receiver `streaming` AND (received LSN == replayed LSN OR replay age < `maxLagSeconds`) — a lagging replica leaves the `-ro` Service automatically |
+| Read endpoint | `<service.name>-ro` FQDN (in TLS SANs); `readReplicas.host` overrides |
+| Opt-out | `readReplicas.optOut: true` together with `enabled: false` or `count: 0`; otherwise the render fails. Reads then fall back to the primary |
+| WAL bound | `walKeepSize` 512MB, `maxSlotWalKeepSize` 4GB: a dead replica cannot fill the primary disk; an invalidated replica is rebuilt by deleting its PVC + pod |
+
+**Replication-lag metric and alert.** The chart ships no postgres_exporter and no in-chart collector, so lag is exposed through the external SigNoz collector's `postgresql` receiver (see `docs/observability/sending-telemetry-to-signoz.md`): point it at the primary (`infra-postgres`) with a monitoring role and enable `postgresql.replication.data_delay` / `postgresql.wal.lag`. Alert: `postgresql.wal.lag` (or `replay_lag` from `pg_stat_replication`) > `maxLagSeconds` for 5 minutes, per replica. Quick check: `kubectl -n waddlebot exec postgres-0 -c postgres -- psql -U waddlebot -c "select application_name, state, replay_lag from pg_stat_replication"`.
+
+**Read policy.** Reads default to replicas where the code has a seam (hub-api read pool, svc-process/svc-action reader). Writes and read-your-own-write paths stay on the primary.
+
+##### Alpha upgrade (existing Deployment `postgres` -> StatefulSet; PVC preserved)
+
+No manual step is required: the `<release>-postgres-handover` pre-install/pre-upgrade hook Job scales the legacy `Deployment/postgres` to 0 and waits (default 300s, `infrastructure.postgresql.handover.timeoutSeconds`) until its pods are gone, failing the release loudly on timeout; it is a no-op when the Deployment is absent. It has a resourceName-scoped Role (deployments + deployments/scale on `postgres` only; read-only pod list/watch). Helm creates new resources before deleting removed ones, which is why the hook (not Helm) must stop the old pod before `postgres-0` starts.
+
+1. (Optional manual pre-step, same effect as the hook) `kubectl --context dal2alpha -n waddlebot scale deploy/postgres --replicas=0`.
+2. `helm3 upgrade waddlebot k8s/helm/waddlebot -f values-alpha.yaml --kube-context dal2alpha -n waddlebot` (Helm v3.17.3). Hooks: handover (-6), provision-secrets creates `<fullname>-db-replication` and, because the SAN identity changed, re-issues the transit CA + leaves (postgres, postgres-replica, seaweedfs).
+3. Verify: `get sts postgres postgres-replica`; on postgres-0 `select application_name,state,replay_lag from pg_stat_replication` shows 2 `streaming` rows; `get endpoints infra-postgres-ro` lists both replica IPs; `select slot_name,active from pg_replication_slots` shows replica_0/1 active.
+4. Rollback: scale both StatefulSets to 0, `helm3 rollback waddlebot <prev>` (recreates the Deployment on the same, untouched PVC). Replica PVCs are disposable copies.
+
+**Replication credential and TLS isolation.** Replicas authenticate with a `.pgpass` (0600, tmpfs emptyDir) built from the Secret at every start; `primary_conninfo` in `postgresql.auto.conf` carries only `passfile=` (the init script rewrites it on every start and fails if a `password=` survives, so replicas bootstrapped by an earlier revision are cleaned). Replicas serve with their own key/cert whose SANs are only `-ro`, the headless Service and the replica pod names; the primary key/cert never reaches a replica pod, so a compromised replica cannot impersonate the writer. In static mode both leaves live in the transit Secret (the provisioning CA key is per-run, so leaves are minted together with their CA) and each pod projects only its own keys; cert-manager mode uses a dedicated `<fullname>-postgres-replica-tls` Secret. libpq clients (psycopg2/psql/alembic) additionally set `PGCHANNELBINDING=require`; asyncpg 0.30 and sqlx 0.9 have no such option and are left as is.
+
+**Changelog consumer / read routing.** svc-process/svc-action run EVERY changelog-consumer read (watermark, change rows, active-set/scope/binding reads) on the PRIMARY (`DB_WATERMARK_HOST`); svc-ingest display-name/detokenization stays on the primary. Full per-path table: `docs/dataplane-db-routing.md`.
 
 #### Redis
 
@@ -280,8 +307,7 @@ MinIO's own KMS backend configuration.
 |-----------|-------------|---------|
 | `infrastructure.qdrant.enabled` | Enable Qdrant vector DB | `true` |
 | `infrastructure.qdrant.image` | Qdrant image | `qdrant/qdrant:latest` |
-| `infrastructure.qdrant.port` | Qdrant HTTP port | `6333` |
-| `infrastructure.qdrant.grpcPort` | Qdrant gRPC port | `6334` |
+| `infrastructure.qdrant.service.port` | Qdrant HTTP port | `6333` |
 | `infrastructure.qdrant.persistence.size` | PVC size | `10Gi` |
 
 ### Processing Module (Router)
@@ -361,20 +387,6 @@ MinIO's own KMS backend configuration.
 | `ingress.annotations` | Ingress annotations | See values.yaml |
 | `ingress.hosts` | Ingress hosts configuration | See values.yaml |
 | `ingress.tls` | TLS configuration | See values.yaml |
-
-### Shared Environment Variables
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `sharedEnv.DB_HOST` | Database host | `postgresql` |
-| `sharedEnv.DB_PORT` | Database port | `5432` |
-| `sharedEnv.DB_NAME` | Database name | `waddlebot` |
-| `sharedEnv.REDIS_HOST` | Redis host | `redis` |
-| `sharedEnv.REDIS_PORT` | Redis port | `6379` |
-| `sharedEnv.ROUTER_URL` | Router service URL | `http://router:8000` |
-| `sharedEnv.HUB_URL` | Hub service URL | `http://hub:8060` |
-| `sharedEnv.LOG_LEVEL` | Logging level | `INFO` |
-| `sharedEnv.RELEASE_MODE` | Enable license enforcement | `false` |
 
 ### Security
 
@@ -574,7 +586,7 @@ generator would regenerate *every* value (all DB passwords, the root KEK) on eac
 |---|---|---|
 | `<fullname>-db-admin` | `POSTGRES_PASSWORD` | Postgres only (skipped if `postgresql.admin.existingSecret`) |
 | `<fullname>-db-credentials` | `PW_<ROLE>` per service role, `PW_WADDLES_PLATFORM_TABLE` (if enabled) | each pod's own key |
-| `waddlebot-secrets` | `DB_READER_PASSWORD`, `DB_REPUTATION_PASSWORD`, `REDIS_PASSWORD`, `REDIS_ADMIN_PASSWORD`, `REDIS_{ROUTER,HUB,WORKFLOW,AI,ANALYTICS,SECURITY,LOYALTY,SPOTIFY,YTMUSIC,TWITCH,DISCORD,SLACK}_PASSWORD`, `VALKEY_DURABLE_PASSWORD`, S3 identities `{HUB_API,DATAPLANE,BUCKET_INIT,STREAMING,BUNDLE_STORAGE}_S3_{ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, `JWT_SECRET` (+`SECRET_KEY`, `JWT_SECRET_KEY` derived), `MODULE_SECRET_KEY`, `SERVICE_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `ENVELOPE_BINDING_KEYS` | envFrom (~40 workloads) |
+| `waddlebot-secrets` | `DB_READER_PASSWORD`, `DB_REPUTATION_PASSWORD`, `REDIS_PASSWORD`, `REDIS_ADMIN_PASSWORD`, `REDIS_{ROUTER,HUB,WORKFLOW,AI,ANALYTICS,SECURITY,LOYALTY,SPOTIFY,YTMUSIC,TWITCH,DISCORD,SLACK}_PASSWORD`, `VALKEY_DURABLE_PASSWORD`, S3 identities `{HUB_API,DATAPLANE,BUCKET_INIT,STREAMING,BUNDLE_STORAGE}_S3_{ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, `SESSION_MAC_KEY` (independent session/refresh-MAC key; no JWT secret exists), `MODULE_SECRET_KEY`, `SERVICE_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `ENVELOPE_BINDING_KEYS` | envFrom (~40 workloads) |
 | same | derived every run (not generated): `REDIS_URL`, `VALKEY_URL`, `VALKEY_URL_TLS`, `VALKEY_DURABLE_URL[_TLS[_AUTH]]`, chart config keys (`AWS_REGION`, `OPENWHISK_*`, ...) | |
 | `<fullname>-valkey-durable-admin` | `VALKEY_DURABLE_ADMIN_PASSWORD` | durable Valkey only |
 | `<fullname>-valkey-kv` | `VALKEY_KV_PASSWORD` (+ derived URLs) | bundle-kv Valkey, svc-action/process |
@@ -1061,9 +1073,29 @@ pipeline:
   otherwise). Adding a scripted language (for example `ruby`) is a values change only.
 - A pool has `languageClass: compiled | scripted | any` (default `any`). Each executor pod gets
   `EXECUTOR_LANGUAGE_CLASS` and `EXECUTOR_LANGUAGES` (comma-separated; `any` = union of both
-  classes). The executor binary does not read them yet: they are the contract the
-  language-partition layer (router + executor) will consume. Nothing else changes for the default
-  single `any` pool.
+  classes). The executor validates them at startup (a typo or an empty list for a partitioned
+  pool refuses to start) and reports a class-qualified `executor_id` (`compiled:<pod>` /
+  `scripted:<pod>`) in `hello`; the stages (`bundle_active_set::partition`) read the same table
+  from `EXECUTOR_LANGUAGE_CLASSES` (rendered from `languageClasses`) and only ever load/dispatch
+  a bundle onto an executor whose class accepts its `app_versions.language`. A bundle whose
+  language is in no class, or whose class has no live executor, is placed nowhere: the stage
+  logs ERROR and counts `executor_partition_unroutable_total` (never a fallback to the other
+  class). Nothing else changes for the default single `any` pool.
+- alpha and dal2alpha ship both pools (`native` compiled, `script` scripted) with their own
+  replicas, resources, PDB, `warmPoolSize` and memory budget; beta/gamma/production keep one `any`
+  pool until their values opt in.
+- **Warm instance pool** (`warmPoolSize`, `warmPoolMaxTotal`, `warmPoolIdleSecs`, per pool): the
+  executor keeps up to `warmPoolSize` one-shot pre-instantiated guests per digest so an invoke
+  skips instantiation. `0` = off (default). Each guest serves exactly one invocation, so no state
+  crosses tenants. Worst-case warm memory is `warmPoolMaxTotal x EXECUTOR_MEMORY_LIMIT_MB`; keep it
+  inside `limit - memoryBudgetMb` (a render test enforces this for the shipped envs). Kill switch:
+  `FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL=true`.
+- **Drain concurrency** (`pipeline.rustDataPlane.drainConcurrency`, `drainOrdering`): svc-process and
+  svc-action handle up to N ordering groups of a drained batch at once. Bundle kv/db/economy have no
+  atomic compare-and-set, so the default key is the app scope `(tenant, community, app)`: a stateful
+  app is strictly serial per scope and concurrency exists only across scopes. `drainOrdering: actor`
+  additionally lets a provably stateless bundle (manifest declares only context/flags/log/clock/http/
+  relay) overlap per actor; stateful or unknown bundles stay scope-serial. `1` = the old serial loop.
 - **Coverage rule:** every stage must be served by exactly one pool **per language class**; an
   `any` pool covers both classes. So the same stage may be listed by a compiled pool and a
   scripted pool, but not by two pools of the same class, and never by none. The rule lives in one

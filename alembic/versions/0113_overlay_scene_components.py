@@ -15,11 +15,11 @@ external reference (the numeric `id` never leaves the database).
   output_kind_code  1 text, 2 image, 3 sanitized_html, 4 surface
   status_code       1 visible, 2 hidden
 
-Chained after 0110_merge_precompile_vault (#1354); 0111/0112 are reserved by other in-flight
-work, whoever merges later re-points down_revision so the chain stays single-headed.
+`down_revision` is the release head at merge time (single-head gate); 0111/0112 are reserved by
+other in-flight work.
 
 Revision ID: 0113_overlay_scene_components
-Revises: 0110_merge_precompile_vault
+Revises: 0119_storage_objects_split
 """
 
 from __future__ import annotations
@@ -30,7 +30,7 @@ from sqlalchemy.dialects import postgresql
 from alembic import op
 
 revision = "0113_overlay_scene_components"
-down_revision = "0110_merge_precompile_vault"
+down_revision = "0119_storage_objects_split"
 branch_labels = None
 depends_on = None
 

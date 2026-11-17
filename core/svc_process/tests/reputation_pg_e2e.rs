@@ -307,6 +307,7 @@ async fn build_caps(cfg: &ConnectConfig) -> StageCapabilities {
     .with_reputation(ReputationWiring {
         store: Arc::new(PostgresReputationStore::new(rep_conn)) as Arc<dyn ReputationStore>,
         flag: Arc::new(StaticGate(true)),
+        auto_ban_flag: None,
     })
     // A write's idempotency key is derived from the invocation's replay-stable event id (never
     // guest input); a fresh UUID per built stack is a distinct delivered event.

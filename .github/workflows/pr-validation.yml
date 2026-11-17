@@ -139,6 +139,22 @@ jobs:
       - name: check-no-stubs
         run: make check-no-stubs
 
+      # A core/ bin crate using rustls without install_default() panics at first TLS build
+      # ("Could not automatically determine the process-level CryptoProvider") -> CrashLoop.
+      - name: check-rustls-provider
+        run: make check-rustls-provider
+
+      # A bundle-<crate> stage missing an out-of-crate #[path]/include_*!/path-dep source fails the
+      # seeder image build only at deploy time (alpha run 43812541222). Zero examined fails.
+      - name: check-bundle-docker-context
+        run: make check-bundle-docker-context
+
+      # A core Rust service Dockerfile that COPYs a Cargo path dep to the wrong container path (or
+      # not at all) fails only inside the deploy image build (svc-streaming platform_keys, deploy
+      # runs 43859970070/43858247593). Negative fixture runs first; zero examined fails.
+      - name: check-core-docker-context
+        run: make check-core-docker-context
+
       # PII boundary: only svc-ingest's outbound drain and svc-presentation may reference the
       # egress detokenizer (svc-action used to detokenize into Valkey queues). Prints files
       # examined; zero examined or any violation fails, and the negative test runs first.
@@ -326,22 +342,39 @@ jobs:
             "alembic==1.20.0" \
             "flask-sqlalchemy==3.1.1" \
             "PyYAML>=6.0.2,<7.0.0"
+          # pytest-xdist parallelizes the full alembic/tests suite (#1389) across
+          # workers. Hash-pinned, --no-deps so it adds only pytest-xdist + execnet
+          # and never upgrades the pytest==9.1.1 installed above. The suite is
+          # xdist-safe: pg_docker.py names each container per os.getpid() (unique
+          # per worker) and allocates an OS-assigned free port per container.
+          pip install --require-hashes --no-deps -r scripts/ci/tests/requirements-xdist.txt
 
       # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only
       # through an Alembic bridge (0001_baseline replays them on a fresh DB only). This proves
       # 0060_port_legacy_sql_097_102 on real Postgres (fresh replay, an existing DB baselined
       # before 097 with seeded data, re-run, minimal CI bootstrap) and that no new numbered SQL
       # file lands un-bridged. No `|| true`: pytest exits 5 on zero collected, failing the step.
-      - name: Legacy SQL -> Alembic bridge (real Postgres)
+      #
+      # Runs the WHOLE alembic/tests suite, not a hand-picked file list: the old four-file list
+      # left every other test_00NN_*.py uncollected in CI, so 0093 (dropped the legacy catalog
+      # branches test_0091 asserted at `head`) and 0117 (a `bundles.admin:moderate` scope string
+      # test_0047's entrypoint scanner matched) broke those tests on the release branch with no
+      # red check. Docker-backed tests skip when the docker CLI is absent, so the step fails loud
+      # if docker is unusable or any test skipped for that reason (a skip is not a pass).
+      - name: Alembic revision tests (full alembic/tests suite, real Postgres)
         if: steps.changes.outputs.any == 'true'
         run: |
           set -euo pipefail
-          python3 -m pytest \
-            alembic/tests/test_legacy_sql_ownership.py \
-            alembic/tests/test_0060_port_legacy_sql_097_102.py \
-            alembic/tests/test_0061_port_legacy_sql_103_codec.py \
-            alembic/tests/test_0001_baseline_fresh_replay.py \
-            -v -rs -p no:cacheprovider
+          docker info --format '{{.ServerVersion}}'
+          log="$(mktemp)"
+          # -n auto parallelizes across pytest-xdist workers. Safe because
+          # pg_docker.py gives each worker its own container (named per os.getpid())
+          # and an OS-allocated free port per container -- no shared container name
+          # or fixed port to collide on.
+          python3 -m pytest alembic/tests -n auto -rfEs -p no:cacheprovider 2>&1 | tee "$log"
+          docker_skips="$(grep -c 'docker CLI not available' "$log" || [ $? -eq 1 ])"
+          echo "docker-unavailable skips: ${docker_skips}"
+          test "${docker_skips}" -eq 0
 
       # This repo's real-Postgres alembic history starts at migration 0020 --
       # everything before it is a 96-file legacy SQL baseline replay
@@ -372,7 +405,11 @@ jobs:
           CREATE TABLE communities (
               id SERIAL PRIMARY KEY,
               name TEXT,
-              tenant_id INTEGER  -- 0045 trigger reads it (legacy NOT NULL column)
+              tenant_id INTEGER,  -- 0045 trigger reads it (legacy NOT NULL column)
+              -- the live-community predicate (0114 reputation_tenant_communities, identity
+              -- resolution): 000_create_base_schema.sql. Mirrors pg_docker.py -- keep in sync.
+              is_active BOOLEAN DEFAULT TRUE,
+              deleted_at TIMESTAMP
           );
           CREATE TABLE hub_users (
               id SERIAL PRIMARY KEY,
@@ -564,8 +601,9 @@ jobs:
             echo "::error::alembic_prior_base_revision.py failed (exit ${status}): ${rev}"
             exit "${status}"
           fi
-          if ! printf '%s' "${rev}" | grep -qE '^[0-9a-z_]+$'; then
-            echo "::error::computed prior_base_revision '${rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+          # One id, or comma-joined parents when the PR adds a merge revision.
+          if ! printf '%s' "${rev}" | grep -qE '^[0-9a-z_]+(,[0-9a-z_]+)*$'; then
+            echo "::error::computed prior_base_revision '${rev}' doesn't match the expected [0-9a-z_]+(,[0-9a-z_]+)* shape -- refusing to use it."
             exit 1
           fi
           echo "has_new_revisions=true" >> "$GITHUB_OUTPUT"
@@ -599,15 +637,20 @@ jobs:
           PY
           )"
           export WADDLES_DB_SERVICE_ROLE_PASSWORDS
-          base_rev="${PRIOR_BASE_REVISION}"
+          base_revs="${PRIOR_BASE_REVISION}"
           # Redundant with the producing step's own check -- cheap, and this
-          # step is the one that actually splices base_rev into an `alembic`
+          # step is the one that actually splices the ids into an `alembic`
           # argv, so it validates independently rather than trusting the
           # upstream step forever.
-          if ! printf '%s' "${base_rev}" | grep -qE '^[0-9a-z_]+$'; then
-            echo "::error::prior_base_revision '${base_rev}' doesn't match the expected [0-9a-z_]+ shape -- refusing to use it."
+          if ! printf '%s' "${base_revs}" | grep -qE '^[0-9a-z_]+(,[0-9a-z_]+)*$'; then
+            echo "::error::prior_base_revision '${base_revs}' doesn't match the expected shape -- refusing to use it."
             exit 1
           fi
+          IFS=',' read -r -a base_rev_list <<< "${base_revs}"
+          # Several ids = the PR adds a merge revision joining a multi-head base.
+          # Downgrading to ONE parent undoes the merge and leaves the other parent
+          # as a head, so `current` must afterwards list every parent.
+          base_rev="${base_rev_list[0]}"
 
           history_lines=$(python3 -m alembic history -r "${base_rev}:head" | grep -c .)
           # `history -r X:head` always includes the edge *into* X as its last
@@ -615,19 +658,21 @@ jobs:
           # printing both `0025 -> 0026` and `0024 -> 0025`) -- subtract 1 to
           # get the count of revisions that actually apply going from X to head.
           revision_count=$((history_lines - 1))
-          echo "revisions to apply (base ${base_rev} -> head): ${revision_count}"
+          echo "revisions to apply (base ${base_revs} -> head): ${revision_count}"
           if [ "${revision_count}" -le 0 ]; then
-            echo "::error::0 revisions between base ${base_rev} and head -- nothing for this gate to verify."
+            echo "::error::0 revisions between base ${base_revs} and head -- nothing for this gate to verify."
             exit 1
           fi
 
-          echo "== downgrade to prior base revision ${base_rev} =="
+          echo "== downgrade to prior base revision ${base_rev} (parents: ${base_revs}) =="
           python3 -m alembic downgrade "${base_rev}"
           current_after_downgrade=$(python3 -m alembic current)
-          if ! printf '%s\n' "${current_after_downgrade}" | grep -q "${base_rev}"; then
-            echo "::error::downgrade to ${base_rev} completed without error, but \`alembic current\` reports '${current_after_downgrade}' -- the DB didn't actually roll back."
-            exit 1
-          fi
+          for parent in "${base_rev_list[@]}"; do
+            if ! printf '%s\n' "${current_after_downgrade}" | grep -q "${parent}"; then
+              echo "::error::downgrade to ${base_rev} completed without error, but \`alembic current\` reports '${current_after_downgrade}' (missing ${parent}) -- the DB didn't actually roll back."
+              exit 1
+            fi
+          done
 
           echo "== upgrade head (2nd pass) =="
           python3 -m alembic upgrade head
@@ -722,6 +767,19 @@ jobs:
         with:
           version: 'v3.13.0'
 
+      # The chart render tests that prove BOTH helm majors (test_interactions_gateway_render.py) need a
+      # helm 4 next to the helm 3 above; a missing major is a CI FAILURE there, never a skip. Exact
+      # version, sha256-verified, exposed as HELM4_BIN (never replaces `helm`).
+      - name: Install Helm 4 (second major for dual-major render tests)
+        run: |
+          set -euo pipefail
+          curl -fsSL --proto '=https' --tlsv1.2 -o /tmp/helm4.tgz https://get.helm.sh/helm-v4.0.0-linux-amd64.tar.gz
+          echo "c77e9e7c1cc96e066bd240d190d1beed9a6b08060b2043ef0862c4f865eca08f  /tmp/helm4.tgz" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/helm4"
+          tar -xzf /tmp/helm4.tgz -C "$RUNNER_TEMP/helm4" --strip-components=1 linux-amd64/helm
+          "$RUNNER_TEMP/helm4/helm" version --short
+          echo "HELM4_BIN=$RUNNER_TEMP/helm4/helm" >> "$GITHUB_ENV"
+
       - name: Set up Python
         uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
         with:
@@ -750,6 +808,22 @@ jobs:
       # exit code 5, never a silent pass -- critical-rules.md Verification Integrity.
       - name: Helm chart template tests (pytest)
         run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
+
+      # #1382 -- a service-leaf Certificate whose SAN falls outside the internal CA's
+      # permitted X.509 nameConstraint subtrees is rejected by rustls-webpki (which checks
+      # EVERY SAN, not just the dialled name), crashlooping the consumer and blocking
+      # `helm --wait` on every deploy. The pytest run above already exercises the
+      # cryptographic render test; this makes it a NAMED, standalone gate that renders
+      # every env and fails LOUD (never a skip) if helm/openssl is missing.
+      - name: Cert name-constraints gate (#1382, all envs)
+        run: make check-cert-name-constraints
+
+      # #1391 -- a helm hook Job with no (or too-large) activeDeadlineSeconds, or long/serial
+      # work (precompile) run AS a blocking hook, can hang `helm --wait` past the deploy
+      # timeout and time the release out. Asserts every hook Job is bounded below the deploy
+      # helm --timeout, for the alpha + beta topologies. Prints hooks examined; zero = fail.
+      - name: Helm hook timeout gate (#1391, all envs)
+        run: make check-helm-hook-timeouts
 
       # changed-only alpha deploys pin each image via global.imageTags; this proves a pinned
       # (unchanged) image keeps its pod template byte-identical, so it does NOT restart, and
@@ -940,6 +1014,39 @@ jobs:
       # `--set-string` style render a clean tag with no `%!` anywhere.
       - name: alpha render -- all-digit short SHA image tag regression test
         run: bash scripts/ci/tests/test_image_tag_all_digit_sha.sh
+
+      # fix/smoke-precompile-pod-exclusion -- the deploy smoke step's generic pod-phase scan
+      # excluded precompile batch pods by the waddlebot.io/workload label. A CronJob batch pod
+      # created before that label was added to the chart does not carry it, and k8s equality
+      # `!=` selects label-less pods, so a stale/stuck precompile pod (alpha deploy 43894038667,
+      # waddlebot-executor-precompile-29914020-cnpqp) was counted as bad and failed the whole
+      # deploy. The scan now excludes precompile batch pods by stable NAME; a Failed precompile
+      # batch Job still trips the gate (step 2b). The bash test embeds the pre-fix label scan to
+      # prove it regresses on the stale pod.
+      - name: smoke step -- precompile pod-exclusion + batch-gate regression tests
+        run: |
+          set -euo pipefail
+          bash scripts/ci/smoke/tests/test-pod-phase-check.sh
+          python3 -m pytest -q -p no:cacheprovider \
+            scripts/ci/smoke/tests/test_pod_phase_classify.py \
+            scripts/ci/smoke/tests/test_precompile_batch_gate.py
+
+      # Static chart-values audit: every values key must be consumed by a template and
+      # every template reference must resolve. Fails the job on any finding (no `|| true`);
+      # zero items examined is a failure inside the target itself.
+      - name: chart values audit (static)
+        run: |
+          set -euo pipefail
+          make audit-chart-values
+
+      # Deep chart-values audit (~3 min): renders each env var of our containers and runs a
+      # delete-and-render pass over every values key. Needs helm (azure/setup-helm above,
+      # on PATH) and pytest + pyyaml (installed by "Install check dependencies" above);
+      # no additional installs required.
+      - name: chart values audit (deep, delete-and-render)
+        run: |
+          set -euo pipefail
+          make audit-chart-values-deep HELM=helm
 
   dockerfile-rust-path-deps:
     name: Dockerfile.rust path-dependency coverage

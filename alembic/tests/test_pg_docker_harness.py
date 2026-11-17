@@ -57,3 +57,28 @@ def test_remove_container_drops_from_live_set(monkeypatch: pytest.MonkeyPatch) -
     pg_docker._remove_container("c-test")
     assert "c-test" not in pg_docker._LIVE_CONTAINERS
     assert calls == [["docker", "rm", "-f", "c-test"]]
+
+
+def test_wait_ready_probes_over_tcp_not_the_unix_socket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The probe must use TCP: the image's first-run temp server answers on the socket only.
+
+    A socket probe passed against that temporary server, then the next `docker exec psql`
+    hit its restart (exit 2) -- seen as a flaky test_0091 failure under the full suite.
+    """
+    calls: list[list[str]] = []
+
+    class _Ok:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_run(argv: list[str], **_kw: object) -> object:
+        calls.append(argv)
+        return _Ok()
+
+    monkeypatch.setattr(pg_docker.subprocess, "run", fake_run)
+    pg_docker._wait_ready("c-test", "u", "d", timeout_s=5.0, probe_timeout_s=1.0)
+    assert len(calls) == 1
+    probe = calls[0]
+    assert probe[:3] == ["docker", "exec", "c-test"]
+    assert probe[probe.index("-h") + 1] == "127.0.0.1"

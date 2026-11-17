@@ -6,13 +6,22 @@ artifacts so executors deserialize (milliseconds) instead of JIT-compiling (seco
 ## Flow
 
 ```
-approve/activate/sign (hub-api)
-  -> upload signed sidecar -> enqueue bundle_precompile_requests (once per digest)
-executor-precompile CronJob (every 2 min)        executor-precompile-backfill Job (Helm hook)
-  export: lease pending rows                       export: every signed, active version
-  bundle-executor --precompile                     bundle-executor --precompile
-  ack: delete done rows, record failures           ack --backfill: exit 1 on any failure
+approve/activate/sign (hub-api)                  executor-precompile-enqueue-r<rev> Job (plain Job,
+  -> upload signed sidecar                         NOT a Helm hook; once per helm revision)
+  -> enqueue bundle_precompile_requests            enqueue-all-active: INSERT every signed,
+          |                                          active version (ON CONFLICT DO NOTHING)
+          v                                                  |
+executor-precompile CronJob (every 2 min, concurrencyPolicy Forbid) <--+
+  export: lease up to batchLimit rows
+  compile: --compile-concurrency N (bounded parallel), skip already-signed digests
+  sign + upload
+  ack: delete done rows, record failures, exit 1 on any failure (Job Failed = loud)
 ```
+
+Precompile never gates `helm upgrade`. Regression: alpha deploy 43868192527 timed out because the old
+`executor-precompile-backfill` post-upgrade hook compiled ~160 bundles serially (~70 s each for
+componentize-py bundles) inside Helm's wait. The release smoke step checks precompile explicitly
+instead (see Operations).
 
 Per item the precompiler (`core/bundle_executor/src/precompile.rs`):
 
@@ -47,9 +56,20 @@ separator (`waddles-cwasm-sig-v1`) differs from the bundle-approval one.
 - Dead letters: `SELECT app_id, version, attempts, last_error FROM bundle_precompile_requests WHERE attempts >= 5`
 - Metrics: `executor_precompile_items_total{status}`, `executor_precompile_duration_seconds`,
   `waddles_hub_bundle_precompile_requests_total{op,outcome}`
-- Backfill hook phase: `pipeline.hubApi.executorPrecompile.backfill.hookPhase`. The default is
-  `post-install,post-upgrade`. Switch to `pre-upgrade` once the precompiler identity and key
-  exist, so artifacts are built before an executor image rolls out.
+- Metrics (compile stage): `executor_precompile_compile_items_total{status}`,
+  `executor_precompile_compile_duration_seconds{status}`; logs `compile stage progress` carry
+  `done`/`total` per item.
+- Throughput knobs (`pipeline.hubApi.executorPrecompile.*`): `compileConcurrency` (default 3),
+  `compileMemoryPerWorkerMi` (2048), `batchLimit` (24), `activeDeadlineSeconds` (1500). The render
+  fails unless `compileConcurrency` <= the compile CPU limit (cores) and
+  `compileConcurrency x compileMemoryPerWorkerMi` <= its memory limit, and unless
+  `activeDeadlineSeconds` < the 1800 s queue lease. wasmtime has no parallel-compilation feature, so
+  one compile = one core.
+- Release gate (`.github/workflows/deploy-dal2alpha.yml` smoke step 2b): this revision's enqueue Job
+  must complete, the CronJob must be `Forbid` and not suspended, and no precompile batch Job created
+  since the release may be Failed. Counts are printed.
+- Re-queue: any `helm upgrade` creates a new
+  `executor-precompile-enqueue-r<rev>` Job.
 
 ## Existing bundles: backfill, storage, and what a miss does
 
@@ -64,14 +84,14 @@ from the SAME image as the executor:
 
 | Producer | Covers | When |
 |---|---|---|
-| `executor-precompile-backfill` Helm hook Job (`hub_api.cli.precompile_queue export --all-active`) | every signed, currently-active version (`app_active_versions`) — this is how all existing core bundles are covered | every `helm upgrade`/`install` (phase `post-install,post-upgrade`; set `pipeline.hubApi.executorPrecompile.backfill.hookPhase=pre-upgrade` once the key + identity exist so artifacts are warm BEFORE a new executor image rolls out) |
-| `executor-precompile` CronJob (`export` leases `bundle_precompile_requests` rows) | digests approved/activated/signed after the queue table exists (enqueued once per digest) | every 2 minutes |
+| `executor-precompile-enqueue-r<rev>` Job (`hub_api.cli.precompile_queue enqueue-all-active`) | queues every signed, currently-active version (`app_active_versions`) — this is how all existing core bundles are covered | every `helm upgrade`/`install`, as a plain Job (not a hook); takes seconds |
+| `executor-precompile` CronJob (`export` leases `bundle_precompile_requests` rows, compiles in parallel) | everything queued, by approval/activation/signing or by the enqueue Job | every 2 minutes, never overlapping |
 
-The queue only knows digests signed after migration `0108_bundle_precompile_requests`, and it is not
-fingerprint-aware: after an executor image change (new fingerprint) only the backfill rebuilds the
-prefix. The backfill is idempotent (an artifact that exists for this fingerprint and verifies is
-skipped) and fails the release loudly if any bundle cannot be compiled (`ack --backfill` exits 1).
-Run it by hand with `helm upgrade` (hook) or by creating a Job from the hook template.
+The queue is not fingerprint-aware; the per-release enqueue Job is what re-queues every active digest
+after an executor image change (new fingerprint). The compile step skips any digest whose artifact
+already exists for this fingerprint and verifies (`PRECOMPILE_SIGNING_PUBLIC_KEYS` is required for
+that, so it is not optional), and a failed item fails its CronJob Job loudly (`ack` exits 1) and
+retries up to the attempt cap.
 
 **What the executor does on a miss** (`SharedRuntime::try_aot` → `materialize`): any problem —
 artifact or `.sig` absent (404), oversized, signature/fingerprint/hash mismatch, no
@@ -110,7 +130,7 @@ mechanism: key provisioning is whatever the chart already does, and the platform
 | Bucket write identity | `svc-bundles-precompiler` (`PRECOMPILER_S3_*`), Write only under `precompiled/` | chart secrets |
 
 Owner checklist: (1) on alpha nothing to do once #1248's executor env lands; (2) elsewhere, supply the
-Secret/ConfigMap above via the environment's secret mechanism; (3) let the backfill hook run, then confirm
+Secret/ConfigMap above via the environment's secret mechanism; (3) let the enqueue Job + CronJob drain the queue, then confirm
 `executor_precompile_fallback_total` stops increasing and `executor_load_duration_seconds{source="aot"}`
 appears. Rotation: configure the new and previous `key_id` together in the public-key map, re-publish,
 then drop the old id. Caveat for the Helm owner: the auto-provision Job re-derives the public ConfigMap from

@@ -30,6 +30,7 @@ from flask_core import (
     install_security_headers,
     setup_aaa_logging,
 )
+from flask_core.jwt_keyring import NoSigningKeyError, get_jwt_keyring, set_jwt_keyring
 from flask_core.mcp_routes import create_mcp_blueprint
 from flask_core.service_jwt import (
     ServiceJwtError,
@@ -54,9 +55,13 @@ from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.community_common import api_error
+from services.db_routing import mark_replica
+from services.default_tenant import verify_default_tenant_at_startup
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
+from services.platform_secrets.bootstrap import get_process_cache
+from services.platform_secrets.jwt_keyring import PlatformVaultJwtKeyring
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -70,6 +75,7 @@ from services.schema import (
 )
 from services.session_cookie import bearer_token_from_cookie
 from services.source_group_reconciler import run_reconcile_loop
+from services.tenant_key_provisioning import run_startup_provisioning
 
 logger = logging.getLogger(__name__)
 
@@ -88,6 +94,11 @@ def _install_error_handlers(app: Quart) -> None:
         """Log the exception, then return the JSON 500 envelope."""
         if isinstance(exc, HTTPException):
             return exc
+        if isinstance(exc, NoSigningKeyError):
+            # The platform vault has not produced a JWT signing key yet (boot, kill-switch ON,
+            # vault refused): sign-in is unavailable, not broken -- never a shared-secret fallback.
+            logger.error("jwt_signing_unavailable path=%s", request.path)
+            return api_error("Sign-in is temporarily unavailable", 503)
         logger.exception("unhandled_exception path=%s method=%s", request.path, request.method)
         return api_error("An unexpected error occurred", 500)
 
@@ -195,6 +206,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     app = Quart(__name__)
     app.config["HUB_API_CONFIG"] = cfg
     app.secret_key = cfg.secret_key
+    if get_jwt_keyring() is None:
+        # ES256 platform JWTs: private key sealed in platform_vault, public keys by `kid`
+        # (docs/PLATFORM_VAULT.md). Fails closed until the vault bootstrap has seeded the cache.
+        set_jwt_keyring(PlatformVaultJwtKeyring(get_process_cache()))
     # OpenTelemetry request hooks + late-bound ASGI middleware shim (telemetry.py). Registered
     # FIRST so its before_request runs before every other hook (the rate limiter can short-circuit
     # later ones) and its after_request runs last, seeing the final status. Providers/exporters
@@ -242,6 +257,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     # recurring InFailedSqlTransaction). Registered before the DAL exists is
     # fine -- the teardown hook reads current_app.config lazily.
     install_db_resilience(app)
+    # Same teardown net for the read-replica connection (config key "read_dal", set at startup
+    # only when DATABASE_READ_REPLICA_URL is configured; a no-op while it is None). Without it a
+    # replica read would leave its pooled connection idle-in-transaction on the hot standby.
+    install_db_resilience(app, dal_key="read_dal")
 
     # security.md A04 hardening -- global before_request hook covering
     # every route registered below, not a per-blueprint decorator (see
@@ -280,11 +299,13 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     @app.route("/ready")
     async def ready() -> tuple[dict[str, str], int]:
         """K8s readinessProbe target -- 200 only once the schema is confirmed at head."""
-        code = 200 if bootstrap_status.is_ready else 503
-        return {
-            "status": bootstrap_status.state.value,
-            "detail": bootstrap_status.detail,
-        }, code
+        code = 200 if bootstrap_status.serving_ready else 503
+        detail = bootstrap_status.detail
+        status_name = bootstrap_status.state.value
+        if bootstrap_status.is_ready and not bootstrap_status.tenant_keys_ready:
+            status_name = "provisioning_tenant_keys"
+            detail = detail or "provisioning per-tenant encryption keys"
+        return {"status": status_name, "detail": detail}, code
 
     @app.before_serving
     async def startup() -> None:
@@ -314,6 +335,8 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         else:
             bootstrap_status.state = BootstrapState.READY
             bootstrap_status.detail = "non-Postgres DATABASE_URL -- bootstrap skipped"
+            # No keystore schema off Postgres (test harness only): nothing to provision.
+            bootstrap_status.tenant_keys_ready = True
         # Per-service ES256 machine JWT issuance (flask_core.service_jwt,
         # feature/eddsa-machine-jwt) -- built from the `service-jwt-
         # signing-key` Secret (SERVICE_JWT_ACTIVE_KID/SERVICE_JWT_PRIVATE_
@@ -364,8 +387,26 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # the wrapper for any future async-offloaded query helpers.
         dal = async_dal.dal
         _bind_reference_tables(dal)
+        if async_dal.read_dal is not None:
+            # Replica-eligible reads build queries from the replica's own table objects, so it
+            # needs the same startup table bindings (schema is owned by migrations: migrate=False).
+            mark_replica(async_dal.read_dal)
+            app.config["read_dal"] = async_dal.read_dal
+            _bind_reference_tables(async_dal.read_dal)
+            logger.info("hub-api read replica configured; replica-eligible reads will use it")
+        else:
+            logger.info(
+                "hub-api read replica NOT configured (DATABASE_READ_REPLICA_URL unset); "
+                "replica-eligible reads fall back to the primary"
+            )
         app.config["async_dal"] = async_dal
         app.config["dal"] = dal
+        # Fail loud on a bad DEFAULT_TENANT_SLUG: logs an ERROR (slug + the reserved tenants that
+        # exist) and records the outcome; never crashes boot (the schema may still be bootstrapping
+        # -- first use of the default tenant re-checks and returns a structured 5xx).
+        app.config["DEFAULT_TENANT_STATUS"] = await verify_default_tenant_at_startup(
+            async_dal, dal, cfg.default_tenant_slug
+        )
         # penguin-dal (R52): a SEPARATE AsyncDB/pool against the same
         # DATABASE_URL, reflecting the ingest_sources/workstreams/
         # workstream_usage_hourly tables migrations 0020-0021 create
@@ -384,7 +425,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # set and the platform KEK is resolved lazily, so the platform-managed
         # baseline needs zero configuration. An ENABLED provider with bad platform
         # credentials raises here -- a loud startup failure, not a first-request one.
-        app.config["envelope_runtime"] = build_envelope_runtime(install_dal)
+        envelope_runtime = build_envelope_runtime(install_dal)
+        app.config["envelope_runtime"] = envelope_runtime
+        # Per-tenant at-rest keys (spec 2026-11-08): after the schema is at head, ensure the
+        # global + system tenants and backfill every existing tenant. Postgres only (the key store
+        # is a Postgres schema); a failure marks hub-api FAILED/not-ready, never silently skipped.
+        app.config["tenant_key_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["tenant_key_task"] = asyncio.create_task(
+                run_startup_provisioning(bootstrap_status, install_dal, envelope_runtime.service)
+            )
         # Object-storage SSE posture (baseline AES256 unless kms.objectStorage.mode=kms): a
         # misconfigured KMS mode raises here; an unentitled one logs a loud ERROR (never silent).
         await get_object_storage_sse().startup_check()
@@ -491,6 +541,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping identity uuid monitor on shutdown: {exc}")
+        tenant_key_task = app.config.get("tenant_key_task")
+        if tenant_key_task is not None:
+            tenant_key_task.cancel()
+            try:
+                await tenant_key_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Tenant key provisioning ended with an error: {exc}")
         purge_task = app.config.get("suppression_purge_task")
         if purge_task is not None:
             purge_task.cancel()

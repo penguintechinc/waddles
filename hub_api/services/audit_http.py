@@ -30,7 +30,6 @@ from typing import Any
 
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import AuthzDecision, get_authz_decision
-from flask_core.secrets import require_secret_key
 from flask_core.tenancy import TenantContext, get_tenant_context
 from quart import Quart, Response, current_app, has_app_context, jsonify, request
 
@@ -100,7 +99,7 @@ async def _resolve_tenant(
     if not auth_header.startswith("Bearer "):
         return None, None
     try:
-        payload = verify_jwt_token(auth_header[7:], require_secret_key())
+        payload = verify_jwt_token(auth_header[7:])
     except Exception:  # noqa: BLE001 - an unreadable token just means "no tenant to attribute"
         logger.debug("audit hook: token tenant claim unreadable; recording on the platform chain")
         return None, None

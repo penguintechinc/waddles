@@ -54,7 +54,6 @@ from .mcp_server import (
     effective_scopes,
     list_tools_for_tenant,
 )
-from .secrets import require_secret_key
 from .tenancy import TenantIsolationError, resolve_tenant_context
 
 logger = logging.getLogger(__name__)
@@ -114,8 +113,7 @@ async def _resolve_identity(dal: Any) -> tuple[Any, Dict[str, Any]]:
     if not auth_header or not auth_header.startswith("Bearer "):
         raise _AuthError(401, "Authentication required")
 
-    secret_key = require_secret_key()
-    payload = verify_jwt_token(auth_header[7:], secret_key)
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         raise _AuthError(401, "Invalid or expired token")
 

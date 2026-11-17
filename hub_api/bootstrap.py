@@ -94,11 +94,20 @@ class BootstrapStatus:
 
     state: BootstrapState = BootstrapState.PENDING
     detail: str = ""
+    #: True once every existing tenant owns an at-rest DEK (tenant-key provisioning pass). Set
+    #: by ``services.tenant_key_provisioning.run_startup_provisioning`` -- or up front for
+    #: non-Postgres test harnesses, which have no key store.
+    tenant_keys_ready: bool = False
 
     @property
     def is_ready(self) -> bool:
         """True only once the schema is confirmed at head."""
         return self.state is BootstrapState.READY
+
+    @property
+    def serving_ready(self) -> bool:
+        """True once the schema is at head AND every tenant has its key (``/ready``)."""
+        return self.is_ready and self.tenant_keys_ready
 
 
 def _script_heads(script_location: str) -> tuple[str, ...]:

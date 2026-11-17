@@ -7,12 +7,15 @@ marker). The decision table, in order:
 
   kill-switch flag ON ................ touch nothing (legacy sources stay authoritative)
   marker present, KEK cannot open it . REFUSE root_mismatch  (root KEK changed; generate nothing)
-  marker present, `secrets` empty .... REFUSE store_wiped    (wipe/old restore; generate nothing)
+  marker present, `secrets` empty .... restore from the S3 escrow when permitted + verified,
+                                       else REFUSE store_wiped / restore_blocked / escrow_*
   marker absent, `secrets` not empty . REFUSE marker_missing
   event chain does not verify ........ REFUSE chain_break
   active row won't open .............. REFUSE unopenable     (never regenerate on open failure)
   rows exist for a type, none active . REFUSE inconsistent
-  marker absent AND store empty ...... genuine first run: write the marker, then create
+  marker absent AND store empty ...... genuine first run: write the marker; if the escrow holds a
+                                       manifest, restore from it (permitted) or REFUSE
+                                       (restore_blocked / escrow_*); only with NO escrow: create
   type has no row .................... first run only: import an allowlisted value, else generate
 
 "First run" is therefore never inferred from "a row would not open". Creation is
@@ -32,11 +35,26 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 from sqlalchemy.engine import Engine
+from sqlalchemy.exc import SQLAlchemyError
 
 from services.envelope.errors import PlatformKekError
 from services.envelope.platform_kek import PlatformKekAdapter
 from services.platform_secrets import telemetry
 from services.platform_secrets.cache import CachedSecret, PlatformSecretCache, verify_until_for
+from services.platform_secrets.escrow import (
+    MANIFEST_KEY as ESCROW_MANIFEST_KEY,
+)
+from services.platform_secrets.escrow import (
+    EscrowError,
+    EscrowMisconfiguredError,
+    EscrowRefusedError,
+    EscrowStore,
+    EscrowUnavailableError,
+    escrow_store_from_env,
+    restore_from_escrow,
+    restore_permitted,
+    sync_escrow,
+)
 from services.platform_secrets.event_chain import append_event, verify_chain
 from services.platform_secrets.importer import import_candidate
 from services.platform_secrets.refresher import CacheRefresher, PgNotifyWaiter, make_loader
@@ -47,6 +65,7 @@ from services.platform_secrets.repository import (
     OUTCOME_SUCCESS,
     REASON_GENERATED,
     REASON_IMPORTED,
+    STATE_ACTIVE,
     NewSecret,
     PlatformVaultRepository,
     SecretRow,
@@ -66,6 +85,8 @@ from services.provider_connections.vault import (
 
 logger = logging.getLogger(__name__)
 
+_MANIFEST_KEY = ESCROW_MANIFEST_KEY
+
 #: Flag key of the opt-out kill-switch: unseen / OFF = the database is the source of platform
 #: keys (core mechanism, so default ON-path); ON = legacy sources stay authoritative.
 KILL_SWITCH_FLAG = "waddles.disable-db-platform-keys"
@@ -75,7 +96,10 @@ class PlatformVaultRefusedError(RuntimeError):
     """Boot refused: the store cannot be trusted or the root changed. Message is a fixed code word.
 
     `reason` is one of `kek_missing`, `root_mismatch`, `store_wiped`, `marker_missing`,
-    `chain_break`, `unopenable`, `inconsistent`.
+    `chain_break`, `unopenable`, `inconsistent`, `restore_blocked`, `escrow_invalid`,
+    `escrow_tampered`, `escrow_missing`, `escrow_unavailable`, `escrow_misconfigured`, and for
+    an offline signer (`load_offline_signer_cache`) `signing_key_missing`,
+    `signing_key_unavailable` / `trust_mismatch`.
     """
 
     def __init__(self, reason: str) -> None:
@@ -118,6 +142,14 @@ def _refuse(reason: str, type_name: str = "all") -> PlatformVaultRefusedError:
         "chain_break": "chain_break",
         "unopenable": "unopenable",
         "inconsistent": "inconsistent",
+        "restore_blocked": "restore_blocked",
+        "escrow_invalid": "escrow_invalid",
+        "escrow_missing": "escrow_invalid",
+        "escrow_tampered": "escrow_tampered",
+        "escrow_rollback": "escrow_rollback",
+        "escrow_unavailable": "unavailable",
+        "escrow_misconfigured": "error",
+        "trust_mismatch": "mismatch",
     }.get(reason, "error")
     telemetry.count_drift(type_name, outcome)
     logger.error("platform vault refused to start reason=%s", reason)
@@ -135,6 +167,46 @@ def _check_root(repo: PlatformVaultRepository, kek: PlatformKekAdapter) -> None:
         same_root = False
     if not same_root:
         raise _refuse("root_mismatch")
+
+
+def _restore_or_refuse(
+    repo: PlatformVaultRepository,
+    kek: PlatformKekAdapter,
+    escrow: EscrowStore,
+    *,
+    permitted: bool,
+    now: datetime,
+    refusal_if_empty: str | None,
+) -> bool:
+    """Try to rebuild the empty store from the escrow; True when rows were restored.
+
+    No manifest in the escrow -> False (`refusal_if_empty`, when given, is then raised: the marker
+    proves this is not a first run, so an empty store with no escrow is `store_wiped`). A manifest
+    that exists but may not be used (`restore_blocked`: not alpha/local and no operator flag) or
+    that fails verification (`escrow_tampered` / `escrow_invalid` / `escrow_missing`, including an
+    object or manifest sealed under another KEK) refuses the boot and generates nothing. The
+    restore itself is all-or-nothing inside the caller's transaction.
+    """
+    try:
+        manifest_present = escrow.get(_MANIFEST_KEY) is not None
+    except EscrowUnavailableError:
+        raise _refuse("escrow_unavailable") from None
+    if not manifest_present:
+        if refusal_if_empty is not None:
+            raise _refuse(refusal_if_empty)
+        return False
+    if not permitted:
+        raise _refuse("restore_blocked")
+    try:
+        report = restore_from_escrow(repo, kek, escrow, now=now)
+    except EscrowRefusedError as exc:
+        raise _refuse(exc.reason) from None
+    except EscrowUnavailableError:
+        raise _refuse("escrow_unavailable") from None
+    if report is None:  # pragma: no cover -- the manifest vanished between the two reads
+        raise _refuse("escrow_unavailable")
+    logger.warning("platform secrets restored from escrow count=%d", report.restored)
+    return report.restored > 0
 
 
 def _open_row(spec: SecretSpec, row: SecretRow, kek: PlatformKekAdapter) -> CachedSecret:
@@ -291,6 +363,8 @@ def bootstrap_platform_secrets(
     *,
     environ: Mapping[str, str] | None = None,
     now: datetime | None = None,
+    escrow: EscrowStore | None = None,
+    restore_allowed: bool = False,
 ) -> BootstrapReport:
     """Run the decision table against `repo`; the caller holds the lock and the transaction.
 
@@ -309,7 +383,15 @@ def bootstrap_platform_secrets(
         else:
             _check_root(repo, kek)
             if count == 0:
-                raise _refuse("store_wiped")
+                if escrow is None or not _restore_or_refuse(
+                    repo,
+                    kek,
+                    escrow,
+                    permitted=restore_allowed,
+                    now=moment,
+                    refusal_if_empty="store_wiped",
+                ):
+                    raise _refuse("store_wiped")
         chain = verify_chain(repo, kek)
         if not chain.intact:
             raise _refuse("chain_break")
@@ -317,6 +399,19 @@ def bootstrap_platform_secrets(
             # Lost the marker race: another bootstrap wrote it -- be a normal (non-first) boot.
             first_run = False
             _check_root(repo, kek)
+        if (
+            first_run
+            and escrow is not None
+            and _restore_or_refuse(
+                repo,
+                kek,
+                escrow,
+                permitted=restore_allowed,
+                now=moment,
+                refusal_if_empty=None,
+            )
+        ):
+            first_run = False  # restored keys are in use: never import over them
         generated: list[str] = []
         imported: list[str] = []
         rejected: list[str] = []
@@ -368,13 +463,17 @@ def run_platform_secrets_bootstrap(
     kill_switch: Callable[[], bool] = db_platform_keys_disabled,
     cache: PlatformSecretCache | None = None,
     kek: PlatformKekAdapter | None = None,
+    escrow: EscrowStore | None = None,
 ) -> BootstrapReport:
     """Entry point from hub-api's bootstrap, inside its advisory lock: one transaction, then seed.
 
     Kill-switch ON returns immediately without touching the database. A missing / malformed KEK
     refuses the boot (`kek_missing`) rather than skipping: an absent root must be loud. On success
     the process cache is seeded only AFTER the commit, so it never holds a value the database
-    does not.
+    does not. With the S3 escrow configured (`PLATFORM_ESCROW_S3_*`) an empty store is restored
+    from it when permitted (alpha/local, or `WADDLES_PLATFORM_SECRETS_ESCROW_RESTORE=1`), and after
+    the commit a second short transaction escrows any version the escrow lacks (best effort: an
+    unreachable store is a metric and a retry on the next boot, never a failed boot).
     """
     if kill_switch():
         logger.warning("platform vault bootstrap skipped: %s is ON", KILL_SWITCH_FLAG)
@@ -384,11 +483,141 @@ def run_platform_secrets_bootstrap(
         adapter = kek if kek is not None else PlatformKekAdapter.from_env(environ)
     except PlatformKekError:
         raise _refuse("kek_missing") from None
+    try:
+        store = escrow if escrow is not None else escrow_store_from_env(environ)
+    except EscrowMisconfiguredError:
+        raise _refuse("escrow_misconfigured") from None
     with engine.begin() as conn:
-        report = bootstrap_platform_secrets(SqlRepository(conn), adapter, environ=environ)
+        report = bootstrap_platform_secrets(
+            SqlRepository(conn),
+            adapter,
+            environ=environ,
+            escrow=store,
+            restore_allowed=restore_permitted(environ),
+        )
+    if store is not None:
+        _sync_escrow_best_effort(engine, adapter, store)
     (cache if cache is not None else _process_cache).seed(report.entries)
     telemetry.register_cache_gauges((cache or _process_cache).gauge_snapshot)
     return report
+
+
+def _sync_escrow_best_effort(engine: Engine, kek: PlatformKekAdapter, store: EscrowStore) -> None:
+    """Escrow new versions in their own transaction; any failure is counted and never fatal.
+
+    Holds the caller's advisory lock (an `escrowed` event extends the audit chain). Only the
+    exception CLASS is logged: driver / botocore messages can echo parameters.
+    """
+    try:
+        with engine.begin() as conn:
+            report = sync_escrow(SqlRepository(conn), kek, store)
+    except (EscrowError, PlatformSecretError, SQLAlchemyError) as exc:
+        telemetry.count_escrow("all", "error")
+        logger.error("platform secret escrow sync failed (%s)", type(exc).__name__)
+        return
+    logger.info(
+        "platform secret escrow sync status=%s examined=%d written=%d drift=%d",
+        report.status,
+        report.examined,
+        report.written,
+        report.drift,
+    )
+
+
+def load_offline_signer_cache(
+    database_url: str,
+    *,
+    environ: Mapping[str, str] | None = None,
+    kill_switch: Callable[[], bool] = db_platform_keys_disabled,
+    cache: PlatformSecretCache | None = None,
+    engine: Engine | None = None,
+) -> int:
+    """Put the vault's ACTIVE bundle_signing key into THIS process's cache; returns 1 (0 = skipped).
+
+    The core-bundle seeder and the signing backfill run as their own Job pods: hub-api's bootstrap
+    seeded hub-api's cache, never theirs, so `PlatformSigner.from_vault()` found nothing there.
+    These Jobs must not hold the platform KEK (it stays inside hub-api, the PII boundary), so the
+    vault is read WITHOUT opening anything: the active row's public key and kid are public columns.
+    The private half comes from the bundle-signing Secret the Jobs already mount (the same Secret
+    hub-api imported as version 1 and the executors' `BUNDLE_SIGNING_PUBLIC_KEYS` is derived from)
+    and is accepted ONLY when its public key equals the vault's active one -- so the vault decides
+    which key signs, and what is signed here is exactly what the executors verify.
+
+    Read-only; creation stays in hub-api's bootstrap (advisory lock; the seeder waits for hub-api
+    `/ready`). Fails closed: kill-switch ON -> 0 (legacy env signer is authoritative); no active
+    row -> `signing_key_missing`; no usable Secret -> `signing_key_unavailable`; a Secret that is
+    not the active key (e.g. after a rotation the Secret did not follow) -> `trust_mismatch`
+    (drift metric). Logs and metrics carry outcome words and counts only, never key material.
+    """
+    env = os.environ if environ is None else environ
+    spec = REGISTRY[SecretType.BUNDLE_SIGNING]
+    if kill_switch():
+        logger.warning("offline signer: platform vault load skipped: %s is ON", KILL_SWITCH_FLAG)
+        telemetry.count_offline_load("skipped")
+        return 0
+    owns_engine = engine is None
+    if engine is None:
+        import sqlalchemy
+
+        engine = sqlalchemy.create_engine(
+            database_url.replace("postgresql://", "postgresql+psycopg2://", 1),
+            pool_pre_ping=True,
+            pool_size=1,
+            max_overflow=0,
+            hide_parameters=True,
+        )
+    with telemetry.span("offline_load", type=spec.name):
+        try:
+            with engine.connect() as conn:
+                rows = SqlRepository(conn).rows_for(int(spec.secret_type), None)
+        except SQLAlchemyError as exc:
+            telemetry.count_offline_load("error")
+            logger.error("offline signer: platform vault read failed (%s)", type(exc).__name__)
+            raise
+        finally:
+            if owns_engine:
+                engine.dispose()
+        active = [r for r in rows if r.state == STATE_ACTIVE]
+        if len(active) != 1 or active[0].public_material is None:
+            telemetry.count_offline_load("error")
+            raise _refuse("signing_key_missing", spec.name)
+        row = active[0]
+        decision = import_candidate(spec, env)
+        if not decision.usable or decision.material is None:
+            telemetry.count_offline_load("error")
+            logger.error(
+                "offline signer: bundle-signing Secret unusable source=%s outcome=%s",
+                decision.source,
+                decision.outcome,
+            )
+            raise _refuse("signing_key_unavailable", spec.name)
+        if decision.material.public_material != row.public_material:
+            telemetry.count_offline_load("mismatch")
+            raise _refuse("trust_mismatch", spec.name)
+    target = cache if cache is not None else _process_cache
+    target.seed(
+        [
+            CachedSecret(
+                secret_type=row.secret_type,
+                scope_id=None,
+                version=row.version,
+                state=row.state,
+                kid=row.kid,
+                public_id=row.public_id,
+                public_material=row.public_material,
+                activated_at=row.activated_at,
+                verify_until=None,
+                plaintext=decision.material.plaintext,
+            )
+        ]
+    )
+    telemetry.count_offline_load("ok")
+    logger.info(
+        "platform secret cache loaded for offline signing type=%s version=%d count=1",
+        spec.name,
+        row.version,
+    )
+    return 1
 
 
 def start_cache_refresher(

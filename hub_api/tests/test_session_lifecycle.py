@@ -25,6 +25,7 @@ import jwt
 import pytest
 from flask_core import token_revocation as tr
 from flask_core.auth import ACCESS_TOKEN_TTL_SECONDS, verify_jwt_token
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -54,8 +55,7 @@ def _config(**overrides: Any) -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key=SECRET_KEY,
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -193,7 +193,7 @@ class TestLoginIssuesSessionCredentials:
         assert a["jti"] != b["jti"]
         sessions = _sessions(auth_db)
         assert [str(s.id) for s in sessions] == [a["sid"], b["sid"]]
-        assert verify_jwt_token(first, SECRET_KEY) is not None
+        assert verify_jwt_token(first) is not None
 
     async def test_the_database_never_holds_a_bearer_credential(
         self, browser: Any, auth_db: Any
@@ -261,7 +261,7 @@ class TestRefreshRotation:
         assert _cookie_value(response, SESSION_COOKIE_NAME) == new_access
         (after,) = _sessions(auth_db)
         assert after.session_token != before.session_token and after.is_active
-        assert verify_jwt_token(new_access, SECRET_KEY) is not None
+        assert verify_jwt_token(new_access) is not None
 
     async def test_a_session_survives_many_rotations_without_a_forced_logout(
         self, browser: Any, auth_db: Any
@@ -271,7 +271,7 @@ class TestRefreshRotation:
         for _ in range(6):
             response = await browser.post("/api/v1/auth/refresh")
             assert response.status_code == 200
-            assert verify_jwt_token((await response.get_json())["token"], SECRET_KEY) is not None
+            assert verify_jwt_token((await response.get_json())["token"]) is not None
         assert len(_sessions(auth_db)) == 1
 
     async def test_refresh_without_a_cookie_is_400(self, probe: Any) -> None:
@@ -559,7 +559,7 @@ class TestLogout:
         response = await browser.post("/api/v1/auth/logout")
         assert response.status_code == 200
         assert not await _alive(probe, access)
-        assert verify_jwt_token(access, SECRET_KEY) is None
+        assert verify_jwt_token(access) is None
 
     async def test_logout_clears_both_cookies_and_ends_refresh(
         self, browser: Any, probe: Any, auth_db: Any

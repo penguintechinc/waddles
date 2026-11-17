@@ -1108,8 +1108,11 @@ async def test_activate_tenant_wide_rolls_back_when_signing_key_missing(
     install_dal: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """No signing key -> fail closed: no tenant-wide activation is left behind unsigned."""
+    from services.platform_secrets.bootstrap import get_process_cache
+
     monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("BUNDLE_SIGNING_KEY_ID", raising=False)
+    get_process_cache().seed(())  # signing reads platform_vault now; the autouse fixture seeds it
     await _install_and_make_available(install_dal)
     with pytest.raises(Exception):  # noqa: B017, PT011 -- any signing failure must abort
         await activate_tenant_wide(

@@ -61,6 +61,9 @@ def _render(values: str, extra_set: list[str] | None = None, kube: str = "1.30.0
     return docs
 
 
+_EXECUTOR_PDBS = ["waddlebot-svc-bundles-executor-native", "waddlebot-svc-bundles-executor-script"]
+
+
 def _of_kind(docs: list[dict[str, Any]], kind: str) -> list[dict[str, Any]]:
     return [d for d in docs if d.get("kind") == kind]
 
@@ -162,7 +165,10 @@ class TestStartupProbe:
     def test_alpha_slow_start_workloads(self, alpha_docs: list[dict[str, Any]]) -> None:
         for suffix in _STARTUP_WORKLOADS:
             c = _by_suffix(alpha_docs, "Deployment", suffix)["spec"]["template"]["spec"]["containers"][0]
-            assert c["startupProbe"]["failureThreshold"] == 30, suffix
+            # svc-streaming carries its own budget (pipeline.svcStreaming.startupProbe: 5s x 60 =
+            # 300s for the cold first boot); every other slow-start workload uses the chart default.
+            want = 60 if suffix.endswith("svc-streaming") else 30
+            assert c["startupProbe"]["failureThreshold"] == want, suffix
             assert "livenessProbe" in c and "readinessProbe" in c, suffix
 
 
@@ -174,13 +180,13 @@ class TestAutoscalingAndPdb:
         # test_executor_statefulset_render.py); nothing else opts in on alpha.
         assert _of_kind(alpha_docs, "HorizontalPodAutoscaler") == []
         pdbs = [d["metadata"]["name"] for d in _of_kind(alpha_docs, "PodDisruptionBudget")]
-        assert pdbs == ["waddlebot-svc-bundles-executor"], pdbs  # 2 executor replicas
+        assert sorted(pdbs) == sorted(["postgres-replica", *_EXECUTOR_PDBS]), pdbs  # 2 postgres replicas + 2 replicas per executor pool
 
     @pytest.mark.parametrize(
         ("values", "extra", "replicas"),
         [
             ("values-alpha.yaml", [], 2),
-            ("values-dal2alpha.yaml", [], 2),
+            ("values-dal2alpha.yaml", [], 1),  # schedulable sizing: 1 replica per language-class pool
             ("values-beta.yaml", ["global.deploymentTier=alpha"], 2),
             ("values-gamma.yaml", ["global.deploymentTier=alpha"], 2),
             ("values-production.yaml", ["global.deploymentTier=alpha"], 3),
@@ -189,13 +195,19 @@ class TestAutoscalingAndPdb:
     def test_svc_bundles_executor_statefulset_per_env(self, values: str, extra: list[str], replicas: int) -> None:
         docs = _render(values, extra)
         sts = [d for d in _of_kind(docs, "StatefulSet") if "executor" in d["metadata"]["name"]]
-        assert [d["metadata"]["name"] for d in sts] == ["waddlebot-svc-bundles-executor"]
+        # alpha-class envs run one pool per language class; beta/gamma/production one unpartitioned pool
+        names = sorted(d["metadata"]["name"] for d in sts)
+        assert names in (_EXECUTOR_PDBS, ["waddlebot-svc-bundles-executor"]), names
         assert not [d for d in _of_kind(docs, "Deployment") if "executor" in d["metadata"]["name"]]
-        assert sts[0]["spec"]["replicas"] == replicas
+        assert all(d["spec"]["replicas"] == replicas for d in sts)
         assert not [d for d in _of_kind(docs, "HorizontalPodAutoscaler") if "executor" in d["metadata"]["name"]]
-        pdb = _by_suffix(docs, "PodDisruptionBudget", "svc-bundles-executor")
-        assert pdb["spec"]["maxUnavailable"] == 1
-        assert pdb["spec"]["selector"]["matchLabels"]["app.kubernetes.io/component"] == "svc-bundles-executor"
+        for name in names:
+            if replicas == 1:  # a single replica never gets a PDB
+                assert not [d for d in _of_kind(docs, "PodDisruptionBudget") if d["metadata"]["name"] == name]
+                continue
+            pdb = _by_suffix(docs, "PodDisruptionBudget", name.removeprefix("waddlebot-"))
+            assert pdb["spec"]["maxUnavailable"] == 1
+            assert pdb["spec"]["selector"]["matchLabels"]["app.kubernetes.io/component"] == "svc-bundles-executor"
 
     def test_hpa_and_pdb_render_for_scalable_service(self) -> None:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true"])
@@ -215,8 +227,8 @@ class TestAutoscalingAndPdb:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true",
                                              "autoscaling.defaults.minReplicas=1"])
         assert _of_kind(docs, "HorizontalPodAutoscaler")
-        # only the executor's own PDB (fixed 2 replicas) remains
-        assert [d["metadata"]["name"] for d in _of_kind(docs, "PodDisruptionBudget")] == ["waddlebot-svc-bundles-executor"]
+        # only the fixed-2-replica workloads' PDBs remain: postgres replicas + the executor pools
+        assert sorted(d["metadata"]["name"] for d in _of_kind(docs, "PodDisruptionBudget")) == sorted(["postgres-replica", *_EXECUTOR_PDBS])
 
     def test_pdb_disable_flag(self) -> None:
         docs = _render("values-alpha.yaml", ["autoscaling.services.hubApi.enabled=true",

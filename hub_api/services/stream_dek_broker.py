@@ -1,4 +1,10 @@
-"""Stream identity-field DEK broker behind ``KeyService.GetStreamDek`` (#442).
+"""Per-tenant DEK broker behind ``KeyService.GetStreamDek`` (#442) and ``GetTenantDek``.
+
+One broker, two key lineages: ``ingest-stream`` (``GetStreamDek``) and ``at-rest``
+(``GetTenantDek``, the tenant-scoped at-rest key the data plane seals bundle kv values with).
+Both go through the same authorization, sealing and audit path; they differ only in which
+``TenantEnvelopeService`` (lineage-separated subkeys) supplies the key and which services may
+hold it. The raw DEK never leaves hub-api -- the data plane receives the HKDF-derived subkey.
 
 svc-ingest encrypts stream identity fields under a per-tenant DEK and svc-process decrypts
 them; neither holds a KEK. This module decides whether a verified caller may have a tenant's
@@ -65,12 +71,23 @@ _latency = _meter.create_histogram(
 
 #: Scope `AuthInterceptor` requires for GetStreamDek (servicers.REQUIRED_SCOPES).
 STREAM_DEK_SCOPE: Final = "key:stream-dek:read"
-#: The only key lineages a caller may request (DB CHECK on `purpose` agrees).
-ALLOWED_PURPOSES: Final = frozenset({PURPOSE_INGEST_STREAM})
+#: Scope `AuthInterceptor` requires for GetTenantDek (servicers.REQUIRED_SCOPES).
+TENANT_DEK_SCOPE: Final = "keys:tenant-dek:read"
+#: The at-rest key lineage's `purpose` label (``keystore.tenant_encryption_keys.purpose``).
+PURPOSE_AT_REST: Final = "at-rest"
+#: The only key lineages a caller may request (DB CHECK on `purpose` agrees, alembic 0120).
+ALLOWED_PURPOSES: Final = frozenset({PURPOSE_INGEST_STREAM, PURPOSE_AT_REST})
 #: Service names (last SPIFFE path segment) allowed to hold stream DEKs. ``svc-gateway`` is the
 #: v3.0 rename of ``svc-ingest`` (same role, same tenant semantics, same SPIFFE_ENV pin); both are
 #: accepted during the rename so the caller's sealed ctx always matches its own SVID segment.
 ALLOWED_SERVICES: Final = frozenset({"svc-ingest", "svc-gateway", "svc-process"})
+#: Services allowed to hold a tenant's at-rest key: the stream holders plus ``svc-action`` (it runs
+#: bundle code with kv access too). Never presentation or any other identity.
+AT_REST_SERVICES: Final = ALLOWED_SERVICES | frozenset({"svc-action"})
+_LINEAGE_SERVICES: Final = {
+    PURPOSE_INGEST_STREAM: ALLOWED_SERVICES,
+    PURPOSE_AT_REST: AT_REST_SERVICES,
+}
 #: Default cache TTL for the unsealed DEK on the caller (matches svc-ingest's 10 min ceiling).
 DEFAULT_TTL_SECONDS: Final = 600
 _TTL_BOUNDS: Final = (60, 3600)
@@ -199,7 +216,11 @@ def deployment_spiffe_env(environ: Mapping[str, str] | None = None) -> str | Non
     return raw if _SPIFFE_ENV_RE.fullmatch(raw) else None
 
 
-def service_name(sub: str, environ: Mapping[str, str] | None = None) -> str:
+def service_name(
+    sub: str,
+    environ: Mapping[str, str] | None = None,
+    allowed: frozenset[str] = ALLOWED_SERVICES,
+) -> str:
     """Return the service name of an allowed caller in THIS deployment's env, else deny.
 
     The env segment is pinned to ``SPIFFE_ENV`` so an SVID minted for another env in the same
@@ -210,7 +231,7 @@ def service_name(sub: str, environ: Mapping[str, str] | None = None) -> str:
         logger.error("stream_dek.spiffe_env_unset", extra={"var": _SPIFFE_ENV_VAR})
         raise StreamDekServiceDeniedError("caller is not permitted stream DEKs")
     match = _SPIFFE_RE.fullmatch(sub or "")
-    if match is None or match.group(1) != env or match.group(2) not in ALLOWED_SERVICES:
+    if match is None or match.group(1) != env or match.group(2) not in allowed:
         raise StreamDekServiceDeniedError("caller is not permitted stream DEKs")
     return match.group(2)
 
@@ -271,11 +292,14 @@ class StreamDekBroker:
         dal: AsyncDB,
         keys: TenantEnvelopeService,
         *,
+        at_rest_keys: TenantEnvelopeService | None = None,
         ttl_seconds: int = DEFAULT_TTL_SECONDS,
     ) -> None:
-        """Bind the hub-api DAL (tenants + audit table) and the ingest-stream key service."""
+        """Bind the DAL (tenants + audit), the stream key service and the optional at-rest one."""
         self._dal = dal
-        self._keys = keys
+        self._keys_by_lineage: dict[str, TenantEnvelopeService] = {PURPOSE_INGEST_STREAM: keys}
+        if at_rest_keys is not None:
+            self._keys_by_lineage[PURPOSE_AT_REST] = at_rest_keys
         self._ttl = ttl_seconds
 
     async def _authorize_tenant(self, claim_tenant: str, tenant_id: int) -> None:
@@ -309,8 +333,14 @@ class StreamDekBroker:
             },
         )
 
-    async def issue(self, request: StreamDekRequest) -> SealedStreamDek:
-        """Return the sealed DEK or raise a :class:`StreamDekError` subclass (always audited)."""
+    async def issue(
+        self, request: StreamDekRequest, *, lineage: str = PURPOSE_INGEST_STREAM
+    ) -> SealedStreamDek:
+        """Return the sealed DEK or raise a :class:`StreamDekError` subclass (always audited).
+
+        `lineage` selects the key lineage and its permitted holders; `request.purpose` must name
+        it exactly, so a caller cannot ask one RPC for the other lineage's key.
+        """
         started = time.monotonic()
         caller = ""
         tenant: int | None = None
@@ -319,18 +349,21 @@ class StreamDekBroker:
         audit_attempted = False
         with _tracer.start_as_current_span("stream_dek.issue") as span:
             try:
-                caller = service_name(request.caller_sub)
+                keys = self._keys_by_lineage.get(lineage)
+                if keys is None:
+                    raise StreamDekUnavailableError("key lineage is not configured")
+                caller = service_name(request.caller_sub, allowed=_LINEAGE_SERVICES[lineage])
                 span.set_attribute("stream_dek.caller", caller)
                 tenant_id = _parse_tenant_id(request.tenant_id)
                 tenant = tenant_id
-                if request.purpose not in ALLOWED_PURPOSES:
-                    raise StreamDekInvalidError("purpose is not a stream key lineage")
+                if request.purpose != lineage:
+                    raise StreamDekInvalidError("purpose is not a key lineage served here")
                 if len(request.caller_public_key) != X25519_KEY_LENGTH:
                     raise StreamDekInvalidError("caller_ephemeral_public_key must be 32 bytes")
                 await self._authorize_tenant(request.claim_tenant, tenant_id)
                 requested = request.version if request.version > 0 else None
                 try:
-                    dek_version, key = await self._keys.data_key(tenant_id, requested)
+                    dek_version, key = await keys.data_key(tenant_id, requested)
                 except TenantKeyNotFoundError as exc:
                     raise StreamDekNotFoundError("stream DEK version not found") from exc
                 except (TenantKeyUnavailableError, EnvelopeInputError) as exc:
@@ -419,4 +452,9 @@ def broker_from_config(config: Mapping[str, Any]) -> StreamDekBroker | None:
     dal = config.get("install_dal")
     if runtime is None or dal is None:
         return None
-    return StreamDekBroker(dal, runtime.stream_service, ttl_seconds=ttl_seconds_from_env())
+    return StreamDekBroker(
+        dal,
+        runtime.stream_service,
+        at_rest_keys=runtime.service,
+        ttl_seconds=ttl_seconds_from_env(),
+    )

@@ -57,6 +57,9 @@ _MIGRATION_0108 = (
     / "versions"
     / "0108_revoke_cfg_communities.py"
 )
+_MIGRATION_0112 = (
+    Path(__file__).resolve().parent.parent / "versions" / "0112_latency_label_reads.py"
+)
 _RUST_SOURCE = REPO_ROOT / "core" / "bundle_config_db" / "src" / "lib.rs"
 _PRIOR = "0106_backfill_kv_capability"
 _ROLES = ("waddles_svc_process", "waddles_svc_action")
@@ -81,6 +84,10 @@ def _effective_grants() -> dict[str, dict[str, tuple[str, ...]]]:
     assert spec is not None and spec.loader is not None
     m0108 = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(m0108)
+    spec = importlib.util.spec_from_file_location("migration_0112", _MIGRATION_0112)
+    assert spec is not None and spec.loader is not None
+    m0112 = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(m0112)
     out: dict[str, dict[str, tuple[str, ...]]] = {}
     for role, tables in _load().GRANTS.items():
         kept: dict[str, tuple[str, ...]] = {}
@@ -89,6 +96,9 @@ def _effective_grants() -> dict[str, dict[str, tuple[str, ...]]]:
             left = tuple(c for c in cols if c not in gone)
             if left:
                 kept[table] = left
+        # 0112 adds the command-latency label columns on top (additive, appended in order).
+        for table, cols in m0112.GRANTS.get(role, {}).items():
+            kept[table] = tuple(dict.fromkeys((*kept.get(table, ()), *cols)))
         out[role] = kept
     return out
 
@@ -265,7 +275,7 @@ def test_catalog_matches_the_migration_grants() -> None:
         }
         assert declared == dict(tables), f"{role}: catalog columns != 0107+0108 grants"
         examined += len(tables)
-    assert examined == 8, "denominator: 4 tables for svc-process + 4 for svc-action"
+    assert examined == 9, "denominator: 5 tables for svc-process + 4 for svc-action"
     # svc-action keeps its pre-existing table-level communities grant; svc-process has none.
     assert "communities" in by_name["waddles_svc_action"].tables
     assert "communities" not in by_name["waddles_svc_process"].columns
@@ -342,7 +352,7 @@ def test_downgrade_revokes_exactly_then_upgrade_regrants(
             for col in cols:
                 assert _col_priv(owner, role, table, col), f"{role} lacks {table}.{col}"
                 checked += 1
-    assert checked == 26, "denominator: 13 svc-process + 13 svc-action columns"
+    assert checked == 29, "denominator: 14 svc-process + 15 svc-action columns (0107+0108+0112)"
 
     alembic_cli("downgrade", _PRIOR, dsn=real_chain.dsn)
     for role, tables in grants.items():

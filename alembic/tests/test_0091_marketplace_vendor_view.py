@@ -30,6 +30,7 @@ _VIEW_059 = (
     _ROOT / "config" / "postgres" / "migrations" / "059_marketplace_consolidation.sql"
 )
 _PREVIOUS = "0090_kick_connection"
+_REVISION = "0091_marketplace_vendor_view"
 
 _LEGACY_DDL = """
 CREATE TABLE hub_modules (
@@ -160,8 +161,10 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
             "VALUES ('waddles.core.a.yanked', 'y', '1.0.0', 'yanked', 'github:acme-co')"
         )
 
-        alembic_cli("upgrade", "head", dsn=db.dsn)
-        alembic_cli("upgrade", "head", dsn=db.dsn)  # idempotent re-run is a no-op
+        # Upgrade to the revision under test, not `head`: 0093_catalog_bundles_only later drops
+        # the legacy branches this test proves 0091 preserves (asserted separately below).
+        alembic_cli("upgrade", _REVISION, dsn=db.dsn)
+        alembic_cli("upgrade", _REVISION, dsn=db.dsn)  # idempotent re-run is a no-op
 
         got = {
             r[0]: r[1:]
@@ -211,6 +214,22 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
             "SELECT has_table_privilege('mc_reader_test', 'marketplace_catalog', 'SELECT')"
         )
         assert cur.fetchone() == (True,), "SELECT grant must survive the view rebuild"
+
+        # At head, 0093 keeps only the bundle branch with 0091's exact bundle rows and grant.
+        alembic_cli("upgrade", "head", dsn=db.dsn)
+        at_head = {
+            r[0]: r[1:]
+            for r in _rows(
+                cur,
+                "SELECT source_ref, vendor_key, source_repo, version, source_id, source "
+                "FROM marketplace_catalog",
+            )
+        }
+        assert at_head == got, "head view = 0091's bundle rows only (legacy branches dropped)"
+        cur.execute(
+            "SELECT has_table_privilege('mc_reader_test', 'marketplace_catalog', 'SELECT')"
+        )
+        assert cur.fetchone() == (True,), "SELECT grant must survive the 0093 rebuild"
 
         alembic_cli("downgrade", _PREVIOUS, dsn=db.dsn)
         cur.execute(

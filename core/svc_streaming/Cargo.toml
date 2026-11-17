@@ -38,7 +38,7 @@ utoipa-swagger-ui = { version = "=10.0.2", features = ["axum"] }
 # pure-Rust `rsa` crate, which carries RUSTSEC-2023-0071 (Marvin Attack --
 # RSA private-key timing side-channel, no fix available) -- a live network
 # service verifying tokens is exactly the exposed scenario the advisory
-# warns about, even though this scaffold only exercises the HS256 path.
+# warns about, even though this crate only exercises the ES256 path.
 # `aws_lc_rs` avoids that dependency entirely (requires cmake + a C/C++
 # compiler in the Docker builder stage -- see `Dockerfile.rust`).
 jsonwebtoken = { version = "=11.0.0", default-features = false, features = ["use_pem", "aws_lc_rs"] }
@@ -55,7 +55,7 @@ chrono = { version = "=0.4.45", features = ["serde"] }
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
-reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "=0.12.28", default-features = false, features = ["rustls-tls", "json", "http2"] }
 sea-orm = { version = "=2.0.2", default-features = false, features = [
     "sqlx-postgres",
     "sqlx-sqlite",
@@ -97,16 +97,31 @@ webrtc = { version = "=0.21.1", default-features = false, features = ["runtime-t
 # Cargo.toml scope -- flagged explicitly in the S6 completion report rather
 # than silently expanded; the alternative is code that cannot compile.
 rtc = "=0.21.1"
-async-trait = "=0.1.92"
+async-trait = "=0.1.89"
 # Host-API mTLS listener (`rooms::host_api`): same crates/versions as the stage
 # services' `host_api.rs` (svc_action/svc_process); all already in Cargo.lock.
-rustls = { version = "=0.23.46", default-features = false, features = ["ring", "tls12"] }
-tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
+tokio-rustls = { version = "=0.26.5", default-features = false, features = ["tls12", "ring"] }
 rustls-pki-types = "=1.15.1"
-hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service"] }
+hyper-util = { version = "=0.1.20", features = ["server-auto", "tokio", "service", "http1", "http2"] }
+# Rooms gRPC control plane (`rooms::grpc`): hub-api -> svc-streaming RoomsService, served over
+# the same mTLS accept loop as the host-API. `transport` = tonic's `Routes`/server; stubs are
+# generated at build time from `proto/waddles/streaming/internal/v1/rooms.proto` (build.rs).
+# tonic/tonic-prost/prost are already resolved at these exact versions in Cargo.lock.
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "router"] }
+tonic-prost = "=0.14.6"
+# `grpc.health.v1` on the rooms gRPC listener (in-mesh health checks over mTLS; kubelet gRPC
+# probes cannot present a client cert, so the chart keeps its HTTP probes). Same hyperium
+# release train as `tonic` above; its deps (tonic/tonic-prost/prost/tokio/tokio-stream) are
+# already resolved at compatible versions in Cargo.lock.
+tonic-health = "=0.14.6"
+prost = "=0.14.4"
 ffmpeg-sidecar = "=2.7.0"
 hls_m3u8 = "=0.7.0"
 object_store = { version = "=0.14.1", features = ["aws"] }
+# Verifying-key cache over `platform_vault.public_keys` (Secrets T10): the platform user/session
+# JWT verifier is ES256 against these public keys, not a shared HMAC secret.
+platform-keys = { path = "../platform_keys", version = "=0.1.0" }
 
 # Direct process-group signalling (`killpg`) and non-reaping exit detection
 # (`waitid(WNOWAIT)`) for `pipeline::process_group` -- the supervisor used to
@@ -117,6 +132,9 @@ object_store = { version = "=0.14.1", features = ["aws"] }
 # is new. `signal` pulls in `process` (waitid/getpgrp); default features off.
 [target.'cfg(unix)'.dependencies]
 nix = { version = "=0.31.3", default-features = false, features = ["signal"] }
+
+[build-dependencies]
+tonic-prost-build = "=0.14.6"
 
 [features]
 # Opt-in real-media end-to-end test (tests/e2e_real_media.rs): drives a real RTMP
@@ -131,6 +149,9 @@ required-features = ["real-media-e2e"]
 [dev-dependencies]
 # Test-only throwaway CA/certs for the host-API mTLS tests (no key material in git).
 rcgen = "=0.14.10"
+# Real-path rooms gRPC test: tonic client over mTLS (`tls-ring` = tonic's rustls/ring backend,
+# already in the graph via the host-API's rustls).
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "router", "tls-ring"] }
 http-body-util = "=0.1.3"
 # `testing` (dev-only feature of the already-declared `opentelemetry_sdk`)
 # unlocks `InMemoryMetricExporter`/`InMemorySpanExporter`, which the

@@ -442,6 +442,8 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("community_id", "integer", notnull=True),
         Field("name", "string", length=50, notnull=True),
         Field("display_name", "string", length=100),
+        Field("is_system", "boolean", default=False),
+        Field("role_kind", "integer", default=0),
         Field("priority", "integer", default=0),
         Field("base_claims", "json"),
         migrate=migrate,
@@ -1375,6 +1377,19 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("set_by", "text", notnull=True),
             Field("set_at", "datetime"),
             Field("expires_at", "datetime"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_floor_bans" not in dal.tables:
+        # Automated hard-ban outbox (alembic 0114). hub-api holds SELECT here (and EXECUTE on
+        # `reputation_floor_ban_erase_subject`), never DELETE/UPDATE: erasure reads the rows to
+        # classify them, then the SQL function deletes/pseudonymises.
+        dal.define_table(
+            "bundle_reputation_floor_bans",
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("user_uuid", "string", length=36, notnull=True),
+            Field("platform", "string", length=32, notnull=True),
+            Field("status", "integer", notnull=True),
             migrate=migrate,
         )
     if "bundle_reputation_tenant_scores" not in dal.tables:

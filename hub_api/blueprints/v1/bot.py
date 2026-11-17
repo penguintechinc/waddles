@@ -145,12 +145,10 @@ def _user_id() -> int:
     (`added_by`/`user_id`), never an authz decision.
     """
     from flask_core.auth import verify_jwt_token
-    from flask_core.secrets import require_secret_key
 
     auth_header = request.headers.get("Authorization", "")
     token = auth_header[7:] if auth_header.startswith("Bearer ") else ""
-    secret_key = require_secret_key()
-    payload = verify_jwt_token(token, secret_key) if token else None
+    payload = verify_jwt_token(token) if token else None
     sub = payload.get("sub") if payload else None
     try:
         return int(sub) if sub is not None else 0

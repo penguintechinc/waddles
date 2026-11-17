@@ -7,18 +7,25 @@
 //! process-stage does the work (identity + tools run there, as in the other
 //! tool-calling apps) and emits a reply event; action-stage only relays it.
 #[allow(warnings)]
+#[rustfmt::skip]
 mod bindings;
+// The webrtc service's canonical access policy, compiled into this bundle from the
+// same source file (no copy to drift); see bundles/rust/webrtc/contract/grants.json.
+#[path = "../../webrtc/src/grants.rs"]
+mod grants;
 mod logic;
+mod moderation;
 
 use bindings::exports::waddle::bundle::action_stage::Guest as ActionGuest;
 use bindings::exports::waddle::bundle::process_stage::Guest as ProcessGuest;
 use bindings::exports::waddle::bundle::streaming_lifecycle::{
     Guest as LifecycleGuest, RecordingInfo, SegmentInfo, StreamInfo,
 };
+use bindings::waddle::bundle::metrics::Label;
 use bindings::waddle::bundle::types::{
     PlatformEvent, StageEnvelope, TransportError, TransportResult, UnsupportedStage,
 };
-use bindings::waddle::bundle::{clock, context, identity, kv, log, relay, tool};
+use bindings::waddle::bundle::{clock, context, flags, kv, log, metrics, relay, tool};
 use logic::{Ident, Store, ToolFail, Tools};
 use serde_json::{Value, json};
 
@@ -55,12 +62,24 @@ impl Store for WasmKv {
     }
 }
 
-/// The host-verified actor (community `user-uuid`).
+/// The host-verified actor as its PER-COMMUNITY call-participant pseudonym (the id hub-api's
+/// REST layer and svc-streaming use). It comes from the webrtc service's `participant.self`
+/// tool, which reads the host-derived `__ctx.participant`; the global community `user-uuid`
+/// is never used for rooms, ACLs or tokens. No pseudonym => unresolved (fail closed).
 struct WasmIdent;
 
 impl Ident for WasmIdent {
     fn actor(&self) -> Result<String, String> {
-        identity::resolve_actor().map_err(|_| "actor unresolved".to_string())
+        WasmTools
+            .invoke("participant.self", &json!({}), None)
+            .ok()
+            .and_then(|v| {
+                v.get("participant")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .filter(|p| logic::is_uuid(p))
+            .ok_or_else(|| "actor unresolved".to_string())
     }
 }
 
@@ -68,6 +87,28 @@ impl Ident for WasmIdent {
 fn log_outcome(op: &str, outcome: &str) {
     let fields = json!({ "op": op, "outcome": outcome }).to_string();
     log::write(log::Level::Debug, "rooms op", &fields);
+}
+
+/// Records one chat op: a counter and a duration histogram labelled with the
+/// closed op label + outcome only (host-bounded cardinality, no user text), and
+/// one PII-free log line. Metric failures are ignored by design: telemetry must
+/// never fail a request.
+fn record_chat(op: &str, ok: bool, started_ns: u64) {
+    let outcome = if ok { "ok" } else { "error" };
+    let labels = [
+        Label {
+            key: "op".into(),
+            value: op.replace('.', "_"),
+        },
+        Label {
+            key: "outcome".into(),
+            value: outcome.into(),
+        },
+    ];
+    let _ = metrics::counter_add("rooms_ops", 1, &labels);
+    let secs = clock::monotonic_nanos().saturating_sub(started_ns) as f64 / 1e9;
+    let _ = metrics::histogram_record("rooms_op_seconds", secs, &labels);
+    log_outcome(op, outcome);
 }
 
 fn reply_event(src: &PlatformEvent, payload: Value) -> PlatformEvent {
@@ -132,20 +173,22 @@ impl ProcessGuest for Component {
                     .and_then(Value::as_str)
                     .map(str::to_string)
             });
-        let Some(reply) = logic::handle_chat(
+        let started = clock::monotonic_nanos();
+        let Some(out) = logic::handle_chat_ex(
             text,
             &ctx.message_id,
             &WasmTools,
             &WasmKv,
             &WasmIdent,
             base.as_deref(),
+            flags::enabled(moderation::FLAG, false),
         ) else {
             return Ok(None);
         };
-        log_outcome("chat", "replied");
+        record_chat(out.op, out.ok, started);
         Ok(Some(reply_event(
             &event,
-            json!({"channel_id": channel, "reply": reply}),
+            json!({"channel_id": channel, "reply": out.reply}),
         )))
     }
 }

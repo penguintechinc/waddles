@@ -26,6 +26,8 @@ expect_used = "deny"
 # Exact-version pins only (no ^ / * ranges) -- see rules/critical-rules.md
 # Dependency Pinning. Cargo.lock is committed alongside this file.
 [dependencies]
+# Direct pin so the entrypoint can install the process-level CryptoProvider (see src/crypto.rs).
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 clap = { version = "=4.5.51", features = ["derive"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", features = ["json", "env-filter"] }

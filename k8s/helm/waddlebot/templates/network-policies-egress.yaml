@@ -117,15 +117,30 @@ spec:
               protocol: TCP
             {{- end }}
     {{- end }}
+    # Postgres primary (writes + read-your-own-write paths).
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
             app.kubernetes.io/name: postgres
             app.kubernetes.io/component: database
+            app.kubernetes.io/role: primary
+      toPorts:
+        - ports:
+            - port: {{ .Values.infrastructure.postgresql.service.port | quote }}
+              protocol: TCP
+    {{- if include "waddlebot.postgres.replicasActive" . }}
+    # Postgres read replicas (the <service>-ro Service's pods).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: postgres
+            app.kubernetes.io/component: database
+            app.kubernetes.io/role: replica
       toPorts:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.postgresReplicaPort | quote }}
               protocol: TCP
+    {{- end }}
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}

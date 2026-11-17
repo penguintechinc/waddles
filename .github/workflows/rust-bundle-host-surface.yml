@@ -1,0 +1,64 @@
+name: Rust bundle-host-surface (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/bundle_host_surface/**'
+      - 'core/service_auth/**'
+      - 'proto/waddles/presentation/**'
+      - '.github/workflows/rust-bundle-host-surface.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: rust
+          globs: |
+            core/bundle_host_surface/**
+            core/service_auth/**
+            proto/waddles/presentation/**
+
+  lint-test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: bundle-host-surface
+      working_directory: core/bundle_host_surface
+      # protoc: this crate's own build.rs (tonic-prost-build over proto/waddles/presentation)
+      # and service_auth's build.rs.
+      extra_apt_packages: protobuf-compiler
+      extra_apt_reason: 'for bundle_host_surface/service_auth build.rs (protoc)'

@@ -93,7 +93,6 @@ from typing import Any
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
-from flask_core.secrets import require_secret_key
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
@@ -101,6 +100,7 @@ from services import analytics_service as svc
 from services.analytics_proxy import AnalyticsCoreProxyClient
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_async_dal, reads_from_replica
 
 analytics_bp = Blueprint("v1_analytics", __name__, url_prefix="/api/v1/analytics")
 
@@ -139,8 +139,7 @@ def _is_super_admin(req: Any) -> bool:
     auth_header = req.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return False
-    secret_key = require_secret_key()
-    payload = verify_jwt_token(auth_header[7:], secret_key)
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         return False
     roles = payload.get("roles") or []
@@ -231,17 +230,19 @@ async def get_member_reputation(community_id: int, user_id: int) -> Any:
 @analytics_bp.route("/platform/overview", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@reads_from_replica("analytics.get_platform_overview")
 async def get_platform_overview() -> Any:
     """`GET /api/v1/analytics/platform/overview`."""
-    return await svc.platform_overview(_proxy_client, current_app.config["async_dal"])
+    return await svc.platform_overview(_proxy_client, get_read_async_dal())
 
 
 @analytics_bp.route("/platform/reputation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@reads_from_replica("analytics.get_platform_reputation")
 async def get_platform_reputation() -> Any:
     """`GET /api/v1/analytics/platform/reputation`."""
-    return await svc.reputation_distribution(current_app.config["async_dal"])
+    return await svc.reputation_distribution(get_read_async_dal())
 
 
 @analytics_bp.route("/platform/growth", methods=["GET"])

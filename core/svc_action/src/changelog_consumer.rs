@@ -257,6 +257,26 @@ fn note_routing(state: &mut ConsumerState, router: &bundle_active_set::SessionRo
     crate::stage_metrics::stage_metrics().record_slot_owner_changes(changed);
 }
 
+/// Fail-loud executor-partition check (see `bundle_active_set::partition`): logs at ERROR when
+/// the unroutable set changes and counts `executor_partition_unroutable_total` per tick.
+fn note_unroutable(
+    state: &mut ConsumerState,
+    router: &bundle_active_set::SessionRouter,
+    table: &bundle_active_set::LanguageTable,
+    active: &HashMap<AppScope, bundle_active_set::ActiveBundleRow>,
+) {
+    let counts = state.routing_observer.observe_unroutable(
+        router,
+        table,
+        active
+            .iter()
+            .map(|(scope, row)| (scope.2.as_str(), row.language.as_str())),
+    );
+    for (label, n) in counts {
+        crate::stage_metrics::stage_metrics().record_partition_unroutable(label, n);
+    }
+}
+
 impl ConsumerState {
     /// Updates the executor membership + kill-switch view [`apply_active_set`]
     /// routes against (called by [`run`] every iteration; tests call it to
@@ -568,11 +588,13 @@ async fn apply_active_set(
         bundle_active_set::DEFAULT_REPLICAS,
     );
     note_routing(state, &router);
+    let language_table = bundle_active_set::partition::table();
+    note_unroutable(state, &router, language_table, &active);
     let mut plan = bundle_active_set::plan_sessions_routed(
         &loaded_snapshot,
         &active,
         live_sessions,
-        |scope, _| router.target_sessions(&scope.2),
+        |scope, row| router.target_sessions(&scope.2, language_table.placement(&row.language)),
         |row| row.digest.as_str(),
     );
     // T2: never resend a Load still in flight; hold a failed/timed-out one
@@ -1544,6 +1566,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
         }
     }
 
@@ -2130,6 +2153,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,
@@ -2321,7 +2345,7 @@ mod tests {
             true,
             bundle_active_set::DEFAULT_REPLICAS,
         )
-        .target_sessions("waddles.a");
+        .target_sessions("waddles.a", bundle_active_set::Placement::Unpartitioned);
         let (sessions, picks) = run(ids.clone(), true).await;
         assert_eq!(sessions, owners);
         assert_eq!(picks.into_iter().collect::<Vec<_>>(), owners);
@@ -3073,6 +3097,7 @@ mod tests {
                     artifact_signature: None,
                     artifact_signature_key_id: None,
                     artifact_signed_approval_id: None,
+                    language: "rust".to_string(),
                     declared_capabilities: Vec::new(),
                     egress: Vec::new(),
                     egress_rps: None,
@@ -3358,6 +3383,44 @@ mod tests {
                 .with_label_values(&["success"])
                 .get(),
             1
+        );
+    }
+
+    /// regression (read skew): the consumer must apply a change below safe_seq using ONLY the connection it is
+    /// given (the PRIMARY in production). A lagging replica that lacks the change (an empty mock that errors on
+    /// any query) is never consulted, so the row cannot be skipped forever.
+    #[tokio::test]
+    async fn consumer_applies_a_change_below_safe_seq_from_its_own_connection_never_a_lagging_replica(
+    ) {
+        let digest = format!("sha256:{}", "b".repeat(64));
+        let lagging_replica = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
+        let primary = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row(150)]])
+            .append_query_results([vec![change_row(101, 1, 0)]])
+            .append_query_results([vec![active_row("waddles.a", 1, 0, 10)]])
+            .append_query_results([vec![version_row(10, "waddles.a", &digest)]])
+            .append_query_results([vec![approval_row(1, "waddles.a")]])
+            .into_connection();
+        let mut state = ConsumerState::new(100);
+        let sink = FakeSink::default();
+        run_incremental_tick(
+            &primary,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1],
+            None,
+            &test_excluded_metric(),
+            &test_dispatch_supervisor_metrics(),
+            &test_changelog_metrics(),
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
+        )
+        .await;
+        assert_eq!(state.last_seq(), 150);
+        assert_eq!(sink.calls(), vec![format!("load:1:waddles.a:{digest}")]);
+        assert!(
+            lagging_replica.into_transaction_log().is_empty(),
+            "the lagging replica must never be queried by the consumer"
         );
     }
 }

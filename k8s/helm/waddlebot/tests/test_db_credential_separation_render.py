@@ -43,6 +43,9 @@ _CATALOG = yaml.safe_load(
     )
 )
 _ROLES = list(_CATALOG["roles"])
+#: Credentials-Secret keys for roles outside the service catalog (alembic 0080 INSERT-only audit sink).
+_EXTRA_CRED_KEYS = {"PW_WADDLES_BUNDLE_STORAGE_AUDIT"}
+_EXPECTED_CRED_KEYS = {f"PW_{r.upper()}" for r in _ROLES} | _EXTRA_CRED_KEYS
 _OWNER = "waddlebot"
 _OWNER_SECRET_KEYS = {
     "POSTGRES_PASSWORD",
@@ -160,7 +163,7 @@ def test_owner_credential_reaches_only_postgres_and_the_migrate_job(
         if "waddlebot-db-admin" in _secret_refs(container)
     }
     has_postgres = any(
-        d.get("kind") == "Deployment" and d["metadata"]["name"] == "postgres" for d in docs
+        d.get("kind") == "StatefulSet" and d["metadata"]["name"] == "postgres" for d in docs
     )
     # values-local points at an external database, so no in-chart Postgres Deployment exists
     assert consumers == ({"postgres"} if has_postgres else set()), (
@@ -271,9 +274,9 @@ def test_role_passwords_are_distinct_strong_and_match_the_migrate_hook(
 ) -> None:
     docs = renders[env_name]
     creds = _secret(docs, "waddlebot-db-credentials")
-    assert set(creds) == {f"PW_{r.upper()}" for r in _ROLES}
+    assert set(creds) == _EXPECTED_CRED_KEYS
     values = list(creds.values())
-    assert len(set(values)) == len(_ROLES), "role passwords must be pairwise distinct"
+    assert len(set(values)) == len(_EXPECTED_CRED_KEYS), "role passwords must be pairwise distinct"
     for key, value in creds.items():
         assert re.fullmatch(r"[A-Za-z0-9._~-]{16,}", value), key
         assert not re.search(r"(?i)changeme|change_me|replace_me|example|password|dev_", value), key
@@ -297,8 +300,8 @@ def test_production_tier_generates_role_credentials_without_manual_steps(helm_av
     """
     docs = _render("--values", str(_CHART_DIR / "values-production.yaml"))
     creds = _secret(docs, "waddlebot-db-credentials")
-    assert set(creds) == {f"PW_{r.upper()}" for r in _ROLES}
-    assert len(set(creds.values())) == len(_ROLES)
+    assert set(creds) == _EXPECTED_CRED_KEYS
+    assert len(set(creds.values())) == len(_EXPECTED_CRED_KEYS)
     for key, value in creds.items():
         assert re.fullmatch(r"[A-Za-z0-9_-]{43}", value), key  # 256-bit base64url
     assert len(_secret(docs, "waddlebot-db-admin")["POSTGRES_PASSWORD"]) == 43
@@ -369,7 +372,7 @@ def test_unknown_role_in_a_template_fails_the_render(helm_available: None) -> No
 
 
 @pytest.mark.parametrize("env_name", ["alpha", "beta"])  # values-local runs no in-cluster Postgres
-def test_postgres_deployment_is_recreate_never_rolling(
+def test_postgres_primary_is_single_writer_statefulset(
     renders: dict[str, list[dict[str, Any]]], env_name: str
 ) -> None:
     """Postgres must never surge a second pod onto its single ReadWriteOnce data volume.
@@ -382,8 +385,10 @@ def test_postgres_deployment_is_recreate_never_rolling(
     found = [
         d
         for d in renders[env_name]
-        if d.get("kind") == "Deployment" and d["metadata"]["name"] == "postgres"
+        if d.get("kind") == "StatefulSet" and d["metadata"]["name"] == "postgres"
     ]
-    assert len(found) == 1, f"expected exactly one postgres Deployment, found {len(found)}"
-    strategy = found[0]["spec"]["strategy"]
-    assert strategy == {"type": "Recreate"}, strategy
+    assert len(found) == 1, f"expected exactly one postgres StatefulSet, found {len(found)}"
+    spec = found[0]["spec"]
+    # A StatefulSet never surges: replicas:1 + RollingUpdate = delete-then-create (one postmaster per PGDATA).
+    assert spec["replicas"] == 1, spec["replicas"]
+    assert spec["updateStrategy"] == {"type": "RollingUpdate"}, spec["updateStrategy"]

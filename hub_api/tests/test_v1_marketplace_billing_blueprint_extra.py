@@ -43,7 +43,6 @@ def _cfg() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
         default_tenant_slug="acme-corp",
         posthog_api_key=None,
         posthog_host="",
@@ -507,6 +506,112 @@ class TestPaymentsBlueprint:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["sessionId"] == "cs_x"
+
+    async def test_checkout_stripe_response_omits_the_paypal_field(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any, monkeypatch: Any
+    ) -> None:
+        """Stripe variant returns `sessionId`+`url` only -- never a paypal `orderId`.
+
+        `/payments/checkout` has no `@validate_response` DTO; its response keys
+        are picked per `provider` (stripe -> `sessionId`, paypal -> `orderId`).
+        Pin the stripe variant's exact field set so a future edit can't let a
+        paypal-only field leak onto the stripe branch.
+        """
+        dal, _t, _c = marketplace_billing_db
+        admin_id = _admin(dal)
+        dal.commit()
+
+        async def fake_checkout(**kwargs: Any) -> dict:
+            return {"id": "cs_shape", "url": "https://checkout.stripe.com/cs_shape"}
+
+        monkeypatch.setattr("services.stripe_service.create_checkout_session", fake_checkout)
+
+        response = await client.post(
+            "/api/v1/marketplace/payments/checkout",
+            headers={
+                **user_auth_headers(user_id=admin_id, scope="marketplace.payment:write"),
+                "Content-Type": "application/json",
+            },
+            data=(
+                b'{"provider": "stripe", "customerEmail": "a@b.com", '
+                b'"items": [{"name": "Widget", "price": 5.0, "quantity": 1}]}'
+            ),
+        )
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["sessionId"] == "cs_shape"
+        assert body["url"] == "https://checkout.stripe.com/cs_shape"
+        assert "orderId" not in body
+
+    async def test_checkout_paypal_returns_order_id_not_session_id(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any, monkeypatch: Any
+    ) -> None:
+        """PayPal variant returns `orderId`+`url` only -- never a stripe `sessionId`.
+
+        The sibling of the stripe test: the paypal branch builds a different
+        response shape (order id + the `approve`-rel approval link). Proves the
+        paypal variant is exercised end to end and does not carry the stripe
+        field.
+        """
+        dal, _t, _c = marketplace_billing_db
+        admin_id = _admin(dal)
+        dal.commit()
+
+        async def fake_order(**kwargs: Any) -> dict:
+            return {
+                "id": "pp_order_1",
+                "links": [
+                    {"rel": "self", "href": "https://api.paypal.com/v2/checkout/orders/pp_order_1"},
+                    {
+                        "rel": "approve",
+                        "href": "https://www.paypal.com/checkoutnow?token=pp_order_1",
+                    },
+                ],
+            }
+
+        monkeypatch.setattr("services.paypal_service.create_order", fake_order)
+
+        response = await client.post(
+            "/api/v1/marketplace/payments/checkout",
+            headers={
+                **user_auth_headers(user_id=admin_id, scope="marketplace.payment:write"),
+                "Content-Type": "application/json",
+            },
+            data=(
+                b'{"provider": "paypal", "customerEmail": "a@b.com", '
+                b'"items": [{"name": "Widget", "price": 5.0, "quantity": 1, "currency": "USD"}]}'
+            ),
+        )
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["orderId"] == "pp_order_1"
+        assert body["url"] == "https://www.paypal.com/checkoutnow?token=pp_order_1"
+        assert "sessionId" not in body
+
+    async def test_checkout_unknown_provider_is_400(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any
+    ) -> None:
+        """Reject-unknown-discriminator: a provider outside {stripe, paypal} is a 400.
+
+        The discriminator must not silently default to stripe or fall through
+        to a 200 with an empty body -- an unrecognized `provider` is a clean
+        client error with no provider call made.
+        """
+        dal, _t, _c = marketplace_billing_db
+        admin_id = _admin(dal)
+        dal.commit()
+        response = await client.post(
+            "/api/v1/marketplace/payments/checkout",
+            headers={
+                **user_auth_headers(user_id=admin_id, scope="marketplace.payment:write"),
+                "Content-Type": "application/json",
+            },
+            data=(
+                b'{"provider": "venmo", "customerEmail": "a@b.com", '
+                b'"items": [{"name": "Widget", "price": 5.0, "quantity": 1}]}'
+            ),
+        )
+        assert response.status_code == 400
 
     async def test_cancel_payment_subscription_unsupported_provider(
         self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any

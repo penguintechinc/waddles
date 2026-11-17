@@ -175,7 +175,7 @@ class TestAuthChain:
             user_id=str(user),
             role="moderator",
             is_active=True,
-            claims_cache={"scopes": ["community:manage_channels"]},
+            claims_cache={"scopes": ["community:manage_channels", "provider.connections:manage"]},
         )
         pc_db.dal.commit()
         ok = await client.get(_base(pc_db), headers=admin_headers(pc_db, user_id=user))
@@ -651,7 +651,7 @@ class TestInternalApi:
             assert (await getattr(client, method)(url)).status_code == 401
             bad = await getattr(client, method)(url, headers={"Authorization": "Bearer not-a-jwt"})
             assert bad.status_code == 401
-            # a user (HS256) JWT is not a machine JWT
+            # a user JWT is not a machine JWT
             user = {
                 "Authorization": f"Bearer {make_user_token(user_id=1, scope='connections:resolve')}"
             }

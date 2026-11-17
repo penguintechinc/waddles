@@ -1,6 +1,6 @@
 """Helm-template assertions for the executor-precompile isolation hardening (security review M1/M2/L1).
 
-Pins, for the CronJob AND the backfill Job pod specs:
+Pins, for the CronJob AND the per-release enqueue Job pod specs:
 
 M1  compile and sign are separate containers: compile has NO key volume mount / key env, sign mounts the
     key secret 0400; an enforced Tetragon exec allowlist selects the pods; runtimeClassName is absent by
@@ -54,13 +54,13 @@ def _render(values: str, extra_set: list[str] | None = None) -> list[dict[str, A
 
 
 def _pod_specs(docs: list[dict[str, Any]]) -> list[tuple[str, dict[str, Any]]]:
-    """(kind, podSpec) for the precompile CronJob and backfill Job."""
+    """(kind, podSpec) for the precompile CronJob and the per-release enqueue Job."""
     out: list[tuple[str, dict[str, Any]]] = []
     for d in docs:
         name = d.get("metadata", {}).get("name", "")
         if d["kind"] == "CronJob" and name.endswith("-executor-precompile"):
             out.append(("CronJob", d["spec"]["jobTemplate"]["spec"]["template"]["spec"]))
-        elif d["kind"] == "Job" and name.endswith("-executor-precompile-backfill"):
+        elif d["kind"] == "Job" and "-executor-precompile-enqueue-r" in name:
             out.append(("Job", d["spec"]["template"]["spec"]))
     return out
 
@@ -77,9 +77,30 @@ class TestPrecompileIsolation:
         specs = _pod_specs(_render(values))
         assert sorted(k for k, _ in specs) == ["CronJob", "Job"], f"examined {len(specs)} pod specs"
 
-    def test_compile_has_no_key_and_sign_mounts_key_0400(self, values: str) -> None:
+    def test_hub_api_steps_have_database_env_and_no_secret_key(self, values: str) -> None:
+        """export/ack read ONLY DATABASE_URL (+ DB role secretKeyRef); SECRET_KEY is never injected.
+
+        Regression (alpha deploy 43797026024): the CLI used the full HubAPIConfig and died with
+        InsecureSecretError on a missing SECRET_KEY. It now needs only the DSN, so the pod must carry
+        DATABASE_URL (fail closed otherwise) and must not receive the session secret (M2).
+        """
         specs = _pod_specs(_render(values))
         assert len(specs) == 2
+        examined = 0
+        for kind, spec in specs:
+            cs = _containers(spec)
+            names = ("export", "ack") if kind == "CronJob" else ("enqueue",)
+            for name in names:
+                env = {e["name"]: e for e in cs[name]["env"]}
+                examined += 1
+                assert env["DATABASE_URL"].get("value"), f"{kind}/{name}: DATABASE_URL missing/empty"
+                assert "secretKeyRef" in env["DB_PASS"]["valueFrom"], f"{kind}/{name}: DB_PASS"
+                assert "SECRET_KEY" not in env, f"{kind}/{name}: SECRET_KEY must not be injected"
+        assert examined == 3, f"examined {examined} hub-api containers"
+
+    def test_compile_has_no_key_and_sign_mounts_key_0400(self, values: str) -> None:
+        specs = [s for s in _pod_specs(_render(values)) if s[0] == "CronJob"]
+        assert len(specs) == 1
         for kind, spec in specs:
             cs = _containers(spec)
             assert {"export", "compile", "sign", "ack"} <= set(cs), f"{kind}: {sorted(cs)}"
@@ -123,7 +144,7 @@ class TestPrecompileIsolation:
                     ref = e.get("valueFrom", {}).get("secretKeyRef")
                     if ref:
                         assert ref["key"], f"{kind}/{name} {e['name']}"
-        assert examined == 8, f"examined {examined} containers"
+        assert examined == 5, f"examined {examined} containers"
 
     def test_dedicated_service_account_without_token(self, values: str) -> None:
         docs = _render(values)
@@ -167,7 +188,7 @@ class TestPrecompileIsolation:
             if d["kind"] == "CronJob" and d["metadata"]["name"].endswith("-executor-precompile"):
                 tpl = d["spec"]["jobTemplate"]["spec"]["template"]
                 assert tpl["metadata"]["labels"][_FLAG] == "executor-precompile"
-            if d["kind"] == "Job" and d["metadata"]["name"].endswith("-executor-precompile-backfill"):
+            if d["kind"] == "Job" and "-executor-precompile-enqueue-r" in d["metadata"]["name"]:
                 assert d["spec"]["template"]["metadata"]["labels"][_FLAG] == "executor-precompile"
 
     def test_tracing_policy_enforced_and_allows_executor_binary(self, values: str) -> None:
@@ -191,7 +212,12 @@ class TestPrecompileIsolation:
     def test_runtime_class_off_by_default_and_set_on_demand(self, values: str) -> None:
         for kind, spec in _pod_specs(_render(values)):
             assert "runtimeClassName" not in spec, kind
-        on = _pod_specs(_render(values, ["pipeline.hubApi.executorPrecompile.runtimeClassName=kata-clh"]))
-        assert len(on) == 2
+        # Only the compile pod runs untrusted wasm through Cranelift; the enqueue Job just INSERTs rows.
+        on = [
+            s
+            for s in _pod_specs(_render(values, ["pipeline.hubApi.executorPrecompile.runtimeClassName=kata-clh"]))
+            if s[0] == "CronJob"
+        ]
+        assert len(on) == 1
         for _, spec in on:
             assert spec["runtimeClassName"] == "kata-clh"

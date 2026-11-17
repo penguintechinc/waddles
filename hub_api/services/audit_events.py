@@ -663,7 +663,6 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("PUT", f"{_ADM}/music/settings"),
             ("POST", f"{_ADM}/music/radio-stations"),
             ("DELETE", f"{_ADM}/music/radio-stations/<int:station_id>"),
-            ("PUT", f"{_ADM}/music-station/policy"),
         ),
     ),
     (
@@ -704,6 +703,26 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("POST", f"{_CAL}/tickets"),
             ("POST", f"{_CAL}/tickets/<ticket_id>/cancel"),
             ("POST", f"{_CAL}/tickets/<ticket_id>/transfer"),
+        ),
+    ),
+    (
+        # Community admin routes gated by dedicated community scopes resolved in-handler (they
+        # used a JWT `require_scope`, which the generic admin-action rule covered).
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_ACTION),
+        (
+            ("PUT", "/api/v1/admin/<int:community_id>/settings"),
+            ("DELETE", "/api/v1/admin/<int:community_id>/members/<int:user_id>"),
+            ("POST", "/api/v1/admin/<int:community_id>/temp-password"),
+            ("PUT", "/api/v1/admin/<int:community_id>/modules/<int:module_id>/config"),
+            ("POST", "/api/v1/admin/<int:community_id>/interaction/channels"),
+            ("PUT", "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>"),
+            ("DELETE", "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>"),
+            ("PUT", "/api/v1/admin/<int:community_id>/interaction/forum/posts/<int:post_id>"),
+            ("DELETE", "/api/v1/admin/<int:community_id>/interaction/forum/replies/<int:reply_id>"),
+            (
+                "PUT",
+                "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>/permissions",
+            ),
         ),
     ),
     (
@@ -751,6 +770,11 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/auth/passkey/login/finish"): _R_SESSION,
     ("POST", "/api/v1/auth/passkey/login/start"): _R_SESSION,
     ("POST", "/api/v1/auth/refresh"): _R_SESSION,
+    ("POST", "/api/v1/auth/step-up/passkey/finish"): (
+        "re-issues the caller's own session token after a verified passkey assertion (no scope "
+        "added); the sensitive action it unlocks is audited by its own route"
+    ),
+    ("POST", "/api/v1/auth/step-up/passkey/start"): "issues a challenge only; no state change",
     ("POST", "/api/v1/auth/register"): _R_SESSION,
     ("POST", "/api/v1/auth/resend-verification"): _R_SESSION,
     ("POST", "/api/v1/auth/sso/<public_id>/acs"): _R_SESSION,
@@ -776,11 +800,6 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("PUT", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
     ("PUT", "/api/v1/user/profile"): _R_SELF,
     ("POST", "/api/v1/<int:community_id>/join-requests"): _R_SELF,
-    ("DELETE", "/api/v1/admin/<int:community_id>/music-station/queue/<int:queue_id>"): _R_OPS,
-    (
-        "DELETE",
-        "/api/v1/admin/<int:community_id>/music-station/queue/playlists/<playlist_id>",
-    ): _R_OPS,
     ("POST", "/api/v1/<community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
     ("POST", "/api/v1/admin/<community_id>/calendar/events/<event_id>/check-in"): _R_OPS,
     (
@@ -793,10 +812,6 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ): _R_OPS,
     ("POST", "/api/v1/admin/<community_id>/workflows/<workflow_id>/test"): _R_OPS,
     ("POST", "/api/v1/admin/<community_id>/workflows/validate"): _R_OPS,
-    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/advance"): _R_OPS,
-    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/playlists"): _R_OPS,
-    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/requests"): _R_OPS,
-    ("PUT", "/api/v1/admin/<int:community_id>/music-station/queue/reorder"): _R_OPS,
     ("POST", "/api/v1/admin/calendar/verify-ticket"): _R_OPS,
     (
         "POST",

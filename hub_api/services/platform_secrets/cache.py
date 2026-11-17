@@ -31,6 +31,9 @@ logger = logging.getLogger(__name__)
 #: How long a failed lookup is remembered, so a stream of unknown key ids costs one DB read.
 NEGATIVE_TTL_SECONDS: Final = 30.0
 
+#: Hard cap on remembered unknown ids, so a stream of distinct hostile kids cannot grow memory.
+MAX_NEGATIVE_ENTRIES: Final = 1024
+
 Clock = Callable[[], datetime]
 
 
@@ -110,13 +113,18 @@ class PlatformSecretCache:
         self._entries: dict[tuple[int, int | None, int], CachedSecret] = {}
         self._negative: dict[tuple[int, int | None, str], datetime] = {}
         self._last_miss_load: datetime | None = None
+        self._last_kid_miss_load: datetime | None = None
 
     def seed(self, entries: Iterable[CachedSecret]) -> None:
         """Replace the whole content (boot seed or a successful refresh)."""
         fresh = {(e.secret_type, e.scope_id, e.version): e for e in entries}
         with self._lock:
             self._entries = fresh
-            self._negative.clear()
+            # Keep remembered misses (a reload must not hand an attacker a free reset of the
+            # negative cache); drop only the kids this snapshot now contains.
+            present = {(e.secret_type, e.scope_id, e.kid) for e in fresh.values() if e.kid}
+            for key in [k for k in self._negative if k in present]:
+                del self._negative[key]
 
     def refresh(self) -> int:
         """Reload through the loader and swap atomically; returns the entry count.
@@ -129,33 +137,53 @@ class PlatformSecretCache:
         self.seed(loaded)
         return len(loaded)
 
-    def _lazy_load(self, key: tuple[int, int | None, str] | None) -> bool:
-        """One rate-limited reload on a miss; True if a reload ran."""
+    def _lazy_load(self, key: tuple[int, int | None, str] | None) -> str:
+        """One rate-limited reload on a miss; returns what happened.
+
+        `ran` (a reload completed), `negative` (that kid is already remembered as unknown),
+        `limited` (the global limiter blocked the reload) or `error` (the loader failed).
+        EVERY miss reload is bounded by a global limiter (one per `negative_ttl`, separately for
+        active-version misses and kid misses), on top of the per-kid negative cache: a stream of
+        distinct unknown kids costs at most one database reload per interval, never one each.
+        Only `ran` proves a kid unknown -- the caller must NOT negative-cache a kid after
+        `limited` / `error`, or an attacker's flood could starve adoption of a real rotation.
+        """
         if self._loader is None:
-            return False
+            return "error"
         now = self._clock()
         with self._lock:
             if key is not None and (until := self._negative.get(key)) is not None and now < until:
-                return False
-            if (
-                key is None
-                and self._last_miss_load
-                and now < self._last_miss_load + self._negative_ttl
-            ):
-                return False
+                return "negative"
+            last = self._last_miss_load if key is None else self._last_kid_miss_load
+            if last is not None and now < last + self._negative_ttl:
+                return "limited"
             if key is None:
                 self._last_miss_load = now
+            else:
+                self._last_kid_miss_load = now
         try:
             self.refresh()
         except Exception as exc:  # noqa: BLE001 -- lookup must fail closed, not crash the caller
             logger.error("platform secret lazy-load failed error_type=%s", type(exc).__name__)
-            return False
-        return True
+            return "error"
+        return "ran"
+
+    def _remember_miss(
+        self, key: tuple[int, int | None, str], until: datetime, now: datetime
+    ) -> None:
+        """Record an unknown id in the bounded negative cache (expired first, then oldest)."""
+        with self._lock:
+            if len(self._negative) >= MAX_NEGATIVE_ENTRIES:
+                for stale in [k for k, u in self._negative.items() if u <= now]:
+                    del self._negative[stale]
+            while len(self._negative) >= MAX_NEGATIVE_ENTRIES:
+                del self._negative[min(self._negative, key=self._negative.__getitem__)]
+            self._negative[key] = until
 
     def active(self, secret_type: int, scope_id: int | None = None) -> CachedSecret:
         """The ACTIVE version of (type, scope); lazy-loads once on a miss, else fails closed."""
         found = self._find_active(secret_type, scope_id)
-        if found is None and self._lazy_load(None):
+        if found is None and self._lazy_load(None) == "ran":
             found = self._find_active(secret_type, scope_id)
         if found is None:
             raise NoActiveSecretError("no active platform secret for that type and scope")
@@ -178,12 +206,15 @@ class PlatformSecretCache:
         if found is not None:
             return found
         negative_key = (secret_type, scope_id, kid)
-        if self._lazy_load(negative_key):
+        outcome = self._lazy_load(negative_key)
+        if outcome == "ran":
             found = self._find_kid(secret_type, scope_id, kid, now)
             if found is not None:
                 return found
-        with self._lock:
-            self._negative[negative_key] = now + self._negative_ttl
+            # A completed reload proves the kid unknown: remember it (bounded).
+            self._remember_miss(negative_key, now + self._negative_ttl, now)
+        # limited / error / already-negative: do NOT remember it -- the rotation NOTIFY refresh
+        # (or the next interval's reload) must still be able to adopt a legitimately new kid.
         raise UnknownKeyIdError("no servable platform key has that key id")
 
     def _find_kid(

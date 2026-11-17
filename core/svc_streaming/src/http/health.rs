@@ -75,6 +75,23 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
             detail: format!("recording disabled: {reason}"),
         },
     };
+    let jwt_keys = match state.config.jwt_keys.ready() {
+        None => DependencyStatus {
+            name: "jwt_keys",
+            configured: false,
+            detail: "no platform JWT key source configured".to_string(),
+        },
+        Some(ready) => DependencyStatus {
+            name: "jwt_keys",
+            configured: ready,
+            detail: if ready {
+                "es256 verifying keys loaded".to_string()
+            } else {
+                "es256 verifying keys not loaded yet".to_string()
+            },
+        },
+    };
+    let jwt_keys_ready = jwt_keys.configured;
     let dependencies = vec![
         DependencyStatus {
             name: "database",
@@ -92,11 +109,14 @@ pub async fn readiness(State(state): State<AppState>) -> Json<ReadinessBody> {
             detail: cfg.ffmpeg_path.display().to_string(),
         },
         record,
+        jwt_keys,
     ];
+    // Until a signing key is usable every authenticated route 401s; that is a
+    // degraded (not unready) pod -- ingest and public routes still serve.
     // Recording is an optional capability: its absence degrades the pod but
     // must not fail readiness (that would pull live ingest out of service
     // and kill every stream), so it reports "degraded" with HTTP 200.
-    let status = if matches!(state.record, RecordReadiness::Enabled) {
+    let status = if matches!(state.record, RecordReadiness::Enabled) && jwt_keys_ready {
         "ok"
     } else {
         "degraded"
@@ -127,7 +147,7 @@ mod tests {
             db_password: Secret::new("x"),
             cache_password: None,
             service_api_key: Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys: crate::jwt_keys::JwtKeys::None,
         };
         AppState::new(config, prometheus::Registry::new())
     }
@@ -139,9 +159,9 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_reports_four_dependencies() {
+    async fn readiness_reports_five_dependencies() {
         let Json(body) = readiness(State(test_state())).await;
-        assert_eq!(body.dependencies.len(), 4);
+        assert_eq!(body.dependencies.len(), 5);
         let ffmpeg = body
             .dependencies
             .iter()
@@ -173,8 +193,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn readiness_is_ok_when_record_is_enabled() {
+    async fn readiness_is_ok_when_record_is_enabled_and_jwt_keys_are_loaded() {
+        use crate::jwt_keys::{test_support::TestKey, JwtKeys};
+        let keys = JwtKeys::in_memory(vec![TestKey::generate().active_row("k1")]);
+        let JwtKeys::Cache(cache) = &keys else {
+            panic!("in_memory builds a cache");
+        };
+        cache.refresh().await.unwrap();
         let mut state = test_state();
+        std::sync::Arc::make_mut(&mut state.config).jwt_keys = keys;
         state.record = RecordReadiness::Enabled;
         let Json(body) = readiness(State(state)).await;
         assert_eq!(body.status, "ok");
@@ -184,6 +211,26 @@ mod tests {
             .find(|d| d.name == "record")
             .unwrap();
         assert!(record.configured);
+        let jwt = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "jwt_keys")
+            .unwrap();
+        assert!(jwt.configured);
+    }
+
+    #[tokio::test]
+    async fn readiness_is_degraded_when_no_jwt_key_source_is_configured() {
+        let mut state = test_state();
+        state.record = RecordReadiness::Enabled;
+        let Json(body) = readiness(State(state)).await;
+        assert_eq!(body.status, "degraded");
+        let jwt = body
+            .dependencies
+            .iter()
+            .find(|d| d.name == "jwt_keys")
+            .unwrap();
+        assert!(!jwt.configured);
     }
 
     #[tokio::test]

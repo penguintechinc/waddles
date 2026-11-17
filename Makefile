@@ -1,16 +1,16 @@
-.PHONY: backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: webui-api-coverage platform-secrets-rotate backfill-tenant-keys backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
+        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-cert-name-constraints check-helm-hook-timeouts check-pii-egress check-bundle-hygiene generate-bundle-signing-key test-ollama-realpath \
+        test-seaweedfs-sse-kms test-helm-pending-recover test-smoke-pod-phase publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        test-helm-matrix test-helm-matrix-quick
+        check-proto test-hub-api test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -26,8 +26,22 @@ docker-push:
 lint:
 	@bash scripts/lint.sh
 
+# Secrets T10 gate: no shared JWT secret / HMAC JWT (see scripts/ci/jwt-hs256-allowlist.txt)
+check-no-shared-jwt-secret:
+	@bash scripts/ci/check-no-shared-jwt-secret.sh
+
+# Idempotent: ensure every existing tenant owns an at-rest DEK (needs DATABASE_URL + the KEK env).
+backfill-tenant-keys:
+	@cd hub_api && PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 -m cli.backfill_tenant_keys
+
 backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py
+
+# Rotate / retire a platform secret THROUGH the hub-api admin API (system-tenant global admin,
+# recent MFA, Idempotency-Key): `make platform-secrets-rotate ARGS="rotate jwt_signing --reason scheduled"`.
+# Needs WADDLES_API_URL and WADDLES_ADMIN_TOKEN in the environment (never as arguments).
+platform-secrets-rotate:
+	@python3 scripts/ops/platform_secrets_rotate.py $(ARGS)
 
 openapi-hubapi:
 	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
@@ -42,6 +56,11 @@ check-openapi-drift:
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
+
+# Proto gate: buf lint + buf breaking vs origin/release/v3.0.X (override PROTO_BREAKING_AGAINST) +
+# committed hub-api stubs match the .proto sources. Prints files examined; fails on zero examined.
+check-proto:
+	@bash scripts/ci/check-proto-gate.sh
 
 # M1.5 gate (docs/superpowers/specs/2026-09-14-rust-data-plane-design.md §16):
 # zero flask_core.database/pydal occurrences under the App Bundle directories.
@@ -66,6 +85,21 @@ test-helm-matrix:
 test-helm-matrix-quick:
 	@bash scripts/ci/helm_matrix.sh --quick
 
+# Dead values keys / never-included helpers in the waddlebot chart (static: .Values, $var aliases,
+# index, wholesale toYaml/range/include parents, subchart). Prints counts; zero examined fails.
+# Intentional keeps go in scripts/ci/audit-chart-values/allowlist.txt with a '# reason'.
+audit-chart-values:
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/audit-chart-values/test_audit_chart_values.py
+	@python3 scripts/ci/audit-chart-values/audit_chart_values.py k8s/helm/waddlebot \
+		--allowlist scripts/ci/audit-chart-values/allowlist.txt
+
+# Deep chart audit (~3 min, needs helm): every rendered env var of our containers must have a reader
+# in the code dirs (allowlist: scripts/ci/audit-chart-values/env-allowlist.txt), and a
+# delete-and-render pass over every values key must agree with the static audit. HELM=<binary>.
+audit-chart-values-deep: audit-chart-values
+	@HELM="$${HELM:-helm}" python3 -m pytest -q -p no:cacheprovider scripts/ci/audit-chart-values/test_audit_chart_deep.py
+	@python3 scripts/ci/audit-chart-values/audit_chart_deep.py k8s/helm/waddlebot --helm "$${HELM:-helm}"
+
 # USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
 # post-install -- helm upgrade --install in alpha-deploy.sh must never pass
 # --wait/--atomic, or a fresh install deadlocks (Deployments wait on hub-api,
@@ -74,10 +108,25 @@ test-helm-matrix-quick:
 check-alpha-deploy-no-wait:
 	@python3 scripts/check_alpha_deploy_no_wait.py
 
+# Live functional smoke of the deployed alpha (KUBE_CONTEXT=dal2alpha); see scripts/smoke/README.md.
+.PHONY: alpha-smoke test-alpha-smoke
+alpha-smoke:
+	@bash scripts/smoke/alpha-smoke.sh
+
+test-alpha-smoke:
+	@python3 -m pytest -q scripts/smoke/test_alpha_smoke.py
+
 # alpha-deploy.sh self-heals a release stuck in pending-* (interrupted upgrade);
 # stub-driven test of that recovery logic, no cluster touched.
 test-helm-pending-recover:
 	@bash scripts/test-helm-pending-recover.sh
+
+# Deploy smoke-step regression: the generic pod-phase scan must exclude precompile batch
+# pods by NAME (a pre-label CronJob pod does not carry waddlebot.io/workload, and k8s `!=`
+# selects label-less pods), and a Failed precompile batch Job must still trip the gate.
+test-smoke-pod-phase:
+	@bash scripts/ci/smoke/tests/test-pod-phase-check.sh
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/smoke/tests/test_pod_phase_classify.py scripts/ci/smoke/tests/test_precompile_batch_gate.py
 
 # No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
 # wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
@@ -87,6 +136,52 @@ test-helm-pending-recover:
 # `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
+
+# Every core/ bin crate that uses rustls must install a process-level CryptoProvider.
+check-rustls-provider:
+	@bash scripts/ci/check-rustls-provider.sh
+
+# Every bundle-<crate> stage in bundles/Dockerfile.core-bundles must COPY each out-of-crate file the
+# release build reads (#[path], include_*!, Cargo path deps). Prints crates/refs examined.
+check-bundle-docker-context:
+	@python3 scripts/ci/check-bundle-docker-context.py
+
+# Every core Rust service Dockerfile (images in scripts/ci/image-inputs.yaml, built with their real
+# context + --build-context) must COPY each Cargo path dep / #[path] / include_*! target to the
+# container path the crate resolves it at. Negative test first: the pre-fix svc-streaming
+# Dockerfile (platform_keys COPYed before WORKDIR, deploy runs 43859970070/43858247593) MUST fail.
+# Prints images/crates/refs examined; zero examined fails.
+check-core-docker-context:
+	@out=$$(python3 scripts/ci/check-core-docker-context.py \
+		--dockerfile-override svc-streaming=scripts/ci/tests/fixtures/core-docker-context/svc_streaming-pre-fix.dockerfile.txt 2>&1); \
+	rc=$$?; if [ "$$rc" -ne 1 ] || ! printf '%s\n' "$$out" | grep -q 'COPYed to /platform_keys, crate expects /build/platform_keys'; then \
+		printf '%s\n' "$$out" >&2; echo "FAIL: negative test (pre-fix svc-streaming) was not rejected for platform_keys (rc=$$rc)" >&2; exit 1; fi; \
+	echo "negative test: pre-fix svc-streaming Dockerfile rejected (rc=1, platform_keys misplaced) -- expected"
+	@python3 scripts/ci/check-core-docker-context.py
+
+# #1382: every rendered cert-manager leaf Certificate's SAN must fall inside its CA's X.509
+# nameConstraint subtrees, for EVERY environment. Cryptographic (mint CA+leaf, `openssl verify`),
+# not a string compare. Fails loud if helm/openssl is missing (a skip examines zero leaves).
+check-cert-name-constraints:
+	@bash scripts/ci/check-cert-name-constraints.sh
+
+# #1391: every helm hook Job must carry a bounded activeDeadlineSeconds below the deploy's helm
+# --timeout, and long/serial work (precompile) must NOT be a blocking hook -- else it can hang
+# `helm --wait` past the timeout and time the release out. Renders each env and pipes to the
+# checker. HOOK_DEPLOY_TIMEOUT defaults to the alpha/dal2alpha deploy timeout (60m = 3600s).
+check-helm-hook-timeouts:
+	@bash -euo pipefail -c 'for v in values-alpha.yaml values-beta.yaml; do \
+		echo "== $$v =="; \
+		helm template waddlebot k8s/helm/waddlebot --kube-version 1.30.0 \
+			--values k8s/helm/waddlebot/$$v --set global.deploymentTier=alpha \
+		| python3 scripts/ci/check-helm-hook-job-timeouts.py --deploy-timeout $(or $(HOOK_DEPLOY_TIMEOUT),3600); \
+	done'
+
+# A catalog bundle whose build inputs changed vs BASE (own source; wit/+waddle-sdk for Python;
+# Cargo path deps, #[path] and include_*! targets for Rust) must bump its version, or the
+# seeder 409s digest_conflict. CI runs it in bundle-hygiene.yml. Zero bundles examined fails.
+check-bundle-version-bump:
+	@python3 scripts/ci/check-bundle-version-bump.py "$(or $(BASE),origin/release/v3.0.X)"
 
 # PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
 # egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its
@@ -117,6 +212,13 @@ check-bundle-hygiene:
 	@python3 -m pytest scripts/ci/tests/test_bundle_stage_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
+
+# webui <-> hub-api REST coverage report (A uncovered, B webui->nonexistent,
+# C spec<->code drift, B-proxy calls proxy->svc-streaming). Report-only;
+# STRICT=1 exits non-zero on any gap. OUT=path writes markdown.
+webui-api-coverage:
+	@python3 -m pytest scripts/ci/tests/test_webui_api_coverage.py -q -p no:cacheprovider
+	@python3 scripts/ci/webui_api_coverage.py $(if $(OUT),--out $(OUT)) $(if $(STRICT),--strict)
 
 # Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
 # goldens (svc_ingest), every corpus event through svc_process's closed-schema pii_tokenize
@@ -156,6 +258,15 @@ command-latency-report:
 	@test -n "$(strip $(METRICS_URLS)$(METRICS_FILES))" || { echo 'usage: make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics ..." [METRICS_FILES="a.txt ..."]' >&2; exit 2; }
 	@python3 -I scripts/ops/command_latency_report.py $(foreach u,$(METRICS_URLS),--url $(u)) $(foreach f,$(METRICS_FILES),--file $(f))
 
+# Alpha-only, idempotent: create/find the latency-canary community bound to the testing guild via the
+# hub-api control plane, activate the Rust !ping bundle, ensure no reputation/economy bundle is active,
+# print the community id for helm `latencyCanary.communityId`. Token only from $WADDLES_ADMIN_TOKEN.
+#   make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]
+.PHONY: seed-latency-canary
+seed-latency-canary:
+	@test -n "$(HUB_API_URL)" -a -n "$(CANARY_GUILD_ID)" || { echo 'usage: make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]' >&2; exit 2; }
+	@python3 -I scripts/ops/seed_latency_canary.py --hub-api-url "$(HUB_API_URL)" --guild-id "$(CANARY_GUILD_ID)" --confirm-alpha $(if $(DRY),--dry-run,)
+
 # Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
 release-merge:
 	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]" >&2; exit 2; }
@@ -165,6 +276,11 @@ release-merge:
 release-auto-merge:
 	@test -n "$(PRS)" || { echo 'usage: make release-auto-merge PRS="<n> <n> ..." [DRY=1]' >&2; exit 2; }
 	@bash scripts/release-auto-merge.sh $(if $(DRY),--dry-run) $(PRS)
+
+# hub_api pytest in a hash-pinned venv (built/refreshed automatically):
+#   make test-hub-api PYTEST_ARGS="tests/test_config.py -x"
+test-hub-api:
+	@bash scripts/test-hub-api.sh $(PYTEST_ARGS)
 
 test-unit:
 	@echo "Running unit tests..."

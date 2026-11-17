@@ -129,9 +129,9 @@ mod tests {
     #[test]
     fn an_override_can_also_deny_a_normally_allowed_family() {
         let snapshot = InMemoryInstancePolicySnapshot::new();
-        snapshot.set(PermissionFamily::StorageObjects, InstanceAction::Deny);
+        snapshot.set(PermissionFamily::StorageObjectsWrite, InstanceAction::Deny);
         assert_eq!(
-            snapshot.action(PermissionFamily::StorageObjects),
+            snapshot.action(PermissionFamily::StorageObjectsWrite),
             InstanceAction::Deny
         );
     }

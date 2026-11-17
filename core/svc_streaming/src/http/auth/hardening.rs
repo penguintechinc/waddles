@@ -1,4 +1,4 @@
-//! JWT verification hardening for svc-streaming's platform (HS256) verifier
+//! JWT verification hardening for svc-streaming's platform (ES256) verifier
 //! (RFC 8725) -- a deliberate, name-for-name MIRROR of
 //! `core/service_auth/src/jwt_hardening.rs`.
 //!
@@ -45,9 +45,9 @@ use opentelemetry::{global, KeyValue};
 use serde_json::{Map, Value};
 use tracing::{debug, error, warn};
 
-/// `verifier` label: user/session platform JWT, HS256 shared secret
-/// (identical value to the Python `VERIFIER_PLATFORM_HS256`).
-pub const VERIFIER_PLATFORM_HS256: &str = "platform_hs256";
+/// `verifier` label: user/session platform JWT, ES256 (platform_vault public keys)
+/// (identical value to the Python `VERIFIER_PLATFORM_ES256`).
+pub const VERIFIER_PLATFORM_ES256: &str = "platform_es256";
 /// `verifier` label: per-service machine JWT, EdDSA, hub-api JWKS
 /// (identical value to the Python `VERIFIER_SERVICE_EDDSA`).
 pub const VERIFIER_SERVICE_EDDSA: &str = "service_eddsa";
@@ -885,12 +885,12 @@ mod tests {
         let capture = test_support::Capture::new();
         capture
             .metrics
-            .record(VERIFIER_PLATFORM_HS256, "hs256", OUTCOME_OK, Instant::now());
+            .record(VERIFIER_PLATFORM_ES256, "es256", OUTCOME_OK, Instant::now());
         capture
             .metrics
-            .record(VERIFIER_PLATFORM_HS256, "hs256", OUTCOME_OK, Instant::now());
+            .record(VERIFIER_PLATFORM_ES256, "es256", OUTCOME_OK, Instant::now());
         capture.metrics.record(
-            VERIFIER_PLATFORM_HS256,
+            VERIFIER_PLATFORM_ES256,
             "none",
             REASON_ALG_NONE,
             Instant::now(),
@@ -903,8 +903,8 @@ mod tests {
             let keys: Vec<&str> = point.attrs.keys().map(String::as_str).collect();
             assert_eq!(keys, ["alg", "outcome", "verifier"], "exact label names");
         }
-        assert_eq!(capture.count("platform_hs256", "hs256", "ok"), 2);
-        assert_eq!(capture.count("platform_hs256", "none", "alg_none"), 1);
+        assert_eq!(capture.count("platform_es256", "es256", "ok"), 2);
+        assert_eq!(capture.count("platform_es256", "none", "alg_none"), 1);
 
         let histograms = capture.points("waddles_jwt_verification_seconds");
         assert_eq!(histograms.len(), 2, "one series per (verifier, alg)");
@@ -918,13 +918,13 @@ mod tests {
             );
             assert_eq!(point.bounds, LATENCY_BOUNDARIES_SECONDS.to_vec());
         }
-        let hs256_ok: u64 = histograms
+        let es256_ok: u64 = histograms
             .iter()
-            .filter(|p| p.attrs["alg"] == "hs256")
+            .filter(|p| p.attrs["alg"] == "es256")
             .map(|p| p.value)
             .sum();
         assert_eq!(
-            hs256_ok, 2,
+            es256_ok, 2,
             "every verification observes the latency histogram"
         );
     }

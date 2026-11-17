@@ -357,15 +357,50 @@ jobs:
           [ "${TOTAL}" -gt 0 ] || { echo "::error::zero Deployments examined" >&2; exit 1; }
           [ "${BAD}" -eq 0 ] || exit 1
 
-          # 2. no non-Running/non-Succeeded pods; examine count > 0.
-          PODS="$(kubectl -n "${NAMESPACE}" get pods --no-headers | wc -l)"
-          PBAD="$(kubectl -n "${NAMESPACE}" get pods --no-headers --field-selector=status.phase!=Running,status.phase!=Succeeded | wc -l)"
-          echo "pods examined=${PODS} bad=${PBAD}"
-          [ "${PODS}" -gt 0 ] && [ "${PBAD}" -eq 0 ] || exit 1
+          # 2. long-running workloads (Deployment/StatefulSet pods) must be Running/Succeeded;
+          #    Job/CronJob-owned pods are judged by their Job's status, not an instantaneous
+          #    phase (a role-sync/precompile pod is legitimately Pending/Init for seconds-to-
+          #    minutes). A Job created since this release that is Failed still trips; a merely
+          #    initializing one does not. Precompile is judged by step 2b. Denominator > 0.
+          bash scripts/ci/smoke/pod-phase-check.sh "${NAMESPACE}" "${RELEASE}"
 
-          # 3. every long-lived Deployment runs exactly its planned image (rebuilt -> new tag,
+          # 2b. bundle AOT precompile readiness, explicit (it never gates helm: no hook).
+          #     Bundles do not need an artifact to serve (the executor JIT-compiles from the
+          #     signed source and counts executor_precompile_fallback_total), so the gate is:
+          #     this release's enqueue Job completed (every active version is queued), the
+          #     CronJob exists with Forbid and is not suspended, and no precompile Job created
+          #     by this release has failed. Counts are printed; zero enqueue Jobs = FAIL.
+          REV="$(helm status "${RELEASE}" -n "${NAMESPACE}" -o json | python3 -c 'import json,sys; print(json.load(sys.stdin)["version"])')"
+          [ -n "${REV}" ] || { echo "::error::helm revision not found" >&2; exit 1; }
+          ENQ_SEL="app.kubernetes.io/component=executor-precompile-enqueue,waddlebot.io/helm-revision=${REV}"
+          ENQ_STATE=""
+          for _ in $(seq 1 60); do
+            ENQ_STATE="$(kubectl -n "${NAMESPACE}" get jobs -l "${ENQ_SEL}" -o jsonpath='{range .items[*]}{.metadata.name} {.status.succeeded} {.status.failed}{"\n"}{end}')"
+            ENQ_COUNT="$(printf '%s\n' "${ENQ_STATE}" | awk 'NF{n++} END{print n+0}')"
+            [ "${ENQ_COUNT}" -eq 1 ] || { echo "::error::expected 1 precompile enqueue Job for revision ${REV}, found ${ENQ_COUNT}" >&2; exit 1; }
+            read -r ENQ_NAME ENQ_OK ENQ_FAILED <<< "${ENQ_STATE}"
+            [ "${ENQ_OK:-0}" -ge 1 ] && break
+            sleep 10
+          done
+          echo "precompile enqueue job=${ENQ_NAME} revision=${REV} succeeded=${ENQ_OK:-0} failed_attempts=${ENQ_FAILED:-0}"
+          [ "${ENQ_OK:-0}" -ge 1 ] || { echo "::error::precompile enqueue Job ${ENQ_NAME} did not complete within 10m" >&2; kubectl -n "${NAMESPACE}" logs "job/${ENQ_NAME}" --tail=50 >&2 || echo "(enqueue logs unavailable)" >&2; exit 1; }
+          CJ="$(kubectl -n "${NAMESPACE}" get cronjob "${RELEASE}-executor-precompile" -o jsonpath='{.spec.concurrencyPolicy} {.spec.suspend}')"
+          read -r CJ_POLICY CJ_SUSPEND <<< "${CJ}"
+          echo "precompile cronjob concurrencyPolicy=${CJ_POLICY} suspend=${CJ_SUSPEND:-false}"
+          [ "${CJ_POLICY}" = "Forbid" ] && [ "${CJ_SUSPEND:-false}" != "true" ] || { echo "::error::precompile CronJob must be Forbid and not suspended" >&2; exit 1; }
+          ENQ_CREATED="$(kubectl -n "${NAMESPACE}" get job "${ENQ_NAME}" -o jsonpath='{.metadata.creationTimestamp}')"
+          # Feed BOTH the enqueue Job and the batch Jobs: the enqueue Job is the enqueue-driven
+          # activity the gate examines, so a window with zero batch Jobs yet still has a non-zero
+          # denominator and the gate can never pass on an empty input.
+          kubectl -n "${NAMESPACE}" get jobs -l 'app.kubernetes.io/component in (executor-precompile,executor-precompile-enqueue)' -o json > "${RUNNER_TEMP}/precompile-jobs.json"
+          python3 scripts/ci/smoke/precompile-batch-gate.py "${RUNNER_TEMP}/precompile-jobs.json" "${ENQ_CREATED}"
+
+          # 3. every long-lived workload runs exactly its planned image (rebuilt -> new tag,
           #    reused -> its old tag); examined count must equal the planned set, > 0.
-          kubectl -n "${NAMESPACE}" get deploy -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
+          #    Deployments AND StatefulSets (the svc-bundles-executor compiled/scripted
+          #    pools run as StatefulSets). MAIN containers[*] only -- NOT initContainers,
+          #    which carry the independent db-migrate tag and would false-match.
+          kubectl -n "${NAMESPACE}" get deploy,statefulset -o jsonpath='{range .items[*]}{.spec.template.spec.containers[*].image}{"\n"}{end}' \
             | python3 scripts/ci/alpha_plan.py verify --plan "${RUNNER_TEMP}/plan.json" --registry "${IMAGE_PREFIX}"
 
           # 4. real health + readiness check against hub-api (HTTP 200 required).
@@ -379,8 +414,12 @@ jobs:
           kubectl -n "${NAMESPACE}" port-forward "deploy/${RELEASE}-hub-api-v3" "${LPORT}:${PORT}" >"${PF_LOG}" 2>&1 &
           PF_PID=$!
           trap 'if kill -0 "${PF_PID}" 2>/dev/null; then kill "${PF_PID}"; fi' EXIT
-          if ! python3 scripts/ci/hub_api_probe.py --base-url "http://127.0.0.1:${LPORT}" \
-              --paths /health /ready --attempts 20 --delay 2 --timeout 5; then
+          # hub-api serves HTTPS on its http-named port (ECDSA P-256 cert, SAN = in-cluster
+          # service FQDN). The port-forward is to 127.0.0.1, which no cert SAN can match, so
+          # --insecure skips TLS verification: this is a liveness smoke check (endpoint returns
+          # 200), not TLS validation. A real non-200 still fails the gate (status is checked).
+          if ! python3 scripts/ci/hub_api_probe.py --base-url "https://127.0.0.1:${LPORT}" \
+              --paths /health /ready --attempts 20 --delay 2 --timeout 5 --insecure; then
             echo "::error::hub-api /health or /ready did not return 200 (port-forward log follows)" >&2
             cat "${PF_LOG}" >&2
             exit 1

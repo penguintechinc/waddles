@@ -62,6 +62,20 @@ jobs:
     # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # sccache gives every crate a shared compilation cache on the GitHub
+      # Actions cache backend: common deps (tokio/tonic/serde) compile once and
+      # are reused by all ~25 callers instead of being recompiled and stored in
+      # a per-crate `target/` cache. Those per-crate target caches summed to
+      # ~21GB against GitHub's 10GB/repo limit and evicted constantly, so every
+      # run started cold. The target/ path is dropped from the actions/cache
+      # step below; sccache now owns compilation caching.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      # sccache cannot cache incremental-compilation artifacts and CI builds
+      # gain nothing from incremental anyway; disabling it is what lets sccache
+      # actually populate (otherwise rustc emits non-cacheable incremental units).
+      CARGO_INCREMENTAL: "0"
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
@@ -82,14 +96,20 @@ jobs:
           toolchain: "1.97.1"
           components: rustfmt, clippy, llvm-tools-preview
 
-      # Persistent cargo cache (GitHub-hosted cache service, survives the
-      # runner's hourly docker prune). Keyed per crate + toolchain +
-      # Cargo.lock so a dependency change gets a fresh entry; restore-keys
-      # fall back to the newest cache for the same crate/toolchain so an
-      # incremental rebuild never starts fully cold. Release-branch push
-      # runs seed it for PR runs. A cache miss only costs time, never
-      # correctness (all cargo steps still run with --locked).
-      - name: Cache cargo registry + git + target
+      # Shared compilation cache (GitHub Actions cache backend via
+      # SCCACHE_GHA_ENABLED). Deduplicates dependency compiles across every
+      # crate, so the common dep tree is stored once instead of ~25 times.
+      - name: Set up sccache (GitHub Actions cache backend)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+
+      # Cargo registry + git caches only (NO target/ -- sccache above owns
+      # compilation caching now). Keyed per crate + toolchain + Cargo.lock so a
+      # dependency change gets a fresh entry; restore-keys fall back to the
+      # newest cache for the same crate/toolchain. These are small (downloaded
+      # .crate sources + git deps), so they no longer blow the 10GB/repo limit
+      # the way the old per-crate target/ caches did. A cache miss only costs
+      # time, never correctness (all cargo steps still run with --locked).
+      - name: Cache cargo registry + git
         if: github.event_name != 'merge_group'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
         with:
@@ -97,7 +117,6 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ${{ inputs.working_directory }}/target
           key: cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working_directory)) }}
           restore-keys: |
             cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-
@@ -110,7 +129,6 @@ jobs:
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ${{ inputs.working_directory }}/target
           key: cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working_directory)) }}
           restore-keys: |
             cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-
@@ -194,6 +212,15 @@ jobs:
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      # clippy (check-only, clippy-driver) and llvm-cov (instrumented codegen
+      # via rustc under -Cinstrument-coverage) genuinely cannot share compiled
+      # artifacts: different driver AND different RUSTFLAGS, and collapsing them
+      # would mean dropping either clippy's -D warnings gate or coverage
+      # instrumentation. They are left as two steps. The repeated dependency
+      # compile they caused is now recovered by sccache (env above): each
+      # distinct (flags, driver) compile is cached once and reused across runs
+      # and across crates, so the second pass is cache hits rather than a cold
+      # rebuild of the dep tree.
       - name: cargo clippy --all-targets --locked -- -D warnings
         run: cargo clippy --all-targets --locked -- -D warnings
 
@@ -218,3 +245,10 @@ jobs:
           else
             cargo llvm-cov --locked --fail-under-lines 90
           fi
+
+      # Hit-rate visibility: prints compile requests vs cache hits so a
+      # regression in cache effectiveness (e.g. an env/flag change that stops
+      # sccache populating) is obvious in the job log. Never fails the job.
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

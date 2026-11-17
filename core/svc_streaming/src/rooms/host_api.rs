@@ -33,7 +33,10 @@ use serde_json::{json, Value};
 use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 
-use super::{IssueRequest, RoomError, RoomService, RouteMode};
+use super::{
+    ActorRole, FactsPatch, HandView, IssueRequest, RoomError, RoomFacts, RoomKind, RoomService,
+    RouteMode,
+};
 
 /// Errors building/running the listener.
 #[derive(Debug, thiserror::Error)]
@@ -148,6 +151,74 @@ struct CreateReq {
     label: Option<String>,
     max_publishers: Option<usize>,
     route: Option<RouteMode>,
+    /// Room facts (default: an open community room). Validated by `RoomFacts::validate`.
+    #[serde(default)]
+    kind: RoomKind,
+    #[serde(default)]
+    closed: bool,
+    #[serde(default)]
+    starts_at: Option<i64>,
+    #[serde(default)]
+    ends_at: Option<i64>,
+    #[serde(default)]
+    allow_guests: bool,
+    /// The room-management scopes the host verified for the caller (forwarded by the webrtc
+    /// tool; never a role name). A non-default fact needs its specific scope, a plain open
+    /// community room needs none.
+    #[serde(default)]
+    actor_scopes: Vec<String>,
+}
+
+/// Scope for kind / schedule facts and for `room.update`.
+pub const SCOPE_ROOMS_UPDATE: &str = "rooms:update";
+/// Scope for enabling guests.
+pub const SCOPE_ROOMS_GUESTS: &str = "rooms:guests";
+
+fn has(scopes: &[String], s: &str) -> bool {
+    scopes.iter().any(|x| x == s)
+}
+
+impl CreateReq {
+    fn facts(&self) -> RoomFacts {
+        RoomFacts {
+            kind: self.kind,
+            closed: self.closed,
+            starts_at: self.starts_at,
+            ends_at: self.ends_at,
+            allow_guests: self.allow_guests,
+        }
+    }
+}
+
+/// Distinguishes an omitted field (`None`: unchanged) from an explicit `null`
+/// (`Some(None)`: clear the bound).
+fn double_option<'de, D>(d: D) -> Result<Option<Option<i64>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<i64>::deserialize(d).map(Some)
+}
+
+/// `room.update`: a PATCH of a room's facts (omitted = unchanged), by a verified admin only.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct UpdateReq {
+    community_id: String,
+    room_id: Uuid,
+    #[serde(default)]
+    kind: Option<RoomKind>,
+    #[serde(default)]
+    closed: Option<bool>,
+    #[serde(default, deserialize_with = "double_option")]
+    starts_at: Option<Option<i64>>,
+    #[serde(default, deserialize_with = "double_option")]
+    ends_at: Option<Option<i64>>,
+    #[serde(default)]
+    allow_guests: Option<bool>,
+    /// The verified actor (pseudonym uuid) and host-verified scopes the webrtc tool forwards.
+    actor_id: Uuid,
+    #[serde(default)]
+    actor_scopes: Vec<String>,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -203,6 +274,96 @@ struct RouteReq {
     mode: RouteMode,
 }
 
+/// The contract version every `room.hand.*` / `room.staff.*` op must state.
+const HAND_API_VERSION: &str = "v1";
+
+/// Refuses a missing or unknown `api_version` (a missing one is the empty string) with
+/// `not_implemented`, before any other field is acted on.
+fn check_api_version(v: &str) -> Result<(), RoomError> {
+    if v == HAND_API_VERSION {
+        Ok(())
+    } else {
+        Err(RoomError::Unsupported(format!(
+            "api_version {v} not supported"
+        )))
+    }
+}
+
+/// `room.hand.raise|lower|ack`: a participant and the actor. There is NO role field (and
+/// unknown fields are refused): authority comes from the server-side member table.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandParticipantReq {
+    #[serde(default)]
+    api_version: String,
+    community_id: String,
+    room_id: Uuid,
+    participant_id: Uuid,
+    actor_id: Uuid,
+}
+
+/// `room.hand.list|reset`, `room.staff.register`: just the actor.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct HandActorReq {
+    #[serde(default)]
+    api_version: String,
+    community_id: String,
+    room_id: Uuid,
+    actor_id: Uuid,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CommunityReq {
+    community_id: String,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ParticipantActionReq {
+    community_id: String,
+    room_id: Uuid,
+    participant_id: Uuid,
+    actor_id: Uuid,
+    /// Display/audit label only -- NEVER read for authorization (scopes decide).
+    #[serde(default)]
+    #[allow(dead_code)]
+    actor_role: Option<String>,
+    /// Host-verified scopes the webrtc tool forwards; the per-action scope is re-checked here.
+    #[serde(default)]
+    actor_scopes: Vec<String>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RoomActorReq {
+    community_id: String,
+    room_id: Uuid,
+    actor_id: Uuid,
+    /// Display/audit label only -- NEVER read for authorization (scopes decide).
+    #[serde(default)]
+    #[allow(dead_code)]
+    actor_role: Option<String>,
+    /// Host-verified scopes the webrtc tool forwards; the per-action scope is re-checked here.
+    #[serde(default)]
+    actor_scopes: Vec<String>,
+}
+
+/// Per-action moderation scopes (a moderator is just a bundle holding them).
+pub const SCOPE_ROOMS_KICK: &str = "rooms:kick";
+pub const SCOPE_ROOMS_MUTE: &str = "rooms:mute";
+pub const SCOPE_ROOMS_LOCK: &str = "rooms:lock";
+
+/// Refuses a moderation op unless the caller's verified scopes include the one it needs.
+fn need_scope(scopes: &[String], scope: &'static str) -> Result<(), RoomError> {
+    if has(scopes, scope) {
+        Ok(())
+    } else {
+        Err(RoomError::Forbidden(
+            "the action's dedicated scope is required",
+        ))
+    }
+}
+
 fn parse<T: for<'de> Deserialize<'de>>(v: Value) -> Result<T, RoomError> {
     serde_json::from_value(v).map_err(|e| RoomError::Invalid(format!("bad request body: {e}")))
 }
@@ -211,15 +372,51 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
     match op {
         "room.create" => {
             let r: CreateReq = parse(body)?;
+            let facts = r.facts();
+            // Defence in depth, per specific scope: kind/schedule facts need `rooms:update`,
+            // enabling guests needs `rooms:guests`; the open-community default needs none.
+            let kind_or_window = facts.kind != RoomKind::Community
+                || facts.starts_at.is_some()
+                || facts.ends_at.is_some();
+            if kind_or_window && !has(&r.actor_scopes, SCOPE_ROOMS_UPDATE) {
+                return Err(RoomError::Forbidden("room facts require rooms:update"));
+            }
+            if facts.allow_guests && !has(&r.actor_scopes, SCOPE_ROOMS_GUESTS) {
+                return Err(RoomError::Forbidden("guests require rooms:guests"));
+            }
             let info = svc
-                .create(
+                .create_with_facts(
                     &r.community_id,
                     r.label,
                     r.max_publishers,
                     r.route.unwrap_or(RouteMode::Sfu),
+                    None,
+                    facts,
                 )
                 .await?;
             Ok(json!(info))
+        }
+        "room.update" => {
+            let r: UpdateReq = parse(body)?;
+            tracing::debug!(actor_id = %r.actor_id, room_id = %r.room_id, "host room.update");
+            // The dedicated `rooms:update` scope (a moderator bundle does not carry it);
+            // enabling guests additionally needs `rooms:guests`.
+            if !has(&r.actor_scopes, SCOPE_ROOMS_UPDATE) {
+                return Err(RoomError::Forbidden("room.update requires rooms:update"));
+            }
+            if r.allow_guests == Some(true) && !has(&r.actor_scopes, SCOPE_ROOMS_GUESTS) {
+                return Err(RoomError::Forbidden("guests require rooms:guests"));
+            }
+            let patch = FactsPatch {
+                kind: r.kind,
+                closed: r.closed,
+                starts_at: r.starts_at,
+                ends_at: r.ends_at,
+                allow_guests: r.allow_guests,
+            };
+            Ok(json!(
+                svc.patch_facts(&r.community_id, r.room_id, patch).await?
+            ))
         }
         "room.get" => {
             let r: RoomReq = parse(body)?;
@@ -242,6 +439,9 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                         subscribe: r.subscribe,
                         source: r.source,
                         ttl_secs: r.ttl_secs,
+                        // Staff is never claimable through a token op (see `room.staff.register`).
+                        staff: false,
+                        guest: false,
                     },
                 )
                 .await?;
@@ -294,6 +494,9 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                         subscribe: !publish,
                         source: r.source,
                         ttl_secs: r.ttl_secs,
+                        // Staff is never claimable through a token op (see `room.staff.register`).
+                        staff: false,
+                        guest: false,
                     },
                 )
                 .await?;
@@ -315,6 +518,128 @@ async fn dispatch(svc: &RoomService, op: &str, body: Value) -> Result<Value, Roo
                     "route mode relay is unsupported; rooms use the local SFU".into(),
                 )),
             }
+        }
+        "room.list" => {
+            let r: CommunityReq = parse(body)?;
+            Ok(json!({"rooms": svc.list_rooms(&r.community_id).await?}))
+        }
+        "room.participants" => {
+            let r: RoomReq = parse(body)?;
+            let info = svc.get(&r.community_id, r.room_id).await?;
+            let participants = svc.participants(&r.community_id, r.room_id).await?;
+            Ok(json!({"room_id": r.room_id, "locked": info.locked,
+                      "count": participants.len(), "participants": participants}))
+        }
+        "room.leave" | "room.kick" => {
+            let r: ParticipantActionReq = parse(body)?;
+            let closed = if op == "room.leave" {
+                // Removing someone else needs the kick scope; leaving yourself needs none.
+                let role = if has(&r.actor_scopes, SCOPE_ROOMS_KICK) {
+                    ActorRole::Moderator
+                } else {
+                    ActorRole::Member
+                };
+                svc.leave(&r.community_id, r.room_id, r.participant_id, r.actor_id, role)
+                    .await?
+            } else {
+                need_scope(&r.actor_scopes, SCOPE_ROOMS_KICK)?;
+                svc.kick(
+                    &r.community_id,
+                    r.room_id,
+                    r.participant_id,
+                    r.actor_id,
+                    ActorRole::Moderator,
+                )
+                .await?
+            };
+            Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id,
+                      "sessions_closed": closed}))
+        }
+        "room.mute" | "room.unmute" => {
+            let r: ParticipantActionReq = parse(body)?;
+            let muted = op == "room.mute";
+            need_scope(&r.actor_scopes, SCOPE_ROOMS_MUTE)?;
+            svc.set_muted(
+                &r.community_id,
+                r.room_id,
+                r.participant_id,
+                muted,
+                ActorRole::Moderator,
+            )
+            .await?;
+            Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id, "muted": muted}))
+        }
+        "room.mute_all" => {
+            let r: RoomActorReq = parse(body)?;
+            need_scope(&r.actor_scopes, SCOPE_ROOMS_MUTE)?;
+            let n = svc
+                .mute_all(&r.community_id, r.room_id, r.actor_id, ActorRole::Moderator)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "muted": n}))
+        }
+        "room.lock" | "room.unlock" => {
+            let r: RoomActorReq = parse(body)?;
+            let locked = op == "room.lock";
+            need_scope(&r.actor_scopes, SCOPE_ROOMS_LOCK)?;
+            svc.set_locked(&r.community_id, r.room_id, locked, ActorRole::Moderator)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "locked": locked}))
+        }
+        "room.hand.raise" => {
+            let r: HandParticipantReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let hand = svc
+                .raise_hand(&r.community_id, r.room_id, r.participant_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "hand": hand}))
+        }
+        "room.hand.lower" => {
+            let r: HandParticipantReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let lowered = svc
+                .lower_hand(&r.community_id, r.room_id, r.participant_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "participant_id": r.participant_id,
+                      "lowered": lowered}))
+        }
+        "room.hand.list" => {
+            let r: HandActorReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            // Staff see the whole queue, everyone else only their own entry: decided by the
+            // member table, not by anything the caller says.
+            let list = svc
+                .list_hands(&r.community_id, r.room_id, r.actor_id, HandView::Auto)
+                .await?;
+            let mut v = serde_json::to_value(list)
+                .map_err(|e| RoomError::Backend(format!("encoding hands: {e}")))?;
+            v["room_id"] = json!(r.room_id);
+            Ok(v)
+        }
+        "room.hand.ack" => {
+            let r: HandParticipantReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let hand = svc
+                .acknowledge_hand(&r.community_id, r.room_id, r.participant_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "hand": hand}))
+        }
+        "room.hand.reset" => {
+            let r: HandActorReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            let cleared = svc
+                .reset_hands(&r.community_id, r.room_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "cleared": cleared}))
+        }
+        // The host-side way to establish room staff. The caller must gate the tool that
+        // reaches this op with the manifest scope `community:moderate`, which the host
+        // verifies BEFORE dispatch -- the body carries no role.
+        "room.staff.register" => {
+            let r: HandActorReq = parse(body)?;
+            check_api_version(&r.api_version)?;
+            svc.register_staff(&r.community_id, r.room_id, r.actor_id)
+                .await?;
+            Ok(json!({"room_id": r.room_id, "actor_id": r.actor_id, "staff": true}))
         }
         "recording.start" | "recording.stop" => Err(RoomError::Unsupported(
             "room recording is unavailable: room publishers have no ffmpeg bridge/RecordSink path yet"
@@ -354,8 +679,20 @@ pub async fn serve(
     server_config: ServerConfig,
     svc: Arc<RoomService>,
 ) -> Result<(), HostApiError> {
+    serve_router(listener, server_config, router(svc), "webrtc host-api").await
+}
+
+/// The mTLS accept loop shared by the host-API and the rooms gRPC listener
+/// (`rooms::grpc`): handshake with `server_config` (client cert required), then
+/// serve `app` over HTTP/1 or HTTP/2 as negotiated. `label` only names the
+/// listener in logs.
+pub async fn serve_router(
+    listener: tokio::net::TcpListener,
+    server_config: ServerConfig,
+    app: Router,
+    label: &'static str,
+) -> Result<(), HostApiError> {
     let acceptor = TlsAcceptor::from(Arc::new(server_config));
-    let app = router(svc);
     loop {
         let (tcp, peer) = listener.accept().await?;
         let acceptor = acceptor.clone();
@@ -369,11 +706,11 @@ pub async fn serve(
                         .serve_connection_with_upgrades(io, svc)
                         .await
                     {
-                        tracing::debug!(error = %e, "webrtc host-api connection ended");
+                        tracing::debug!(listener = label, error = %e, "connection ended");
                     }
                 }
                 Err(e) => {
-                    tracing::warn!(%peer, error = %e, "webrtc host-api mTLS handshake refused")
+                    tracing::warn!(listener = label, %peer, error = %e, "mTLS handshake refused")
                 }
             }
         });

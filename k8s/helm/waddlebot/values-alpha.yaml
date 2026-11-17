@@ -26,7 +26,7 @@ global:
   # login. The password is NOT committed here (fix/alpha-helm-deploy) -- it
   # comes from the required WADDLEBOT_ALPHA_ADMIN_PASSWORD env var via
   # scripts/deploy-alpha.sh's generated secrets values file, same as
-  # jwtSecret/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
+  # sessionMacKey/moduleSecretKey/serviceApiKey/minio root creds below. NEVER
   # reused in beta/gamma/production (see values.yaml global.initialAdmin).
   initialAdmin:
     email: "admin@waddlebot.localhost.local"
@@ -56,7 +56,6 @@ infrastructure:
       limits: { cpu: "1000m", memory: "1Gi" }
   redis:
     enabled: true
-    replicas: 1
     persistence: {size: 512Mi}
     # fix/valkey-tls-alpha -- dual-listener TLS port for the 3 Rust data-plane pods, whose
     # `penguin_spine::SpineConfig::validate()` fail-closes on plaintext VALKEY_URL. Real CA/
@@ -154,6 +153,12 @@ pipeline:
   hubApi:
     aiEnabled: false
     replicas: 1
+    # Explicit reserved catch-all tenant slug (security.md Reserved Tenants): mirrors
+    # pipeline.defaultTenantId above. Alpha's tenants table holds only `default` and `system`;
+    # there is no reserved `global` tenant. hub-api logs an ERROR and returns a structured 5xx
+    # if this slug has no active tenants row.
+    extraEnv:
+      DEFAULT_TENANT_SLUG: "default"
     resources:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
@@ -253,9 +258,23 @@ pipeline:
       rtmpPort: 31935
       srtPort: 30900
       httpPort: 31208
-    resources:
-      requests: { cpu: "200m", memory: "256Mi" }
-      limits: { cpu: "2000m", memory: "1Gi" }
+    # Resources follow the base owner policy (requests 250m/512Mi, limits 4 CPU/4Gi).
+    #
+    # RTC media: NodePort (owner-approved alpha exemption from the no-external-ports rule). The
+    # fixed nodePort MUST equal webrtc.udpPort -- the SFU advertises the port it binds in its ICE
+    # candidates, so the router UDP port-forward is WAN 31400/udp -> <node IP>:31400/udp (owner
+    # action; docs/RTC_MEDIA_EXPOSURE.md). externalTrafficPolicy Cluster so any node answers
+    # (the node SNATs, hence host + remote-node in the CNP entities). Chart refuses NodePort
+    # outside global.deploymentTier alpha|local.
+    webrtc:
+      udpPort: 31400
+      media:
+        service:
+          type: NodePort
+          nodePort: { udp: 31400, tcp: 0 }
+          externalTrafficPolicy: Cluster
+        networkPolicy:
+          fromEntities: ["world", "host", "remote-node"]
 
   # feature/e2e-helm-rust-dataplane -- Rust data-plane stack. Formalizing the alpha e2e
   # cutover state here (svc-action executor wiring) -- this was previously
@@ -407,6 +426,32 @@ pipeline:
       resources:
         requests: { cpu: "500m", memory: "1Gi" }
         limits: { cpu: "4000m", memory: "2560Mi" }
+      # Language partition (owner decision 2026-11-14, approved architecture exception): compiled
+      # and scripted bundles run on SEPARATE pools, 2 replicas each (both slot owners, and the
+      # per-pool PDB renders). Worst case 2x1536Mi + 2x2560Mi = 8Gi vs the old shared 2x2560Mi:
+      # requests stay small, limits are the headroom.
+      pools:
+        - name: native
+          languageClass: compiled
+          stages: [svc-process-rust, svc-action-rust]
+          replicas: 2
+          memoryBudgetMb: 1024
+          # One-shot warm instances (headroom = limit - budget must cover maxTotal x 64Mi).
+          warmPoolSize: 1
+          warmPoolMaxTotal: 4
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "2000m", memory: "1536Mi" }
+        - name: script
+          languageClass: scripted
+          stages: [svc-process-rust, svc-action-rust]
+          replicas: 2
+          memoryBudgetMb: 1536
+          warmPoolSize: 2
+          warmPoolMaxTotal: 8
+          resources:
+            requests: { cpu: "250m", memory: "512Mi" }
+            limits: { cpu: "4000m", memory: "2560Mi" }
 
 presentation:
   # Rust svc-presentation (overlay + image surface). Overlay view/SSE port reachable on-host at
