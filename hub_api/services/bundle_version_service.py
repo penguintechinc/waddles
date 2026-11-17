@@ -431,6 +431,20 @@ async def list_versions_by_status(
     resolved_status = _STATUS_ALIASES.get(status.lower(), status.upper())
 
     query = install_dal(install_dal.app_version_uploads.status == resolved_status)
+    if status.lower() == "pending":
+        # `install_version_globally()` keeps `app_version_uploads.status == PUBLISHED`
+        # and records the install in `app_global_installs`. Exclude already-installed
+        # (and non-revoked superseded) versions so seeded or approved bundles do not
+        # linger in the Pending queue.
+        installed_rows = await install_dal(
+            install_dal.app_global_installs.revoked_at == None  # noqa: E711
+        ).select()
+        installed_pairs = {(r.app_id, r.version) for r in installed_rows}
+        if installed_pairs:
+            all_rows = await query.select(orderby=~install_dal.app_version_uploads.created_at)
+            filtered = [r for r in all_rows if (r.app_id, r.version) not in installed_pairs]
+            return filtered[offset : offset + limit], len(filtered)
+
     total = await query.count()
     rows = await query.select(
         orderby=~install_dal.app_version_uploads.created_at,

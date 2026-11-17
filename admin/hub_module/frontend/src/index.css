@@ -340,3 +340,12 @@
     animation-iteration-count: infinite !important;
   }
 }
+
+/*
+ * Work around @penguintechinc/react-libs FormModalBuilder putting both
+ * `inline-block` and `flex` on the modal card after a `100vh` inline-block
+ * spacer, which pushes the modal off the bottom-left corner at sm+.
+ */
+[role='dialog'][aria-labelledby='modal-title'] > div > div.inline-block.flex.flex-col {
+  display: inline-flex;
+}
