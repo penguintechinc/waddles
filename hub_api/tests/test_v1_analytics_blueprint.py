@@ -266,6 +266,9 @@ class TestCommunityHealthFeatureGate:
             headers=auth_headers(scope="analytics:read"),
         )
         assert response.status_code == 402
+        err = (await response.get_json())["error"]
+        assert err["code"] == "FEATURE_NOT_ENABLED"
+        assert "Professional plan" in err["message"]
         proxy_stub.assert_not_awaited()
 
     async def test_flag_on_is_200(
@@ -507,6 +510,41 @@ class TestMaskedFailure:
             "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
         )
         assert response.status_code == 502
+        err = (await response.get_json())["error"]
+        assert err["code"] == "ANALYTICS_UNAVAILABLE"
+        assert "analytics-core" in err["message"]
+        assert "unreachable" in err["message"]
+
+    async def test_url_unset_is_503_analytics_unavailable(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = {"error": "service_unavailable", "service": "analytics-core"}
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=503, body=body)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 503
+        payload = await response.get_json()
+        assert payload["success"] is False
+        assert payload["error"]["code"] == "ANALYTICS_UNAVAILABLE"
+
+    async def test_upstream_5xx_is_real_error_not_unavailable(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=500, body=None)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 502
+        assert (await response.get_json())["error"]["code"] == "ANALYTICS_UPSTREAM_ERROR"
 
     async def test_upstream_4xx_passes_status_with_rewrapped_body(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch

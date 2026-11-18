@@ -16,7 +16,9 @@ override (`PUT /api/v1/superadmin/communities/<id>`) is never flag-gated.
   2 Premium) via `community_tier_service.allocate(source=tenant_admin)`; any other tier is 400
   `INVALID_TIER`.
 
-Errors: 402 `TEAM_POOL_EXHAUSTED` (`requiredTier`, `limit`, `used`, `upgrade`), 503
+Errors: 402 `TENANT_TIER_REQUIRED` (Free tenant: no license / no Premium pool, so no Premium
+communities; `requiredTenantTier`, `upgrade`), 402 `TEAM_POOL_EXHAUSTED` (`requiredTier`,
+`limit`, `used`, `upgrade`), 503
 `TEAM_POOL_UNAVAILABLE` (the pool size could not be determined -- never a silent zero), 404 for an
 unknown / other-tenant / malformed community UUID and when the flag is OFF. Enum fields are int
 codes; only `public_id` UUIDs cross the boundary (the numeric community id never does). Every
@@ -44,7 +46,7 @@ from quart_schema import RequestSchemaValidationError, validate_request, validat
 from services import community_tier_service as svc
 from services.audit_http import get_service as get_audit_service
 from services.current_user import get_current_user_id
-from services.errors import ApiError, bad_request, not_found
+from services.errors import ApiError, bad_request, not_found, tenant_tier_required
 from services.pool_provider import get_pool_provider
 from services.schema import bind_community_tier_tables
 from services.tenant_service import require_matching_tenant
@@ -403,6 +405,9 @@ async def set_community_tier(
                 },
             ),
         )
+    except svc.TenantNotLicensed:
+        logger.info("tenant_community_tiers.tenant_not_licensed")
+        return _err(tenant_tier_required())
     except svc.PoolUnavailable:
         logger.warning("tenant_community_tiers.pool_unavailable")
         return _pool_unavailable()

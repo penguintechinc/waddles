@@ -277,7 +277,11 @@ async def get_platform_community_health() -> Any:
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_HEALTH, tenant=ctx.tenant_slug):
-        return api_error("Community health analytics requires a Professional plan or higher", 402)
+        return svc.analytics_error(
+            "Community health analytics requires a Professional plan or higher",
+            402,
+            svc.CODE_FEATURE_NOT_ENABLED,
+        )
     limit = _clamp_limit(request.args.get("limit"))
     return await svc.community_health_summaries(_proxy_client, limit)
 
