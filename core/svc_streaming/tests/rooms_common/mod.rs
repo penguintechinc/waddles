@@ -199,7 +199,7 @@ pub async fn channel(
 }
 
 pub fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 /// Mints a machine JWT like hub-api's issuer would.

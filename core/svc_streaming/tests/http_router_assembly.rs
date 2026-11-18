@@ -84,7 +84,7 @@ fn sign_token(claims: &Claims) -> String {
 }
 
 fn valid_claims(config: &Config) -> Claims {
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     Claims {
         sub: "user-123".into(),
         iss: config.cli.jwt_issuer.clone(),

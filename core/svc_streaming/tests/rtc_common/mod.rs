@@ -341,7 +341,7 @@ pub fn viewer_token_epoch(
     epoch: u64,
 ) -> String {
     use svc_streaming::rooms::token::{RoomClaims, ROOM_TOKEN_AUDIENCE, ROOM_TOKEN_ISSUER};
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     test_token_keys()
         .sign(&RoomClaims {
             iss: ROOM_TOKEN_ISSUER.into(),

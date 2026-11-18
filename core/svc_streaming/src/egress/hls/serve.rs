@@ -15,8 +15,8 @@ use axum::http::{Method, StatusCode};
 use axum::response::Response;
 use axum::routing::get;
 use axum::{Json, Router};
-use chrono::{DateTime, Utc};
 use serde::Serialize;
+use time::OffsetDateTime;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::egress::hls::output;
@@ -60,7 +60,7 @@ impl RunningPipelines for EmptyRunningPipelines {
 pub struct RunningPipeline {
     pub id: PipelineId,
     pub profile: String,
-    pub started_at: DateTime<Utc>,
+    pub started_at: OffsetDateTime,
 }
 
 /// State for [`hls_router`]: the `STREAM_DATA_DIR` root (segment/playlist
@@ -105,7 +105,8 @@ struct PipelineListingEntry {
     id: PipelineId,
     profile: String,
     url: String,
-    started_at: DateTime<Utc>,
+    #[serde(serialize_with = "crate::timestamp::serialize_z")]
+    started_at: OffsetDateTime,
 }
 
 /// Wire schema for `GET /live/{community_id}` -- `{pipelines: [...]}`.
@@ -325,7 +326,7 @@ mod tests {
     #[tokio::test]
     async fn listing_returns_pipelines_as_json() {
         let pipeline_id = Uuid::new_v4();
-        let started_at = Utc::now();
+        let started_at = OffsetDateTime::now_utc();
         let app = hls_router(state_with(vec![RunningPipeline {
             id: pipeline_id,
             profile: "1080p60".into(),
@@ -367,7 +368,7 @@ mod tests {
         let app = hls_router(state_with(vec![RunningPipeline {
             id: pipeline_id,
             profile: "1080p60".into(),
-            started_at: Utc::now(),
+            started_at: OffsetDateTime::now_utc(),
         }]));
 
         let response = app

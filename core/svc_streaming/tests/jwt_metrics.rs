@@ -146,7 +146,7 @@ async fn the_router_maps_rejections_and_reports_into_the_shared_metric_stream() 
         state.config.cli.jwt_audience.clone(),
     );
     let app = router(state);
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let claims = json!({
         "sub": "user-1", "iss": iss, "aud": aud, "iat": now, "exp": now + 3600,
         "scope": "streaming:read", "tenant": "tenant-abc", "teams": [], "roles": [],

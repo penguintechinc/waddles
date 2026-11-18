@@ -218,7 +218,7 @@ impl TokenKeys {
     }
 
     fn self_test(&self) -> Result<(), TokenError> {
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let probe = RoomClaims {
             iss: ROOM_TOKEN_ISSUER.into(),
             aud: ROOM_TOKEN_AUDIENCE.into(),
@@ -289,7 +289,7 @@ mod tests {
     }
 
     fn claims(exp_off: i64) -> RoomClaims {
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         RoomClaims {
             iss: ROOM_TOKEN_ISSUER.into(),
             aud: ROOM_TOKEN_AUDIENCE.into(),

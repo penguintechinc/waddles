@@ -13,11 +13,11 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use chrono::{DateTime, NaiveDateTime, Utc};
 use object_store::path::Path as StorePath;
 use object_store::{
     Attribute, AttributeValue, Attributes, ObjectStore, PutMultipartOptions, PutOptions,
 };
+use time::OffsetDateTime;
 use tokio::time::sleep;
 use tracing::Instrument;
 
@@ -181,15 +181,14 @@ async fn list_segment_files(dir: &Path) -> std::io::Result<Vec<SegmentFile>> {
 /// `RecordSink::ffmpeg_output_args`). Falls back to `None` (caller uses
 /// "now") for any name that doesn't match -- defensive, not expected in
 /// normal operation.
-fn parse_started_at(file_name: &str) -> Option<DateTime<Utc>> {
+fn parse_started_at(file_name: &str) -> Option<OffsetDateTime> {
     let stem = file_name.strip_suffix(".ts")?;
-    let naive = NaiveDateTime::parse_from_str(stem, "%Y%m%d%H%M%S").ok()?;
-    Some(naive.and_utc())
+    crate::timestamp::parse_compact_utc(stem)
 }
 
 async fn upload_segment(ctx: &WatcherContext, entry: &SegmentFile) -> Result<(), ()> {
     let key = format!("{}/{}", ctx.key_prefix, entry.file_name);
-    let started_at = parse_started_at(&entry.file_name).unwrap_or_else(Utc::now);
+    let started_at = parse_started_at(&entry.file_name).unwrap_or_else(OffsetDateTime::now_utc);
     let span = tracing::info_span!(
         "recording_upload",
         pipeline_id = %ctx.pipeline_id,
@@ -209,7 +208,7 @@ async fn upload_segment(ctx: &WatcherContext, entry: &SegmentFile) -> Result<(),
                 .await
             {
                 Ok(()) => {
-                    let uploaded_at = Utc::now();
+                    let uploaded_at = OffsetDateTime::now_utc();
                     ctx.metrics
                         .upload_duration_seconds
                         .with_label_values(&["success"])
@@ -282,7 +281,7 @@ fn backoff_delay(ctx: &WatcherContext, attempt: u32) -> Duration {
         .min(ctx.retry_max_delay)
 }
 
-fn build_attributes(ctx: &WatcherContext, started_at: DateTime<Utc>) -> Attributes {
+fn build_attributes(ctx: &WatcherContext, started_at: OffsetDateTime) -> Attributes {
     let mut attrs = Attributes::new();
     attrs.insert(
         Attribute::Metadata("pipeline-id".into()),
@@ -294,7 +293,7 @@ fn build_attributes(ctx: &WatcherContext, started_at: DateTime<Utc>) -> Attribut
     );
     attrs.insert(
         Attribute::Metadata("started-at".into()),
-        AttributeValue::from(started_at.to_rfc3339()),
+        AttributeValue::from(crate::timestamp::to_rfc3339_offset(started_at)),
     );
     attrs
 }
@@ -310,7 +309,7 @@ async fn try_upload_once(
     ctx: &WatcherContext,
     entry: &SegmentFile,
     key: &str,
-    started_at: DateTime<Utc>,
+    started_at: OffsetDateTime,
 ) -> Result<(), object_store::Error> {
     let location = StorePath::from(key);
     let attributes = build_attributes(ctx, started_at);
@@ -405,7 +404,10 @@ mod tests {
     #[test]
     fn parse_started_at_reads_the_strftime_pattern() {
         let parsed = parse_started_at("20260911120000.ts").expect("must parse");
-        assert_eq!(parsed.to_rfc3339(), "2026-09-11T12:00:00+00:00");
+        assert_eq!(
+            crate::timestamp::to_rfc3339_offset(parsed),
+            "2026-09-11T12:00:00+00:00"
+        );
     }
 
     #[test]
@@ -499,7 +501,7 @@ mod tests {
         ctx.store = store.clone();
         let key = "tenant-1/community-1/pipeline/large.ts";
 
-        let result = try_upload_once(&ctx, &entry, key, Utc::now()).await;
+        let result = try_upload_once(&ctx, &entry, key, OffsetDateTime::now_utc()).await;
         assert!(result.is_ok(), "multipart upload must succeed: {result:?}");
 
         let fetched = store

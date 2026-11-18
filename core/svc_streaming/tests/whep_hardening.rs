@@ -74,7 +74,9 @@ async fn whep_session_never_outlives_its_token_or_epoch() {
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(whep.viewer_count(pipeline).await, 2);
     assert_eq!(whep.sweep().await, 0, "nothing expired yet");
-    let reaped = whep.sweep_at(chrono::Utc::now().timestamp() + 60).await;
+    let reaped = whep
+        .sweep_at(time::OffsetDateTime::now_utc().unix_timestamp() + 60)
+        .await;
     assert_eq!(reaped, 1, "only the 30s-token session expired");
     assert_eq!(whep.viewer_count(pipeline).await, 1);
 
