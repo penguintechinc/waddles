@@ -22982,9 +22982,11 @@ paths:
                 a username.
               properties:
                 communityId:
-                  format: uuid
+                  anyOf:
+                  - format: uuid
+                    type: string
+                  - type: integer
                   title: Communityid
-                  type: string
                 message:
                   title: Message
                   type: string
