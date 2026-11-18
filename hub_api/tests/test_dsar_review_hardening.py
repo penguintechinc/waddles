@@ -525,14 +525,49 @@ class TestResubmitContentIsDraftUntilLatestTokenConsumed:
         assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
         assert self._plain(_rows(db)[0]) == "same"
 
-    async def test_resend_keeps_the_draft_and_the_committed_content(
+    async def test_bare_resend_clears_the_draft_so_it_never_commits(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        """regression: a resend kept an attacker's draft that the owner's resend link then committed."""
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="attacker", regime=2)
+        assert (await _resend(client, email="v@example.org", req_type=1)).status_code == 202
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig"
+        assert row.pending_message_enc is None and row.pending_regime is None
+        assert row.pending_token_hash is None
+        assert (
+            await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        ).status_code == 200
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig" and int(row.regime) == 1
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+
+    async def test_draft_is_bound_to_the_token_it_was_created_under(
         self, client: Any, db: Any, notifier: FakeNotifier
     ) -> None:
         await _public_submit(client, email="v@example.org", message="orig", regime=1)
         await _public_submit(client, email="v@example.org", message="draft", regime=2)
-        assert (await _resend(client, email="v@example.org", req_type=1)).status_code == 202
         row = _rows(db)[0]
-        assert self._plain(row) == "orig" and int(row.pending_regime) == 2
+        token = notifier.last_token()
+        assert row.pending_token_hash == svc.crypto.hash_token(token).hex()
+        assert row.pending_token_hash == row.verification_token_hash
+
+    async def test_draft_with_a_different_token_hash_is_discarded_not_committed(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        db.dal(db.dal.dsar_requests.id == _rows(db)[0].id).update(pending_token_hash="0" * 64)
+        db.dal.commit()
+        assert (
+            await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        ).status_code == 200
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig" and int(row.regime) == 1
+        assert row.pending_message_enc is None and row.pending_regime is None
+        assert row.pending_token_hash is None
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
 
     async def test_closing_an_unverified_request_purges_the_draft(
         self, client: Any, db: Any, world: dict[str, int]
@@ -547,6 +582,7 @@ class TestResubmitContentIsDraftUntilLatestTokenConsumed:
         assert res.status_code == 200
         row = _rows(db)[0]
         assert row.pending_message_enc is None and row.pending_regime is None
+        assert row.pending_token_hash is None
         assert row.message_enc is None
 
 

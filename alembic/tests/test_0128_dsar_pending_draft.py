@@ -47,9 +47,11 @@ def test_upgrade_and_downgrade_emit_expected_ddl() -> None:
         module.upgrade()
     up = "\n".join(c.args[0] for c in execute.call_args_list)
     assert "pending_message_enc TEXT" in up and "pending_regime SMALLINT" in up
+    assert "pending_token_hash TEXT" in up
     assert "ck_dsar_requests_pending_regime" in up
     with mock.patch.object(module.op, "execute") as execute:
         module.downgrade()
     down = "\n".join(c.args[0] for c in execute.call_args_list)
     assert "DROP COLUMN IF EXISTS pending_regime" in down
     assert "DROP COLUMN IF EXISTS pending_message_enc" in down
+    assert "DROP COLUMN IF EXISTS pending_token_hash" in down

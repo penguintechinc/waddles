@@ -3339,6 +3339,7 @@ def bind_dsar_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("message_enc", "text"),
         Field("pending_message_enc", "text"),
         Field("pending_regime", "integer"),
+        Field("pending_token_hash", "string", length=64),
         Field("contact_purged_at", "datetime"),
         Field("verification_token_hash", "string", length=64),
         Field("verification_expires_at", "datetime"),

@@ -794,15 +794,27 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
     commit: dict[str, Any] = {}
     committed_regime = int(row.regime)
     content_changed = False
-    if row.pending_regime is not None:
-        # The latest token's draft becomes the request's content, now that its mailbox owner
-        # redeemed that exact token (an older token no longer matches the stored hash).
+    draft_bound = (
+        row.pending_regime is not None
+        and row.pending_token_hash is not None
+        and hmac_equal(str(row.pending_token_hash), token_hash)
+    )
+    if row.pending_regime is not None and not draft_bound:
+        # A draft not created under THIS token is never committed, only discarded.
+        commit = {
+            "pending_message_enc": None,
+            "pending_regime": None,
+            "pending_token_hash": None,
+        }
+    if draft_bound:
+        # The draft was created under exactly the token redeemed now: its mailbox owner commits it.
         committed_regime = int(row.pending_regime)
         commit = {
             "message_enc": row.pending_message_enc,
             "regime": committed_regime,
             "pending_message_enc": None,
             "pending_regime": None,
+            "pending_token_hash": None,
         }
         old_message = (
             crypto.decrypt(row.message_enc, row_id=row.public_id) if row.message_enc else None
@@ -876,7 +888,9 @@ def rotate_pending_public_sync(
     `message_enc`/`regime`: the new content is stored as a DRAFT (`pending_message_enc` encrypted under
     the row's public_id, NULL when absent; `pending_regime`) tied to the token minted here, and
     `consume_verification_token` commits it only when that latest token is redeemed, i.e. by the
-    mailbox owner. A bare resend passes `None` and leaves any draft as it was.
+    mailbox owner. The draft is bound to this token by `pending_token_hash`. A bare resend passes
+    `None` and CLEARS any draft (an earlier submitter's content must not ride a link it did not
+    create).
     """
     now = now_utc()
     rows = dal(
@@ -890,7 +904,12 @@ def rotate_pending_public_sync(
         return None
     row = rows[0]
     token = _new_token()
-    content: dict[str, Any] = {}
+    new_hash = crypto.hash_token(token).hex()
+    content: dict[str, Any] = {
+        "pending_message_enc": None,
+        "pending_regime": None,
+        "pending_token_hash": None,
+    }
     if replace_content is not None:
         message, regime = replace_content
         content = {
@@ -898,12 +917,13 @@ def rotate_pending_public_sync(
                 crypto.encrypt(message, row_id=row.public_id) if message else None
             ),
             "pending_regime": int(regime),
+            "pending_token_hash": new_hash,
         }
     updated = dal(
         (dal.dsar_requests.id == row.id)
         & (dal.dsar_requests.status == int(RequestStatus.VERIFICATION_PENDING))
     ).update(
-        verification_token_hash=crypto.hash_token(token).hex(),
+        verification_token_hash=new_hash,
         verification_expires_at=now + timedelta(minutes=verify_token_ttl_minutes()),
         updated_at=now,
         **content,
@@ -1019,6 +1039,7 @@ async def _purge_contact(async_dal: Any, dal: Any, row_id: int) -> None:
         message_enc=None,
         pending_message_enc=None,
         pending_regime=None,
+        pending_token_hash=None,
         response_notes=None,  # admin free text may quote the requester: purged with the contact data
         verification_token_hash=None,
         verification_expires_at=None,

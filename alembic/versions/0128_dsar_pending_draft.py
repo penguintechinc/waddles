@@ -2,8 +2,9 @@
 
 A resubmit for an already-pending public request used to overwrite the committed `message_enc` /
 `regime`, letting an unauthenticated third party rewrite what the mailbox owner had written. The
-resubmitted content now waits in a DRAFT (`pending_message_enc`, `pending_regime`) and is copied into
-the committed columns only when the latest emailed token is consumed (the mailbox owner clicked it).
+resubmitted content now waits in a DRAFT (`pending_message_enc`, `pending_regime`, bound to the token it was created under by
+`pending_token_hash`) and is copied into the committed columns only when exactly that token is
+consumed (the mailbox owner clicked it); a bare resend clears the draft.
 `pending_regime IS NOT NULL` marks that a draft exists (its message may legitimately be NULL).
 
 Both columns are nullable and unindexed; the encrypted draft is blanked with the other contact data.
@@ -25,6 +26,7 @@ depends_on = None
 _UPGRADE = (
     "ALTER TABLE dsar_requests ADD COLUMN IF NOT EXISTS pending_message_enc TEXT",
     "ALTER TABLE dsar_requests ADD COLUMN IF NOT EXISTS pending_regime SMALLINT",
+    "ALTER TABLE dsar_requests ADD COLUMN IF NOT EXISTS pending_token_hash TEXT",
     (
         "ALTER TABLE dsar_requests ADD CONSTRAINT ck_dsar_requests_pending_regime "
         "CHECK (pending_regime IS NULL OR pending_regime BETWEEN 1 AND 3)"
@@ -33,6 +35,7 @@ _UPGRADE = (
 
 _DOWNGRADE = (
     "ALTER TABLE dsar_requests DROP CONSTRAINT IF EXISTS ck_dsar_requests_pending_regime",
+    "ALTER TABLE dsar_requests DROP COLUMN IF EXISTS pending_token_hash",
     "ALTER TABLE dsar_requests DROP COLUMN IF EXISTS pending_regime",
     "ALTER TABLE dsar_requests DROP COLUMN IF EXISTS pending_message_enc",
 )
