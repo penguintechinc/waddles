@@ -12,12 +12,12 @@ import { communityKeys } from './useMyCommunities';
 
 /** Query keys for join-request reads. */
 export const joinRequestKeys = {
-  mine: (communityId: number) => ['community', communityId, 'join-request', 'mine'] as const,
-  pending: (communityId: number) => ['community', communityId, 'join-requests', 'pending'] as const,
+  mine: (communityId: string) => ['community', communityId, 'join-request', 'mine'] as const,
+  pending: (communityId: string) => ['community', communityId, 'join-requests', 'pending'] as const,
 };
 
 /** The caller's own request for a community; `enabled` is false for signed-out visitors. */
-export function useMyJoinRequest(communityId: number, enabled: boolean): UseQueryResult<MyJoinRequest | null> {
+export function useMyJoinRequest(communityId: string, enabled: boolean): UseQueryResult<MyJoinRequest | null> {
   return useQuery({
     queryKey: joinRequestKeys.mine(communityId),
     queryFn: () => fetchMyJoinRequest(communityId),
@@ -26,7 +26,7 @@ export function useMyJoinRequest(communityId: number, enabled: boolean): UseQuer
 }
 
 /** Submit (or reopen) a join request, then refresh the caller's request status. */
-export function useSubmitJoinRequest(communityId: number): UseMutationResult<MyJoinRequest, Error, string> {
+export function useSubmitJoinRequest(communityId: string): UseMutationResult<MyJoinRequest, Error, string> {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: (message: string) => submitJoinRequest(communityId, message),
@@ -35,7 +35,7 @@ export function useSubmitJoinRequest(communityId: number): UseMutationResult<MyJ
 }
 
 /** Join an open community directly, then refresh the caller's community list. */
-export function useJoinOpenCommunity(communityId: number): UseMutationResult<{ joined: boolean }, Error, void> {
+export function useJoinOpenCommunity(communityId: string): UseMutationResult<{ joined: boolean }, Error, void> {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: () => joinOpenCommunity(communityId),
@@ -44,7 +44,7 @@ export function useJoinOpenCommunity(communityId: number): UseMutationResult<{ j
 }
 
 /** Pending join requests for the admin queue. */
-export function usePendingJoinRequests(communityId: number): UseQueryResult<JoinRequestPage> {
+export function usePendingJoinRequests(communityId: string): UseQueryResult<JoinRequestPage> {
   return useQuery({ queryKey: joinRequestKeys.pending(communityId), queryFn: () => fetchJoinRequests(communityId) });
 }
 
@@ -54,7 +54,7 @@ export interface ReviewJoinRequestVariables {
 }
 
 /** Approve/reject; refreshes the queue, and (on approve) the member's own community list. */
-export function useReviewJoinRequest(communityId: number): UseMutationResult<void, Error, ReviewJoinRequestVariables> {
+export function useReviewJoinRequest(communityId: string): UseMutationResult<void, Error, ReviewJoinRequestVariables> {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: ({ requestId, decision }: ReviewJoinRequestVariables) => reviewJoinRequest(communityId, requestId, decision),

@@ -23,7 +23,7 @@ const BAR_FILL: Record<BadgeTone, string> = {
  * Top reputation scorers for a community, from the served
  * `GET /api/v1/community/:id/reputation/leaderboard` (display names only; the server exposes no ids or avatars).
  */
-export function ReputationLeaderboardTab({ communityId }: { communityId: number }) {
+export function ReputationLeaderboardTab({ communityId }: { communityId: string }) {
   const query = useReputationLeaderboard(communityId, 50);
 
   const columns: readonly Column<ReputationEntry & { rank: number }>[] = [

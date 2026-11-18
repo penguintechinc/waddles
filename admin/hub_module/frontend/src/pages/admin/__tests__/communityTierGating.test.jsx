@@ -31,13 +31,13 @@ vi.mock('../../../services/api', () => ({
 vi.mock('../../../components/BotScoreBadge', () => ({ default: () => null }));
 vi.mock('../../../components/FormModal', () => ({ FormModalBuilder: () => null }));
 
-/** Mounts a page at /admin/7/x with /auth/me reporting community 7 at `tier` (undefined = field absent). */
+/** Mounts a page at /admin/00000007-0000-4000-8000-000000000000/x with /auth/me reporting community 7 at `tier` (undefined = field absent). */
 async function mount(Page, tier) {
-  const community = { id: 7, name: 'acme', role: 'community-admin' };
+  const community = { id: '00000007-0000-4000-8000-000000000000', name: 'acme', role: 'community-admin' };
   if (tier !== undefined) community.licenseTier = tier;
   api.get.mockResolvedValue({ data: { success: true, user: { id: 1, communities: [community] } } });
   render(
-    <MemoryRouter initialEntries={['/admin/7/x']}>
+    <MemoryRouter initialEntries={['/admin/00000007-0000-4000-8000-000000000000/x']}>
       <AuthProvider>
         <Routes><Route path="/admin/:communityId/x" element={<Page />} /></Routes>
       </AuthProvider>

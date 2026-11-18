@@ -69,7 +69,7 @@ function parseRow(raw: unknown): JoinRequestRow {
 }
 
 /** `POST /api/v1/:id/join-requests`; resolves to the pending request that was created/reopened. */
-export async function submitJoinRequest(communityId: number, message: string): Promise<MyJoinRequest> {
+export async function submitJoinRequest(communityId: string, message: string): Promise<MyJoinRequest> {
   const { data } = await apiClient.post<unknown>(`/api/v1/${communityId}/join-requests`, {
     message: message.trim() === '' ? null : message,
   });
@@ -84,21 +84,21 @@ export async function submitJoinRequest(communityId: number, message: string): P
 }
 
 /** `POST /api/v1/communities/:id/join` -- direct join of an open community; `joined` is false if already a member. */
-export async function joinOpenCommunity(communityId: number): Promise<{ joined: boolean }> {
+export async function joinOpenCommunity(communityId: string): Promise<{ joined: boolean }> {
   const { data } = await apiClient.post<unknown>(`/api/v1/communities/${communityId}/join`);
   const body = expectRecord(data, 'open join');
   return { joined: body['joined'] === true };
 }
 
 /** `GET /api/v1/:id/join-requests/mine`; `null` when the caller has never asked to join. */
-export async function fetchMyJoinRequest(communityId: number): Promise<MyJoinRequest | null> {
+export async function fetchMyJoinRequest(communityId: string): Promise<MyJoinRequest | null> {
   const { data } = await apiClient.get<unknown>(`/api/v1/${communityId}/join-requests/mine`);
   const request = expectRecord(data, 'my join request')['request'];
   return request === null || request === undefined ? null : parseMine(request);
 }
 
 /** `GET /api/v1/admin/:id/join-requests?status=pending`. */
-export async function fetchJoinRequests(communityId: number, page = 1, limit = 25): Promise<JoinRequestPage> {
+export async function fetchJoinRequests(communityId: string, page = 1, limit = 25): Promise<JoinRequestPage> {
   const { data } = await apiClient.get<unknown>(`/api/v1/admin/${communityId}/join-requests`, {
     params: { status: 'pending', page, limit },
   });
@@ -114,7 +114,7 @@ export async function fetchJoinRequests(communityId: number, page = 1, limit = 2
 
 /** `PUT /api/v1/admin/:id/join-requests/:requestId/{approve,reject}`. */
 export async function reviewJoinRequest(
-  communityId: number,
+  communityId: string,
   requestId: number,
   decision: 'approve' | 'reject',
 ): Promise<void> {

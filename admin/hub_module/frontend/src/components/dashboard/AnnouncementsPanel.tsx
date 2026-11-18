@@ -33,7 +33,7 @@ function AnnouncementItem({ announcement }: { announcement: Announcement }) {
  * Latest published announcements (community admins only; the server rejects everyone else, so
  * non-managers are never queried). Every response shows a state: empty, plan (402), unavailable (503), error.
  */
-export function AnnouncementsPanel({ communityId, canManage }: { communityId: number; canManage: boolean }) {
+export function AnnouncementsPanel({ communityId, canManage }: { communityId: string; canManage: boolean }) {
   const query = useAnnouncements(communityId, 5, canManage);
   if (!canManage) return null;
   return (

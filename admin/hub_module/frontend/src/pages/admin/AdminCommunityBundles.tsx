@@ -7,6 +7,7 @@ import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import { bundleActivationApi, type StorageAccess, type TableAccess } from '../../services/bundleActivationApi';
 import AccessGrantWarning from '../../components/bundles/AccessGrantWarning';
+import { parseCommunityId } from '../../lib/communityId';
 
 /**
  * Community Bundles ("app bundle modularity") admin page -- COMMUNITY tier
@@ -21,7 +22,7 @@ import AccessGrantWarning from '../../components/bundles/AccessGrantWarning';
  */
 
 const bundleActivationKeys = {
-  list: (communityId: number) => ['community-bundle-activations', communityId] as const,
+  list: (communityId: string) => ['community-bundle-activations', communityId] as const,
 };
 
 /** Read-only PostHog `waddles.command-<appId>` runtime status beside a bundle row. */
@@ -43,7 +44,7 @@ function CommandFlagBadge({ appId }: { appId: string }) {
 // shape is not reliably inferred when consumed from a strict .tsx file, so
 // `isCommunityAdmin` is typed explicitly here rather than trusting inference.
 interface CommunityAuth {
-  isCommunityAdmin: (communityId: string | number | undefined) => boolean;
+  isCommunityAdmin: (communityId: string | undefined) => boolean;
 }
 
 export default function AdminCommunityBundles() {
@@ -63,8 +64,9 @@ export default function AdminCommunityBundles() {
   } | null>(null);
   const [grantsAck, setGrantsAck] = useState(false);
 
-  const communityId = Number(communityIdParam);
-  const hasValidCommunity = Number.isFinite(communityId);
+  // '' marks an invalid route param: queries stay disabled and the page renders its invalid state.
+  const communityId = parseCommunityId(communityIdParam) ?? '';
+  const hasValidCommunity = communityId !== '';
   const canManage = Boolean(isCommunityAdmin(communityIdParam));
 
   const {

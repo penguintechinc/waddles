@@ -15,13 +15,13 @@ export interface EventSyncState {
 
 export const eventSyncApi = {
   /** `GET /api/v1/communities/<id>/calendar/event-sync` -- requires `community.guild_pairing:read`. */
-  get: (communityId: string | number) =>
+  get: (communityId: string) =>
     apiClient
       .get<EventSyncState>(`/api/v1/communities/${communityId}/calendar/event-sync`)
       .then((res) => res.data),
 
   /** `PUT /api/v1/communities/<id>/calendar/event-sync` body `{enabled}` -- requires `community.guild_pairing:write`. */
-  set: (communityId: string | number, enabled: boolean) =>
+  set: (communityId: string, enabled: boolean) =>
     apiClient
       .put<EventSyncState>(`/api/v1/communities/${communityId}/calendar/event-sync`, { enabled })
       .then((res) => res.data),

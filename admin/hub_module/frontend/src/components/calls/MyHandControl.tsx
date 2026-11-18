@@ -6,7 +6,7 @@ import type { CallsApiError } from '../../services/callsApi';
 import { CallsActionError } from './CallsErrors';
 
 export interface MyHandControlProps {
-  communityId: number;
+  communityId: string;
   roomId: string;
 }
 

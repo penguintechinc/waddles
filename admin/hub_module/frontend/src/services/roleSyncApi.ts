@@ -20,8 +20,8 @@ export interface CreateGuildPairingPayload {
 
 /** Shared TanStack Query keys for role-sync data, so every writer invalidates the same cache entry. */
 export const roleSyncKeys = {
-  pairings: (communityId: number) => ['role-sync-pairings', communityId] as const,
-  bindings: (communityId: number, pairingId: number) =>
+  pairings: (communityId: string) => ['role-sync-pairings', communityId] as const,
+  bindings: (communityId: string, pairingId: number) =>
     ['role-sync-bindings', communityId, pairingId] as const,
 };
 
@@ -152,7 +152,7 @@ export interface CreateRoleMirrorPayload {
 
 export const roleSyncApi = {
   /** `GET .../discord/roles?guild_id=` -- a paired guild's roles; requires `community.guild_pairing:read`. */
-  listGuildRoles: (communityId: number, guildId: string) =>
+  listGuildRoles: (communityId: string, guildId: string) =>
     apiClient
       .get<{ success: boolean; roles: DiscordRole[] }>(
         `/api/v1/communities/${communityId}/discord/roles`,
@@ -161,7 +161,7 @@ export const roleSyncApi = {
       .then((res) => res.data.roles),
 
   /** `GET .../discord/role-mirrors` -- mirror mappings + last sync counters. */
-  listMirrors: (communityId: number) =>
+  listMirrors: (communityId: string) =>
     apiClient
       .get<{ success: boolean; mappings: RoleMirrorMapping[] }>(
         `/api/v1/communities/${communityId}/discord/role-mirrors`,
@@ -169,7 +169,7 @@ export const roleSyncApi = {
       .then((res) => res.data.mappings),
 
   /** `POST .../discord/role-mirrors` -- one-way source -> target mapping; requires `...:write`. */
-  createMirror: (communityId: number, payload: CreateRoleMirrorPayload) =>
+  createMirror: (communityId: string, payload: CreateRoleMirrorPayload) =>
     apiClient
       .post<{ success: boolean; mapping: RoleMirrorMapping }>(
         `/api/v1/communities/${communityId}/discord/role-mirrors`,
@@ -178,11 +178,11 @@ export const roleSyncApi = {
       .then((res) => res.data.mapping),
 
   /** `DELETE .../discord/role-mirrors/<mappingId>`. */
-  deleteMirror: (communityId: number, mappingId: number) =>
+  deleteMirror: (communityId: string, mappingId: number) =>
     apiClient.delete<void>(`/api/v1/communities/${communityId}/discord/role-mirrors/${mappingId}`),
 
   /** `GET /api/v1/communities/<communityId>/guild-pairings` -- requires `community.guild_pairing:read`. */
-  listPairings: (communityId: number) =>
+  listPairings: (communityId: string) =>
     apiClient
       .get<GuildPairingListResponse>(`/api/v1/communities/${communityId}/guild-pairings`)
       .then((res) => res.data.pairings),
@@ -191,7 +191,7 @@ export const roleSyncApi = {
    * `POST /api/v1/communities/<communityId>/guild-pairings` -- pair a Discord
    * server by ID (hub-api verifies the bot is in it); requires `community.guild_pairing:write`.
    */
-  createPairing: (communityId: number, payload: CreateGuildPairingPayload) =>
+  createPairing: (communityId: string, payload: CreateGuildPairingPayload) =>
     apiClient
       .post<GuildPairingResponse>(`/api/v1/communities/${communityId}/guild-pairings`, payload)
       .then((res) => res.data.pairing),
@@ -200,7 +200,7 @@ export const roleSyncApi = {
    * `POST .../discord/server-install/authorize` -- returns the Discord OAuth
    * install URL the browser must be sent to; the callback pairs the server.
    */
-  startServerInstall: (communityId: number, payload: { sync_enabled: boolean }) =>
+  startServerInstall: (communityId: string, payload: { sync_enabled: boolean }) =>
     apiClient
       .post<{ success: boolean; authorize_url: string }>(
         `/api/v1/communities/${communityId}/discord/server-install/authorize`,
@@ -209,7 +209,7 @@ export const roleSyncApi = {
       .then((res) => res.data.authorize_url),
 
   /** `PATCH .../guild-pairings/<pairingId>` -- requires `community.guild_pairing:write`. */
-  updatePairing: (communityId: number, pairingId: number, payload: UpdateGuildPairingPayload) =>
+  updatePairing: (communityId: string, pairingId: number, payload: UpdateGuildPairingPayload) =>
     apiClient
       .patch<GuildPairingResponse>(
         `/api/v1/communities/${communityId}/guild-pairings/${pairingId}`,
@@ -218,7 +218,7 @@ export const roleSyncApi = {
       .then((res) => res.data.pairing),
 
   /** `GET .../guild-pairings/<pairingId>/role-bindings` -- requires `community.guild_pairing:read`. */
-  listBindings: (communityId: number, pairingId: number) =>
+  listBindings: (communityId: string, pairingId: number) =>
     apiClient
       .get<RoleSyncBindingListResponse>(
         `/api/v1/communities/${communityId}/guild-pairings/${pairingId}/role-bindings`,
@@ -226,7 +226,7 @@ export const roleSyncApi = {
       .then((res) => res.data.bindings),
 
   /** `POST .../guild-pairings/<pairingId>/role-bindings` -- requires `community.guild_pairing:write`. */
-  createBinding: (communityId: number, pairingId: number, payload: CreateRoleSyncBindingPayload) =>
+  createBinding: (communityId: string, pairingId: number, payload: CreateRoleSyncBindingPayload) =>
     apiClient
       .post<RoleSyncBindingResponse>(
         `/api/v1/communities/${communityId}/guild-pairings/${pairingId}/role-bindings`,
@@ -235,7 +235,7 @@ export const roleSyncApi = {
       .then((res) => res.data.binding),
 
   /** `DELETE .../guild-pairings/<pairingId>/role-bindings/<bindingId>` -- requires `community.guild_pairing:write`. */
-  deleteBinding: (communityId: number, pairingId: number, bindingId: number) =>
+  deleteBinding: (communityId: string, pairingId: number, bindingId: number) =>
     apiClient.delete<void>(
       `/api/v1/communities/${communityId}/guild-pairings/${pairingId}/role-bindings/${bindingId}`,
     ),

@@ -13,8 +13,8 @@ import { answerResponse, fakeDevices, fakeMediaDeps, resetFakeRtc } from '../../
 const auth = vi.hoisted(() => ({ admin: false }));
 vi.mock('../../../contexts/AuthContext', () => ({ useAuth: () => ({ isCommunityAdmin: () => auth.admin }) }));
 
-const TOWN_HALL = '/api/v1/communities/7/town-hall';
-const MEMBER = `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}`;
+const TOWN_HALL = '/api/v1/communities/00000007-0000-4000-8000-000000000000/town-hall';
+const MEMBER = `/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms/${ROOM_ID}`;
 const SELF = '11111111-1111-4111-8111-111111111111';
 const hall = {
   success: true,
@@ -23,11 +23,11 @@ const hall = {
   locked: false,
   participant_count: 2,
   created: false,
-  join: { method: 'POST', path: `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}/join` },
+  join: { method: 'POST', path: `/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms/${ROOM_ID}/join` },
 };
-const MEMBER_ROOMS = '/api/v1/community/7/interact/voice/rooms';
-const MEMBER_PARTICIPANTS = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/participants`;
-const MY_HAND = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`;
+const MEMBER_ROOMS = '/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms';
+const MEMBER_PARTICIPANTS = `/api/v1/communities/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/participants`;
+const MY_HAND = `/api/v1/communities/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/hands/mine`;
 const handIdle = { success: true, participant_id: SELF, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null };
 const joinOk = {
   success: true,
@@ -46,7 +46,7 @@ const joinOk = {
 const roster = { success: true, locked: false, participants: [participantWire(SELF, 'Me Myself'), participantWire(ADA, 'Ada Lovelace')] };
 const memberRooms = { success: true, rooms: [roomWire({ room_id: ROOM_ID, publisher_ids: [SELF, ADA], subscriber_count: 0 })] };
 
-function renderPage(route = '/community/7/town-hall') {
+function renderPage(route = '/community/00000007-0000-4000-8000-000000000000/town-hall') {
   const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => (init.method === 'DELETE' ? new Response(null, { status: 204 }) : answerResponse('/rtc/rooms/r/sessions/s')));
   return renderWithProviders(
     <TownHall overrides={{ devices: fakeDevices(), media: fakeMediaDeps(fetchImpl as unknown as ReturnType<typeof vi.fn>) }} />,
@@ -88,8 +88,8 @@ describe('TownHall', () => {
       [`GET ${MEMBER_ROOMS}`]: memberRooms,
       [`GET ${MEMBER_PARTICIPANTS}`]: roster,
       [`GET ${MY_HAND}`]: handIdle,
-      [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/participants`]: roster,
-      [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/raised-hands`]: { success: true, count: 0, raised_hands: [] },
+      [`GET /api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/participants`]: roster,
+      [`GET /api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/raised-hands`]: { success: true, count: 0, raised_hands: [] },
     });
     const { unmount } = renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Join with microphone' }));

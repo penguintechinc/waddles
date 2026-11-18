@@ -12,7 +12,7 @@ function Stat({ value, label, tone }: { value: string; label: string; tone: stri
 }
 
 /** The caller's weekly stats and ranks. A failure is shown inline; it never hides the leaderboard below. */
-export function MyStatsCard({ communityId }: { communityId: number }) {
+export function MyStatsCard({ communityId }: { communityId: string }) {
   const query = useMyActivityStats(communityId);
   if (query.isPending) return <Skeleton className="mb-6 h-24" />;
   if (query.isError) {

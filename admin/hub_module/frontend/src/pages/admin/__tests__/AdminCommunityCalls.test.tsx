@@ -19,9 +19,9 @@ import {
   serve,
 } from '../../../test/callsFixtures';
 
-const BASE = '/api/v1/admin/7/calls/rooms';
+const BASE = '/api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms';
 
-function renderPage(route = '/admin/7/calls') {
+function renderPage(route = '/admin/00000007-0000-4000-8000-000000000000/calls') {
   return renderWithProviders(<AdminCommunityCalls />, { route, path: '/admin/:communityId/calls' });
 }
 

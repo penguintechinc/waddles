@@ -13,6 +13,7 @@ import { TIER } from '../../services/communityTierConstants';
 import { useLiveStreams } from '../../hooks/useCommunityPanels';
 import { useMyCommunities, usePublicCommunity } from '../../hooks/useMyCommunities';
 import type { MyCommunity } from '../../services/myCommunitiesApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 function StatTile({ value, label, tone }: { value: string; label: string; tone: string }) {
   return (
@@ -76,7 +77,7 @@ function DashboardBody({ membership }: { membership: MyCommunity }) {
 }
 
 /** Member dashboard for one community, composed only from routes hub-api serves. */
-function DashboardView({ communityId }: { communityId: number }) {
+function DashboardView({ communityId }: { communityId: string }) {
   const mine = useMyCommunities();
   return (
     <QueryBoundary
@@ -109,8 +110,8 @@ function DashboardView({ communityId }: { communityId: number }) {
 /** Route wrapper: validates `:id` before any query runs. */
 export default function CommunityDashboard() {
   const { id } = useParams<{ id: string }>();
-  const communityId = Number(id);
-  if (!Number.isInteger(communityId) || communityId <= 0) {
+  const communityId = parseCommunityId(id);
+  if (communityId === null) {
     return <ErrorState title="Unknown community" message="This community link is not valid." />;
   }
   return <DashboardView communityId={communityId} />;

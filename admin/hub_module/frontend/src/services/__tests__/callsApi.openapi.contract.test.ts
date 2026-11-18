@@ -44,7 +44,7 @@ const spec = loadSpec();
 const rec = recordRequests(apiClient);
 afterAll(rec.restore);
 
-const COMMUNITY = 7;
+const COMMUNITY = '00000007-0000-4000-8000-000000000000';
 const ROOM = '3f2b8c1e-9a4d-4e57-8b21-6c0d5e7f1a90';
 const PERSON = '7a1d2c3b-5e6f-4a80-9b1c-2d3e4f5a6b7c';
 
@@ -140,15 +140,15 @@ describe('calls client conforms to openapi/v1.yaml', () => {
 
 describe('the contract checks can fail', () => {
   it('rejects a path the spec does not document', () => {
-    expect(findOperation(spec, 'GET', '/api/v1/admin/7/calls/lobbies')).toBeNull();
+    expect(findOperation(spec, 'GET', '/api/v1/admin/00000007-0000-4000-8000-000000000000/calls/lobbies')).toBeNull();
   });
 
   it('rejects a method the spec does not document on a real path', () => {
-    expect(findOperation(spec, 'PATCH', '/api/v1/admin/7/calls/rooms')).toBeNull();
+    expect(findOperation(spec, 'PATCH', '/api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms')).toBeNull();
   });
 
   it('rejects the legacy create body ({name}) and a missing required key', () => {
-    const found = findOperation(spec, 'POST', '/api/v1/community/7/interact/voice/rooms');
+    const found = findOperation(spec, 'POST', '/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms');
     expect(found).not.toBeNull();
     expect(checkRequestBody(spec, found?.operation ?? {}, { name: 'x' })).toEqual([
       'body key "name" is not in the spec',
@@ -157,7 +157,7 @@ describe('the contract checks can fail', () => {
   });
 
   it('rejects a body on an operation that declares none', () => {
-    const found = findOperation(spec, 'POST', `/api/v1/admin/7/calls/rooms/${ROOM}/lock`);
+    const found = findOperation(spec, 'POST', `/api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM}/lock`);
     expect(checkRequestBody(spec, found?.operation ?? {}, { x: 1 })).toEqual(['client sent a body but the spec declares none']);
   });
 

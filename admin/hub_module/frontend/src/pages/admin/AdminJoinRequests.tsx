@@ -4,6 +4,7 @@ import { Alert, Button, DataTable, ErrorState, PageHeader, type Column } from '.
 import { getErrorMessage } from '../../components/ui/errors';
 import { usePendingJoinRequests, useReviewJoinRequest } from '../../hooks/useJoinRequests';
 import type { JoinRequestRow } from '../../services/joinRequestsApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 /** `Oct 21, 2026`; empty when the timestamp does not parse. */
 function formatRequested(iso: string): string {
@@ -12,7 +13,7 @@ function formatRequested(iso: string): string {
 }
 
 /** Pending join-request queue with approve/reject, on the served `/admin/:id/join-requests` routes. */
-function JoinRequestsQueue({ communityId }: { communityId: number }) {
+function JoinRequestsQueue({ communityId }: { communityId: string }) {
   const query = usePendingJoinRequests(communityId);
   const review = useReviewJoinRequest(communityId);
   const busy = review.isPending ? review.variables : undefined;
@@ -102,8 +103,8 @@ function JoinRequestsQueue({ communityId }: { communityId: number }) {
 /** Route wrapper: validates `:communityId` before any query runs. */
 export default function AdminJoinRequests() {
   const { communityId } = useParams<{ communityId: string }>();
-  const id = Number(communityId);
-  if (!Number.isInteger(id) || id <= 0) {
+  const id = parseCommunityId(communityId);
+  if (id === null) {
     return <ErrorState title="Unknown community" message="This join requests link is not valid." />;
   }
   return <JoinRequestsQueue communityId={id} />;

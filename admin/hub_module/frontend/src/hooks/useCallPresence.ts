@@ -20,7 +20,7 @@ export interface CallPresence {
  * read the member participants route (names + media state, no moderation internals). `enabled` is false until
  * the call is connected.
  */
-export function useCallPresence(communityId: number, roomId: string, moderator: boolean, enabled: boolean): CallPresence {
+export function useCallPresence(communityId: string, roomId: string, moderator: boolean, enabled: boolean): CallPresence {
   const admin = useRoomParticipants(communityId, roomId, enabled && moderator);
   const member = useMemberParticipants(communityId, roomId, enabled && !moderator);
   const source = moderator ? admin : member;

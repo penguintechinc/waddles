@@ -41,12 +41,12 @@ export const CALLS_POLL_MS = 5000;
 
 /** Query keys for calls reads, scoped by route family and community. */
 export const callKeys = {
-  rooms: (scope: CallsScope, communityId: number) => ['calls', scope, communityId, 'rooms'] as const,
-  participants: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'participants'] as const,
-  memberParticipants: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'participants'] as const,
-  hands: (communityId: number, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'hands'] as const,
-  townHall: (communityId: number) => ['calls', 'member', communityId, 'town-hall'] as const,
-  myHand: (communityId: number, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'my-hand'] as const,
+  rooms: (scope: CallsScope, communityId: string) => ['calls', scope, communityId, 'rooms'] as const,
+  participants: (communityId: string, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'participants'] as const,
+  memberParticipants: (communityId: string, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'participants'] as const,
+  hands: (communityId: string, roomId: string) => ['calls', 'admin', communityId, 'rooms', roomId, 'hands'] as const,
+  townHall: (communityId: string) => ['calls', 'member', communityId, 'town-hall'] as const,
+  myHand: (communityId: string, roomId: string) => ['calls', 'member', communityId, 'rooms', roomId, 'my-hand'] as const,
 };
 
 /** Stops polling once a read has failed, so an error state stays put until the user retries. */
@@ -55,7 +55,7 @@ export function pollUnlessFailed(state: { status: string }): number | false {
 }
 
 /** Rooms of a community. Failures are an error state (never an empty list); no automatic retries, the UI offers one. */
-export function useCallRooms(scope: CallsScope, communityId: number, enabled = true): UseQueryResult<CallRoom[], CallsApiError> {
+export function useCallRooms(scope: CallsScope, communityId: string, enabled = true): UseQueryResult<CallRoom[], CallsApiError> {
   return useQuery<CallRoom[], CallsApiError>({
     queryKey: callKeys.rooms(scope, communityId),
     queryFn: () => fetchRooms(scope, communityId),
@@ -66,7 +66,7 @@ export function useCallRooms(scope: CallsScope, communityId: number, enabled = t
 }
 
 /** Participants of the selected room (moderator view), polled. */
-export function useRoomParticipants(communityId: number, roomId: string | null, enabled = true): UseQueryResult<CallParticipantList, CallsApiError> {
+export function useRoomParticipants(communityId: string, roomId: string | null, enabled = true): UseQueryResult<CallParticipantList, CallsApiError> {
   return useQuery<CallParticipantList, CallsApiError>({
     queryKey: callKeys.participants(communityId, roomId ?? ''),
     queryFn: () => fetchParticipants(communityId, roomId ?? ''),
@@ -77,7 +77,7 @@ export function useRoomParticipants(communityId: number, roomId: string | null, 
 }
 
 /** Participants of a room as a member sees them (names + media state, no moderation internals), polled. */
-export function useMemberParticipants(communityId: number, roomId: string | null, enabled = true): UseQueryResult<CallParticipantList, CallsApiError> {
+export function useMemberParticipants(communityId: string, roomId: string | null, enabled = true): UseQueryResult<CallParticipantList, CallsApiError> {
   return useQuery<CallParticipantList, CallsApiError>({
     queryKey: callKeys.memberParticipants(communityId, roomId ?? ''),
     queryFn: () => fetchMemberParticipants(communityId, roomId ?? ''),
@@ -88,7 +88,7 @@ export function useMemberParticipants(communityId: number, roomId: string | null
 }
 
 /** The selected room's raised-hands queue, oldest first (moderator view), polled. */
-export function useRaisedHands(communityId: number, roomId: string | null): UseQueryResult<RaisedHand[], CallsApiError> {
+export function useRaisedHands(communityId: string, roomId: string | null): UseQueryResult<RaisedHand[], CallsApiError> {
   return useQuery<RaisedHand[], CallsApiError>({
     queryKey: callKeys.hands(communityId, roomId ?? ''),
     queryFn: () => fetchRaisedHands(communityId, roomId ?? ''),
@@ -119,7 +119,7 @@ function useCallsMutation<TVars, TData>(
 }
 
 /** Create a room, then refresh the room list. */
-export function useCreateRoom(scope: CallsScope, communityId: number) {
+export function useCreateRoom(scope: CallsScope, communityId: string) {
   return useCallsMutation(
     (input: { roomName: string; maxParticipants?: number }) => createRoom(scope, communityId, input),
     [callKeys.rooms(scope, communityId)],
@@ -127,12 +127,12 @@ export function useCreateRoom(scope: CallsScope, communityId: number) {
 }
 
 /** Delete a room (admin), then refresh the room list. */
-export function useDeleteRoom(communityId: number) {
+export function useDeleteRoom(communityId: string) {
   return useCallsMutation((roomId: string) => deleteRoom(communityId, roomId), [callKeys.rooms('admin', communityId)]);
 }
 
 /** Lock or unlock a room (admin), then refresh rooms and participants. */
-export function useSetLocked(communityId: number) {
+export function useSetLocked(communityId: string) {
   const base = ['calls', 'admin', communityId] as const;
   return useCallsMutation(
     (vars: { roomId: string; locked: boolean }) => setRoomLocked(communityId, vars.roomId, vars.locked),
@@ -141,7 +141,7 @@ export function useSetLocked(communityId: number) {
 }
 
 /** Remove a participant (admin), then refresh the room's participants, hands and the room list. */
-export function useKick(communityId: number) {
+export function useKick(communityId: string) {
   return useCallsMutation(
     (vars: { roomId: string; participantId: string }) => kickParticipant(communityId, vars.roomId, vars.participantId),
     [['calls', 'admin', communityId]],
@@ -149,7 +149,7 @@ export function useKick(communityId: number) {
 }
 
 /** Mute or unmute one participant (admin), then refresh participants. */
-export function useSetMuted(communityId: number) {
+export function useSetMuted(communityId: string) {
   return useCallsMutation(
     (vars: { roomId: string; participantId: string; muted: boolean }) =>
       setParticipantMuted(communityId, vars.roomId, vars.participantId, vars.muted),
@@ -158,7 +158,7 @@ export function useSetMuted(communityId: number) {
 }
 
 /** Mute every publisher but the acting admin; resolves to the muted count. */
-export function useMuteAll(communityId: number) {
+export function useMuteAll(communityId: string) {
   return useCallsMutation(
     (roomId: string) => muteAll(communityId, roomId),
     [['calls', 'admin', communityId]],
@@ -166,7 +166,7 @@ export function useMuteAll(communityId: number) {
 }
 
 /** Acknowledge one raised hand (admin), then refresh the queue. */
-export function useAcknowledgeHand(communityId: number) {
+export function useAcknowledgeHand(communityId: string) {
   return useCallsMutation(
     (vars: { roomId: string; participantId: string }) => acknowledgeHand(communityId, vars.roomId, vars.participantId),
     [['calls', 'admin', communityId]],
@@ -174,7 +174,7 @@ export function useAcknowledgeHand(communityId: number) {
 }
 
 /** Clear the whole queue (admin); resolves to the cleared count. */
-export function useResetHands(communityId: number) {
+export function useResetHands(communityId: string) {
   return useCallsMutation(
     (roomId: string) => resetHands(communityId, roomId),
     [['calls', 'admin', communityId]],
@@ -182,27 +182,27 @@ export function useResetHands(communityId: number) {
 }
 
 /** Join a room as the signed-in member. */
-export function useJoinRoom(communityId: number): UseMutationResult<JoinedRoom, CallsApiError, string> {
+export function useJoinRoom(communityId: string): UseMutationResult<JoinedRoom, CallsApiError, string> {
   return useCallsMutation((roomId: string) => joinRoom(communityId, roomId), [callKeys.rooms('member', communityId)]);
 }
 
 /** Leave a room, then refresh the room list. */
-export function useLeaveRoom(communityId: number) {
+export function useLeaveRoom(communityId: string) {
   return useCallsMutation((roomId: string) => leaveRoom(communityId, roomId), [callKeys.rooms('member', communityId)]);
 }
 
 /** Raise the member's own hand; resolves to the queued hand. */
-export function useRaiseHand(communityId: number) {
+export function useRaiseHand(communityId: string) {
   return useCallsMutation((roomId: string) => raiseHand(communityId, roomId), [['calls', 'member', communityId]]);
 }
 
 /** Lower the member's own hand; resolves to whether a hand was actually raised. */
-export function useLowerHand(communityId: number) {
+export function useLowerHand(communityId: string) {
   return useCallsMutation((roomId: string) => lowerHand(communityId, roomId), [['calls', 'member', communityId]]);
 }
 
 /** The community's Town Hall room (lazily created by hub-api, so a read never means "not opened yet"). */
-export function useTownHall(communityId: number): UseQueryResult<TownHall, CallsApiError> {
+export function useTownHall(communityId: string): UseQueryResult<TownHall, CallsApiError> {
   return useQuery<TownHall, CallsApiError>({
     queryKey: callKeys.townHall(communityId),
     queryFn: () => fetchTownHall(communityId),
@@ -211,7 +211,7 @@ export function useTownHall(communityId: number): UseQueryResult<TownHall, Calls
 }
 
 /** The member's own hand and whether a moderator acknowledged it, polled while connected. */
-export function useMyHand(communityId: number, roomId: string, enabled: boolean): UseQueryResult<MyHand, CallsApiError> {
+export function useMyHand(communityId: string, roomId: string, enabled: boolean): UseQueryResult<MyHand, CallsApiError> {
   return useQuery<MyHand, CallsApiError>({
     queryKey: callKeys.myHand(communityId, roomId),
     queryFn: () => fetchMyHand(communityId, roomId),

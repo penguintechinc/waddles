@@ -177,7 +177,7 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-function mount(communityId = '42', search = '') {
+function mount(communityId = '0000002a-0000-4000-8000-000000000000', search = '') {
   return render(
     <MemoryRouter initialEntries={[`/admin/${communityId}/role-sync${search}`]}>
       <Routes>
@@ -249,18 +249,18 @@ describe('AdminRoleSyncMapping', () => {
   });
 
   it('shows a success banner and refetches after the install callback redirect', async () => {
-    mount('42', '?discord_server=paired&guild_id=555000111');
+    mount('0000002a-0000-4000-8000-000000000000', '?discord_server=paired&guild_id=555000111');
     expect(await screen.findByTestId('install-banner-success')).toHaveTextContent('555000111');
     await waitFor(() => expect(mockedRoleSyncApi.listPairings).toHaveBeenCalled());
   });
 
   it('shows a friendly error banner for a callback error reason', async () => {
-    mount('42', '?discord_server=error&reason=invalid_or_expired_state');
+    mount('0000002a-0000-4000-8000-000000000000', '?discord_server=error&reason=invalid_or_expired_state');
     expect(await screen.findByTestId('install-banner-error')).toHaveTextContent('expired');
   });
 
   it('falls back to a generic banner for an unknown callback reason', async () => {
-    mount('42', '?discord_server=error&reason=weird');
+    mount('0000002a-0000-4000-8000-000000000000', '?discord_server=error&reason=weird');
     expect(await screen.findByTestId('install-banner-error')).toHaveTextContent('Adding the Discord server failed');
   });
 
@@ -275,7 +275,7 @@ describe('AdminRoleSyncMapping', () => {
     expect(role).toHaveTextContent('902');
     expect(role).toHaveTextContent('moderator');
     expect(role).toHaveTextContent('Discord → Waddles');
-    expect(mockedRoleSyncApi.listBindings).toHaveBeenCalledWith(42, 7);
+    expect(mockedRoleSyncApi.listBindings).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7);
   });
 
   it('renders the pairing status card with sync state, event sync and mapping count', async () => {
@@ -302,7 +302,7 @@ describe('AdminRoleSyncMapping', () => {
     const box = await screen.findByLabelText('Role sync enabled');
     fireEvent.click(box);
     await waitFor(() =>
-      expect(mockedRoleSyncApi.updatePairing).toHaveBeenCalledWith(42, 7, { sync_enabled: false }),
+      expect(mockedRoleSyncApi.updatePairing).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7, { sync_enabled: false }),
     );
   });
 
@@ -355,7 +355,7 @@ describe('AdminRoleSyncMapping', () => {
     });
 
     await waitFor(() =>
-      expect(mockedRoleSyncApi.createBinding).toHaveBeenCalledWith(42, 7, {
+      expect(mockedRoleSyncApi.createBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7, {
         sync_scope: 'community_role',
         discord_role_id: '903',
         community_role: 'vip',
@@ -379,7 +379,7 @@ describe('AdminRoleSyncMapping', () => {
       fireEvent.click(screen.getByText('Delete', { selector: 'button[type="submit"]' }));
     });
 
-    await waitFor(() => expect(mockedRoleSyncApi.deleteBinding).toHaveBeenCalledWith(42, 7, 1));
+    await waitFor(() => expect(mockedRoleSyncApi.deleteBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7, 1));
   });
 
   it('surfaces a create error instead of swallowing it', async () => {

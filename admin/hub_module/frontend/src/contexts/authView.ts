@@ -13,9 +13,9 @@ export interface AuthView {
   isAuthenticated: boolean;
   isSuperAdmin: boolean;
   /** Whether the caller administers the given community (false when the context cannot say). */
-  isCommunityAdmin: (communityId: number) => boolean;
+  isCommunityAdmin: (communityId: string) => boolean;
   /** License tier code (1 Free, 2 Premium) of one of the caller's communities; missing = 1. UX hint only. */
-  communityTier: (communityId: number) => number;
+  communityTier: (communityId: string) => number;
   /** Re-fetches `/auth/me` into the context (skipped by the context if fresh). */
   refreshUser: () => Promise<void>;
 }
@@ -33,13 +33,13 @@ async function callRefresh(refresh: unknown): Promise<void> {
 }
 
 /** Wraps the context's `isCommunityAdmin(communityId)` when it is a function; "not an admin" otherwise. */
-function narrowCommunityAdmin(fn: unknown): (communityId: number) => boolean {
+function narrowCommunityAdmin(fn: unknown): (communityId: string) => boolean {
   if (typeof fn !== 'function') return () => false;
   return (communityId) => Reflect.apply(fn, undefined, [communityId]) === true;
 }
 
 /** Wraps the context's `communityTier(communityId)` when it is a function; Free (1) otherwise. */
-function narrowCommunityTier(fn: unknown): (communityId: number) => number {
+function narrowCommunityTier(fn: unknown): (communityId: string) => number {
   if (typeof fn !== 'function') return () => 1;
   return (communityId) => {
     const tier: unknown = Reflect.apply(fn, undefined, [communityId]);

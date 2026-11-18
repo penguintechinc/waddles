@@ -10,14 +10,14 @@ import {
 } from '../../services/roleSyncApi';
 
 interface MirrorRolesSectionProps {
-  communityId: number;
+  communityId: string;
   pairings: GuildPairing[];
   canManage: boolean;
 }
 
 const mirrorKeys = {
-  list: (communityId: number) => ['role-mirrors', communityId] as const,
-  roles: (communityId: number, guildId: string) =>
+  list: (communityId: string) => ['role-mirrors', communityId] as const,
+  roles: (communityId: string, guildId: string) =>
     ['role-mirror-roles', communityId, guildId] as const,
 };
 

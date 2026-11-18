@@ -10,7 +10,7 @@ import {
 
 /** Props for {@link AddDiscordServerPanel}. */
 export interface AddDiscordServerPanelProps {
-  communityId: number;
+  communityId: string;
   canManage: boolean;
   onPaired?: ((pairing: GuildPairing) => void) | undefined;
 }

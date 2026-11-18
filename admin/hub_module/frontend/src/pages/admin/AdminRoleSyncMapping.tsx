@@ -22,6 +22,7 @@ import {
   type RoleSyncScope,
   type SubscriberTier,
 } from '../../services/roleSyncApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 /**
  * Discord guild role <-> community role/scope mapping admin UI -- the
@@ -42,7 +43,7 @@ import {
 
 // `AuthContext.jsx` is plain JS (checkJs: false) -- see `AdminCommunityBundles.tsx`.
 interface CommunityAuth {
-  isCommunityAdmin: (communityId: string | number | undefined) => boolean;
+  isCommunityAdmin: (communityId: string | undefined) => boolean;
 }
 
 /** Friendly text for hub-api's install-callback `?discord_server=error&reason=` codes. */
@@ -65,8 +66,9 @@ export default function AdminRoleSyncMapping() {
   const { isCommunityAdmin } = useAuth() as CommunityAuth;
   const queryClient = useQueryClient();
 
-  const communityId = Number(communityIdParam);
-  const hasValidCommunity = Number.isFinite(communityId);
+  // '' marks an invalid route param: queries stay disabled and the page renders its invalid state.
+  const communityId = parseCommunityId(communityIdParam) ?? '';
+  const hasValidCommunity = communityId !== '';
   const canManage = Boolean(isCommunityAdmin(communityIdParam));
 
   const [searchParams] = useSearchParams();

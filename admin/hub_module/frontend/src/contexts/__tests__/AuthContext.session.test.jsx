@@ -19,9 +19,9 @@ const USER = {
   roles: ['admin', 'vendor'],
   isAnalyticsConsumer: true,
   communities: [
-    { id: 1, role: 'community-owner' },
-    { id: 2, role: 'member' },
-    { id: 3, role: 'moderator' },
+    { id: '00000001-0000-4000-8000-000000000000', role: 'community-owner' },
+    { id: '00000002-0000-4000-8000-000000000000', role: 'member' },
+    { id: '00000003-0000-4000-8000-000000000000', role: 'moderator' },
   ],
 };
 
@@ -382,7 +382,7 @@ describe('AuthContext role helpers', () => {
     expect(auth.current.isAdmin).toBeUndefined();
     expect(auth.current.isAnalyticsConsumer).toBe(false);
     expect(auth.current.isCommunityAdmin()).toBeUndefined();
-    expect(auth.current.isCommunityAdmin(1)).toBeUndefined();
+    expect(auth.current.isCommunityAdmin('00000001-0000-4000-8000-000000000000')).toBeUndefined();
   });
 
   it('recognises super and platform admins', async () => {
@@ -394,21 +394,21 @@ describe('AuthContext role helpers', () => {
   it('isCommunityAdmin checks any community, or a specific one by (string or number) id', async () => {
     const auth = await mountAuth();
     expect(auth.current.isCommunityAdmin()).toBe(true);
-    expect(auth.current.isCommunityAdmin(1)).toBe(true);
-    expect(auth.current.isCommunityAdmin('3')).toBe(true);
-    expect(auth.current.isCommunityAdmin(2)).toBe(false);
-    expect(auth.current.isCommunityAdmin(99)).toBe(false);
+    expect(auth.current.isCommunityAdmin('00000001-0000-4000-8000-000000000000')).toBe(true);
+    expect(auth.current.isCommunityAdmin('00000003-0000-4000-8000-000000000000')).toBe(true);
+    expect(auth.current.isCommunityAdmin('00000002-0000-4000-8000-000000000000')).toBe(false);
+    expect(auth.current.isCommunityAdmin('00000063-0000-4000-8000-000000000000')).toBe(false);
   });
 
   it('isCommunityAdmin accepts a sole community-owner membership but not the non-canonical "owner"', async () => {
-    const owner = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: 4, role: 'community-owner' }] } } });
-    expect(owner.current.isCommunityAdmin(4)).toBe(true);
-    const legacy = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: 4, role: 'owner' }] } } });
-    expect(legacy.current.isCommunityAdmin(4)).toBe(false);
+    const owner = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: '00000004-0000-4000-8000-000000000000', role: 'community-owner' }] } } });
+    expect(owner.current.isCommunityAdmin('00000004-0000-4000-8000-000000000000')).toBe(true);
+    const legacy = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: '00000004-0000-4000-8000-000000000000', role: 'owner' }] } } });
+    expect(legacy.current.isCommunityAdmin('00000004-0000-4000-8000-000000000000')).toBe(false);
   });
 
   it('isCommunityAdmin is false for a user whose only role is plain member', async () => {
-    const auth = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: 2, role: 'member' }] } } });
+    const auth = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: '00000002-0000-4000-8000-000000000000', role: 'member' }] } } });
     expect(auth.current.isCommunityAdmin()).toBe(false);
   });
 });

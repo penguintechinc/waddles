@@ -48,10 +48,10 @@ const CONFIG: BundleConfig = {
 };
 
 function setRole(role: string) {
-  auth.mockReturnValue({ user: { communities: [{ id: 7, role }] } } as unknown as ReturnType<typeof useAuth>);
+  auth.mockReturnValue({ user: { communities: [{ id: '00000007-0000-4000-8000-000000000000', role }] } } as unknown as ReturnType<typeof useAuth>);
 }
 
-function mount(path = '/admin/7/settings') {
+function mount(path = '/admin/00000007-0000-4000-8000-000000000000/settings') {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false }, mutations: { retry: false } } });
   const wrapper = ({ children }: { children: ReactNode }) => (
     <QueryClientProvider client={client}>{children}</QueryClientProvider>
@@ -74,8 +74,8 @@ beforeEach(() => {
   flag.mockReturnValue(true);
   setRole('community-admin');
   activation.list.mockResolvedValue([
-    { appId: GREET, communityId: 7, tenantId: 1, versionId: 1, version: '1.2.0', activatedAt: null },
-    { appId: PLAIN, communityId: 7, tenantId: 1, versionId: 2, version: '0.1.0', activatedAt: null },
+    { appId: GREET, communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 1, version: '1.2.0', activatedAt: null },
+    { appId: PLAIN, communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 2, version: '0.1.0', activatedAt: null },
   ]);
   api.descriptor.mockImplementation(async (_c, appId) => ({
     success: true, appId, version: '1', tools: [], configSchema: appId === GREET ? SCHEMA : null,
@@ -110,16 +110,16 @@ describe('AdminBundleSettings', () => {
 
   it('saves with the loaded version as expectedVersion', async () => {
     api.saveConfig.mockResolvedValue({ ...CONFIG, version: 3, config: { message: 'yo', enabled: true } });
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     const input = await screen.findByLabelText(/Welcome message/);
     fireEvent.change(input, { target: { value: 'yo' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
-    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith(7, GREET, { message: 'yo', enabled: true }, 2));
+    await waitFor(() => expect(api.saveConfig).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', GREET, { message: 'yo', enabled: true }, 2));
     expect(await screen.findByText('Settings saved.')).toBeInTheDocument();
   });
 
   it('reset restores the last saved values', async () => {
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     const input = await screen.findByLabelText(/Welcome message/);
     fireEvent.change(input, { target: { value: 'changed' } });
     fireEvent.click(screen.getByRole('button', { name: 'Reset' }));
@@ -128,7 +128,7 @@ describe('AdminBundleSettings', () => {
 
   it('offers a reload on a 409 version conflict', async () => {
     api.saveConfig.mockRejectedValue(new BundleAdminError(409, 'config_version_conflict', 'stale'));
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     await screen.findByLabelText(/Welcome message/);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     const reload = await screen.findByRole('button', { name: 'Reload latest' });
@@ -141,33 +141,33 @@ describe('AdminBundleSettings', () => {
     api.saveConfig.mockRejectedValue(
       new BundleAdminError(422, 'config_invalid', 'bad', { errors: [{ path: '$.message', rule: 'maxLength' }] }),
     );
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     await screen.findByLabelText(/Welcome message/);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText(/Rejected by server: maxLength/)).toBeInTheDocument();
   });
 
   it('renders "no settings" (not an error) for a schema-less bundle', async () => {
-    mount(`/admin/7/settings/${PLAIN}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${PLAIN}`);
     expect(await screen.findByTestId('no-settings')).toBeInTheDocument();
     expect(api.getConfig).not.toHaveBeenCalled();
   });
 
   it('treats a 404 bundle_has_no_config from /config as no settings', async () => {
     api.getConfig.mockRejectedValue(new BundleAdminError(404, 'bundle_has_no_config', 'none'));
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     expect(await screen.findByTestId('no-settings')).toBeInTheDocument();
   });
 
   it('shows a permission message on 403', async () => {
     api.descriptor.mockRejectedValue(new BundleAdminError(403, 'FORBIDDEN', 'no'));
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     expect(await screen.findByText(/do not have permission/)).toBeInTheDocument();
   });
 
   it('gives moderators a read-only form with no save/reset', async () => {
     setRole('moderator');
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     expect(await screen.findByLabelText(/Welcome message/)).toHaveAttribute('readonly');
     expect(screen.queryByRole('button', { name: 'Save' })).not.toBeInTheDocument();
     expect(screen.getByText(/Read-only/)).toBeInTheDocument();
@@ -181,7 +181,7 @@ describe('AdminBundleSettings', () => {
   });
   it('close returns to the grid and generic save errors surface', async () => {
     api.saveConfig.mockRejectedValue(new BundleAdminError(500, 'ERROR_500', 'Server exploded'));
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     await screen.findByLabelText(/Welcome message/);
     fireEvent.click(screen.getByRole('button', { name: 'Save' }));
     expect(await screen.findByText('Server exploded')).toBeInTheDocument();
@@ -192,7 +192,7 @@ describe('AdminBundleSettings', () => {
   it('explains an inactive bundle and a network failure', async () => {
     api.descriptor.mockRejectedValue(new BundleAdminError(404, 'bundle_not_active', 'x'));
     activation.list.mockRejectedValue(new Error('offline'));
-    mount(`/admin/7/settings/${GREET}`);
+    mount(`/admin/00000007-0000-4000-8000-000000000000/settings/${GREET}`);
     expect(await screen.findByText(/no longer active/)).toBeInTheDocument();
     expect(await screen.findByText(/Something went wrong/)).toBeInTheDocument();
   });

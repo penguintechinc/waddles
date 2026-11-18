@@ -18,8 +18,8 @@ const ME_TWO = {
   user: {
     id: 1,
     communities: [
-      { id: 7, name: 'acme', displayName: 'Acme', role: 'community-owner' },
-      { id: 9, name: 'penguins', displayName: 'Penguin Pals', role: 'member' },
+      { id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'community-owner' },
+      { id: '00000009-0000-4000-8000-000000000000', name: 'penguins', displayName: 'Penguin Pals', role: 'member' },
     ],
   },
 };
@@ -27,7 +27,7 @@ const ME_TWO = {
 const PUBLIC_7 = {
   success: true,
   community: {
-    id: 7,
+    id: '00000007-0000-4000-8000-000000000000',
     name: 'acme',
     displayName: 'Acme',
     description: 'Star Citizen social club',
@@ -51,8 +51,8 @@ describe('DashboardHome (post-login landing)', () => {
   it('populates My Communities from /auth/me and enriches with public details', async () => {
     const get = mockApiGet((url) => {
       if (url === '/api/v1/auth/me') return ME_TWO;
-      if (url === '/api/v1/public/communities/7') return PUBLIC_7;
-      if (url === '/api/v1/public/communities/9') throw httpError(404, { error: 'Community not found' });
+      if (url === '/api/v1/public/communities/00000007-0000-4000-8000-000000000000') return PUBLIC_7;
+      if (url === '/api/v1/public/communities/00000009-0000-4000-8000-000000000000') throw httpError(404, { error: 'Community not found' });
       return unexpectedUrl(url);
     });
     renderLanding();
@@ -61,7 +61,7 @@ describe('DashboardHome (post-login landing)', () => {
     const cards = within(grid).getAllByTestId('community-card');
     expect(cards).toHaveLength(2);
     expect(screen.getByRole('heading', { level: 1, name: 'Welcome back, tux!' })).toBeInTheDocument();
-    expect(cards[0]).toHaveAttribute('href', '/dashboard/community/7');
+    expect(cards[0]).toHaveAttribute('href', '/dashboard/community/00000007-0000-4000-8000-000000000000');
     expect(within(cards[0]!).getByText('Owner')).toBeInTheDocument();
     expect(within(cards[1]!).getByText('Penguin Pals')).toBeInTheDocument();
     expect(within(cards[1]!).getByText('Member')).toBeInTheDocument();
@@ -89,7 +89,7 @@ describe('DashboardHome (post-login landing)', () => {
       if (url !== '/api/v1/auth/me') return unexpectedUrl(url);
       calls += 1;
       if (calls === 1) throw httpError(500, { error: { code: 'INTERNAL', message: 'Database unavailable' } });
-      return { success: true, user: { id: 1, communities: [{ id: 7, name: 'acme', displayName: 'Acme', role: 'member' }] } };
+      return { success: true, user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'member' }] } };
     });
     renderLanding();
     const alert = await screen.findByRole('alert');
@@ -125,8 +125,8 @@ describe('DashboardHome (post-login landing)', () => {
         return {
           success: true,
           communities: [
-            { id: 9, name: 'penguins', displayName: 'Penguin Pals', memberCount: 3 },
-            { id: 12, name: 'pen-testers', displayName: 'Pen Testers', description: 'Security folks', platform: 'twitch', memberCount: 40 },
+            { id: '00000009-0000-4000-8000-000000000000', name: 'penguins', displayName: 'Penguin Pals', memberCount: 3 },
+            { id: '0000000c-0000-4000-8000-000000000000', name: 'pen-testers', displayName: 'Pen Testers', description: 'Security folks', platform: 'twitch', memberCount: 40 },
           ],
           pagination: { page: 1, limit: 6, total: 2, totalPages: 1 },
         };
@@ -141,7 +141,7 @@ describe('DashboardHome (post-login landing)', () => {
     // Already-joined "Penguin Pals" is excluded from discovery; the unjoined one is offered.
     expect(within(discover).getAllByTestId('discover-card')).toHaveLength(1);
     expect(within(discover).getByText('Pen Testers')).toBeInTheDocument();
-    expect(within(discover).getByTestId('discover-card')).toHaveAttribute('href', '/communities/12');
+    expect(within(discover).getByTestId('discover-card')).toHaveAttribute('href', '/communities/0000000c-0000-4000-8000-000000000000');
     // Own list is filtered locally: only the matching community remains.
     const own = screen.getByTestId('communities-grid');
     expect(within(own).getAllByTestId('community-card')).toHaveLength(1);

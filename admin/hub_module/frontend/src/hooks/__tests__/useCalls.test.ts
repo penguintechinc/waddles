@@ -13,9 +13,9 @@ describe('useCalls', () => {
   });
 
   it('scopes query keys by route family, community and room', () => {
-    expect(callKeys.rooms('admin', 7)).toEqual(['calls', 'admin', 7, 'rooms']);
-    expect(callKeys.rooms('member', 7)).toEqual(['calls', 'member', 7, 'rooms']);
-    expect(callKeys.hands(7, 'r')).toEqual(['calls', 'admin', 7, 'rooms', 'r', 'hands']);
-    expect(callKeys.participants(7, 'r')).toEqual(['calls', 'admin', 7, 'rooms', 'r', 'participants']);
+    expect(callKeys.rooms('admin', '00000007-0000-4000-8000-000000000000')).toEqual(['calls', 'admin', '00000007-0000-4000-8000-000000000000', 'rooms']);
+    expect(callKeys.rooms('member', '00000007-0000-4000-8000-000000000000')).toEqual(['calls', 'member', '00000007-0000-4000-8000-000000000000', 'rooms']);
+    expect(callKeys.hands('00000007-0000-4000-8000-000000000000', 'r')).toEqual(['calls', 'admin', '00000007-0000-4000-8000-000000000000', 'rooms', 'r', 'hands']);
+    expect(callKeys.participants('00000007-0000-4000-8000-000000000000', 'r')).toEqual(['calls', 'admin', '00000007-0000-4000-8000-000000000000', 'rooms', 'r', 'participants']);
   });
 });

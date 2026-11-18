@@ -5,9 +5,10 @@ import { CallRoomView } from '../../components/calls/CallRoomView';
 import { CallsErrorPanel } from '../../components/calls/CallsErrors';
 import { useTownHall } from '../../hooks/useCalls';
 import type { SessionDeps } from '../../services/media/callSession';
+import { parseCommunityId } from '../../lib/communityId';
 
 /** The community's persistent default room: members meet here with audio and video. */
-function TownHallRoom({ communityId, overrides }: { communityId: number; overrides: Pick<SessionDeps, 'devices' | 'media'> | undefined }) {
+function TownHallRoom({ communityId, overrides }: { communityId: string; overrides: Pick<SessionDeps, 'devices' | 'media'> | undefined }) {
   const { isCommunityAdmin } = useAuthView();
   const townHall = useTownHall(communityId);
 
@@ -38,8 +39,8 @@ function TownHallRoom({ communityId, overrides }: { communityId: number; overrid
 /** Route wrapper: validates `:communityId` before any request is made. */
 export default function TownHall({ overrides }: { overrides?: Pick<SessionDeps, 'devices' | 'media'> }) {
   const { communityId } = useParams<{ communityId: string }>();
-  const id = Number(communityId);
-  if (!Number.isInteger(id) || id <= 0) {
+  const id = parseCommunityId(communityId);
+  if (id === null) {
     return <ErrorState title="Unknown community" message="This Town Hall link is not valid." />;
   }
   return <TownHallRoom communityId={id} overrides={overrides} />;

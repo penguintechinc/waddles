@@ -7,11 +7,12 @@ import { useAuthView } from '../../contexts/authView';
 import { useCommunityMembers } from '../../hooks/useCommunityPanels';
 import { useMyCommunities } from '../../hooks/useMyCommunities';
 import type { MemberPage } from '../../services/communityMembersApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 const PAGE_SIZE = 25;
 
 /** Roster for community admins/moderators; everyone else gets an honest "not available yet". */
-function MembersView({ communityId }: { communityId: number }) {
+function MembersView({ communityId }: { communityId: string }) {
   const { isSuperAdmin } = useAuthView();
   const mine = useMyCommunities();
   const membership = mine.data?.find((c) => c.id === communityId);
@@ -140,8 +141,8 @@ function MembersView({ communityId }: { communityId: number }) {
 /** Route wrapper: validates `:id` before any query runs. */
 export default function CommunityMembers() {
   const { id } = useParams<{ id: string }>();
-  const communityId = Number(id);
-  if (!Number.isInteger(communityId) || communityId <= 0) {
+  const communityId = parseCommunityId(id);
+  if (communityId === null) {
     return <ErrorState title="Unknown community" message="This members link is not valid." />;
   }
   return <MembersView communityId={communityId} />;

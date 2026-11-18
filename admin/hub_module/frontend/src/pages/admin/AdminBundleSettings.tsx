@@ -7,10 +7,11 @@ import { bundleActivationApi } from '../../services/bundleActivationApi';
 import { BundleAdminError, bundleAdminApi } from '../../services/bundleAdminApi';
 import BundleSettingsPanel from '../../components/bundles/BundleSettingsPanel';
 import { bundleName, describeError, settingsKeys } from '../../components/bundles/settingsHelpers';
+import { parseCommunityId } from '../../lib/communityId';
 
 // AuthContext.jsx is plain JS; type the slice this page reads explicitly.
 interface CommunityAuth {
-  user?: { communities?: { id: number; role: string }[] } | null;
+  user?: { communities?: { id: string; role: string }[] } | null;
 }
 
 const EDIT_ROLES = ['community-owner', 'community-admin'];
@@ -27,7 +28,8 @@ export default function AdminBundleSettings() {
   const { communityId: cidParam, appId } = useParams<{ communityId: string; appId?: string }>();
   const navigate = useNavigate();
   const { user } = useAuth() as CommunityAuth;
-  const communityId = Number(cidParam);
+  // '' marks an invalid route param: queries stay disabled and the page renders its invalid state.
+  const communityId = parseCommunityId(cidParam) ?? '';
   const role = user?.communities?.find((c) => c.id === communityId)?.role ?? '';
   const canEdit = EDIT_ROLES.includes(role);
   const canView = VIEW_ROLES.includes(role);
@@ -35,7 +37,7 @@ export default function AdminBundleSettings() {
   const list = useQuery({
     queryKey: ['community-bundle-activations', communityId],
     queryFn: () => bundleActivationApi.list(communityId),
-    enabled: enabled && canView && Number.isFinite(communityId),
+    enabled: enabled && canView && communityId !== '',
   });
   const bundles = list.data ?? [];
   const descriptors = useQueries({
