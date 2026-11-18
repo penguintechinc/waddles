@@ -452,45 +452,102 @@ class TestEveryActActionOnPublicRequestNeedsEmailMatchOrOverride:
         assert res.status_code == 200
 
 
-class TestRotationOverwritesPlantedContent:
-    """regression: a reused pending row kept the earlier submitter's message and regime."""
+class TestResubmitContentIsDraftUntilLatestTokenConsumed:
+    """regression: a resubmit rewrote the committed message/regime of a pending request.
 
-    async def test_victim_submit_replaces_planted_message_and_regime(
+    Only the mailbox owner redeeming the LATEST token may commit new content; an unauthenticated
+    resubmit alone changes nothing that admins or the row's committed columns hold.
+    """
+
+    @staticmethod
+    def _plain(row: Any) -> str | None:
+        if not row.message_enc:
+            return None
+        return str(svc.crypto.decrypt(row.message_enc, row_id=row.public_id))
+
+    async def test_resubmit_leaves_committed_content_and_stores_a_draft(
         self, client: Any, db: Any, notifier: FakeNotifier
     ) -> None:
-        await _public_submit(client, email="v@example.org", message="attacker planted", regime=2)
-        planted = _rows(db)[0]
-        assert planted.message_enc and int(planted.regime) == 2
         await _public_submit(client, email="v@example.org", message="victim words", regime=1)
+        await _public_submit(client, email="v@example.org", message="attacker text", regime=2)
         row = _rows(db)[0]
-        assert len(_rows(db)) == 1 and int(row.regime) == 1
-        assert svc.crypto.decrypt(row.message_enc, row_id=row.public_id) == "victim words"
+        assert len(_rows(db)) == 1
+        assert self._plain(row) == "victim words" and int(row.regime) == 1  # unchanged
+        assert int(row.pending_regime) == 2
+        assert svc.crypto.decrypt(row.pending_message_enc, row_id=row.public_id) == "attacker text"
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+        assert svc.decrypt_contact(row) == (None, None)  # pending: admins see nothing
+
+    async def test_old_token_is_dead_and_latest_token_commits_the_draft(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="victim words", regime=1)
+        first = notifier.last_token()
+        await _public_submit(client, email="v@example.org", message="second text", regime=2)
+        latest = notifier.last_token()
+        assert (await client.post(f"{PUB}/verify", json={"token": first})).status_code == 400
+        row = _rows(db)[0]
+        assert self._plain(row) == "victim words" and int(row.status) == int(S.VERIFICATION_PENDING)
+        assert (await client.post(f"{PUB}/verify", json={"token": latest})).status_code == 200
+        row = _rows(db)[0]
+        assert self._plain(row) == "second text" and int(row.regime) == 2
+        assert row.pending_message_enc is None and row.pending_regime is None
         evt = [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
-        assert len(evt) == 1 and "attacker" not in str(evt[0].detail)
+        assert len(evt) == 1
         assert evt[0].detail == {"fields": ["message", "regime"], "message_present": True}
+        assert "second text" not in str(evt[0].detail)
 
-    async def test_victim_submit_without_message_clears_planted_text(
+    async def test_draft_without_message_clears_the_committed_message_on_consume(
         self, client: Any, db: Any, notifier: FakeNotifier
     ) -> None:
-        await _public_submit(client, email="v@example.org", message="attacker planted")
+        await _public_submit(client, email="v@example.org", message="planted")
         await _public_submit(client, email="v@example.org")
-        assert _rows(db)[0].message_enc is None
+        assert self._plain(_rows(db)[0]) == "planted"  # not yet committed
         await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
-        admin_view = svc.decrypt_contact(_rows(db)[0])
-        assert admin_view[1] is None  # nothing attacker-authored reaches the verified request
+        row = _rows(db)[0]
+        assert row.message_enc is None and svc.decrypt_contact(row)[1] is None
 
-    async def test_resend_leaves_content_untouched(
+    async def test_plain_verify_without_resubmit_is_unchanged_and_emits_no_content_event(
         self, client: Any, db: Any, notifier: FakeNotifier
     ) -> None:
-        await _public_submit(client, email="v@example.org", message="orig")
-        before = _rows(db)[0].message_enc
-        assert (await _resend(client, email="v@example.org", req_type=1)).status_code == 202
-        assert _rows(db)[0].message_enc == before
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig" and int(row.status) == int(S.VERIFIED)
         assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
 
-    async def test_unverified_message_is_never_shown_to_admins(self, client: Any, db: Any) -> None:
-        await _public_submit(client, email="v@example.org", message="attacker planted")
-        assert svc.decrypt_contact(_rows(db)[0]) == (None, None)
+    async def test_identical_resubmit_commits_without_a_content_event(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="same", regime=1)
+        await _public_submit(client, email="v@example.org", message="same", regime=1)
+        await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+        assert self._plain(_rows(db)[0]) == "same"
+
+    async def test_resend_keeps_the_draft_and_the_committed_content(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        assert (await _resend(client, email="v@example.org", req_type=1)).status_code == 202
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig" and int(row.pending_regime) == 2
+
+    async def test_closing_an_unverified_request_purges_the_draft(
+        self, client: Any, db: Any, world: dict[str, int]
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig")
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        res = await client.patch(
+            f"{_base()}/{_rows(db)[0].public_id}",
+            json={"status": int(S.REJECTED)},
+            headers=_headers(world["admin"]),
+        )
+        assert res.status_code == 200
+        row = _rows(db)[0]
+        assert row.pending_message_enc is None and row.pending_regime is None
+        assert row.message_enc is None
 
 
 class TestConcurrency:

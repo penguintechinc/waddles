@@ -791,21 +791,57 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
         logger.debug("dsar.verification_invalid")
         return False
     token_hash = crypto.hash_token(token).hex()
+    commit: dict[str, Any] = {}
+    committed_regime = int(row.regime)
+    content_changed = False
+    if row.pending_regime is not None:
+        # The latest token's draft becomes the request's content, now that its mailbox owner
+        # redeemed that exact token (an older token no longer matches the stored hash).
+        committed_regime = int(row.pending_regime)
+        commit = {
+            "message_enc": row.pending_message_enc,
+            "regime": committed_regime,
+            "pending_message_enc": None,
+            "pending_regime": None,
+        }
+        old_message = (
+            crypto.decrypt(row.message_enc, row_id=row.public_id) if row.message_enc else None
+        )
+        new_message = (
+            crypto.decrypt(row.pending_message_enc, row_id=row.public_id)
+            if row.pending_message_enc
+            else None
+        )
+        content_changed = old_message != new_message or int(row.regime) != committed_regime
     claimed = await async_dal.update_async(
         (dal.dsar_requests.id == row.id)
         & (dal.dsar_requests.verification_token_hash == token_hash)
         & (dal.dsar_requests.status == int(RequestStatus.VERIFICATION_PENDING)),
         status=int(RequestStatus.VERIFIED),
         verified_at=now,
-        due_at=compute_due_at(row.regime, now),
+        due_at=compute_due_at(committed_regime, now),
         expires_at=None,
         verification_token_hash=None,
         verification_expires_at=None,
         updated_at=now,
+        **commit,
     )
     if not claimed:
         telemetry.verification_outcomes.add(1, {"outcome": "invalid"})
         return False
+    if content_changed:
+        await record_event(
+            async_dal,
+            dal,
+            tenant_id=int(row.tenant_id),
+            request_id=int(row.id),
+            event_type=EventType.CONTENT_REPLACED,
+            actor_kind=ActorKind.PUBLIC_REQUESTER,
+            detail={
+                "fields": ["message", "regime"],
+                "message_present": commit["message_enc"] is not None,
+            },
+        )
     await record_event(
         async_dal,
         dal,
@@ -836,11 +872,11 @@ def rotate_pending_public_sync(
     pending ERASE for the same address). `None` when nothing matching is pending. The old token
     stops working (its hash is overwritten); the mail only ever goes to the email's owner.
 
-    `replace_content=(message, regime)` (a fresh submit reusing the row) OVERWRITES the stored
-    message (re-encrypted under the row's public_id; `None` clears it) and regime with the current
-    submission, so text planted by an earlier third-party submit can never ride into the request the
-    email's owner then verifies. A PII-free `CONTENT_REPLACED` event records it. A bare resend
-    passes `None` and leaves the content alone.
+    `replace_content=(message, regime)` (a fresh submit reusing the row) NEVER touches the committed
+    `message_enc`/`regime`: the new content is stored as a DRAFT (`pending_message_enc` encrypted under
+    the row's public_id, NULL when absent; `pending_regime`) tied to the token minted here, and
+    `consume_verification_token` commits it only when that latest token is redeemed, i.e. by the
+    mailbox owner. A bare resend passes `None` and leaves any draft as it was.
     """
     now = now_utc()
     rows = dal(
@@ -858,8 +894,10 @@ def rotate_pending_public_sync(
     if replace_content is not None:
         message, regime = replace_content
         content = {
-            "message_enc": crypto.encrypt(message, row_id=row.public_id) if message else None,
-            "regime": int(regime),
+            "pending_message_enc": (
+                crypto.encrypt(message, row_id=row.public_id) if message else None
+            ),
+            "pending_regime": int(regime),
         }
     updated = dal(
         (dal.dsar_requests.id == row.id)
@@ -872,19 +910,6 @@ def rotate_pending_public_sync(
     )
     if not updated:
         return None
-    if replace_content is not None:
-        dal.dsar_request_events.insert(
-            public_id=str(uuid.uuid4()),
-            tenant_id=tenant_id,
-            request_id=int(row.id),
-            event_type=int(EventType.CONTENT_REPLACED),
-            actor_kind=int(ActorKind.PUBLIC_REQUESTER),
-            actor_user_id=None,
-            from_status=None,
-            to_status=None,
-            detail={"fields": ["message", "regime"], "message_present": bool(replace_content[0])},
-            created_at=now,
-        )
     return row, token
 
 
@@ -992,6 +1017,8 @@ async def _purge_contact(async_dal: Any, dal: Any, row_id: int) -> None:
         contact_email_enc=None,
         contact_email_hash=None,
         message_enc=None,
+        pending_message_enc=None,
+        pending_regime=None,
         response_notes=None,  # admin free text may quote the requester: purged with the contact data
         verification_token_hash=None,
         verification_expires_at=None,
