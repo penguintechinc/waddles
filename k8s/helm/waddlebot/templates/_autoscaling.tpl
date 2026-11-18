@@ -187,6 +187,7 @@ Call with (dict "root" $ "service" "svc-bundles-executor").
   (dict "key" "svcCore" "name" "svc-core" "component" "svc-core" "on" (not (not $v.pipeline.svcCore.enabled)) "replicas" (int $v.pipeline.svcCore.replicas) "hpa" true)
   (dict "key" "svcProcessRust" "name" "svc-process-rust" "component" "svc-process-rust" "on" (not (not (and $rdp.enabled $rdp.svcProcess.enabled))) "replicas" (int $rdp.svcProcess.replicas) "hpa" true)
   (dict "key" "svcActionRust" "name" "svc-action-rust" "component" "svc-action-rust" "on" (not (not (and $rdp.enabled $rdp.svcAction.enabled))) "replicas" (int $rdp.svcAction.replicas) "hpa" true)
+  (dict "key" "svcAnalytics" "name" "svc-analytics" "component" "svc-analytics" "on" (not (not $v.pipeline.svcAnalytics.enabled)) "replicas" (int $v.pipeline.svcAnalytics.replicas) "hpa" true)
   (dict "key" "svcIngestRust" "name" "svc-ingest-rust" "component" "svc-ingest-rust" "on" (not (not (and $rdp.enabled $rdp.svcIngest.enabled))) "replicas" (int $rdp.svcIngest.replicas) "hpa" false)
   (dict "key" "egressProxy" "name" "egress-proxy" "component" "egress-proxy" "on" (not (not $v.egressProxy.enabled)) "replicas" (int $v.egressProxy.replicas) "hpa" false)
 -}}

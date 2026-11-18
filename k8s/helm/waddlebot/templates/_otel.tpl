@@ -159,7 +159,7 @@ CNP that selects a pod with no other egress policy would itself flip that pod to
 
 {{/* JSON list of the component labels that carry OTEL_* env (waddlebot.otel.env call sites). */}}
 {{- define "waddlebot.otel.emitters" -}}
-{{- list "hub-api" "svc-ingest-rust" "svc-process-rust" "svc-action-rust" "svc-bundles-executor" "svc-presentation" "svc-streaming" "egress-proxy" | toJson -}}
+{{- list "hub-api" "svc-ingest-rust" "svc-process-rust" "svc-action-rust" "svc-bundles-executor" "svc-presentation" "svc-streaming" "svc-analytics" "egress-proxy" | toJson -}}
 {{- end -}}
 
 {{/*
