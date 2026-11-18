@@ -26826,8 +26826,8 @@ paths:
                 3 do_not_sell); erase needs confirm.
 
 
-                `overrideReason` is required to erase on a PUBLIC-form request whose
-                requester''s verified email
+                `overrideReason` is required to act (export/erase/do-not-sell) on
+                a PUBLIC-form request whose requester''s verified email
 
                 does not match the linked account''s email; it is recorded in the
                 event trail.'

@@ -124,6 +124,7 @@ class EventType(IntEnum):
     CONTACT_PURGED = 11
     VERIFICATION_RESENT = 12
     SUBJECT_LINKED = 13
+    CONTENT_REPLACED = 14
 
 
 class ActorKind(IntEnum):
@@ -821,7 +822,12 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
 
 
 def rotate_pending_public_sync(
-    dal: Any, *, tenant_id: int, email: str, request_type: RequestType
+    dal: Any,
+    *,
+    tenant_id: int,
+    email: str,
+    request_type: RequestType,
+    replace_content: tuple[str | None, Regime] | None = None,
 ) -> tuple[Any, str] | None:
     """New token for the newest still-pending request of `email` AND `request_type` (no commit).
 
@@ -829,6 +835,12 @@ def rotate_pending_public_sync(
     requester can never be sent a link that verifies a different request (e.g. an attacker's
     pending ERASE for the same address). `None` when nothing matching is pending. The old token
     stops working (its hash is overwritten); the mail only ever goes to the email's owner.
+
+    `replace_content=(message, regime)` (a fresh submit reusing the row) OVERWRITES the stored
+    message (re-encrypted under the row's public_id; `None` clears it) and regime with the current
+    submission, so text planted by an earlier third-party submit can never ride into the request the
+    email's owner then verifies. A PII-free `CONTENT_REPLACED` event records it. A bare resend
+    passes `None` and leaves the content alone.
     """
     now = now_utc()
     rows = dal(
@@ -842,6 +854,13 @@ def rotate_pending_public_sync(
         return None
     row = rows[0]
     token = _new_token()
+    content: dict[str, Any] = {}
+    if replace_content is not None:
+        message, regime = replace_content
+        content = {
+            "message_enc": crypto.encrypt(message, row_id=row.public_id) if message else None,
+            "regime": int(regime),
+        }
     updated = dal(
         (dal.dsar_requests.id == row.id)
         & (dal.dsar_requests.status == int(RequestStatus.VERIFICATION_PENDING))
@@ -849,9 +868,23 @@ def rotate_pending_public_sync(
         verification_token_hash=crypto.hash_token(token).hex(),
         verification_expires_at=now + timedelta(minutes=verify_token_ttl_minutes()),
         updated_at=now,
+        **content,
     )
     if not updated:
         return None
+    if replace_content is not None:
+        dal.dsar_request_events.insert(
+            public_id=str(uuid.uuid4()),
+            tenant_id=tenant_id,
+            request_id=int(row.id),
+            event_type=int(EventType.CONTENT_REPLACED),
+            actor_kind=int(ActorKind.PUBLIC_REQUESTER),
+            actor_user_id=None,
+            from_status=None,
+            to_status=None,
+            detail={"fields": ["message", "regime"], "message_present": bool(replace_content[0])},
+            created_at=now,
+        )
     return row, token
 
 

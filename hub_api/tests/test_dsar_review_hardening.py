@@ -398,6 +398,101 @@ class TestEraseOnPublicRequestNeedsEmailMatchOrOverride:
         assert res.status_code == 200
 
 
+class TestEveryActActionOnPublicRequestNeedsEmailMatchOrOverride:
+    """regression: only ERASE was email-gated; export/do-not-sell on a mismatched link were open."""
+
+    @pytest.mark.parametrize(("req_type", "action"), [(1, "export"), (3, "do_not_sell")])
+    async def test_mismatched_email_refuses_and_override_is_audited(
+        self,
+        client: Any,
+        db: Any,
+        world: dict[str, int],
+        notifier: FakeNotifier,
+        req_type: int,
+        action: str,
+    ) -> None:
+        await _verified_public(client, notifier, email="attacker@example.org", req_type=req_type)
+        req_id = str(_rows(db)[0].public_id)
+        link = await client.patch(
+            f"{_base()}/{req_id}",
+            json={"subjectUserId": _uuid_of(db, world["alice"])},
+            headers=_headers(world["admin"]),
+        )
+        assert link.status_code == 200
+        res = await client.post(
+            f"{_base()}/{req_id}/act", json={"action": action}, headers=_headers(world["admin"])
+        )
+        body = await res.get_json()
+        assert res.status_code == 422 and body["error"]["code"] == "DSAR_SUBJECT_EMAIL_MISMATCH"
+        assert "alice@example.com" not in str(body)  # no account data in the refusal
+        assert _rows(db)[0].status == int(S.VERIFIED)
+        ok = await client.post(
+            f"{_base()}/{req_id}/act",
+            json={"action": action, "overrideReason": "ID verified by phone"},
+            headers=_headers(world["admin"]),
+        )
+        assert ok.status_code == 200
+        acted = [e for e in _events(db) if e.event_type == int(E.ACTION_EXECUTED)][-1]
+        assert acted.detail["email_override"] is True
+        assert acted.detail["override_reason"] == "ID verified by phone"
+
+    async def test_matching_email_exports_without_override(
+        self, client: Any, db: Any, world: dict[str, int], notifier: FakeNotifier
+    ) -> None:
+        await _verified_public(client, notifier, email="Alice@Example.com", req_type=1)
+        req_id = str(_rows(db)[0].public_id)
+        await client.patch(
+            f"{_base()}/{req_id}",
+            json={"subjectUserId": _uuid_of(db, world["alice"])},
+            headers=_headers(world["admin"]),
+        )
+        res = await client.post(
+            f"{_base()}/{req_id}/act", json={"action": "export"}, headers=_headers(world["admin"])
+        )
+        assert res.status_code == 200
+
+
+class TestRotationOverwritesPlantedContent:
+    """regression: a reused pending row kept the earlier submitter's message and regime."""
+
+    async def test_victim_submit_replaces_planted_message_and_regime(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="attacker planted", regime=2)
+        planted = _rows(db)[0]
+        assert planted.message_enc and int(planted.regime) == 2
+        await _public_submit(client, email="v@example.org", message="victim words", regime=1)
+        row = _rows(db)[0]
+        assert len(_rows(db)) == 1 and int(row.regime) == 1
+        assert svc.crypto.decrypt(row.message_enc, row_id=row.public_id) == "victim words"
+        evt = [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+        assert len(evt) == 1 and "attacker" not in str(evt[0].detail)
+        assert evt[0].detail == {"fields": ["message", "regime"], "message_present": True}
+
+    async def test_victim_submit_without_message_clears_planted_text(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="attacker planted")
+        await _public_submit(client, email="v@example.org")
+        assert _rows(db)[0].message_enc is None
+        await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        admin_view = svc.decrypt_contact(_rows(db)[0])
+        assert admin_view[1] is None  # nothing attacker-authored reaches the verified request
+
+    async def test_resend_leaves_content_untouched(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig")
+        before = _rows(db)[0].message_enc
+        assert (await _resend(client, email="v@example.org", req_type=1)).status_code == 202
+        assert _rows(db)[0].message_enc == before
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+
+    async def test_unverified_message_is_never_shown_to_admins(self, client: Any, db: Any) -> None:
+        await _public_submit(client, email="v@example.org", message="attacker planted")
+        assert svc.decrypt_contact(_rows(db)[0]) == (None, None)
+
+
 class TestConcurrency:
     async def test_two_admins_acting_at_once_execute_exactly_once(
         self, client: Any, db: Any, world: dict[str, int], monkeypatch: pytest.MonkeyPatch

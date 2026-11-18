@@ -1613,7 +1613,8 @@ class TestUnverifiedIsNeverActionable:
         db.dal.commit()
         response = await client.post(
             f"{_base()}/{item['id']}/act",
-            json={"action": "export"},
+            # requester email (bob) != linked account (alice): every act action needs the override
+            json={"action": "export", "overrideReason": "identity confirmed out of band"},
             headers=_headers(world["admin"]),
         )
         assert response.status_code == 200

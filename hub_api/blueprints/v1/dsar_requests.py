@@ -211,7 +211,7 @@ class ExtendBody:
 class ActBody:
     """`action` must match the request type (1 export, 2 erase, 3 do_not_sell); erase needs confirm.
 
-    `overrideReason` is required to erase on a PUBLIC-form request whose requester's verified email
+    `overrideReason` is required to act (export/erase/do-not-sell) on a PUBLIC-form request whose requester's verified email
     does not match the linked account's email; it is recorded in the event trail.
     """
 
@@ -756,15 +756,13 @@ async def act_on_dsar_request(data: ActBody, tenant_slug: str, request_id: str) 
         action = admin_svc.DsarAction(expected)
         subject_id = int(row.subject_user_id)
         override_detail: dict[str, Any] = {}
-        if (
-            action is admin_svc.DsarAction.ERASE
-            and svc.Source(row.source) is svc.Source.PUBLIC_FORM
-            and not await svc.subject_email_matches(
-                async_dal, dal, subject_user_id=subject_id, row=row
-            )
+        if svc.Source(row.source) is svc.Source.PUBLIC_FORM and not await svc.subject_email_matches(
+            async_dal, dal, subject_user_id=subject_id, row=row
         ):
-            # An unauthenticated requester only proved control of THEIR mailbox: erasing a linked
-            # account needs that mailbox to be the account's, or a recorded admin override.
+            # An unauthenticated requester only proved control of THEIR mailbox: acting on a linked
+            # account (export hands that account's data to the admin who relays it to the
+            # requester; erase/do-not-sell alter it) needs that mailbox to be the account's, or a
+            # recorded admin override. Applies to EVERY act action.
             reason = svc.clean_text(data.overrideReason, "overrideReason", svc.REASON_MAX)
             if not reason:
                 raise ApiError(
@@ -1101,7 +1099,11 @@ async def _intake_public(
 
         def work() -> bool:
             rotated = svc.rotate_pending_public_sync(
-                dal, tenant_id=tenant_id, email=email, request_type=req_type
+                dal,
+                tenant_id=tenant_id,
+                email=email,
+                request_type=req_type,
+                replace_content=(message, regime),
             )
             fresh = rotated is None
             if rotated is None:
