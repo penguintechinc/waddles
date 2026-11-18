@@ -90,6 +90,42 @@ Valkey stream `waddles:analytics` (its own stream; approximate `MAXLEN ~`), cons
 **No handles, no usernames, no message content, no free text.** The PII boundary holds: analytics
 stores hold only numeric internal ids and user UUID tokens.
 
+### Producer (`core/svc_ingest/src/analytics.rs`)
+
+Ingest XADDs one entry per successfully published platform event, after the main spine append.
+
+| Property | Behaviour |
+|---|---|
+| Flag | `waddles.analytics-stream` (ENV baseline `FLAG_WADDLES_ANALYTICS_STREAM`), default OFF, never the bypass domain. OFF = one atomic load per event, zero queueing, zero XADD |
+| Bound | `XADD waddles:analytics MAXLEN ~ ANALYTICS_STREAM_MAXLEN * ...` (default 500000, min 1000) |
+| Isolation | hot path only `try_send`s onto a bounded queue (`ANALYTICS_QUEUE_CAPACITY`, 4096); a worker with bounded concurrency (`ANALYTICS_TOKENIZE_CONCURRENCY`, 8) tokenizes and XADDs under timeouts (`ANALYTICS_PUBLISH_TIMEOUT_MS` 250, `ANALYTICS_TOKENIZE_TIMEOUT_MS` 500). Queue full / timeout / Valkey error => drop + counter + rate-limited WARN; never an ingest failure or delay |
+| Scope | the numeric tenant/community the publish funnel already resolved. No resolved scope => skip `no_scope`; tenant-wide (`community_id` 0) => skip `tenant_wide` |
+| `kind_code` | `chat.message`/`message` 1, `interaction.command`/`chat.command` 2, `member.join` 3, `member.leave` 4, `presence.start` 5, `presence.end` 6; other event types are skipped (`unmapped_kind`) |
+| `provenance_code` | = `platform_code`: 1 first-party Waddles, 2 Discord, 3 Twitch, 4 YouTube, 5 other. Codes 2..5 are platform-derived, so later gates can exclude them |
+| Metrics | `svc_ingest_analytics_published_total`, `..._skipped_total{reason}` (`unmapped_kind`, `no_scope`, `tenant_wide`, `no_user_token`, `bad_timestamp`, `tokenizer_unavailable`), `..._failed_total{reason}` (`queue_full`, `timeout`, `error`, `connect`), `svc_ingest_analytics_publish_duration_seconds` |
+
+**Member token (INTERIM resolution).** `user_uuid` is taken from `payload["user_uuid"]` when an
+upstream stage stamped it (the planned PII-tokenizer service bundle will; that stamp always wins).
+Until it exists, the producer's worker resolves the token itself with the EXISTING hub-backed
+`IdentityTokenizer` (`MintEphemeralPseudonyms`, minted under the event's `tenant_id`) from the
+platform's raw user id (`user_id`/`author_id`), off the hot path, behind a bounded TTL cache
+(`ANALYTICS_TOKEN_CACHE_CAPACITY`, 10000; found 10 min, not-found 30 s, tokenizer-down 5 s) keyed by
+a SHA-256 of (tenant, platform, id), so a raw id is never stored as a key. The raw id/handle never
+reaches the stream, a log line, a metric label or the cache key. Failure, timeout or unknown id =>
+the event is skipped (`tokenizer_unavailable` / `no_user_token`), never guessed. **This step is
+interim: remove it when the tokenizer bundle stamps `user_uuid`.**
+
+**Known limitation / open compliance item (DPIA).** The tokenizer returns the registered
+`hub_users.uuid` when the platform id is linked to a hub user in that tenant, else a stable
+per-tenant pseudonym stored once in `ephemeral_pseudonyms` (the same value as
+`community_members.user_uuid`), so erasure and `data_use_exclusions` already act on these tokens.
+But (a) when a linked account is erased its pseudonym mapping is deleted, so a returning user gets
+a FRESH token that is not in `data_use_exclusions` (`record_erasure_exclusions` only covers tokens
+in scope at erasure time); (b) do-not-sell preferences exist only for registered accounts (global
+`cookie_consent`), so unlinked pseudonymous identities cannot carry a per-user opt-out (layer B
+uses tenant-level opt-in regardless). A stale cached pre-erasure token is harmless: it is in
+`data_use_exclusions` (ERASED), so `svc_analytics` drops it. Flag (a) and (b) for the DPIA.
+
 ## Retention
 
 Purge by `retention_days`: delete rows where the row's time column + `retention_days` < now

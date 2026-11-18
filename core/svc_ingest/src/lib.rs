@@ -63,6 +63,7 @@
 //! dependency, unlike `svc_process`/`svc_action`.
 
 pub mod active_context;
+pub mod analytics;
 pub mod canary;
 pub mod commands_reconcile;
 pub mod config;
@@ -339,6 +340,7 @@ where
     // The env Discord application serves only this tenant (tenant_discord).
     tenant_discord::set_default_tenant_id(config.cli.default_tenant_id);
     let ingest_metrics = Arc::new(telemetry::register_ingest_metrics(&prom_registry));
+    let analytics_metrics = analytics::register_metrics(&prom_registry);
     let mut state = http::AppState::new(config.clone(), prom_registry);
     let receiver_readiness = Arc::clone(&state.receiver_readiness);
 
@@ -398,6 +400,8 @@ where
         // publish. A flag that is ON but misconfigured fails the process
         // loudly -- never a silent downgrade to the v2/static path.
         try_install_scope_resolver(&config, ingest_metrics.clone()).await?;
+        // Analytics stream producer (flag `waddles.analytics-stream`, default OFF): installed inert.
+        analytics::boot(&config.cli, analytics_metrics, license_client.clone());
         // Twitch IRC (primary e2e path), Discord Gateway (secondary), the
         // Twitch outbound relay drain, and the Twitch EventSub webhook
         // receiver each independently no-op with a logged reason when
