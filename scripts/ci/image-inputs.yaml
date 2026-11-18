@@ -330,6 +330,7 @@ ignore:
   - core/*/*.yml
   - core/*/*.sh
   - core/*/*.json
+  - core/analytics_policy/**
   - core/bundle_compiler/**
   - core/connector_e2e/**
   - core/module_rtc/**

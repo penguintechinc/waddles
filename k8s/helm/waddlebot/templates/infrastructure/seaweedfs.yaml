@@ -64,10 +64,15 @@ spec:
   # and well under every env's helm --timeout (beta 10m, alpha/dal2alpha 60m).
   # scripts/ci/check-helm-hook-job-timeouts.py enforces this statically.
   activeDeadlineSeconds: 300
+  # FAILED Jobs (and their pods/logs) stay inspectable for 24h; hook-succeeded above only
+  # deletes on success. NOTE: on DeadlineExceeded the Job controller itself reaps running pods,
+  # so diagnosability comes from the script's own per-call timeouts (it fails first, with logs).
+  ttlSecondsAfterFinished: 86400
   template:
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       restartPolicy: Never
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -86,41 +91,78 @@ spec:
         - /bin/sh
         - -c
         - |
-          set -e
+          set -eu
+          # pipefail is absent from some sh builds; enable when supported.
+          (set -o pipefail) 2>/dev/null && set -o pipefail
           export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}"
           export AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}"
           export AWS_DEFAULT_REGION="us-east-1"
           # feature/transit-tls-core (F5): https against the FQDN, internal CA pinned (aws cli reads AWS_CA_BUNDLE).
           export AWS_CA_BUNDLE="{{ include "waddlebot.transitTls.caPath" . }}"
           ENDPOINT="{{ include "waddlebot.transitTls.s3Endpoint" . }}"
+          # Fail FAST and DIAGNOSABLY: the Job controller reaps the pod on
+          # activeDeadlineSeconds (no logs survive), so every call is bounded well inside the
+          # deadline -- a stall makes THIS script exit non-zero with a log line, leaving a Failed
+          # pod whose logs `kubectl logs` can still read. Worst case before first failure:
+          # WAIT_MAX + CALL_TIMEOUT.
+          CALL_TIMEOUT=30
+          WAIT_MAX=90
+          log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) bucket-init: $*"; }
+          command -v timeout >/dev/null 2>&1 || { log "ERROR: 'timeout' not found in image; cannot bound aws calls"; exit 1; }
+          awsx() { timeout "${CALL_TIMEOUT}" aws --endpoint-url "$ENDPOINT" "$@"; }
+          # Bounded wait for the S3 gateway (post-hook can fire before SeaweedFS is Ready).
+          log "waiting for S3 endpoint ${ENDPOINT} (max ${WAIT_MAX}s)"
+          waited=0
+          until err=$(timeout 10 aws --endpoint-url "$ENDPOINT" s3api list-buckets 2>&1 >/dev/null); do
+            if [ "${waited}" -ge "${WAIT_MAX}" ]; then
+              log "ERROR: S3 endpoint ${ENDPOINT} not ready after ${WAIT_MAX}s; last error: $(echo "${err}" | tail -n 3)"
+              exit 1
+            fi
+            sleep 3
+            waited=$((waited + 3))
+          done
+          log "S3 endpoint ready after ${waited}s"
           # "recordings" (svc-streaming egress) and bundleExecutor.bucketName
           # ("waddles-bundles", core/bundle_executor's BUNDLE_BUCKET_NAME) --
           # both consumers expect their bucket to already exist; previously
           # only bucketName + "recordings" were created here, leaving
           # "waddles-bundles" as a pre-existing gap.
+          EXPECTED={{ if eq .Values.bundleStorage.mode "bundled" }}5{{ else }}4{{ end }}
+          VERIFIED=0
           for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}" "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}"{{ if eq .Values.bundleStorage.mode "bundled" }} "{{ .Values.bundleStorage.bucketName }}"{{ end }}; do
-            aws --endpoint-url "$ENDPOINT" s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already" && true || true
-            aws --endpoint-url "$ENDPOINT" s3api head-bucket --bucket "${bucket}" 2>/dev/null \
-              || aws --endpoint-url "$ENDPOINT" s3api create-bucket --bucket "${bucket}" --region us-east-1
+            log "bucket ${bucket}: ensure exists"
+            # Best-effort mb (masked on purpose): the head-bucket || create-bucket gate below is the real check.
+            { awsx s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already"; } || true
+            awsx s3api head-bucket --bucket "${bucket}" 2>/dev/null \
+              || awsx s3api create-bucket --bucket "${bucket}" --region us-east-1
           {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.autoEncryptBucket (or .Values.infrastructure.seaweedfs.encryption.secretName (include "waddlebot.kms.objectStorageActive" .)) }}
             # Default bucket encryption (SSE-S3) -- objects written without an
             # explicit ServerSideEncryption header are still encrypted at rest,
             # requires WEED_S3_SSE_KEK to already be configured on the server.
             # kms.objectStorage.mode=kms (templates/_kms.tpl) swaps the default to
             # SSE-KMS under the operator's key, ON TOP of the baseline above.
-            aws --endpoint-url "$ENDPOINT" s3api put-bucket-encryption --bucket "${bucket}" \
+            log "bucket ${bucket}: put-bucket-encryption"
+            awsx s3api put-bucket-encryption --bucket "${bucket}" \
               --server-side-encryption-configuration '{{ include "waddlebot.kms.bucketEncryptionConfig" . }}'
           {{- end }}
+            awsx s3api head-bucket --bucket "${bucket}"
+            VERIFIED=$((VERIFIED + 1))
+            log "bucket ${bucket}: verified (${VERIFIED}/${EXPECTED})"
           done
           {{- if .Values.infrastructure.seaweedfs.escrow.versioning }}
           # Platform-secret escrow bucket: versioning keeps every prior object/manifest version so a
           # poisoned or mistaken overwrite is recoverable. Loud (not fatal) if unsupported.
-          aws --endpoint-url "$ENDPOINT" s3api put-bucket-versioning --bucket "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}" \
+          log "bucket {{ .Values.infrastructure.seaweedfs.escrow.bucketName }}: put-bucket-versioning"
+          awsx s3api put-bucket-versioning --bucket "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}" \
             --versioning-configuration Status=Enabled \
             || echo "WARNING: could not enable versioning on {{ .Values.infrastructure.seaweedfs.escrow.bucketName }} -- escrow history is NOT retained" >&2
           {{- end }}
-          aws --endpoint-url "$ENDPOINT" s3 ls
-          echo "Buckets {{ .Values.infrastructure.seaweedfs.bucketName }}, recordings, {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }} initialized successfully"
+          awsx s3 ls
+          if [ "${EXPECTED}" -lt 1 ] || [ "${VERIFIED}" -ne "${EXPECTED}" ]; then
+            log "ERROR: ${VERIFIED}/${EXPECTED} buckets verified"
+            exit 1
+          fi
+          log "${VERIFIED}/${EXPECTED} buckets verified"
         env:
         # Dedicated hook-scoped "bucket-init" identity (Admin) -- never the
         # shared rootUser/rootPassword admin credential, and never mounted by

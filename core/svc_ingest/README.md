@@ -209,6 +209,20 @@ placeholders (svc-action never resolves them); `Egress::prepare` substitutes the
 | Telemetry | `svc_ingest_egress_detokenize_total{outcome}` (`resolved`, `tokens_sent`, `no_tokens`, `no_resolver`, `kill_switch`, `no_tenant`); no names/tokens in logs |
 | Boundary gate | `make check-pii-egress` (`scripts/ci/check-pii-egress-boundary.sh`): no crate outside svc-ingest's drain/sender_exec and svc-presentation may reference `egress_detokenizer` |
 
+## Analytics stream producer (`src/analytics.rs`)
+
+Flag `waddles.analytics-stream` (ENV `FLAG_WADDLES_ANALYTICS_STREAM`), default OFF. When ON, each
+published platform event also yields one metadata-only `XADD waddles:analytics MAXLEN ~ N` entry
+(`v`, `tenant_id`, `community_id`, `user_uuid`, `platform_code`, `kind_code`, `ts_ms`,
+`provenance_code`; no handle/content/free text). Fire-and-forget through a bounded queue and a
+worker with timeouts: a failure drops the event (counter + rate-limited WARN), never fails or
+slows ingest. **Interim:** the member token is `payload["user_uuid"]` when stamped, else the worker
+tokenizes the raw platform user id via the existing hub identity tokenizer (cached, hashed key,
+never logged) until the PII-tokenizer bundle stamps it. Settings (`ANALYTICS_*`), metrics and the
+wire contract: `docs/analytics-foundation.md` "Producer".
+
+**Limitation (open DPIA item):** after an account is erased its pseudonym mapping is deleted, so a returning user gets a fresh token that is not in `data_use_exclusions`; unlinked pseudonymous identities cannot carry a per-user do-not-sell opt-out. See the docs "Known limitation".
+
 ## Connector heartbeat (P6a T5)
 
 The connector driver schedules `receiver.on-heartbeat-due` per connection when a transport declares

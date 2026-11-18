@@ -48,6 +48,11 @@ from enum import StrEnum
 #: Written into NOT NULL text columns that must stop identifying the subject but cannot be NULL.
 ERASED_PLACEHOLDER = "[erased]"
 
+#: `data_use_exclusions.reason_code` written for every erased subject token (alembic 0129 enum:
+#: 1 do_not_sell, 2 gpc, 3 objection, 4 erased, 5 age_not_adult).
+EXCLUSION_REASON_ERASED = 4
+EXCLUSIONS_TABLE = "data_use_exclusions"
+
 
 class Key(StrEnum):
     """How a column identifies the erased subject."""
@@ -253,6 +258,18 @@ RULES: tuple[Rule, ...] = (
         columns=("actor",),
     ),
     delete("analytics_suspected_bots", platform("platform", "platform_user_id")),
+    # analytics foundation (alembic 0129): layer A user-keyed tables are in schema `analytics_fp`
+    # (registry names are schema-qualified for non-public schemas).
+    delete("analytics_fp.member_daily", uuid("user_uuid")),
+    delete("analytics_fp.member_sessions", uuid("user_uuid")),
+    delete("analytics_fp.member_signals_daily", uuid("user_uuid")),
+    retain(
+        "data_use_exclusions",
+        "suppression list (do-not-sell/GPC/objection/erased/not-adult): must outlive erasure so "
+        "the subject is never re-included (Art. 17(3)(b)/21); holds only a pseudonymous uuid token",
+    ),
+    ref("tenant_data_programme_optin", "signer_uuid", reason=_ACTOR + "; programme consent record"),
+    ref("export_runs", "actor_uuid", reason=_ACTOR + "; export decision audit trail"),
     delete("auto_shoutout_creators", platform("platform", "platform_user_id")),
     delete("booking_page_members", hub("hub_user_id")),
     delete("booking_pages", hub("hub_user_id")),
