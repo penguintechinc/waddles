@@ -26,7 +26,6 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
-import hmac
 import json
 import logging
 import secrets
@@ -111,6 +110,20 @@ async def get_hub_settings_map(async_dal: Any, dal: Any) -> dict[str, str]:
 
 _ALTCHA_MAX_NUMBER = 50_000
 _ALTCHA_TTL_SECONDS = 300
+_ALTCHA_MAC_PERSON = b"login-altcha-v1"
+_ALTCHA_EXPIRES_MAX_DIGITS = 12
+
+
+def altcha_signature(secret: str, challenge: str) -> str:
+    """Keyed BLAKE2b-256 MAC over `challenge`, domain-separated for login ALTCHA.
+
+    The secret is pre-hashed so any-length config values fit BLAKE2b's 64-byte
+    key limit. Server-issued and server-verified; the widget treats it as opaque.
+    """
+    key = hashlib.blake2b(secret.encode(), digest_size=32, person=_ALTCHA_MAC_PERSON).digest()
+    return hashlib.blake2b(
+        challenge.encode(), digest_size=32, key=key, person=_ALTCHA_MAC_PERSON
+    ).hexdigest()
 
 
 def create_altcha_challenge(
@@ -124,7 +137,7 @@ def create_altcha_challenge(
     salt = f"{secrets.token_hex(12)}?expires={expires}"
     secret_number = secrets.randbelow(max_number + 1)
     challenge = hashlib.sha256(f"{salt}{secret_number}".encode()).hexdigest()
-    signature = hmac.new(hmac_key.encode(), challenge.encode(), hashlib.sha256).hexdigest()
+    signature = altcha_signature(hmac_key, challenge)
     return {
         "algorithm": "SHA-256",
         "challenge": challenge,
@@ -162,20 +175,22 @@ def verify_altcha_payload(payload_b64: str, hmac_key: str) -> bool:
     ):
         return False
 
-    expected_sig = hmac.new(hmac_key.encode(), challenge.encode(), hashlib.sha256).hexdigest()
-    if not hmac.compare_digest(signature, expected_sig):
+    if not secrets.compare_digest(
+        signature.encode(), altcha_signature(hmac_key, challenge).encode()
+    ):
         return False
 
     if "?expires=" in salt:
-        try:
-            expires = int(salt.rsplit("?expires=", 1)[1].split("&", 1)[0])
-        except ValueError:
+        expires_raw = salt.rsplit("?expires=", 1)[1].split("&", 1)[0]
+        if not (expires_raw.isascii() and expires_raw.isdigit()) or (
+            len(expires_raw) > _ALTCHA_EXPIRES_MAX_DIGITS
+        ):
             return False
-        if expires < int(time.time()):
+        if int(expires_raw) < int(time.time()):
             return False
 
     computed = hashlib.sha256(f"{salt}{number}".encode()).hexdigest()
-    return hmac.compare_digest(computed, challenge)
+    return secrets.compare_digest(computed.encode(), challenge.encode())
 
 
 async def validate_captcha(

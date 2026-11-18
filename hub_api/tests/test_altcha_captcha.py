@@ -67,6 +67,19 @@ def test_verify_altcha_rejects_tampered_and_expired_payloads() -> None:
     assert auth_service.verify_altcha_payload(token, "") is False
 
 
+def test_verify_altcha_rejects_malformed_expiry_and_non_ascii() -> None:
+    hmac_key = "test-altcha-hmac-key"
+    challenge = auth_service.create_altcha_challenge(hmac_key, max_number=50)
+    base = {k: challenge[k] for k in ("algorithm", "challenge", "salt", "signature")}
+    for bad_expires in ("abc", "", "-5", "1e9", "9" * 40, "\u0663\u0663"):
+        forged = dict(base, number=0, salt=f"abc?expires={bad_expires}")
+        token = base64.b64encode(json.dumps(forged).encode()).decode("ascii")
+        assert auth_service.verify_altcha_payload(token, hmac_key) is False
+    non_ascii = dict(base, number=0, signature="\u00e9" * 8)
+    token = base64.b64encode(json.dumps(non_ascii).encode()).decode("ascii")
+    assert auth_service.verify_altcha_payload(token, hmac_key) is False
+
+
 async def test_validate_captcha_altcha_dispatch() -> None:
     hmac_key = "test-altcha-hmac-key"
     challenge = auth_service.create_altcha_challenge(hmac_key, max_number=200)
