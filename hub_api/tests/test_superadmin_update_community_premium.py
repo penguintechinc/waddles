@@ -90,6 +90,21 @@ def _system_tenant(admin_db: Any) -> None:
     dal.commit()
 
 
+@pytest.fixture(autouse=True)
+def _licensed_tenant(admin_db: Any, app: Quart, _system_tenant: None) -> None:
+    """Operators may only grant Premium to a LICENSED tenant: give it an operator pool of 100.
+
+    Tests of the Free-tenant / full-pool / outage behaviours overwrite or bypass this pool.
+    """
+    import asyncio
+
+    dal = admin_db.dal
+    store = svc.PoolStore(admin_db, dal)
+    asyncio.run(
+        store.put(_tenant_id(admin_db), PREMIUM, 100, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
+    )
+
+
 async def _put(client: Any, community_id: int, body: dict[str, Any], **hdr: Any) -> tuple[int, Any]:
     if "licenseTier" in body:  # tier overrides are operator actions: the system tenant by default
         hdr.setdefault("tenant", SYSTEM_TENANT_SLUG)
@@ -200,7 +215,50 @@ class TestLicenseTierOverride:
         assert event.action == "license.community_tier_overridden"
         assert REASON in str(event)
 
-    async def test_never_blocked_when_pool_full_or_unknown(
+    async def test_free_tenant_override_is_402_tenant_tier_required(
+        self, client: Any, admin_db: Any, audit: RecordingAudit
+    ) -> None:
+        """regression: a tenant whose pool is "not licensed" cannot be given Premium by anyone."""
+        store = svc.PoolStore(admin_db, admin_db.dal)
+        await store.put(
+            _tenant_id(admin_db), PREMIUM, None, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
+        )
+        cid = _community(admin_db)
+        status, body = await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
+        assert status == 402 and body["error"]["code"] == "TENANT_TIER_REQUIRED"
+        assert body["error"]["message"] == (
+            "Premium communities require a Professional or Enterprise license"
+        )
+        assert body["error"]["details"] == {"requiredTenantTier": "professional", "upgrade": True}
+        assert _active(admin_db, cid) is None and _row(admin_db, cid).license_tier != "premium"
+        assert audit.events[-1].action == "license.community_tier_allocation_blocked"
+
+    async def test_setting_the_operator_pool_first_makes_the_tenant_eligible(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        store = svc.PoolStore(admin_db, admin_db.dal)
+        tid = _tenant_id(admin_db)
+        await store.put(tid, PREMIUM, None, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
+        cid = _community(admin_db)
+        body = {"licenseTier": PREMIUM, "reasonCode": REASON}
+        assert (await _put(client, cid, body))[0] == 402
+        await store.put(tid, PREMIUM, 3, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
+        assert (await _put(client, cid, body))[0] == 200
+
+    async def test_undeterminable_pool_is_503_team_pool_unavailable(
+        self, client: Any, admin_db: Any, app: Quart
+    ) -> None:
+        class Down:
+            async def get_pool(self, tenant_id: int, tier_code: int) -> Any:
+                raise svc.PoolUnavailable("license server down")
+
+        app.config["POOL_PROVIDER"] = Down()
+        cid = _community(admin_db)
+        status, body = await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
+        assert status == 503 and body["error"]["code"] == "TEAM_POOL_UNAVAILABLE"
+        assert _active(admin_db, cid) is None
+
+    async def test_never_blocked_when_pool_full(
         self, client: Any, admin_db: Any, audit: RecordingAudit
     ) -> None:
         store = svc.PoolStore(admin_db, admin_db.dal)
