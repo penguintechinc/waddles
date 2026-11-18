@@ -22,6 +22,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.bundle_activation import BLUEPRINTS
 from services.bundle_approval_service import install_version_globally
 from services.tenant_app_availability_service import set_available
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import make_user_token, make_user_token_with_roles
 
 _MANIFEST = {
@@ -116,9 +117,26 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     quart_app.config["async_dal"] = bundle_install_db
     quart_app.config["dal"] = dal
     quart_app.config["install_dal"] = install_dal
+    install_community_ids(quart_app, dal)
     for bp in BLUEPRINTS:
         quart_app.register_blueprint(bp)
     return quart_app
+
+
+_DB: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _bind_db(bundle_install_db: Any) -> Any:
+    """Expose the test DB to `cu` so seeded numeric ids map to community UUIDs in URLs."""
+    _DB[:] = [bundle_install_db]
+    yield
+    _DB.clear()
+
+
+def cu(community_id: int) -> str:
+    """Public UUID of a seeded community (client-facing routes never take the numeric id)."""
+    return public_id(_DB[0], community_id)
 
 
 async def _seed_community(install_dal: Any, *, tenant_id: int = 1, name: str = "acme") -> int:
@@ -130,7 +148,7 @@ async def test_list_requires_membership(app: Quart, install_dal: Any) -> None:
     token = make_user_token(user_id=999, scope="")
     client = app.test_client()
     response = await client.get(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -141,7 +159,7 @@ async def test_activate_requires_admin(app: Quart, install_dal: Any) -> None:
     token = make_user_token(user_id=999, scope="")
     client = app.test_client()
     response = await client.post(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
         json={"appId": "waddles.socials.music.default"},
     )
@@ -153,7 +171,7 @@ async def test_activate_happy_path(app: Quart, install_dal: Any) -> None:
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     client = app.test_client()
     response = await client.post(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
         json={"appId": "waddles.socials.music.default"},
     )
@@ -166,7 +184,7 @@ async def test_activate_happy_path(app: Quart, install_dal: Any) -> None:
     ).first()
     assert active is not None
     listing = await client.get(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
     )
     rows = (await listing.get_json())["bundles"]
@@ -190,7 +208,7 @@ async def test_activate_without_availability_is_409(app: Quart, install_dal: Any
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     client = app.test_client()
     response = await client.post(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
         json={"appId": "waddles.socials.music.default"},
     )
@@ -201,7 +219,7 @@ async def test_activate_unknown_community_is_404(app: Quart) -> None:
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/community/999999/activation",
+        f"/api/v1/apps/community/{UNKNOWN_PUBLIC_ID}/activation",
         headers={"Authorization": f"Bearer {token}"},
         json={"appId": "waddles.socials.music.default"},
     )
@@ -213,7 +231,7 @@ async def test_deactivate_requires_admin(app: Quart, install_dal: Any) -> None:
     token = make_user_token(user_id=999, scope="")
     client = app.test_client()
     response = await client.delete(
-        f"/api/v1/apps/community/{community_id}/activation/waddles.socials.music.default",
+        f"/api/v1/apps/community/{cu(community_id)}/activation/waddles.socials.music.default",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -224,12 +242,12 @@ async def test_deactivate_happy_path(app: Quart, install_dal: Any) -> None:
     admin_token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     client = app.test_client()
     await client.post(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {admin_token}"},
         json={"appId": "waddles.socials.music.default"},
     )
     response = await client.delete(
-        f"/api/v1/apps/community/{community_id}/activation/waddles.socials.music.default",
+        f"/api/v1/apps/community/{cu(community_id)}/activation/waddles.socials.music.default",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 200
@@ -244,12 +262,12 @@ async def test_list_happy_path_after_activation(app: Quart, install_dal: Any) ->
     admin_token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     client = app.test_client()
     await client.post(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {admin_token}"},
         json={"appId": "waddles.socials.music.default"},
     )
     response = await client.get(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 200
@@ -295,7 +313,7 @@ async def test_activate_response_has_empty_warnings_by_default(
     community_id = await _seed_community(install_dal)
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     response = await app.test_client().post(
-        f"/api/v1/apps/community/{community_id}/activation",
+        f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
         json={"appId": app_id},
     )
@@ -318,7 +336,7 @@ async def test_activate_conflict_warning_names_owner_and_is_still_201(
     community_id = await _seed_community(install_dal)
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     client = app.test_client()
-    url = f"/api/v1/apps/community/{community_id}/activation"
+    url = f"/api/v1/apps/community/{cu(community_id)}/activation"
     headers = {"Authorization": f"Bearer {token}"}
 
     first = await client.post(url, headers=headers, json={"appId": app_a})

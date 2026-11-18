@@ -29,6 +29,7 @@ from services.guild_pairing import (
     list_pairings,
     update_pairing,
 )
+from tests.community_ids import install_community_ids, public_id
 
 G_A = "111111111111111111"  # gitleaks:allow - fake snowflakes
 G_B = "222222222222222222"
@@ -389,7 +390,7 @@ class TestPrivilegedAndEveryone:
         _pair(dal, cid, G_A, G_B)
         monkeypatch.setattr(bp, "_list_roles_for_mirror", _lister_priv({R_DST: (0x8, False)}))
         r = await app.test_client().post(
-            f"/api/v1/communities/{cid}/discord/role-mirrors",
+            f"/api/v1/communities/{public_id(dal, cid)}/discord/role-mirrors",
             headers={
                 **auth_headers(scope="community.guild_pairing:write"),
                 "Content-Type": "application/json",
@@ -919,8 +920,9 @@ def app(guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
     dal, *_ = guild_pairing_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(guild_pairing_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(guild_pairing_bp)
     monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(bp, "_list_roles_for_mirror", _lister(_ALL_ROLES))
     return quart_app
@@ -940,9 +942,9 @@ class TestRoutes:
     async def test_member_forbidden(
         self, app: Quart, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _d, cid, *_ = guild_pairing_db
+        dal, cid, *_ = guild_pairing_db
         c = app.test_client()
-        url = f"/api/v1/communities/{cid}/discord/role-mirrors"
+        url = f"/api/v1/communities/{public_id(dal, cid)}/discord/role-mirrors"
         assert (await c.get(url, headers=auth_headers(scope="profile:read"))).status_code == 403
         r = await c.post(
             url,
@@ -963,7 +965,7 @@ class TestRoutes:
         dal, cid, *_ = guild_pairing_db
         _pair(dal, cid, G_A, G_B)
         c = app.test_client()
-        url = f"/api/v1/communities/{cid}/discord/role-mirrors"
+        url = f"/api/v1/communities/{public_id(dal, cid)}/discord/role-mirrors"
         w = {
             **auth_headers(scope="community.guild_pairing:write"),
             "Content-Type": "application/json",
@@ -1007,7 +1009,7 @@ class TestRoutes:
         c2 = dal.communities.insert(name="oc", tenant_id=t2)
         dal.commit()
         r = await app.test_client().get(
-            f"/api/v1/communities/{c2}/discord/role-mirrors",
+            f"/api/v1/communities/{public_id(dal, c2)}/discord/role-mirrors",
             headers=auth_headers(scope="community.guild_pairing:read"),
         )
         assert r.status_code == 404

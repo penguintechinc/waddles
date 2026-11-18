@@ -28,6 +28,7 @@ from quart_schema import QuartSchema
 import blueprints.v1.community_loyalty as loyalty_module
 from blueprints.v1.community_loyalty import loyalty_bp, loyalty_internal_bp
 from services.schema import bind_auth_tables, bind_loyalty_tables
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 from tests.conftest import TENANT_SLUG
 
 SERVICE_API_KEY = "test-service-key"
@@ -66,6 +67,7 @@ def app(loyalty_db: Any) -> Quart:
     async_dal, _community_id = loyalty_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, async_dal.dal)
     quart_app.register_blueprint(loyalty_bp)
     quart_app.register_blueprint(loyalty_internal_bp)
     quart_app.config["dal"] = async_dal.dal
@@ -123,9 +125,9 @@ class TestScopeAndTenant:
     async def test_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/loyalty/config",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/config", community_id),
             headers=auth_headers(scope="community.loyalty:write"),
         )
         assert response.status_code == 403
@@ -133,16 +135,16 @@ class TestScopeAndTenant:
     async def test_wipe_requires_admin_scope(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.post(
-            f"/api/v1/admin/{community_id}/loyalty/wipe",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/wipe", community_id),
             headers=auth_headers(scope="community.loyalty:write"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/loyalty/config",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/loyalty/config",
             headers=auth_headers(scope="community.loyalty:read"),
         )
         assert response.status_code == 404
@@ -161,17 +163,19 @@ class TestScopeAndTenant:
         self, client: Any, auth_headers: Any, method: str, path_suffix: str, scope: str
     ) -> None:
         response = await client.open(
-            f"/api/v1/admin/9999/{path_suffix}", method=method, headers=auth_headers(scope=scope)
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/{path_suffix}",
+            method=method,
+            headers=auth_headers(scope=scope),
         )
         assert response.status_code == 404
 
     async def test_feature_disabled_is_402(
         self, client: Any, auth_headers: Any, loyalty_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         monkeypatch.setattr(loyalty_module, "feature_enabled", AsyncMock(return_value=False))
         response = await client.get(
-            f"/api/v1/admin/{community_id}/loyalty/config",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/config", community_id),
             headers=auth_headers(scope="community.loyalty:read"),
         )
         assert response.status_code == 402
@@ -181,9 +185,9 @@ class TestConfig:
     async def test_get_config_returns_defaults(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/loyalty/config",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/config", community_id),
             headers=auth_headers(scope="community.loyalty:read"),
         )
         assert response.status_code == 200
@@ -195,9 +199,9 @@ class TestConfig:
     async def test_update_config_partial(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/loyalty/config",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/config", community_id),
             headers={
                 **auth_headers(scope="community.loyalty:write"),
                 "Content-Type": "application/json",
@@ -212,9 +216,9 @@ class TestConfig:
     async def test_update_config_empty_body_is_400(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/loyalty/config",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/config", community_id),
             headers={
                 **auth_headers(scope="community.loyalty:write"),
                 "Content-Type": "application/json",
@@ -226,9 +230,9 @@ class TestConfig:
 
 class TestLeaderboardAndBalance:
     async def test_leaderboard_empty(self, client: Any, auth_headers: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/loyalty/leaderboard",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/leaderboard", community_id),
             headers=auth_headers(scope="community.loyalty:read"),
         )
         assert response.status_code == 200
@@ -238,9 +242,9 @@ class TestLeaderboardAndBalance:
     async def test_adjust_balance_add_points(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/loyalty/user/u1/balance",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -254,9 +258,9 @@ class TestLeaderboardAndBalance:
     async def test_adjust_balance_missing_platform_is_400(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/loyalty/user/u1/balance",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -268,9 +272,9 @@ class TestLeaderboardAndBalance:
     async def test_adjust_balance_rejects_negative_overshoot(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/loyalty/user/u1/balance",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -284,9 +288,9 @@ class TestWipeAndStats:
     async def test_wipe_zeroes_balances(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         await client.put(
-            f"/api/v1/admin/{community_id}/loyalty/user/u1/balance",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -294,7 +298,7 @@ class TestWipeAndStats:
             json={"platform": "twitch", "delta": 25},
         )
         response = await client.post(
-            f"/api/v1/admin/{community_id}/loyalty/wipe",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/wipe", community_id),
             headers=auth_headers(scope="community.loyalty:admin"),
         )
         assert response.status_code == 200
@@ -302,9 +306,9 @@ class TestWipeAndStats:
         assert body["data"]["affected"] == 1
 
     async def test_stats_aggregates(self, client: Any, auth_headers: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         await client.put(
-            f"/api/v1/admin/{community_id}/loyalty/user/u1/balance",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -312,7 +316,7 @@ class TestWipeAndStats:
             json={"platform": "twitch", "delta": 40},
         )
         response = await client.get(
-            f"/api/v1/admin/{community_id}/loyalty/stats",
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/stats", community_id),
             headers=auth_headers(scope="community.loyalty:read"),
         )
         assert response.status_code == 200
@@ -323,7 +327,7 @@ class TestWipeAndStats:
 
 class TestInternalRoutes:
     async def test_bad_service_key_is_401(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.get(
             f"/api/v1/internal/loyalty/balance?community_id={community_id}&platform=twitch&platform_user_id=u1",
             headers={"X-Service-Key": "wrong"},
@@ -338,7 +342,7 @@ class TestInternalRoutes:
         assert response.status_code == 404
 
     async def test_get_balance(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.get(
             f"/api/v1/internal/loyalty/balance?community_id={community_id}&platform=twitch&platform_user_id=u1",
             headers=_service_headers(),
@@ -348,7 +352,7 @@ class TestInternalRoutes:
         assert body["data"]["balance"] == 0
 
     async def test_leaderboard(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.get(
             f"/api/v1/internal/loyalty/leaderboard?community_id={community_id}&limit=5",
             headers=_service_headers(),
@@ -358,7 +362,7 @@ class TestInternalRoutes:
         assert body["data"]["entries"] == []
 
     async def test_list_items(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await client.get(
             f"/api/v1/internal/loyalty/items?community_id={community_id}",
             headers=_service_headers(),
@@ -368,7 +372,7 @@ class TestInternalRoutes:
         assert body["data"]["items"] == []
 
     async def test_earn_credits_points(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await _post_json(
             client,
             "/api/v1/internal/loyalty/earn",
@@ -390,7 +394,7 @@ class TestInternalRoutes:
     async def test_earn_gated_by_feature_flag(
         self, client: Any, loyalty_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         monkeypatch.setattr(loyalty_module, "feature_enabled", AsyncMock(return_value=False))
         response = await _post_json(
             client,
@@ -407,7 +411,7 @@ class TestInternalRoutes:
         assert response.status_code == 402
 
     async def test_adjust_via_internal_route(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await _post_json(
             client,
             "/api/v1/internal/loyalty/adjust",
@@ -427,7 +431,7 @@ class TestInternalRoutes:
         assert body["error"]["message"] == "insufficient points"
 
     async def test_redeem_not_enough_points_message(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         await _post_json(
             client,
             "/api/v1/internal/loyalty/earn",
@@ -458,7 +462,7 @@ class TestInternalRoutes:
     async def test_redeem_gated_by_feature_flag(
         self, client: Any, loyalty_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         monkeypatch.setattr(loyalty_module, "feature_enabled", AsyncMock(return_value=False))
         response = await _post_json(
             client,
@@ -474,7 +478,7 @@ class TestInternalRoutes:
         assert response.status_code == 402
 
     async def test_redeem_missing_fields_is_400(self, client: Any, loyalty_db: Any) -> None:
-        _, community_id = loyalty_db
+        async_dal, community_id = loyalty_db
         response = await _post_json(
             client,
             "/api/v1/internal/loyalty/redeem",

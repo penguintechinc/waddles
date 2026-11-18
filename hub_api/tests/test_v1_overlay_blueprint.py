@@ -31,6 +31,7 @@ from quart_schema import QuartSchema
 import blueprints.v1.overlay as overlay_module
 from blueprints.v1.overlay import SCOPE_ADMIN, overlay_bp
 from config import HubAPIConfig
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
@@ -70,10 +71,11 @@ def _test_config() -> HubAPIConfig:
 def app(overlay_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(overlay_bp)
     quart_app.config["dal"] = overlay_db.dal
     quart_app.config["async_dal"] = overlay_db
     quart_app.config["HUB_API_CONFIG"] = _test_config()
+    install_community_ids(quart_app, overlay_db.dal)
+    quart_app.register_blueprint(overlay_bp)
     return quart_app
 
 
@@ -121,7 +123,7 @@ class TestOverlayDedicatedScope:
             ],
         )
         token = make_user_token(user_id=611, scope=SCOPE_ADMIN)
-        path = f"/api/v1/admin/{community_id}/overlay"
+        path = f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay"
         if method == "POST":
             path += "/rotate"
         response = await client.open(
@@ -137,7 +139,7 @@ class TestOverlayDedicatedScope:
         )
         token = make_user_token(user_id=612, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 200
@@ -145,7 +147,7 @@ class TestOverlayDedicatedScope:
 
 class TestGetOverlay:
     async def test_get_overlay_without_token_is_401(self, client: Any) -> None:
-        response = await client.get("/api/v1/admin/1/overlay")
+        response = await client.get(f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/overlay")
         assert response.status_code == 401
 
     async def test_get_overlay_missing_scope_is_403(self, client: Any, overlay_db: Any) -> None:
@@ -153,7 +155,7 @@ class TestGetOverlay:
         seed_membership(overlay_db, community_id=community_id, user_id=42)
         token = make_user_token(user_id=42, scope="")  # no streaming.overlay:admin
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -165,7 +167,7 @@ class TestGetOverlay:
         community_id = seed_community(overlay_db)
         token = make_user_token(user_id=99, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -178,7 +180,7 @@ class TestGetOverlay:
         seed_membership(overlay_db, community_id=community_id, user_id=7, role="community-member")
         token = make_user_token(user_id=7, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -195,7 +197,7 @@ class TestGetOverlay:
         # itself exists.
         token = make_user_token(user_id=55, scope=SCOPE_ADMIN, tenant=OTHER_TENANT_SLUG)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -208,7 +210,7 @@ class TestGetOverlay:
         seed_super_admin(overlay_db, user_id=1)
         token = make_super_admin_token(user_id=1, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 200
@@ -219,7 +221,9 @@ class TestGetOverlay:
         headers, community_id, _ = _owner_headers(overlay_db)
         overlay_db.dal.executesql("ALTER TABLE communities ADD COLUMN overlay_code VARCHAR(16)")
         overlay_db.dal.commit()
-        first = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        first = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay", headers=headers
+        )
         assert first.status_code == 200
         first_body = await first.get_json()
         assert first_body["success"] is True
@@ -235,7 +239,9 @@ class TestGetOverlay:
         assert overlay["is_active"] is True
         assert overlay["enabled_sources"] == ["alerts", "chat", "goals", "ticker"]
 
-        second = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        second = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay", headers=headers
+        )
         second_body = await second.get_json()
         assert second_body["overlay"]["overlay_key"] == overlay["overlay_key"]
         assert second_body["overlay"]["id"] == overlay["id"]
@@ -245,14 +251,14 @@ class TestUpdateOverlay:
     async def test_update_overlay_no_fields_is_400(self, client: Any, overlay_db: Any) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/overlay", headers=headers, json={}
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay", headers=headers, json={}
         )
         assert response.status_code == 400
 
     async def test_update_overlay_not_found_is_404(self, client: Any, overlay_db: Any) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers=headers,
             json={"isActive": False},
         )
@@ -260,9 +266,11 @@ class TestUpdateOverlay:
 
     async def test_update_overlay_active_flag(self, client: Any, overlay_db: Any) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
-        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)  # create
+        await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay", headers=headers
+        )  # create
         response = await client.put(
-            f"/api/v1/admin/{community_id}/overlay",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay",
             headers=headers,
             json={
                 "isActive": False,
@@ -281,17 +289,19 @@ class TestRotateOverlayKey:
     async def test_rotate_overlay_key_not_found_is_404(self, client: Any, overlay_db: Any) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay/rotate", headers=headers
         )
         assert response.status_code == 404
 
     async def test_rotate_overlay_key_changes_key(self, client: Any, overlay_db: Any) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
-        created = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        created = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay", headers=headers
+        )
         old_key = (await created.get_json())["overlay"]["overlay_key"]
 
         response = await client.post(
-            f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay/rotate", headers=headers
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -306,7 +316,7 @@ class TestGetOverlayStats:
         community_id = seed_community(overlay_db)
         token = make_user_token(user_id=123, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay/stats",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay/stats",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -315,16 +325,23 @@ class TestGetOverlayStats:
         self, client: Any, overlay_db: Any
     ) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
-        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay", headers=headers
+        )
         response = await client.get(
-            f"/api/v1/admin/{community_id}/overlay/stats?days=not-a-number", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay/stats?days=not-a-number",
+            headers=headers,
         )
         assert response.status_code == 200
 
     async def test_get_overlay_stats_empty(self, client: Any, overlay_db: Any) -> None:
         headers, community_id, _ = _owner_headers(overlay_db)
-        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)  # create
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay/stats", headers=headers)
+        await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay", headers=headers
+        )  # create
+        response = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay/stats", headers=headers
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["stats"]["total_access_count"] == 0
@@ -351,7 +368,9 @@ class TestGetOverlayStats:
         )
         dal.commit()
 
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay/stats", headers=headers)
+        response = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/overlay/stats", headers=headers
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert len(body["stats"]["daily"]) == 1

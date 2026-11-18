@@ -37,6 +37,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from pydal import Field
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -51,6 +52,7 @@ from blueprints.v1.event import (
     event_calendar_bp,
 )
 from services.event_calendar_proxy import ProxyResult
+from tests.community_ids import install_community_ids, public_id
 
 _PATH_FILL = {
     "id": "42",
@@ -76,9 +78,9 @@ _ROUTE_PREFIX: dict[str, str] = {
 }
 
 
-def _full_path(route: Any) -> str:
+def _full_path(route: Any, pid: str) -> str:
     """Prefix + `/booking-pages/<page_id>` -> `/api/v1/calendar/booking-pages/9`."""
-    filled = route.rule
+    filled = route.rule.replace("<community_id>", pid)
     for name, value in _PATH_FILL.items():
         filled = filled.replace(f"<{name}>", value)
     return _ROUTE_PREFIX[route.name] + filled
@@ -153,12 +155,25 @@ _EXPECTED_SCOPES: dict[str, str | None] = {
 
 @pytest.fixture
 def app(tenant_db: Any) -> Quart:
+    # Minimal communities table; ids 1..3 seeded so community 3 matches the numeric id the
+    # downstream-path assertions expect (the cuuid hook swaps the public UUID back to it).
+    tenant_db.define_table("communities", Field("name"))
+    for n in range(1, 4):
+        tenant_db.communities.insert(name=f"c{n}")
+    tenant_db.commit()
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    quart_app.config["dal"] = tenant_db
+    install_community_ids(quart_app, tenant_db)
     quart_app.register_blueprint(event_calendar_bp)
     quart_app.register_blueprint(event_calendar_admin_bp)
-    quart_app.config["dal"] = tenant_db
     return quart_app
+
+
+@pytest.fixture
+def cpid(app: Quart, tenant_db: Any) -> str:
+    """Public UUID of seeded community 3."""
+    return public_id(tenant_db, 3)
 
 
 @pytest.fixture
@@ -209,23 +224,23 @@ class TestRouteTableCharacterization:
 
     @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.name)
     async def test_gated_route_without_token_is_401(
-        self, client: Any, route: Any
+        self, cpid: str, client: Any, route: Any
     ) -> None:
         """Every scoped route rejects an anonymous caller -- `tenant_middleware` first."""
         if route.scope is None:
             pytest.skip("public route -- no auth decorator by design (Node's optionalAuth)")
-        response = await client.open(_full_path(route), method=route.method)
+        response = await client.open(_full_path(route, cpid), method=route.method)
         assert response.status_code == 401
 
     @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.name)
     async def test_gated_route_with_correct_scope_reaches_proxy(
-        self, client: Any, route: Any, auth_headers: Any, proxy_stub: AsyncMock
+        self, cpid: str, client: Any, route: Any, auth_headers: Any, proxy_stub: AsyncMock
     ) -> None:
         """A token carrying exactly the declared scope reaches the handler (not 401/403)."""
         if route.scope is None:
             pytest.skip("public route -- covered by TestPublicBookingRoutes")
         response = await client.open(
-            _full_path(route),
+            _full_path(route, cpid),
             method=route.method,
             headers=auth_headers(scope=route.scope),
             json={} if route.has_body else None,
@@ -251,7 +266,7 @@ class TestRouteTableCharacterization:
         "route", [r for r in ALL_ROUTES if r.scope == SCOPE_ADMIN], ids=lambda r: r.name
     )
     async def test_admin_routes_reject_read_only_scope(
-        self, client: Any, route: Any, auth_headers: Any
+        self, cpid: str, client: Any, route: Any, auth_headers: Any
     ) -> None:
         """`SCOPE_ADMIN` routes 403 a caller with only `event.calendar:read`.
 
@@ -262,7 +277,7 @@ class TestRouteTableCharacterization:
         `SCOPE_ADMIN`.
         """
         response = await client.open(
-            _full_path(route), method=route.method, headers=auth_headers(scope=SCOPE_READ)
+            _full_path(route, cpid), method=route.method, headers=auth_headers(scope=SCOPE_READ)
         )
         assert response.status_code == 403
 
@@ -270,11 +285,11 @@ class TestRouteTableCharacterization:
         "route", [r for r in ALL_ROUTES if r.scope == SCOPE_WRITE], ids=lambda r: r.name
     )
     async def test_write_routes_accept_wildcard_write_scope(
-        self, client: Any, route: Any, auth_headers: Any, proxy_stub: AsyncMock
+        self, cpid: str, client: Any, route: Any, auth_headers: Any, proxy_stub: AsyncMock
     ) -> None:
         """`*:write` (a real SCOPE_BUNDLES entry) covers every `event.calendar:write` route."""
         response = await client.open(
-            _full_path(route),
+            _full_path(route, cpid),
             method=route.method,
             headers=auth_headers(scope="*:write"),
             json={} if route.has_body else None,
@@ -320,11 +335,11 @@ class TestPublicBookingRoutes:
 
 class TestDownstreamPathTemplating:
     async def test_nested_admin_path_is_built_from_all_three_path_params(
-        self, client: Any, auth_headers: Any, proxy_stub: AsyncMock
+        self, cpid: str, client: Any, auth_headers: Any, proxy_stub: AsyncMock
     ) -> None:
         """`cancelTicket`'s 3 path params all land in the forwarded downstream path."""
         await client.post(
-            "/api/v1/admin/3/calendar/events/11/tickets/77/cancel",
+            f"/api/v1/admin/{cpid}/calendar/events/11/tickets/77/cancel",
             headers=auth_headers(scope=SCOPE_ADMIN),
             json={"reason": "duplicate"},
         )
@@ -371,10 +386,10 @@ class TestBodyAndClientMetaForwarding:
         assert forwarded_body == {"timezone": "America/Chicago"}
 
     async def test_check_in_attaches_ip_and_user_agent(
-        self, client: Any, auth_headers: Any, proxy_stub: AsyncMock
+        self, cpid: str, client: Any, auth_headers: Any, proxy_stub: AsyncMock
     ) -> None:
         await client.post(
-            "/api/v1/admin/3/calendar/events/11/check-in",
+            f"/api/v1/admin/{cpid}/calendar/events/11/check-in",
             headers={**auth_headers(scope=SCOPE_ADMIN), "User-Agent": "scanner-app/1.0"},
             json={"ticket_id": 77},
         )
@@ -386,27 +401,23 @@ class TestBodyAndClientMetaForwarding:
     async def test_get_route_never_reads_a_body(
         self, client: Any, auth_headers: Any, proxy_stub: AsyncMock
     ) -> None:
-        await client.get(
-            "/api/v1/calendar/booking-pages", headers=auth_headers(scope=SCOPE_READ)
-        )
+        await client.get("/api/v1/calendar/booking-pages", headers=auth_headers(scope=SCOPE_READ))
         assert proxy_stub.await_args.kwargs["json_body"] is None
 
 
 class TestCsvExportBranch:
     async def test_format_csv_sets_content_type_and_disposition(
-        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+        self, cpid: str, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         import blueprints.v1.event as event_module
 
         stub = AsyncMock(
-            return_value=ProxyResult(
-                ok=True, status_code=200, body={"rows": [{"ticket_id": 1}]}
-            )
+            return_value=ProxyResult(ok=True, status_code=200, body={"rows": [{"ticket_id": 1}]})
         )
         monkeypatch.setattr(event_module._proxy_client, "request", stub)
 
         response = await client.get(
-            "/api/v1/admin/3/calendar/events/11/attendance/export?format=csv",
+            f"/api/v1/admin/{cpid}/calendar/events/11/attendance/export?format=csv",
             headers=auth_headers(scope=SCOPE_ADMIN),
         )
         assert response.status_code == 200
@@ -414,10 +425,10 @@ class TestCsvExportBranch:
         assert "attendance-11.csv" in response.headers["Content-Disposition"]
 
     async def test_format_json_returns_plain_json_relay(
-        self, client: Any, auth_headers: Any, proxy_stub: AsyncMock
+        self, cpid: str, client: Any, auth_headers: Any, proxy_stub: AsyncMock
     ) -> None:
         response = await client.get(
-            "/api/v1/admin/3/calendar/events/11/attendance/export",
+            f"/api/v1/admin/{cpid}/calendar/events/11/attendance/export",
             headers=auth_headers(scope=SCOPE_ADMIN),
         )
         assert response.status_code == 200
@@ -507,7 +518,7 @@ class TestFeatureGate:
         stub.assert_not_awaited()
 
     async def test_ticketing_route_blocked_when_flag_off(
-        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+        self, cpid: str, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A ticketing-capability route is independently gated -- also 402 when denied."""
         import blueprints.v1.event as event_module
@@ -517,7 +528,7 @@ class TestFeatureGate:
         monkeypatch.setattr(event_module._proxy_client, "request", stub)
 
         response = await client.get(
-            "/api/v1/admin/3/calendar/events/11/ticket-types",
+            f"/api/v1/admin/{cpid}/calendar/events/11/ticket-types",
             headers=auth_headers(scope=SCOPE_ADMIN),
         )
 
@@ -525,7 +536,7 @@ class TestFeatureGate:
         stub.assert_not_awaited()
 
     async def test_calendar_and_ticketing_routes_gate_on_distinct_flags(
-        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+        self, cpid: str, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """Calendar routes check `.event.calendar`; ticket routes check `.event.ticketing`."""
         import blueprints.v1.event as event_module
@@ -545,7 +556,7 @@ class TestFeatureGate:
 
         await client.get("/api/v1/calendar/my-bookings", headers=auth_headers(scope=SCOPE_READ))
         await client.get(
-            "/api/v1/admin/3/calendar/events/11/ticket-types",
+            f"/api/v1/admin/{cpid}/calendar/events/11/ticket-types",
             headers=auth_headers(scope=SCOPE_ADMIN),
         )
 

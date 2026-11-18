@@ -19,6 +19,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.community_inventory import inventory_bp
 from services import community_inventory as inventory_svc
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 
 @pytest.fixture
@@ -26,6 +27,7 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(inventory_bp)
     quart_app.config["dal"] = dal
     return quart_app
@@ -60,14 +62,14 @@ class TestScopeAndTenant:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             headers=auth_headers(scope="community.inventory:use"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/inventory/items",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/inventory/items",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert response.status_code == 404
@@ -101,7 +103,7 @@ class TestUnknownCommunity404Sweep:
         self, client: Any, auth_headers: Any, method: str, path_suffix: str, scope: str
     ) -> None:
         response = await client.open(
-            f"/api/v1/admin/9999/{path_suffix}",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/{path_suffix}",
             method=method,
             headers=auth_headers(scope=scope, user_id="1"),
         )
@@ -115,7 +117,7 @@ class TestItemCrud:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "", "quantity": 5},
         )
@@ -129,7 +131,7 @@ class TestItemCrud:
 
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             write_headers,
             {"name": "Green Screen", "category": "gear", "quantity": 3},
         )
@@ -140,13 +142,13 @@ class TestItemCrud:
         item_id = item["id"]
 
         list_resp = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert len((await list_resp.get_json())["items"]) == 1
 
         update_resp = await client.put(
-            f"/api/v1/admin/{community_id}/inventory/items/{item_id}",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/{item_id}",
             headers={**write_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"name": "Green Screen Mk2"}),
         )
@@ -154,12 +156,13 @@ class TestItemCrud:
         assert (await update_resp.get_json())["item"]["name"] == "Green Screen Mk2"
 
         delete_resp = await client.delete(
-            f"/api/v1/admin/{community_id}/inventory/items/{item_id}", headers=write_headers
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/{item_id}",
+            headers=write_headers,
         )
         assert delete_resp.status_code == 200
 
         after_delete = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert len((await after_delete.get_json())["items"]) == 0
@@ -204,7 +207,7 @@ class TestCheckoutCheckin:
         dal, community_id = community_db
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Boom Mic", "quantity": 2},
         )
@@ -212,7 +215,7 @@ class TestCheckoutCheckin:
 
         checkout_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkout",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"item_id": item_id, "quantity": 1},
         )
@@ -223,14 +226,14 @@ class TestCheckoutCheckin:
         assert dal.inventory_items[item_id].available_quantity == 1
 
         my_items_resp = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/my-items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/my-items",
             headers=auth_headers(scope="community.inventory:use", user_id="1"),
         )
         assert len((await my_items_resp.get_json())["checkouts"]) == 1
 
         checkin_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkin",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkin",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"checkout_id": checkout["id"]},
         )
@@ -244,7 +247,7 @@ class TestCheckoutCheckin:
         _, community_id = community_db
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Rare Lens", "quantity": 1},
         )
@@ -252,7 +255,7 @@ class TestCheckoutCheckin:
 
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkout",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"item_id": item_id, "quantity": 5},
         )
@@ -264,7 +267,7 @@ class TestCheckoutCheckin:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkout",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"quantity": 1},
         )
@@ -276,7 +279,7 @@ class TestCheckoutCheckin:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkout",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"item_id": 1, "quantity": "not-a-number"},
         )
@@ -288,7 +291,7 @@ class TestCheckoutCheckin:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkout",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"item_id": 9999, "quantity": 1},
         )
@@ -300,7 +303,7 @@ class TestCheckoutCheckin:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkin",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkin",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {},
         )
@@ -312,7 +315,7 @@ class TestCheckoutCheckin:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkin",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkin",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"checkout_id": 9999},
         )
@@ -329,14 +332,14 @@ class TestCheckoutCheckin:
         dal, community_id = community_db
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Tripod", "quantity": 5},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
         checkout_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkout",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"item_id": item_id, "quantity": 3},
         )
@@ -344,7 +347,7 @@ class TestCheckoutCheckin:
 
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkin",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkin",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"checkout_id": checkout_id, "quantity_returned": 3},
         )
@@ -357,7 +360,7 @@ class TestUpdateDeleteNotFound:
     ) -> None:
         _, community_id = community_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/inventory/items/9999",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/9999",
             headers={
                 **auth_headers(scope="community.inventory:write"),
                 "Content-Type": "application/json",
@@ -371,7 +374,7 @@ class TestUpdateDeleteNotFound:
     ) -> None:
         _, community_id = community_db
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/inventory/items/9999",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/9999",
             headers=auth_headers(scope="community.inventory:write"),
         )
         assert response.status_code == 404
@@ -385,7 +388,7 @@ class TestStockAdjustments:
         _, community_id = community_db
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Batteries", "quantity": 10},
         )
@@ -393,7 +396,8 @@ class TestStockAdjustments:
 
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items/{item_id}/stock/add",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/items/{item_id}/stock/add",
             auth_headers(scope="community.inventory:write", user_id="1"),
             {"quantity": 5, "notes": "restock"},
         )
@@ -406,7 +410,7 @@ class TestStockAdjustments:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items/1/stock/add",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/1/stock/add",
             auth_headers(scope="community.inventory:write", user_id="1"),
             {"quantity": -1},
         )
@@ -419,7 +423,7 @@ class TestStockAdjustments:
         _, community_id = community_db
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Cables", "quantity": 10},
         )
@@ -427,7 +431,8 @@ class TestStockAdjustments:
 
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items/{item_id}/stock/remove",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/items/{item_id}/stock/remove",
             auth_headers(scope="community.inventory:write", user_id="1"),
             {"quantity": 4, "notes": "damaged"},
         )
@@ -440,7 +445,8 @@ class TestStockAdjustments:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items/1/stock/remove",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/items/1/stock/remove",
             auth_headers(scope="community.inventory:write", user_id="1"),
             {"quantity": 0},
         )
@@ -457,33 +463,35 @@ class TestListCheckoutsAuditAndSummary:
         dal.commit()
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Camera", "quantity": 3},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
         await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/checkout",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
             {"item_id": item_id, "quantity": 1},
         )
 
         all_resp = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/checkouts",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkouts",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert all_resp.status_code == 200
         assert len((await all_resp.get_json())["checkouts"]) == 1
 
         filtered_resp = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/checkouts?status=active",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/checkouts?status=active",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert len((await filtered_resp.get_json())["checkouts"]) == 1
 
         none_resp = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/checkouts?status=returned",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/checkouts?status=returned",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert len((await none_resp.get_json())["checkouts"]) == 0
@@ -507,7 +515,7 @@ class TestListCheckoutsAuditAndSummary:
         monkeypatch.setattr(dal, "executesql", fake_executesql)
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/summary",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/summary",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert response.status_code == 200
@@ -527,14 +535,15 @@ class TestListCheckoutsAuditAndSummary:
         dal, community_id = community_db
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Mixer", "quantity": 2},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
         await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items/{item_id}/stock/add",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/items/{item_id}/stock/add",
             auth_headers(scope="community.inventory:write", user_id="1"),
             {"quantity": 1},
         )
@@ -555,20 +564,22 @@ class TestListCheckoutsAuditAndSummary:
         dal.commit()
 
         all_resp = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/log",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/log",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert all_resp.status_code == 200
         assert len((await all_resp.get_json())["log"]) == 1
 
         item_filtered = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/log?item_id={item_id}&action=add_stock",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/log?item_id={item_id}&action=add_stock",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert len((await item_filtered.get_json())["log"]) == 1
 
         no_match = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/log?action=remove_stock",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/log?action=remove_stock",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert len((await no_match.get_json())["log"]) == 0
@@ -614,7 +625,7 @@ class TestListCheckoutsAuditAndSummary:
         monkeypatch.setattr(inventory_bp_module, "get_audit_log", _spy_get_audit_log)
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/log?limit=999999",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/log?limit=999999",
             headers=auth_headers(scope="community.inventory:read"),
         )
         assert response.status_code == 200
@@ -628,12 +639,12 @@ class TestAvailableItems:
         _, community_id = community_db
         await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/inventory/items",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
             auth_headers(scope="community.inventory:write"),
             {"name": "Drone", "quantity": 1},
         )
         response = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/available",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/available",
             headers=auth_headers(scope="community.inventory:use"),
         )
         assert response.status_code == 200
@@ -657,7 +668,8 @@ class TestAvailableItems:
         monkeypatch.setattr(dal, "executesql", fake_executesql)
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/inventory/available?search=drone",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/available?search=drone",
             headers=auth_headers(scope="community.inventory:use"),
         )
         assert response.status_code == 200

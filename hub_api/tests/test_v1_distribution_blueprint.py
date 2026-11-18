@@ -22,6 +22,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.distribution import distribution_bp
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_token
 
 
@@ -29,9 +30,10 @@ from tests.conftest import TENANT_SLUG, make_token
 def app(distribution_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(distribution_bp)
     quart_app.config["dal"] = distribution_db.dal
     quart_app.config["async_dal"] = distribution_db
+    install_community_ids(quart_app, distribution_db.dal)
+    quart_app.register_blueprint(distribution_bp)
     return quart_app
 
 
@@ -127,14 +129,26 @@ class TestInputValidation:
         )
         assert response.status_code == 400
 
-    async def test_non_integer_community_id_is_400(self, client: Any) -> None:
+    @pytest.mark.parametrize("raw", ["not-a-uuid", "42"])
+    async def test_non_uuid_community_id_is_400(self, client: Any, raw: str) -> None:
+        """`community_id` is the community public UUID; a numeric id is rejected too."""
         response = await client.get(
-            "/api/v1/distribution/bundles?stage=ingest&community_id=not-an-int",
+            f"/api/v1/distribution/bundles?stage=ingest&community_id={raw}",
             headers=_headers(),
         )
         assert response.status_code == 400
         body = await response.get_json()
         assert body["error"]["code"] == "INVALID_COMMUNITY_ID"
+
+    async def test_unknown_uuid_community_lists_nothing(self, client: Any) -> None:
+        """A well-formed UUID no community owns behaves like an unknown numeric id did: empty."""
+        response = await client.get(
+            "/api/v1/distribution/bundles?stage=ingest"
+            "&community_id=00000000-0000-4000-8000-00000000dead",
+            headers=_headers(),
+        )
+        assert response.status_code == 200
+        assert (await response.get_json())["bundles"] == []
 
 
 class TestListBundles:
@@ -193,8 +207,9 @@ class TestListBundles:
         )
         dal.commit()
 
+        cuuid = public_id(distribution_db, community_id)
         response = await client.get(
-            f"/api/v1/distribution/bundles?stage=ingest&community_id={community_id}",
+            f"/api/v1/distribution/bundles?stage=ingest&community_id={cuuid}",
             headers=_headers(),
         )
         assert response.status_code == 200
@@ -219,8 +234,9 @@ class TestListBundles:
         )
         dal.commit()
 
+        cuuid = public_id(distribution_db, community_id)
         response = await client.get(
-            f"/api/v1/distribution/bundles?stage=ingest&community_id={community_id}",
+            f"/api/v1/distribution/bundles?stage=ingest&community_id={cuuid}",
             headers=_headers(),
         )
         body = await response.get_json()
@@ -259,15 +275,16 @@ class TestListBundles:
         )
         dal.commit()
 
+        cuuid = public_id(distribution_db, community_id)
         response = await client.get(
-            f"/api/v1/distribution/bundles?stage=ingest&community_id={community_id}",
+            f"/api/v1/distribution/bundles?stage=ingest&community_id={cuuid}",
             headers=_headers(),
         )
         body = await response.get_json()
         assert body["bundles"] == []
 
         action_response = await client.get(
-            f"/api/v1/distribution/bundles?stage=action&community_id={community_id}",
+            f"/api/v1/distribution/bundles?stage=action&community_id={cuuid}",
             headers=_headers(),
         )
         action_body = await action_response.get_json()

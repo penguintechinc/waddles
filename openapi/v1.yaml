@@ -1411,14 +1411,20 @@ components:
       title: CommunityDetailDTO
       type: object
     CommunityMembershipDTO:
-      description: Community membership DTO.
+      description: 'Community membership DTO.
+
+
+        `id` is the community''s PUBLIC UUID (`communities.public_id`), the only community
+
+        identifier that crosses the API boundary; use it verbatim in `/community/<id>/...`
+        URLs.'
       properties:
         displayName:
           title: Displayname
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         licenseTier:
           default: 1
           description: 'The community''s own tier: 1 Free, 2 Premium (no active allocation
@@ -6759,7 +6765,8 @@ paths:
               properties:
                 communityId:
                   anyOf:
-                  - type: integer
+                  - format: uuid
+                    type: string
                   - type: 'null'
                   default: null
                   title: Communityid
@@ -6851,7 +6858,8 @@ paths:
                   type: string
                 community_id:
                   anyOf:
-                  - type: integer
+                  - format: uuid
+                    type: string
                   - type: 'null'
                   default: null
                   title: Community Id
@@ -7081,7 +7089,8 @@ paths:
               properties:
                 communityId:
                   anyOf:
-                  - type: integer
+                  - format: uuid
+                    type: string
                   - type: 'null'
                   default: null
                   title: Communityid
@@ -22107,8 +22116,9 @@ paths:
               description: Request DTO for `POST /cancel`.
               properties:
                 communityId:
+                  format: uuid
                   title: Communityid
-                  type: integer
+                  type: string
                 immediately:
                   default: false
                   title: Immediately
@@ -22195,8 +22205,9 @@ paths:
                   title: Cancelurl
                   type: string
                 communityId:
+                  format: uuid
                   title: Communityid
-                  type: integer
+                  type: string
                 provider:
                   default: stripe
                   title: Provider
@@ -22565,8 +22576,9 @@ paths:
                   title: Codeid
                   type: integer
                 communityId:
+                  format: uuid
                   title: Communityid
-                  type: integer
+                  type: string
                 subscriptionId:
                   title: Subscriptionid
                   type: integer
@@ -22970,8 +22982,9 @@ paths:
                 a username.
               properties:
                 communityId:
+                  format: uuid
                   title: Communityid
-                  type: integer
+                  type: string
                 message:
                   title: Message
                   type: string

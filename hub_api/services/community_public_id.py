@@ -147,6 +147,62 @@ async def translate_community_view_arg() -> None:
     return None
 
 
+def parse_public_id(raw: object) -> str | None:
+    """Canonical lowercase UUID text for a client-supplied community id, else `None`.
+
+    Strict: only a dashed UUID string qualifies (a numeric id, a bool, an int or free text is
+    `None`), so request bodies/query args reject the old enumerable numeric form.
+    """
+    if not isinstance(raw, str) or not _UUID_FULL.fullmatch(raw.strip()):
+        return None
+    return str(uuid.UUID(raw.strip()))
+
+
+async def resolve_public_community_id(raw: object) -> int | None:
+    """Internal numeric id for a client-supplied community UUID (request body / query arg).
+
+    Returns `None` when `raw` is not a UUID (caller raises its existing validation error) and
+    `UNKNOWN_COMMUNITY_ID` for a well-formed UUID no community owns, which the caller's existing
+    tenant/membership fence then treats exactly like a non-existent numeric id (no oracle).
+    """
+    canonical = parse_public_id(raw)
+    if canonical is None:
+        return None
+    return await lookup_community_id(canonical)
+
+
+async def to_internal_community_id(value: uuid.UUID | str | None) -> int | None:
+    """Internal numeric id for an already-validated UUID request field (`None` passes through).
+
+    For dataclass request DTOs typed `uuid.UUID | None`: pydantic has already rejected numeric
+    and malformed input with the standard validation error, so this only translates (unknown
+    UUID -> `UNKNOWN_COMMUNITY_ID`, handled by the caller's existing tenant/membership fence).
+    """
+    if value is None:
+        return None
+    return await lookup_community_id(str(uuid.UUID(str(value))))
+
+
+async def lookup_public_id(community_id: int) -> str:
+    """Public UUID for an internal numeric community id (response/redirect construction).
+
+    `communities.public_id` is NOT NULL since alembic 0084, so a missing row/value is a bug and
+    raises `RuntimeError` (fail loud) rather than emitting the numeric id.
+    """
+    async_dal = current_app.config["async_dal"]
+    dal = current_app.config["dal"]
+    if "communities" not in dal.tables:
+        bind_auth_tables(dal)
+    elif "public_id" not in dal.communities.fields:
+        bind_tenant_tables(dal)
+    rows = await async_dal.select_async(
+        dal(dal.communities.id == community_id), dal.communities.public_id
+    )
+    if not rows or not rows[0].public_id:
+        raise RuntimeError(f"community {community_id} has no public_id")
+    return str(rows[0].public_id)
+
+
 def register_default_converter() -> None:
     """Make `cuuid` known to every Quart app in the process (idempotent, import-time).
 

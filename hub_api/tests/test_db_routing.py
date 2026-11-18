@@ -43,6 +43,7 @@ from services.db_routing import (
     reset_fallback_warning,
 )
 from services.schema import bind_auth_tables, bind_streaming_tables
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG
 
 HUB_API = Path(__file__).resolve().parent.parent
@@ -177,11 +178,12 @@ class TestReadOnlyUsesReplica:
         replica.commit()
         app = _app(primary, replica)
         QuartSchema(app)
+        install_community_ids(app, primary)
         app.register_blueprint(live_status_public_bp)
         app.register_blueprint(live_status_internal_bp)
         client = app.test_client()
 
-        resp = await client.get(f"/api/v1/public/communities/{cid}/live")
+        resp = await client.get(f"/api/v1/public/communities/{public_id(primary, cid)}/live")
         assert resp.status_code == 200
         data = (await resp.get_json())["data"]
         assert data["live"] is True and data["channel"] == "Replica Channel"
@@ -190,7 +192,7 @@ class TestReadOnlyUsesReplica:
         # A private community must 404 from the PRIMARY gate even though the replica has data.
         primary(primary.communities.id == cid).update(is_public=False)
         primary.commit()
-        denied = await client.get(f"/api/v1/public/communities/{cid}/live")
+        denied = await client.get(f"/api/v1/public/communities/{public_id(primary, cid)}/live")
         assert denied.status_code == 404
 
     async def test_catalog_route_receives_replica_dal(self, tmp_path: Path, counter: Any) -> None:
@@ -230,8 +232,11 @@ class TestPrimaryFallback:
         primary.commit()
         app = _app(primary, None)
         QuartSchema(app)
+        install_community_ids(app, primary)
         app.register_blueprint(live_status_public_bp)
-        resp = await app.test_client().get(f"/api/v1/public/communities/{cid}/live")
+        resp = await app.test_client().get(
+            f"/api/v1/public/communities/{public_id(primary, cid)}/live"
+        )
         assert resp.status_code == 200
         assert set(_targets(counter)) == {"primary", "primary_fallback"}
 

@@ -22,6 +22,7 @@ import blueprints.v1.community_music as music_module
 from blueprints.v1.community_music import community_music_bp
 from services import community_music_service as svc
 from services.bundle_data_v2 import derive_v2_table_identity
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 REQUESTER_UUID = "11111111-2222-3333-4444-555555555555"
@@ -63,10 +64,11 @@ def _patches(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
 def app(music_station_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(community_music_bp)
     quart_app.config["dal"] = music_station_db.dal
     quart_app.config["async_dal"] = music_station_db
     quart_app.config["install_dal"] = object()
+    install_community_ids(quart_app, music_station_db.dal)
+    quart_app.register_blueprint(community_music_bp)
     return quart_app
 
 
@@ -185,7 +187,8 @@ def _member(db: Any, community_id: int, user_id: int = 2) -> dict[str, str]:
 
 
 async def _get(client: Any, community_id: int, headers: dict[str, str]) -> Any:
-    return await client.get(f"/api/v1/communities/{community_id}/music", headers=headers)
+    pid = public_id(client.app.config["dal"], community_id)
+    return await client.get(f"/api/v1/communities/{pid}/music", headers=headers)
 
 
 class TestMusicPage:
@@ -274,7 +277,9 @@ class TestMusicPage:
     async def test_unauthenticated_refused(self, client: Any, music_station_db: Any) -> None:
         _create_tables(music_station_db)
         c = _community(music_station_db)
-        resp = await client.get(f"/api/v1/communities/{c}/music")
+        resp = await client.get(
+            f"/api/v1/communities/{public_id(client.app.config['dal'], c)}/music"
+        )
         assert resp.status_code in (401, 403)
 
     async def test_cross_community_and_tenant_isolated(

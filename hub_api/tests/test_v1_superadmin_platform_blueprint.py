@@ -21,6 +21,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
 from services.tenant_key_provisioning import TenantKeyProvisioningError
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -46,6 +47,7 @@ def provisioned(monkeypatch: pytest.MonkeyPatch) -> list[tuple[int, str]]:
 def app(admin_db: Any, provisioned: list[tuple[int, str]]) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, admin_db.dal)
     quart_app.register_blueprint(superadmin_bp)
     quart_app.config["dal"] = admin_db.dal
     quart_app.config["async_dal"] = admin_db
@@ -145,13 +147,16 @@ class TestCommunityManagement:
         assert body["communities"][0]["name"] == "acme-community"
 
     async def test_get_community_not_found_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/superadmin/communities/9999", headers=_headers())
+        response = await client.get(
+            f"/api/v1/superadmin/communities/{UNKNOWN_PUBLIC_ID}", headers=_headers()
+        )
         assert response.status_code == 404
 
     async def test_get_community_found(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.get(
-            f"/api/v1/superadmin/communities/{community_id}", headers=_headers()
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}", community_id),
+            headers=_headers(),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -190,7 +195,7 @@ class TestCommunityManagement:
         )
         community_id = (await created.get_json())["community"]["id"]
         response = await client.post(
-            f"/api/v1/superadmin/communities/{community_id}/reassign",
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}/reassign", community_id),
             headers=_headers(),
             json={"newOwnerName": "newowner"},
         )
@@ -224,7 +229,7 @@ class TestCommunityManagement:
     async def test_update_community_success(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
-            f"/api/v1/superadmin/communities/{community_id}",
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}", community_id),
             headers=_headers(),
             json={"displayName": "Renamed"},
         )
@@ -232,7 +237,7 @@ class TestCommunityManagement:
 
     async def test_update_community_not_found_is_404(self, client: Any) -> None:
         response = await client.put(
-            "/api/v1/superadmin/communities/9999",
+            f"/api/v1/superadmin/communities/{UNKNOWN_PUBLIC_ID}",
             headers=_headers(),
             json={"displayName": "X"},
         )
@@ -241,21 +246,23 @@ class TestCommunityManagement:
     async def test_delete_community_success(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.delete(
-            f"/api/v1/superadmin/communities/{community_id}", headers=_headers()
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}", community_id),
+            headers=_headers(),
         )
         assert response.status_code == 200
 
     async def test_delete_global_community_is_403(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db, is_global=True)
         response = await client.delete(
-            f"/api/v1/superadmin/communities/{community_id}", headers=_headers()
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}", community_id),
+            headers=_headers(),
         )
         assert response.status_code == 403
 
     async def test_reassign_owner_success(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.post(
-            f"/api/v1/superadmin/communities/{community_id}/reassign",
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}/reassign", community_id),
             headers=_headers(),
             json={"newOwnerName": "newowner"},
         )
@@ -264,7 +271,9 @@ class TestCommunityManagement:
     async def test_reassign_owner_missing_name_is_400(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.post(
-            f"/api/v1/superadmin/communities/{community_id}/reassign", headers=_headers(), json={}
+            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}/reassign", community_id),
+            headers=_headers(),
+            json={},
         )
         assert response.status_code == 400
 

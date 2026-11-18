@@ -34,6 +34,7 @@ from services.provider_connections.gameserver import (
     parse_sealed_target,
 )
 from services.provider_connections.registry import build_default_registry
+from tests.community_ids import UNKNOWN_PUBLIC_ID, public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
 from tests.provider_connections.support import raw_rows
 
@@ -102,8 +103,11 @@ def gs_app(pc_app: Quart, pc_db: Any, clock: FakeClock) -> Quart:
     return pc_app
 
 
-def _base(db: Any, community_id: int | None = None) -> str:
-    return f"/api/v1/communities/{community_id or db.seed.community_id}/gameserver-connections"
+def _base(db: Any, community_id: int | str | None = None) -> str:
+    """Collection URL; `community_id` may be a numeric seed id or an already-public UUID string."""
+    target = community_id or db.seed.community_id
+    public = target if isinstance(target, str) else public_id(db, target)
+    return f"/api/v1/communities/{public}/gameserver-connections"
 
 
 def _body(**over: Any) -> str:
@@ -138,7 +142,7 @@ async def test_create_returns_only_ids_and_never_the_secret_or_address(
     assert PASSWORD not in dump and PUBLIC_HOST not in dump
     # The generic admin list leaks neither.
     listing = await client.get(
-        f"/api/v1/communities/{pc_db.seed.community_id}/provider-connections",
+        f"/api/v1/communities/{public_id(pc_db, pc_db.seed.community_id)}/provider-connections",
         headers=admin_headers(pc_db),
     )
     listed = await listing.get_data(as_text=True)
@@ -205,7 +209,7 @@ async def test_other_communities_and_tenants_cannot_touch_a_server(
         ).get_data(as_text=True)
     )
     cid = created["server"]["connectionId"]
-    other = pc_db.seed.community_id + 999
+    other = UNKNOWN_PUBLIC_ID  # a well-formed UUID no community owns
     for method, url in (
         ("post", f"{_base(pc_db, other)}/{cid}/test"),
         ("delete", f"{_base(pc_db, other)}/{cid}"),

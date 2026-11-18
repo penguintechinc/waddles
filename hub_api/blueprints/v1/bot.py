@@ -36,6 +36,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import logging
+import uuid
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -47,6 +48,10 @@ from quart_schema import validate_request, validate_response
 
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
+from services.community_public_id import (
+    resolve_public_community_id,
+    to_internal_community_id,
+)
 from services.errors import ApiError
 from services.global_identity import is_global_admin_sync
 
@@ -57,6 +62,8 @@ _SHOUTOUT_READ = "bot.shoutout:read"
 _SHOUTOUT_WRITE = "bot.shoutout:write"
 _AI_CHATTER_READ = "bot.ai_chatter:read"
 _AI_CHATTER_WRITE = "bot.ai_chatter:write"
+logger = logging.getLogger(__name__)
+
 _AI_KNOWLEDGE_READ = "bot.ai_knowledge:read"
 _AI_KNOWLEDGE_WRITE = "bot.ai_knowledge:write"
 _SERVER_MANAGER_ADMIN = "bot.server_manager:admin"
@@ -482,7 +489,8 @@ class KnowledgeSourceCreateRequest:
 
     source_name: str
     source_type: str
-    community_id: int | None = None
+    #: Community public UUID (never the numeric id).
+    community_id: uuid.UUID | None = None
     vendor_id: int | None = None
     module_id: int | None = None
     source_url: str | None = None
@@ -540,7 +548,8 @@ class KnowledgeSearchRequest:
     """Request body -- Knowledge Search."""
 
     query: str
-    communityId: int | None = None
+    #: Community public UUID (never the numeric id).
+    communityId: uuid.UUID | None = None
     vendorId: int | None = None
     topK: int | None = None
 
@@ -580,7 +589,8 @@ class SuggestRequest:
 
     ticketId: int
     ticketText: str
-    communityId: int | None = None
+    #: Community public UUID (never the numeric id).
+    communityId: uuid.UUID | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -702,7 +712,12 @@ async def list_knowledge_sources() -> Any:
     `communityId` (legacy `community_id` accepted) is REQUIRED for non-super-admins;
     only a global super admin may list unfiltered.
     """
-    community_id = _int_arg("communityId", 0) or _int_arg("community_id", 0) or None
+    raw_community = request.args.get("communityId") or request.args.get("community_id")
+    community_id: int | None = None
+    if raw_community:
+        community_id = await resolve_public_community_id(raw_community)
+        if community_id is None:
+            return _error("communityId must be a community UUID", 400, "BAD_REQUEST")
     if community_id is None:
         if not await _caller_is_super_admin():
             return _error("communityId is required", 400, "BAD_REQUEST")
@@ -721,11 +736,12 @@ async def list_knowledge_sources() -> Any:
 @validate_response(KnowledgeSourceResponse, 201)
 async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
     """`aiKnowledgeController.createSource` -- `POST /api/v1/admin/ai-knowledge/sources`."""
-    denied = await _check_optional_community(data.community_id)
+    community_id = await to_internal_community_id(data.community_id)
+    denied = await _check_optional_community(community_id)
     if denied:
         return denied
-    if not await _scope_allowed(data.community_id, data.vendor_id) or (
-        data.community_id is not None
+    if not await _scope_allowed(community_id, data.vendor_id) or (
+        community_id is not None
         and data.vendor_id is not None
         and not await _scope_allowed(None, data.vendor_id)
     ):
@@ -733,7 +749,7 @@ async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
     payload = bot_ai_knowledge.KnowledgeSourceCreate(
         source_name=data.source_name,
         source_type=data.source_type,
-        community_id=data.community_id,
+        community_id=community_id,
         vendor_id=data.vendor_id,
         module_id=data.module_id,
         source_url=data.source_url,
@@ -841,18 +857,20 @@ async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
     """`aiKnowledgeController.searchKnowledgeBase` -- `POST /api/v1/admin/ai-knowledge/search`."""
     if not data.query or not data.query.strip():
         return _error("query is required", 400, "BAD_REQUEST")
-    denied = await _require_query_scope(data.communityId)
+    community_id = await to_internal_community_id(data.communityId)
+    denied = await _require_query_scope(community_id)
     if denied:
         return denied
     try:
         results = await bot_ai_knowledge.search_knowledge(
             _dal(),
             data.query,
-            community_id=data.communityId,
+            community_id=community_id,
             vendor_id=data.vendorId,
             top_k=data.topK or 5,
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning("ai-knowledge request refused: status=%s", exc.status)
         return _error(str(exc), exc.status, "BAD_REQUEST")
     return KnowledgeSearchResponse(
         success=True,
@@ -884,14 +902,16 @@ async def suggest_for_ticket(data: SuggestRequest) -> Any:
     """`aiKnowledgeController.suggestForTicket` -- `POST /api/v1/admin/ai-knowledge/suggest`."""
     if not data.ticketId or not data.ticketText or not data.ticketText.strip():
         return _error("ticketId and ticketText are required", 400, "BAD_REQUEST")
-    denied = await _require_query_scope(data.communityId)
+    community_id = await to_internal_community_id(data.communityId)
+    denied = await _require_query_scope(community_id)
     if denied:
         return denied
     try:
         suggestion = await bot_ai_knowledge.generate_suggestion(
-            _dal(), data.ticketId, data.ticketText.strip(), community_id=data.communityId
+            _dal(), data.ticketId, data.ticketText.strip(), community_id=community_id
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning("ai-knowledge request refused: status=%s", exc.status)
         return _error(str(exc), exc.status, "BAD_REQUEST")
     if suggestion is None:
         return SuggestResponse(

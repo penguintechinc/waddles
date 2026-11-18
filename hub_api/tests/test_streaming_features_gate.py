@@ -39,6 +39,8 @@ from blueprints.v1.overlay import overlay_bp
 from blueprints.v1.stream import community_stream_bp
 from blueprints.v1.streaming import streaming_bp
 from config import HubAPIConfig
+from tests.community_ids import install_community_ids, public_id
+from tests.conftest import seed_community
 
 
 def _test_config() -> HubAPIConfig:
@@ -68,6 +70,7 @@ class TestStreamFeatureGate:
     def app(self, overlay_db: Any) -> Quart:
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, overlay_db.dal)
         quart_app.register_blueprint(community_stream_bp)
         quart_app.config["dal"] = overlay_db.dal
         quart_app.config["async_dal"] = overlay_db
@@ -92,7 +95,8 @@ class TestStreamFeatureGate:
         token = make_user_token(user_id=1, tenant=TENANT_SLUG, scope="*:read")
 
         response = await client.get(
-            "/api/v1/community/1/streams", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/community/{public_id(overlay_db, seed_community(overlay_db))}/streams",
+            headers={"Authorization": f"Bearer {token}"},
         )
 
         assert response.status_code == 402
@@ -106,6 +110,7 @@ class TestBroadcastFeatureGateIsProfessionalTier:
     def app(self, overlay_db: Any) -> Quart:
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, overlay_db.dal)
         quart_app.register_blueprint(streaming_bp)
         quart_app.config["dal"] = overlay_db.dal
         quart_app.config["async_dal"] = overlay_db
@@ -130,7 +135,8 @@ class TestBroadcastFeatureGateIsProfessionalTier:
         token = make_user_token(user_id=1, tenant=TENANT_SLUG, scope="*:read")
 
         response = await client.get(
-            "/api/v1/admin/1/streams", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(overlay_db, seed_community(overlay_db))}/streams",
+            headers={"Authorization": f"Bearer {token}"},
         )
 
         assert response.status_code == 402
@@ -142,6 +148,7 @@ class TestRtcFeatureGate:
     def app(self, overlay_db: Any) -> Quart:
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, overlay_db.dal)
         quart_app.register_blueprint(calls_admin_bp)
         quart_app.config["dal"] = overlay_db.dal
         quart_app.config["async_dal"] = overlay_db
@@ -162,7 +169,8 @@ class TestRtcFeatureGate:
         token = make_user_token(user_id=1, tenant=TENANT_SLUG, scope="streaming.calls:admin")
 
         response = await client.get(
-            "/api/v1/admin/1/calls/rooms", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(overlay_db, seed_community(overlay_db))}/calls/rooms",
+            headers={"Authorization": f"Bearer {token}"},
         )
 
         assert response.status_code == 402
@@ -174,6 +182,7 @@ class TestMusicStationFeatureGate:
     def app(self, streaming_db: Any) -> Quart:
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, streaming_db.dal)
         quart_app.register_blueprint(music_bp)
         quart_app.config["dal"] = streaming_db.dal
         quart_app.config["async_dal"] = streaming_db
@@ -195,7 +204,8 @@ class TestMusicStationFeatureGate:
         token = make_user_token(user_id=1, tenant=TENANT_SLUG, scope="*:read")
 
         response = await client.get(
-            "/api/v1/admin/1/music/settings", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(streaming_db, seed_community(streaming_db))}/music/settings",
+            headers={"Authorization": f"Bearer {token}"},
         )
 
         assert response.status_code == 402
@@ -207,6 +217,7 @@ class TestOverlaysFeatureGate:
     def app(self, overlay_db: Any) -> Quart:
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, overlay_db.dal)
         quart_app.register_blueprint(overlay_bp)
         quart_app.config["dal"] = overlay_db.dal
         quart_app.config["async_dal"] = overlay_db
@@ -232,7 +243,8 @@ class TestOverlaysFeatureGate:
         token = make_user_token(user_id=1, tenant=TENANT_SLUG, scope="streaming.overlay:admin")
 
         response = await client.get(
-            "/api/v1/admin/1/overlay", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(overlay_db, seed_community(overlay_db))}/overlay",
+            headers={"Authorization": f"Bearer {token}"},
         )
 
         assert response.status_code == 402

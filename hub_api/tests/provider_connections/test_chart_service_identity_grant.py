@@ -34,6 +34,7 @@ from flask_core.service_jwt import (
     load_identities_from_env,
 )
 
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import SERVICE_AUDIENCE, admin_headers
 from tests.provider_connections.test_api import INTERNAL, _create
 
@@ -286,7 +287,7 @@ async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
     assert (await (await client.get(url, headers=headers)).get_json())["items"] == []
 
     patched = await client.patch(
-        f"/api/v1/communities/{pc_db.seed.community_id}/provider-connections/{body['id']}",
+        f"/api/v1/communities/{public_id(pc_db, pc_db.seed.community_id)}/provider-connections/{body['id']}",
         headers=admin_headers(pc_db),
         data=json.dumps({"enabled": True}),
     )

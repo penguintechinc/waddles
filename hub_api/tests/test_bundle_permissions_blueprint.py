@@ -11,6 +11,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.bundle_permissions import BLUEPRINTS
+from tests.community_ids import cpath, install_community_ids
 from tests.conftest import make_token, make_user_token, make_user_token_with_roles
 
 _APP_ID = "waddles.socials.music.default"
@@ -77,6 +78,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     quart_app.config["async_dal"] = bundle_install_db
     quart_app.config["dal"] = dal
     quart_app.config["install_dal"] = install_dal
+    install_community_ids(quart_app, dal)
     for bp in BLUEPRINTS:
         quart_app.register_blueprint(bp)
     return quart_app
@@ -179,7 +181,12 @@ async def test_grant_requires_community_admin(app: Quart, install_dal: Any) -> N
     token = make_user_token(user_id=999, scope="")
     client = app.test_client()
     response = await client.post(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+        cpath(
+            app.config["dal"],
+            "/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+            community_id,
+            _APP_ID=_APP_ID,
+        ),
         headers={"Authorization": f"Bearer {token}"},
         json={"version": _VERSION, "grantedPermissions": ["storage.kv", "ai.generate"]},
     )
@@ -197,7 +204,12 @@ async def test_grant_consent_required_when_partial(app: Quart, install_dal: Any)
     community_id = await _seed_community(install_dal)
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     response = await client.post(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+        cpath(
+            app.config["dal"],
+            "/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+            community_id,
+            _APP_ID=_APP_ID,
+        ),
         headers={"Authorization": f"Bearer {token}"},
         json={"version": _VERSION, "grantedPermissions": ["storage.kv"]},
     )
@@ -217,7 +229,12 @@ async def test_grant_then_revoke_happy_path(app: Quart, install_dal: Any) -> Non
     community_id = await _seed_community(install_dal)
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     grant_response = await client.post(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+        cpath(
+            app.config["dal"],
+            "/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+            community_id,
+            _APP_ID=_APP_ID,
+        ),
         headers={"Authorization": f"Bearer {token}"},
         json={"version": _VERSION, "grantedPermissions": ["storage.kv", "ai.generate"]},
     )
@@ -227,8 +244,13 @@ async def test_grant_then_revoke_happy_path(app: Quart, install_dal: Any) -> Non
     assert set(grant_body.keys()) == {"success", "grantVersion"}
 
     revoke_response = await client.delete(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/ai.generate"
-        f"?version={_VERSION}",
+        cpath(
+            app.config["dal"],
+            "/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/ai.generate?version={_VERSION}",
+            community_id,
+            _APP_ID=_APP_ID,
+            _VERSION=_VERSION,
+        ),
         headers={"Authorization": f"Bearer {token}"},
     )
     assert revoke_response.status_code == 200
@@ -236,7 +258,12 @@ async def test_grant_then_revoke_happy_path(app: Quart, install_dal: Any) -> Non
     assert revoke_body["grantVersion"] == 2
 
     listing = await client.get(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/granted",
+        cpath(
+            app.config["dal"],
+            "/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/granted",
+            community_id,
+            _APP_ID=_APP_ID,
+        ),
         headers={"Authorization": f"Bearer {token}"},
     )
     body = await listing.get_json()
@@ -248,8 +275,13 @@ async def test_revoke_requires_community_admin(app: Quart, install_dal: Any) -> 
     token = make_user_token(user_id=999, scope="")
     client = app.test_client()
     response = await client.delete(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/ai.generate"
-        f"?version={_VERSION}",
+        cpath(
+            app.config["dal"],
+            "/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/ai.generate?version={_VERSION}",
+            community_id,
+            _APP_ID=_APP_ID,
+            _VERSION=_VERSION,
+        ),
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403

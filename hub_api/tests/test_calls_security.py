@@ -19,8 +19,13 @@ from typing import Any
 import grpc
 import pytest
 
-from blueprints.v1.calls import SCOPE_ADMIN, SCOPE_READ, SCOPE_WRITE
+from blueprints.v1.calls import (
+    SCOPE_ADMIN,
+    SCOPE_READ,
+    SCOPE_WRITE,
+)
 from services.calls_proxy import RoomsClient
+from tests.community_ids import UNKNOWN_PUBLIC_ID, public_id  # noqa: F401
 from tests.conftest import OTHER_TENANT_SLUG, make_user_token, seed_community, seed_membership
 from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by name)
     PARTICIPANT,
@@ -37,6 +42,12 @@ from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by 
     user_headers,
     user_uuid,
 )
+
+
+def _cu(db: Any, community_id: int) -> str:
+    """Short alias for the community public UUID used in long URLs."""
+    return public_id(db, community_id)
+
 
 ROOM_OTHER = "3c2a1b0f-9e8d-4c7b-8a6f-5e4d3c2b1a09"
 VICTIM = "9c1d2e3f-0a1b-4c2d-8e3f-4a5b6c7d8e9f"
@@ -93,7 +104,7 @@ class TestCrossCommunityIsolation:
     ) -> None:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         response = await client.open(
-            f"/api/v1/admin/{cid_b}/calls/rooms/{ROOM}{suffix}",
+            f"/api/v1/admin/{public_id(overlay_db, cid_b)}/calls/rooms/{ROOM}{suffix}",
             method=method,
             headers=headers,
             json=body,
@@ -112,7 +123,8 @@ class TestCrossCommunityIsolation:
     ) -> None:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         response = await client.post(
-            f"/api/v1/community/{cid_b}/interact/voice/rooms/{ROOM}/{action}", headers=headers
+            f"/api/v1/community/{_cu(overlay_db, cid_b)}/interact/voice/rooms/{ROOM}/{action}",
+            headers=headers,
         )
         assert response.status_code == 404
         assert "token" not in await response.get_json()  # no join credential leaked
@@ -123,7 +135,9 @@ class TestCrossCommunityIsolation:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         fake.seed_room(cid_b, ROOM_OTHER, label="b-room")
         body = await (
-            await client.get(f"/api/v1/admin/{cid_b}/calls/rooms", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid_b)}/calls/rooms", headers=headers
+            )
         ).get_json()
         assert [r["room_id"] for r in body["rooms"]] == [ROOM_OTHER]
         assert body["rooms"][0]["label"] == "b-room"
@@ -133,8 +147,8 @@ class TestCrossCommunityIsolation:
     ) -> None:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         for path in (
-            f"/api/v1/admin/{cid_a}/calls/rooms/{ROOM}/participants",
-            f"/api/v1/community/{cid_a}/interact/voice/rooms",
+            f"/api/v1/admin/{public_id(overlay_db, cid_a)}/calls/rooms/{ROOM}/participants",
+            f"/api/v1/community/{public_id(overlay_db, cid_a)}/interact/voice/rooms",
         ):
             response = await client.get(path, headers=headers)
             assert response.status_code == 403
@@ -148,7 +162,8 @@ class TestCrossCommunityIsolation:
         seed_membership(overlay_db, community_id=foreign, user_id=910, role="community-owner")
         token = make_user_token(user_id=910, scope=SCOPE_ADMIN)  # token is for the default tenant
         response = await client.get(
-            f"/api/v1/admin/{foreign}/calls/rooms", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(overlay_db, foreign)}/calls/rooms",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
         assert fake.calls == []
@@ -160,7 +175,7 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
     ) -> None:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         response = await client.post(
-            f"/api/v1/admin/{cid_b}/calls/rooms",
+            f"/api/v1/admin/{public_id(overlay_db, cid_b)}/calls/rooms",
             headers=_json_headers(headers),
             data=json.dumps({"room_name": "mine", "community_id": cid_a, "tenant": "evil"}),
         )
@@ -174,14 +189,14 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
     ) -> None:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         await client.post(
-            f"/api/v1/admin/{cid_b}/calls/rooms/{ROOM}/kick",
+            f"/api/v1/admin/{public_id(overlay_db, cid_b)}/calls/rooms/{ROOM}/kick",
             headers=_json_headers(headers),
             data=json.dumps({"identity": VICTIM, "community_id": cid_a}),
         )
         fake.seed_room(cid_b, ROOM_OTHER)  # B own room: the join reaches the RPC
         record_room(overlay_db, cid_b, ROOM_OTHER)
         await client.post(
-            f"/api/v1/community/{cid_b}/interact/voice/rooms/{ROOM_OTHER}/join",
+            f"/api/v1/community/{_cu(overlay_db, cid_b)}/interact/voice/rooms/{ROOM_OTHER}/join",
             headers=_json_headers(headers),
             data=json.dumps({"community_id": cid_a, "participant_id": VICTIM}),
         )
@@ -205,7 +220,9 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
     ) -> None:
         headers, _, cid_b = _two_communities(overlay_db, fake)
         response = await client.post(
-            f"/api/v1/admin/{cid_b}/calls/rooms/{ROOM}/{path_suffix}", headers=headers, json=body
+            f"/api/v1/admin/{public_id(overlay_db, cid_b)}/calls/rooms/{ROOM}/{path_suffix}",
+            headers=headers,
+            json=body,
         )
         assert response.status_code == 400
         assert (await response.get_json())["error"]["code"] == "INVALID_IDENTITY"
@@ -217,7 +234,7 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
         headers, _, cid_b = _two_communities(overlay_db, fake)
         for name in ("community_1_general", "general", "0b6f3e1a"):
             response = await client.get(
-                f"/api/v1/admin/{cid_b}/calls/rooms/{name}", headers=headers
+                f"/api/v1/admin/{public_id(overlay_db, cid_b)}/calls/rooms/{name}", headers=headers
             )
             assert response.status_code == 400
             assert (await response.get_json())["error"]["code"] == "INVALID_ROOM_ID"
@@ -231,7 +248,8 @@ class TestCommunityAndParticipantComeFromVerifiedAuth:
         fake.seed_participant(cid_b, pid(cid_b, 902), ROOM_OTHER)
         body = await (
             await client.get(
-                f"/api/v1/admin/{cid_b}/calls/rooms/{ROOM_OTHER}/participants", headers=headers
+                f"/api/v1/admin/{_cu(overlay_db, cid_b)}/calls/rooms/{ROOM_OTHER}/participants",
+                headers=headers,
             )
         ).get_json()
         assert body["participants"]
@@ -272,7 +290,7 @@ class TestFailuresAreHonest:
         headers, cid_a, cid_b = _two_communities(overlay_db, fake)
         for rpc in ("ListRooms", "ListParticipants", "ListHands"):
             fake.fail[rpc] = (code, "x")
-        response = await client.get(path.format(cid=cid_b), headers=headers)
+        response = await client.get(path.format(cid=public_id(overlay_db, cid_b)), headers=headers)
         assert response.status_code == http
         body = await response.get_json()
         assert body["success"] is False
@@ -284,7 +302,9 @@ class TestFailuresAreHonest:
         headers, _, cid_b = _two_communities(overlay_db, fake)
         fake.fail["ListRooms"] = (grpc.StatusCode.UNAVAILABLE, "x")
         body = await (
-            await client.get(f"/api/v1/admin/{cid_b}/calls/rooms", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid_b)}/calls/rooms", headers=headers
+            )
         ).get_json()
         assert body["error"]["code"] == "STREAMING_UNAVAILABLE"
         assert body["error"]["details"] == {"retryable": True}
@@ -317,7 +337,9 @@ class TestFailuresAreHonest:
             overlay_db, scope=SCOPE_ADMIN, role="community-owner", user_id=920
         )
         caplog.set_level(logging.ERROR)
-        response = await client.get(f"/api/v1/admin/{cid}/calls/rooms", headers=headers)
+        response = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/calls/rooms", headers=headers
+        )
         assert response.status_code == 503
         body = await response.get_json()
         assert body["success"] is False
@@ -335,7 +357,9 @@ class TestFailuresAreHonest:
         headers, cid = user_headers(
             overlay_db, scope=SCOPE_ADMIN, role="community-owner", user_id=921
         )
-        response = await client.get(f"/api/v1/admin/{cid}/calls/rooms", headers=headers)
+        response = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/calls/rooms", headers=headers
+        )
         assert response.status_code == 502
         assert (await response.get_json())["error"]["code"] == "STREAMING_AUTH_NOT_CONFIGURED"
         assert fake.calls == []

@@ -42,6 +42,7 @@ from blueprints.v1.marketplace_billing import (
     subscriptions_bp,
 )
 from config import HubAPIConfig
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import insert_global_admin
 
 TENANT_SLUG = "acme-corp"
@@ -80,18 +81,24 @@ def app(marketplace_billing_db: Any) -> Quart:
     dal, _tenant_id, _community_id = marketplace_billing_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    quart_app.config["dal"] = dal
+    quart_app.config["HUB_API_CONFIG"] = _cfg()
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(premium_bp)
     quart_app.register_blueprint(discount_bp)
     quart_app.register_blueprint(subscriptions_bp)
     quart_app.register_blueprint(payments_bp)
-    quart_app.config["dal"] = dal
-    quart_app.config["HUB_API_CONFIG"] = _cfg()
     return quart_app
 
 
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
+
+
+def _pid(client: Any, community_id: int) -> str:
+    """The community's public UUID (client routes take it, never the numeric id)."""
+    return public_id(client.app.config["dal"], community_id)
 
 
 def _make_admin_user(dal: Any, *, super_admin: bool = True) -> int:
@@ -133,7 +140,9 @@ class TestPremiumPricing:
 class TestPremiumStatusAuth:
     async def test_missing_token_is_401(self, client: Any, marketplace_billing_db: Any) -> None:
         _dal, _tenant_id, community_id = marketplace_billing_db
-        response = await client.get(f"/api/v1/marketplace/premium/status/{community_id}")
+        response = await client.get(
+            f"/api/v1/marketplace/premium/status/{_pid(client, community_id)}"
+        )
         assert response.status_code == 401
 
     async def test_wrong_scope_is_403(
@@ -141,7 +150,7 @@ class TestPremiumStatusAuth:
     ) -> None:
         _dal, _tenant_id, community_id = marketplace_billing_db
         response = await client.get(
-            f"/api/v1/marketplace/premium/status/{community_id}",
+            f"/api/v1/marketplace/premium/status/{_pid(client, community_id)}",
             headers=auth_headers(scope="marketplace.premium:read"),
         )
         assert response.status_code == 403
@@ -153,7 +162,7 @@ class TestPremiumStatusAuth:
         caller_id = int(dal.hub_users.insert(username="rando", email="rando@example.com"))
         dal.commit()
         response = await client.get(
-            f"/api/v1/marketplace/premium/status/{community_id}",
+            f"/api/v1/marketplace/premium/status/{_pid(client, community_id)}",
             headers=user_auth_headers(user_id=caller_id, scope="marketplace.premium:admin"),
         )
         assert response.status_code == 403
@@ -172,14 +181,14 @@ class TestCrossCommunityIDOR:
 
         # Caller administers community_a, not community_b -- must be denied.
         response = await client.get(
-            f"/api/v1/marketplace/premium/status/{community_b}",
+            f"/api/v1/marketplace/premium/status/{_pid(client, community_b)}",
             headers=user_auth_headers(user_id=caller_id, scope="marketplace.premium:admin"),
         )
         assert response.status_code == 403
 
         # Sanity: the SAME caller against THEIR OWN community succeeds.
         response_own = await client.get(
-            f"/api/v1/marketplace/premium/status/{community_a}",
+            f"/api/v1/marketplace/premium/status/{_pid(client, community_a)}",
             headers=user_auth_headers(user_id=caller_id, scope="marketplace.premium:admin"),
         )
         assert response_own.status_code == 200
@@ -195,7 +204,7 @@ class TestCrossCommunityIDOR:
         _make_member(dal, community_id=community_a, user_id=caller_id, role="community-admin")
 
         response = await client.get(
-            f"/api/v1/marketplace/communities/{community_b}/subscriptions",
+            f"/api/v1/marketplace/communities/{_pid(client, community_b)}/subscriptions",
             headers=user_auth_headers(user_id=caller_id, scope="marketplace.subscription:read"),
         )
         assert response.status_code == 403
@@ -241,7 +250,7 @@ class TestForgedAmountIgnored:
             },
             data=_json.dumps(
                 {
-                    "communityId": community_id,
+                    "communityId": public_id(dal, community_id),
                     "provider": "unsupported-provider-skips-http-call",
                     "successUrl": "https://example.com/ok",
                     "cancelUrl": "https://example.com/cancel",
@@ -336,7 +345,11 @@ class TestDiscountCodeRedeemPriceTrust:
                 "Content-Type": "application/json",
             },
             data=_json.dumps(
-                {"codeId": code_id, "communityId": community_id, "subscriptionId": 1}
+                {
+                    "codeId": code_id,
+                    "communityId": public_id(dal, community_id),
+                    "subscriptionId": 1,
+                }
             ).encode(),
         )
         assert response.status_code == 200
@@ -352,5 +365,7 @@ class TestDiscountCodeRedeemPriceTrust:
 class TestSubscriptionAuthBypass:
     async def test_missing_token_is_401(self, client: Any, marketplace_billing_db: Any) -> None:
         _dal, _tenant_id, community_id = marketplace_billing_db
-        response = await client.get(f"/api/v1/marketplace/communities/{community_id}/subscriptions")
+        response = await client.get(
+            f"/api/v1/marketplace/communities/{_pid(client, community_id)}/subscriptions"
+        )
         assert response.status_code == 401

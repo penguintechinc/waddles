@@ -15,6 +15,7 @@ import pytest
 from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.service_jwt import ServiceJwtIssuer
 
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import admin_headers
 from tests.provider_connections.fake_google import APP_CLIENT_ID, FakeGoogle
 from tests.provider_connections.support import raw_rows, set_column
@@ -113,7 +114,7 @@ async def test_a_tenant_admin_replace_expires_the_old_connections_and_drops_thei
     assert (await resolved.get_json())["reason"] == "app_replaced"
 
     listed = await yt_client.get(
-        f"/api/v1/communities/{yt_db.seed.community_id}/provider-connections",
+        f"/api/v1/communities/{public_id(yt_db, yt_db.seed.community_id)}/provider-connections",
         headers=admin_headers(yt_db),
     )
     (view,) = (await listed.get_json())["connections"]

@@ -23,6 +23,7 @@ from blueprints.v1.streaming import streaming_bp
 from config import HubAPIConfig
 from services import stream_keys_service as svc
 from services.platform_integrations_crypto import decrypt_value, stream_destination_aad
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token, role_kind_fields
 
 _ENC_KEY = "11" * 32
@@ -60,10 +61,11 @@ def _test_config() -> HubAPIConfig:
 def app(streaming_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(streaming_bp)
     quart_app.config["dal"] = streaming_db.dal
     quart_app.config["async_dal"] = streaming_db
     quart_app.config["HUB_API_CONFIG"] = _test_config()
+    install_community_ids(quart_app, streaming_db.dal)
+    quart_app.register_blueprint(streaming_bp)
     return quart_app
 
 
@@ -82,10 +84,15 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return stub
 
 
+#: numeric seed id -> the community's public UUID (URLs take the UUID, never the numeric id).
+_PUBLIC_IDS: dict[int, str] = {}
+
+
 def _community(db: Any, name: str = "acme-community") -> int:
     tenant = db.dal(db.dal.tenants.slug == TENANT_SLUG).select().first()
     cid: int = db.dal.communities.insert(name=name, tenant_id=int(tenant.id))
     db.dal.commit()
+    _PUBLIC_IDS[cid] = public_id(db, cid)
     return cid
 
 
@@ -108,7 +115,7 @@ def _admin(db: Any, *, community_id: int, user_id: int = 1) -> dict[str, str]:
 
 
 def _url(cid: int, tail: str = "") -> str:
-    return f"/api/v1/admin/{cid}/streams{tail}"
+    return f"/api/v1/admin/{_PUBLIC_IDS[cid]}/streams{tail}"
 
 
 async def _create(client: Any, cid: int, headers: dict[str, str]) -> dict[str, Any]:

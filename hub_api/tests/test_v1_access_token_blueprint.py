@@ -24,6 +24,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.access_token import community_tokens_bp, user_tokens_bp
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 
 @pytest.fixture
@@ -31,9 +32,10 @@ def app(support_token_db: Any) -> Quart:
     dal, _ = support_token_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(user_tokens_bp)
     quart_app.register_blueprint(community_tokens_bp)
-    quart_app.config["dal"] = dal
     return quart_app
 
 
@@ -69,7 +71,9 @@ class TestAuthBypass:
 
     async def test_list_cats_requires_token(self, client: Any, support_token_db: Any) -> None:
         _, community_id = support_token_db
-        response = await client.get(f"/api/v1/admin/{community_id}/tokens/cats")
+        response = await client.get(
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats"
+        )
         assert response.status_code == 401
 
 
@@ -79,14 +83,14 @@ class TestScopeEnforcement:
     ) -> None:
         _, community_id = support_token_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/tokens/cats",
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
             headers=auth_headers(scope="community.tokens:read"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/tokens/cats",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/tokens/cats",
             headers=auth_headers(scope="community.tokens:admin", user_id="99"),
         )
         assert response.status_code == 404
@@ -233,7 +237,7 @@ class TestScopesCatalog:
     ) -> None:
         _, community_id = support_token_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/tokens/scopes",
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/scopes",
             headers=auth_headers(scope="community.tokens:admin", user_id="99"),
         )
         assert response.status_code == 200
@@ -246,7 +250,7 @@ class TestCatFlow:
         _, community_id = support_token_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/tokens/cats",
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
             auth_headers(scope="community.tokens:admin", user_id="99"),
             {"name": "bot", "scopes": []},
         )
@@ -258,7 +262,7 @@ class TestCatFlow:
         _, community_id = support_token_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/tokens/cats",
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
             auth_headers(scope="community.tokens:admin", user_id="99"),
             {"name": "bot", "scopes": ["not-a-real-scope"]},
         )
@@ -271,7 +275,7 @@ class TestCatFlow:
         headers = auth_headers(scope="community.tokens:admin", user_id="99")
         create = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/tokens/cats",
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
             headers,
             {"name": "relay-bot", "scopes": ["chat:read"]},
         )
@@ -279,7 +283,10 @@ class TestCatFlow:
         token = (await create.get_json())["token"]
         assert token.startswith("wdl_c_")
 
-        listing = await client.get(f"/api/v1/admin/{community_id}/tokens/cats", headers=headers)
+        listing = await client.get(
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
+            headers=headers,
+        )
         body = await listing.get_json()
         assert body["used"] == 1
         assert body["quota"] == 5
@@ -288,11 +295,15 @@ class TestCatFlow:
         token_id = row["id"]
 
         revoke = await client.delete(
-            f"/api/v1/admin/{community_id}/tokens/cats/{token_id}", headers=headers
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats/{token_id}",
+            headers=headers,
         )
         assert revoke.status_code == 200
 
-        after = await client.get(f"/api/v1/admin/{community_id}/tokens/cats", headers=headers)
+        after = await client.get(
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
+            headers=headers,
+        )
         assert (await after.get_json())["used"] == 0
 
     async def test_revoke_unknown_token_is_404(
@@ -300,7 +311,7 @@ class TestCatFlow:
     ) -> None:
         _, community_id = support_token_db
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/tokens/cats/9999",
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats/9999",
             headers=auth_headers(scope="community.tokens:admin", user_id="99"),
         )
         assert response.status_code == 404
@@ -313,7 +324,7 @@ class TestCatFlow:
         for i in range(5):
             response = await _post_json(
                 client,
-                f"/api/v1/admin/{community_id}/tokens/cats",
+                f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
                 headers,
                 {"name": f"bot-{i}", "scopes": ["chat:read"]},
             )
@@ -321,7 +332,7 @@ class TestCatFlow:
 
         sixth = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/tokens/cats",
+            f"/api/v1/admin/{public_id(support_token_db[0], community_id)}/tokens/cats",
             headers,
             {"name": "bot-6", "scopes": ["chat:read"]},
         )

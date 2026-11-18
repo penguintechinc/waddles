@@ -43,6 +43,8 @@ gateway exists in this consolidated app).
 
 from __future__ import annotations
 
+import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -55,9 +57,12 @@ from quart_schema import validate_request, validate_response
 from services import marketplace_billing_service as svc
 from services import paypal_service, stripe_service
 from services.community_common import api_error, community_in_tenant
+from services.community_public_id import resolve_public_community_id, to_internal_community_id
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dal, reads_from_replica
 from services.errors import ApiError
+
+logger = logging.getLogger(__name__)
 
 premium_bp = Blueprint("v1_marketplace_premium", __name__, url_prefix="/api/v1/marketplace/premium")
 discount_bp = Blueprint(
@@ -110,6 +115,13 @@ def _caller_has_scope(required_scope: str) -> bool:
     return False
 
 
+async def _internal_community_id(public_id: uuid.UUID) -> int:
+    """Internal numeric id for a request-body community UUID (unknown UUID -> fenced as unknown)."""
+    resolved = await to_internal_community_id(public_id)
+    assert resolved is not None  # nosec B101 - the DTO field is a required UUID
+    return resolved
+
+
 def _require_community_admin(community_id: int) -> tuple[dict[str, object], int] | None:
     """Tenant-isolation + per-community-admin gate. Error tuple to short-circuit, or `None`."""
     ctx = get_tenant_context(request)
@@ -142,14 +154,15 @@ async def get_pricing() -> svc.PricingConfigDTO:
             baseSeatLimit=base_seat_limit,
             overagePriceCents=overage_price,
         )
-    try:
-        community_id = int(community_id_raw)
-    except ValueError:
+    # `communityId` is the community public UUID; anything else prices like "no community".
+    resolved = await resolve_public_community_id(community_id_raw)
+    if resolved is None:
         return svc.PricingConfigDTO(
             basePriceCents=base_price,
             baseSeatLimit=base_seat_limit,
             overagePriceCents=overage_price,
         )
+    community_id = resolved
     seat_count = svc.get_current_seat_count(dal, community_id)
     estimated = svc.calculate_monthly_bill(seat_count, base_price, base_seat_limit, overage_price)
     return svc.PricingConfigDTO(
@@ -191,7 +204,8 @@ def _dto_or_none(dto: Any) -> dict[str, Any] | None:
 class PremiumSubscribeRequest:
     """Request DTO for `POST /subscribe` -- caller picks a plan, NEVER a price."""
 
-    communityId: int
+    #: Community public UUID (never the numeric id).
+    communityId: uuid.UUID
     provider: str = "stripe"
     successUrl: str = ""
     cancelUrl: str = ""
@@ -203,7 +217,8 @@ class PremiumSubscribeRequest:
 @validate_request(PremiumSubscribeRequest)
 async def subscribe_premium(data: PremiumSubscribeRequest) -> tuple[dict[str, object], int]:
     """`POST /subscribe` -- price is SERVER-computed (see `calculate_monthly_bill`'s docstring)."""
-    denied = _require_community_admin(data.communityId)
+    community_id = await _internal_community_id(data.communityId)
+    denied = _require_community_admin(community_id)
     if denied is not None:
         return denied
     dal = _dal()
@@ -211,7 +226,7 @@ async def subscribe_premium(data: PremiumSubscribeRequest) -> tuple[dict[str, ob
     assert ctx is not None  # nosec B101
 
     base_price, base_seat_limit, overage_price = svc.get_pricing_config(dal)
-    seat_count = svc.get_current_seat_count(dal, data.communityId)
+    seat_count = svc.get_current_seat_count(dal, community_id)
     total_cents = svc.calculate_monthly_bill(seat_count, base_price, base_seat_limit, overage_price)
 
     checkout_url: str | None = None
@@ -233,15 +248,16 @@ async def subscribe_premium(data: PremiumSubscribeRequest) -> tuple[dict[str, ob
                 customer_email=None,
                 success_url=data.successUrl,
                 cancel_url=data.cancelUrl,
-                metadata={"communityId": str(data.communityId), "type": "community_premium"},
+                metadata={"communityId": str(community_id), "type": "community_premium"},
             )
         except (ApiError, httpx.HTTPError) as exc:
+            logger.warning("premium checkout session failed: exc=%s", type(exc).__name__)
             return api_error(f"Failed to create checkout session: {exc}", 502)
         checkout_url = result.get("url")
         session_id = result.get("id")
 
     svc.upsert_trialing_premium_subscription(
-        dal, data.communityId, ctx.tenant_id, base_price, overage_price, base_seat_limit, seat_count
+        dal, community_id, ctx.tenant_id, base_price, overage_price, base_seat_limit, seat_count
     )
 
     return {
@@ -260,7 +276,8 @@ async def subscribe_premium(data: PremiumSubscribeRequest) -> tuple[dict[str, ob
 class PremiumCancelRequest:
     """Request DTO for `POST /cancel`."""
 
-    communityId: int
+    #: Community public UUID (never the numeric id).
+    communityId: uuid.UUID
     immediately: bool = False
 
 
@@ -270,13 +287,15 @@ class PremiumCancelRequest:
 @validate_request(PremiumCancelRequest)
 async def cancel_premium(data: PremiumCancelRequest) -> tuple[dict[str, object], int]:
     """`POST /cancel`."""
-    denied = _require_community_admin(data.communityId)
+    community_id = await _internal_community_id(data.communityId)
+    denied = _require_community_admin(community_id)
     if denied is not None:
         return denied
     dal = _dal()
     try:
-        updated = svc.cancel_premium_subscription(dal, data.communityId, data.immediately)
+        updated = svc.cancel_premium_subscription(dal, community_id, data.immediately)
     except ApiError as exc:
+        logger.warning("premium cancel refused: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     if data.immediately and updated.stripeSubscriptionId:
@@ -434,7 +453,8 @@ class RedeemDiscountCodeRequest:
     """
 
     codeId: int
-    communityId: int
+    #: Community public UUID (never the numeric id).
+    communityId: uuid.UUID
     subscriptionId: int
 
 
@@ -444,14 +464,14 @@ class RedeemDiscountCodeRequest:
 @validate_request(RedeemDiscountCodeRequest)
 async def redeem_discount_code(data: RedeemDiscountCodeRequest) -> tuple[dict[str, object], int]:
     """`POST /vendor/discount-codes/redeem` -- community-admin-gated + server-priced (IDOR fix)."""
-    denied = _require_community_admin(data.communityId)
+    community_id = await _internal_community_id(data.communityId)
+    denied = _require_community_admin(community_id)
     if denied is not None:
         return denied
     try:
-        result = svc.redeem_discount_code(
-            _dal(), data.codeId, data.communityId, data.subscriptionId
-        )
+        result = svc.redeem_discount_code(_dal(), data.codeId, community_id, data.subscriptionId)
     except ApiError as exc:
+        logger.warning("discount redeem refused: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     import dataclasses
 

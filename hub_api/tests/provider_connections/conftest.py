@@ -66,6 +66,7 @@ from services.provider_connections.static_secret import (
 )
 from services.provider_connections.twitch import TwitchAdapter
 from services.schema import bind_auth_tables, bind_community_authz_tables
+from tests.community_ids import install_community_ids
 from tests.conftest import SECRET_KEY, TENANT_SLUG, make_user_token
 from tests.provider_connections.fake_twitch import (
     APP_CLIENT_ID,
@@ -431,6 +432,7 @@ def pc_app(
     """The real blueprints + auth chain wired to the test database and service."""
     app = Quart(__name__)
     QuartSchema(app)
+    install_community_ids(app, pc_db.dal)
     app.register_blueprint(provider_connections_bp)
     app.config["dal"] = pc_db.dal
     app.config["async_dal"] = pc_db

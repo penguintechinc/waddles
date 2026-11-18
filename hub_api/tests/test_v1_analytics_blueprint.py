@@ -34,6 +34,7 @@ import blueprints.v1.analytics as analytics_module
 from blueprints.v1.analytics import analytics_bp
 from services import analytics_service
 from services.analytics_proxy import ProxyResult
+from tests.community_ids import cpath, install_community_ids
 
 
 @pytest.fixture
@@ -41,9 +42,9 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(analytics_bp)
     quart_app.config["dal"] = dal
-    quart_app.config["async_dal"] = dal
     return quart_app
 
 
@@ -111,8 +112,10 @@ class TestAuthBypass:
     async def test_community_member_route_missing_token_is_401(
         self, client: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
-        response = await client.get(f"/api/v1/analytics/community/{community_id}/members/7/stats")
+        dal, community_id = community_db
+        response = await client.get(
+            cpath(dal, "/api/v1/analytics/community/{community_id}/members/7/stats", community_id)
+        )
         assert response.status_code == 401
 
 
@@ -370,9 +373,9 @@ class TestCommunityMemberViews:
     async def test_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/7/stats",
+            cpath(dal, "/api/v1/analytics/community/{community_id}/members/7/stats", community_id),
             headers=auth_headers(scope="community.analytics:read"),
         )
         assert response.status_code == 403
@@ -384,7 +387,7 @@ class TestCommunityMemberViews:
         dal.community_members.insert(community_id=community_id, user_id="7", is_active=True)
         dal.commit()
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/7/stats",
+            cpath(dal, "/api/v1/analytics/community/{community_id}/members/7/stats", community_id),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 200
@@ -402,7 +405,9 @@ class TestCommunityMemberViews:
         dal.community_members.insert(community_id=community_id, user_id="7", is_active=True)
         dal.commit()
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/7/reputation",
+            cpath(
+                dal, "/api/v1/analytics/community/{community_id}/members/7/reputation", community_id
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 200
@@ -434,10 +439,12 @@ class TestCrossTenantLeak:
     async def test_non_member_user_is_404(
         self, client: Any, user_auth_headers: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         # No community_members row for user_id="404" -- never joined this community.
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/404/stats",
+            cpath(
+                dal, "/api/v1/analytics/community/{community_id}/members/404/stats", community_id
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 404
@@ -446,9 +453,13 @@ class TestCrossTenantLeak:
     async def test_non_member_user_is_404_on_reputation_route_too(
         self, client: Any, user_auth_headers: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/404/reputation",
+            cpath(
+                dal,
+                "/api/v1/analytics/community/{community_id}/members/404/reputation",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 404

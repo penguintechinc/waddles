@@ -11,6 +11,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.community_join import community_join_bp
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 from tests.test_v1_join_request_blueprint import (
     _auth_header,
@@ -35,9 +36,10 @@ def _seed_community(auth_db: Any, *, join_mode: str) -> int:
 def app(auth_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(community_join_bp)
     quart_app.config["dal"] = auth_db.dal
     quart_app.config["async_dal"] = auth_db
+    install_community_ids(quart_app, auth_db.dal)
+    quart_app.register_blueprint(community_join_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
 
@@ -59,7 +61,7 @@ def _members(auth_db: Any, community_id: int, user_id: int) -> int:
 class TestJoinCommunity:
     async def test_unauthenticated_is_401(self, client: Any, auth_db: Any) -> None:
         cid = _seed_community(auth_db, join_mode="open")
-        response = await client.post(f"/api/v1/communities/{cid}/join")
+        response = await client.post(f"/api/v1/communities/{public_id(auth_db, cid)}/join")
         assert response.status_code == 401
 
     async def test_open_join_creates_membership_with_exact_fields(
@@ -68,7 +70,7 @@ class TestJoinCommunity:
         cid = _seed_community(auth_db, join_mode="open")
         uid = _seed_user(auth_db, email="o@example.com", username="opener")
         response = await client.post(
-            f"/api/v1/communities/{cid}/join", headers=_auth_header(user_id=uid)
+            f"/api/v1/communities/{public_id(auth_db, cid)}/join", headers=_auth_header(user_id=uid)
         )
         assert response.status_code == 201
         assert await response.get_json() == {"success": True, "community_id": cid, "joined": True}
@@ -78,8 +80,12 @@ class TestJoinCommunity:
         cid = _seed_community(auth_db, join_mode="open")
         uid = _seed_user(auth_db, email="i@example.com", username="idem")
         headers = _auth_header(user_id=uid)
-        first = await client.post(f"/api/v1/communities/{cid}/join", headers=headers)
-        second = await client.post(f"/api/v1/communities/{cid}/join", headers=headers)
+        first = await client.post(
+            f"/api/v1/communities/{public_id(auth_db, cid)}/join", headers=headers
+        )
+        second = await client.post(
+            f"/api/v1/communities/{public_id(auth_db, cid)}/join", headers=headers
+        )
         assert first.status_code == 201
         assert second.status_code == 200
         assert (await second.get_json())["joined"] is False
@@ -92,7 +98,7 @@ class TestJoinCommunity:
         cid = _seed_community(auth_db, join_mode=mode)
         uid = _seed_user(auth_db, email=f"{mode}@example.com", username=mode)
         response = await client.post(
-            f"/api/v1/communities/{cid}/join", headers=_auth_header(user_id=uid)
+            f"/api/v1/communities/{public_id(auth_db, cid)}/join", headers=_auth_header(user_id=uid)
         )
         assert response.status_code == 403
         assert "JOIN_NOT_OPEN" in str(await response.get_json())
@@ -110,7 +116,7 @@ class TestJoinCommunity:
         )
         auth_db.dal.commit()
         response = await client.post(
-            f"/api/v1/communities/{cid}/join", headers=_auth_header(user_id=uid)
+            f"/api/v1/communities/{public_id(auth_db, cid)}/join", headers=_auth_header(user_id=uid)
         )
         assert response.status_code == 403
 
@@ -122,7 +128,8 @@ class TestJoinCommunity:
         uid = _seed_user(auth_db, email="x@example.com", username="xtenant")
         token = make_user_token(user_id=uid, tenant=TENANT_SLUG)
         response = await client.post(
-            f"/api/v1/communities/{cid}/join", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/communities/{public_id(auth_db, cid)}/join",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 404
         assert _members(auth_db, cid, uid) == 0

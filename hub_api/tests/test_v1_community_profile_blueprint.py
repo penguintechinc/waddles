@@ -34,6 +34,7 @@ from blueprints.v1.community_profile import community_profile_bp
 from config import HubAPIConfig
 from services import community_profile_service as svc
 from services.errors import ApiError
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -63,11 +64,28 @@ def _test_config() -> HubAPIConfig:
 def app(auth_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(community_profile_bp)
     quart_app.config["dal"] = auth_db.dal
     quart_app.config["async_dal"] = auth_db
+    install_community_ids(quart_app, auth_db.dal)
+    quart_app.register_blueprint(community_profile_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
+
+
+_DB: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _bind_db(auth_db: Any) -> Any:
+    """Expose the test DB to `cu` so seeded numeric ids map to community UUIDs in URLs."""
+    _DB[:] = [auth_db]
+    yield
+    _DB.clear()
+
+
+def cu(community_id: int) -> str:
+    """Public UUID of a seeded community (client-facing routes never take the numeric id)."""
+    return public_id(_DB[0], community_id)
 
 
 @pytest.fixture
@@ -141,7 +159,7 @@ def _auth_header(*, user_id: int) -> dict[str, str]:
 class TestGetCommunityProfile:
     async def test_public_community_visible_to_anonymous(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db, visibility="public")
-        response = await client.get(f"/api/v1/public/communities/{community_id}/profile")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/profile")
         assert response.status_code == 200
         body = await response.get_json()
         assert body["success"] is True
@@ -152,7 +170,7 @@ class TestGetCommunityProfile:
         self, client: Any, auth_db: Any
     ) -> None:
         community_id = _seed_community(auth_db, visibility="registered")
-        response = await client.get(f"/api/v1/public/communities/{community_id}/profile")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/profile")
         assert response.status_code == 200
         body = await response.get_json()
         assert body["community"]["restricted"] is True
@@ -163,14 +181,14 @@ class TestGetCommunityProfile:
         community_id = _seed_community(auth_db, visibility="registered")
         viewer_id = _seed_user(auth_db, email="viewer@example.com", username="viewer")
         response = await client.get(
-            f"/api/v1/public/communities/{community_id}/profile",
+            f"/api/v1/public/communities/{cu(community_id)}/profile",
             headers=_auth_header(user_id=viewer_id),
         )
         body = await response.get_json()
         assert body["community"]["restricted"] is False
 
     async def test_missing_community_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/public/communities/999999/profile")
+        response = await client.get(f"/api/v1/public/communities/{UNKNOWN_PUBLIC_ID}/profile")
         assert response.status_code == 404
 
 
@@ -178,7 +196,7 @@ class TestUpdateCommunityProfile:
     async def test_missing_token_is_401(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/profile", json={"displayName": "New Name"}
+            f"/api/v1/admin/{cu(community_id)}/profile", json={"displayName": "New Name"}
         )
         assert response.status_code == 401
 
@@ -206,7 +224,7 @@ class TestUpdateCommunityProfile:
         )
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/profile",
+            f"/api/v1/admin/{cu(community_id)}/profile",
             json={"displayName": "Hijacked"},
             headers=_auth_header(user_id=outsider_id),
         )
@@ -230,7 +248,7 @@ class TestUpdateCommunityProfile:
         _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=mod_role)
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/profile",
+            f"/api/v1/admin/{cu(community_id)}/profile",
             json={"displayName": "Nope"},
             headers=_auth_header(user_id=mod_id),
         )
@@ -248,7 +266,7 @@ class TestUpdateCommunityProfile:
         _seed_member(auth_db, community_id=community_id, user_id=admin_id, role_id=admin_role)
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/profile",
+            f"/api/v1/admin/{cu(community_id)}/profile",
             json={"displayName": "New Name", "visibility": "members_only"},
             headers=_auth_header(user_id=admin_id),
         )
@@ -271,7 +289,7 @@ class TestUpdateCommunityProfile:
         _seed_member(auth_db, community_id=community_id, user_id=admin_id, role_id=admin_role)
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/profile",
+            f"/api/v1/admin/{cu(community_id)}/profile",
             json={"visibility": "not-a-real-visibility"},
             headers=_auth_header(user_id=admin_id),
         )
@@ -281,14 +299,14 @@ class TestUpdateCommunityProfile:
 class TestCommunityLogo:
     async def test_upload_missing_token_is_401(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
-        response = await client.post(f"/api/v1/admin/{community_id}/logo")
+        response = await client.post(f"/api/v1/admin/{cu(community_id)}/logo")
         assert response.status_code == 401
 
     async def test_delete_by_non_admin_is_403(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
         random_id = _seed_user(auth_db, email="rand@example.com", username="rand")
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/logo", headers=_auth_header(user_id=random_id)
+            f"/api/v1/admin/{cu(community_id)}/logo", headers=_auth_header(user_id=random_id)
         )
         assert response.status_code == 403
 
@@ -307,7 +325,7 @@ class TestCommunityLogo:
         _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=mod_role)
 
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/logo", headers=_auth_header(user_id=mod_id)
+            f"/api/v1/admin/{cu(community_id)}/logo", headers=_auth_header(user_id=mod_id)
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -331,7 +349,7 @@ class TestCommunityLogo:
         )
         _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=mod_role)
         response = await client.open(
-            f"/api/v1/admin/{community_id}/{path}",
+            f"/api/v1/admin/{cu(community_id)}/{path}",
             method=method,
             headers=_auth_header(user_id=mod_id),
         )
@@ -349,7 +367,7 @@ class TestCommunityLogo:
         _seed_member(auth_db, community_id=community_id, user_id=admin_id, role_id=admin_role)
 
         response = await client.post(
-            f"/api/v1/admin/{community_id}/logo", headers=_auth_header(user_id=admin_id)
+            f"/api/v1/admin/{cu(community_id)}/logo", headers=_auth_header(user_id=admin_id)
         )
         assert response.status_code == 400
 
@@ -393,7 +411,7 @@ class TestCommunityLogo:
             )
         }
         response = await client.post(
-            f"/api/v1/admin/{community_id}/logo",
+            f"/api/v1/admin/{cu(community_id)}/logo",
             files=files,
             headers=_auth_header(user_id=admin_id),
         )
@@ -406,7 +424,7 @@ class TestCommunityLogo:
 class TestCommunityBanner:
     async def test_upload_missing_token_is_401(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
-        response = await client.post(f"/api/v1/admin/{community_id}/banner")
+        response = await client.post(f"/api/v1/admin/{cu(community_id)}/banner")
         assert response.status_code == 401
 
     async def test_upload_success(self, client: Any, auth_db: Any, monkeypatch: Any) -> None:
@@ -438,7 +456,7 @@ class TestCommunityBanner:
             )
         }
         response = await client.post(
-            f"/api/v1/admin/{community_id}/banner",
+            f"/api/v1/admin/{cu(community_id)}/banner",
             files=files,
             headers=_auth_header(user_id=admin_id),
         )
@@ -450,7 +468,7 @@ class TestCommunityBanner:
         community_id = _seed_community(auth_db)
         random_id = _seed_user(auth_db, email="rand2@example.com", username="rand2")
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/banner", headers=_auth_header(user_id=random_id)
+            f"/api/v1/admin/{cu(community_id)}/banner", headers=_auth_header(user_id=random_id)
         )
         assert response.status_code == 403
 
@@ -466,7 +484,7 @@ class TestCommunityBanner:
         _seed_member(auth_db, community_id=community_id, user_id=admin_id, role_id=admin_role)
 
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/banner", headers=_auth_header(user_id=admin_id)
+            f"/api/v1/admin/{cu(community_id)}/banner", headers=_auth_header(user_id=admin_id)
         )
         assert response.status_code == 200
         body = await response.get_json()

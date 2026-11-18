@@ -40,6 +40,7 @@ from services.ai_routing.errors import invalid_byok_key
 from services.schema import _define_audit_log
 from tests._dataplane_grpc import DataplaneClient, serving_dataplane
 from tests.ai_routing_helpers import ensure_tier_tables, grant_tier, patch_tenant_tier
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
@@ -88,9 +89,10 @@ def app(ai_routing_db: Any, issuer: ServiceJwtIssuer) -> Quart:
     ai_routing_db.dal.commit()
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(media_byok.media_byok_admin_bp)
     quart_app.config["dal"] = ai_routing_db.dal
     quart_app.config["async_dal"] = ai_routing_db
+    install_community_ids(quart_app, ai_routing_db.dal)
+    quart_app.register_blueprint(media_byok.media_byok_admin_bp)
     quart_app.config["SERVICE_JWT_ISSUER"] = issuer
     quart_app.config["SERVICE_JWT_VERIFIER"] = issuer.as_verifier()
     quart_app.config["rate_limiter"] = RateLimiter(redis_url="", namespace="t")
@@ -156,7 +158,7 @@ class TestByokDedicatedScope:
         )
         headers = {"Authorization": f"Bearer {make_user_token(user_id=811)}"}
         client = app.test_client()
-        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
         r = await client.put(
             url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
         )
@@ -171,7 +173,7 @@ class TestAdminApi:
     async def test_set_status_rotate_delete(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         client = app.test_client()
-        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
         r = await client.put(
             url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
         )
@@ -191,7 +193,7 @@ class TestAdminApi:
     async def test_key_never_returned_or_stored_plain(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         client = app.test_client()
-        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
         put = await client.put(
             url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
         )
@@ -206,7 +208,7 @@ class TestAdminApi:
     ) -> None:
         headers, cid = _admin(ai_routing_db, tier="free")
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": PLAINTEXT},
         )
@@ -221,7 +223,7 @@ class TestAdminApi:
             patch_tenant_tier(monkeypatch, tenant_tier)
             headers, cid = _admin(ai_routing_db, tier=None)
             r = await app.test_client().put(
-                f"/api/v1/admin/{cid}/media/byok-keys",
+                cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
                 headers=headers,
                 json={"provider": "gemini", "api_key": PLAINTEXT},
             )
@@ -230,7 +232,7 @@ class TestAdminApi:
     async def test_rejected_key_not_stored(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": "bad-key"},
         )
@@ -240,7 +242,7 @@ class TestAdminApi:
     async def test_invalid_provider_400(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "openai", "api_key": PLAINTEXT},
         )
@@ -251,7 +253,7 @@ class TestAdminApi:
         seed_membership(ai_routing_db, community_id=cid, user_id=802, role="member")
         headers = {"Authorization": f"Bearer {make_user_token(user_id=802)}"}
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": PLAINTEXT},
         )
@@ -261,7 +263,7 @@ class TestAdminApi:
         _, other_cid = _admin(ai_routing_db, tenant=OTHER_TENANT_SLUG)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=801, tenant=TENANT_SLUG)}"}
         client = app.test_client()
-        url = f"/api/v1/admin/{other_cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", other_cid)
         assert (await client.get(url, headers=headers)).status_code == 403
         r = await client.put(
             url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
@@ -270,14 +272,16 @@ class TestAdminApi:
         assert (await client.delete(f"{url}/gemini", headers=headers)).status_code == 403
 
     async def test_unauthenticated_401(self, app: Quart) -> None:
-        assert (await app.test_client().get("/api/v1/admin/1/media/byok-keys")).status_code == 401
+        assert (
+            await app.test_client().get(f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/media/byok-keys")
+        ).status_code == 401
 
     async def test_ai_listing_excludes_gemini(self, app: Quart, ai_routing_db: Any) -> None:
         from services.ai_routing import config_service
 
         headers, cid = _admin(ai_routing_db)
         await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": PLAINTEXT},
         )
@@ -289,7 +293,7 @@ class TestAdminApi:
 
 async def _store(app: Quart, db: Any, headers: dict[str, str], cid: int) -> None:
     r = await app.test_client().put(
-        f"/api/v1/admin/{cid}/media/byok-keys",
+        cpath(db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
         headers=headers,
         json={"provider": "gemini", "api_key": PLAINTEXT},
     )
@@ -382,7 +386,10 @@ class TestResolver:
     ) -> None:
         admin, cid = _admin(ai_routing_db)
         await _store(app, ai_routing_db, admin, cid)
-        await app.test_client().delete(f"/api/v1/admin/{cid}/media/byok-keys/gemini", headers=admin)
+        await app.test_client().delete(
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys/gemini", cid),
+            headers=admin,
+        )
         r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert r.status == media_pb2.BYOK_STATUS_NOT_CONFIGURED
 
@@ -706,7 +713,7 @@ class TestGeminiValidation:
 class TestInputBounds:
     async def test_blank_and_oversized_key_400(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
-        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
         for key in ("   ", "k" * (svc.MAX_KEY_CHARS + 1)):
             r = await app.test_client().put(
                 url, headers=headers, json={"provider": "gemini", "api_key": key}
@@ -717,6 +724,7 @@ class TestInputBounds:
     async def test_delete_without_key_404(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         r = await app.test_client().delete(
-            f"/api/v1/admin/{cid}/media/byok-keys/gemini", headers=headers
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys/gemini", cid),
+            headers=headers,
         )
         assert r.status_code == 404

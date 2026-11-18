@@ -25,6 +25,7 @@ caller widen scope beyond its own token's tenant.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -36,8 +37,11 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
 from services import distribution_service as svc
+from services.community_public_id import resolve_public_community_id
 from services.errors import ApiError
 from services.schema import bind_app_bundle_tables
+
+logger = logging.getLogger(__name__)
 
 distribution_bp = Blueprint("v1_distribution", __name__, url_prefix="/api/v1/distribution")
 
@@ -86,16 +90,18 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
-def _parse_community_id(raw: str | None) -> int | None:
-    """Parse the optional `community_id` query param; raises `ApiError` on a non-int value."""
+async def _parse_community_id(raw: str | None) -> int | None:
+    """Resolve the optional `community_id` query param (a community public UUID).
+
+    Returns the internal numeric id (unknown UUID -> a value no row holds, so the listing is
+    simply empty, same as an unknown numeric id before); raises `ApiError` on a non-UUID value.
+    """
     if raw is None or raw == "":
         return None
-    try:
-        return int(raw)
-    except ValueError as exc:
-        raise ApiError(
-            f"community_id {raw!r} must be an integer", 400, "INVALID_COMMUNITY_ID"
-        ) from exc
+    resolved = await resolve_public_community_id(raw)
+    if resolved is None:
+        raise ApiError("community_id must be a community UUID", 400, "INVALID_COMMUNITY_ID")
+    return resolved
 
 
 # ---------------------------------------------------------------------------
@@ -156,8 +162,9 @@ async def list_distribution_bundles() -> (
         )
 
     try:
-        community_id = _parse_community_id(request.args.get("community_id"))
+        community_id = await _parse_community_id(request.args.get("community_id"))
     except ApiError as exc:
+        logger.warning("distribution list refused: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     ctx = get_tenant_context(request)

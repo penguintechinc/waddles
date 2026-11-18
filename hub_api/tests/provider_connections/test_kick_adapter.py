@@ -38,6 +38,7 @@ from services.provider_connections.errors import (
 )
 from services.provider_connections.kick import KICK_SPEC, KickAdapter
 from services.provider_connections.registry import build_default_registry
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import SYSTEM_SERVICE_ID, FakeClock, admin_headers
 from tests.provider_connections.fake_kick import (
     APP_CLIENT_ID,
@@ -126,7 +127,7 @@ def _app_log(caplog: pytest.LogCaptureFixture) -> str:
 
 
 def _base(db: Any, community_id: int | None = None) -> str:
-    return f"/api/v1/communities/{community_id or db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, community_id or db.seed.community_id)}/provider-connections"
 
 
 def _body(tokens: tuple[str, str], slug: str = "streamer-one") -> str:

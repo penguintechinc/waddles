@@ -19,6 +19,7 @@ import blueprints.v1.overlay as overlay_module
 from blueprints.v1.overlay import SCOPE_ADMIN, overlay_bp
 from services import overlay_scene_service
 from services.schema import bind_lifecycle_tables
+from tests.community_ids import cpath, install_community_ids
 from tests.test_v1_overlay_blueprint import (
     OTHER_TENANT_SLUG,
     _owner_headers,
@@ -43,10 +44,11 @@ def app(overlay_db: Any) -> Quart:
     bind_lifecycle_tables(overlay_db.dal, migrate=True)
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(overlay_bp)
     quart_app.config["dal"] = overlay_db.dal
     quart_app.config["async_dal"] = overlay_db
     quart_app.config["HUB_API_CONFIG"] = _test_config()
+    install_community_ids(quart_app, overlay_db.dal)
+    quart_app.register_blueprint(overlay_bp)
     return quart_app
 
 
@@ -126,16 +128,16 @@ def _register_widget(
     dal.commit()
 
 
-def _url(community_id: int, suffix: str = "") -> str:
-    """Admin overlay URL."""
-    return f"/api/v1/admin/{community_id}/overlay{suffix}"
+def _url(overlay_db: Any, community_id: int, suffix: str = "") -> str:
+    """Admin overlay URL (community addressed by its public UUID)."""
+    return cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id) + suffix
 
 
 class TestWidgets:
     async def test_lists_enabled_bundle_widgets(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "waddles.core.overlay.alerts", [WIDGET])
-        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         assert res.status_code == 200
         widgets = (await res.get_json())["widgets"]
         assert [w["widget_id"] for w in widgets] == ["alerts.stream.event_box"]
@@ -147,7 +149,7 @@ class TestWidgets:
         dal = overlay_db.dal
         dal(dal.app_activations.app_id == "waddles.core.overlay.alerts").update(enabled=False)
         dal.commit()
-        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         assert (await res.get_json())["widgets"] == []
 
     async def test_registry_widgets_are_tenant_isolated(self, client: Any, overlay_db: Any) -> None:
@@ -156,7 +158,7 @@ class TestWidgets:
         _activate_bundle(overlay_db, cid, "reg.bundle", [])
         _register_widget(overlay_db, cid, "mine.widget")
         _register_widget(overlay_db, other, "theirs.widget")
-        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         ids = [w["widget_id"] for w in (await res.get_json())["widgets"]]
         assert ids == ["mine.widget"]
 
@@ -165,12 +167,12 @@ class TestWidgets:
     ) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         _flags_on.return_value = False
-        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         assert res.status_code == 402
 
     async def test_requires_scope(self, client: Any, overlay_db: Any) -> None:
         _, cid, _ = _owner_headers(overlay_db)
-        res = await client.get(_url(cid, "/widgets"))
+        res = await client.get(_url(overlay_db, cid, "/widgets"))
         assert res.status_code == 401
         assert SCOPE_ADMIN == "streaming.overlay:admin"
 
@@ -184,16 +186,16 @@ class TestBundleIsolation:
         second = {**WIDGET, "display_name": "Second", "default_x": 200}
         _activate_bundle(overlay_db, cid, "a.bundle", [first])
         _activate_bundle(overlay_db, cid, "b.bundle", [second])
-        listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
-            "widgets"
-        ]
+        listed = (
+            await (await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)).get_json()
+        )["widgets"]
         assert [(w["bundle_app_id"], w["display_name"]) for w in listed] == [
             ("a.bundle", "First"),
             ("b.bundle", "Second"),
         ]
         for app_id, x in (("a.bundle", 100), ("b.bundle", 200)):
             res = await client.post(
-                _url(cid, "/layout/components"),
+                _url(overlay_db, cid, "/layout/components"),
                 headers=headers,
                 json={"bundle_app_id": app_id, "widget_id": WIDGET["widget_id"]},
             )
@@ -206,7 +208,7 @@ class TestBundleIsolation:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "a.bundle", [WIDGET])
         res = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "b.bundle", "widget_id": WIDGET["widget_id"]},
         )
@@ -232,12 +234,12 @@ class TestBundleIsolation:
             overlay_db, cid, "owner.bundle", [owner], owned_surfaces=["owner.bundle.now"]
         )
         _activate_bundle(overlay_db, cid, "thief.bundle", [thief])
-        listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
-            "widgets"
-        ]
+        listed = (
+            await (await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)).get_json()
+        )["widgets"]
         assert [w["widget_id"] for w in listed] == ["music.card"]
         res = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "thief.bundle", "widget_id": "evil.card"},
         )
@@ -265,9 +267,9 @@ class TestBundleIsolation:
             surface_id="owner.bundle.now",
             output_kind_code=4,
         )
-        listed = (await (await client.get(_url(cid, "/widgets"), headers=headers)).get_json())[
-            "widgets"
-        ]
+        listed = (
+            await (await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)).get_json()
+        )["widgets"]
         assert [w["widget_id"] for w in listed] == ["music.card"]
 
     async def test_contested_surface_withholds_only_its_own_widgets(
@@ -285,7 +287,7 @@ class TestBundleIsolation:
             "c.bundle",
             [{**WIDGET, "widget_id": "c.text"}],
         )
-        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         assert res.status_code == 200
         ids = sorted(
             (w["bundle_app_id"], w["widget_id"]) for w in (await res.get_json())["widgets"]
@@ -297,14 +299,14 @@ class TestBundleIsolation:
     ) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         _register_widget(overlay_db, cid, "orphan.widget", bundle_app_id="gone.bundle")
-        res = await client.get(_url(cid, "/widgets"), headers=headers)
+        res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         assert (await res.get_json())["widgets"] == []
 
 
 class TestLayout:
     async def test_default_canvas_is_1080p(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
-        res = await client.get(_url(cid, "/layout"), headers=headers)
+        res = await client.get(_url(overlay_db, cid, "/layout"), headers=headers)
         layout = (await res.get_json())["layout"]
         assert layout["canvas"] == {"resolution": "1080p", "width": 1920, "height": 1080}
         assert layout["components"] == []
@@ -315,7 +317,7 @@ class TestLayout:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "waddles.core.overlay.alerts", [WIDGET])
         add = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "waddles.core.overlay.alerts", "widget_id": WIDGET["widget_id"]},
         )
@@ -327,7 +329,7 @@ class TestLayout:
         assert comp["visible"] is True
 
         upd = await client.patch(
-            _url(cid, f"/layout/components/{comp['instance_id']}"),
+            _url(overlay_db, cid, f"/layout/components/{comp['instance_id']}"),
             headers=headers,
             json={"x": 100, "visible": False, "props": {"theme": "dark"}},
         )
@@ -340,11 +342,11 @@ class TestLayout:
         )
 
         gone = await client.delete(
-            _url(cid, f"/layout/components/{comp['instance_id']}"), headers=headers
+            _url(overlay_db, cid, f"/layout/components/{comp['instance_id']}"), headers=headers
         )
         assert gone.status_code == 200
         again = await client.delete(
-            _url(cid, f"/layout/components/{comp['instance_id']}"), headers=headers
+            _url(overlay_db, cid, f"/layout/components/{comp['instance_id']}"), headers=headers
         )
         assert again.status_code == 404
 
@@ -352,7 +354,7 @@ class TestLayout:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "real.bundle", [WIDGET])
         add = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
         )
@@ -364,7 +366,7 @@ class TestLayout:
         _activate_bundle(overlay_db, cid, "reg.bundle", [])
         _register_widget(overlay_db, other, "theirs.widget")
         res = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "reg.bundle", "widget_id": "theirs.widget"},
         )
@@ -384,14 +386,16 @@ class TestLayout:
         self, client: Any, overlay_db: Any, body: dict[str, Any]
     ) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
-        res = await client.post(_url(cid, "/layout/components"), headers=headers, json=body)
+        res = await client.post(
+            _url(overlay_db, cid, "/layout/components"), headers=headers, json=body
+        )
         assert res.status_code in (400, 422)
 
     async def test_geometry_must_fit_canvas(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "real.bundle", [WIDGET])
         res = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"], "x": 3000},
         )
@@ -401,7 +405,7 @@ class TestLayout:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "real.bundle", [WIDGET])
         res = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={
                 "bundle_app_id": "real.bundle",
@@ -416,13 +420,13 @@ class TestLayout:
         _activate_bundle(overlay_db, cid, "real.bundle", [WIDGET])
         for _ in range(overlay_scene_service.MAX_COMPONENTS):
             ok = await client.post(
-                _url(cid, "/layout/components"),
+                _url(overlay_db, cid, "/layout/components"),
                 headers=headers,
                 json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
             )
             assert ok.status_code == 201
         over = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
         )
@@ -432,17 +436,17 @@ class TestLayout:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "real.bundle", [WIDGET])
         add = await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
         )
         instance = (await add.get_json())["component"]["instance_id"]
         other_headers, other_cid, _ = _owner_headers(overlay_db)
         res = await client.delete(
-            _url(other_cid, f"/layout/components/{instance}"), headers=other_headers
+            _url(overlay_db, other_cid, f"/layout/components/{instance}"), headers=other_headers
         )
         assert res.status_code == 404
-        still = await client.get(_url(cid, "/layout"), headers=headers)
+        still = await client.get(_url(overlay_db, cid, "/layout"), headers=headers)
         assert len((await still.get_json())["layout"]["components"]) == 1
 
     async def test_clear_layout(self, client: Any, overlay_db: Any) -> None:
@@ -450,11 +454,11 @@ class TestLayout:
         _activate_bundle(overlay_db, cid, "real.bundle", [WIDGET])
         for _ in range(3):
             await client.post(
-                _url(cid, "/layout/components"),
+                _url(overlay_db, cid, "/layout/components"),
                 headers=headers,
                 json={"bundle_app_id": "real.bundle", "widget_id": WIDGET["widget_id"]},
             )
-        res = await client.delete(_url(cid, "/layout"), headers=headers)
+        res = await client.delete(_url(overlay_db, cid, "/layout"), headers=headers)
         assert (await res.get_json())["removed_count"] == 3
 
 
@@ -464,7 +468,7 @@ class TestCanvas:
     ) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         res = await client.put(
-            _url(cid, "/layout/canvas"), headers=headers, json={"resolution": "4k"}
+            _url(overlay_db, cid, "/layout/canvas"), headers=headers, json={"resolution": "4k"}
         )
         assert res.status_code == 200
         assert (await res.get_json())["canvas"] == {
@@ -477,16 +481,18 @@ class TestCanvas:
             dal(dal.presentation_config.community_id == cid).select().first().canvas_resolution_code
             == 3
         )
-        back = await client.get(_url(cid, "/layout"), headers=headers)
+        back = await client.get(_url(overlay_db, cid, "/layout"), headers=headers)
         assert (await back.get_json())["layout"]["canvas"]["resolution"] == "4k"
         # Idempotent: a second set updates the same row, never inserts a duplicate.
-        await client.put(_url(cid, "/layout/canvas"), headers=headers, json={"resolution": "2k"})
+        await client.put(
+            _url(overlay_db, cid, "/layout/canvas"), headers=headers, json={"resolution": "2k"}
+        )
         assert dal(dal.presentation_config.community_id == cid).count() == 1
 
     async def test_unknown_resolution_rejected(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         res = await client.put(
-            _url(cid, "/layout/canvas"), headers=headers, json={"resolution": "8k"}
+            _url(overlay_db, cid, "/layout/canvas"), headers=headers, json={"resolution": "8k"}
         )
         assert res.status_code in (400, 422)
 
@@ -495,9 +501,11 @@ class TestCanvas:
     ) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
         _activate_bundle(overlay_db, cid, "real.bundle", [WIDGET])
-        await client.put(_url(cid, "/layout/canvas"), headers=headers, json={"resolution": "4k"})
+        await client.put(
+            _url(overlay_db, cid, "/layout/canvas"), headers=headers, json={"resolution": "4k"}
+        )
         await client.post(
-            _url(cid, "/layout/components"),
+            _url(overlay_db, cid, "/layout/components"),
             headers=headers,
             json={
                 "bundle_app_id": "real.bundle",
@@ -507,10 +515,10 @@ class TestCanvas:
             },
         )
         res = await client.put(
-            _url(cid, "/layout/canvas"), headers=headers, json={"resolution": "1080p"}
+            _url(overlay_db, cid, "/layout/canvas"), headers=headers, json={"resolution": "1080p"}
         )
         assert res.status_code == 409
-        kept = await client.get(_url(cid, "/layout"), headers=headers)
+        kept = await client.get(_url(overlay_db, cid, "/layout"), headers=headers)
         assert (await kept.get_json())["layout"]["canvas"]["resolution"] == "4k"
 
 

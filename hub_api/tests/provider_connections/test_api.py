@@ -9,6 +9,7 @@ import pytest
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer
 
 from services.provider_connections.store import SealedSecrets  # noqa: F401 - import smoke
+from tests.community_ids import public_id
 from tests.conftest import insert_global_admin, make_user_token
 from tests.provider_connections.conftest import (
     BOT,
@@ -48,7 +49,7 @@ ADMIN_FIELDS = {
 
 
 def _base(db: Any, community_id: int | None = None) -> str:
-    return f"/api/v1/communities/{community_id or db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, community_id or db.seed.community_id)}/provider-connections"
 
 
 def _body(tokens: tuple[str, str | None], **overrides: Any) -> str:

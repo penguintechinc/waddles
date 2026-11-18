@@ -26,6 +26,7 @@ from waddles.streaming.internal.v1 import rooms_pb2, rooms_pb2_grpc
 import blueprints.v1.calls as calls_module
 from services import calls_proxy
 from services.calls_proxy import ROUTE_RPCS, UNROUTED_RPCS, RoomsClient
+from services.community_public_id import install_community_public_ids
 
 PROTO = Path(__file__).resolve().parents[2] / "proto/waddles/streaming/internal/v1/rooms.proto"
 
@@ -36,6 +37,7 @@ def _descriptor_rpcs() -> set[str]:
 
 def _routes() -> set[tuple[str, str]]:
     app = Quart(__name__)
+    install_community_public_ids(app)
     for bp in calls_module.BLUEPRINTS:
         app.register_blueprint(bp)
     return {

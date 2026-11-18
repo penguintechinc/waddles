@@ -26,6 +26,7 @@ from services.call_access import (
     grants_for,
 )
 from services.calls_proxy import RoomInfo
+from tests.community_ids import cpath
 from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by name)
     ROOM,
     FakeRooms,
@@ -97,8 +98,14 @@ class TestPolicyMatchesTheSharedContract:
         assert [k.value for k in call_access.KIND_CODES] == CONTRACT["kinds"]
 
 
-def _join_url(community_id: int, room: str = ROOM) -> str:
-    return f"/api/v1/community/{community_id}/interact/voice/rooms/{room}/join"
+def _join_url(db: Any, community_id: int, room: str = ROOM) -> str:
+    """Join route for `community_id`, addressed by its public UUID."""
+    return cpath(
+        db,
+        "/api/v1/community/{community_id}/interact/voice/rooms/{room}/join",
+        community_id,
+        room=room,
+    )
 
 
 def _member(overlay_db: Any, *, recorded: bool = True, **kw: Any) -> tuple[dict[str, str], int]:
@@ -115,7 +122,7 @@ class TestJoinRoute:
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
         headers, cid = _member(overlay_db)
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         assert response.status_code == 200
         body = await response.get_json()
         join = next(r for name, r, _ in fake.calls if name == "JoinRoom")
@@ -136,7 +143,7 @@ class TestJoinRoute:
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
         headers, cid = _member(overlay_db)
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         assert response.headers["Cache-Control"] == "no-store"
 
     async def test_a_locked_room_refuses_a_member_without_minting_a_token(
@@ -144,7 +151,7 @@ class TestJoinRoute:
     ) -> None:
         headers, cid = _member(overlay_db)
         fake.seed_room(cid, locked=True)
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         assert response.status_code == 403
         error = (await response.get_json())["error"]
         assert (error["code"], error["message"]) == ("ROOM_ACCESS_DENIED", "room is locked")
@@ -165,7 +172,7 @@ class TestJoinRoute:
         )
         record_room(overlay_db, cid)
         fake.seed_room(cid, locked=True)
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         join = next(r for name, r, _ in fake.calls if name == "JoinRoom")  # the policy allowed it
         assert (join.publish, join.subscribe) == (True, True)
         if response.status_code != 200:
@@ -176,7 +183,7 @@ class TestJoinRoute:
     ) -> None:
         headers, cid = _member(overlay_db)
         fake.seed_room(999)  # ROOM exists, but in another community
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         assert response.status_code == 404
         assert [name for name, _, _ in fake.calls] == ["GetRoom"]
 
@@ -191,7 +198,7 @@ class TestJoinRoute:
             "STREAMING_RTC_ICE_SERVERS", '[{"urls": ["stun:stun.example.org:3478"]}]'
         )
         headers, cid = _member(overlay_db)
-        body = await (await client.post(_join_url(cid), headers=headers)).get_json()
+        body = await (await client.post(_join_url(overlay_db, cid), headers=headers)).get_json()
         assert body["ice_servers"] == [{"urls": ["stun:stun.example.org:3478"]}]
 
     async def test_a_turn_config_is_refused_loudly_and_no_token_is_minted(
@@ -203,7 +210,7 @@ class TestJoinRoute:
     ) -> None:
         monkeypatch.setenv("STREAMING_RTC_ICE_SERVERS", '[{"urls": ["turn:relay.example.org"]}]')
         headers, cid = _member(overlay_db)
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         assert response.status_code == 503
         assert (await response.get_json())["error"]["code"] == "STREAMING_NOT_CONFIGURED"
         assert "JoinRoom" not in [name for name, _, _ in fake.calls]
@@ -217,7 +224,7 @@ class TestJoinRoute:
     ) -> None:
         headers, cid = _member(overlay_db)
         caplog.set_level(logging.DEBUG)
-        body = await (await client.post(_join_url(cid), headers=headers)).get_json()
+        body = await (await client.post(_join_url(overlay_db, cid), headers=headers)).get_json()
         assert body["token"]
         assert body["token"] not in caplog.text
         assert body["token_id"] not in caplog.text
@@ -263,7 +270,7 @@ class TestJoinFailsClosedOnRoomFacts:
         fake.seed_room(cid)
         if kind is not None:
             record_room(overlay_db, cid, kind=kind, **rec)
-        return await client.post(_join_url(cid), headers=headers), fake
+        return await client.post(_join_url(overlay_db, cid), headers=headers), fake
 
     async def test_a_plain_community_room_gets_the_normal_grants(
         self, client: Any, overlay_db: Any, fake: FakeRooms
@@ -325,7 +332,7 @@ class TestJoinFailsClosedOnRoomFacts:
             overlay_db, scope=SCOPE_WRITE, role="community-owner", user_id=640
         )
         fake.seed_room(cid)
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         assert response.status_code == 200
         body = await response.get_json()
         assert (body["publish"], body["subscribe"]) == (True, True)
@@ -336,5 +343,5 @@ class TestJoinFailsClosedOnRoomFacts:
         headers, cid = _member(overlay_db, recorded=False)
         fake.seed_room(cid)
         record_room(overlay_db, 999)  # same room id, recorded under a different community
-        response = await client.post(_join_url(cid), headers=headers)
+        response = await client.post(_join_url(overlay_db, cid), headers=headers)
         assert response.status_code == 403

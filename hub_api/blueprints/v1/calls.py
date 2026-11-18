@@ -79,6 +79,7 @@ from services.calls_proxy import (
     RoomsRpcError,
     StreamingTargetNotConfiguredError,
 )
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError, payment_required
 from services.scope_registry import SCOPE_CALLS_MANAGE
@@ -1051,6 +1052,7 @@ async def _town_hall_response(
     """Describe the Town Hall (participant count is a live figure; no internals)."""
     room = town_hall.room
     listed = await _client.list_participants(community_id, room.room_id)
+    public_community_id = await lookup_public_id(community_id)
     return TownHallResponse(
         room_id=room.room_id,
         label=room.label or call_town_hall.TOWN_HALL_LABEL,
@@ -1059,7 +1061,7 @@ async def _town_hall_response(
         created=town_hall.created,
         join=TownHallJoin(
             method="POST",
-            path=f"/api/v1/community/{community_id}/interact/voice/rooms/{room.room_id}/join",
+            path=f"/api/v1/community/{public_community_id}/interact/voice/rooms/{room.room_id}/join",
         ),
     )
 

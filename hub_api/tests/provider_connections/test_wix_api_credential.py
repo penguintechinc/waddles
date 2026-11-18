@@ -23,6 +23,7 @@ from services.provider_connections.adapter import AdapterRegistry
 from services.provider_connections.errors import InvalidConnectionInput, VaultCorrupt
 from services.provider_connections.static_secret import ExternalHttpAdapter
 from services.provider_connections.wix import WixAdapter
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
 from tests.provider_connections.support import open_row, raw_rows, seal_for_row, set_column
 from tests.provider_connections.test_resolve_v2 import STATIC_SCOPE, _bound, _url
@@ -59,7 +60,7 @@ def wix_service(pc_db: Any, pc_app: Quart, clock: FakeClock) -> ProviderConnecti
 
 
 def _base(db: Any) -> str:
-    return f"/api/v1/communities/{db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, db.seed.community_id)}/provider-connections"
 
 
 def _body(public_key: str, **overrides: Any) -> str:
@@ -334,7 +335,7 @@ class TestRotation:
         created = await _create(client, pc_db, public_key_b64)
         conn = (await created.get_json())["connection"]["id"]
         response = await client.patch(
-            f"/api/v1/communities/{pc_db.seed.other_community_id}/provider-connections/{conn}",
+            f"/api/v1/communities/{public_id(pc_db, pc_db.seed.other_community_id)}/provider-connections/{conn}",
             headers=admin_headers(pc_db),
             json={"api_credential": DOC},
         )

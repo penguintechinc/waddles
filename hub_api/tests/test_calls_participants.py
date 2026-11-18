@@ -17,12 +17,13 @@ import pytest
 from blueprints.v1.calls import SCOPE_ADMIN
 from services import call_participants
 from services.call_participants import GUEST_LABEL, identity_uuid, resolve_display_names
+from tests.community_ids import public_id
 from tests.conftest import TENANT_SLUG, make_user_token, seed_community, seed_membership
 from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by name)
     ROOM,
     FakeRooms,
     _feature_enabled_default_on,
-    app,
+    app,  # noqa: F401  (fixture: installs community UUIDs)
     client,
     fake,
     pid,
@@ -157,7 +158,8 @@ class TestPiiBoundaryThroughTheRoutes:
         fake.seed_room(cid)
         fake.seed_participant(cid, pid(cid, 52))
         response = await client.get(
-            f"/api/v1/admin/{cid}/calls/rooms/{ROOM}/participants", headers=admin
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/calls/rooms/{ROOM}/participants",
+            headers=admin,
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -185,7 +187,7 @@ class TestPiiBoundaryThroughTheRoutes:
         fake.seed_participant(cid, pid(cid, 62))
         fake.fail["ListHands"] = (grpc.StatusCode.UNAVAILABLE, "boom")
         caplog.set_level(logging.DEBUG)
-        base = f"/api/v1/admin/{cid}/calls/rooms/{ROOM}"
+        base = f"/api/v1/admin/{public_id(overlay_db, cid)}/calls/rooms/{ROOM}"
         await client.get(f"{base}/participants", headers=admin)
         await client.get(f"{base}/raised-hands", headers=admin)  # fails -> ERROR log path
         assert "Zelda" not in caplog.text and "Ada" not in caplog.text
@@ -202,7 +204,10 @@ class TestPiiBoundaryThroughTheRoutes:
         fake.seed_room(cid)
         fake.seed_participant(cid, pid(cid, 72))
         body = await (
-            await client.get(f"/api/v1/admin/{cid}/calls/rooms/{ROOM}/participants", headers=admin)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid)}/calls/rooms/{ROOM}/participants",
+                headers=admin,
+            )
         ).get_json()
         assert body["participants"][0]["display_name"] == GUEST_LABEL
 
@@ -214,7 +219,7 @@ class TestPiiBoundaryThroughTheRoutes:
         seed_membership(overlay_db, community_id=cid, user_id=81, role="community-owner")
         token = make_user_token(user_id=81, scope="streaming.calls:write")  # member scope only
         response = await client.get(
-            f"/api/v1/admin/{cid}/calls/rooms/{ROOM}/participants",
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/calls/rooms/{ROOM}/participants",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403

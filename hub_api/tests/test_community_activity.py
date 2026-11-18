@@ -22,6 +22,7 @@ from blueprints.v1.community_activity import (
     activity_internal_bp,
     activity_member_bp,
 )
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 
 @pytest.fixture
@@ -29,6 +30,7 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(activity_member_bp)
     quart_app.register_blueprint(activity_admin_bp)
     quart_app.register_blueprint(activity_internal_bp)
@@ -60,7 +62,7 @@ class TestMemberLeaderboards:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/leaderboard/watch-time",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/leaderboard/watch-time",
             headers=auth_headers(scope="community.activity:write"),
         )
         assert response.status_code == 403
@@ -70,7 +72,7 @@ class TestMemberLeaderboards:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/leaderboard/watch-time",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/leaderboard/watch-time",
             headers=auth_headers(scope="community.activity:read"),
         )
         assert response.status_code == 200
@@ -93,7 +95,7 @@ class TestMemberLeaderboards:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/activity/my-stats",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/activity/my-stats",
             headers=auth_headers(scope="community.activity:read", user_id="1"),
         )
         assert response.status_code == 200
@@ -111,7 +113,7 @@ class TestMemberLeaderboards:
         """
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/activity/my-stats",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/activity/my-stats",
             headers=auth_headers(scope="community.activity:read", user_id="not-a-number"),
         )
         assert response.status_code == 400
@@ -120,7 +122,7 @@ class TestMemberLeaderboards:
         self, client: Any, auth_headers: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/community/9999/leaderboard/watch-time",
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/leaderboard/watch-time",
             headers=auth_headers(scope="community.activity:read"),
         )
         assert response.status_code == 404
@@ -130,7 +132,7 @@ class TestMemberLeaderboards:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/leaderboard/messages",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/leaderboard/messages",
             headers=auth_headers(scope="community.activity:read"),
         )
         assert response.status_code == 200
@@ -146,7 +148,7 @@ class TestMemberLeaderboards:
         self, client: Any, auth_headers: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/community/9999/leaderboard/messages",
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/leaderboard/messages",
             headers=auth_headers(scope="community.activity:read"),
         )
         assert response.status_code == 404
@@ -157,7 +159,8 @@ class TestMemberLeaderboards:
         """`_int_arg`'s `except ValueError` branch."""
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/leaderboard/watch-time?limit=not-a-number",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}"
+            f"/leaderboard/watch-time?limit=not-a-number",
             headers=auth_headers(scope="community.activity:read"),
         )
         assert response.status_code == 200
@@ -170,7 +173,7 @@ class TestAdminLeaderboardConfig:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/leaderboard-config",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/leaderboard-config",
             headers=auth_headers(scope="community.activity:admin"),
         )
         assert response.status_code == 200
@@ -182,21 +185,21 @@ class TestAdminLeaderboardConfig:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/leaderboard-config",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/leaderboard-config",
             headers=auth_headers(scope="community.activity:read"),
         )
         assert response.status_code == 403
 
     async def test_get_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/leaderboard-config",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/leaderboard-config",
             headers=auth_headers(scope="community.activity:admin"),
         )
         assert response.status_code == 404
 
     async def test_update_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.put(
-            "/api/v1/admin/9999/leaderboard-config",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/leaderboard-config",
             headers={
                 **auth_headers(scope="community.activity:admin"),
                 "Content-Type": "application/json",
@@ -477,7 +480,7 @@ class TestAdminLeaderboardConfigUpdate:
     async def test_update_success(self, client: Any, auth_headers: Any, community_db: Any) -> None:
         _, community_id = community_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/leaderboard-config",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/leaderboard-config",
             headers={
                 **auth_headers(scope="community.activity:admin"),
                 "Content-Type": "application/json",
@@ -493,7 +496,7 @@ class TestAdminLeaderboardConfigUpdate:
         }
 
         get_resp = await client.get(
-            f"/api/v1/admin/{community_id}/leaderboard-config",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/leaderboard-config",
             headers=auth_headers(scope="community.activity:admin"),
         )
         assert (await get_resp.get_json())["config"]["display_limit"] == 50
@@ -507,12 +510,12 @@ class TestAdminLeaderboardConfigUpdate:
             "Content-Type": "application/json",
         }
         await client.put(
-            f"/api/v1/admin/{community_id}/leaderboard-config",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/leaderboard-config",
             headers=headers,
             data=json_module.dumps({"display_limit": 10}),
         )
         response = await client.put(
-            f"/api/v1/admin/{community_id}/leaderboard-config",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/leaderboard-config",
             headers=headers,
             data=json_module.dumps({"display_limit": 20}),
         )
@@ -523,7 +526,7 @@ class TestAdminLeaderboardConfigUpdate:
     ) -> None:
         _, community_id = community_db
         response = await client.put(
-            f"/api/v1/admin/{community_id}/leaderboard-config",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/leaderboard-config",
             headers={
                 **auth_headers(scope="community.activity:admin"),
                 "Content-Type": "application/json",

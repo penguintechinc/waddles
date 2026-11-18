@@ -23,6 +23,7 @@ from quart_schema import QuartSchema
 import blueprints.v1.overlay as overlay_module
 from blueprints.v1.overlay import SCOPE_ADMIN, overlay_bp
 from services import overlay_service
+from tests.community_ids import cpath, install_community_ids
 from tests.conftest import TENANT_SLUG, make_user_token, seed_community, seed_membership
 from tests.test_v1_overlay_blueprint import _test_config
 
@@ -68,6 +69,7 @@ def _token_row(overlay_db: Any, community_id: int) -> Any:
 def app(overlay_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, overlay_db.dal)
     quart_app.register_blueprint(overlay_bp)
     quart_app.config["dal"] = overlay_db.dal
     quart_app.config["async_dal"] = overlay_db
@@ -101,7 +103,9 @@ class TestMintWritesThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        response = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         assert response.status_code == 200
         key = (await response.get_json())["overlay"]["overlay_key"]
 
@@ -118,7 +122,9 @@ class TestMintWritesThrough:
     ) -> None:
         """regression: the key handed out was dead -- svc-presentation rejected it."""
         headers, community_id = owner
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        response = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         key = (await response.get_json())["overlay"]["overlay_key"]
 
         cred = _creds(overlay_db, community_id)
@@ -130,8 +136,12 @@ class TestMintWritesThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        first = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
-        second = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        first = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
+        second = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         key = (await first.get_json())["overlay"]["overlay_key"]
         assert (await second.get_json())["overlay"]["overlay_key"] == key
         dal = overlay_db.dal
@@ -142,7 +152,9 @@ class TestMintWritesThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        response = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         body = await response.get_json()
         key = body["overlay"]["overlay_key"]
         raw = await response.get_data(as_text=True)
@@ -185,7 +197,9 @@ class TestMintWritesThrough:
         dal.commit()
         assert _creds(overlay_db, community_id) is None
 
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        response = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         assert (await response.get_json())["overlay"]["overlay_key"] == legacy_key
         assert _creds(overlay_db, community_id).key_hash == _sha256_hex(legacy_key)
 
@@ -212,10 +226,15 @@ class TestRotateWritesThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        created = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        created = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         old_key = (await created.get_json())["overlay"]["overlay_key"]
 
-        rotated = await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
+        rotated = await client.post(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay/rotate", community_id),
+            headers=headers,
+        )
         assert rotated.status_code == 200
         new_key = (await rotated.get_json())["overlay"]["overlay_key"]
         assert new_key != old_key
@@ -231,9 +250,14 @@ class TestRotateWritesThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        created = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        created = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         old_key = (await created.get_json())["overlay"]["overlay_key"]
-        rotated = await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
+        rotated = await client.post(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay/rotate", community_id),
+            headers=headers,
+        )
         new_key = (await rotated.get_json())["overlay"]["overlay_key"]
 
         cred = _creds(overlay_db, community_id)
@@ -247,11 +271,19 @@ class TestRotateWritesThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        first = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        first = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         key1 = (await first.get_json())["overlay"]["overlay_key"]
-        second = await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
+        second = await client.post(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay/rotate", community_id),
+            headers=headers,
+        )
         key2 = (await second.get_json())["overlay"]["overlay_key"]
-        third = await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
+        third = await client.post(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay/rotate", community_id),
+            headers=headers,
+        )
         key3 = (await third.get_json())["overlay"]["overlay_key"]
 
         cred = _creds(overlay_db, community_id)
@@ -263,8 +295,13 @@ class TestRotateWritesThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
-        rotated = await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
+        await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
+        rotated = await client.post(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay/rotate", community_id),
+            headers=headers,
+        )
         raw = await rotated.get_data(as_text=True)
         cred = _creds(overlay_db, community_id)
         assert cred.key_hash not in raw
@@ -278,7 +315,9 @@ class TestRotateWritesThrough:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         headers, community_id = owner
-        created = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        created = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         old_key = (await created.get_json())["overlay"]["overlay_key"]
 
         def _boom(*_a: Any, **_k: Any) -> None:
@@ -298,18 +337,24 @@ class TestDeactivateFollowsThrough:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        created = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        created = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         key = (await created.get_json())["overlay"]["overlay_key"]
         assert _svc_presentation_accepts(_creds(overlay_db, community_id), key)
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/overlay", headers=headers, json={"isActive": False}
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id),
+            headers=headers,
+            json={"isActive": False},
         )
         assert response.status_code == 200
         assert not _svc_presentation_accepts(_creds(overlay_db, community_id), key)
 
         await client.put(
-            f"/api/v1/admin/{community_id}/overlay", headers=headers, json={"isActive": True}
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id),
+            headers=headers,
+            json={"isActive": True},
         )
         assert _svc_presentation_accepts(_creds(overlay_db, community_id), key)
 
@@ -336,7 +381,9 @@ class TestOverlayCode:
         _add_overlay_code_column(overlay_db)
         assert _overlay_code(overlay_db, community_id) is None
 
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        response = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         assert response.status_code == 200
         code = _overlay_code(overlay_db, community_id)
         assert code is not None and len(code) == 16
@@ -352,17 +399,27 @@ class TestOverlayCode:
         )
         overlay_db.dal.commit()
 
-        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
-        await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
+        await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
+        await client.post(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay/rotate", community_id),
+            headers=headers,
+        )
         assert _overlay_code(overlay_db, community_id) == "a1b2c3d4e5f60718"
 
     async def test_rotate_also_backfills_a_null_overlay_code(
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner
-        await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         _add_overlay_code_column(overlay_db)
-        await client.post(f"/api/v1/admin/{community_id}/overlay/rotate", headers=headers)
+        await client.post(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay/rotate", community_id),
+            headers=headers,
+        )
         assert len(_overlay_code(overlay_db, community_id)) == 16
 
     async def test_overlay_url_is_a_route_the_rust_router_serves_on_every_endpoint(
@@ -374,7 +431,7 @@ class TestOverlayCode:
             f"UPDATE communities SET overlay_code = 'a1b2c3d4e5f60718' WHERE id = {community_id}"  # noqa: S608
         )
         overlay_db.dal.commit()
-        base = f"/api/v1/admin/{community_id}/overlay"
+        base = cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id)
         responses = [
             await client.get(base, headers=headers),
             await client.put(base, headers=headers, json={"isActive": True}),
@@ -391,7 +448,9 @@ class TestOverlayCode:
         self, client: Any, overlay_db: Any, owner: tuple[dict[str, str], int]
     ) -> None:
         headers, community_id = owner  # pre-0057: column deliberately NOT added
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        response = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         assert (await response.get_json())["overlay"]["overlayUrl"] is None
 
     async def test_missing_overlay_code_column_does_not_break_mint(
@@ -399,7 +458,9 @@ class TestOverlayCode:
     ) -> None:
         """Pre-0057 database: column absent -- mint still works and credentials are written."""
         headers, community_id = owner  # note: column deliberately NOT added
-        response = await client.get(f"/api/v1/admin/{community_id}/overlay", headers=headers)
+        response = await client.get(
+            cpath(overlay_db, "/api/v1/admin/{community_id}/overlay", community_id), headers=headers
+        )
         assert response.status_code == 200
         key = (await response.get_json())["overlay"]["overlay_key"]
         assert _creds(overlay_db, community_id).key_hash == _sha256_hex(key)

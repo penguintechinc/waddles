@@ -45,6 +45,7 @@ from quart_schema import validate_response
 
 from services import discord_server_install as server_install_svc
 from services import install_state_binding as binding
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.discord_install_service import (
     DiscordInstallError,
@@ -249,6 +250,21 @@ async def install_status() -> InstallStatusResponse | tuple[dict[str, object], i
 SERVER_INSTALL_BINDING_COOKIE = binding.cookie_name("dc_server_install")
 
 
+async def _role_sync_target(origin: str, community_id: int | None) -> str:
+    """Webui role-sync page for a community, addressed by its public UUID (never the numeric id).
+
+    Falls back to the dashboard (logged, id-free) when there is no community or the row has no
+    `public_id`, so a redirect is always produced and no enumerable id ever reaches the URL.
+    """
+    if community_id is None:
+        return f"{origin}/dashboard"
+    try:
+        return f"{origin}/admin/{await lookup_public_id(community_id)}/role-sync"
+    except RuntimeError:
+        logger.error("discord server install redirect: community has no public_id")
+        return f"{origin}/dashboard"
+
+
 async def _server_install_callback(code: str, state: str) -> Any:
     """Add-Discord-server leg of the shared callback: record install + pair, then redirect.
 
@@ -262,7 +278,7 @@ async def _server_install_callback(code: str, state: str) -> Any:
         # User cancelled on Discord: burn the state (if ours) to learn where to send them.
         try:
             pending = await server_install_svc.consume_server_state(state, nonce)
-            target = f"{origin}/admin/{pending.community_id}/role-sync"
+            target = await _role_sync_target(origin, pending.community_id)
         except Exception:  # noqa: BLE001 - any state failure still returns the browser home
             target = f"{origin}/dashboard"
         return redirect(f"{target}?{urlencode({'discord_server': 'error', 'reason': 'cancelled'})}")
@@ -276,11 +292,7 @@ async def _server_install_callback(code: str, state: str) -> Any:
         )
     except server_install_svc.ServerInstallError as exc:
         logger.warning("discord server install callback failed: code=%s", exc.code)
-        target = (
-            f"{origin}/admin/{exc.community_id}/role-sync"
-            if exc.community_id is not None
-            else f"{origin}/dashboard"
-        )
+        target = await _role_sync_target(origin, exc.community_id)
         return redirect(f"{target}?{urlencode({'discord_server': 'error', 'reason': exc.code})}")
     except ApiError as exc:
         logger.warning("discord server install callback failed: code=%s", exc.code)
@@ -288,7 +300,7 @@ async def _server_install_callback(code: str, state: str) -> Any:
             f"{origin}/dashboard?{urlencode({'discord_server': 'error', 'reason': exc.code})}"
         )
     page = redirect(
-        f"{origin}/admin/{result.community_id}/role-sync?"
+        f"{await _role_sync_target(origin, result.community_id)}?"
         + urlencode({"discord_server": "paired", "guild_id": result.guild_id})
     )
     binding.clear_binding_cookie(page, SERVER_INSTALL_BINDING_COOKIE)

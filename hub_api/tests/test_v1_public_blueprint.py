@@ -24,6 +24,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.public import public_bp, signup_settings_alias_bp
 from config import HubAPIConfig
 from services import landing_stats_cache
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG
 
 
@@ -73,10 +74,11 @@ def _test_config() -> HubAPIConfig:
 def app(platform_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(public_bp)
-    quart_app.register_blueprint(signup_settings_alias_bp)
     quart_app.config["dal"] = platform_db.dal
     quart_app.config["async_dal"] = platform_db
+    install_community_ids(quart_app, platform_db.dal)
+    quart_app.register_blueprint(public_bp)
+    quart_app.register_blueprint(signup_settings_alias_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
 
@@ -209,19 +211,19 @@ class TestCommunities:
         assert names == ["own-tenant-community"]
 
     async def test_get_community_not_found_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/public/communities/9999")
+        response = await client.get(f"/api/v1/public/communities/{UNKNOWN_PUBLIC_ID}")
         assert response.status_code == 404
 
     async def test_get_community_found(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db, tenant_id=1)
-        response = await client.get(f"/api/v1/public/communities/{community_id}")
+        response = await client.get(
+            f"/api/v1/public/communities/{public_id(platform_db, community_id)}"
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["community"]["id"] == community_id
 
-    async def test_spotlighted_excludes_support_type(
-        self, client: Any, platform_db: Any
-    ) -> None:
+    async def test_spotlighted_excludes_support_type(self, client: Any, platform_db: Any) -> None:
         _seed_community(platform_db, tenant_id=1, name="creator-a", community_type="creator")
         _seed_community(platform_db, tenant_id=1, name="support-team", community_type="support")
 

@@ -12,6 +12,7 @@ for the encryption / atomic-claim / PII-free-log guarantees.
 
 from __future__ import annotations
 
+import logging
 import uuid
 from dataclasses import dataclass
 from typing import cast
@@ -26,10 +27,13 @@ from quart import Blueprint, Response, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import one_time_secret_service as svc
+from services.community_public_id import to_internal_community_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 
 FEATURE_SECRET_MESSAGING = "waddles.secret-messaging"  # noqa: S105 -- flag key, not a credential
+
+logger = logging.getLogger(__name__)
 
 one_time_secrets_bp = Blueprint(
     "v1_one_time_secrets", __name__, url_prefix="/api/v1/one-time-secrets"
@@ -49,7 +53,8 @@ class CreateSecretRequest:
 
     __pydantic_config__ = ConfigDict(extra="forbid")
 
-    communityId: int
+    #: Community public UUID (never the numeric id).
+    communityId: uuid.UUID
     targetUserUuid: uuid.UUID
     message: str
     ttlSeconds: int = svc.DEFAULT_TTL_SECONDS
@@ -112,16 +117,21 @@ async def create_secret(
     tenant_id, slug = _tenant()
     if (off := await _flag_off(slug)) is not None:
         return off
+    community_id = await to_internal_community_id(data.communityId)
+    assert community_id is not None  # nosec B101 - required UUID field
     try:
         created = await svc.create_secret(
             cast(AsyncDB, current_app.config["install_dal"]),
             tenant_id=tenant_id,
-            community_id=data.communityId,
+            community_id=community_id,
             target_user_uuid=data.targetUserUuid,
             message=data.message,
             ttl_seconds=data.ttlSeconds,
         )
     except ApiError as exc:
+        logger.warning(
+            "one-time secret create refused: code=%s status=%s", exc.code, exc.status_code
+        )
         return _err(exc)
     return (
         CreateSecretResponse(

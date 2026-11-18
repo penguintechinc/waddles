@@ -6,9 +6,12 @@ import asyncio
 import uuid
 from typing import Any
 
+import pytest
+
 from blueprints.v1.calls import SCOPE_READ, SCOPE_WRITE
 from services import call_town_hall
 from services.call_town_hall import TOWN_HALL_LABEL
+from tests.community_ids import public_id
 from tests.conftest import seed_community, seed_membership
 from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by name)
     ROOM,
@@ -29,12 +32,28 @@ BOTH = f"{SCOPE_READ} {SCOPE_WRITE}"
 ROOM_B = "3c2a1b0f-9e8d-4c7b-8a6f-5e4d3c2b1a09"
 
 
+_DB: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _bind_db(overlay_db: Any) -> Any:
+    """Expose the test DB to the URL helpers so numeric seeded ids map to community UUIDs."""
+    _DB[:] = [overlay_db]
+    yield
+    _DB.clear()
+
+
+def cu(community_id: int) -> str:
+    """Public UUID of a seeded community (client-facing routes never take the numeric id)."""
+    return public_id(_DB[0], community_id)
+
+
 def _mine(cid: int, room: str = ROOM) -> str:
-    return f"/api/v1/communities/{cid}/calls/rooms/{room}/hands/mine"
+    return f"/api/v1/communities/{cu(cid)}/calls/rooms/{room}/hands/mine"
 
 
 def _th(cid: int) -> str:
-    return f"/api/v1/communities/{cid}/town-hall"
+    return f"/api/v1/communities/{cu(cid)}/town-hall"
 
 
 def _member(overlay_db: Any, *, user_id: int = 700, cid: int | None = None) -> tuple[dict, int]:
@@ -70,7 +89,7 @@ class TestMyHand:
         other, _ = _member(overlay_db, user_id=702, cid=cid)
         await join(client, cid, mine)
         await join(client, cid, other)
-        base = f"/api/v1/community/{cid}/interact/voice/rooms/{ROOM}"
+        base = f"/api/v1/community/{cu(cid)}/interact/voice/rooms/{ROOM}"
         await client.post(f"{base}/raise-hand", headers=other)  # someone else's hand
         await client.post(f"{base}/raise-hand", headers=mine)
         body = await (await client.get(_mine(cid), headers=mine)).get_json()
@@ -158,7 +177,7 @@ class TestTownHall:
         uuid.UUID(body["room_id"])
         assert body["join"] == {
             "method": "POST",
-            "path": f"/api/v1/community/{cid}/interact/voice/rooms/{body['room_id']}/join",
+            "path": f"/api/v1/community/{cu(cid)}/interact/voice/rooms/{body['room_id']}/join",
         }
         state = fake.rooms[(str(cid), body["room_id"])]
         assert state["label"] == TOWN_HALL_LABEL and state["empty_timeout_secs"] == 0
@@ -220,7 +239,7 @@ class TestTownHall:
     ) -> None:
         """Labels are member-settable, so the reserved name is refused (any case/spacing)."""
         headers, cid = _member(overlay_db)
-        base = f"/api/v1/community/{cid}/interact/voice/rooms"
+        base = f"/api/v1/community/{cu(cid)}/interact/voice/rooms"
         for label in ("Town Hall", "town hall", "  TOWN   HALL ", "tOwN\thAlL"):
             response = await client.post(base, headers=headers, json={"room_name": label})
             assert response.status_code == 400, label
@@ -329,16 +348,16 @@ class TestMemberVisibility:
         fake.seed_room(cid)
         fake.seed_participant(cid, pid(cid, 5))
         member_list = await (
-            await client.get(f"/api/v1/community/{cid}/interact/voice/rooms", headers=member)
+            await client.get(f"/api/v1/community/{cu(cid)}/interact/voice/rooms", headers=member)
         ).get_json()
         admin_list = await (
-            await client.get(f"/api/v1/admin/{cid}/calls/rooms", headers=admin)
+            await client.get(f"/api/v1/admin/{cu(cid)}/calls/rooms", headers=admin)
         ).get_json()
         assert member_list["rooms"][0]["publisher_ids"] == []
         assert admin_list["rooms"][0]["publisher_ids"] == [pid(cid, 5)]  # staff still see them
         created = await (
             await client.post(
-                f"/api/v1/community/{cid}/interact/voice/rooms",
+                f"/api/v1/community/{cu(cid)}/interact/voice/rooms",
                 headers=member,
                 json={"room_name": "chat"},
             )
@@ -350,7 +369,7 @@ class TestMemberVisibility:
     ) -> None:
         member, cid = _member(overlay_db)
         await join(client, cid, member)
-        base = f"/api/v1/community/{cid}/interact/voice/rooms/{ROOM}"
+        base = f"/api/v1/community/{cu(cid)}/interact/voice/rooms/{ROOM}"
         first = await (await client.post(f"{base}/raise-hand", headers=member)).get_json()
         hand = fake.rooms[(str(cid), ROOM)]["hands"][0]
         hand["ack_at"], hand["ack_by"] = 1700001234, pid(cid, 799)
@@ -378,7 +397,7 @@ class TestMemberVisibility:
             {"pid": pid(cid, 801), "raised_at": 5, "ack_at": 9, "ack_by": pid(cid, 799)}
         )
         response = await client.get(
-            f"/api/v1/communities/{cid}/calls/rooms/{ROOM}/participants", headers=member
+            f"/api/v1/communities/{cu(cid)}/calls/rooms/{ROOM}/participants", headers=member
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -409,7 +428,7 @@ class TestMemberVisibility:
         _feature_enabled_default_on: Any,
     ) -> None:
         member, cid = _member(overlay_db)
-        url = f"/api/v1/communities/{cid}/calls/rooms/{ROOM}/participants"
+        url = f"/api/v1/communities/{cu(cid)}/calls/rooms/{ROOM}/participants"
         outsider, _ = user_headers(
             overlay_db,
             scope=BOTH,

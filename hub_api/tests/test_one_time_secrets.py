@@ -9,12 +9,14 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from pydal import Field
 from quart import Quart
 from quart_schema import QuartSchema
 from sqlalchemy import text, update
 
 from blueprints.v1 import one_time_secrets as bp_module
 from services import one_time_secret_service as svc
+from tests.community_ids import install_community_ids
 from tests.conftest import TENANT_SLUG, make_user_token
 
 _KEY = "ab" * 32
@@ -37,11 +39,16 @@ async def world(bundle_install_db: Any, install_dal: Any) -> dict[str, Any]:
     app.config["async_dal"] = bundle_install_db
     app.config["dal"] = bundle_install_db.dal
     app.config["install_dal"] = install_dal
-    app.register_blueprint(bp_module.one_time_secrets_bp)
 
     target_uuid, other_uuid = uuid.uuid4(), uuid.uuid4()
     community_id = int(await install_dal.communities.async_insert(tenant_id=1, name="c1"))
+    community_public_id = str(uuid.uuid4())
     async with install_dal.engine.begin() as conn:
+        # the pydal-side `communities` binding the `cuuid` resolver reads (same sqlite file)
+        await conn.execute(
+            text("UPDATE communities SET public_id = :p WHERE id = :i"),
+            {"p": community_public_id, "i": community_id},
+        )
         await conn.execute(
             text("CREATE TABLE hub_users (id INTEGER PRIMARY KEY, username TEXT, uuid CHAR(32))")
         )
@@ -53,10 +60,21 @@ async def world(bundle_install_db: Any, install_dal: Any) -> dict[str, Any]:
             ],
         )
         await conn.run_sync(svc.METADATA.create_all)
+    pydal = bundle_install_db.dal
+    pydal.define_table(
+        "communities",
+        Field("tenant_id", "integer"),
+        Field("name"),
+        Field("public_id"),
+        migrate=False,
+    )
+    install_community_ids(app, pydal)
+    app.register_blueprint(bp_module.one_time_secrets_bp)
     return {
         "app": app,
         "dal": install_dal,
         "community_id": community_id,
+        "community_public_id": community_public_id,
         "target_uuid": target_uuid,
         "other_uuid": other_uuid,
     }
@@ -74,7 +92,7 @@ def _puller(user_id: int) -> dict[str, str]:
 
 async def _create(w: dict[str, Any], **overrides: Any) -> Any:
     body = {
-        "communityId": w["community_id"],
+        "communityId": w["community_public_id"],
         "targetUserUuid": str(w["target_uuid"]),
         "message": _MESSAGE,
     } | overrides
@@ -154,7 +172,11 @@ async def test_ciphertext_at_rest_and_token_hashed(world: dict[str, Any]) -> Non
 async def test_scope_required(world: dict[str, Any]) -> None:
     no_scope = {"Authorization": f"Bearer {make_user_token(user_id=1, tenant=TENANT_SLUG)}"}
     client = world["app"].test_client()
-    body = {"communityId": 1, "targetUserUuid": str(world["target_uuid"]), "message": "x"}
+    body = {
+        "communityId": world["community_public_id"],
+        "targetUserUuid": str(world["target_uuid"]),
+        "message": "x",
+    }
     assert (await client.post(CREATE, headers=no_scope, json=body)).status_code == 403
     assert (await client.post(PULL, headers=no_scope, json={"token": "t"})).status_code == 403
 
@@ -176,7 +198,12 @@ async def test_create_validation(world: dict[str, Any], overrides: dict[str, Any
 
 async def test_create_unknown_target_and_foreign_community(world: dict[str, Any]) -> None:
     assert (await _create(world, targetUserUuid=str(uuid.uuid4()))).status_code == 404
-    assert (await _create(world, communityId=9999)).status_code == 404
+    assert (await _create(world, communityId=str(uuid.uuid4()))).status_code == 404
+
+
+async def test_create_rejects_numeric_community_id(world: dict[str, Any]) -> None:
+    """Request-side community ids are public UUIDs; the numeric form fails validation."""
+    assert (await _create(world, communityId=world["community_id"])).status_code in (400, 422)
 
 
 async def test_missing_key_fails_loud(
