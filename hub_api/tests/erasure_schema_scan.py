@@ -31,7 +31,7 @@ _SCRIPTS_SQL_DIR = REPO_ROOT / "scripts" / "db"
 _ALEMBIC_DIR = REPO_ROOT / "alembic" / "versions"
 
 _IDENT = r'"?([A-Za-z_][A-Za-z0-9_]*)"?'
-_TABLE_REF = r'(?:public\.|"public"\.)?' + _IDENT
+_TABLE_REF = r'(?:public\.|"public"\.)?"?((?:analytics_fp\.)?[A-Za-z_][A-Za-z0-9_]*)"?'
 
 _CREATE_TABLE = re.compile(
     r"CREATE\s+(?:UNLOGGED\s+)?TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?" + _TABLE_REF + r"\s*\(", re.I

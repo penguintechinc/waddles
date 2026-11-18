@@ -75,10 +75,13 @@ def table_catalog(dal: Any) -> dict[str, frozenset[str]]:
                 catalog.setdefault(str(name).lower(), set()).add(str(row[1]).lower())
         return {k: frozenset(v) for k, v in catalog.items()}
     rows = dal.executesql(
-        "SELECT c.table_name, c.column_name FROM information_schema.columns c "
+        "SELECT CASE WHEN c.table_schema = current_schema() THEN c.table_name "
+        "ELSE c.table_schema || '.' || c.table_name END, c.column_name "
+        "FROM information_schema.columns c "
         "JOIN information_schema.tables t "
         "ON t.table_schema = c.table_schema AND t.table_name = c.table_name "
-        "WHERE c.table_schema = current_schema() AND t.table_type = 'BASE TABLE'"
+        "WHERE (c.table_schema = current_schema() OR c.table_schema = 'analytics_fp') "
+        "AND t.table_type = 'BASE TABLE'"
     )
     for table, column in rows:
         catalog.setdefault(str(table).lower(), set()).add(str(column).lower())
@@ -116,14 +119,25 @@ def _column_types() -> dict[str, dict[str, str]]:
 _COLUMN_TYPES = _column_types()
 
 
+def _quote_table(dal: Any, table: str) -> str:
+    """Quote `table`; a `schema.table` registry name is quoted per part on Postgres.
+
+    sqlite (the unit-test dialect) has no schemas, so a dotted name stays one identifier.
+    """
+    quote = dal._adapter.dialect.quote
+    if "." in table and getattr(dal, "_dbname", "") != "sqlite":
+        return ".".join(quote(part) for part in table.split("."))
+    return str(quote(table))
+
+
 def _alias(dal: Any, table: str) -> Any:
     """The lazily-defined pydal alias of `table` carrying only the registry's columns."""
-    name = _ALIAS_PREFIX + table
+    name = _ALIAS_PREFIX + table.replace(".", "__")  # pydal names cannot contain a dot
     if name not in dal.tables:
         with _ALIAS_LOCK:
             if name not in dal.tables:
                 fields = [Field(col, ftype) for col, ftype in _COLUMN_TYPES.get(table, {}).items()]
-                rname = dal._adapter.dialect.quote(table)
+                rname = _quote_table(dal, table)
                 dal.define_table(name, *fields, rname=rname, migrate=False)
     return dal[name]
 
