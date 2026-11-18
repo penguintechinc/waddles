@@ -1,0 +1,215 @@
+# feature/analytics-helm (analytics W7) -- Rust svc-analytics (core/svc_analytics): consumes the
+# Valkey stream `waddles:analytics` as consumer group `svc_analytics` and upserts layer A
+# (`analytics_fp`) first-party aggregates. Contract: docs/analytics-foundation.md.
+#
+# OFF by default (`pipeline.svcAnalytics.enabled: false`). Enabling it renders: Deployment +
+# ClusterIP Service (gRPC health only), a dedicated default-deny CiliumNetworkPolicy and the
+# enforced Tetragon exec allowlist. HPA/PDB come from templates/autoscaling.yaml (key `svcAnalytics`).
+#
+# - gRPC-only (org rule): no HTTP surface, no metrics port -- OTLP push via the shared OTEL_*
+#   helper; probes are native `grpc.health.v1` on the one plaintext health port.
+# - Database identity: LOGIN role `waddles_svc_analytics` (config/postgres/service-roles.yaml;
+#   member_of the NOLOGIN group `analytics_writer` from alembic 0129). The password is
+#   create-if-absent generated into <release>-db-credentials by the provision-secrets hook
+#   (key PW_WADDLES_SVC_ANALYTICS, never overwritten, existingSecret honoured) and LOGIN is
+#   asserted idempotently by the db-migrate Job (migrations/run-alembic.sh).
+# - Flag: the writer path is dark unless FLAG_WADDLES_ANALYTICS_STREAM (shared ConfigMap, ENV
+#   baseline `config.analyticsStreamEnabled`, default false; PostHog overrides) is on.
+# - Stateless + rootless: uid 10001 (Rust Dockerfile `appuser`), read-only rootfs, /tmp emptyDir.
+{{- if .Values.pipeline.svcAnalytics.enabled }}
+{{- $sa := .Values.pipeline.svcAnalytics }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-analytics
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-analytics
+spec:
+  {{- if not (include "waddlebot.hpaManaged" (dict "root" $ "key" "svcAnalytics")) }}
+  replicas: {{ $sa.replicas }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-analytics
+  template:
+    metadata:
+      labels:
+        {{- include "waddlebot.selectorLabels" . | nindent 8 }}
+        app.kubernetes.io/component: svc-analytics
+    spec:
+      {{- include "waddlebot.terminationGracePeriod" $ | nindent 6 }}
+      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # No Kubernetes API access needed: the service talks to Postgres + Valkey + the collector only.
+      automountServiceAccountToken: false
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+      - name: svc-analytics
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" ($sa.imageRepository | default "svc-analytics")) }}"
+        imagePullPolicy: {{ .Values.global.imagePullPolicy | default "IfNotPresent" }}
+        {{- include "waddlebot.preStop" $ | nindent 8 }}
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 10001
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities:
+            drop:
+            - ALL
+        ports:
+        - name: grpc
+          containerPort: {{ $sa.healthPort }}
+          protocol: TCP
+        envFrom:
+        - configMapRef:
+            name: {{ include "waddlebot.fullname" . }}-config
+        env:
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-analytics") | nindent 8 }}
+        # Own least-privilege DB identity (inherits analytics_fp DML + data_use_exclusions SELECT).
+{{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_svc_analytics") | nindent 8 }}
+{{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
+        - name: GRPC_HEALTH_PORT
+          value: {{ $sa.healthPort | quote }}
+        - name: ANALYTICS_STREAM_KEY
+          value: {{ $sa.streamKey | quote }}
+        - name: ANALYTICS_CONSUMER_GROUP
+          value: {{ $sa.consumerGroup | quote }}
+        {{- /* Same durable-Valkey TLS-only override as svc-process-rust: fail the render rather than fall back to the plaintext envFrom VALKEY_URL. */}}
+        {{- include "waddlebot.assertDurableTls" . }}
+        {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+        - name: VALKEY_URL
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_DURABLE_URL_TLS
+        - name: VALKEY_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-secrets
+              key: VALKEY_DURABLE_PASSWORD
+        {{- end }}
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
+        startupProbe:
+          grpc:
+            port: {{ $sa.healthPort }}
+          periodSeconds: {{ .Values.startupProbe.periodSeconds }}
+          timeoutSeconds: 5
+          failureThreshold: {{ .Values.startupProbe.failureThreshold }}
+        livenessProbe:
+          grpc:
+            port: {{ $sa.healthPort }}
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          grpc:
+            port: {{ $sa.healthPort }}
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        resources:
+          {{- toYaml $sa.resources | nindent 10 }}
+        volumeMounts:
+        {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
+        - name: tmp
+          mountPath: /tmp
+      volumes:
+      {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
+      - name: tmp
+        emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-analytics
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-analytics
+spec:
+  type: ClusterIP
+  ports:
+  - port: {{ $sa.healthPort }}
+    targetPort: grpc
+    protocol: TCP
+    name: grpc
+  selector:
+    {{- include "waddlebot.selectorLabels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-analytics
+{{- if .Values.networkPolicy.enabled }}
+---
+# Dedicated default-deny CNP. Ingress: nothing from other pods (kubelet probes are host-local and
+# bypass pod ingress policy); egress: DNS, the OTLP collector, Postgres primary and Valkey ONLY.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-svc-analytics
+  namespace: {{ .Values.namespace }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: svc-analytics
+spec:
+  endpointSelector:
+    matchLabels:
+      {{- include "waddlebot.selectorLabels" . | nindent 6 }}
+      app.kubernetes.io/component: svc-analytics
+  ingress:
+    - {}
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            io.kubernetes.pod.namespace: kube-system
+            k8s-app: kube-dns
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: UDP
+            - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
+              protocol: TCP
+    {{- include "waddlebot.otel.egressRule" (dict "root" $ "component" "svc-analytics") | nindent 4 }}
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: postgres
+            app.kubernetes.io/component: database
+            app.kubernetes.io/role: primary
+      toPorts:
+        - ports:
+            - port: {{ .Values.infrastructure.postgresql.service.port | quote }}
+              protocol: TCP
+    {{- if .Values.infrastructure.valkeyDurable.enabled }}
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: valkey-durable
+            app.kubernetes.io/component: delivery-store
+      toPorts:
+        - ports:
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+            {{- else }}
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+            {{- end }}
+              protocol: TCP
+    {{- else }}
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: redis
+            app.kubernetes.io/component: cache
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.valkeyPort | quote }}
+              protocol: TCP
+            {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
+            - port: {{ .Values.infrastructure.redis.tls.port | quote }}
+              protocol: TCP
+            {{- end }}
+    {{- end }}
+{{- end }}
+# Enforced Tetragon exec allowlist (cnp=false: the dedicated CNP above replaces the generic one).
+{{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "svc-analytics" "ports" (list $sa.healthPort) "runtime" "rust" "binaries" (list "/app/svc-analytics") "cnp" false) }}
+{{- end }}

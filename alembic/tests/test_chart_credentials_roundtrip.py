@@ -97,7 +97,7 @@ def test_every_rendered_workload_identity_authenticates_against_the_provisioned_
             check=False,
         )
         assert reconcile.returncode == 0, reconcile.stderr
-        assert "Reconciled 33 service roles" in reconcile.stdout
+        assert "Reconciled 34 service roles" in reconcile.stdout
 
         connected: dict[str, str] = {}
         for doc in docs:
