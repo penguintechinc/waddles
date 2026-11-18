@@ -128,6 +128,15 @@ SCOPE_SSO_ADMIN = "auth.sso:admin"
 #: be satisfied by any logged-in user.
 SCOPE_CONNECTIONS_ADMIN = "connections:admin"
 
+#: Tenant-admin community tier allocation (`hub_api/blueprints/v1/tenant_community_tiers.py`).
+#: `:allocate` spends a pool slot; `:read` is informational only (every session carries the
+#: `*:read` wildcard, so the routes ALSO require `tenant:admin` -- `require_scope` ANDs every
+#: listed scope, so this is not bypassable). Granted to the tenant `admin` bundle below. Global
+#: admins cover `:read` via `*:read`, but NOT `:allocate` (`*:admin` only matches action `admin`):
+#: a global-admin token is refused on the allocate route, which fails closed.
+SCOPE_TENANT_COMMUNITY_TIER_READ = "tenant.community_tier:read"
+SCOPE_TENANT_COMMUNITY_TIER_ALLOCATE = "tenant.community_tier:allocate"
+
 
 @dataclass(slots=True)
 class OAuthProvider:
@@ -740,7 +749,8 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             'tenant:read', 'tenant:write', 'tenant:admin', 'tenant:delete',
             'community:create', 'community:delete', 'billing:read', 'billing:write',
             'settings:write', 'compliance.audit:admin', SCOPE_SSO_ADMIN,
-            SCOPE_CONNECTIONS_ADMIN,
+            SCOPE_CONNECTIONS_ADMIN, SCOPE_TENANT_COMMUNITY_TIER_READ,
+            SCOPE_TENANT_COMMUNITY_TIER_ALLOCATE,
         ],
         'maintainer': [
             'tenant:read', 'tenant:write', 'community:create',

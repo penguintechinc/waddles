@@ -10,17 +10,24 @@ access/refresh tokens) solving a different problem (posting/reading *as* a
 community's own linked account). This blueprint is a registry of inbound
 event sources over the `ingest_sources` table, read by the Rust data
 plane's ingest workers, and carries no credential of any kind. Mounted at
-`/api/v1/communities/<id>/ingest-sources` -- a deliberately distinct word
+`/api/v1/communities/<community-uuid>/ingest-sources` -- a deliberately distinct word
 ("ingest-sources" not "connections") from that sibling blueprint's path
 segment, so the two are never confused at the route level. See
 `services/ingest_source_registry_service.py`'s own docstring for the full
 reconciliation note.
 
+**Ids on the wire are `public_id` UUIDs only.** The community path segment is the community's
+`public_id`, `<ingest_source_id>` is the source's `public_id`, and the DTO's `id`/`communityId`
+are those same UUIDs (the BIGINT surrogate keys never cross the boundary -- enumerable ids are
+an IDOR vector). Resolution to the internal key happens server-side with the tenant fence in the
+lookup itself; a malformed, unknown or other-tenant id is a uniform 404. The list cursor is the
+last row's `public_id` for the same reason.
+
 **Community-scoped by product requirement.** A physical source (Twitch
 channel, Discord server, webhook) can legitimately be linked to multiple
 communities of the same tenant -- the approved data model is a future
 `sources`/`community_connections` M:N split. Every route below is nested
-under `/communities/<int:community_id>/...`; `community_id` is validated
+under `/communities/<community-uuid>/...`; the community is validated
 against the caller's tenant by the SERVICE layer (`services.
 ingest_source_registry_service._validate_community_tenant`, an `install_dal`
 -based check -- NOT `community_common.community_in_tenant`, which assumes
@@ -36,7 +43,7 @@ later, never through this API and never writing to the table directly.
 `tenant_id` is derived exclusively from the validated JWT via
 `flask_core.tenancy.get_tenant_context` (`tenant_middleware` runs first on
 every route below, security.md's ordering contract) -- NEVER from a path
-segment or request body; `community_id` comes from the URL path and is
+segment or request body; the community `public_id` comes from the URL path and is
 always validated against that same tenant before use.
 
 Scopes follow this repo's existing `tenant` SCOPE_BUNDLES ladder
@@ -57,6 +64,7 @@ feature never stores credentials.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any, cast
 
@@ -71,10 +79,12 @@ from quart_schema import validate_request, validate_response
 from services import ingest_source_registry_service as svc
 from services.errors import ApiError
 
+logger = logging.getLogger(__name__)
+
 ingest_sources_bp = Blueprint(
     "v1_ingest_sources",
     __name__,
-    url_prefix="/api/v1/communities/<int:community_id>/ingest-sources",
+    url_prefix="/api/v1/communities/<string:community_public_id>/ingest-sources",
 )
 
 #: Query-string page size ceiling -- mirrors `usage_query_service.MAX_USAGE_PAGE_SIZE`'s
@@ -102,14 +112,17 @@ def _tenant_id() -> int:
 
 @dataclass(slots=True, frozen=True)
 class IngestSourceDTO:
-    """A single ingest source on the wire. Never carries any secret/credential field."""
+    """A single ingest source on the wire. Never carries any secret/credential field.
 
-    id: int
+    `id` is the source's `public_id` UUID and `communityId` its community's `public_id` UUID.
+    """
+
+    id: str
     platform: str
     sourceId: str
     label: str
     enabled: bool
-    communityId: int | None
+    communityId: str
     createdAt: str
     updatedAt: str
 
@@ -145,7 +158,7 @@ class IngestSourceResponse:
 class CreateIngestSourceRequest:
     """Request DTO for `POST /api/v1/communities/<id>/ingest-sources`.
 
-    `communityId` is NOT a body field -- it comes from the URL path (module
+    The community is NOT a body field -- it comes from the URL path (module
     docstring: every operation is community-scoped) -- and there is
     deliberately NO token/secret/credential field: `extra="forbid"` below
     rejects one outright rather than silently ignoring it.
@@ -160,7 +173,7 @@ class CreateIngestSourceRequest:
 
 @dataclass(slots=True, frozen=True)
 class UpdateIngestSourceRequest:
-    """Request DTO for `PATCH .../ingest-sources/<id>` -- display metadata + enable/disable."""
+    """Request DTO for `PATCH .../ingest-sources/<uuid>` -- display metadata + enable/disable."""
 
     __pydantic_config__ = ConfigDict(extra="forbid")
 
@@ -168,14 +181,15 @@ class UpdateIngestSourceRequest:
     enabled: bool | None = None
 
 
-def _to_dto(row: Any) -> IngestSourceDTO:
+def _to_dto(row: Any, community_public_id: str) -> IngestSourceDTO:
+    """Map a row to its wire DTO; every row in a response belongs to `community_public_id`."""
     return IngestSourceDTO(
-        id=row.id,
+        id=str(row.public_id),
         platform=row.platform,
         sourceId=row.source_id,
         label=row.label,
         enabled=bool(row.enabled),
-        communityId=row.community_id,
+        communityId=community_public_id,
         createdAt=row.created_at.isoformat() if row.created_at else "",
         updatedAt=row.updated_at.isoformat() if row.updated_at else "",
     )
@@ -192,13 +206,33 @@ def _parse_bool(raw: str | None) -> bool | None:
     raise ApiError("enabled must be a boolean", 422, "invalid_enabled")
 
 
-def _parse_int(raw: str | None, *, field_name: str) -> int | None:
+def _parse_limit(raw: str | None) -> int | None:
     if raw is None:
         return None
     try:
         return int(raw)
     except ValueError as exc:
-        raise ApiError(f"{field_name} must be an integer", 422, f"invalid_{field_name}") from exc
+        raise ApiError("limit must be an integer", 422, "invalid_limit") from exc
+
+
+async def _community(community_public_id: str) -> tuple[int, str]:
+    """Resolve the path community UUID to `(internal id, public id)`, tenant-fenced (404)."""
+    return await svc.resolve_community(
+        _install_dal(), tenant_id=_tenant_id(), community_public_id=community_public_id
+    )
+
+
+async def _source_internal_id(community_id: int, ingest_source_id: str) -> int:
+    """Resolve a source UUID inside the tenant+community; any miss is the same 404."""
+    internal = await svc.resolve_ingest_source_id(
+        _install_dal(),
+        tenant_id=_tenant_id(),
+        community_id=community_id,
+        public_id=ingest_source_id,
+    )
+    if internal is None:
+        raise ApiError("Ingest source not found", 404, "NOT_FOUND")
+    return internal
 
 
 @ingest_sources_bp.route("", methods=["GET"])
@@ -206,14 +240,22 @@ def _parse_int(raw: str | None, *, field_name: str) -> int | None:
 @require_scope("tenant:read")  # type: ignore[misc]
 @validate_response(IngestSourceListResponse)
 async def list_ingest_sources(
-    community_id: int,
+    community_public_id: str,
 ) -> IngestSourceListResponse | tuple[dict[str, object], int]:
-    """`GET /api/v1/communities/<id>/ingest-sources` -- community-scoped, filterable, paginated."""
+    """`GET ./communities/<uuid>/ingest-sources` -- community-scoped, filterable, paginated."""
     tenant_id = _tenant_id()
     install_dal = _install_dal()
     try:
-        limit = _parse_int(request.args.get("limit"), field_name="limit") or _DEFAULT_LIMIT
-        cursor = _parse_int(request.args.get("cursor"), field_name="cursor")
+        community_id, community_pid = await _community(community_public_id)
+        limit = _parse_limit(request.args.get("limit")) or _DEFAULT_LIMIT
+        cursor: int | None = None
+        raw_cursor = request.args.get("cursor")
+        if raw_cursor is not None:
+            cursor = await svc.resolve_ingest_source_id(
+                install_dal, tenant_id=tenant_id, community_id=community_id, public_id=raw_cursor
+            )
+            if cursor is None:
+                raise ApiError("cursor is not a valid ingest source id", 422, "invalid_cursor")
         enabled = _parse_bool(request.args.get("enabled"))
         rows, next_cursor = await svc.list_ingest_sources(
             install_dal,
@@ -225,13 +267,15 @@ async def list_ingest_sources(
             cursor=cursor,
         )
     except ApiError as exc:
+        logger.debug("ingest_sources.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     return IngestSourceListResponse(
         success=True,
-        ingestSources=[_to_dto(row) for row in rows],
+        ingestSources=[_to_dto(row, community_pid) for row in rows],
         meta=IngestSourceMetaDTO(
-            limit=limit, nextCursor=str(next_cursor) if next_cursor is not None else None
+            limit=limit,
+            nextCursor=str(rows[-1].public_id) if next_cursor is not None and rows else None,
         ),
     )
 
@@ -242,12 +286,13 @@ async def list_ingest_sources(
 @validate_request(CreateIngestSourceRequest)
 @validate_response(IngestSourceResponse, status_code=201)
 async def create_ingest_source(
-    data: CreateIngestSourceRequest, community_id: int
+    data: CreateIngestSourceRequest, community_public_id: str
 ) -> tuple[IngestSourceResponse | dict[str, object], int]:
-    """`POST /api/v1/communities/<id>/ingest-sources` -- register a source. No secret material."""
+    """`POST /api/v1/communities/<uuid>/ingest-sources` -- register a source. No secret material."""
     tenant_id = _tenant_id()
     install_dal = _install_dal()
     try:
+        community_id, community_pid = await _community(community_public_id)
         row = await svc.create_ingest_source(
             install_dal,
             tenant_id=tenant_id,
@@ -257,50 +302,57 @@ async def create_ingest_source(
             label=data.label,
         )
     except ApiError as exc:
+        logger.debug("ingest_sources.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return IngestSourceResponse(success=True, ingestSource=_to_dto(row)), 201
+    return IngestSourceResponse(success=True, ingestSource=_to_dto(row, community_pid)), 201
 
 
-@ingest_sources_bp.route("/<int:ingest_source_id>", methods=["PATCH"])
+@ingest_sources_bp.route("/<string:ingest_source_id>", methods=["PATCH"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:admin")  # type: ignore[misc]
 @validate_request(UpdateIngestSourceRequest)
 @validate_response(IngestSourceResponse)
 async def update_ingest_source(
-    data: UpdateIngestSourceRequest, community_id: int, ingest_source_id: int
+    data: UpdateIngestSourceRequest, community_public_id: str, ingest_source_id: str
 ) -> IngestSourceResponse | tuple[dict[str, object], int]:
-    """`PATCH .../ingest-sources/<id>` -- update `label` and/or `enabled` only."""
+    """`PATCH .../ingest-sources/<uuid>` -- update `label` and/or `enabled` only."""
     tenant_id = _tenant_id()
     install_dal = _install_dal()
     try:
+        community_id, community_pid = await _community(community_public_id)
+        internal_id = await _source_internal_id(community_id, ingest_source_id)
         row = await svc.update_ingest_source(
             install_dal,
             tenant_id=tenant_id,
             community_id=community_id,
-            ingest_source_id=ingest_source_id,
+            ingest_source_id=internal_id,
             label=data.label,
             enabled=data.enabled,
         )
     except ApiError as exc:
+        logger.debug("ingest_sources.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return IngestSourceResponse(success=True, ingestSource=_to_dto(row))
+    return IngestSourceResponse(success=True, ingestSource=_to_dto(row, community_pid))
 
 
-@ingest_sources_bp.route("/<int:ingest_source_id>", methods=["DELETE"])
+@ingest_sources_bp.route("/<string:ingest_source_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:admin")  # type: ignore[misc]
-async def delete_ingest_source(community_id: int, ingest_source_id: int) -> tuple[Any, int]:
-    """`DELETE .../ingest-sources/<id>` -- hard-deletes the source, disables its workstream."""
+async def delete_ingest_source(community_public_id: str, ingest_source_id: str) -> tuple[Any, int]:
+    """`DELETE .../ingest-sources/<uuid>` -- hard-deletes the source, disables its workstream."""
     tenant_id = _tenant_id()
     install_dal = _install_dal()
     try:
+        community_id, _ = await _community(community_public_id)
+        internal_id = await _source_internal_id(community_id, ingest_source_id)
         deleted = await svc.delete_ingest_source(
             install_dal,
             tenant_id=tenant_id,
             community_id=community_id,
-            ingest_source_id=ingest_source_id,
+            ingest_source_id=internal_id,
         )
     except ApiError as exc:
+        logger.debug("ingest_sources.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     if not deleted:
         return _err(ApiError("Ingest source not found", 404, "NOT_FOUND"))

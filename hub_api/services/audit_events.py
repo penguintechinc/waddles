@@ -177,6 +177,15 @@ class AuditAction(StrEnum):
     LICENSE_TOKEN_BALANCE_CHANGED = "license.token_balance_changed"  # noqa: S105  # nosec B105
     LICENSE_PAYOUT_PROFILE_CHANGED = "license.payout_profile_changed"
     LICENSE_VENDOR_MODULE_CHANGED = "license.vendor_module_changed"
+    # --- community tier allocation (Pro/Ent team entitlements drawn from the tenant pool) ---
+    LICENSE_COMMUNITY_TIER_ALLOCATED = "license.community_tier_allocated"
+    LICENSE_COMMUNITY_TIER_RELEASED = "license.community_tier_released"
+    LICENSE_COMMUNITY_TIER_OVERRIDDEN = "license.community_tier_overridden"
+    LICENSE_COMMUNITY_TIER_ALLOCATION_BLOCKED = "license.community_tier_allocation_blocked"
+    # --- per-tenant licensing (issue #901): tenant license key + operator-set pools ---
+    LICENSE_TENANT_KEY_SET = "license.tenant_key_set"
+    LICENSE_TENANT_KEY_CLEARED = "license.tenant_key_cleared"
+    LICENSE_TENANT_POOL_SET = "license.tenant_pool_set"
     # --- community administration ---
     ADMIN_COMMUNITY_PROFILE_CHANGED = "admin.community_profile_changed"
     ADMIN_AI_CONFIG_CHANGED = "admin.ai_config_changed"
@@ -742,6 +751,11 @@ _R_SESSION: Final[str] = (
     "login/session/registration handshake: session issue/revoke is audited at the mint/revoke "
     "chokepoint (audit_http.record_session_*)"
 )
+_R_DSAR: Final[str] = (
+    "DSAR inbox intake/verification: every state change is recorded, PII-free, in the "
+    "append-only dsar_request_events table (a per-request audit trail with its own actor kinds), "
+    "and public callers have no identity to attribute in the chain"
+)
 _R_PUBLIC: Final[str] = (
     "unauthenticated public/inbound endpoint: no actor, pre-identity noise an attacker could use "
     "to bloat the chain"
@@ -781,6 +795,14 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/auth/temp-password"): _R_SESSION,
     ("POST", "/api/v1/user/passkey/register/start"): _R_SESSION,
     ("POST", "/api/v1/cookie"): _R_PUBLIC,
+    ("POST", "/api/v1/user/me/privacy-requests"): _R_DSAR,
+    ("POST", "/api/v1/public/<tenant_slug>/privacy-requests"): _R_DSAR,
+    ("POST", "/api/v1/public/<tenant_slug>/privacy-requests/resend-verification"): _R_DSAR,
+    ("POST", "/api/v1/public/privacy-requests/verify"): _R_DSAR,
+    ("POST", "/api/v1/public/privacy-requests/verify/preview"): (
+        "previews a verification token (request type and expiry only); consumes nothing and "
+        "changes no state"
+    ),
     ("POST", "/api/v1/github-sync/webhook"): _R_PUBLIC,
     ("POST", "/api/v1/marketplace/public/vendor/submit"): _R_PUBLIC,
     ("POST", "/api/v1/calendar/book/<slug>"): _R_PUBLIC,

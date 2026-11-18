@@ -64,6 +64,47 @@ data:
   # waddles.webui.role_sync_mapping (the admin role-sync page) ENV baselines (default OFF).
   FLAG_WADDLES_COMMUNITY_GUILD_PAIRING: {{ .Values.config.guildPairingEnabled | default false | quote }}
   FLAG_WADDLES_WEBUI_ROLE_SYNC_MAPPING: {{ .Values.config.webuiRoleSyncMappingEnabled | default false | quote }}
+  # waddles.webui.super_tenants ENV baseline (super-admin Tenants page; PostHog -> ENV -> default).
+  FLAG_WADDLES_WEBUI_SUPER_TENANTS: {{ .Values.config.webuiSuperTenantsEnabled | default false | quote }}
+  # waddles.dsar-inbox ENV baseline (DSAR request inbox rollout; PostHog -> ENV -> default OFF).
+  # Gates ONLY the new inbox -- the existing manual export/erase/do-not-sell routes are never gated.
+  FLAG_WADDLES_DSAR_INBOX: {{ .Values.config.dsarInboxEnabled | default false | quote }}
+  # waddles.community-tier-allocation ENV baseline (tenant-admin tier allocation; default OFF).
+  FLAG_WADDLES_COMMUNITY_TIER_ALLOCATION: {{ .Values.config.communityTierAllocationEnabled | default false | quote }}
+  # DSAR inbox tunables (non-secret). Secrets (DSAR_FINGERPRINT_KEY, captcha secret/HMAC key) come from the Secret.
+  DSAR_UNVERIFIED_EXPIRY_HOURS: {{ .Values.config.dsarUnverifiedExpiryHours | default 72 | quote }}
+  DSAR_CONTACT_RETENTION_DAYS: {{ .Values.config.dsarContactRetentionDays | default 30 | quote }}
+  DSAR_CAPTCHA_PROVIDER: {{ .Values.config.dsarCaptchaProvider | default "" | quote }}
+  DSAR_CAPTCHA_SITE_KEY: {{ .Values.config.dsarCaptchaSiteKey | default "" | quote }}
+  # Provider-reported hostnames accepted for turnstile/recaptcha (comma list). Blank => host of DSAR_VERIFY_URL_BASE; none resolvable => captcha fails closed (503).
+  DSAR_CAPTCHA_HOSTNAMES: {{ .Values.config.dsarCaptchaHostnames | default "" | quote }}
+  DSAR_RECAPTCHA_VERSION: {{ .Values.config.dsarRecaptchaVersion | default "v3" | quote }}
+  # Public verification page. Blank => derived from webui.publicUrl (+ /privacy-request/verify); both blank => verification mail cannot be built (fails loud, request stays verification_pending).
+  {{- $verifyBase := .Values.config.dsarVerifyUrlBase | default "" }}
+  {{- if and (not $verifyBase) .Values.webui.publicUrl }}{{ $verifyBase = printf "%s/privacy-request/verify" (trimSuffix "/" .Values.webui.publicUrl) }}{{ end }}
+  DSAR_VERIFY_URL_BASE: {{ $verifyBase | quote }}
+  # DSAR verification mail over SMTP (hub-api, hub_api/services/dsar_email_sender.py). Non-secret settings; the
+  # username/password come from the operator-supplied Secret named by config.dsarSmtp.existingSecret (hub-api.yaml).
+  # DSAR_SMTP_HOST blank => no sender: delivery fails loud (event + ERROR log), never faked.
+  DSAR_SMTP_HOST: {{ .Values.config.dsarSmtp.host | default "" | quote }}
+  DSAR_SMTP_PORT: {{ .Values.config.dsarSmtp.port | default "" | quote }}
+  DSAR_SMTP_TLS: {{ .Values.config.dsarSmtp.tls | default "starttls" | quote }}
+  DSAR_SMTP_ALLOW_PLAINTEXT: {{ .Values.config.dsarSmtp.allowPlaintext | default false | quote }}
+  DSAR_SMTP_TLS_CA_FILE: {{ .Values.config.dsarSmtp.tlsCaFile | default "" | quote }}
+  DSAR_SMTP_FROM_ADDRESS: {{ .Values.config.dsarSmtp.fromAddress | default "" | quote }}
+  DSAR_SMTP_FROM_NAME: {{ .Values.config.dsarSmtp.fromName | default "" | quote }}
+  DSAR_SMTP_REPLY_TO: {{ .Values.config.dsarSmtp.replyTo | default "" | quote }}
+  DSAR_SMTP_CONNECT_TIMEOUT: {{ .Values.config.dsarSmtp.connectTimeoutSeconds | default 5 | quote }}
+  DSAR_SMTP_SEND_TIMEOUT: {{ .Values.config.dsarSmtp.sendTimeoutSeconds | default 10 | quote }}
+  DSAR_SMTP_MAX_RETRIES: {{ .Values.config.dsarSmtp.maxRetries | default 2 | quote }}
+  DSAR_SMTP_BACKOFF_SECONDS: {{ .Values.config.dsarSmtp.backoffSeconds | default 0.5 | quote }}
+  DSAR_SMTP_TOTAL_TIMEOUT: {{ .Values.config.dsarSmtp.totalTimeoutSeconds | default 30 | quote }}
+  # DSAR verification-mail outbox worker (hub_api/services/dsar_outbox.py).
+  DSAR_OUTBOX_MAX_ATTEMPTS: {{ (.Values.config.dsarOutbox | default dict).maxAttempts | default 5 | quote }}
+  DSAR_OUTBOX_BACKOFF_SECONDS: {{ (.Values.config.dsarOutbox | default dict).backoffSeconds | default 30 | quote }}
+  DSAR_OUTBOX_LEASE_SECONDS: {{ (.Values.config.dsarOutbox | default dict).leaseSeconds | default 180 | quote }}
+  DSAR_OUTBOX_POLL_SECONDS: {{ (.Values.config.dsarOutbox | default dict).pollSeconds | default 5 | quote }}
+  DSAR_OUTBOX_RETENTION_DAYS: {{ (.Values.config.dsarOutbox | default dict).retentionDays | default 7 | quote }}
   # waddles.community.connections ENV baseline (default OFF; PostHog overrides when connected).
   # Gates the per-community Discord/Twitch connect authorize route (hub-api); also tier-gated
   # (Professional) -- tier is bypassed only on *.penguintech.cloud hosts.

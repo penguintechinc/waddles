@@ -50,6 +50,7 @@ async def feature_enabled(
     tenant: str,
     community: int | None = None,
     default: bool = False,
+    tenant_id: int | None = None,
 ) -> bool:
     """
     Evaluate a namespaced (`waddles.<module>.<feature>`) flag for a tenant.
@@ -73,14 +74,17 @@ async def feature_enabled(
         community=community,
         default=default,
         request_host=_current_request_host(),
+        tenant_id=tenant_id,
     )
 
 
-async def get_tier(*, tenant: str, community: int | None = None) -> str:
+async def get_tier(
+    *, tenant: str, community: int | None = None, tenant_id: int | None = None
+) -> str:
     """
     Resolve the effective license tier (``free``/``professional``/``enterprise``).
 
-    ``max(tenant_tier, community_tier)``, cascading down -- the same
+    The TENANT's licence tier (a community never changes it) -- the same
     resolution `feature_enabled` enforces, exposed for callers that need the
     tier itself (a `flags.tier` host capability, an admin UI badge). A
     hardcoded bypass domain reports ``enterprise`` exactly where it would skip
@@ -92,7 +96,7 @@ async def get_tier(*, tenant: str, community: int | None = None) -> str:
         if tier_check_bypassed(_current_request_host(), community):
             return TIER_ENTERPRISE
         resolved = await get_entitlement_client().effective_tier(
-            tenant=tenant, community=community
+            tenant=tenant, community=community, tenant_id=tenant_id
         )
     except Exception:  # noqa: BLE001 - tier lookup must never crash a request path
         return TIER_FREE

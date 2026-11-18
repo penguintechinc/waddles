@@ -104,8 +104,10 @@ DEFAULT_MEDIA_ALLOWED_SERVICES: Final = ("svc-process",)
 
 _TIERS: Final = {
     "free": media_pb2.MEDIA_TIER_FREE,
-    "professional": media_pb2.MEDIA_TIER_PROFESSIONAL,
-    "enterprise": media_pb2.MEDIA_TIER_ENTERPRISE,
+    # Communities are only Free or Premium; the media proto predates that and still names
+    # PROFESSIONAL/ENTERPRISE, so Premium maps to the LOWEST paid enum (PROFESSIONAL).
+    # MEDIA_TIER_ENTERPRISE is never emitted.
+    "premium": media_pb2.MEDIA_TIER_PROFESSIONAL,
 }
 _BYOK_STATUS: Final = {
     media.STATUS_OK: media_pb2.BYOK_STATUS_OK,

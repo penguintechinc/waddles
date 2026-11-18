@@ -1,7 +1,7 @@
 """`route_completion()` -- the single entrypoint every AI-using caller in hub-api goes through.
 
 Real dispatch, no stubs: resolves the community's AI config + entitlement
-(PostHog flag AND Enterprise license tier -- `critical-rules.md`'s two-gate
+(PostHog flag AND Premium community tier -- `critical-rules.md`'s two-gate
 model), picks a tier, calls the matching REAL client (`clients.py`), meters
 premium-tier usage against the token ledger (`services.token_ledger`), and
 falls back down the ladder (premium -> BYOK-configured-tier -> free) exactly
@@ -32,7 +32,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, replace
-from typing import Any
+from typing import Any, Final
 
 from flask_core.ai_guard import sanitize_model_output, scan_for_injection
 from flask_core.ai_guard import telemetry as guard_telemetry
@@ -63,6 +63,11 @@ from services.ai_routing.errors import (
     not_entitled,
 )
 from services.ai_routing.models import AIRequest, AIResponse, ByokProvider, Tier
+from services.community_tier_service import (
+    TIER_NAME_FREE,
+    TIER_NAME_PREMIUM,
+    resolve_effective_tier,
+)
 from services.errors import ApiError
 
 logger = logging.getLogger(__name__)
@@ -70,51 +75,88 @@ logger = logging.getLogger(__name__)
 #: Base capability gate -- covers the whole endpoint, including free tier
 #: (general.md: every feature behind its own flag, defaulted OFF).
 FEATURE_AI_ROUTING = "waddles.ai.routing"
-#: Premium-local-metered tier gate (spec §7) -- flag AND Enterprise tier.
+#: Premium-local-metered tier gate (spec §7) -- flag AND Premium community tier.
 FEATURE_AI_PREMIUM = "waddles.ai.premium_models"
-#: BYOK tier gate -- flag AND Professional-or-higher tier (2026-11-06 decision;
-#: was Enterprise in spec §7).
+#: BYOK / custom-endpoint tier gate -- flag AND the provider rule below.
 FEATURE_AI_BYOK = "waddles.ai.byok"
 
+#: Communities are only Free or Premium (2026-11-18 decision). A FREE community may point the
+#: custom-endpoint path ONLY at these self-hostable providers.
+FREE_CUSTOM_ENDPOINT_PROVIDERS: Final = frozenset({"ollama", "waddleai"})
+#: PREMIUM adds bring-your-own-key for these hosted providers.
+PREMIUM_BYOK_PROVIDERS: Final = frozenset({"openai", "gemini", "anthropic"})
 
-async def _is_enterprise_tier(async_dal: Any, dal: Any, *, community_id: int) -> bool:
-    """Direct `communities.license_tier` read -- same pattern `workflow_service.validate_license()`.
 
-    Not routed through the `FeatureContract`/`tier_requirements` catalog
-    (`libs/core_platform_module/features.py`) -- that registration lives
-    outside hub-api's own directory tree and isn't wired up for this
-    brand-new capability yet; this direct check is the same
-    self-contained fallback the pre-existing `workflow_service.py` port
-    already established for exactly this situation (see that module's
-    own docstring), so premium/BYOK entitlement is never silently
-    unenforced just because the flag registry hasn't caught up.
+def provider_allowed_for_tier(provider: str | None, tier: str) -> bool:
+    """Whether a community at `tier` ('free'/'premium') may use custom/BYOK `provider`.
+
+    Free: Ollama and WaddleAI only. Premium: those plus OpenAI, Gemini and Anthropic. Any other
+    or unknown provider is denied for every tier (fail closed); `None` never matches.
     """
-    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    if not rows:
+    if provider is None:
         return False
-    tier = (rows.first().license_tier or "").strip().lower()
-    return tier == "enterprise"
+    if provider in FREE_CUSTOM_ENDPOINT_PROVIDERS:
+        return True
+    return provider in PREMIUM_BYOK_PROVIDERS and tier == TIER_NAME_PREMIUM
 
 
-async def _is_professional_or_higher(async_dal: Any, dal: Any, *, community_id: int) -> bool:
-    """Community `license_tier` is professional or enterprise (BYOK floor); unknown -> False."""
-    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    if not rows:
-        return False
-    tier = (rows.first().license_tier or "").strip().lower()
-    return tier in ("professional", "enterprise")
+async def _community_effective_tier(
+    async_dal: Any, dal: Any, *, community_id: int, tenant: str | None = None
+) -> str:
+    """Effective tier of `community_id` via the single resolver, keyed by numeric ids.
+
+    'premium' iff the community has an active allocation (the tenant's own tier never uplifts
+    it): the tenant id comes from the community row (server
+    state), never from a caller-supplied slug. An unknown, INACTIVE or other-tenant community
+    (when the caller's validated `tenant` slug is given) and any lookup failure all report
+    `free` identically -- no existence/tier oracle -- never a paid tier, never a raise. Any
+    failure logs ERROR with the exception type only.
+    """
+    try:
+        rows = await async_dal.select_async(
+            dal((dal.communities.id == community_id) & (dal.communities.is_active == True))  # noqa: E712
+        )
+        row = rows.first() if rows else None
+        if row is None or row.tenant_id is None:
+            return TIER_NAME_FREE
+        if tenant is not None:
+            owner = await async_dal.select_async(dal(dal.tenants.id == int(row.tenant_id)))
+            owner_row = owner.first() if owner else None
+            if owner_row is None or str(owner_row.slug or "") != tenant:
+                return TIER_NAME_FREE
+        tier: str = await resolve_effective_tier(async_dal, dal, int(row.tenant_id), community_id)
+        return tier
+    except Exception as exc:  # noqa: BLE001 - an entitlement gate fails closed to free
+        logger.error("ai_routing_tier_resolve_failed error_type=%s", type(exc).__name__)
+        return TIER_NAME_FREE
+
+
+async def _is_premium_tier(
+    async_dal: Any, dal: Any, *, community_id: int, tenant: str | None = None
+) -> bool:
+    """Premium floor: the community's effective tier is Premium (fail-closed to False)."""
+    tier = await _community_effective_tier(async_dal, dal, community_id=community_id, tenant=tenant)
+    return tier == TIER_NAME_PREMIUM
 
 
 async def _premium_entitled(async_dal: Any, dal: Any, *, tenant: str, community_id: int) -> bool:
     if not await feature_enabled(FEATURE_AI_PREMIUM, tenant=tenant, community=community_id):
         return False
-    return await _is_enterprise_tier(async_dal, dal, community_id=community_id)
+    return await _is_premium_tier(async_dal, dal, community_id=community_id, tenant=tenant)
 
 
-async def _byok_entitled(async_dal: Any, dal: Any, *, tenant: str, community_id: int) -> bool:
+async def _byok_entitled(
+    async_dal: Any, dal: Any, *, tenant: str, community_id: int, provider: str | None
+) -> bool:
+    """Flag AND provider rule (Free: Ollama/WaddleAI; Premium adds OpenAI/Gemini/Anthropic)."""
     if not await feature_enabled(FEATURE_AI_BYOK, tenant=tenant, community=community_id):
         return False
-    return await _is_professional_or_higher(async_dal, dal, community_id=community_id)
+    if provider is None:
+        return (
+            True  # no provider chosen yet: the caller reports "not configured", not a tier denial
+        )
+    tier = await _community_effective_tier(async_dal, dal, community_id=community_id, tenant=tenant)
+    return provider_allowed_for_tier(provider, tier)
 
 
 @dataclass(slots=True, frozen=True)
@@ -366,11 +408,13 @@ async def _route(
         elif ambient:
             tier, fallback_reason = "free", "not_entitled"
         else:
-            raise not_entitled("Premium AI models require an Enterprise plan")
+            raise not_entitled("Premium AI models require a Premium community")
 
     if tier == "byok":
-        entitled = await _byok_entitled(async_dal, dal, tenant=tenant, community_id=community_id)
         provider = ai_request.byok_provider or config.byok_provider
+        entitled = await _byok_entitled(
+            async_dal, dal, tenant=tenant, community_id=community_id, provider=provider
+        )
         if entitled and provider is not None:
             try:
                 return await _run_byok(
@@ -401,7 +445,10 @@ async def _route(
             fallback_reason = "not_entitled" if not entitled else "byok_provider_not_configured"
         else:
             if not entitled:
-                raise not_entitled("BYOK requires a Professional plan or higher")
+                raise not_entitled(
+                    "This AI provider is not available on your community's tier "
+                    "(Free: Ollama or WaddleAI; Premium adds OpenAI, Gemini, Anthropic)"
+                )
             raise byok_key_missing("No BYOK provider configured for this community")
 
     return await _run_free(ai_request, fallback_reason=fallback_reason, guard=guard)

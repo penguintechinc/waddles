@@ -46,6 +46,7 @@ from flask_core.auth import (
     verify_jwt_token,
 )
 from flask_core.token_revocation import get_token_revocation
+from opentelemetry import metrics
 from quart import has_request_context
 
 from config import HubAPIConfig
@@ -961,6 +962,7 @@ class CommunityMembership:
     name: str
     display_name: str
     role: str
+    license_tier: int = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -986,6 +988,70 @@ class CurrentUserResult:
     has_password: bool
     linked_platforms: list[LinkedIdentitySummary]
     communities: list[CommunityMembership]
+
+
+_TIER_LOOKUP_CHUNK = 500
+_TIER_LOOKUP_FAILED = metrics.get_meter("waddles.hub_api.auth").create_counter(
+    "waddles.auth.me.tier_lookup_failed",
+    unit="1",
+    description="/auth/me community-tier lookups that failed (display falls back to Free).",
+)
+
+
+#: Community tier codes `/auth/me` reports: 1 Free, 2 Premium (anything else displays as Free).
+_TIER_CODE_FREE = 1
+_KNOWN_TIER_CODES = frozenset({1, 2})
+
+
+async def _community_tier_codes(
+    async_dal: Any,
+    dal: Any,
+    community_ids: list[int],
+    *,
+    tenant_by_community: dict[int, int] | None = None,
+) -> dict[int, int]:
+    """Map community id -> active allocated tier code (1 Free / 2 Premium), chunked + batched.
+
+    Callers pass only the CALLER'S OWN community ids (their memberships). When
+    `tenant_by_community` is given, an allocation whose `tenant_id` differs from the community's
+    own tenant is ignored (same rule as `resolve_effective_tier`). Communities with no active
+    allocation are absent (callers treat that as Free = 1); any other stored code is
+    coerced to 1 with a DEBUG log. Fails safe for display: any lookup
+    error logs ERROR (exception type only), bumps `waddles_auth_me_tier_lookup_failed_total` and
+    returns ``{}`` so ``/auth/me`` never fails on it -- never silently.
+    """
+    if not community_ids:
+        return {}
+    try:
+        from services.schema import bind_community_tier_tables  # noqa: PLC0415 - avoid import cycle
+
+        bind_community_tier_tables(dal)
+        t = dal.community_tier_allocations
+        out: dict[int, int] = {}
+        for start in range(0, len(community_ids), _TIER_LOOKUP_CHUNK):
+            chunk = community_ids[start : start + _TIER_LOOKUP_CHUNK]
+            rows = await async_dal.select_async(
+                dal(t.community_id.belongs(chunk) & (t.released_at == None)),  # noqa: E711
+                t.community_id,
+                t.tier_code,
+                t.tenant_id,
+            )
+            for r in rows:
+                cid = int(r.community_id)
+                if tenant_by_community is not None and tenant_by_community.get(cid) != int(
+                    r.tenant_id
+                ):
+                    continue
+                code = int(r.tier_code)
+                if code not in _KNOWN_TIER_CODES:
+                    logger.debug("community_tier_code_unknown community_id=%d code=%d", cid, code)
+                    code = _TIER_CODE_FREE
+                out[cid] = code
+        return out
+    except Exception as exc:  # noqa: BLE001 - display hint only; never fail /auth/me
+        logger.error("community_tier_lookup_failed error_type=%s", type(exc).__name__)
+        _TIER_LOOKUP_FAILED.add(1, {"error_type": type(exc).__name__})
+        return {}
 
 
 async def get_current_user(
@@ -1020,7 +1086,18 @@ async def get_current_user(
         dal.communities.id,
         dal.communities.name,
         dal.communities.display_name,
+        dal.communities.tenant_id,
         dal.community_members.role,
+    )
+    tiers = await _community_tier_codes(
+        async_dal,
+        dal,
+        [int(r.communities.id) for r in community_rows],
+        tenant_by_community={
+            int(r.communities.id): int(r.communities.tenant_id)
+            for r in community_rows
+            if r.communities.tenant_id is not None
+        },
     )
     communities = [
         CommunityMembership(
@@ -1028,6 +1105,7 @@ async def get_current_user(
             name=r.communities.name,
             display_name=r.communities.display_name or r.communities.name,
             role=r.community_members.role,
+            license_tier=tiers.get(int(r.communities.id), 1),
         )
         for r in community_rows
     ]

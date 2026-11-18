@@ -8,13 +8,15 @@ mirrors `services/event_calendar_proxy.py`'s `EventCalendarProxyClient`
 hub-api-owned logic ride along with the proxying, both ported here:
 
 1. `validate_license()` -- `workflowController.js::validateLicense()`,
-   a direct `communities` table read (license_key/license_expires_at/
-   license_tier), gating `create_workflow`/`publish_workflow`/
-   `execute_workflow` only (matches Node's own call sites exactly --
-   `update`/`delete`/`test`/`validate`/list/get/executions/webhooks
-   never call it in Node either). See `services/schema.py`'s module
-   docstring gap (4): these three columns aren't in any real migration,
-   byte-faithful-to-Node gap, not introduced by this port.
+   gating `create_workflow`/`publish_workflow`/`execute_workflow` as in Node,
+   and (hardening beyond Node) also `update`, `test` and webhook creation --
+   every path that mutates or runs a workflow (`require_workflow_tier`). The gate is the
+   community's EFFECTIVE tier
+   (`community_tier_service.resolve_effective_tier`: Premium iff the
+   community has an active allocation -- the tenant tier never uplifts it --
+   keyed by numeric ids, fail-closed to Free); the per-community `license_key`/`license_expires_at`
+   requirement was dropped (an allocated Premium tier
+   unlocks workflows like every other feature).
 
 2. `get_workflow_or_403()` -- SECURITY FIX, not a faithful-port item.
    `getWorkflow()` is the ONLY Node handler that checks
@@ -38,19 +40,22 @@ hub-api-owned logic ride along with the proxying, both ported here:
 
 from __future__ import annotations
 
+import logging
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
+from services.community_tier_service import TIER_NAME_PREMIUM, resolve_effective_tier
 from services.errors import ApiError, forbidden, not_found
+
+logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "http://workflow-core:8070"
 _DEFAULT_TIMEOUT_SECONDS = 10.0
-#: Matches workflowController.js::validateLicense()'s workflowTiers list exactly.
-_WORKFLOW_LICENSE_TIERS = frozenset({"pro", "enterprise", "premium"})
+#: Workflows need a Premium community (old Node `workflowTiers`: pro/enterprise/premium).
+_WORKFLOW_REQUIRED_TIER = TIER_NAME_PREMIUM
 
 
 @dataclass(slots=True, frozen=True)
@@ -131,52 +136,54 @@ def error_from_proxy(result: ProxyResult, *, not_found_message: str) -> ApiError
     return ApiError(str(message) if message else "Workflow service error", 500, "INTERNAL_ERROR")
 
 
-def _is_expired(expires_at: datetime | None) -> bool:
-    """`communities.license_expires_at < now`, tz-aware-or-naive-storage safe.
+_LICENSE_DENIED_REASON = "Workflows not included in current license tier"
 
-    BUG FIX (caught by this port's own test suite, not a Node behavior to
-    preserve): pydal's sqlite adapter round-trips a tz-aware `datetime`
-    back as NAIVE, silently dropping `tzinfo` while keeping the UTC wall-
-    clock VALUE unchanged (confirmed empirically -- inserting
-    `datetime.now(UTC)` and reading it back gives a naive datetime equal
-    to the UTC wall-clock reading, not the local one). Comparing that
-    against `datetime.now()` (naive LOCAL time) silently miscomputes
-    "expired" by the server's UTC offset -- correct only by accident on a
-    UTC-configured host. Postgres (`TIMESTAMPTZ`, the real column type
-    here) returns a genuinely tz-AWARE datetime via psycopg2, so the
-    naive branch is sqlite/test-only today, but must stay correct
-    independent of host timezone regardless.
+
+async def validate_license(
+    async_dal: Any, dal: Any, *, community_id: int, tenant: str | None = None
+) -> LicenseCheckResult:
+    """Port of `workflowController.js::validateLicense()`, now an effective-tier gate.
+
+    Valid when the community's effective tier (Premium via allocation only, numeric-id keyed) is
+    Premium. No per-community license key is required. An
+    unknown, INACTIVE or other-tenant community (when the caller's validated `tenant` slug is
+    given) and any lookup failure all produce the SAME denial as Free -- no existence or tier
+    oracle -- logged at ERROR (type only) for failures; never a 500.
     """
-    if expires_at is None:
-        return False
-    now = (
-        datetime.now(UTC)
-        if expires_at.tzinfo is not None
-        else datetime.now(UTC).replace(tzinfo=None)
-    )
-    return expires_at < now
+    denied = LicenseCheckResult(False, _LICENSE_DENIED_REASON)
+    try:
+        rows = await async_dal.select_async(
+            dal((dal.communities.id == community_id) & (dal.communities.is_active == True))  # noqa: E712
+        )
+        row = rows.first() if rows else None
+        if row is None or row.tenant_id is None:
+            return denied
+        if tenant is not None:
+            owner = await async_dal.select_async(dal(dal.tenants.id == int(row.tenant_id)))
+            owner_row = owner.first() if owner else None
+            if owner_row is None or str(owner_row.slug or "") != tenant:
+                return denied
+        tier = await resolve_effective_tier(async_dal, dal, int(row.tenant_id), community_id)
+    except Exception as exc:  # noqa: BLE001 - a gate fails closed, never 500s on a tier lookup
+        logger.error("workflow_license_check_failed error_type=%s", type(exc).__name__)
+        return denied
 
-
-async def validate_license(async_dal: Any, dal: Any, *, community_id: int) -> LicenseCheckResult:
-    """Port of `workflowController.js::validateLicense()`.
-
-    Direct `communities` read -- no proxy call to `workflow-core`.
-    """
-    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    if not rows:
-        return LicenseCheckResult(False, "Community not found")
-    row = rows.first()
-
-    if not row.license_key:
-        return LicenseCheckResult(False, "No license configured")
-    if _is_expired(row.license_expires_at):
-        return LicenseCheckResult(False, "License expired")
-
-    tier = (row.license_tier or "").lower()
-    if tier not in _WORKFLOW_LICENSE_TIERS:
-        return LicenseCheckResult(False, "Workflows not included in current license tier")
-
+    if tier != _WORKFLOW_REQUIRED_TIER:
+        return denied
     return LicenseCheckResult(True)
+
+
+async def require_workflow_tier(
+    async_dal: Any, dal: Any, *, community_id: int, tenant: str | None = None
+) -> None:
+    """Raise a 403 `ApiError` unless `validate_license` passes.
+
+    The one gate every workflow execution/mutation entry point (create, update, publish,
+    execute, test, webhook create) calls, so a downgraded community stops at once.
+    """
+    check = await validate_license(async_dal, dal, community_id=community_id, tenant=tenant)
+    if not check.valid:
+        raise forbidden(f"Workflows not available: {check.reason}")
 
 
 async def get_workflow_or_403(

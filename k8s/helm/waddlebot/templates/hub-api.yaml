@@ -342,6 +342,41 @@ spec:
             secretKeyRef:
               name: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretName }}
               key: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretKey }}
+        # DSAR inbox requester-contact AES-256-GCM key (64 hex), auto-provisioned like the OTS key.
+        - name: DSAR_FINGERPRINT_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.autoProvisionedKeys.dsarFingerprint.secretName }}
+              key: {{ .Values.autoProvisionedKeys.dsarFingerprint.secretKey }}
+        # Captcha verification secrets for the PUBLIC DSAR form (operator-supplied Secret
+        # `waddlebot-dsar-captcha`; absent => the form fails closed with 503).
+        - name: DSAR_CAPTCHA_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-dsar-captcha
+              key: DSAR_CAPTCHA_SECRET
+              optional: true
+        - name: DSAR_ALTCHA_HMAC_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-dsar-captcha
+              key: DSAR_ALTCHA_HMAC_KEY
+              optional: true
+        # DSAR verification-mail SMTP credentials (operator-supplied Secret; see values.yaml
+        # config.dsarSmtp). Optional: unauthenticated relays need neither key. Never auto-generated,
+        # never a placeholder -- an absent Secret simply means "no SMTP auth".
+        - name: DSAR_SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.config.dsarSmtp.existingSecret | default "waddlebot-dsar-smtp" }}
+              key: DSAR_SMTP_USERNAME
+              optional: true
+        - name: DSAR_SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.config.dsarSmtp.existingSecret | default "waddlebot-dsar-smtp" }}
+              key: DSAR_SMTP_PASSWORD
+              optional: true
         # Enterprise SSO (hub_api/services/sso_*.py) -- encryption key (optional: SSO is
         # entitlement-gated), tuning, SSRF allowlist, shared Google client. See templates/_sso.tpl.
         {{- include "waddlebot.sso.hubApiEnv" . | nindent 8 }}

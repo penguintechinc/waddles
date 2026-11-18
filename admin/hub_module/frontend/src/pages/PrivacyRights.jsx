@@ -9,12 +9,117 @@
  * Rectification (Art. 16) is not duplicated here; it lives on the profile
  * editor, and a second place to change the same fields would drift from it.
  */
-import { useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 
 import api from '../services/api';
 import { useCookieConsent } from '../hooks/useCookieConsent';
+import { userPrivacyRequestsApi } from '../services/userPrivacyRequestsApi';
+import {
+  REGIME_LABEL,
+  REQUEST_TYPE_LABEL,
+  STATUS_LABEL,
+  dsarErrorCode,
+  dsarErrorMessage,
+} from '../services/dsarConstants';
+
+const formatDate = (iso) => (iso ? new Date(iso).toLocaleDateString() : 'Not set');
+
+/**
+ * "Submit a privacy request" section: files a formal request through the tenant's request inbox
+ * and lists the caller's own requests with status and due date.
+ */
+function PrivacyRequestsSection() {
+  const [requestType, setRequestType] = useState('1');
+  const [regime, setRegime] = useState('1');
+  const [items, setItems] = useState(null);
+  const [loadState, setLoadState] = useState('loading'); // loading | ok | disabled | error
+  const [submitting, setSubmitting] = useState(false);
+  const [message, setMessage] = useState(null);
+  const [problem, setProblem] = useState(null);
+
+  const load = useCallback(async () => {
+    try {
+      setItems(await userPrivacyRequestsApi.list());
+      setLoadState('ok');
+    } catch (err) {
+      setLoadState(dsarErrorCode(err) === 'DSAR_INBOX_DISABLED' ? 'disabled' : 'error');
+    }
+  }, []);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setSubmitting(true);
+    setMessage(null);
+    setProblem(null);
+    try {
+      await userPrivacyRequestsApi.create({ requestType: Number(requestType), regime: Number(regime) });
+      setMessage('Your request has been submitted.');
+      await load();
+    } catch (err) {
+      setProblem(dsarErrorMessage(err, 'Your request could not be submitted. Please try again.'));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <section className="mt-6 rounded-lg border border-line bg-surface-raised p-5" aria-labelledby="privacy-requests-title">
+      <h2 id="privacy-requests-title" className="text-xl font-semibold text-gold-400">Submit a privacy request</h2>
+      <p className="mt-1 text-sm text-fg-muted">
+        File a formal request and track it here. We respond within the legal deadline for your region.
+      </p>
+      {loadState === 'disabled' ? (
+        <p className="mt-4 text-sm" data-testid="requests-disabled">Formal privacy requests are not enabled for your community yet.</p>
+      ) : (
+        <>
+          <form onSubmit={submit} className="mt-4 grid gap-3 sm:grid-cols-2">
+            <label className="block text-sm text-fg-secondary">
+              Request type
+              <select value={requestType} onChange={(e) => setRequestType(e.target.value)} className="mt-1 w-full rounded border border-line-strong bg-surface px-3 py-2 text-fg">
+                {Object.entries(REQUEST_TYPE_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </label>
+            <label className="block text-sm text-fg-secondary">
+              Privacy law
+              <select value={regime} onChange={(e) => setRegime(e.target.value)} className="mt-1 w-full rounded border border-line-strong bg-surface px-3 py-2 text-fg">
+                {Object.entries(REGIME_LABEL).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+              </select>
+            </label>
+            <div className="sm:col-span-2">
+              <button type="submit" disabled={submitting} data-testid="submit-privacy-request" className="rounded bg-sky-600 px-4 py-2 font-medium text-white hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50">
+                {submitting ? 'Submitting…' : 'Submit request'}
+              </button>
+            </div>
+          </form>
+          {message && <p role="status" className="mt-3 text-sm text-emerald-300">{message}</p>}
+          {problem && <p role="alert" className="mt-3 text-sm text-red-300">{problem}</p>}
+          <h3 className="mt-5 font-medium">Your requests</h3>
+          {loadState === 'loading' && <p role="status" className="text-sm text-fg-muted">Loading…</p>}
+          {loadState === 'error' && <p role="alert" className="text-sm text-red-300">Your requests could not be loaded.</p>}
+          {loadState === 'ok' && items.length === 0 && <p className="text-sm text-fg-muted" data-testid="requests-empty">You have not submitted any requests.</p>}
+          {loadState === 'ok' && items.length > 0 && (
+            <ul className="mt-2 space-y-2" data-testid="requests-list">
+              {items.map((r) => (
+                <li key={r.id} className="rounded border border-line p-3 text-sm">
+                  <span className="font-medium">{REQUEST_TYPE_LABEL[r.requestType] ?? 'Request'}</span>
+                  {' · '}{STATUS_LABEL[r.status] ?? 'Unknown'}
+                  {' · '}Submitted {formatDate(r.requestedAt)}
+                  {' · '}Due {formatDate(r.dueAt)}
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </section>
+  );
+}
 
 export default function PrivacyRights() {
   const { consent, setDoNotSell, loading: consentLoading } = useCookieConsent();
@@ -165,6 +270,8 @@ export default function PrivacyRights() {
             {optedOut ? 'You are opted out — allow sharing again' : 'Opt out of sale or sharing'}
           </button>
         </section>
+
+        <PrivacyRequestsSection />
 
         <section className="mt-6 rounded-lg border border-red-800 bg-surface-raised p-5">
           <h2 className="text-xl font-semibold text-red-400">Delete my data</h2>

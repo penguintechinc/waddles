@@ -376,6 +376,15 @@ RULES: tuple[Rule, ...] = (
     ref("ai_token_transactions", "actor_user_id", reason=_ACTOR),
     ref("analytics_suspected_bots", "reviewed_by", reason=_ACTOR),
     ref("announcements", "updated_by", reason=_ACTOR),
+    ref(
+        "dsar_requests",
+        "subject_user_id",
+        "assignee_user_id",
+        reason="DSAR handling record, retained as proof the request was honoured (Art. 5(2), "
+        "17(3)(e)); the user row is anonymised in place so the reference is pseudonymous; "
+        "requester contact data is blanked by the retention job",
+    ),
+    ref("dsar_request_events", "actor_user_id", reason=_ACTOR + "; append-only DSAR audit trail"),
     ref("app_activations", "activated_by", reason=_ACTOR),
     ref(
         "app_active_versions",
@@ -405,6 +414,14 @@ RULES: tuple[Rule, ...] = (
     ref("calendar_tickets", "cancelled_by", "checked_in_by", "transferred_by", reason=_ACTOR),
     ref("call_raised_hands", "acknowledged_by", reason=_ACTOR),
     ref("command_aliases", "created_by", reason=_ACTOR),
+    ref(
+        "community_tier_allocations",
+        "allocated_by",
+        "released_by",
+        reason=_ACTOR + "; licensing ledger row retained as proof of entitlement allocation",
+    ),
+    ref("tenant_license_pools", "set_by", reason=_ACTOR),
+    ref("tenant_license_keys", "license_key_set_by", reason=_ACTOR),
     ref("community_access_tokens", "created_by_user_id", reason=_ACTOR),
     ref(
         "community_connection_access", "approved_by_user_id", "requested_by_user_id", reason=_ACTOR

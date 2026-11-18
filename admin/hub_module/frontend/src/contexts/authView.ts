@@ -14,6 +14,8 @@ export interface AuthView {
   isSuperAdmin: boolean;
   /** Whether the caller administers the given community (false when the context cannot say). */
   isCommunityAdmin: (communityId: number) => boolean;
+  /** License tier code (1 Free, 2 Premium) of one of the caller's communities; missing = 1. UX hint only. */
+  communityTier: (communityId: number) => number;
   /** Re-fetches `/auth/me` into the context (skipped by the context if fresh). */
   refreshUser: () => Promise<void>;
 }
@@ -36,6 +38,15 @@ function narrowCommunityAdmin(fn: unknown): (communityId: number) => boolean {
   return (communityId) => Reflect.apply(fn, undefined, [communityId]) === true;
 }
 
+/** Wraps the context's `communityTier(communityId)` when it is a function; Free (1) otherwise. */
+function narrowCommunityTier(fn: unknown): (communityId: number) => number {
+  if (typeof fn !== 'function') return () => 1;
+  return (communityId) => {
+    const tier: unknown = Reflect.apply(fn, undefined, [communityId]);
+    return tier === 2 ? 2 : 1;
+  };
+}
+
 /** Narrows an unknown context value into an `AuthView`. Exported for tests. */
 export function toAuthView(raw: unknown): AuthView {
   const record: WireRecord = isRecord(raw) ? raw : {};
@@ -44,6 +55,7 @@ export function toAuthView(raw: unknown): AuthView {
     isAuthenticated: record['isAuthenticated'] === true,
     isSuperAdmin: record['isSuperAdmin'] === true,
     isCommunityAdmin: narrowCommunityAdmin(record['isCommunityAdmin']),
+    communityTier: narrowCommunityTier(record['communityTier']),
     refreshUser: () => callRefresh(record['refreshUser']),
   };
 }

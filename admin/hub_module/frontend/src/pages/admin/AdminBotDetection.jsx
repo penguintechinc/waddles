@@ -2,6 +2,8 @@ import { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
+import TierLocked from '../../components/TierLocked';
+import { TIER } from '../../services/communityTierConstants';
 import BotScoreBadge from '../../components/BotScoreBadge';
 import { ShieldCheckIcon, ExclamationTriangleIcon, UserGroupIcon, ClockIcon } from '@heroicons/react/24/outline';
 import { FormModalBuilder } from '../../components/FormModal';
@@ -23,7 +25,7 @@ const RECOMMENDED_ACTIONS = [
 
 function AdminBotDetection() {
   const { communityId } = useParams();
-  const { user } = useAuth();
+  const { communityTier } = useAuth();
   const [detections, setDetections] = useState([]);
   const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
@@ -36,7 +38,9 @@ function AdminBotDetection() {
   const [showReviewModal, setShowReviewModal] = useState(false);
   const [botScore, setBotScore] = useState(null);
   const [botScoreLoading, setBotScoreLoading] = useState(true);
-  const isPremium = user?.isPremium || false;
+  // UX hint only: the server's tier gates are authoritative (an ungated client still gets 402/403).
+  const tier = communityTier(communityId);
+  const isPremium = tier >= TIER.premium;
 
   useEffect(() => {
     fetchDetections();
@@ -151,22 +155,7 @@ function AdminBotDetection() {
   }
 
   if (!isPremium) {
-    return (
-      <div className="text-center py-12">
-        <div className="card p-8 max-w-2xl mx-auto">
-          <svg className="w-16 h-16 text-gold-400 mx-auto mb-4" fill="currentColor" viewBox="0 0 20 20">
-            <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
-          </svg>
-          <h2 className="text-2xl font-bold text-sky-100 mb-2">Premium Feature</h2>
-          <p className="text-navy-400 mb-6">
-            Bot Detection is a premium feature. Upgrade your community to access advanced bot detection and moderation tools.
-          </p>
-          <button className="btn btn-primary">
-            Upgrade to Premium
-          </button>
-        </div>
-      </div>
-    );
+    return <TierLocked feature="Bot Detection" requiredTier={TIER.premium} currentTier={tier} />;
   }
 
   return (

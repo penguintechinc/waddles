@@ -211,6 +211,18 @@ export function AuthProvider({ children }) {
     isPlatformAdmin: user?.roles?.includes('platform-admin'),
     isVendor: user?.roles?.includes('vendor'),
     isAnalyticsConsumer: user?.isAnalyticsConsumer || false,
+    // Scope-based authz (never role names). `scopes` and `tenantSlug` come from
+    // the server-issued session (GET /auth/me); the webui never invents them.
+    scopes: Array.isArray(user?.scopes) ? user.scopes : [],
+    tenantSlug: typeof user?.tenantSlug === 'string' ? user.tenantSlug : null,
+    hasScope: (scope) => Array.isArray(user?.scopes) && user.scopes.includes(scope),
+    // License tier (1 Free, 2 Premium) of one of the caller's communities, from
+    // /auth/me `communities[].licenseTier`. A missing/unknown value is Free. UX hint only: the
+    // server's tier gates are authoritative.
+    communityTier: (communityId) => {
+      const c = user?.communities?.find((x) => x.id === Number(communityId));
+      return c?.licenseTier === 2 ? 2 : 1;
+    },
     // Community-level admin check (for any community, or a specific one)
     isCommunityAdmin: (communityId) => {
       const adminRoles = ['community-owner', 'community-admin', 'moderator'];

@@ -3,7 +3,7 @@
 Spec: `docs/superpowers/specs/2026-11-06-harness-media-generation.md` (PR3).
 
 * `media_byok_admin_bp` (`/api/v1/admin/<community_id>/media/byok-keys`) -- set/rotate, status,
-  delete. Community-admin only (`require_community_admin`, tenant-bound), Professional-or-higher
+  delete. Community-admin only (`require_community_admin`, tenant-bound), Premium-community
   required to SET (a downgraded community can still delete). The key is never returned: responses
   carry `key_last4` only. Audited by the HTTP audit hook (`audit_events._INLINE_AUTHZ_GROUPS`).
 
@@ -146,7 +146,7 @@ async def get_media_byok_status(
 async def set_media_byok_key(
     data: SetMediaByokRequest, community_id: int
 ) -> MediaByokKeyDTO | tuple[dict[str, object], int]:
-    """`PUT .../media/byok-keys` -- Professional+ required; validated against Gemini first.
+    """`PUT .../media/byok-keys` -- Premium community required; validated against Gemini first.
 
     Never logs or echoes `data.api_key`; the response is the masked record.
     """

@@ -30,7 +30,10 @@ from quart_schema import QuartSchema
 
 import blueprints.v1.workflow as workflow_module
 from blueprints.v1.workflow import workflow_bp
+from services import community_tier_service as tier_svc
 from services.workflow_service import ProxyResult
+from tests.ai_routing_helpers import ensure_tier_tables, grant_tier, patch_tenant_tier
+from tests.conftest import TENANT_SLUG
 
 COMMUNITY_ID = 1
 OTHER_COMMUNITY_ID = 2
@@ -211,6 +214,11 @@ def fake_core(monkeypatch: pytest.MonkeyPatch) -> FakeWorkflowCore:
     return fake
 
 
+@pytest.fixture(autouse=True)
+def _free_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_tenant_tier(monkeypatch, "free")
+
+
 @pytest.fixture
 def app(automation_db: Any) -> Quart:
     quart_app = Quart(__name__)
@@ -231,13 +239,16 @@ def _seed_admin(
 ) -> None:
     """Seed a `community_roles`/`community_members` row granting `community:manage_members`."""
     dal = automation_db.dal
+    ensure_tier_tables(dal)
+    tenant_id = dal(dal.tenants.slug == TENANT_SLUG).select().first().id
     dal.communities.insert(
         id=community_id,
+        tenant_id=tenant_id,
         name=f"community-{community_id}",
         display_name=f"Community {community_id}",
-        license_key="lic-123" if licensed else None,
-        license_tier="pro" if licensed else None,
     )
+    if licensed:  # an allocated Premium tier unlocks workflows; no license key needed
+        grant_tier(dal, community_id, tier_svc.TIER_CODE_PREMIUM)
     role_id = dal.community_roles.insert(
         community_id=community_id,
         name="admin",
@@ -447,7 +458,7 @@ class TestCrossCommunityOwnershipFix:
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
     ) -> None:
         """Exercises the `description`/`definition` conditional-include branches too."""
-        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
+        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=True)
         fake_core.workflows["wf-own"] = {
             "id": "wf-own",
             "communityId": COMMUNITY_ID,
@@ -474,7 +485,7 @@ class TestCrossCommunityOwnershipFix:
     async def test_update_workflow_own_community_succeeds(
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
     ) -> None:
-        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
+        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=True)
         fake_core.workflows["wf-own"] = {
             "id": "wf-own",
             "communityId": COMMUNITY_ID,
@@ -627,11 +638,25 @@ class TestExecuteWorkflow:
 
 
 class TestTestWorkflow:
-    async def test_test_workflow_no_license_needed(
+    async def test_test_workflow_blocked_without_license(
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
     ) -> None:
-        """Node never gates `testWorkflow()` on a license -- neither does this port."""
+        """A test run EXECUTES the workflow: a Free (e.g. downgraded) community is denied."""
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=False)
+        fake_core.workflows["wf-1"] = {"id": "wf-1", "communityId": COMMUNITY_ID}
+        headers = user_auth_headers(user_id=ADMIN_USER_ID)
+        response = await client.post(
+            f"/api/v1/admin/{COMMUNITY_ID}/workflows/wf-1/test",
+            headers=headers,
+            json={"input": {}, "context": {}},
+        )
+        assert response.status_code == 403
+        assert not [c for c in fake_core.calls if c[1].endswith("/test")]
+
+    async def test_test_workflow_succeeds_with_license(
+        self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
+    ) -> None:
+        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=True)
         fake_core.workflows["wf-1"] = {"id": "wf-1", "communityId": COMMUNITY_ID}
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
@@ -642,6 +667,20 @@ class TestTestWorkflow:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["result"]["success"] is True
+
+    async def test_update_and_webhook_create_blocked_without_license(
+        self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
+    ) -> None:
+        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=False)
+        fake_core.workflows["wf-1"] = {"id": "wf-1", "communityId": COMMUNITY_ID}
+        headers = user_auth_headers(user_id=ADMIN_USER_ID)
+        base = f"/api/v1/admin/{COMMUNITY_ID}/workflows/wf-1"
+        put = await client.put(base, headers=headers, json={"name": "x"})
+        hook = await client.post(
+            f"{base}/webhooks", headers=headers, json={"event": "e", "url": "https://e.com"}
+        )
+        assert (put.status_code, hook.status_code) == (403, 403)
+        assert fake_core.workflows["wf-1"].get("name") != "x"
 
     async def test_test_workflow_cross_community_is_403(
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
@@ -802,7 +841,7 @@ class TestWebhooks:
     async def test_create_webhook_missing_fields_is_400(
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
     ) -> None:
-        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
+        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=True)
         fake_core.workflows["wf-1"] = {"id": "wf-1", "communityId": COMMUNITY_ID}
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
@@ -813,7 +852,7 @@ class TestWebhooks:
     async def test_create_webhook_succeeds(
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
     ) -> None:
-        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
+        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=True)
         fake_core.workflows["wf-1"] = {"id": "wf-1", "communityId": COMMUNITY_ID}
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
@@ -850,7 +889,7 @@ class TestWebhooks:
     async def test_delete_webhook_succeeds(
         self, client: Any, user_auth_headers: Any, automation_db: Any, fake_core: FakeWorkflowCore
     ) -> None:
-        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
+        _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID, licensed=True)
         fake_core.workflows["wf-1"] = {"id": "wf-1", "communityId": COMMUNITY_ID}
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         await client.post(

@@ -194,6 +194,51 @@ components:
       - enabled
       title: AiDjDTO
       type: object
+    AllocationDTO:
+      description: One active allocation. `communityId` is the community's `public_id`
+        UUID.
+      properties:
+        allocatedAt:
+          title: Allocatedat
+          type: string
+        communityId:
+          title: Communityid
+          type: string
+        source:
+          title: Source
+          type: integer
+        stale:
+          title: Stale
+          type: boolean
+        tier:
+          title: Tier
+          type: integer
+      required:
+      - communityId
+      - tier
+      - source
+      - allocatedAt
+      - stale
+      title: AllocationDTO
+      type: object
+    AllocationMetaDTO:
+      description: Pagination metadata for the allocation list.
+      properties:
+        limit:
+          title: Limit
+          type: integer
+        offset:
+          title: Offset
+          type: integer
+        total:
+          title: Total
+          type: integer
+      required:
+      - total
+      - limit
+      - offset
+      title: AllocationMetaDTO
+      type: object
     Announcement:
       description: One `announcements` row, camelCase-in-Node fields kept snake_case
         here (ruff N815).
@@ -1232,7 +1277,14 @@ components:
       title: CommandLogEntry
       type: object
     CommunityDTO:
-      description: Community summary DTO.
+      description: 'Community summary DTO.
+
+
+        `publicId` is the community''s `public_id` UUID: the identifier the
+
+        UUID-keyed routes (e.g. ingest sources) take. The numeric `id` is retained
+
+        only for the legacy `/admin/<id>` links in `TenantCommunities.jsx`.'
       properties:
         communityType:
           title: Communitytype
@@ -1260,8 +1312,12 @@ components:
         name:
           title: Name
           type: string
+        publicId:
+          title: Publicid
+          type: string
       required:
       - id
+      - publicId
       - name
       - displayName
       - memberCount
@@ -1362,6 +1418,14 @@ components:
           type: string
         id:
           title: Id
+          type: integer
+        licenseTier:
+          default: 1
+          description: 'The community''s own tier: 1 Free, 2 Premium (no active allocation
+            = 1; the tenant''s own tier never uplifts a community). Treat this as
+            a display/UX hint only, never an authorization decision: backend gates
+            remain authoritative.'
+          title: Licensetier
           type: integer
         name:
           title: Name
@@ -2010,8 +2074,8 @@ components:
       title: DistributionMetaDTO
       type: object
     DsarResultDTO:
-      description: One target user's outcome. `data`/`incomplete` are populated for
-        a completed export only.
+      description: 'One target''s outcome; `userId` is the user UUID. `data`/`incomplete`:
+        completed export.'
       properties:
         data:
           anyOf:
@@ -2045,7 +2109,7 @@ components:
           type: string
         userId:
           title: Userid
-          type: integer
+          type: string
       required:
       - userId
       - status
@@ -2406,14 +2470,16 @@ components:
       title: IdentityDTO
       type: object
     IngestSourceDTO:
-      description: A single ingest source on the wire. Never carries any secret/credential
+      description: 'A single ingest source on the wire. Never carries any secret/credential
         field.
+
+
+        `id` is the source''s `public_id` UUID and `communityId` its community''s
+        `public_id` UUID.'
       properties:
         communityId:
-          anyOf:
-          - type: integer
-          - type: 'null'
           title: Communityid
+          type: string
         createdAt:
           title: Createdat
           type: string
@@ -2422,7 +2488,7 @@ components:
           type: boolean
         id:
           title: Id
-          type: integer
+          type: string
         label:
           title: Label
           type: string
@@ -2834,6 +2900,28 @@ components:
       - value
       title: LeaderboardEntry
       type: object
+    LicenseStatusDTO:
+      description: The only license-key facts that leave the server.
+      properties:
+        configured:
+          title: Configured
+          type: boolean
+        fingerprint:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Fingerprint
+        setAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Setat
+      required:
+      - configured
+      - fingerprint
+      - setAt
+      title: LicenseStatusDTO
+      type: object
     LinkedPlatformDTO:
       description: Linked platform DTO.
       properties:
@@ -3042,6 +3130,16 @@ components:
             type: string
           title: Roles
           type: array
+        scopes:
+          items:
+            type: string
+          title: Scopes
+          type: array
+        tenantSlug:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Tenantslug
         username:
           anyOf:
           - type: string
@@ -3059,6 +3157,8 @@ components:
       - linkedPlatforms
       - roles
       - communities
+      - scopes
+      - tenantSlug
       title: MeUserDTO
       type: object
     MediaByokKeyDTO:
@@ -3616,6 +3716,61 @@ components:
       - lastActivity
       title: PlatformUserDTO
       type: object
+    PoolDTO:
+      description: One stored pool row.
+      properties:
+        limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Limit
+        observedAt:
+          title: Observedat
+          type: string
+        source:
+          title: Source
+          type: string
+        tierCode:
+          title: Tiercode
+          type: integer
+      required:
+      - tierCode
+      - limit
+      - source
+      - observedAt
+      title: PoolDTO
+      type: object
+    PoolTierDTO:
+      description: 'The Premium pool. `limit`: null = not licensed, -1 = unlimited.
+        `tier` is always 2.'
+      properties:
+        available:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Available
+        limit:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Limit
+        overage:
+          title: Overage
+          type: integer
+        tier:
+          title: Tier
+          type: integer
+        used:
+          title: Used
+          type: integer
+      required:
+      - tier
+      - limit
+      - used
+      - available
+      - overage
+      title: PoolTierDTO
+      type: object
     ProfileDTO:
       description: Profile DTO.
       properties:
@@ -4172,6 +4327,178 @@ components:
       - systemMin
       - systemMax
       title: ReputationDTO
+      type: object
+    RequestDTO:
+      description: 'One inbox request. Enum fields are int codes (see `services/dsar_service.py`).
+
+
+        `unverified` is true while a public-form requester has not proved their email:
+        such rows have
+
+        no `requesterEmail`/`requesterMessage` and no SLA clock (`dueAt`/`dueState`
+        null). `dueState`
+
+        is `ok` / `due_soon` / `overdue`, or null for closed and unverified requests.'
+      properties:
+        assigneeId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Assigneeid
+        completedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Completedat
+        contactPurged:
+          title: Contactpurged
+          type: boolean
+        dueAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dueat
+        dueState:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Duestate
+        effectiveDueAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Effectivedueat
+        expiresAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Expiresat
+        extendedUntil:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Extendeduntil
+        extensionReason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Extensionreason
+        id:
+          title: Id
+          type: string
+        regime:
+          title: Regime
+          type: integer
+        requestType:
+          title: Requesttype
+          type: integer
+        requestedAt:
+          title: Requestedat
+          type: string
+        requesterEmail:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Requesteremail
+        requesterMessage:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Requestermessage
+        responseNotes:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Responsenotes
+        source:
+          title: Source
+          type: integer
+        status:
+          title: Status
+          type: integer
+        subjectUserId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Subjectuserid
+        unverified:
+          title: Unverified
+          type: boolean
+        verifiedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Verifiedat
+      required:
+      - id
+      - requestType
+      - status
+      - regime
+      - source
+      - requestedAt
+      - verifiedAt
+      - dueAt
+      - extendedUntil
+      - effectiveDueAt
+      - extensionReason
+      - dueState
+      - completedAt
+      - expiresAt
+      - assigneeId
+      - subjectUserId
+      - responseNotes
+      - requesterEmail
+      - requesterMessage
+      - contactPurged
+      - unverified
+      title: RequestDTO
+      type: object
+    RequestEventDTO:
+      description: One append-only audit event. `detail` is PII-free.
+      properties:
+        actorId:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Actorid
+        actorKind:
+          title: Actorkind
+          type: integer
+        createdAt:
+          title: Createdat
+          type: string
+        detail:
+          anyOf:
+          - additionalProperties: true
+            type: object
+          - type: 'null'
+          title: Detail
+        eventType:
+          title: Eventtype
+          type: integer
+        fromStatus:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Fromstatus
+        id:
+          title: Id
+          type: string
+        toStatus:
+          anyOf:
+          - type: integer
+          - type: 'null'
+          title: Tostatus
+      required:
+      - id
+      - eventType
+      - actorKind
+      - actorId
+      - fromStatus
+      - toStatus
+      - detail
+      - createdAt
+      title: RequestEventDTO
       type: object
     ResolvedAppDTO:
       description: 'Response DTO: one resolved App in a community''s active coexistence
@@ -6177,6 +6504,56 @@ components:
       - email
       - username
       title: UserDTO
+      type: object
+    UserRequestDTO:
+      description: A caller's own request (no admin-only fields).
+      properties:
+        completedAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Completedat
+        dueAt:
+          anyOf:
+          - type: string
+          - type: 'null'
+          title: Dueat
+        extendedUntil:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Extendeduntil
+        extensionReason:
+          anyOf:
+          - type: string
+          - type: 'null'
+          default: null
+          title: Extensionreason
+        id:
+          title: Id
+          type: string
+        regime:
+          title: Regime
+          type: integer
+        requestType:
+          title: Requesttype
+          type: integer
+        requestedAt:
+          title: Requestedat
+          type: string
+        status:
+          title: Status
+          type: integer
+      required:
+      - id
+      - requestType
+      - status
+      - regime
+      - requestedAt
+      - dueAt
+      - completedAt
+      title: UserRequestDTO
       type: object
     VendorEntry:
       description: One vendor marketplace (a GitHub org) with its per-repo breakdown.
@@ -9998,8 +10375,8 @@ paths:
                 title: MediaByokKeyDTO
                 type: object
           description: Masked key record -- never carries the real key.
-      summary: '`PUT .../media/byok-keys` -- Professional+ required; validated against
-        Gemini first.'
+      summary: '`PUT .../media/byok-keys` -- Premium community required; validated
+        against Gemini first.'
   /api/v1/admin/{community_id}/media/byok-keys/{provider}:
     delete:
       description: ''
@@ -13650,9 +14027,7 @@ paths:
       summary: Publish workflow.
   /api/v1/admin/{community_id}/workflows/{workflow_id}/test:
     post:
-      description: '
-
-        No license gate -- matches Node, which never calls `validateLicense()` here.'
+      description: ''
       operationId: post_test_workflow
       parameters:
       - in: path
@@ -13668,7 +14043,7 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Test execute workflow.
+      summary: 'Test execute workflow (tier-gated: a test run executes the workflow).'
   /api/v1/admin/{community_id}/workflows/{workflow_id}/webhooks:
     get:
       description: ''
@@ -17501,176 +17876,6 @@ paths:
         default:
           description: Undocumented response
       summary: '`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>/role-bindings/<binding_id>`.'
-  /api/v1/communities/{community_id}/ingest-sources:
-    get:
-      description: ''
-      operationId: get_list_ingest_sources
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for `GET /api/v1/communities/<id>/ingest-sources`.
-                properties:
-                  ingestSources:
-                    items:
-                      $ref: '#/components/schemas/IngestSourceDTO'
-                    title: Ingestsources
-                    type: array
-                  meta:
-                    $ref: '#/components/schemas/IngestSourceMetaDTO'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                title: IngestSourceListResponse
-                type: object
-          description: Response DTO for `GET /api/v1/communities/<id>/ingest-sources`.
-      summary: '`GET /api/v1/communities/<id>/ingest-sources` -- community-scoped,
-        filterable, paginated.'
-    post:
-      description: ''
-      operationId: post_create_ingest_source
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              additionalProperties: false
-              description: 'Request DTO for `POST /api/v1/communities/<id>/ingest-sources`.
-
-
-                `communityId` is NOT a body field -- it comes from the URL path (module
-
-                docstring: every operation is community-scoped) -- and there is
-
-                deliberately NO token/secret/credential field: `extra="forbid"` below
-
-                rejects one outright rather than silently ignoring it.'
-              properties:
-                label:
-                  title: Label
-                  type: string
-                platform:
-                  title: Platform
-                  type: string
-                sourceId:
-                  title: Sourceid
-                  type: string
-              required:
-              - platform
-              - sourceId
-              - label
-              title: CreateIngestSourceRequest
-              type: object
-      responses:
-        '201':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for a single-ingest-source result (create/update).
-                properties:
-                  ingestSource:
-                    $ref: '#/components/schemas/IngestSourceDTO'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - ingestSource
-                title: IngestSourceResponse
-                type: object
-          description: Response DTO for a single-ingest-source result (create/update).
-      summary: '`POST /api/v1/communities/<id>/ingest-sources` -- register a source.
-        No secret material.'
-  /api/v1/communities/{community_id}/ingest-sources/{ingest_source_id}:
-    delete:
-      description: ''
-      operationId: delete_delete_ingest_source
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      - in: path
-        name: ingest_source_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`DELETE .../ingest-sources/<id>` -- hard-deletes the source, disables
-        its workstream.'
-    patch:
-      description: ''
-      operationId: patch_update_ingest_source
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          type: integer
-      - in: path
-        name: ingest_source_id
-        required: true
-        schema:
-          type: integer
-      requestBody:
-        content:
-          application/json:
-            schema:
-              additionalProperties: false
-              description: Request DTO for `PATCH .../ingest-sources/<id>` -- display
-                metadata + enable/disable.
-              properties:
-                enabled:
-                  anyOf:
-                  - type: boolean
-                  - type: 'null'
-                  default: null
-                  title: Enabled
-                label:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
-                  title: Label
-              title: UpdateIngestSourceRequest
-              type: object
-      responses:
-        '200':
-          content:
-            application/json:
-              schema:
-                description: Response DTO for a single-ingest-source result (create/update).
-                properties:
-                  ingestSource:
-                    $ref: '#/components/schemas/IngestSourceDTO'
-                  success:
-                    title: Success
-                    type: boolean
-                required:
-                - success
-                - ingestSource
-                title: IngestSourceResponse
-                type: object
-          description: Response DTO for a single-ingest-source result (create/update).
-      summary: '`PATCH .../ingest-sources/<id>` -- update `label` and/or `enabled`
-        only.'
   /api/v1/communities/{community_id}/join:
     post:
       description: ''
@@ -18297,6 +18502,176 @@ paths:
                 type: object
           description: The community's persistent Town Hall room.
       summary: Ensure the community's Town Hall exists (member, write scope); idempotent.
+  /api/v1/communities/{community_public_id}/ingest-sources:
+    get:
+      description: ''
+      operationId: get_list_ingest_sources
+      parameters:
+      - in: path
+        name: community_public_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /api/v1/communities/<id>/ingest-sources`.
+                properties:
+                  ingestSources:
+                    items:
+                      $ref: '#/components/schemas/IngestSourceDTO'
+                    title: Ingestsources
+                    type: array
+                  meta:
+                    $ref: '#/components/schemas/IngestSourceMetaDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: IngestSourceListResponse
+                type: object
+          description: Response DTO for `GET /api/v1/communities/<id>/ingest-sources`.
+      summary: '`GET ./communities/<uuid>/ingest-sources` -- community-scoped, filterable,
+        paginated.'
+    post:
+      description: ''
+      operationId: post_create_ingest_source
+      parameters:
+      - in: path
+        name: community_public_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: 'Request DTO for `POST /api/v1/communities/<id>/ingest-sources`.
+
+
+                The community is NOT a body field -- it comes from the URL path (module
+
+                docstring: every operation is community-scoped) -- and there is
+
+                deliberately NO token/secret/credential field: `extra="forbid"` below
+
+                rejects one outright rather than silently ignoring it.'
+              properties:
+                label:
+                  title: Label
+                  type: string
+                platform:
+                  title: Platform
+                  type: string
+                sourceId:
+                  title: Sourceid
+                  type: string
+              required:
+              - platform
+              - sourceId
+              - label
+              title: CreateIngestSourceRequest
+              type: object
+      responses:
+        '201':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for a single-ingest-source result (create/update).
+                properties:
+                  ingestSource:
+                    $ref: '#/components/schemas/IngestSourceDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - ingestSource
+                title: IngestSourceResponse
+                type: object
+          description: Response DTO for a single-ingest-source result (create/update).
+      summary: '`POST /api/v1/communities/<uuid>/ingest-sources` -- register a source.
+        No secret material.'
+  /api/v1/communities/{community_public_id}/ingest-sources/{ingest_source_id}:
+    delete:
+      description: ''
+      operationId: delete_delete_ingest_source
+      parameters:
+      - in: path
+        name: community_public_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: ingest_source_id
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`DELETE .../ingest-sources/<uuid>` -- hard-deletes the source, disables
+        its workstream.'
+    patch:
+      description: ''
+      operationId: patch_update_ingest_source
+      parameters:
+      - in: path
+        name: community_public_id
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: ingest_source_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: Request DTO for `PATCH .../ingest-sources/<uuid>` -- display
+                metadata + enable/disable.
+              properties:
+                enabled:
+                  anyOf:
+                  - type: boolean
+                  - type: 'null'
+                  default: null
+                  title: Enabled
+                label:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Label
+              title: UpdateIngestSourceRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for a single-ingest-source result (create/update).
+                properties:
+                  ingestSource:
+                    $ref: '#/components/schemas/IngestSourceDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - ingestSource
+                title: IngestSourceResponse
+                type: object
+          description: Response DTO for a single-ingest-source result (create/update).
+      summary: '`PATCH .../ingest-sources/<uuid>` -- update `label` and/or `enabled`
+        only.'
   /api/v1/community/{community_id}/activity/my-stats:
     get:
       description: ''
@@ -23010,6 +23385,229 @@ paths:
                 type: object
           description: Response DTO for stream details.
       summary: Get stream details.
+  /api/v1/public/privacy-requests/altcha-challenge:
+    get:
+      description: ''
+      operationId: get_get_dsar_altcha_challenge
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Signed altcha proof-of-work challenge (self-hosted captcha).
+                properties:
+                  algorithm:
+                    title: Algorithm
+                    type: string
+                  challenge:
+                    title: Challenge
+                    type: string
+                  maxnumber:
+                    title: Maxnumber
+                    type: integer
+                  salt:
+                    title: Salt
+                    type: string
+                  signature:
+                    title: Signature
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - algorithm
+                - challenge
+                - salt
+                - signature
+                - maxnumber
+                title: AltchaChallengeResponse
+                type: object
+          description: Signed altcha proof-of-work challenge (self-hosted captcha).
+      summary: Issue a signed altcha challenge (only when altcha is the configured
+        provider).
+  /api/v1/public/privacy-requests/captcha-config:
+    get:
+      description: ''
+      operationId: get_get_dsar_captcha_config
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Everything the browser needs; never a secret. `challengeUrl`
+                  is set for altcha only.
+                properties:
+                  challengeUrl:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Challengeurl
+                  provider:
+                    title: Provider
+                    type: string
+                  siteKey:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Sitekey
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - provider
+                - siteKey
+                - challengeUrl
+                title: CaptchaConfigResponse
+                type: object
+          description: Everything the browser needs; never a secret. `challengeUrl`
+            is set for altcha only.
+      summary: Provider name + public site key (+ altcha URL); 503 when no provider
+        is configured.
+  /api/v1/public/privacy-requests/verify:
+    get:
+      description: '
+
+        Prefer `POST /privacy-requests/verify/preview`: a token in a query string
+        can land in proxy
+
+        access logs, a body cannot.'
+      operationId: get_verify_dsar_get
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Non-consuming confirm-page data: what the link would
+                  verify. No PII, no tenant internals.'
+                properties:
+                  expiresAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Expiresat
+                  regime:
+                    title: Regime
+                    type: integer
+                  requestType:
+                    title: Requesttype
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  valid:
+                    title: Valid
+                    type: boolean
+                required:
+                - success
+                - valid
+                - requestType
+                - regime
+                - expiresAt
+                title: VerifyPreviewResponse
+                type: object
+          description: 'Non-consuming confirm-page data: what the link would verify.
+            No PII, no tenant internals.'
+      summary: NON-consuming preview of `?token=` (mail scanners prefetch GET links;
+        only POST consumes).
+    post:
+      description: ''
+      operationId: post_verify_dsar_post
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Verification token from the emailed link.
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: VerifyBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`verified` is always true on 200; any failure is the
+                  same 400 `DSAR_VERIFICATION_INVALID`.'
+                properties:
+                  success:
+                    title: Success
+                    type: boolean
+                  verified:
+                    title: Verified
+                    type: boolean
+                required:
+                - success
+                - verified
+                title: VerifyResponse
+                type: object
+          description: '`verified` is always true on 200; any failure is the same
+            400 `DSAR_VERIFICATION_INVALID`.'
+      summary: Consume the single-use verification token; moves the request to `verified`.
+  /api/v1/public/privacy-requests/verify/preview:
+    post:
+      description: ''
+      operationId: post_verify_dsar_preview
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Verification token from the emailed link.
+              properties:
+                token:
+                  title: Token
+                  type: string
+              required:
+              - token
+              title: VerifyBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Non-consuming confirm-page data: what the link would
+                  verify. No PII, no tenant internals.'
+                properties:
+                  expiresAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Expiresat
+                  regime:
+                    title: Regime
+                    type: integer
+                  requestType:
+                    title: Requesttype
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  valid:
+                    title: Valid
+                    type: boolean
+                required:
+                - success
+                - valid
+                - requestType
+                - regime
+                - expiresAt
+                title: VerifyPreviewResponse
+                type: object
+          description: 'Non-consuming confirm-page data: what the link would verify.
+            No PII, no tenant internals.'
+      summary: Same preview as the GET with the token in the body (never in a URL
+        or access log).
   /api/v1/public/signup-settings:
     get:
       description: ''
@@ -23096,6 +23694,146 @@ paths:
             the cache).
       summary: Serve the cached landing stats snapshot (refreshed by the 5-minute
         CronJob).
+  /api/v1/public/{tenant_slug}/privacy-requests:
+    post:
+      description: '
+
+        Never reveals whether the tenant or the email exists or whether a limit was
+        hit. The request
+
+        is stored `verification_pending` (not actionable, no SLA clock) until the
+        emailed token is
+
+        consumed; request row and mail row commit atomically.'
+      operationId: post_submit_public_dsar_request
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Public form. No name field by design. `captchaToken` is
+                the provider's response token.
+              properties:
+                captchaToken:
+                  title: Captchatoken
+                  type: string
+                email:
+                  title: Email
+                  type: string
+                message:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Message
+                regime:
+                  title: Regime
+                  type: integer
+                requestType:
+                  title: Requesttype
+                  type: integer
+              required:
+              - email
+              - requestType
+              - regime
+              - captchaToken
+              title: PublicSubmitBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Uniform 202 body: identical whether or not the tenant/email
+                  exist or a row was created.'
+                properties:
+                  accepted:
+                    title: Accepted
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - accepted
+                title: PublicAcceptedResponse
+                type: object
+          description: 'Uniform 202 body: identical whether or not the tenant/email
+            exist or a row was created.'
+      summary: Public DSAR form. Captcha + email verification required; uniform 202
+        for every valid submit.
+  /api/v1/public/{tenant_slug}/privacy-requests/resend-verification:
+    post:
+      description: '
+
+        Only the pending request of the SAME type is rotated, so a link can never
+        verify a request the
+
+        caller did not ask about. Identical response AND timing whether or not one
+        exists (the
+
+        no-pending branch spends the same DB work via `dsar_outbox.decoy`); mail is
+        queued with the
+
+        token rotation in ONE transaction, never awaited. The previous token stops
+        working.'
+      operationId: post_resend_dsar_verification
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Re-send the verification email for the pending request
+                of `requestType` (captcha required).
+              properties:
+                captchaToken:
+                  title: Captchatoken
+                  type: string
+                email:
+                  title: Email
+                  type: string
+                requestType:
+                  title: Requesttype
+                  type: integer
+              required:
+              - email
+              - requestType
+              - captchaToken
+              title: PublicResendBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Uniform 202 body: identical whether or not the tenant/email
+                  exist or a row was created.'
+                properties:
+                  accepted:
+                    title: Accepted
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - accepted
+                title: PublicAcceptedResponse
+                type: object
+          description: 'Uniform 202 body: identical whether or not the tenant/email
+            exist or a row was created.'
+      summary: Re-send the verification email for the pending request of `requestType`
+        (uniform 202).
   /api/v1/signup-settings:
     get:
       description: ''
@@ -23404,7 +24142,13 @@ paths:
           description: Response DTO for get-community.
       summary: Get a single community's details.
     put:
-      description: ''
+      description: '
+
+        Absent key = unchanged. Explicit `null` clears the nullable `seatLimit` (unlimited)
+        and
+
+        `description`; the non-nullable `displayName`/`isActive`/`isPublic` reject
+        null with a 400.'
       operationId: put_update_community__put_api_v1_superadmin_communities_community_id
       parameters:
       - in: path
@@ -23454,6 +24198,12 @@ paths:
                   - type: 'null'
                   default: null
                   title: Ispublic
+                licenseTier:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Licensetier
                 ownerId:
                   anyOf:
                   - type: string
@@ -23478,9 +24228,17 @@ paths:
                   - type: 'null'
                   default: null
                   title: Platformserverid
+                reasonCode:
+                  anyOf:
+                  - maxLength: 64
+                    type: string
+                  - type: 'null'
+                  default: null
+                  title: Reasoncode
                 seatLimit:
                   anyOf:
-                  - type: integer
+                  - minimum: 0
+                    type: integer
                   - type: 'null'
                   default: null
                   title: Seatlimit
@@ -23505,7 +24263,7 @@ paths:
                 title: MessageResponse
                 type: object
           description: Response DTO for message endpoints.
-      summary: Update community details.
+      summary: Update community details; `licenseTier` is an operator tier override.
   /api/v1/superadmin/communities/{community_id}/reassign:
     post:
       description: ''
@@ -24001,6 +24759,110 @@ paths:
                 type: object
           description: Response DTO for message endpoints.
       summary: Update a tenant.
+  /api/v1/superadmin/tenants/{tenant_id}/license-pools:
+    get:
+      description: ''
+      operationId: get_get_license_pools
+      parameters:
+      - in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: integer
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the pool GET and PUT.
+                properties:
+                  bypassDomain:
+                    title: Bypassdomain
+                    type: boolean
+                  pools:
+                    items:
+                      $ref: '#/components/schemas/PoolDTO'
+                    title: Pools
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantId:
+                    title: Tenantid
+                    type: integer
+                required:
+                - success
+                - tenantId
+                - pools
+                - bypassDomain
+                title: PoolsResponse
+                type: object
+          description: Response DTO for the pool GET and PUT.
+      summary: Return the stored pool rows for a tenant.
+  /api/v1/superadmin/tenants/{tenant_id}/license-pools/{tier_code}:
+    put:
+      description: ''
+      operationId: put_put_license_pool
+      parameters:
+      - in: path
+        name: tenant_id
+        required: true
+        schema:
+          type: integer
+      - in: path
+        name: tier_code
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for the operator pool PUT: `limit` is REQUIRED
+                (null = not licensed).
+
+
+                An omitted key is a 400, never an implicit "wipe the pool".'
+              properties:
+                limit:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  title: Limit
+              required:
+              - limit
+              title: SetPoolRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for the pool GET and PUT.
+                properties:
+                  bypassDomain:
+                    title: Bypassdomain
+                    type: boolean
+                  pools:
+                    items:
+                      $ref: '#/components/schemas/PoolDTO'
+                    title: Pools
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                  tenantId:
+                    title: Tenantid
+                    type: integer
+                required:
+                - success
+                - tenantId
+                - pools
+                - bypassDomain
+                title: PoolsResponse
+                type: object
+          description: Response DTO for the pool GET and PUT.
+      summary: Set a tenant's pool by hand (bypass domains only; 409 elsewhere).
   /api/v1/superadmin/users:
     get:
       description: ''
@@ -25177,6 +26039,118 @@ paths:
                 type: object
           description: Response DTO for `GET /<tenant_slug>/communities`.
       summary: Get tenant communities.
+  /api/v1/tenant/{tenant_slug}/communities/tier-allocations:
+    get:
+      description: ''
+      operationId: get_list_allocations
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /communities/tier-allocations`.
+                properties:
+                  allocations:
+                    items:
+                      $ref: '#/components/schemas/AllocationDTO'
+                    title: Allocations
+                    type: array
+                  meta:
+                    $ref: '#/components/schemas/AllocationMetaDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                title: AllocationListResponse
+                type: object
+          description: Response DTO for `GET /communities/tier-allocations`.
+      summary: Active Premium allocations of the tenant's communities (paginated;
+        `tier`/`source`).
+  /api/v1/tenant/{tenant_slug}/communities/{community_uuid}/tier:
+    put:
+      description: ''
+      operationId: put_set_community_tier
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: community_uuid
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              additionalProperties: false
+              description: 'Request DTO for `PUT ./tier`: `tier` is 1 Free or 2 Premium.'
+              properties:
+                tier:
+                  title: Tier
+                  type: integer
+              required:
+              - tier
+              title: SetTierRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `PUT /communities/<uuid>/tier` (`limit`
+                  null = not licensed / Free).
+                properties:
+                  changed:
+                    title: Changed
+                    type: boolean
+                  communityId:
+                    title: Communityid
+                    type: string
+                  limit:
+                    anyOf:
+                    - type: integer
+                    - type: 'null'
+                    title: Limit
+                  overage:
+                    title: Overage
+                    type: integer
+                  previousTier:
+                    title: Previoustier
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  tier:
+                    title: Tier
+                    type: integer
+                  used:
+                    title: Used
+                    type: integer
+                required:
+                - success
+                - communityId
+                - tier
+                - previousTier
+                - changed
+                - used
+                - limit
+                - overage
+                title: SetTierResponse
+                type: object
+          description: Response DTO for `PUT /communities/<uuid>/tier` (`limit` null
+            = not licensed / Free).
+      summary: Allocate (tier 2) or release (tier 1) a community's Premium slot from
+        the team pool.
   /api/v1/tenant/{tenant_slug}/kms:
     delete:
       description: '
@@ -25364,6 +26338,155 @@ paths:
                 type: object
           description: Response DTO for `POST /kms/activate`.
       summary: Verify the customer key, re-wrap every DEK onto it, and activate (Enterprise-gated).
+  /api/v1/tenant/{tenant_slug}/license:
+    delete:
+      description: ''
+      operationId: delete_delete_license
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for DELETE.
+                properties:
+                  cleared:
+                    title: Cleared
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - cleared
+                title: LicenseClearedResponse
+                type: object
+          description: Response DTO for DELETE.
+      summary: Clear the tenant's license key.
+    get:
+      description: ''
+      operationId: get_get_license
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for GET/PUT.
+                properties:
+                  license:
+                    $ref: '#/components/schemas/LicenseStatusDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - license
+                title: LicenseStatusResponse
+                type: object
+          description: Response DTO for GET/PUT.
+      summary: Return whether a key is configured, its fingerprint and when it was
+        set.
+    put:
+      description: ''
+      operationId: put_put_license
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Request DTO for `PUT /license`; the key is validated in
+                the service, never echoed.
+              properties:
+                licenseKey:
+                  title: Licensekey
+                  type: string
+              required:
+              - licenseKey
+              title: SetLicenseKeyRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for GET/PUT.
+                properties:
+                  license:
+                    $ref: '#/components/schemas/LicenseStatusDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - license
+                title: LicenseStatusResponse
+                type: object
+          description: Response DTO for GET/PUT.
+      summary: Seal and store the tenant's license key (write-only; never echoed).
+  /api/v1/tenant/{tenant_slug}/license/pool:
+    get:
+      description: ''
+      operationId: get_get_pool
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for `GET /license/pool`.
+                properties:
+                  observedAt:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Observedat
+                  source:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Source
+                  stale:
+                    title: Stale
+                    type: boolean
+                  success:
+                    title: Success
+                    type: boolean
+                  tiers:
+                    items:
+                      $ref: '#/components/schemas/PoolTierDTO'
+                    title: Tiers
+                    type: array
+                required:
+                - success
+                - tiers
+                - observedAt
+                - stale
+                - source
+                title: PoolResponse
+                type: object
+          description: Response DTO for `GET /license/pool`.
+      summary: The tenant's team-axis pool per tier (limit / used / available / overage).
   /api/v1/tenant/{tenant_slug}/privacy/bulk:
     post:
       description: ''
@@ -25378,7 +26501,7 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for the bulk route. `userIds` is capped per
+              description: Bulk request DTO. `userIds` are user UUIDs, capped per
                 action by the service.
               properties:
                 action:
@@ -25394,7 +26517,7 @@ paths:
                   type: boolean
                 userIds:
                   items:
-                    type: integer
+                    type: string
                   title: Userids
                   type: array
               required:
@@ -25442,7 +26565,362 @@ paths:
             with per-user results.
       summary: Run one DSAR action over many of the tenant's users -- per-user results,
         not atomic.
-  /api/v1/tenant/{tenant_slug}/privacy/users/{user_id}/do-not-sell:
+  /api/v1/tenant/{tenant_slug}/privacy/requests:
+    get:
+      description: ''
+      operationId: get_list_dsar_requests
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Paginated inbox page. `total` counts every row matching
+                  the filters.
+                properties:
+                  items:
+                    items:
+                      $ref: '#/components/schemas/RequestDTO'
+                    title: Items
+                    type: array
+                  limit:
+                    title: Limit
+                    type: integer
+                  offset:
+                    title: Offset
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  total:
+                    title: Total
+                    type: integer
+                required:
+                - success
+                - items
+                - total
+                - limit
+                - offset
+                title: RequestListResponse
+                type: object
+          description: Paginated inbox page. `total` counts every row matching the
+            filters.
+      summary: List the tenant's DSAR inbox. Unverified/expired requests only appear
+        when `status` asks.
+    post:
+      description: ''
+      operationId: post_create_dsar_request
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Admin-entered request. `receivedAt` (ISO 8601) back-dates
+                the SLA clock start.
+              properties:
+                notes:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Notes
+                receivedAt:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Receivedat
+                regime:
+                  title: Regime
+                  type: integer
+                requestType:
+                  title: Requesttype
+                  type: integer
+                requesterEmail:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Requesteremail
+                subjectUserId:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Subjectuserid
+              required:
+              - requestType
+              - regime
+              title: CreateRequestBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Single-request envelope (create / update / extend).
+                properties:
+                  request:
+                    $ref: '#/components/schemas/RequestDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                title: RequestResponse
+                type: object
+          description: Single-request envelope (create / update / extend).
+      summary: Enter a request received out-of-band (letter, email, phone). Status
+        starts `received`.
+  /api/v1/tenant/{tenant_slug}/privacy/requests/{request_id}:
+    get:
+      description: ''
+      operationId: get_get_dsar_request
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: request_id
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: '`GET .../requests/<id>`: the request plus its full audit
+                  trail.'
+                properties:
+                  events:
+                    items:
+                      $ref: '#/components/schemas/RequestEventDTO'
+                    title: Events
+                    type: array
+                  request:
+                    $ref: '#/components/schemas/RequestDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                title: RequestDetailResponse
+                type: object
+          description: '`GET .../requests/<id>`: the request plus its full audit trail.'
+      summary: One request with its audit trail. Another tenant's id is a 404, never
+        a 403.
+    patch:
+      description: ''
+      operationId: patch_update_dsar_request
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: request_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: Partial update. `status` may only be 4, 5, 6 or 7. `clearAssignee`
+                unassigns.
+              properties:
+                assigneeId:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Assigneeid
+                clearAssignee:
+                  default: false
+                  title: Clearassignee
+                  type: boolean
+                responseNotes:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Responsenotes
+                status:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Status
+                subjectOverrideReason:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Subjectoverridereason
+                subjectUserId:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Subjectuserid
+              title: UpdateRequestBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Single-request envelope (create / update / extend).
+                properties:
+                  request:
+                    $ref: '#/components/schemas/RequestDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                title: RequestResponse
+                type: object
+          description: Single-request envelope (create / update / extend).
+      summary: Change status (4-7), assignee, notes or linked subject; 409 while the
+        requester is unverified.
+  /api/v1/tenant/{tenant_slug}/privacy/requests/{request_id}/act:
+    post:
+      description: '
+
+        409 `DSAR_UNVERIFIED` until a public requester verified their email. Not tier-gated.'
+      operationId: post_act_on_dsar_request
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: request_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: '`action` must match the request type (1 export, 2 erase,
+                3 do_not_sell); erase needs confirm.
+
+
+                `overrideReason` is required to erase on a PUBLIC-form request whose
+                requester''s verified email
+
+                does not match the linked account''s email; it is recorded in the
+                event trail.'
+              properties:
+                action:
+                  title: Action
+                  type: string
+                confirm:
+                  default: false
+                  title: Confirm
+                  type: boolean
+                overrideReason:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Overridereason
+              required:
+              - action
+              title: ActBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Result of executing the request's export / erase / do-not-sell.
+                properties:
+                  request:
+                    $ref: '#/components/schemas/RequestDTO'
+                  result:
+                    $ref: '#/components/schemas/DsarResultDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                - result
+                title: ActResponse
+                type: object
+          description: Result of executing the request's export / erase / do-not-sell.
+      summary: Execute export / erase / do-not-sell for the request's subject (reuses
+        the admin DSAR logic).
+  /api/v1/tenant/{tenant_slug}/privacy/requests/{request_id}/extend:
+    post:
+      description: ''
+      operationId: post_extend_dsar_request
+      parameters:
+      - in: path
+        name: tenant_slug
+        required: true
+        schema:
+          type: string
+      - in: path
+        name: request_id
+        required: true
+        schema:
+          type: string
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: The one allowed extension; `reason` is mandatory.
+              properties:
+                reason:
+                  title: Reason
+                  type: string
+              required:
+              - reason
+              title: ExtendBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Single-request envelope (create / update / extend).
+                properties:
+                  request:
+                    $ref: '#/components/schemas/RequestDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                title: RequestResponse
+                type: object
+          description: Single-request envelope (create / update / extend).
+      summary: Use the single allowed extension (GDPR +2 calendar months, CCPA +45d,
+        other +30d); a reason is required.
+  /api/v1/tenant/{tenant_slug}/privacy/users/{user_uuid}/do-not-sell:
     put:
       description: ''
       operationId: put_do_not_sell_user
@@ -25453,7 +26931,7 @@ paths:
         schema:
           type: string
       - in: path
-        name: user_id
+        name: user_uuid
         required: true
         schema:
           type: string
@@ -25479,8 +26957,8 @@ paths:
                 title: SingleDsarResponse
                 type: object
           description: Response DTO for the single-user routes.
-      summary: Record a CCPA/CPRA Do-Not-Sell opt-out for `user_id` (one-way, idempotent).
-  /api/v1/tenant/{tenant_slug}/privacy/users/{user_id}/erase:
+      summary: Record a CCPA/CPRA Do-Not-Sell opt-out for the user (one-way, idempotent).
+  /api/v1/tenant/{tenant_slug}/privacy/users/{user_uuid}/erase:
     post:
       description: ''
       operationId: post_erase_user
@@ -25491,7 +26969,7 @@ paths:
         schema:
           type: string
       - in: path
-        name: user_id
+        name: user_uuid
         required: true
         schema:
           type: string
@@ -25529,9 +27007,9 @@ paths:
                 title: SingleDsarResponse
                 type: object
           description: Response DTO for the single-user routes.
-      summary: Erase/anonymize `user_id` (GDPR Art. 17); needs `confirm=true`, refused
+      summary: Erase/anonymize the user (GDPR Art. 17); needs `confirm=true`, refused
         if shared.
-  /api/v1/tenant/{tenant_slug}/privacy/users/{user_id}/export:
+  /api/v1/tenant/{tenant_slug}/privacy/users/{user_uuid}/export:
     get:
       description: ''
       operationId: get_export_user
@@ -25542,7 +27020,7 @@ paths:
         schema:
           type: string
       - in: path
-        name: user_id
+        name: user_uuid
         required: true
         schema:
           type: string
@@ -25568,7 +27046,7 @@ paths:
                 title: SingleDsarResponse
                 type: object
           description: Response DTO for the single-user routes.
-      summary: Export `user_id`'s personal data held within the admin's own tenant
+      summary: Export the user's personal data held within the admin's own tenant
         (GDPR Art. 15/20).
   /api/v1/tenant/{tenant_slug}/reputation/config:
     get:
@@ -26209,6 +27687,75 @@ paths:
         default:
           description: Undocumented response
       summary: Export the authenticated user's personal data (GDPR Art. 15/20).
+  /api/v1/user/me/privacy-requests:
+    get:
+      description: ''
+      operationId: get_list_my_dsar_requests
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: The caller's own requests, newest first.
+                properties:
+                  items:
+                    items:
+                      $ref: '#/components/schemas/UserRequestDTO'
+                    title: Items
+                    type: array
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - items
+                title: UserRequestListResponse
+                type: object
+          description: The caller's own requests, newest first.
+      summary: The caller's own requests in this tenant, newest first.
+    post:
+      description: ''
+      operationId: post_create_my_dsar_request
+      parameters: []
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Logged-in intake: what the caller asks for and under which
+                regime.'
+              properties:
+                regime:
+                  title: Regime
+                  type: integer
+                requestType:
+                  title: Requesttype
+                  type: integer
+              required:
+              - requestType
+              - regime
+              title: UserRequestBody
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Envelope for `POST /api/v1/user/me/privacy-requests`.
+                properties:
+                  request:
+                    $ref: '#/components/schemas/UserRequestDTO'
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - request
+                title: UserRequestResponse
+                type: object
+          description: Envelope for `POST /api/v1/user/me/privacy-requests`.
+      summary: File a data-subject request as the signed-in user (tenant from the
+        token, never the body).
   /api/v1/user/passkey/credentials:
     get:
       description: ''

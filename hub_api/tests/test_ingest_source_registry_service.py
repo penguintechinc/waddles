@@ -21,6 +21,7 @@ from services.ingest_source_registry_service import (
     delete_ingest_source,
     get_ingest_source,
     list_ingest_sources,
+    parse_public_id,
     update_ingest_source,
 )
 
@@ -440,3 +441,20 @@ async def test_delete_ingest_source_missing_returns_false(install_dal: Any) -> N
         install_dal, tenant_id=1, community_id=community_id, ingest_source_id=999999
     )
     assert deleted is False
+
+
+# -- public_id helpers (ids on the wire are UUIDs only) ----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [None, "", "1", "12345", "not-a-uuid", "00000000-0000-0000-0000-00000000000", "g" * 36],
+)
+def test_parse_public_id_rejects_non_uuids(raw: str | None) -> None:
+    assert parse_public_id(raw) is None
+
+
+def test_parse_public_id_canonicalises() -> None:
+    upper = "AAAAAAAA-BBBB-4CCC-8DDD-EEEEEEEEEEEE"
+    assert parse_public_id(upper) == upper.lower()
+    assert parse_public_id(upper.replace("-", "")) == upper.lower()

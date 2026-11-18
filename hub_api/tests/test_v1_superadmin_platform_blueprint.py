@@ -344,6 +344,75 @@ class TestTenantManagement:
         )
         assert response.status_code == 400
 
+    @pytest.mark.parametrize(
+        "slug",
+        [
+            "verify",
+            "resend-verification",
+            "privacy-requests",
+            "captcha-config",
+            "altcha-challenge",
+            "preview",
+            "public",
+            "api",
+            "admin",
+            "tenant",
+            "superadmin",
+        ],
+    )
+    async def test_create_tenant_route_shadowing_slug_is_409(self, client: Any, slug: str) -> None:
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(),
+            json={"slug": slug, "displayName": "X"},
+        )
+        assert response.status_code == 409
+
+    @pytest.mark.parametrize("slug", ["123", "007", " 42 "])
+    async def test_create_tenant_digits_only_slug_is_400(self, client: Any, slug: str) -> None:
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(),
+            json={"slug": slug, "displayName": "X"},
+        )
+        assert response.status_code == 400
+
+    @pytest.mark.parametrize("slug", ["VERIFY", " Public ", "System", "DEFAULT"])
+    async def test_reserved_slugs_are_case_insensitive_at_create(
+        self, client: Any, slug: str
+    ) -> None:
+        response = await client.post(
+            "/api/v1/superadmin/tenants",
+            headers=_headers(),
+            json={"slug": slug, "displayName": "X"},
+        )
+        assert response.status_code in (400, 409)  # never created, whichever rule fires first
+
+    @pytest.mark.parametrize("slug", ["123", " Public ", "SYSTEM", "Bad Slug"])
+    async def test_update_tenant_rename_is_validated_and_normalized(
+        self, admin_db: Any, slug: str
+    ) -> None:
+        from services import superadmin_service as svc
+        from services.errors import ApiError
+
+        tid = admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).select().first().id
+        with pytest.raises(ApiError):
+            await svc.update_tenant(admin_db, admin_db.dal, tenant_id=tid, fields={"slug": slug})
+
+    @pytest.mark.parametrize("slug", ["verify", "privacy-requests", "public"])
+    async def test_update_tenant_rename_to_route_slug_is_refused(
+        self, admin_db: Any, slug: str
+    ) -> None:
+        from services import superadmin_service as svc
+        from services.errors import ApiError
+
+        tenant = admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).select().first()
+        with pytest.raises(ApiError) as exc:
+            await svc.update_tenant(
+                admin_db, admin_db.dal, tenant_id=tenant.id, fields={"slug": slug}
+            )
+        assert exc.value.status_code == 403
+
     async def test_create_tenant_duplicate_slug_is_409(self, client: Any) -> None:
         response = await client.post(
             "/api/v1/superadmin/tenants",

@@ -1,4 +1,4 @@
-"""v1 tenant-admin DSAR console -- Enterprise access export / erasure / Do-Not-Sell, single + bulk.
+"""v1 tenant-admin DSAR console -- single-subject actions (every tier) + Enterprise bulk.
 
 The ADMIN layer on top of the statutory self-service DSAR
 (`blueprints/v1/data_privacy.py`, `/api/v1/user/me/data`, which is
@@ -15,18 +15,23 @@ Every route, in this order (security.md: tenant -> scope -> feature):
    `/api/v1/tenant/<slug>/*` route uses (a global admin's `*:admin`
    covers it). Never role names.
 3. `require_matching_tenant` -- the URL slug must equal the JWT tenant.
-4. `feature_enabled("waddles.compliance.bulk_dsar")` -- the Enterprise
-   two-gate (PostHog flag AND license tier); fails CLOSED (402) when
-   either gate is off or unreachable.
+4. BULK ROUTE ONLY: `feature_enabled("waddles.compliance.bulk_dsar")` -- the
+   Enterprise two-gate (PostHog flag AND license tier); fails CLOSED (402)
+   when either gate is off or unreachable. Single-subject export / erase /
+   do-not-sell are statutory rights and are NOT tier-gated (any tier).
 
 Routes (mounted under `/api/v1/tenant`):
 
 | Method | Path                                                  | Action      |
 |--------|-------------------------------------------------------|-------------|
-| GET    | `/<slug>/privacy/users/<id>/export`                    | export      |
-| POST   | `/<slug>/privacy/users/<id>/erase`  `{confirm: true}`  | erase       |
-| PUT    | `/<slug>/privacy/users/<id>/do-not-sell`               | do_not_sell |
+| GET    | `/<slug>/privacy/users/<uuid>/export`                  | export      |
+| POST   | `/<slug>/privacy/users/<uuid>/erase`  `{confirm: true}`| erase       |
+| PUT    | `/<slug>/privacy/users/<uuid>/do-not-sell`             | do_not_sell |
 | POST   | `/<slug>/privacy/bulk` `{action, userIds, confirm}`    | any         |
+
+`<uuid>` / `userIds` are `hub_users.uuid` values -- the numeric PK never crosses this boundary
+(IDOR). A malformed, unknown or other-tenant UUID is the same uniform 404 (bulk: the same
+per-item `not_found`).
 
 Responses go through explicit DTOs (security.md Output Validation) via
 `services.dto_response.jsonify_dto` -- the same nested-dataclass-after-
@@ -52,7 +57,7 @@ from services import admin_data_privacy_service as svc
 from services import tenant_service
 from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
-from services.errors import ApiError, bad_request, payment_required
+from services.errors import ApiError, payment_required
 from services.schema import bind_admin_privacy_tables
 
 logger = logging.getLogger(__name__)
@@ -64,14 +69,12 @@ admin_data_privacy_bp = Blueprint(
 #: Scope every tenant-admin route in this API requires (`blueprints/v1/tenant.py`).
 SCOPE_TENANT_ADMIN = "tenant:admin"
 
-_GATE_DENIED_MESSAGE = "Admin and bulk data-subject requests require an Enterprise plan"
-
-#: Postgres `integer` ids are <= 10 digits; 18 keeps `int()` bounded without a magic 2**31.
-_MAX_USER_ID_DIGITS = 18
+_GATE_DENIED_MESSAGE = "Bulk data-subject requests require an Enterprise plan"
 
 _HTTP_STATUS_BY_RESULT = {
     svc.DsarStatus.COMPLETED: 200,
     svc.DsarStatus.ALREADY_DONE: 200,
+    svc.DsarStatus.PARTIAL: 200,  # data was delivered; `success` is false and `incomplete` set
     svc.DsarStatus.NOT_FOUND: 404,
     svc.DsarStatus.CONFLICT: 409,
     svc.DsarStatus.FORBIDDEN: 403,
@@ -80,10 +83,25 @@ _HTTP_STATUS_BY_RESULT = {
 }
 
 
+#: Request-body ceiling for this console's POST routes. The largest legitimate body is a bulk
+#: list of `MAX_BULK_USERS` UUIDs (~50 bytes each); the app-wide cap is the bundle-upload size.
+ADMIN_PRIVACY_MAX_BODY_BYTES = 16384
+
+_SUCCESS_STATUSES = frozenset({svc.DsarStatus.COMPLETED, svc.DsarStatus.ALREADY_DONE})
+
+
 @admin_data_privacy_bp.before_request
-async def _ensure_tables() -> None:
-    """Idempotently bind this console's tables -- see `schema.bind_admin_privacy_tables`."""
+async def _ensure_tables() -> tuple[dict[str, object], int] | None:
+    """Bind this console's tables and cap POST bodies (declared AND streamed/chunked) early."""
+    if request.method == "POST":
+        length = request.content_length
+        if length is not None and length > ADMIN_PRIVACY_MAX_BODY_BYTES:
+            return _err(ApiError("Request body too large", 413, "PAYLOAD_TOO_LARGE"))
+        body = getattr(request, "body", None)
+        if body is not None and hasattr(body, "_max_content_length"):
+            body._max_content_length = ADMIN_PRIVACY_MAX_BODY_BYTES  # cap chunked uploads too
     bind_admin_privacy_tables(current_app.config["dal"])
+    return None
 
 
 def _dal() -> tuple[Any, Any]:
@@ -100,9 +118,9 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 
 @dataclass(slots=True, frozen=True)
 class DsarResultDTO:
-    """One target user's outcome. `data`/`incomplete` are populated for a completed export only."""
+    """One target's outcome; `userId` is the user UUID. `data`/`incomplete`: completed export."""
 
-    userId: int
+    userId: str
     status: str
     detail: str | None = None
     data: dict[str, list[dict[str, Any]]] | None = None
@@ -139,16 +157,16 @@ class EraseUserRequest:
 
 @dataclass(slots=True, frozen=True)
 class BulkDsarRequest:
-    """Request DTO for the bulk route. `userIds` is capped per action by the service."""
+    """Bulk request DTO. `userIds` are user UUIDs, capped per action by the service."""
 
     action: Literal["export", "erase", "do_not_sell"]
-    userIds: list[int]
+    userIds: list[str]
     confirm: bool = False
 
 
 def _result_dto(result: svc.DsarResult) -> DsarResultDTO:
     return DsarResultDTO(
-        userId=result.user_id,
+        userId=result.user_uuid,
         status=result.status.value,
         detail=result.detail,
         data=result.data,
@@ -156,18 +174,20 @@ def _result_dto(result: svc.DsarResult) -> DsarResultDTO:
     )
 
 
-async def _authorize(tenant_slug: str) -> svc.DsarActor:
-    """Run the tenant -> slug-match -> Enterprise-gate chain; return the acting admin.
+async def _authorize(tenant_slug: str, *, bulk: bool = False) -> svc.DsarActor:
+    """Run the tenant -> slug-match (-> Enterprise gate, bulk only) chain; return the acting admin.
 
-    `tenant_middleware` and `require_scope` have already run (decorators).
-    Raises `ApiError` -- 403 on a URL/JWT tenant mismatch, 402 when the
-    Enterprise gate denies (fail-closed).
+    `tenant_middleware` and `require_scope` have already run (decorators). Single-subject
+    export/erase/do-not-sell are statutory data-subject rights and work in EVERY tier; only the
+    at-scale `bulk` route (and automation) requires the Enterprise `waddles.compliance.bulk_dsar`
+    gate. Raises `ApiError` -- 403 on a URL/JWT tenant mismatch, 402 when the bulk gate denies
+    (fail-closed).
     """
     ctx = get_tenant_context(request)
     # tenant_middleware postcondition (see tenant.py) -- a mypy narrowing aid, not a runtime guard.
     assert ctx is not None  # nosec B101
     tenant_service.require_matching_tenant(tenant_slug, ctx.tenant_slug)
-    if not await feature_enabled(svc.FEATURE_BULK_DSAR, tenant=ctx.tenant_slug):
+    if bulk and not await feature_enabled(svc.FEATURE_BULK_DSAR, tenant=ctx.tenant_slug):
         raise payment_required(_GATE_DENIED_MESSAGE)
     return svc.DsarActor(
         user_id=get_current_user_id(request),
@@ -178,33 +198,15 @@ async def _authorize(tenant_slug: str) -> svc.DsarActor:
     )
 
 
-def _parse_user_id(raw: str) -> int:
-    """Parse the `<user_id>` path segment into a positive int, or raise a 400 `ApiError`.
-
-    The segment is an untyped Werkzeug converter (not `<int:user_id>`) on
-    purpose: quart-schema's `PATH_RE` mis-renders a typed converter that
-    follows another parameter (`<tenant_slug>/.../<int:user_id>` ->
-    `/api/v1/tenant/{user_id}`), which would publish a wrong OpenAPI path.
-    ASCII digits only -- `str.isdigit()` alone accepts other scripts' digits.
-    """
-    if not (raw.isascii() and raw.isdigit() and len(raw) <= _MAX_USER_ID_DIGITS):
-        raise bad_request("user_id must be a positive integer")
-    user_id = int(raw)
-    if user_id <= 0:
-        raise bad_request("user_id must be a positive integer")
-    return user_id
-
-
 async def _run_single(
-    tenant_slug: str, action: svc.DsarAction, raw_user_id: str, *, confirm: bool = False
+    tenant_slug: str, action: svc.DsarAction, raw_user_uuid: str, *, confirm: bool = False
 ) -> tuple[Any, int]:
     """Authorize, run `action` for one user, and map the outcome onto an HTTP status."""
     async_dal, dal = _dal()
     try:
         actor = await _authorize(tenant_slug)
-        user_id = _parse_user_id(raw_user_id)
-        results = await svc.run_dsar(
-            async_dal, dal, actor=actor, action=action, user_ids=[user_id], confirm=confirm
+        result = await svc.run_single_dsar_by_uuid(
+            async_dal, dal, actor=actor, action=action, user_uuid=raw_user_uuid, confirm=confirm
         )
     except ApiError as exc:
         logger.info(
@@ -212,45 +214,50 @@ async def _run_single(
             extra={"action": action.value, "status": exc.status_code, "code": exc.code},
         )
         return _err(exc)
-    result = results[0]
     status = _HTTP_STATUS_BY_RESULT[result.status]
     response, _ = jsonify_dto(
-        SingleDsarResponse(success=status == 200, action=action.value, result=_result_dto(result)),
+        SingleDsarResponse(
+            success=result.status in _SUCCESS_STATUSES,
+            action=action.value,
+            result=_result_dto(result),
+        ),
         status,
     )
     if action is svc.DsarAction.EXPORT and status == 200:
         response.headers["Content-Disposition"] = (
-            f'attachment; filename="waddles-dsar-{user_id}.json"'
+            f'attachment; filename="waddles-dsar-{result.user_uuid}.json"'
         )
     return response, status
 
 
-@admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_id>/export", methods=["GET"])
+@admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_uuid>/export", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @document_response(SingleDsarResponse)
-async def export_user(tenant_slug: str, user_id: str) -> tuple[Any, int]:
-    """Export `user_id`'s personal data held within the admin's own tenant (GDPR Art. 15/20)."""
-    return await _run_single(tenant_slug, svc.DsarAction.EXPORT, user_id)
+async def export_user(tenant_slug: str, user_uuid: str) -> tuple[Any, int]:
+    """Export the user's personal data held within the admin's own tenant (GDPR Art. 15/20)."""
+    return await _run_single(tenant_slug, svc.DsarAction.EXPORT, user_uuid)
 
 
-@admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_id>/erase", methods=["POST"])
+@admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_uuid>/erase", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @validate_request(EraseUserRequest)
 @document_response(SingleDsarResponse)
-async def erase_user(data: EraseUserRequest, tenant_slug: str, user_id: str) -> tuple[Any, int]:
-    """Erase/anonymize `user_id` (GDPR Art. 17); needs `confirm=true`, refused if shared."""
-    return await _run_single(tenant_slug, svc.DsarAction.ERASE, user_id, confirm=data.confirm)
+async def erase_user(data: EraseUserRequest, tenant_slug: str, user_uuid: str) -> tuple[Any, int]:
+    """Erase/anonymize the user (GDPR Art. 17); needs `confirm=true`, refused if shared."""
+    return await _run_single(tenant_slug, svc.DsarAction.ERASE, user_uuid, confirm=data.confirm)
 
 
-@admin_data_privacy_bp.route("/<tenant_slug>/privacy/users/<user_id>/do-not-sell", methods=["PUT"])
+@admin_data_privacy_bp.route(
+    "/<tenant_slug>/privacy/users/<user_uuid>/do-not-sell", methods=["PUT"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @document_response(SingleDsarResponse)
-async def do_not_sell_user(tenant_slug: str, user_id: str) -> tuple[Any, int]:
-    """Record a CCPA/CPRA Do-Not-Sell opt-out for `user_id` (one-way, idempotent)."""
-    return await _run_single(tenant_slug, svc.DsarAction.DO_NOT_SELL, user_id)
+async def do_not_sell_user(tenant_slug: str, user_uuid: str) -> tuple[Any, int]:
+    """Record a CCPA/CPRA Do-Not-Sell opt-out for the user (one-way, idempotent)."""
+    return await _run_single(tenant_slug, svc.DsarAction.DO_NOT_SELL, user_uuid)
 
 
 @admin_data_privacy_bp.route("/<tenant_slug>/privacy/bulk", methods=["POST"])
@@ -263,13 +270,13 @@ async def bulk_dsar(data: BulkDsarRequest, tenant_slug: str) -> tuple[Any, int]:
     async_dal, dal = _dal()
     action = svc.DsarAction(data.action)
     try:
-        actor = await _authorize(tenant_slug)
-        results = await svc.run_dsar(
+        actor = await _authorize(tenant_slug, bulk=True)
+        results = await svc.run_dsar_by_uuid(
             async_dal,
             dal,
             actor=actor,
             action=action,
-            user_ids=data.userIds,
+            user_uuids=data.userIds,
             confirm=data.confirm,
         )
     except ApiError as exc:
@@ -278,9 +285,7 @@ async def bulk_dsar(data: BulkDsarRequest, tenant_slug: str) -> tuple[Any, int]:
             extra={"action": action.value, "status": exc.status_code, "code": exc.code},
         )
         return _err(exc)
-    ok = sum(
-        1 for r in results if r.status in (svc.DsarStatus.COMPLETED, svc.DsarStatus.ALREADY_DONE)
-    )
+    ok = sum(1 for r in results if r.status in _SUCCESS_STATUSES)
     return jsonify_dto(
         BulkDsarResponse(
             success=ok == len(results),

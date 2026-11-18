@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { superAdminApi } from '../../services/api';
+import { TIER_BADGE_CLASS, TIER_LABEL, TIER_OPTIONS, REASON_CODES, REASON_LABEL, normalizeTier } from '../../services/communityTierConstants';
 import { getPlatformIcon, getPlatformColor, getPlatformLabel, getAllPlatformOptions } from '../../utils/platformConfig';
 
 function SuperAdminCommunities() {
@@ -46,6 +47,7 @@ function SuperAdminCommunities() {
     loadCommunities();
   };
 
+  /** Save an edit; returns an error message to show inside the dialog, or null on success/no-op. */
   const handleUpdate = async (id, data) => {
     try {
       const response = await superAdminApi.updateCommunity(id, data);
@@ -53,8 +55,14 @@ function SuperAdminCommunities() {
         setEditingCommunity(null);
         loadCommunities();
       }
+      return null;
     } catch (err) {
-      alert(err.response?.data?.error?.message || 'Failed to update community');
+      const status = err.response?.status;
+      const message = err.response?.data?.error?.message;
+      if (status === 403 && data.licenseTier !== undefined) {
+        return message || "Changing a community's tier requires global admin access (users:admin).";
+      }
+      return message || 'Failed to update community';
     }
   };
 
@@ -182,15 +190,11 @@ function SuperAdminCommunities() {
                   </td>
                   <td>{community.memberCount}</td>
                   <td>
-                    {community.isPremium ? (
-                      <span className="badge badge-gold border border-gold-500/40 text-gold-300">
-                        ⭐ Premium
-                      </span>
-                    ) : (
-                      <span className="badge badge-gray text-navy-400">
-                        Standard
-                      </span>
-                    )}
+                    <span
+                      className={`badge border ${TIER_BADGE_CLASS[normalizeTier(community.licenseTier ?? (community.isPremium ? 2 : 1))]}`}
+                    >
+                      {TIER_LABEL[normalizeTier(community.licenseTier ?? (community.isPremium ? 2 : 1))]}
+                    </span>
                   </td>
                   <td>
                     <span className={`badge ${
@@ -286,21 +290,73 @@ function SuperAdminCommunities() {
   );
 }
 
+/**
+ * Parse the Seat Limit field. Blank means unlimited (null); otherwise a whole number >= 1.
+ * Returns { value, error } so the dialog can show an inline field error.
+ */
+export function parseSeatLimit(raw) {
+  const text = String(raw ?? '').trim();
+  if (text === '') return { value: null, error: null };
+  if (!/^\d+$/.test(text) || Number(text) < 1) {
+    return { value: null, error: 'Seat limit must be a whole number of 1 or more (leave blank for unlimited).' };
+  }
+  return { value: Number(text), error: null };
+}
+
+/**
+ * Builds the PUT body from the edit form. `seatLimit` and `licenseTier` are sent only when they differ
+ * from the loaded value (absent = unchanged on the server, explicit null = unlimited); a cleared
+ * description is sent as null; the tier always travels with its reason. `isPremium` is never sent (the server derives it).
+ */
+function buildUpdatePayload(community, form, seatValue, reasonCode) {
+  const payload = {
+    displayName: form.displayName,
+    description: form.description === '' ? null : form.description,
+    isActive: form.isActive,
+    isPublic: form.isPublic,
+  };
+  const loadedSeat = community.seatLimit ?? null;
+  if (seatValue !== loadedSeat) payload.seatLimit = seatValue;
+  if (form.licenseTier !== loadedTierOf(community)) {
+    payload.licenseTier = form.licenseTier;
+    payload.reasonCode = reasonCode;
+  }
+  return payload;
+}
+
+/** The community's current tier code; falls back to the legacy premium flag for older payloads. */
+function loadedTierOf(community) {
+  return normalizeTier(community.licenseTier ?? (community.isPremium ? 2 : 1));
+}
+
 function EditCommunityModal({ community, onClose, onSave }) {
+  const loadedTier = loadedTierOf(community);
   const [form, setForm] = useState({
     displayName: community.displayName || '',
     description: community.description || '',
     isActive: community.isActive,
     isPublic: community.isPublic,
-    isPremium: community.isPremium || false,
+    licenseTier: loadedTier,
     seatLimit: community.seatLimit ?? '',
   });
+  const [reasonCode, setReasonCode] = useState('');
   const [saving, setSaving] = useState(false);
+  const [seatError, setSeatError] = useState(null);
+  const [reasonError, setReasonError] = useState(null);
+  const [saveError, setSaveError] = useState(null);
+  const tierChanged = form.licenseTier !== loadedTier;
 
   const handleSubmit = async (e) => {
     e.preventDefault();
+    const seat = parseSeatLimit(form.seatLimit);
+    setSeatError(seat.error);
+    setSaveError(null);
+    const missingReason = tierChanged && !reasonCode;
+    setReasonError(missingReason ? 'Select a reason for the tier change.' : null);
+    if (seat.error || missingReason) return;
     setSaving(true);
-    await onSave(community.id, form);
+    const message = await onSave(community.id, buildUpdatePayload(community, form, seat.value, reasonCode));
+    if (message) setSaveError(message);
     setSaving(false);
   };
 
@@ -310,7 +366,7 @@ function EditCommunityModal({ community, onClose, onSave }) {
         <div className="p-6 border-b border-navy-700">
           <h2 id="super-admin-communities-dialog-1-title" className="text-xl font-semibold text-sky-100">Edit Community</h2>
         </div>
-        <form onSubmit={handleSubmit}>
+        <form onSubmit={handleSubmit} noValidate>
           <div className="p-6 space-y-4">
             <div>
               <label htmlFor="super-admin-communities-display-name" className="block text-sm font-medium text-sky-200 mb-1">Display Name</label>
@@ -351,28 +407,78 @@ function EditCommunityModal({ community, onClose, onSave }) {
                 />
                 <span className="text-sm">Public</span>
               </label>
-              <label className="flex items-center gap-2 text-gold-300">
-                <input
-                  type="checkbox"
-                  checked={form.isPremium}
-                  onChange={(e) => setForm({ ...form, isPremium: e.target.checked })}
-                  className="w-4 h-4 rounded bg-navy-800 border-navy-600"
-                />
-                <span className="text-sm">⭐ Premium Community</span>
-              </label>
             </div>
+            <div>
+              <label htmlFor="super-admin-communities-license-tier" className="block text-sm font-medium text-sky-200 mb-1">License tier</label>
+              <select
+                id="super-admin-communities-license-tier"
+                value={form.licenseTier}
+                onChange={(e) => {
+                  setForm({ ...form, licenseTier: Number(e.target.value) });
+                  setReasonError(null);
+                }}
+                className="input w-full"
+                aria-describedby="super-admin-communities-license-tier-help"
+              >
+                {TIER_OPTIONS.map((t) => (
+                  <option key={t} value={t}>{TIER_LABEL[t]}</option>
+                ))}
+              </select>
+              <p id="super-admin-communities-license-tier-help" className="text-xs mt-1 text-sky-400">
+                {"Operator override: not blocked by the tenant's pool; counts against it and is audited."}
+              </p>
+            </div>
+            {tierChanged && (
+              <div>
+                <label htmlFor="super-admin-communities-reason-code" className="block text-sm font-medium text-sky-200 mb-1">Reason for tier change</label>
+                <select
+                  id="super-admin-communities-reason-code"
+                  value={reasonCode}
+                  onChange={(e) => { setReasonCode(e.target.value); setReasonError(null); }}
+                  className="input w-full"
+                  aria-invalid={reasonError ? 'true' : undefined}
+                  aria-describedby="super-admin-communities-reason-code-help"
+                >
+                  <option value="">Select a reason...</option>
+                  {REASON_CODES.map((r) => (
+                    <option key={r} value={r}>{REASON_LABEL[r]}</option>
+                  ))}
+                </select>
+                <p
+                  id="super-admin-communities-reason-code-help"
+                  className={`text-xs mt-1 ${reasonError ? 'text-red-400' : 'text-sky-400'}`}
+                  role={reasonError ? 'alert' : undefined}
+                >
+                  {reasonError || 'Required: recorded in the audit trail.'}
+                </p>
+              </div>
+            )}
             <div>
               <label htmlFor="super-admin-communities-seat-limit" className="block text-sm font-medium text-sky-200 mb-1">Seat Limit</label>
               <input
                 id="super-admin-communities-seat-limit"
-                type="number"
+                type="text"
+                inputMode="numeric"
                 value={form.seatLimit}
                 onChange={(e) => setForm({ ...form, seatLimit: e.target.value })}
                 className="input w-full"
                 placeholder="Leave blank for unlimited"
-                min="1"
+                aria-invalid={seatError ? 'true' : undefined}
+                aria-describedby="super-admin-communities-seat-limit-help"
               />
+              <p
+                id="super-admin-communities-seat-limit-help"
+                className={`text-xs mt-1 ${seatError ? 'text-red-400' : 'text-sky-400'}`}
+                role={seatError ? 'alert' : undefined}
+              >
+                {seatError || 'Blank = unlimited seats.'}
+              </p>
             </div>
+            {saveError && (
+              <div role="alert" className="text-sm text-red-400 border border-red-500/40 rounded p-2">
+                {saveError}
+              </div>
+            )}
           </div>
           <div className="p-6 border-t border-navy-700 flex justify-end gap-3">
             <button type="button" onClick={onClose} className="btn btn-secondary">
