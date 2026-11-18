@@ -19,7 +19,7 @@ requires_docker = pytest.mark.skipif(
 
 _ROOT = Path(__file__).resolve().parents[2]
 _PATH = _ROOT / "alembic" / "versions" / "0121_dsar_requests.py"
-_PREV = "0118_room_scopes_moderator"
+_PREV = "0121_community_owner_role_fix"
 
 
 def _load() -> ModuleType:

@@ -167,6 +167,37 @@ class TestCommunityManagement:
         body = await response.get_json()
         assert body["community"]["name"] == "new-community"
 
+    async def test_create_community_stores_canonical_owner_role(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        # regression: owner row was written as 'owner'; every gate expects 'community-owner'
+        response = await client.post(
+            "/api/v1/superadmin/communities",
+            headers=_headers(),
+            json={"name": "Owned Community", "platform": "discord"},
+        )
+        assert response.status_code == 201
+        rows = admin_db.dal(admin_db.dal.community_members.id > 0).select()
+        assert [(r.user_id, r.role) for r in rows] == [("1", "community-owner")]
+
+    async def test_reassign_owner_keeps_canonical_owner_role(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        created = await client.post(
+            "/api/v1/superadmin/communities",
+            headers=_headers(),
+            json={"name": "Reassign Me", "platform": "discord"},
+        )
+        community_id = (await created.get_json())["community"]["id"]
+        response = await client.post(
+            f"/api/v1/superadmin/communities/{community_id}/reassign",
+            headers=_headers(),
+            json={"newOwnerName": "newowner"},
+        )
+        assert response.status_code == 200
+        rows = admin_db.dal(admin_db.dal.community_members.community_id == community_id).select()
+        assert [r.role for r in rows] == ["community-owner"]
+
     async def test_create_community_missing_platform_is_400(self, client: Any) -> None:
         response = await client.post(
             "/api/v1/superadmin/communities", headers=_headers(), json={"name": "No Platform"}

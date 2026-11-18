@@ -16,7 +16,7 @@ received, stored, and acted on by tenant admins. Design notes the code depends o
   from the parent request/tenant is the only permitted removal).
 
 Revision ID: 0121_dsar_requests
-Revises: 0118_room_scopes_moderator
+Revises: 0121_community_owner_role_fix
 Create Date: 2026-11-17
 """
 
@@ -25,7 +25,7 @@ from __future__ import annotations
 from alembic import op
 
 revision = "0121_dsar_requests"
-down_revision = "0118_room_scopes_moderator"
+down_revision = "0121_community_owner_role_fix"
 branch_labels = None
 depends_on = None
 

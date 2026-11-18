@@ -50,6 +50,7 @@ from services.current_user import (
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.login_providers import ERR_PROVIDER_DISABLED
+from services.rate_limiting import RATE_LIMITER_CONFIG_KEY, _client_ip
 from services.session_cookie import (
     clear_session_cookie_after_request,
     issue_refresh_cookie,
@@ -59,6 +60,7 @@ from services.session_cookie import (
 )
 
 auth_bp = Blueprint("v1_auth", __name__, url_prefix="/api/v1/auth")
+captcha_bp = Blueprint("v1_captcha", __name__, url_prefix="/api/v1/captcha")
 
 #: ``__Host-`` cookie binding an account-link `state` to the initiating browser.
 LINK_BINDING_COOKIE = binding.cookie_name("oauth_link")
@@ -1112,4 +1114,56 @@ async def passkey_login_finish(
     )
 
 
-BLUEPRINTS: list[Blueprint] = [auth_bp]
+@dataclass(slots=True, frozen=True)
+class AltchaChallengeResponse:
+    """Self-hosted ALTCHA proof-of-work challenge DTO."""
+
+    algorithm: str
+    challenge: str
+    maxnumber: int
+    salt: str
+    signature: str
+
+
+#: `app.config` key under which the shared Valkey client for ALTCHA single-use/rate-limit
+#: state is cached (tests inject a fake here).
+ALTCHA_STORE_CONFIG_KEY = "altcha_redis"
+
+
+def _altcha_store() -> Any:
+    """Shared Valkey client for ALTCHA state: injected, else the rate limiter's, else lazily opened.
+
+    Returns None when no real shared client exists (the limiter fell back to in-memory); callers
+    then fail closed with 503 -- per-replica memory can never provide single-use semantics.
+    """
+    injected = current_app.config.get(ALTCHA_STORE_CONFIG_KEY)
+    if injected is not None:
+        return injected
+    limiter = current_app.config.get(RATE_LIMITER_CONFIG_KEY)
+    return getattr(limiter, "_redis", None) if limiter is not None else None
+
+
+@captcha_bp.errorhandler(ApiError)
+async def _captcha_api_error(exc: ApiError) -> tuple[dict[str, object], int]:
+    """Render the service layer's fail-closed 429/503 as the standard error envelope."""
+    return _err(exc)
+
+
+@captcha_bp.route("/challenge", methods=["GET"])
+@validate_response(AltchaChallengeResponse)
+async def get_captcha_challenge() -> AltchaChallengeResponse:
+    """Issue a self-hosted ALTCHA proof-of-work challenge (per-IP limited, fail closed)."""
+    cfg = _cfg()
+    store = _altcha_store()
+    if not cfg.altcha_hmac_key or store is None:
+        raise auth_service.altcha_unavailable()
+    await auth_service.enforce_altcha_rate_limit(store, _client_ip(cfg.trusted_proxy_hops))
+    return AltchaChallengeResponse(**auth_service.create_altcha_challenge(cfg.altcha_hmac_key))
+
+
+#: Register the shared-store resolver so `auth_service.register` (whose route is unchanged)
+#: can verify single-use ALTCHA payloads against the same Valkey client.
+auth_service.altcha_store_provider = _altcha_store
+
+
+BLUEPRINTS: list[Blueprint] = [auth_bp, captcha_bp]

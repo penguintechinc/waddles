@@ -532,6 +532,27 @@ class TestMeCommunityLicenseTier:
         out = await auth_service._community_tier_codes(auth_db, auth_db.dal, [1, 2, 3, 4, 5])
         assert out == {} and queries == 3
 
+    async def test_me_returns_canonical_community_owner_role(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        """regression: communities[].role is the stored role; owners must read 'community-owner'."""
+        user_id = _seed_user(auth_db, email="owner@example.com", username="owner1")
+        community_id = auth_db.dal.communities.insert(
+            name="owned", display_name="Owned", platform="discord", is_active=True
+        )
+        auth_db.dal.community_members.insert(
+            community_id=community_id,
+            user_id=str(user_id),
+            role="community-owner",
+            is_active=True,
+        )
+        auth_db.dal.commit()
+        token = make_user_token(user_id=user_id, tenant=TENANT_SLUG)
+        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert [c["role"] for c in body["user"]["communities"]] == ["community-owner"]
+
 
 class TestSetPassword:
     async def test_set_password_without_token_is_401(self, client: Any) -> None:

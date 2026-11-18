@@ -17067,6 +17067,44 @@ paths:
       responses:
         default:
           description: Undocumented response
+  /api/v1/captcha/challenge:
+    get:
+      description: ''
+      operationId: get_get_captcha_challenge
+      parameters: []
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Self-hosted ALTCHA proof-of-work challenge DTO.
+                properties:
+                  algorithm:
+                    title: Algorithm
+                    type: string
+                  challenge:
+                    title: Challenge
+                    type: string
+                  maxnumber:
+                    title: Maxnumber
+                    type: integer
+                  salt:
+                    title: Salt
+                    type: string
+                  signature:
+                    title: Signature
+                    type: string
+                required:
+                - algorithm
+                - challenge
+                - maxnumber
+                - salt
+                - signature
+                title: AltchaChallengeResponse
+                type: object
+          description: Self-hosted ALTCHA proof-of-work challenge DTO.
+      summary: Issue a self-hosted ALTCHA proof-of-work challenge (per-IP limited,
+        fail closed).
   /api/v1/communities/{community_id}/calendar/event-sync:
     get:
       description: ''

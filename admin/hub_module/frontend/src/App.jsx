@@ -227,7 +227,7 @@ export function TenantScope() {
 }
 
 // Protected route wrapper
-function ProtectedRoute({ children, requireCommunityAdmin = false, requirePlatformAdmin = false, requireSuperAdmin = false, requireAnalyticsConsumerOrSuperAdmin = false }) {
+export function ProtectedRoute({ children, requireCommunityAdmin = false, requirePlatformAdmin = false, requireSuperAdmin = false, requireAnalyticsConsumerOrSuperAdmin = false }) {
   const { user, loading, hasRole, isAnalyticsConsumer } = useAuth();
 
   if (loading) {

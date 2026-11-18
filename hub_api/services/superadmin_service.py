@@ -42,6 +42,7 @@ from services import community_tier_service
 from services.errors import ApiError, bad_request, conflict, forbidden, not_found
 from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.global_identity import SYSTEM_TENANT_SLUG
+from services.member_roles import COMMUNITY_OWNER_ROLE
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
 
 logger = logging.getLogger(__name__)
@@ -231,7 +232,7 @@ async def create_community(
         member_values=lambda cid: dict(
             community_id=cid,
             user_id=str(caller_id),
-            role="owner",
+            role=COMMUNITY_OWNER_ROLE,
             is_active=True,
             joined_at=datetime.now(UTC),
         ),
