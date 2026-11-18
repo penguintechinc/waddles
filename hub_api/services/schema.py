@@ -301,6 +301,9 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("license_key", "string", length=255),
         Field("license_expires_at", "datetime"),
         Field("license_tier", "string", length=50),
+        # alembic 0084: external UUID id (UUIDs only cross the API boundary). Read-side mapping
+        # only: no pydal default, so inserts keep using the DB's own gen_random_uuid() default.
+        Field("public_id", "string", length=36),
         # Columns below added by the M3 Platform-admin group (adminController.js
         # /superadminController.js), the M2 Core Tenancy-Misc group
         # (communityProfileController.js / joinRequestController.js port),
@@ -1456,6 +1459,27 @@ def bind_admin_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
     bind_auth_tables(dal, migrate=migrate)
     bind_privacy_tables(dal, migrate=migrate)
     _define_audit_log(dal, migrate=migrate)
+    bind_tenant_do_not_sell_table(dal, migrate=migrate)
+
+
+def bind_tenant_do_not_sell_table(dal: Any, *, migrate: bool = False) -> None:
+    """Bind `tenant_do_not_sell` (alembic 0125): a tenant admin's DSAR Do-Not-Sell, per tenant.
+
+    Idempotent. `UNIQUE (tenant_id, user_id)` is enforced by Postgres (the writer also catches a
+    race); the pydal table is declared without it so the sqlite test backend stays simple.
+    """
+    if "tenant_do_not_sell" in dal.tables:
+        return
+    dal.define_table(
+        "tenant_do_not_sell",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("user_id", "integer", notnull=True),
+        Field("source_code", "integer", notnull=True),
+        Field("recorded_by", "integer"),
+        Field("created_at", "datetime", notnull=True),
+        migrate=migrate,
+    )
 
 
 def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -2020,6 +2044,7 @@ def bind_tenant_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("tenant_id", "integer"),
         Field("is_public", "boolean", default=True),
         Field("community_type", "string", length=50, default="creator"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         Field("created_at", "datetime"),
         migrate=migrate,
         redefine=True,
@@ -3294,5 +3319,152 @@ def bind_stream_keys_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("force_cut", "boolean", notnull=True, default=False),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_dsar_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the DSAR inbox tables (`dsar_requests`, `dsar_request_events`; alembic 0121).
+
+    Idempotent. Composes `bind_admin_privacy_tables()` (hub_users/tenants-adjacent tables the
+    `act` endpoint's reused export/erase/do-not-sell logic reads). Ciphertext (vault-sealed) and
+    hash columns are base64/hex TEXT (the repo's field-encryption convention) so they behave
+    identically on the sqlite test backend and Postgres. Timestamps are timezone-aware in Postgres
+    (TIMESTAMPTZ).
+    """
+    bind_admin_privacy_tables(dal, migrate=migrate)
+    if "dsar_requests" in dal.tables:
+        _bind_dsar_mail_outbox(dal, migrate=migrate)
+        return
+    dal.define_table(
+        "dsar_requests",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("community_id", "integer"),
+        Field("request_type", "integer", notnull=True),
+        Field("status", "integer", notnull=True),
+        Field("regime", "integer", notnull=True),
+        Field("source", "integer", notnull=True),
+        Field("requested_at", "datetime", notnull=True),
+        Field("verified_at", "datetime"),
+        Field("due_at", "datetime"),
+        Field("extended_until", "datetime"),
+        Field("extension_reason", "text"),
+        Field("completed_at", "datetime"),
+        Field("expires_at", "datetime"),
+        Field("assignee_user_id", "integer"),
+        Field("subject_user_id", "integer"),
+        Field("response_notes", "text"),
+        Field("contact_email_enc", "text"),
+        Field("contact_email_hash", "string", length=64),
+        Field("message_enc", "text"),
+        Field("contact_purged_at", "datetime"),
+        Field("verification_token_hash", "string", length=64),
+        Field("verification_expires_at", "datetime"),
+        Field("verification_sent_at", "datetime"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "dsar_request_events",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("request_id", "integer", notnull=True),
+        Field("event_type", "integer", notnull=True),
+        Field("actor_kind", "integer", notnull=True),
+        Field("actor_user_id", "integer"),
+        Field("from_status", "integer"),
+        Field("to_status", "integer"),
+        Field("detail", "json"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+    _bind_dsar_mail_outbox(dal, migrate=migrate)
+
+
+def _bind_dsar_mail_outbox(dal: Any, *, migrate: bool) -> None:
+    """Bind `dsar_mail_outbox` (alembic 0123): durable queue of verification mails to send."""
+    if "dsar_mail_outbox" in dal.tables:
+        return
+    dal.define_table(
+        "dsar_mail_outbox",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("request_id", "integer", notnull=True),
+        Field("tenant_slug", "string", length=63, notnull=True),
+        Field("kind", "integer", notnull=True),
+        Field("token_enc", "text"),
+        Field("status", "integer", notnull=True),
+        Field("attempts", "integer", notnull=True),
+        Field("next_attempt_at", "datetime", notnull=True),
+        Field("claimed_until", "datetime"),
+        Field("lease_token", "string", length=36),
+        Field("last_reason", "string", length=40),
+        Field("created_at", "datetime", notnull=True),
+        Field("completed_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_community_tier_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the community-tier ledger + pool cache (alembic 0126). Idempotent.
+
+    `community_tier_allocations`: at most one active (`released_at` NULL) row per community.
+    `tenant_license_pools`: last observed team-axis pool limit per (tenant, tier). Enum columns
+    are integer codes (see `services/community_tier_service.py`); timestamps are TIMESTAMPTZ in
+    Postgres. Also binds `communities` (idempotent) because the service writes its denormalized
+    `license_tier`/`is_premium` copies in the same transaction.
+    """
+    if "community_tier_allocations" in dal.tables:
+        return
+    if "communities" not in dal.tables:
+        bind_auth_tables(dal, migrate=migrate)
+    dal.define_table(
+        "community_tier_allocations",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("tier_code", "integer", notnull=True),
+        Field("source_code", "integer", notnull=True),
+        Field("allocated_by", "integer"),
+        Field("allocated_at", "datetime", notnull=True),
+        Field("released_at", "datetime"),
+        Field("released_by", "integer"),
+        Field("release_reason_code", "integer"),
+        Field("last_active_at", "datetime", notnull=True),
+        Field("created_at", "datetime", notnull=True),
+        Field("updated_at", "datetime", notnull=True),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "tenant_license_pools",
+        Field("tenant_id", "integer", notnull=True),
+        Field("axis_code", "integer", notnull=True),
+        Field("tier_code", "integer", notnull=True),
+        Field("limit_count", "integer"),
+        Field("observed_at", "datetime", notnull=True),
+        Field("source_code", "integer", notnull=True),
+        Field("set_by", "integer"),
+        migrate=migrate,
+    )
+
+
+def bind_tenant_license_key_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind `tenant_license_keys` (alembic 0127): one sealed license key per tenant. Idempotent.
+
+    Only `services/tenant_license_service.py` touches this table; `license_key_sealed` is the
+    vault's opaque ciphertext and is never selected into a response DTO.
+    """
+    if "tenant_license_keys" in dal.tables:
+        return
+    dal.define_table(
+        "tenant_license_keys",
+        Field("tenant_id", "integer", notnull=True, unique=True),
+        Field("license_key_sealed", "text", notnull=True),
+        Field("seal_version", "integer", notnull=True, default=1),
+        Field("license_key_fingerprint", "string", length=16, notnull=True),
+        Field("license_key_set_at", "datetime", notnull=True),
+        Field("license_key_set_by", "integer"),
         migrate=migrate,
     )

@@ -9,26 +9,29 @@ Invariants this module owns:
 
 * the plaintext key leaves this module ONLY through `resolve_media_key` (the internal resolver);
   every other accessor returns `key_last4` metadata;
-* tier is `max(tenant_tier, community_tier)`, resolved here from trusted server state (the license
-  gate + `communities.license_tier`), never from a caller-supplied value, and fails closed to
-  `free` on anything unresolvable;
+* tier is `max(tenant_tier, community_tier)`, resolved here from trusted server state (the single
+  `community_tier_service.resolve_effective_tier`, numeric-id keyed), never from a caller-supplied
+  value, and fails closed to `free` on anything unresolvable;
 * every lookup is tenant-bound: a community that is not in the stated tenant never resolves.
 """
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, Final
 
 import httpx
-from flask_core.feature_flags import get_tier
-from flask_core.tier_catalog import TIER_FREE, normalize_tier, tier_level
+from flask_core.tier_catalog import TIER_FREE, tier_level
 
 from services.ai_routing import config_service
 from services.ai_routing.config_service import ByokKeyInfo
 from services.ai_routing.errors import invalid_byok_key, provider_error
 from services.community_authz import community_belongs_to_tenant
+from services.community_tier_service import resolve_effective_tier
 from services.errors import ApiError, bad_request
+
+logger = logging.getLogger(__name__)
 
 #: The only media provider in v3.0 (single BYOK Gemini key; OpenAI/others deferred to v3.1.x).
 MEDIA_PROVIDER_GEMINI: Final = "gemini"
@@ -62,36 +65,31 @@ class CommunityScopeError(Exception):
 
 def tier_meets_media_floor(tier: str) -> bool:
     """True when `tier` is Professional or higher; an unknown tier is below the floor."""
-    return tier_level(tier) >= tier_level(MIN_MEDIA_TIER)
-
-
-async def _tenant_slug(async_dal: Any, dal: Any, *, tenant_id: int) -> str:
-    """Slug of `tenant_id` (the license gate is keyed by slug); raises if the tenant is unknown."""
-    rows = await async_dal.select_async(dal(dal.tenants.id == tenant_id))
-    if not rows:
-        raise CommunityScopeError("unknown tenant")
-    return str(rows.first().slug)
+    return bool(tier_level(tier) >= tier_level(MIN_MEDIA_TIER))
 
 
 async def effective_tier(async_dal: Any, dal: Any, *, tenant_id: int, community_id: int) -> str:
-    """`max(tenant_tier, community_tier)` for a community INSIDE `tenant_id`; fails closed to free.
+    """`max(tenant_tier, community allocation)` for a community INSIDE `tenant_id`; fails closed.
 
-    The tenant tier comes from the license gate (`flask_core.feature_flags.get_tier`, which itself
-    fails closed to `free`); the community tier is the tenant-admin allocation on
-    `communities.license_tier`. An unknown tier string ranks below `free` and never lifts the
-    result. Raises `CommunityScopeError` when the community is not in the tenant -- a tier is
-    never reported for a pair that does not exist.
+    Delegates to the single resolver (`community_tier_service.resolve_effective_tier`), keyed by
+    numeric tenant and community ids -- never a tenant slug. A resolver failure reports `free`
+    (and logs ERROR). Raises `CommunityScopeError` when the community is not in the tenant -- a
+    tier is never reported for a pair that does not exist.
     """
-    if not await community_belongs_to_tenant(
-        async_dal, dal, community_id=community_id, tenant_id=tenant_id
-    ):
+    try:
+        belongs = await community_belongs_to_tenant(
+            async_dal, dal, community_id=community_id, tenant_id=tenant_id
+        )
+    except Exception as exc:  # noqa: BLE001 - an entitlement gate fails closed to free
+        logger.error("media_byok_tier_scope_check_failed error_type=%s", type(exc).__name__)
+        return str(TIER_FREE)
+    if not belongs:
         raise CommunityScopeError("community not in tenant")
-    slug = await _tenant_slug(async_dal, dal, tenant_id=tenant_id)
-    tenant_tier = normalize_tier(await get_tier(tenant=slug))
-    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    community_tier = normalize_tier(rows.first().license_tier or "")
-    best = max((tenant_tier, community_tier), key=tier_level)
-    return best if tier_level(best) > 0 else TIER_FREE
+    try:
+        return await resolve_effective_tier(async_dal, dal, tenant_id, community_id)
+    except Exception as exc:  # noqa: BLE001 - belt and braces; the resolver already fails closed
+        logger.error("media_byok_tier_resolve_failed error_type=%s", type(exc).__name__)
+        return str(TIER_FREE)
 
 
 async def _validate_gemini_key(api_key: str) -> None:

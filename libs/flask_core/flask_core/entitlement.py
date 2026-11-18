@@ -429,8 +429,11 @@ class CommunityTierSource(Protocol):
     (`communities.license_tier`) and must not be run through a thread.
     """
 
-    async def community_tier(self, tenant: str, community: int) -> Optional[str]:
-        """Return the tier allocated to `community` under `tenant`, or None if none is allocated."""
+    async def community_tier(self, tenant_id: int, community_id: int) -> Optional[str]:
+        """Return the tier allocated to community `community_id` under numeric tenant `tenant_id`, or None.
+
+        Numeric ids only (never slugs). Only consulted when a source is installed.
+        """
         ...
 
 
@@ -670,6 +673,7 @@ class EntitlementClient:
         community: Optional[int] = None,
         default: bool = False,
         request_host: Optional[str] = None,
+        tenant_id: Optional[int] = None,
     ) -> bool:
         """
         Resolve `flag_key` for `tenant` (optionally narrower per `community`).
@@ -688,6 +692,7 @@ class EntitlementClient:
                 community=community,
                 default=default,
                 request_host=request_host,
+                tenant_id=tenant_id,
             )
         except Exception as exc:  # noqa: BLE001 - entitlement must never crash a request path
             logger.exception(
@@ -720,6 +725,7 @@ class EntitlementClient:
         community: Optional[int],
         default: bool,
         request_host: Optional[str],
+        tenant_id: Optional[int] = None,
     ) -> bool:
         if not tenant:
             raise ValueError("tenant is required for entitlement evaluation")
@@ -743,7 +749,11 @@ class EntitlementClient:
             True
             if tier_check_bypassed(request_host, community)
             else await self._check_tier(
-                flag_key, required, tenant=tenant, community=community
+                flag_key,
+                required,
+                tenant=tenant,
+                community=community,
+                tenant_id=tenant_id,
             )
         )
 
@@ -845,11 +855,17 @@ class EntitlementClient:
             return None
 
     async def _check_tier(
-        self, flag_key: str, required: str, *, tenant: str, community: Optional[int]
+        self,
+        flag_key: str,
+        required: str,
+        *,
+        tenant: str,
+        community: Optional[int],
+        tenant_id: Optional[int] = None,
     ) -> Optional[bool]:
         """Does the effective tier meet `required`? None if the tier can't be determined."""
         effective = await self.effective_tier(
-            tenant=tenant, community=community, flag_key=flag_key
+            tenant=tenant, community=community, flag_key=flag_key, tenant_id=tenant_id
         )
         if effective is None:
             return None
@@ -865,7 +881,12 @@ class EntitlementClient:
         return satisfied
 
     async def effective_tier(
-        self, *, tenant: str, community: Optional[int] = None, flag_key: str = ""
+        self,
+        *,
+        tenant: str,
+        community: Optional[int] = None,
+        flag_key: str = "",
+        tenant_id: Optional[int] = None,
     ) -> Optional[str]:
         """
         ``max(tenant_tier, community_tier)`` -- the tier `tenant` (and `community`) is licensed at.
@@ -878,7 +899,10 @@ class EntitlementClient:
         `tier_grace_seconds` -- because the community allocation is drawn from
         the tenant's licensed pool and can't be trusted without it. A failing
         community source degrades to "no uplift" (a *lower* tier: fail closed).
-        `flag_key` is optional log context only. Does not apply the bypass
+        `tenant_id` is the AUTHORITATIVE numeric tenant id (request context), the
+        only input the community allocation source accepts -- the `tenant` string
+        may be a slug and is never coerced to an id; without it there is no
+        community uplift (fail closed). `flag_key` is optional log context only. Does not apply the bypass
         domains -- see `tier_check_bypassed` -- so it reports the licensed tier.
         """
         if not tenant:
@@ -888,7 +912,9 @@ class EntitlementClient:
             return None
         if community is None or self.community_tier_source is None:
             return tenant_tier
-        community_tier = await self._community_tier(flag_key, tenant, community)
+        community_tier = await self._community_tier(
+            flag_key, tenant, community, tenant_id
+        )
         if community_tier is not None and tier_level(community_tier) > tier_level(
             tenant_tier
         ):
@@ -919,7 +945,11 @@ class EntitlementClient:
         return tier
 
     async def _community_tier(
-        self, flag_key: str, tenant: str, community: int
+        self,
+        flag_key: str,
+        tenant: str,
+        community: int,
+        tenant_id: Optional[int] = None,
     ) -> Optional[str]:
         """Resolve a community's allocated tier; None means no uplift (none, or source down)."""
         source = self.community_tier_source
@@ -927,20 +957,22 @@ class EntitlementClient:
             source is None
         ):  # pragma: no cover - guarded by the caller; kept for type narrowing
             return None
-        key: TierCacheKey = (_SCOPE_COMMUNITY, tenant, community)
+        if tenant_id is None or isinstance(tenant_id, bool) or tenant_id < 0:
+            # No authoritative numeric tenant id: never coerce the tenant string
+            # (a slug such as "1" is not tenant id 1). Fail closed, no uplift.
+            logger.error(
+                "entitlement.community_tier_no_tenant_id flag_key=%s", flag_key
+            )
+            return None
+        key: TierCacheKey = (_SCOPE_COMMUNITY, f"{tenant}#{tenant_id}", community)
         started = time.monotonic()
         try:
-            raw = await source.community_tier(tenant, community)
+            raw = await source.community_tier(tenant_id, community)
         except Exception as exc:  # noqa: BLE001 - a failing allocation source must not raise
             logger.warning(
-                "entitlement.community_tier_source_unreachable flag_key=%s tenant=%s "
-                "community=%s error=%s: %s",
+                "entitlement.community_tier_source_unreachable flag_key=%s error=%s",
                 flag_key,
-                tenant,
-                community,
                 type(exc).__name__,
-                exc,
-                exc_info=True,
             )
             return self._last_known_tier(key)
         finally:

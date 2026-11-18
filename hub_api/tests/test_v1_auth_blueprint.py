@@ -262,6 +262,41 @@ class TestLogin:
 
 
 class TestMe:
+    async def test_me_bearer_wins_over_cookie_identity_never_merged(
+        self, bridged_client: Any, auth_db: Any
+    ) -> None:
+        """Adversarial review: cookie for A + bearer for B must yield B's profile AND B's tenant."""
+        auth_db.dal.tenants.insert(slug="tenant-a", display_name="A", is_active=True)
+        auth_db.dal.commit()
+        user_a = _seed_user(auth_db, email="a@example.com", username="usera")
+        user_b = _seed_user(auth_db, email="b@example.com", username="userb")
+        cookie_a = make_user_token(user_id=user_a, scope="tenant:admin", tenant="tenant-a")
+        bearer_b = make_user_token(user_id=user_b, scope="community:read", tenant=TENANT_SLUG)
+
+        response = await bridged_client.get(
+            "/api/v1/auth/me",
+            headers={"Cookie": f"wb_session={cookie_a}", "Authorization": f"Bearer {bearer_b}"},
+        )
+
+        user = (await response.get_json())["user"]
+        assert user["email"] == "b@example.com"
+        assert user["tenantSlug"] == TENANT_SLUG
+        assert user["scopes"] == ["community:read"]
+
+    async def test_me_invalid_bearer_never_borrows_cookie_scopes_for_another_user(
+        self, bridged_client: Any, auth_db: Any
+    ) -> None:
+        user_a = _seed_user(auth_db, email="a2@example.com", username="usera2")
+        cookie_a = make_user_token(user_id=user_a, scope="tenant:admin", tenant=TENANT_SLUG)
+
+        response = await bridged_client.get(
+            "/api/v1/auth/me",
+            headers={"Cookie": f"wb_session={cookie_a}", "Authorization": "Bearer garbage"},
+        )
+
+        # Bearer wins the bridge and is invalid: logged out, no identity mixing at all.
+        assert (await response.get_json())["user"] is None
+
     async def test_me_without_token_returns_null_user(self, client: Any) -> None:
         """Matches Node's optionalAuth -- absent token is "logged out", not an error."""
         response = await client.get("/api/v1/auth/me")
@@ -277,6 +312,225 @@ class TestMe:
         body = await response.get_json()
         assert body["user"]["email"] == "carol@example.com"
         assert body["user"]["hasPassword"] is True
+
+    async def test_me_plain_user_scopes_and_tenant_slug(self, client: Any, auth_db: Any) -> None:
+        user_id = _seed_user(auth_db, email="plain@example.com")
+        token = make_user_token(user_id=user_id, scope="community:read", tenant=TENANT_SLUG)
+        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        user = (await response.get_json())["user"]
+        assert user["scopes"] == ["community:read"]
+        assert user["tenantSlug"] == TENANT_SLUG
+
+    async def test_me_tenant_admin_has_scope_and_slug(self, client: Any, auth_db: Any) -> None:
+        user_id = _seed_user(auth_db, email="ta@example.com")
+        token = make_user_token(
+            user_id=user_id, scope="tenant:admin community:read", tenant=TENANT_SLUG
+        )
+        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        user = (await response.get_json())["user"]
+        assert user["scopes"] == ["community:read", "tenant:admin"]
+        assert user["tenantSlug"] == TENANT_SLUG
+
+    async def test_me_token_without_scope_claim_gets_empty_scopes(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        user_id = _seed_user(auth_db, email="noscope@example.com")
+        token = make_user_token(user_id=user_id, tenant=TENANT_SLUG)
+        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert (await response.get_json())["user"]["scopes"] == []
+
+    async def test_me_unresolvable_tenant_is_null_not_error(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        user_id = _seed_user(auth_db, email="ghost@example.com")
+        token = make_user_token(user_id=user_id, scope="tenant:admin", tenant="no-such-tenant")
+        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert response.status_code == 200
+        user = (await response.get_json())["user"]
+        assert user["tenantSlug"] is None
+        assert user["scopes"] == ["tenant:admin"]
+
+    async def test_me_inactive_tenant_slug_not_disclosed(self, client: Any, auth_db: Any) -> None:
+        auth_db.dal.tenants.insert(slug="dormant-corp", display_name="Dormant", is_active=False)
+        auth_db.dal.commit()
+        user_id = _seed_user(auth_db, email="dormant@example.com")
+        token = make_user_token(user_id=user_id, scope="tenant:admin", tenant="dormant-corp")
+        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert (await response.get_json())["user"]["tenantSlug"] is None
+
+    async def test_me_exact_user_field_set(self, client: Any, auth_db: Any) -> None:
+        """Regression: any extra/missing field on the /auth/me user object fails loudly."""
+        user_id = _seed_user(auth_db, email="shape@example.com")
+        token = make_user_token(user_id=user_id, scope="tenant:admin", tenant=TENANT_SLUG)
+        response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+        body = await response.get_json()
+        assert set(body) == {"success", "user"}
+        assert set(body["user"]) == {
+            "id",
+            "email",
+            "username",
+            "avatarUrl",
+            "isSuperAdmin",
+            "isVendor",
+            "isAnalyticsConsumer",
+            "hasPassword",
+            "linkedPlatforms",
+            "roles",
+            "communities",
+            "scopes",
+            "tenantSlug",
+        }
+
+
+def _seed_member_community(
+    auth_db: Any, user_id: int, name: str, *, tier: int | None = None, released: bool = False
+) -> int:
+    """Seed a community with `user_id` as an active member; optionally an allocation row."""
+    from services.schema import bind_community_tier_tables
+
+    dal = auth_db.dal
+    bind_community_tier_tables(dal, migrate=True)
+    tenant = dal(dal.tenants.slug == TENANT_SLUG).select().first()
+    cid: int = dal.communities.insert(
+        name=name, display_name=name, tenant_id=tenant.id, is_active=True
+    )
+    dal.community_members.insert(
+        community_id=cid, user_id=str(user_id), role="member", is_active=True
+    )
+    if tier is not None:
+        now = datetime.now(UTC)
+        dal.community_tier_allocations.insert(
+            public_id=f"00000000-0000-0000-0000-{cid:012d}",
+            tenant_id=tenant.id,
+            community_id=cid,
+            tier_code=tier,
+            source_code=1,
+            allocated_at=now,
+            released_at=now if released else None,
+            last_active_at=now,
+            created_at=now,
+            updated_at=now,
+        )
+    dal.commit()
+    return cid
+
+
+async def _me_communities(client: Any, user_id: int) -> dict[str, Any]:
+    token = make_user_token(user_id=user_id, scope="tenant:admin", tenant=TENANT_SLUG)
+    response = await client.get("/api/v1/auth/me", headers={"Authorization": f"Bearer {token}"})
+    body = await response.get_json()
+    return {c["name"]: c for c in body["user"]["communities"]}
+
+
+class TestMeCommunityLicenseTier:
+    async def test_tiers_free_pro_released_and_exact_fields(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        uid = _seed_user(auth_db, email="t1@example.com", username="t1")
+        _seed_member_community(auth_db, uid, "free-c")
+        _seed_member_community(auth_db, uid, "pro-c", tier=2)
+        _seed_member_community(auth_db, uid, "ent-c", tier=3)
+        _seed_member_community(auth_db, uid, "released-c", tier=2, released=True)
+        comms = await _me_communities(client, uid)
+        assert {k: v["licenseTier"] for k, v in comms.items()} == {
+            "free-c": 1,
+            "pro-c": 2,
+            "ent-c": 3,
+            "released-c": 1,
+        }
+        assert set(comms["pro-c"]) == {"id", "name", "displayName", "role", "licenseTier"}
+
+    async def test_tiers_do_not_leak_between_users(self, client: Any, auth_db: Any) -> None:
+        a = _seed_user(auth_db, email="a@example.com", username="a")
+        b = _seed_user(auth_db, email="b@example.com", username="b")
+        _seed_member_community(auth_db, a, "a-pro", tier=2)
+        _seed_member_community(auth_db, b, "b-free")
+        assert set(await _me_communities(client, a)) == {"a-pro"}
+        comms_b = await _me_communities(client, b)
+        assert set(comms_b) == {"b-free"}
+        assert comms_b["b-free"]["licenseTier"] == 1
+
+    async def test_tier_lookup_is_one_batched_query(self, client: Any, auth_db: Any) -> None:
+        uid = _seed_user(auth_db, email="q@example.com", username="q")
+        for i in range(5):
+            _seed_member_community(auth_db, uid, f"c{i}", tier=2)
+        calls: list[str] = []
+        original = auth_db.select_async
+
+        async def spy(query: Any, *fields: Any, **kw: Any) -> Any:
+            if any(getattr(f, "tablename", "") == "community_tier_allocations" for f in fields):
+                calls.append("alloc")
+            return await original(query, *fields, **kw)
+
+        auth_db.select_async = spy
+        try:
+            comms = await _me_communities(client, uid)
+        finally:
+            del auth_db.select_async
+        assert len(comms) == 5
+        assert calls == ["alloc"]
+
+    async def test_lookup_error_fails_safe_to_free(
+        self, client: Any, auth_db: Any, monkeypatch: Any
+    ) -> None:
+        uid = _seed_user(auth_db, email="e@example.com", username="e")
+        _seed_member_community(auth_db, uid, "pro-c", tier=2)
+
+        def boom(*a: Any, **k: Any) -> None:
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr("services.schema.bind_community_tier_tables", boom)
+        comms = await _me_communities(client, uid)
+        assert comms["pro-c"]["licenseTier"] == 1
+
+    async def test_lookup_error_increments_failure_counter(
+        self, client: Any, auth_db: Any, monkeypatch: Any
+    ) -> None:
+        uid = _seed_user(auth_db, email="m@example.com", username="m")
+        _seed_member_community(auth_db, uid, "pro-c", tier=2)
+        added: list[tuple[int, dict[str, str]]] = []
+
+        class Recorder:
+            def add(self, n: int, attrs: dict[str, str]) -> None:
+                added.append((n, attrs))
+
+        def boom(*a: Any, **k: Any) -> None:
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr("services.schema.bind_community_tier_tables", boom)
+        monkeypatch.setattr("services.auth_service._TIER_LOOKUP_FAILED", Recorder())
+        await _me_communities(client, uid)
+        assert added == [(1, {"error_type": "RuntimeError"})]
+
+    async def test_allocation_from_another_tenant_is_ignored(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        """An allocation row whose tenant differs from the community's own tenant never shows."""
+        uid = _seed_user(auth_db, email="x@example.com", username="x")
+        _seed_member_community(auth_db, uid, "pro-c", tier=2)
+        dal = auth_db.dal
+        dal(dal.community_tier_allocations.id > 0).update(tenant_id=987654)
+        dal.commit()
+        assert (await _me_communities(client, uid))["pro-c"]["licenseTier"] == 1
+
+    async def test_large_id_list_is_chunked(self, auth_db: Any, monkeypatch: Any) -> None:
+        from services import auth_service
+        from services.schema import bind_community_tier_tables
+
+        bind_community_tier_tables(auth_db.dal, migrate=True)
+        auth_db.dal(auth_db.dal.community_tier_allocations).count()
+        monkeypatch.setattr(auth_service, "_TIER_LOOKUP_CHUNK", 2)
+        queries = 0
+        original = auth_db.select_async
+
+        async def spy(query: Any, *fields: Any, **kw: Any) -> Any:
+            nonlocal queries
+            queries += 1
+            return await original(query, *fields, **kw)
+
+        monkeypatch.setattr(auth_db, "select_async", spy, raising=False)
+        out = await auth_service._community_tier_codes(auth_db, auth_db.dal, [1, 2, 3, 4, 5])
+        assert out == {} and queries == 3
 
 
 class TestSetPassword:

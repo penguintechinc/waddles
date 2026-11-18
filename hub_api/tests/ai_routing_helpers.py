@@ -13,8 +13,10 @@ from typing import Any
 import httpx
 import pytest
 
+from services import community_tier_service as tier_svc
 from services import token_ledger
 from services.ai_routing import router
+from services.schema import bind_community_tier_tables
 
 
 def patch_feature_flags(
@@ -30,22 +32,64 @@ def patch_feature_flags(
     monkeypatch.setattr(router, "feature_enabled", _fake)
 
 
+def ensure_tier_tables(dal: Any) -> None:
+    """Bind + create the community-tier ledger tables (sqlite needs `migrate=True` + a touch)."""
+    bind_community_tier_tables(dal, migrate=True)
+    dal.commit()
+    dal(dal.community_tier_allocations).count()
+    dal(dal.tenant_license_pools).count()
+
+
+def patch_tenant_tier(monkeypatch: pytest.MonkeyPatch, tier: str | dict[str, str] = "free") -> None:
+    """Stub the license gate (`get_tier`) the single resolver asks for the TENANT tier.
+
+    `tier` is a fixed tier name, or a `{tenant_slug: tier}` map (unlisted slugs -> `free`) so a
+    test can prove the tenant uplift is bound to the right tenant.
+    """
+
+    async def _fake(*, tenant: str, community: int | None = None) -> str:
+        return tier if isinstance(tier, str) else tier.get(tenant, "free")
+
+    monkeypatch.setattr(tier_svc, "get_tier", _fake)
+
+
 def seed_community(ai_routing_db: Any) -> tuple[Any, int]:
-    """Insert one active, un-licensed community under the `acme-corp` tenant."""
+    """Insert one active Free community (no allocation) under the `acme-corp` tenant."""
     dal = ai_routing_db.dal
+    ensure_tier_tables(dal)
     tenant = dal(dal.tenants.slug == "acme-corp").select().first()
-    community_id = dal.communities.insert(
-        name="acme", tenant_id=tenant.id, is_active=True, license_tier=None
-    )
+    community_id = dal.communities.insert(name="acme", tenant_id=tenant.id, is_active=True)
     dal.commit()
     return ai_routing_db, community_id
 
 
-async def set_enterprise(async_dal: Any, community_id: int) -> None:
-    """Flip the community to the Enterprise license tier (premium/BYOK entitlement half)."""
-    await async_dal.update_async(
-        async_dal.dal.communities.id == community_id, license_tier="enterprise"
+async def set_tier(async_dal: Any, community_id: int, tier_code: int) -> None:
+    """Give the community an ACTIVE allocation of `tier_code` (the only real tier write path)."""
+    grant_tier(async_dal.dal, community_id, tier_code)
+
+
+def grant_tier(dal: Any, community_id: int, tier_code: int) -> None:
+    """Sync form of :func:`set_tier` for fixtures that hold a bare `dal`."""
+    ensure_tier_tables(dal)
+    now = tier_svc.now_utc()
+    tenant_id = dal(dal.communities.id == community_id).select().first().tenant_id
+    dal.community_tier_allocations.insert(
+        public_id=f"alloc-{community_id}-{tier_code}",
+        tenant_id=tenant_id,
+        community_id=community_id,
+        tier_code=tier_code,
+        source_code=tier_svc.SOURCE_OPERATOR_OVERRIDE,
+        allocated_at=now,
+        last_active_at=now,
+        created_at=now,
+        updated_at=now,
     )
+    dal.commit()
+
+
+async def set_enterprise(async_dal: Any, community_id: int) -> None:
+    """Allocate the Enterprise tier to the community (premium AI entitlement half)."""
+    await set_tier(async_dal, community_id, tier_svc.TIER_CODE_ENTERPRISE)
 
 
 async def credit_premium(

@@ -68,6 +68,8 @@ CLIENT_FLAG_KEYS: tuple[str, ...] = (
     "waddles.secret-messaging",
     "waddles.community.chat-realtime",
     "waddles.music.queue-page",
+    "waddles.dsar-inbox",
+    "waddles.community-tier-allocation",
 )
 
 _meter = metrics.get_meter("waddles.hub_api.flags")

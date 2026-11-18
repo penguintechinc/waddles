@@ -56,9 +56,13 @@ from services.erasure_external import EnvExternalErasure, ExternalErasure
 from services.errors import bad_request, not_found, unauthorized
 from services.global_identity import is_global_admin
 from services.platform_account import guard_platform_account
+from services.schema import bind_tenant_tables
 from services.suppression_keys import PlatformKekKeySource, SuppressionKeySource
 
 logger = logging.getLogger(__name__)
+
+#: Bounded reason code reported for an export source that failed (never raw exception text).
+EXPORT_SOURCE_FAILED = "source_unavailable"
 
 #: Tables erasure deliberately NEVER deletes from. GDPR Art. 5(2)
 #: (accountability) obliges the controller to be able to DEMONSTRATE that
@@ -455,8 +459,54 @@ async def collect_user_data(
         try:
             data[key] = await coro
         except Exception as exc:  # noqa: BLE001 - a partial export beats a 500, see docstring
-            failures.append({"source": key, "error": str(exc)})
+            # Never echo the raw exception text (driver/host detail) to the subject or admin:
+            # the response carries a bounded reason code; the real error goes to the log.
+            logger.warning(
+                "dsar.export_source_failed",
+                extra={"source": key, "error_type": type(exc).__name__},
+            )
+            failures.append({"source": key, "error": EXPORT_SOURCE_FAILED})
     return data, failures
+
+
+async def community_public_ids(
+    async_dal: Any, dal: Any, community_ids: Collection[int]
+) -> dict[int, str]:
+    """Map internal `communities.id` -> `public_id` UUID for `community_ids` (one query)."""
+    if not community_ids:
+        return {}
+    if "public_id" not in dal.communities.fields:
+        # `communities` is first bound without `public_id`; the tenant binder extends it
+        # (idempotent, in-memory only). Do not depend on a tenant route having run first.
+        bind_tenant_tables(dal)
+    rows = await async_dal.select_async(
+        dal(dal.communities.id.belongs(sorted(community_ids))),
+        dal.communities.id,
+        dal.communities.public_id,
+    )
+    return {int(r.id): str(r.public_id) for r in rows if r.public_id}
+
+
+async def remap_community_ids(
+    async_dal: Any, dal: Any, data: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Replace every integer `community_id` in `data` with the community's public UUID, in place.
+
+    The numeric PK never crosses an API boundary. A community with no row (deleted) maps to
+    `None` rather than leaking the numeric id.
+    """
+    wanted = {
+        int(row["community_id"])
+        for rows in data.values()
+        for row in rows
+        if isinstance(row.get("community_id"), int) and not isinstance(row["community_id"], bool)
+    }
+    mapping = await community_public_ids(async_dal, dal, wanted)
+    for rows in data.values():
+        for row in rows:
+            cid = row.get("community_id")
+            if isinstance(cid, int) and not isinstance(cid, bool):
+                row["community_id"] = mapping.get(cid)
 
 
 async def export_user_data(

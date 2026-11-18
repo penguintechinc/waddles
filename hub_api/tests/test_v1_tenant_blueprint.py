@@ -21,6 +21,7 @@ Fail-first proofs (executed, not narrated):
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -268,6 +269,41 @@ class TestTenantCommunities:
         body = await response.get_json()
         names = [c["name"] for c in body["communities"]]
         assert names == ["mine"]
+
+    async def test_community_dto_exact_field_set_and_public_id(
+        self, client: Any, tenant_admin_db: Any
+    ) -> None:
+        # regression: community DTO exposes the public_id UUID, nothing extra
+        tenant_row = (
+            tenant_admin_db.dal(tenant_admin_db.dal.tenants.slug == TENANT_SLUG).select().first()
+        )
+        tenant_admin_db.dal.communities.insert(
+            name="mine", display_name="Mine", tenant_id=tenant_row.id, is_active=True
+        )
+        tenant_admin_db.dal.commit()
+        stored = (
+            tenant_admin_db.dal(tenant_admin_db.dal.communities.name == "mine").select().first()
+        )
+
+        response = await client.get(
+            f"/api/v1/tenant/{TENANT_SLUG}/communities", headers=_admin_headers()
+        )
+        body = await response.get_json()
+        assert len(body["communities"]) == 1
+        dto = body["communities"][0]
+        assert set(dto) == {
+            "id",
+            "publicId",
+            "name",
+            "displayName",
+            "memberCount",
+            "isActive",
+            "isPublic",
+            "communityType",
+            "createdAt",
+        }
+        assert dto["publicId"] == str(stored.public_id)
+        assert str(uuid.UUID(dto["publicId"])) == dto["publicId"]
 
 
 class TestTenantAdmins:

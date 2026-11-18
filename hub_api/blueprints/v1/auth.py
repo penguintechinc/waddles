@@ -24,10 +24,12 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Annotated, Any, cast
 
 from flask_core.api_utils import error_response
-from flask_core.auth import DEFAULT_TENANT_SLUG
+from flask_core.auth import DEFAULT_TENANT_SLUG, verify_jwt_token
+from flask_core.authz import parse_scope_claim
+from pydantic import Field as PydanticField
 from quart import Blueprint, after_this_request, current_app, redirect, request
 from quart_schema import validate_request, validate_response
 
@@ -273,6 +275,17 @@ class CommunityMembershipDTO:
     name: str
     displayName: str
     role: str
+    licenseTier: Annotated[
+        int,
+        PydanticField(
+            description=(
+                "The community's own allocated tier: 1 Free, 2 Professional, 3 Enterprise "
+                "(no active allocation = 1). The effective tier also includes the tenant's tier "
+                "(gates apply the max server-side), so treat this as a display/UX hint only, "
+                "never an authorization decision: backend gates remain authoritative."
+            )
+        ),
+    ] = 1
 
 
 @dataclass(slots=True, frozen=True)
@@ -290,6 +303,8 @@ class MeUserDTO:
     linkedPlatforms: list[LinkedPlatformDTO]
     roles: list[str]
     communities: list[CommunityMembershipDTO]
+    scopes: list[str]
+    tenantSlug: str | None
 
 
 @dataclass(slots=True, frozen=True)
@@ -671,7 +686,7 @@ async def logout_all() -> SimpleSuccessResponse | tuple[dict[str, object], int]:
     return SimpleSuccessResponse(success=True)
 
 
-async def _renew_from_refresh_cookie(async_dal: Any, dal: Any) -> int | None:
+async def _renew_from_refresh_cookie(async_dal: Any, dal: Any) -> tuple[int, str] | None:
     """Silently renew an expired access token from the refresh cookie (SPA load after 15 minutes).
 
     `/me` answers "not logged in" (200, `user: null`) rather than 401 for a missing/expired
@@ -691,7 +706,31 @@ async def _renew_from_refresh_cookie(async_dal: Any, dal: Any) -> int | None:
     issue_session_cookie(renewed.access_token)
     if renewed.refresh_token is not None:
         issue_refresh_cookie(renewed.refresh_token, max_age=cfg.refresh_token_ttl_seconds)
-    return renewed.user_id
+    return renewed.user_id, renewed.access_token
+
+
+async def _me_token_context(
+    async_dal: Any, dal: Any, token: str | None
+) -> tuple[list[str], str | None]:
+    """Derive `(scopes, tenantSlug)` for `/me` from a server-validated JWT.
+
+    Scopes come from the verified `scope` claim; the tenant slug is re-read from the `tenants`
+    table (active rows only) using the verified `tenant` claim, never from request input. No
+    token, an invalid token or an unresolvable/inactive tenant yields `([], None)` -- the SPA
+    then simply hides the tenant-admin section.
+    """
+    payload = verify_jwt_token(token) if token else None
+    if payload is None:
+        return [], None
+    scopes = sorted(parse_scope_claim(payload.get("scope")))
+    claim = payload.get("tenant")
+    if not isinstance(claim, str) or not claim:
+        return scopes, None
+    rows = await async_dal.select_async(
+        dal((dal.tenants.slug == claim) & (dal.tenants.is_active == True))  # noqa: E712 - pydal Field comparison
+    )
+    tenant = rows.first() if rows else None
+    return scopes, (str(tenant.slug) if tenant is not None else None)
 
 
 @auth_bp.route("/me", methods=["GET"])
@@ -700,11 +739,16 @@ async def me() -> MeResponse:
     """Me."""
     async_dal, dal = _dal()
     user_id = get_optional_current_user_id(request)
+    auth_header = request.headers.get("Authorization") or ""
+    token = auth_header[7:] if user_id is not None and auth_header.startswith("Bearer ") else None
     if user_id is None:
-        user_id = await _renew_from_refresh_cookie(async_dal, dal)
+        renewed = await _renew_from_refresh_cookie(async_dal, dal)
+        if renewed is not None:
+            user_id, token = renewed
     result = await auth_service.get_current_user(async_dal, dal, user_id=user_id)
     if result is None:
         return MeResponse(success=True, user=None)
+    scopes, tenant_slug = await _me_token_context(async_dal, dal, token)
     return MeResponse(
         success=True,
         user=MeUserDTO(
@@ -724,10 +768,16 @@ async def me() -> MeResponse:
             + (["vendor"] if result.is_vendor else []),
             communities=[
                 CommunityMembershipDTO(
-                    id=c.id, name=c.name, displayName=c.display_name, role=c.role
+                    id=c.id,
+                    name=c.name,
+                    displayName=c.display_name,
+                    role=c.role,
+                    licenseTier=c.license_tier,
                 )
                 for c in result.communities
             ],
+            scopes=scopes,
+            tenantSlug=tenant_slug,
         ),
     )
 

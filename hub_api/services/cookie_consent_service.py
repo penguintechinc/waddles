@@ -34,6 +34,7 @@ already use for the same reason.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -43,6 +44,9 @@ from quart import Request
 
 from services.audit_service import report_write_failure
 from services.errors import not_found
+from services.schema import bind_tenant_do_not_sell_table
+
+logger = logging.getLogger(__name__)
 
 #: Matches `routes/cookieConsent.js`'s cookie name verbatim -- the
 #: frontend (`CookieConsentContext.jsx`) reads/writes this exact name.
@@ -165,6 +169,58 @@ async def get_or_create_consent(
         updated_at=_iso(row.updated_at),
         requires_update=row.consent_version != current_version,
     )
+
+
+#: `tenant_do_not_sell.source_code` enum.
+DNS_SOURCE_TENANT_ADMIN_DSAR = 1
+DNS_SOURCE_DSAR_REQUEST = 2
+
+
+async def has_global_do_not_sell(async_dal: Any, dal: Any, *, user_id: int) -> bool:
+    """True when the USER's own platform-wide preference opts out of sale/sharing.
+
+    Reads every `cookie_consent` row of the user (banner, self-service, GPC); `doNotSell` is set
+    only by the user's own choice or a GPC signal, never by a tenant admin (tenant-admin DSAR
+    opt-outs live in `tenant_do_not_sell`; rows written by older versions stay global).
+    """
+    rows = await async_dal.select_async(dal(dal.cookie_consent.user_id == user_id))
+    return any(dict(row.preferences or {}).get("doNotSell") is True for row in rows)
+
+
+async def has_tenant_do_not_sell(async_dal: Any, dal: Any, *, tenant_id: int, user_id: int) -> bool:
+    """True when tenant `tenant_id` holds a Do-Not-Sell record for `user_id` (that tenant only).
+
+    Binds `tenant_do_not_sell` first (idempotent) so a worker that never ran an admin write
+    still has the table; raises on a lookup error (`effective_do_not_sell` fails closed).
+    """
+    bind_tenant_do_not_sell_table(dal)
+    rows = await async_dal.select_async(
+        dal(
+            (dal.tenant_do_not_sell.tenant_id == tenant_id)
+            & (dal.tenant_do_not_sell.user_id == user_id)
+        ),
+        limitby=(0, 1),
+    )
+    return bool(rows)
+
+
+async def effective_do_not_sell(async_dal: Any, dal: Any, *, tenant_id: int, user_id: int) -> bool:
+    """The ONE rule for a user's Do-Not-Sell state inside tenant `tenant_id`.
+
+    `effective = user's global preference OR tenant `tenant_id`'s own record`. Another tenant's
+    record never counts. Every tenant-aware reader (sale/sharing/third-party analytics decisions)
+    must call this instead of reading `cookie_consent` directly.
+
+    FAILS CLOSED: if either lookup errors the user is treated as opted out (`True`) and only the
+    error type is logged -- a consent check must never default to "may sell".
+    """
+    try:
+        if await has_global_do_not_sell(async_dal, dal, user_id=user_id):
+            return True
+        return await has_tenant_do_not_sell(async_dal, dal, tenant_id=tenant_id, user_id=user_id)
+    except Exception as exc:  # noqa: BLE001 - fail closed on any lookup failure
+        logger.error("consent.do_not_sell_lookup_failed", extra={"error_type": type(exc).__name__})
+        return True
 
 
 async def save_consent(

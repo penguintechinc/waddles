@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet, useParams } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { LoadingState, ServedFeature } from './components/ui';
 
@@ -33,6 +33,8 @@ const OAuthCallback = lazy(() => import('./pages/auth/OAuthCallback'));
 // Cookie Policy page
 const CookiePolicy = lazy(() => import('./pages/CookiePolicy'));
 const PrivacyRights = lazy(() => import('./pages/PrivacyRights'));
+const PublicPrivacyRequest = lazy(() => import('./pages/privacy/PublicPrivacyRequest'));
+const PublicPrivacyVerify = lazy(() => import('./pages/privacy/PublicPrivacyVerify'));
 
 // Calendar pages
 const CalendarSettings = lazy(() => import('./pages/calendar/CalendarSettings'));
@@ -160,8 +162,14 @@ const SuperAdminTenants = lazy(() => import('./pages/superadmin/SuperAdminTenant
 
 // Tenant admin pages
 const TenantDashboard = lazy(() => import('./pages/tenant/TenantDashboard'));
+const TenantSettings = lazy(() => import('./pages/tenant/TenantSettings'));
+const TenantPrivacy = lazy(() => import('./pages/tenant/TenantPrivacy'));
+const TenantKms = lazy(() => import('./pages/tenant/TenantKms'));
+const TenantIngestSources = lazy(() => import('./pages/tenant/TenantIngestSources'));
 const TenantAdmins = lazy(() => import('./pages/tenant/TenantAdmins'));
 const TenantCommunities = lazy(() => import('./pages/tenant/TenantCommunities'));
+const TenantCommunityTiers = lazy(() => import('./pages/tenant/TenantCommunityTiers'));
+const TenantLicense = lazy(() => import('./pages/tenant/TenantLicense'));
 
 // Admin pages (new)
 const AdminCommunityRoles = lazy(() => import('./pages/admin/AdminCommunityRoles'));
@@ -193,6 +201,29 @@ function CommunityBundlesRedirect() {
 function TenantBundlesRedirect() {
   const { tenantSlug } = useParams();
   return <Navigate to={`/tenant/${tenantSlug}/bundles`} replace />;
+}
+
+/**
+ * Tenant-admin scope boundary. Keys the outlet by the URL slug so every tenant page remounts (and
+ * drops cleartext exports, pending erasure IDs, form state) when the slug changes, and refuses to
+ * render for a non-superadmin whose session tenant differs from the route slug. UX guard only:
+ * the server enforces the same tenant boundary.
+ */
+export function TenantScope() {
+  const { tenantSlug } = useParams();
+  const { hasScope, tenantSlug: ownSlug, loading } = useAuth();
+  if (loading) return <LoadingState fullPage label="Checking your session" />;
+  // Global admins are identified by the `tenants:admin` scope (server-enforced), never a role name.
+  if (!hasScope('tenants:admin') && typeof ownSlug === 'string' && ownSlug !== tenantSlug) {
+    return (
+      <div role="alert" data-testid="tenant-not-authorized" className="p-6">
+        <h2 className="text-lg font-semibold">Not authorized</h2>
+        <p className="text-sm">You do not have access to this tenant.</p>
+        <a href={`/tenant/${encodeURIComponent(ownSlug)}`} className="underline">Go to your tenant</a>
+      </div>
+    );
+  }
+  return <Outlet key={tenantSlug} />;
 }
 
 // Protected route wrapper
@@ -235,6 +266,10 @@ function ProtectedRoute({ children, requireCommunityAdmin = false, requirePlatfo
 function App() {
   return (
     <Routes>
+      {/* Public privacy-request pages: standalone layout, no auth, no site chrome */}
+      <Route path="/privacy-request/verify" element={<Suspense fallback={<LoadingState fullPage label="Loading" />}><PublicPrivacyVerify /></Suspense>} />
+      <Route path="/privacy-request/:tenantSlug" element={<Suspense fallback={<LoadingState fullPage label="Loading" />}><PublicPrivacyRequest /></Suspense>} />
+
       {/* Public routes */}
       <Route element={<PublicLayout />}>
         <Route path="/" element={<HomePage />} />
@@ -468,14 +503,22 @@ function App() {
           </ProtectedRoute>
         }
       >
-        <Route path="/tenant/:tenantSlug" element={<TenantDashboard />} />
-        <Route path="/tenant/:tenantSlug/modules" element={<TenantBundlesRedirect />} />
-        <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
-        <Route path="/tenant/:tenantSlug/reputation" element={<TenantReputationSettings />} />
-        <Route path="/tenant/:tenantSlug/discord-app" element={<TenantDiscordApp />} />
-        <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
-        {/* Wave-1 stub: tenant bundle catalog slice */}
-        <Route path="/tenant/:tenantSlug/bundles" element={<TenantBundleCatalog />} />
+        <Route path="/tenant/:tenantSlug" element={<TenantScope />}>
+          <Route index element={<TenantDashboard />} />
+          <Route path="modules" element={<TenantBundlesRedirect />} />
+          <Route path="settings" element={<TenantSettings />} />
+          <Route path="admins" element={<TenantAdmins />} />
+          <Route path="reputation" element={<TenantReputationSettings />} />
+          <Route path="discord-app" element={<TenantDiscordApp />} />
+          <Route path="communities" element={<TenantCommunities />} />
+          <Route path="community-tiers" element={<TenantCommunityTiers />} />
+          <Route path="license" element={<TenantLicense />} />
+          <Route path="privacy" element={<TenantPrivacy />} />
+          <Route path="kms" element={<TenantKms />} />
+          <Route path="ingest-sources" element={<TenantIngestSources />} />
+          {/* Wave-1 stub: tenant bundle catalog slice */}
+          <Route path="bundles" element={<TenantBundleCatalog />} />
+        </Route>
       </Route>
 
       {/* Catch all - redirect to home */}

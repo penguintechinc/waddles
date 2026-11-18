@@ -163,9 +163,15 @@ class UpdateSettingsRequest:
 
 @dataclass(slots=True, frozen=True)
 class CommunityDTO:
-    """Community summary DTO."""
+    """Community summary DTO.
+
+    `publicId` is the community's `public_id` UUID: the identifier the
+    UUID-keyed routes (e.g. ingest sources) take. The numeric `id` is retained
+    only for the legacy `/admin/<id>` links in `TenantCommunities.jsx`.
+    """
 
     id: int
+    publicId: str
     name: str
     displayName: str
     memberCount: int
@@ -244,6 +250,7 @@ def _tenant_dto(row: Any) -> TenantDTO:
 def _community_dto(row: Any) -> CommunityDTO:
     return CommunityDTO(
         id=row.id,
+        publicId=str(row.public_id),
         name=row.name,
         displayName=row.display_name or row.name,
         memberCount=row.member_count or 0,

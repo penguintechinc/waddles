@@ -86,6 +86,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    text,
 )
 
 from services.schema import (
@@ -1597,6 +1598,17 @@ def _create_bundle_install_tables(conn: Any) -> None:
         "ingest_sources",
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),
+        # migration 0122: the UUID that crosses the API boundary (Postgres: gen_random_uuid()).
+        Column(
+            "public_id",
+            String(36),
+            unique=True,
+            server_default=text(
+                "(lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' "
+                "|| substr(hex(randomblob(2)), 2) || '-a' || substr(hex(randomblob(2)), 2) "
+                "|| '-' || hex(randomblob(6))))"
+            ),
+        ),
         Column("tenant_id", Integer, nullable=False),
         Column("community_id", Integer),
         Column("platform", String(50), nullable=False),

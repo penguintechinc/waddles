@@ -57,6 +57,8 @@ from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.community_common import api_error
 from services.db_routing import mark_replica
 from services.default_tenant import verify_default_tenant_at_startup
+from services.dsar_outbox import run_worker_loop as dsar_outbox_worker_loop
+from services.dsar_service import run_maintenance_loop as dsar_run_maintenance_loop
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
@@ -498,6 +500,26 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             app.config["suppression_purge_task"] = asyncio.create_task(
                 run_purge_loop(async_dal, dal, is_ready=lambda: bootstrap_status.is_ready)
             )
+        # DSAR inbox maintenance: expires unverified public requests (and purges their contact
+        # PII), blanks retained contact PII after closure, refreshes the overdue gauge. Idempotent,
+        # runs in every replica; a failed pass is logged and retried. Waits for schema readiness.
+        app.config["dsar_maintenance_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["dsar_maintenance_task"] = asyncio.create_task(
+                dsar_run_maintenance_loop(
+                    async_dal, dal, is_ready=lambda: bootstrap_status.is_ready
+                )
+            )
+        # DSAR verification-mail worker: drains the durable `dsar_mail_outbox` (public routes only
+        # enqueue). Every replica runs one; rows are leased by conditional UPDATE so each mail is
+        # claimed once. A failed pass is logged and retried. Waits for schema readiness.
+        app.config["dsar_outbox_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["dsar_outbox_task"] = asyncio.create_task(
+                dsar_outbox_worker_loop(
+                    async_dal, dal, app=app, is_ready=lambda: bootstrap_status.is_ready
+                )
+            )
         # Level-triggered reconcile of every app_source_bindings row to a live Valkey consumer
         # group (a slug/name rename or a missed best-effort provision otherwise leaves
         # svc-process on NOGROUP forever). Runs in every replica (idempotent); a failed pass is
@@ -557,6 +579,22 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping suppression purge task on shutdown: {exc}")
+        dsar_task = app.config.get("dsar_maintenance_task")
+        if dsar_task is not None:
+            dsar_task.cancel()
+            try:
+                await dsar_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping DSAR maintenance task on shutdown: {exc}")
+        outbox_task = app.config.get("dsar_outbox_task")
+        if outbox_task is not None:
+            outbox_task.cancel()
+            try:
+                await outbox_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping DSAR outbox worker on shutdown: {exc}")
         reconcile_task = app.config.get("source_group_reconcile_task")
         if reconcile_task is not None:
             reconcile_task.cancel()

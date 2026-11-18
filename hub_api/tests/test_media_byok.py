@@ -15,6 +15,7 @@ Mutation checks (executed): (1) removing the `tier_meets_media_floor` gate in `r
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import grpc
@@ -33,10 +34,12 @@ from grpc_internal.dataplane_servicers import (
     SCOPE_MEDIA_TIER_RESOLVE,
     MediaServicer,
 )
+from services import community_tier_service as tier_svc
 from services import media_byok_service as svc
 from services.ai_routing.errors import invalid_byok_key
 from services.schema import _define_audit_log
 from tests._dataplane_grpc import DataplaneClient, serving_dataplane
+from tests.ai_routing_helpers import ensure_tier_tables, grant_tier
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
@@ -54,7 +57,8 @@ SCOPES = frozenset({SCOPE_MEDIA_BYOK_RESOLVE, SCOPE_MEDIA_TIER_RESOLVE})
 
 
 @pytest.fixture(autouse=True)
-def _env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _env(monkeypatch: pytest.MonkeyPatch, ai_routing_db: Any) -> None:
+    ensure_tier_tables(ai_routing_db.dal)
     monkeypatch.setenv("AI_BYOK_ENCRYPTION_KEY", "22" * 32)
     monkeypatch.delenv("MEDIA_BYOK_ALLOWED_SERVICES", raising=False)
 
@@ -66,7 +70,7 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
         return "free"
 
     monkeypatch.setattr(svc, "_validate_gemini_key", _valid)
-    monkeypatch.setattr(svc, "get_tier", _free_tenant)
+    monkeypatch.setattr(tier_svc, "get_tier", _free_tenant)
 
 
 @pytest.fixture
@@ -97,8 +101,20 @@ def app(ai_routing_db: Any, issuer: ServiceJwtIssuer) -> Quart:
 
 
 def _set_tier(db: Any, community_id: int, tier: str | None) -> None:
-    db.dal(db.dal.communities.id == community_id).update(license_tier=tier)
-    db.dal.commit()
+    """Set the community's ALLOCATED tier (real ledger row); free/None/unknown = no allocation."""
+    dal = db.dal
+    now = tier_svc.now_utc()
+    dal(
+        (dal.community_tier_allocations.community_id == community_id)
+        & (dal.community_tier_allocations.released_at == None)  # noqa: E711
+    ).update(released_at=now)
+    code = {
+        "professional": tier_svc.TIER_CODE_PROFESSIONAL,
+        "enterprise": tier_svc.TIER_CODE_ENTERPRISE,
+    }.get(tier or "")
+    if code is not None:
+        grant_tier(dal, community_id, code)
+    dal.commit()
 
 
 def _tenant_id(db: Any, slug: str) -> int:
@@ -207,7 +223,7 @@ class TestAdminApi:
         async def _pro(*, tenant: str, community: int | None = None) -> str:
             return "professional"
 
-        monkeypatch.setattr(svc, "get_tier", _pro)
+        monkeypatch.setattr(tier_svc, "get_tier", _pro)
         headers, cid = _admin(ai_routing_db, tier=None)
         r = await app.test_client().put(
             f"/api/v1/admin/{cid}/media/byok-keys",
@@ -524,11 +540,86 @@ class TestEffectiveTier:
         async def _t(*, tenant: str, community: int | None = None) -> str:
             return tenant_tier
 
-        monkeypatch.setattr(svc, "get_tier", _t)
+        monkeypatch.setattr(tier_svc, "get_tier", _t)
         _, cid = _admin(ai_routing_db, tier=community_tier)
         token = _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE)
         r = await _tier_call(dp, token, _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert _TIER_NAMES[r.tier] == expected
+
+    async def test_resolver_failure_is_free_and_logs_error(
+        self,
+        ai_routing_db: Any,
+        issuer: ServiceJwtIssuer,
+        dp: DataplaneClient,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Tier lookup fails -> Free (never a paid tier, never an RPC error) + an ERROR record."""
+
+        async def _boom(*, tenant: str, community: int | None = None) -> str:
+            raise RuntimeError("license gate down")
+
+        monkeypatch.setattr(tier_svc, "get_tier", _boom)
+        _, cid = _admin(ai_routing_db, tier="enterprise")
+        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
+        with caplog.at_level(logging.ERROR):
+            r = await _tier_call(dp, _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE), tid, cid)
+            b = await _resolve(dp, _token(issuer), tid, cid)
+        assert _TIER_NAMES[r.tier] == "free"
+        assert b.status == media_pb2.BYOK_STATUS_TIER_REQUIRED
+        assert any(
+            x.levelno >= logging.ERROR and "RuntimeError" in x.getMessage() for x in caplog.records
+        )
+
+    async def test_scope_check_failure_is_free_and_logs_error(
+        self,
+        ai_routing_db: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A DB error in the community-in-tenant check fails closed to Free (ERROR, type only)."""
+
+        async def _boom(*a: Any, **k: Any) -> bool:
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(svc, "community_belongs_to_tenant", _boom)
+        _, cid = _admin(ai_routing_db, tier="enterprise")
+        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
+        with caplog.at_level(logging.ERROR):
+            tier = await svc.effective_tier(
+                ai_routing_db, ai_routing_db.dal, tenant_id=tid, community_id=cid
+            )
+        assert tier == "free"
+        assert any("RuntimeError" in x.getMessage() for x in caplog.records)
+
+    async def test_numeric_id_keying_twin_display_name_and_slug_rename(
+        self, ai_routing_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Allocation never crosses same-display-name tenants and survives a slug rename."""
+        dal = ai_routing_db.dal
+        twin_tid = int(dal.tenants.insert(slug="acme-twin", display_name="Acme Corp"))
+        dal.commit()
+        _, granted = _admin(ai_routing_db, tier="professional")
+        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
+        twin_cid = seed_community(ai_routing_db, tenant_slug="acme-twin")
+
+        async def _lic(*, tenant: str, community: int | None = None) -> str:
+            return "enterprise" if tenant == TENANT_SLUG else "free"
+
+        got = await svc.effective_tier(ai_routing_db, dal, tenant_id=tid, community_id=granted)
+        assert got == "professional"
+        twin = await svc.effective_tier(
+            ai_routing_db, dal, tenant_id=twin_tid, community_id=twin_cid
+        )
+        assert twin == "free"
+        # the allocation's tenant never lifts a community claimed under the other tenant
+        with pytest.raises(svc.CommunityScopeError):
+            await svc.effective_tier(ai_routing_db, dal, tenant_id=twin_tid, community_id=granted)
+        dal(dal.tenants.id == tid).update(slug="acme-renamed")
+        dal.commit()
+        monkeypatch.setattr(tier_svc, "get_tier", _lic)  # license keyed to the OLD slug
+        renamed = await svc.effective_tier(ai_routing_db, dal, tenant_id=tid, community_id=granted)
+        assert renamed == "professional"
 
     async def test_refusals(
         self, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient

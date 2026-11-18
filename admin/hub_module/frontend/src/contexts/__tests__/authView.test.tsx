@@ -35,6 +35,19 @@ describe('toAuthView', () => {
   });
 });
 
+describe('toAuthView communityTier', () => {
+  it('wraps the context function and clamps unknown values to Free', () => {
+    const view = toAuthView({ communityTier: (id: number) => (id === 7 ? 3 : id === 8 ? 2 : 42) });
+    expect(view.communityTier(7)).toBe(3);
+    expect(view.communityTier(8)).toBe(2);
+    expect(view.communityTier(9)).toBe(1);
+  });
+
+  it('defaults to Free when the context has no communityTier', () => {
+    expect(toAuthView({}).communityTier(7)).toBe(1);
+  });
+});
+
 describe('useAuthView', () => {
   it('keeps refreshUser identity stable while the context function is unchanged', () => {
     const refresh = vi.fn().mockResolvedValue(undefined);

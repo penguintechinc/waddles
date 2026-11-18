@@ -64,10 +64,11 @@ reverse-proxy body that was never hub-api's row to begin with).
 
 from __future__ import annotations
 
+import logging
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
 from services.community_authz import require_community_admin, require_valid_community_id
@@ -79,8 +80,11 @@ from services.workflow_service import (
     WorkflowCoreProxyClient,
     error_from_proxy,
     get_workflow_or_403,
+    require_workflow_tier,
     validate_license,
 )
+
+logger = logging.getLogger(__name__)
 
 workflow_bp = Blueprint("v1_workflow", __name__, url_prefix="/api/v1/admin")
 
@@ -124,8 +128,28 @@ async def _guard(raw_community_id: str) -> int | tuple[dict[str, object], int]:
         community_id = require_valid_community_id(raw_community_id)
         await _require_admin(community_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return community_id
+
+
+def _tenant_slug() -> str | None:
+    """The caller's validated tenant slug (never request data), or `None` if unavailable."""
+    ctx = get_tenant_context(request)
+    return ctx.tenant_slug if ctx is not None else None
+
+
+async def _tier_gate(community_id: int) -> tuple[dict[str, object], int] | None:
+    """Workflow-tier gate for a mutating/executing route: an error tuple, or `None` to proceed."""
+    async_dal, dal = _dal()
+    try:
+        await require_workflow_tier(
+            async_dal, dal, community_id=community_id, tenant=_tenant_slug()
+        )
+    except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
+        return _err(exc)
+    return None
 
 
 def _proxy_response(result: ProxyResult, *, not_found_message: str) -> ApiError | None:
@@ -186,7 +210,9 @@ async def create_workflow(community_id: str) -> tuple[dict[str, object], int]:
         return _err(bad_request("Name and definition are required"))
 
     async_dal, dal = _dal()
-    license_check = await validate_license(async_dal, dal, community_id=guard)
+    license_check = await validate_license(
+        async_dal, dal, community_id=guard, tenant=_tenant_slug()
+    )
     if not license_check.valid:
         return _err(forbidden(f"Workflows not available: {license_check.reason}"))
 
@@ -218,6 +244,7 @@ async def get_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, o
     try:
         body = await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return {"success": True, "workflow": body}, 200
 
@@ -232,7 +259,10 @@ async def update_workflow(community_id: str, workflow_id: str) -> tuple[dict[str
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
+    if (denied := await _tier_gate(guard)) is not None:
+        return denied
 
     payload = await request.get_json(silent=True) or {}
     body: dict[str, Any] = {"communityId": guard, "updatedBy": get_current_user_id(request)}
@@ -260,6 +290,7 @@ async def delete_workflow(community_id: str, workflow_id: str) -> tuple[dict[str
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     result = await _client.request(
@@ -288,10 +319,13 @@ async def publish_workflow(community_id: str, workflow_id: str) -> tuple[dict[st
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     async_dal, dal = _dal()
-    license_check = await validate_license(async_dal, dal, community_id=guard)
+    license_check = await validate_license(
+        async_dal, dal, community_id=guard, tenant=_tenant_slug()
+    )
     if not license_check.valid:
         return _err(forbidden(f"Workflows not available: {license_check.reason}"))
 
@@ -349,10 +383,13 @@ async def execute_workflow(community_id: str, workflow_id: str) -> tuple[dict[st
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     async_dal, dal = _dal()
-    license_check = await validate_license(async_dal, dal, community_id=guard)
+    license_check = await validate_license(
+        async_dal, dal, community_id=guard, tenant=_tenant_slug()
+    )
     if not license_check.valid:
         return _err(forbidden(f"Workflows not available: {license_check.reason}"))
 
@@ -376,17 +413,17 @@ async def execute_workflow(community_id: str, workflow_id: str) -> tuple[dict[st
 @workflow_bp.route("/<community_id>/workflows/<workflow_id>/test", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 async def test_workflow(community_id: str, workflow_id: str) -> tuple[dict[str, object], int]:
-    """Test execute workflow.
-
-    No license gate -- matches Node, which never calls `validateLicense()` here.
-    """
+    """Test execute workflow (tier-gated: a test run executes the workflow)."""
     guard = await _guard(community_id)
     if isinstance(guard, tuple):
         return guard
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
+    if (denied := await _tier_gate(guard)) is not None:
+        return denied
 
     payload = await request.get_json(silent=True) or {}
     result = await _client.request(
@@ -415,6 +452,7 @@ async def list_executions(community_id: str, workflow_id: str) -> tuple[dict[str
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     page, limit = max(1, _int_arg("page", 1)), min(100, max(1, _int_arg("limit", 25)))
@@ -449,6 +487,7 @@ async def get_execution(
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     result = await _client.request(
@@ -474,6 +513,7 @@ async def cancel_execution(
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     result = await _client.request(
@@ -502,6 +542,7 @@ async def list_webhooks(community_id: str, workflow_id: str) -> tuple[dict[str, 
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     result = await _client.request(
@@ -524,7 +565,10 @@ async def create_webhook(community_id: str, workflow_id: str) -> tuple[dict[str,
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
+    if (denied := await _tier_gate(guard)) is not None:
+        return denied
 
     payload = await request.get_json(silent=True) or {}
     event, url = payload.get("event"), payload.get("url")
@@ -563,6 +607,7 @@ async def delete_webhook(
     try:
         await get_workflow_or_403(_client, community_id=guard, workflow_id=workflow_id)
     except ApiError as exc:
+        logger.debug("workflow.rejected code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     result = await _client.request(

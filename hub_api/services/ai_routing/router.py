@@ -44,6 +44,7 @@ from flask_core.ai_tool_authz import (
     authorize_tool_calls,
 )
 from flask_core.feature_flags import feature_enabled
+from flask_core.tier_catalog import TIER_ENTERPRISE, TIER_FREE, TIER_PROFESSIONAL, tier_level
 
 from services import token_ledger
 from services.ai_routing import config_service
@@ -63,6 +64,7 @@ from services.ai_routing.errors import (
     not_entitled,
 )
 from services.ai_routing.models import AIRequest, AIResponse, ByokProvider, Tier
+from services.community_tier_service import resolve_effective_tier
 from services.errors import ApiError
 
 logger = logging.getLogger(__name__)
@@ -77,44 +79,64 @@ FEATURE_AI_PREMIUM = "waddles.ai.premium_models"
 FEATURE_AI_BYOK = "waddles.ai.byok"
 
 
-async def _is_enterprise_tier(async_dal: Any, dal: Any, *, community_id: int) -> bool:
-    """Direct `communities.license_tier` read -- same pattern `workflow_service.validate_license()`.
+async def _community_effective_tier(
+    async_dal: Any, dal: Any, *, community_id: int, tenant: str | None = None
+) -> str:
+    """Effective tier of `community_id` via the single resolver, keyed by numeric ids.
 
-    Not routed through the `FeatureContract`/`tier_requirements` catalog
-    (`libs/core_platform_module/features.py`) -- that registration lives
-    outside hub-api's own directory tree and isn't wired up for this
-    brand-new capability yet; this direct check is the same
-    self-contained fallback the pre-existing `workflow_service.py` port
-    already established for exactly this situation (see that module's
-    own docstring), so premium/BYOK entitlement is never silently
-    unenforced just because the flag registry hasn't caught up.
+    `max(tenant tier, community allocation)`: the tenant id comes from the community row (server
+    state), never from a caller-supplied slug. An unknown, INACTIVE or other-tenant community
+    (when the caller's validated `tenant` slug is given) and any lookup failure all report
+    `free` identically -- no existence/tier oracle -- never a paid tier, never a raise. Any
+    failure logs ERROR with the exception type only.
     """
-    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    if not rows:
-        return False
-    tier = (rows.first().license_tier or "").strip().lower()
-    return tier == "enterprise"
+    try:
+        rows = await async_dal.select_async(
+            dal((dal.communities.id == community_id) & (dal.communities.is_active == True))  # noqa: E712
+        )
+        row = rows.first() if rows else None
+        if row is None or row.tenant_id is None:
+            return str(TIER_FREE)
+        if tenant is not None:
+            owner = await async_dal.select_async(dal(dal.tenants.id == int(row.tenant_id)))
+            owner_row = owner.first() if owner else None
+            if owner_row is None or str(owner_row.slug or "") != tenant:
+                return str(TIER_FREE)
+        tier: str = await resolve_effective_tier(async_dal, dal, int(row.tenant_id), community_id)
+        return tier
+    except Exception as exc:  # noqa: BLE001 - an entitlement gate fails closed to free
+        logger.error("ai_routing_tier_resolve_failed error_type=%s", type(exc).__name__)
+        return str(TIER_FREE)
 
 
-async def _is_professional_or_higher(async_dal: Any, dal: Any, *, community_id: int) -> bool:
-    """Community `license_tier` is professional or enterprise (BYOK floor); unknown -> False."""
-    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
-    if not rows:
-        return False
-    tier = (rows.first().license_tier or "").strip().lower()
-    return tier in ("professional", "enterprise")
+async def _is_enterprise_tier(
+    async_dal: Any, dal: Any, *, community_id: int, tenant: str | None = None
+) -> bool:
+    """Premium-local-metered floor: effective tier is Enterprise (fail-closed to False)."""
+    tier = await _community_effective_tier(async_dal, dal, community_id=community_id, tenant=tenant)
+    return bool(tier_level(tier) >= tier_level(TIER_ENTERPRISE))
+
+
+async def _is_professional_or_higher(
+    async_dal: Any, dal: Any, *, community_id: int, tenant: str | None = None
+) -> bool:
+    """BYOK floor: effective tier is Professional or Enterprise (fail-closed to False)."""
+    tier = await _community_effective_tier(async_dal, dal, community_id=community_id, tenant=tenant)
+    return bool(tier_level(tier) >= tier_level(TIER_PROFESSIONAL))
 
 
 async def _premium_entitled(async_dal: Any, dal: Any, *, tenant: str, community_id: int) -> bool:
     if not await feature_enabled(FEATURE_AI_PREMIUM, tenant=tenant, community=community_id):
         return False
-    return await _is_enterprise_tier(async_dal, dal, community_id=community_id)
+    return await _is_enterprise_tier(async_dal, dal, community_id=community_id, tenant=tenant)
 
 
 async def _byok_entitled(async_dal: Any, dal: Any, *, tenant: str, community_id: int) -> bool:
     if not await feature_enabled(FEATURE_AI_BYOK, tenant=tenant, community=community_id):
         return False
-    return await _is_professional_or_higher(async_dal, dal, community_id=community_id)
+    return await _is_professional_or_higher(
+        async_dal, dal, community_id=community_id, tenant=tenant
+    )
 
 
 @dataclass(slots=True, frozen=True)

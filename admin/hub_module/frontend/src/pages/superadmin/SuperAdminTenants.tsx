@@ -11,6 +11,7 @@ import type {
   TenantDTO,
   UpdateTenantPayload,
 } from '../../services/superTenantApi';
+import TenantLicensePools from '../../components/superadmin/TenantLicensePools';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 
 const LIMIT = 25;
@@ -38,6 +39,7 @@ function SuperAdminTenants() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editingTenant, setEditingTenant] = useState<TenantDTO | null>(null);
+  const [poolsTenant, setPoolsTenant] = useState<TenantDTO | null>(null);
   const [deactivatingTenant, setDeactivatingTenant] = useState<TenantDTO | null>(null);
   const [confirmSlug, setConfirmSlug] = useState('');
 
@@ -335,6 +337,13 @@ function SuperAdminTenants() {
                         Edit
                       </button>
                       <button
+                        onClick={() => setPoolsTenant(tenant)}
+                        className="text-sky-400 hover:text-sky-300 text-sm"
+                        aria-label={`License pools for ${tenant.displayName}`}
+                      >
+                        License pools
+                      </button>
+                      <button
                         onClick={() => setDeactivatingTenant(tenant)}
                         disabled={tenant.isGlobal}
                         className="text-red-400 hover:text-red-300 text-sm disabled:opacity-30 disabled:cursor-not-allowed"
@@ -404,6 +413,14 @@ function SuperAdminTenants() {
         themeMode="dark"
         colors={WADDLES_GOLD_COLORS}
       />
+
+      {poolsTenant && (
+        <TenantLicensePools
+          tenantId={poolsTenant.id}
+          tenantSlug={poolsTenant.slug}
+          onClose={() => setPoolsTenant(null)}
+        />
+      )}
 
       {deactivatingTenant && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">

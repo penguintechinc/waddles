@@ -30,22 +30,51 @@ superadminController.js").
 
 from __future__ import annotations
 
+import logging
 import math
 from datetime import UTC, datetime
 from typing import Any
 
 from flask_core.auth import DEFAULT_TENANT_SLUG
+from opentelemetry import metrics
 
-from services.errors import bad_request, conflict, forbidden, not_found
+from services import community_tier_service
+from services.errors import ApiError, bad_request, conflict, forbidden, not_found
 from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.global_identity import SYSTEM_TENANT_SLUG
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
+
+logger = logging.getLogger(__name__)
+_TIER_OVERRIDE_FAILED = metrics.get_meter("waddles.hub_api.superadmin").create_counter(
+    "waddles.superadmin.tier_override_failed",
+    unit="1",
+    description="Operator tier overrides whose allocation or audit write failed (loud).",
+)
 
 VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporate", "other")
 VALID_JOIN_MODES = ("open", "approval", "invite")
 #: Reserved tenant slugs (security.md): `system` = operator plane (its admins ARE the global
 #: admins), `default` = catch-all. Never creatable, renamable-to, renamable or deactivatable here.
 RESERVED_TENANT_SLUGS = frozenset({SYSTEM_TENANT_SLUG, DEFAULT_TENANT_SLUG})
+#: Slugs that would shadow a fixed route segment (public DSAR routes under
+#: `/api/v1/public/<tenant_slug>/...` and the webui `/privacy-request/:tenantSlug` pages) or a
+#: top-level path. Rejected on tenant create and rename-to only; unlike RESERVED_TENANT_SLUGS this
+#: does not affect deactivation/rename-from of existing tenants.
+RESERVED_ROUTE_SLUGS = frozenset(
+    {
+        "verify",
+        "resend-verification",
+        "privacy-requests",
+        "captcha-config",
+        "altcha-challenge",
+        "preview",
+        "public",
+        "api",
+        "admin",
+        "tenant",
+        "superadmin",
+    }
+)
 
 
 def _ensure_tables(dal: Any) -> None:
@@ -210,30 +239,96 @@ async def create_community(
     return await get_community(async_dal, dal, community_id=new_id)
 
 
+#: Short machine reasons an operator may record for a tier override (the audit rule only accepts a
+#: short snake_case token, never free text -- `community_tier_service._REASON_RE`).
+TIER_OVERRIDE_REASON_CODES = (
+    "support_request",
+    "sales_agreement",
+    "trial_extension",
+    "billing_correction",
+    "partner_program",
+    "data_correction",
+    "other",
+)
+
+
 async def update_community(
     async_dal: Any,
     dal: Any,
     *,
     community_id: int,
     fields: dict[str, Any],
+    license_tier: int | None = None,
+    reason_code: str | None = None,
+    actor: int | None = None,
+    pool: Any = None,
+    audit: Any = None,
 ) -> None:
-    """Update community details.
+    """Update community details and/or set its licence tier (operator override).
 
-    `fields` are already-validated update deltas (camelCase->column).
+    `fields` are already-validated update deltas (camelCase->column); a `None` value means
+    "set NULL" (the route only passes None for the nullable `description`/`seat_limit`).
+    `is_premium` is derived from the tier and can never be written directly. `license_tier`
+    (1 free / 2 professional / 3 enterprise) goes through
+    `community_tier_service.allocate(source=operator_override)`: never blocked by a full pool,
+    counted as overage and audited, with `reason_code` as the audit reason.
     """
     _ensure_tables(dal)
-    await get_community(async_dal, dal, community_id=community_id)  # 404 if missing
+    community = await get_community(async_dal, dal, community_id=community_id)  # 404 if missing
 
+    if "is_premium" in fields:
+        raise bad_request("isPremium is derived from licenseTier; send licenseTier instead")
     community_type = fields.get("community_type")
     if community_type is not None and community_type not in VALID_COMMUNITY_TYPES:
         raise bad_request(
             f"Invalid community type. Must be one of: {', '.join(VALID_COMMUNITY_TYPES)}"
         )
-    if not fields:
+    if not fields and license_tier is None:
         raise bad_request("No updates provided")
+    if license_tier is not None:
+        if license_tier not in community_tier_service.TIER_NAMES:
+            raise bad_request("licenseTier must be 1 (free), 2 (professional) or 3 (enterprise)")
+        if reason_code not in TIER_OVERRIDE_REASON_CODES:
+            raise bad_request(
+                "reasonCode is required with licenseTier and must be one of: "
+                + ", ".join(TIER_OVERRIDE_REASON_CODES)
+            )
+        if community.tenant_id is None:
+            raise bad_request("Community has no tenant; its tier cannot be allocated")
 
-    fields["updated_at"] = datetime.now(UTC)
-    await async_dal.update_async(dal.communities.id == community_id, **fields)
+    if license_tier is not None:
+        try:
+            await community_tier_service.allocate(
+                async_dal,
+                dal,
+                tenant_id=int(community.tenant_id),
+                community_id=community_id,
+                tier=license_tier,
+                actor=actor,
+                source=community_tier_service.SOURCE_OPERATOR_OVERRIDE,
+                pool=pool,
+                reason=reason_code,
+                audit=audit,
+            )
+        except ApiError:
+            raise
+        except Exception as exc:
+            # The allocation commits BEFORE its audit event is written, so an audit-sink failure
+            # leaves the override applied but unaudited: never report success, make it loud.
+            logger.error(
+                "community_tier_override_failed community_id=%s error_type=%s",
+                community_id,
+                type(exc).__name__,
+            )
+            _TIER_OVERRIDE_FAILED.add(1, {"error_type": type(exc).__name__})
+            raise ApiError(
+                "Tier override could not be completed or audited; verify the community's tier",
+                500,
+                "TIER_OVERRIDE_FAILED",
+            ) from exc
+    if fields:
+        fields["updated_at"] = datetime.now(UTC)
+        await async_dal.update_async(dal.communities.id == community_id, **fields)
 
 
 async def delete_community(async_dal: Any, dal: Any, *, community_id: int, caller_id: int) -> None:
@@ -276,8 +371,15 @@ async def reassign_owner(
 _SLUG_RE_MSG = "Slug must be lowercase alphanumeric with hyphens, no leading/trailing hyphens"
 
 
+def _normalize_slug(slug: str) -> str:
+    """The stored form of a slug (trimmed); reserved/duplicate checks use `.lower()` of this."""
+    return slug.strip()
+
+
 def _valid_slug(slug: str) -> bool:
     if not slug or slug[0] == "-" or slug[-1] == "-":
+        return False
+    if slug.isdigit():  # digits-only would collide with numeric tenant ids where slugs coerce
         return False
     return all(c.isalnum() or c == "-" for c in slug) and slug.islower()
 
@@ -324,10 +426,14 @@ async def create_tenant(
         raise bad_request("Tenant slug is required")
     if not display_name or not display_name.strip():
         raise bad_request("Display name is required")
-    slug = slug.strip()
+    slug = _normalize_slug(slug)
+    if slug.isdigit():
+        raise bad_request("Slug cannot be digits only (it would collide with numeric tenant ids)")
     if not _valid_slug(slug):
         raise bad_request(_SLUG_RE_MSG)
     if slug.lower() in RESERVED_TENANT_SLUGS:
+        raise conflict("That tenant slug is reserved")
+    if slug.lower() in RESERVED_ROUTE_SLUGS:
         raise conflict("That tenant slug is reserved")
 
     existing = await async_dal.select_async(dal(dal.tenants.slug == slug))
@@ -366,9 +472,18 @@ async def update_tenant(
         raise not_found("Tenant not found")
     current_slug = str(rows.first().slug or "")
     new_slug = fields.get("slug")
-    if new_slug is not None and str(new_slug).strip().lower() in RESERVED_TENANT_SLUGS:
-        raise forbidden("That tenant slug is reserved")
-    if current_slug in RESERVED_TENANT_SLUGS and (
+    if new_slug is not None:
+        new_slug = _normalize_slug(str(new_slug))
+        fields["slug"] = new_slug  # store exactly the normalized form that was checked
+        if new_slug.isdigit():
+            raise bad_request(
+                "Slug cannot be digits only (it would collide with numeric tenant ids)"
+            )
+        if not _valid_slug(new_slug):
+            raise bad_request(_SLUG_RE_MSG)
+        if new_slug.lower() in RESERVED_TENANT_SLUGS or new_slug.lower() in RESERVED_ROUTE_SLUGS:
+            raise forbidden("That tenant slug is reserved")
+    if current_slug.lower() in RESERVED_TENANT_SLUGS and (
         (new_slug is not None and new_slug != current_slug) or fields.get("is_active") is False
     ):
         raise forbidden("A reserved tenant cannot be renamed or deactivated")

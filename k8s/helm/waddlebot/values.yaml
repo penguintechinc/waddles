@@ -2625,6 +2625,59 @@ config:
   # ENV baselines for waddles.community.guild_pairing / waddles.webui.role_sync_mapping (default OFF).
   guildPairingEnabled: false
   webuiRoleSyncMappingEnabled: false
+  # ENV baseline for waddles.webui.super_tenants -> FLAG_WADDLES_WEBUI_SUPER_TENANTS (super-admin
+  # Tenants page). Baselined ON so tenant management is reachable; PostHog still overrides.
+  webuiSuperTenantsEnabled: true
+  # ENV baseline for waddles.dsar-inbox -> FLAG_WADDLES_DSAR_INBOX (DSAR request inbox rollout).
+  # Baselined ON; PostHog still overrides. Gates only the NEW inbox, never the manual DSAR actions.
+  dsarInboxEnabled: true
+  # ENV baseline for waddles.community-tier-allocation -> FLAG_WADDLES_COMMUNITY_TIER_ALLOCATION
+  # (tenant-admin community tier allocation API/UI; default OFF, PostHog overrides). Never gates
+  # the superadmin tier override.
+  communityTierAllocationEnabled: false
+  # DSAR inbox (non-secret): unverified public requests expire after this many hours; contact PII
+  # is blanked this many days after a request closes; captcha provider turnstile|recaptcha|altcha
+  # ('' = public form returns 503, fail closed); public verification page base URL.
+  dsarUnverifiedExpiryHours: 72
+  dsarContactRetentionDays: 30
+  dsarCaptchaProvider: ""
+  dsarCaptchaSiteKey: ""
+  dsarCaptchaHostnames: ""   # comma list; blank => host of the verify URL
+  dsarRecaptchaVersion: "v3"  # v3 enforces score + action; v2 has neither
+  # Public verification page the emailed link points at (`<base>?tenant=<slug>#token=<token>`).
+  # Blank => `<webui.publicUrl>/privacy-request/verify`; both blank => the link cannot be built.
+  dsarVerifyUrlBase: ""
+  # DSAR verification email over SMTP (hub-api; docs/dsar-inbox.md Operations). host blank = NO
+  # sender: public-form requests stay verification_pending and expire (fails loud, never faked).
+  # EXTERNAL secret, operator-supplied -- never auto-generated and never a placeholder here:
+  #   kubectl -n <ns> create secret generic waddlebot-dsar-smtp \
+  #     --from-literal=DSAR_SMTP_USERNAME=<user> --from-literal=DSAR_SMTP_PASSWORD=<password>
+  # (keys DSAR_SMTP_USERNAME / DSAR_SMTP_PASSWORD; omit the Secret for an unauthenticated relay).
+  # Certificate verification is always ON; tls: starttls (default, required, no downgrade) | tls
+  # (implicit) | none (dev only: also needs allowPlaintext: true, and never with credentials).
+  dsarSmtp:
+    host: ""
+    port: ""                 # blank => 587 (starttls) / 465 (tls) / 25 (none)
+    tls: "starttls"
+    allowPlaintext: false    # explicit dev-only switch for tls: none
+    tlsCaFile: ""            # extra trust anchor path (private relay CA mounted in the pod)
+    fromAddress: ""          # required when host is set
+    fromName: ""             # blank => "Privacy Requests"
+    replyTo: ""
+    existingSecret: "waddlebot-dsar-smtp"   # a Secret NAME (reference), not a credential
+    connectTimeoutSeconds: 5
+    sendTimeoutSeconds: 10
+    maxRetries: 2            # transient (4xx / connection) only; 5xx is never retried
+    backoffSeconds: 0.5      # exponential with jitter, capped at 8 s
+    totalTimeoutSeconds: 30
+  # DSAR verification-mail outbox worker (hub_api/services/dsar_outbox.py). The public routes only
+  # enqueue; the worker sends, so SMTP latency/outages never reach the request path.
+  dsarOutbox:
+    maxAttempts: 5           # worker attempts (each runs the SMTP retries above) before a terminal failure
+    backoffSeconds: 30       # first worker-level retry delay; doubles with jitter, capped at 1 h
+    leaseSeconds: 180        # a claimed row is re-claimable after this (crash recovery); > totalTimeoutSeconds
+    pollSeconds: 5           # worker poll interval (an enqueue also wakes the local worker)
+    retentionDays: 7         # terminal outbox rows are pruned after this
 
 # Pod Security Context
 # Graceful shutdown (templates/_resilience.tpl), applied to EVERY Deployment: a preStop sleep
@@ -3327,6 +3380,14 @@ autoProvisionedKeys:
   oneTimeSecret:
     secretName: "waddlebot-ots-encryption-key"
     secretKey: "ONE_TIME_SECRET_ENCRYPTION_KEY"
+    externalSecret: false
+  # DSAR inbox -- keyed-digest key (64 hex), hub-api env DSAR_FINGERPRINT_KEY: used ONLY to bucket
+  # requester emails for rate limiting/duplicate detection without storing or keying on the raw
+  # address. Requester contact data itself is sealed by the existing CREDENTIAL_ENCRYPTION_KEY vault.
+  # Generated once; own key domain, never shared.
+  dsarFingerprint:
+    secretName: "waddlebot-dsar-fingerprint-key"
+    secretKey: "DSAR_FINGERPRINT_KEY"
     externalSecret: false
 
 # Enterprise external KMS / BYOK (customer-managed keys) -- the Enterprise-tier upsell ON TOP OF

@@ -143,3 +143,6 @@ opentelemetry-instrumentation-requests==0.66b2
 opentelemetry-exporter-otlp-proto-grpc==1.45.2
 protobuf>=5.29.6,<7.0
 prometheus-client>=0.19.0
+# DSAR verification mail (services/dsar_email_sender.py): maintained async SMTP client
+# (MIT, cole/aiosmtplib, zero runtime deps). Replaces the unimplemented EmailTransport stub path.
+aiosmtplib==5.1.3
