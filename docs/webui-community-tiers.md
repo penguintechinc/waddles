@@ -14,12 +14,13 @@ Frontend for the backend contract in `docs/community-tier-allocation.md`. Commun
 - Pool: one meter, "Premium communities: used of limit", available, over-limit warning in text and color, `unlimited` for -1 ("Unlimited (operator deployment)" when `source` is `bypass_default`), `not licensed` for null, a source note, a Stale badge with the observed time. Allocations are read with `?tier=2`; the PUT sends tier 1 (release) or 2 only.
 - Communities come from `tenantApi.getCommunities`; only the `publicId` UUID is sent to allocation calls. Current tier is read from `communities/tier-allocations` (no row = Free).
 - Release or downgrade asks for confirmation first ("this community loses Premium features").
+- A not-licensed pool (`limit` null, a Free tenant) shows the panel "Premium communities require a Professional or Enterprise license" with an upgrade hint and disables the Premium choice (Free communities' select is disabled; a grandfathered Premium community stays releasable to Free). A 402 `TENANT_TIER_REQUIRED` from the PUT maps to the same message.
 - 402 `TEAM_POOL_EXHAUSTED` shows the upgrade panel ("Your Premium pool is full (N of N). Release a slot or upgrade your license."), not an error toast. 503 `TEAM_POOL_UNAVAILABLE` says team licensing isn't available from the license server yet (selects disabled, no fake data). 404 (flag `waddles.community-tier-allocation` OFF or not this tenant's community) shows a "not enabled" state. 403, 409 and other errors have their own messages. Results are announced in an `aria-live` region.
 
 ## Super admin dialog
 
 - Changing the tier requires a `reasonCode` (`support_request`, `sales_agreement`, `trial_extension`, `billing_correction`, `partner_program`, `data_correction`, `other`). The request carries `licenseTier` + `reasonCode` and never `isPremium`.
-- Helper text: operator override is not blocked by the tenant's pool, counts against it and is audited.
+- Helper text: operator override is not blocked by the tenant's pool, counts against it and is audited. A 402 `TENANT_TIER_REQUIRED` (Free tenant) is shown in the dialog (`role="alert"`) with the hint "On operator deployments set the tenant's pool first (License pools)."
 - `seatLimit`: omitted when unchanged, explicit `null` when a set value is cleared (unlimited), integer >= 1 otherwise. A cleared description is sent as `null`.
 - Backend errors show inline (`role="alert"`); a 403 on a tier change falls back to "requires global admin access (users:admin)".
 

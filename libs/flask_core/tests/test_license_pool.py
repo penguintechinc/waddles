@@ -230,10 +230,10 @@ async def test_4xx_not_retried(server: Server) -> None:
     assert server.calls == 1
 
 
-async def test_no_tenant_license_raises(server: Server) -> None:
+async def test_no_tenant_license_is_not_licensed_not_an_outage(server: Server) -> None:
     p = make(server.url, MemoryStore(), Clock(), key=None)  # type: ignore[arg-type]
-    with pytest.raises(PoolUnavailable, match="no_tenant_license"):
-        await p.get_pool(1, PRO)
+    info = await p.get_pool(1, PRO)
+    assert info.limit is None and info.stale is False
     assert server.calls == 0
 
 
@@ -364,8 +364,8 @@ async def test_grace_never_applies_to_403_or_missing_key_and_evicts(
     server.script = [(200, GOOD)]
     await make(server.url, store2, clock).get_pool(1, PRO)
     clock.advance(3600)
-    with pytest.raises(PoolUnavailable, match="no_tenant_license"):
-        await make(server.url, store2, clock, key=None).get_pool(1, PRO)  # type: ignore[arg-type]
+    info = await make(server.url, store2, clock, key=None).get_pool(1, PRO)  # type: ignore[arg-type]
+    assert info.limit is None  # key removed: Free tenant, cached pool did not survive
     assert (1, PRO) not in store2.rows
 
 

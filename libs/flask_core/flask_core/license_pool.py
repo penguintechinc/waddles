@@ -11,6 +11,8 @@ Premium pool" and fails LOUD when it cannot know:
 * Bypass domains (hardcoded, never env/flag driven): NO license-server call;
   only the global admin's ``operator_set`` row in the store is read.
 
+A tenant with NO license key is a Free tenant: ``PoolInfo(limit=None)`` ("not licensed"), not an
+error. Real failures (outage, bad response, no team axis, unreadable key) raise PoolUnavailable.
 Errors are failures: no silent demotion, no default number. ``penguin_licensing``
 is deliberately NOT used because it returns the free tier on any error, which
 would mask an outage as "pool = 0".
@@ -251,7 +253,11 @@ class LicenseServerPoolProvider:
         self._inflight: dict[int, asyncio.Task[dict[int, int | None]]] = {}
 
     async def get_pool(self, tenant_id: int, tier_code: int) -> PoolInfo:
-        """Return the tenant's pool for `tier_code` or raise PoolUnavailable."""
+        """Return the tenant's pool for `tier_code` or raise PoolUnavailable.
+
+        A tenant with no license key resolves to ``limit=None`` (not licensed), not an error;
+        PoolUnavailable is reserved for real failures (outage, bad response, no team axis).
+        """
         if tier_code not in TIER_RESPONSE_KEYS:
             raise ValueError(f"tier_code must be one of {sorted(TIER_RESPONSE_KEYS)}")
         now = self._clock()
@@ -277,6 +283,16 @@ class LicenseServerPoolProvider:
         try:
             limits = await self._refresh_single_flight(tenant_id)
         except _Refused as exc:
+            if exc.outcome == "no_tenant_license":
+                # A tenant with no license key is a Free tenant: a definitive "not licensed"
+                # answer (limit None), deliberately NOT an outage. Any cached pool must not
+                # outlive the key's removal.
+                logger.info("license_pool.not_licensed tenant_id=%s", tenant_id)
+                if row is not None:
+                    await self._evict(tenant_id)
+                return PoolInfo(
+                    limit=None, observed_at=now, stale=False, source="license_server"
+                )
             logger.error(
                 "license_pool.%s type=%s reason=%s",
                 "team_axis_absent"

@@ -3,7 +3,7 @@ import { useParams } from 'react-router-dom';
 import { tenantApi } from '../../services/api';
 import { tenantCommunityTiersApi } from '../../services/tenantCommunityTiersApi';
 import { TIER_BADGE_CLASS, TIER_LABEL, TIER_OPTIONS, normalizeTier, tierLabel } from '../../services/communityTierConstants';
-import { classifyTierError } from '../../services/communityTierErrors';
+import { classifyTierError, TENANT_TIER_REQUIRED_MESSAGE } from '../../services/communityTierErrors';
 import { ConfirmDialog, PoolMeter } from '../../components/tenant/CommunityTierParts';
 
 const PAGE_SIZE = 50;
@@ -103,7 +103,9 @@ function TenantCommunityTiers() {
       });
     } catch (err) {
       const c = classifyTierError(err);
-      if (c.kind === 'exhausted') {
+      if (c.kind === 'tier_required') {
+        setNotice({ type: 'error', text: TENANT_TIER_REQUIRED_MESSAGE });
+      } else if (c.kind === 'exhausted') {
         const d = c.details || {};
         setExhausted({
           tier: 2,
@@ -141,6 +143,8 @@ function TenantCommunityTiers() {
   };
 
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+  // A Free tenant (pool limit null = not licensed) can hold no Premium communities.
+  const notLicensed = !!pool && (pool.tiers || []).some((row) => row.tier === 2 && row.limit === null);
 
   let body;
   if (loading) {
@@ -174,6 +178,16 @@ function TenantCommunityTiers() {
         {poolUnavailable && (
           <div role="alert" className="card p-4 border border-amber-500/40 text-amber-200" data-testid="pool-unavailable">
             Team licensing isn&apos;t available from the license server yet; contact your platform administrator.
+          </div>
+        )}
+
+        {notLicensed && (
+          <div className="card p-4 border border-gold-500/40 text-gold-200" role="status" data-testid="tenant-tier-required">
+            <p className="font-semibold">{TENANT_TIER_REQUIRED_MESSAGE}</p>
+            <p className="text-sm">
+              Your tenant is on the Free plan. Upgrade to Professional or Enterprise to allocate Premium to communities;
+              communities already on Premium keep it and can be released to Free.
+            </p>
           </div>
         )}
 
@@ -246,11 +260,11 @@ function TenantCommunityTiers() {
                         id={selectId}
                         className="input w-40"
                         value={tier}
-                        disabled={saving || poolUnavailable || !c.publicId}
+                        disabled={saving || poolUnavailable || !c.publicId || (notLicensed && tier === 1)}
                         onChange={(e) => onSelect(c, e.target.value)}
                       >
                         {TIER_OPTIONS.map((t) => (
-                          <option key={t} value={t}>
+                          <option key={t} value={t} disabled={notLicensed && t === 2 && tier !== 2}>
                             {TIER_LABEL[t]}
                           </option>
                         ))}

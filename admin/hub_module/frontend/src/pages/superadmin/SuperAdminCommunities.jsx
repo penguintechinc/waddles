@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { Link } from 'react-router-dom';
 import { superAdminApi } from '../../services/api';
 import { TIER_BADGE_CLASS, TIER_LABEL, TIER_OPTIONS, REASON_CODES, REASON_LABEL, normalizeTier } from '../../services/communityTierConstants';
+import { isTenantTierRequired, TENANT_TIER_REQUIRED_MESSAGE, OPERATOR_POOL_HINT } from '../../services/communityTierErrors';
 import { getPlatformIcon, getPlatformColor, getPlatformLabel, getAllPlatformOptions } from '../../utils/platformConfig';
 
 function SuperAdminCommunities() {
@@ -59,6 +60,9 @@ function SuperAdminCommunities() {
     } catch (err) {
       const status = err.response?.status;
       const message = err.response?.data?.error?.message;
+      if (isTenantTierRequired(err)) {
+        return `${message || TENANT_TIER_REQUIRED_MESSAGE} ${OPERATOR_POOL_HINT}`;
+      }
       if (status === 403 && data.licenseTier !== undefined) {
         return message || "Changing a community's tier requires global admin access (users:admin).";
       }

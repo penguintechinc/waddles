@@ -8,9 +8,10 @@ A community is **Free** (code 1) or **Premium** (code 2). There is exactly ONE p
 | Premium | Allocated by a tenant admin from the tenant's single team-axis pool (`tenant_license_pools`, tier 2). |
 | Effective tier | `premium` iff the community has an active allocation (any source: tenant admin, operator override, backfill), else `free`; any error fails closed to Free. The tenant-level license tier does NOT uplift a community: the pool is the entitlement. |
 | Overage | A NEW Premium allocation beyond the pool is blocked (`PoolExhausted`, 402 + upgrade path). An existing allocation is NEVER stripped; a smaller pool or tenant downgrade only blocks new allocations. |
-| Operator override | Super admins may set Free or Premium. Never blocked, still counted (reported as `overage`), audited as `license.community_tier_overridden`. |
+| Operator override | Super admins may set Free or Premium. Never blocked by pool EXHAUSTION, still counted (reported as `overage`), audited as `license.community_tier_overridden`. The tenant must still be licensed (see Free tenants). |
+| Free tenants | Only Professional and Enterprise tenants can have Premium communities. A tenant with NO license key, or whose pool resolves to "not licensed" (`limit` null), is a Free tenant: allocation by the tenant admin AND by the operator override is refused with `402 TENANT_TIER_REQUIRED` (`TenantNotLicensed`, audited as `license.community_tier_allocation_blocked`). On bypass domains the operator makes a tenant eligible by setting its pool first (`PUT /superadmin/tenants/<id>/license-pools/2`); the default tenant there stays unlimited. Existing Premium communities are grandfathered (never stripped, effective tier unchanged); releasing to Free always works. |
 | Staleness | Reporting only. Automatic slot reclamation is NOT active (see Staleness below): every unreleased allocation counts against the pool. |
-| Pool unknown | `PoolUnavailable` (503) when a NEW slot would be consumed. Never a silent zero. An idempotent re-PUT of the tier the community already holds succeeds without the pool (no slot consumed); releases (Free) never need it. |
+| Pool unknown | `PoolUnavailable` (503) when a NEW slot would be consumed, for the tenant admin AND the operator override (a genuine failure: license-server outage beyond grace, no team axis, unreadable stored key, store error). Never a silent zero, never confused with "no license key" (that is a Free tenant, 402). An idempotent re-PUT of the tier the community already holds succeeds without the pool (no slot consumed); releases (Free) never need it. |
 
 ## Staleness
 
@@ -39,7 +40,7 @@ allocators for the last slot serialize and exactly one wins.
 - `pool_usage(async_dal, dal, tenant_id, *, pool)` one entry (`TIER_CODE_PREMIUM`): used / limit / available / overage / stale_excluded (stale rows are included in `used`)
 - `touch_active(async_dal, dal, community_id)` rate-limited (5 min in-process, 1 h in DB)
 - Constants: `TIER_CODE_FREE = 1`, `TIER_CODE_PREMIUM = 2`, `TIER_NAMES`, `POOLED_TIER_CODES = (2,)`.
-- `PoolInfo`, `PoolProvider` (Protocol), `PoolStore`, `StorePoolProvider`, `PoolExhausted`, `PoolUnavailable`
+- `PoolInfo`, `PoolProvider` (Protocol), `PoolStore`, `StorePoolProvider`, `PoolExhausted`, `PoolUnavailable`, `TenantNotLicensed`
 
 ## Telemetry and audit
 
@@ -77,11 +78,12 @@ Scopes: `tenant:admin` AND `tenant.community_tier:read` (GETs) / `tenant.communi
 
 | Route | Purpose |
 |-------|---------|
-| `GET license/pool` | `{tiers:[{tier,limit,used,available,overage}], observedAt, stale, source}`; `tiers` has exactly ONE element (tier 2); `limit` null = not licensed, -1 = unlimited |
+| `GET license/pool` | `{tiers:[{tier,limit,used,available,overage}], observedAt, stale, source}`; `tiers` has exactly ONE element (tier 2); `limit` null = not licensed (a Free tenant: 200, never 503), -1 = unlimited |
 | `GET communities/tier-allocations?tier=&source=&limit=&offset=` | `{allocations:[{communityId,tier,source,allocatedAt,stale}], meta:{total,limit,offset}}`; active Premium rows only; `tier` accepts 2 only; invalid filter = 400 |
 | `PUT communities/<community_uuid>/tier` body `{tier}` | 1 = Free (releases), 2 = Premium; anything else = 400 `INVALID_TIER` -> `{communityId,tier,previousTier,changed,used,limit,overage}` |
 
-Errors: `402 TEAM_POOL_EXHAUSTED` (`error.details`: `requiredTier`, `limit`, `used`, `upgrade: true` -- no pricing/upgrade URL is
+Errors: `402 TENANT_TIER_REQUIRED` ("Premium communities require a Professional or Enterprise license"; `error.details`:
+`requiredTenantTier: "professional"`, `upgrade: true`; same envelope from the superadmin override), `402 TEAM_POOL_EXHAUSTED` (`error.details`: `requiredTier`, `limit`, `used`, `upgrade: true` -- no pricing/upgrade URL is
 configured in hub-api yet, so none is sent), `503 TEAM_POOL_UNAVAILABLE` (pool unknown, fail loud), `404` unknown / other-tenant /
 malformed UUID or flag OFF, `400` invalid `tier` or query value.
 

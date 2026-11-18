@@ -55,7 +55,7 @@ provider = LicenseServerPoolProvider(
 ```
 
 `get_tenant_license_key` returns None when no key is set or the row cannot be opened (logs the
-exception type only), so the provider raises `PoolUnavailable('no_tenant_license')` (fail loud).
+exception type only), so the pool provider treats an absent key as a Free tenant (`PoolInfo(limit=None)`, 402 `TENANT_TIER_REQUIRED` on a Premium allocation). Its resolver detects a stored-but-unreadable key (`get_license_status().configured`) and fails loud with `PoolUnavailable` (503) instead of reading it as Free.
 
 ## Not done yet (rest of #901)
 
@@ -67,5 +67,5 @@ and the license server's team axis in `/api/v2/entitlements` (separate repo).
 
 - `seal_version` must be `>= 1` (CHECK in 0127 and enforced on read): 0 selects the legacy no-AAD open path, never valid here. The 0127 downgrade refuses while keys exist unless `ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1`.
 - Setting/replacing/clearing a key evicts the tenant's cached license-server pool rows (see `license-pool.md`). The key routes are deliberately not feature-flag gated.
-- Only vault open failures read as "no key" (loud `PoolUnavailable('no_tenant_license')`); database errors propagate and count as transient for the pool provider.
+- Vault open failures return None from `get_tenant_license_key`, but the pool resolver turns "key stored yet unreadable" into a loud `PoolUnavailable`; only a genuinely absent key means Free. Database errors propagate and count as transient for the pool provider.
 - The audit write after a key change is retried once, then fails loudly (ERROR + `waddles_audit_write_failed_total`).
