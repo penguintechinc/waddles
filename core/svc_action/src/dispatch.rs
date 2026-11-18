@@ -776,8 +776,14 @@ pub trait AuditSink: Send + Sync {
         community_id: Option<i32>,
         app_id: &'a str,
         record: &'a DispatchRecord,
-        envelope_ts: Option<chrono::DateTime<chrono::FixedOffset>>,
+        envelope_ts: Option<time::OffsetDateTime>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
+/// Parses an envelope `ts` (RFC 3339, any UTC offset) for the audit row's `envelope_ts`
+/// column; `None` on a malformed string, exactly as the former chrono parse behaved.
+pub(crate) fn parse_envelope_ts(ts: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).ok()
 }
 
 /// `(tenants.id, communities.id)` -- the pair [`TenantResolver::resolve`]
@@ -1300,7 +1306,7 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
         .resolve(&d.env.tenant, d.env.community.as_deref())
         .await
         .unwrap_or((0, None));
-    let envelope_ts = chrono::DateTime::parse_from_rfc3339(&d.env.ts).ok();
+    let envelope_ts = parse_envelope_ts(&d.env.ts);
     deps.audit
         .record(tenant_fk, community_fk, &deps.app_id, &record, envelope_ts)
         .await;
@@ -1668,6 +1674,51 @@ mod tests {
     use super::*;
     use crate::hop::BoundaryReason;
 
+    // Golden parses: the instants/offsets chrono's `parse_from_rfc3339` produced for the same
+    // strings (envelope `ts` is emitted as `...SS.mmmZ`; other hops may send offsets/micros).
+    mod parse_envelope_ts_golden {
+        use super::super::parse_envelope_ts;
+
+        #[test]
+        fn utc_millis_z() {
+            let t = parse_envelope_ts("2023-11-14T22:13:20.123Z").unwrap();
+            assert_eq!(t.unix_timestamp_nanos(), 1_700_000_000_123_000_000);
+            assert!(t.offset().is_utc());
+        }
+
+        #[test]
+        fn preserves_offset_and_instant() {
+            let t = parse_envelope_ts("2023-11-15T03:43:20.123+05:30").unwrap();
+            assert_eq!(t.unix_timestamp_nanos(), 1_700_000_000_123_000_000);
+            assert_eq!(t.offset().whole_seconds(), 5 * 3600 + 30 * 60);
+        }
+
+        #[test]
+        fn sub_millisecond_precision_is_kept() {
+            let t = parse_envelope_ts("2023-11-14T22:13:20.123456789Z").unwrap();
+            assert_eq!(t.unix_timestamp_nanos(), 1_700_000_000_123_456_789);
+        }
+
+        #[test]
+        fn whole_seconds_and_negative_offset() {
+            let t = parse_envelope_ts("2023-11-14T14:13:20-08:00").unwrap();
+            assert_eq!(t.unix_timestamp(), 1_700_000_000);
+        }
+
+        #[test]
+        fn malformed_is_none() {
+            for bad in [
+                "",
+                "not-a-ts",
+                "2023-11-14",
+                "2023-13-14T00:00:00Z",
+                "2023-11-14T22:13:20",
+            ] {
+                assert!(parse_envelope_ts(bad).is_none(), "{bad}");
+            }
+        }
+    }
+
     // regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
     // emptied svc-action dispatch digest (alpha 2026-10-03)
     mod digest_source_usable_digest {
@@ -1933,7 +1984,7 @@ mod tests {
             _community_id: Option<i32>,
             _app_id: &'a str,
             record: &'a DispatchRecord,
-            _envelope_ts: Option<chrono::DateTime<chrono::FixedOffset>>,
+            _envelope_ts: Option<time::OffsetDateTime>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
             let record = record.clone();
             Box::pin(async move {

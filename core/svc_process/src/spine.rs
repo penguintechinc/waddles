@@ -1821,7 +1821,7 @@ async fn handle_delivered_inner<S: SpineOps>(
 
     let scope = Scope::new(d.env.tenant.clone(), d.env.community.clone());
     let dest_stream = scope.action_stream(&dest_app_id);
-    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let ts = crate::timefmt::now_rfc3339_millis();
     // Command-latency: carry the inbound trace onto the action envelope with this stage's stamps
     // added -- the publish time (entry id), consume/hand-off instants and the REGISTERED command the
     // message invokes (read in place from the decrypted text; the text itself is never kept). The

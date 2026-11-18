@@ -613,12 +613,12 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 name = "bundle-active-set"
 version = "0.1.0"
 dependencies = [
- "chrono",
  "futures-util",
  "sea-orm",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "xxhash-rust",
 ]
@@ -3482,10 +3482,10 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "546040c653a705e60ec65ecd3191a809603734bebbc225775916dea9ae409b31"
 dependencies = [
- "chrono",
  "ordered-float",
  "sea-query-derive",
  "serde_json",
+ "time",
  "uuid",
 ]
 
@@ -3832,7 +3832,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cfg-if",
- "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -3853,6 +3852,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -3908,7 +3908,6 @@ dependencies = [
  "bitflags",
  "byteorder",
  "bytes",
- "chrono",
  "crc",
  "digest 0.11.3",
  "dotenvy",
@@ -3923,6 +3922,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
 ]
@@ -3937,7 +3937,6 @@ dependencies = [
  "base64 0.22.1",
  "bitflags",
  "byteorder",
- "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -3959,6 +3958,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -3971,7 +3971,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi",
- "chrono",
  "flume",
  "form_urlencoded",
  "futures-channel",
@@ -3985,6 +3984,7 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "url",
  "uuid",
@@ -4042,7 +4042,6 @@ dependencies = [
  "bundle-host-kv",
  "bundle-host-surface",
  "bundle-tool-call",
- "chrono",
  "circuit-breaker",
  "clap",
  "command-latency",
@@ -4072,6 +4071,7 @@ dependencies = [
  "socket2",
  "subtle",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-rustls",
  "tokio-stream",

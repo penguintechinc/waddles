@@ -29,7 +29,7 @@ tracing = "=0.1.44"
 # two-exact-versions conflict in the shared dependency graph, same
 # precedent core/service_auth/Cargo.toml's own thiserror comment documents.
 async-trait = "=0.1.89"
-chrono = { version = "=0.4.45", features = ["serde"] }
+time = "=0.3.55"
 # CSPRNG for the opaque VIEW token (`rand::rngs::OsRng`, OS entropy source)
 # -- not hand-rolled, matches rules/backend-rust.md "vetted crate, not
 # hand-rolled". sha2 hashes the token before it is ever persisted (view

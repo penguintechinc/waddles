@@ -1777,7 +1777,7 @@ mod tests {
             id: 1,
             safe_seq,
             min_retained_seq,
-            computed_at: chrono::Utc::now(),
+            computed_at: time::OffsetDateTime::now_utc(),
         }
     }
 
@@ -1793,7 +1793,7 @@ mod tests {
             entity: "app_active_versions".to_string(),
             entity_id: "waddles.a".to_string(),
             op: "upsert".to_string(),
-            changed_at: chrono::Utc::now(),
+            changed_at: time::OffsetDateTime::now_utc(),
             writer_xid: None,
         }
     }
