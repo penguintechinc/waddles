@@ -211,7 +211,7 @@ class ExtendBody:
 class ActBody:
     """`action` must match the request type (1 export, 2 erase, 3 do_not_sell); erase needs confirm.
 
-    `overrideReason` is required to erase on a PUBLIC-form request whose requester's verified email
+    `overrideReason` is required to act (export/erase/do-not-sell) on a PUBLIC-form request whose requester's verified email
     does not match the linked account's email; it is recorded in the event trail.
     """
 
@@ -296,12 +296,20 @@ class VerifyBody:
 
 @dataclass(slots=True, frozen=True)
 class VerifyPreviewResponse:
-    """Non-consuming confirm-page data: what the link would verify. No PII, no tenant internals."""
+    """Non-consuming confirm-page data: EXACTLY what `POST .../verify` will commit.
+
+    `regime`/`message` are the content the request holds once this token is confirmed (the draft
+    bound to this token when there is one, else the committed content); `message` is plain text the
+    client MUST render escaped; `contentChanged` is true when that differs from what is stored now.
+    No tenant internals, no email.
+    """
 
     success: bool
     valid: bool
     requestType: int
     regime: int
+    message: str | None
+    contentChanged: bool
     expiresAt: str | None
 
 
@@ -756,15 +764,13 @@ async def act_on_dsar_request(data: ActBody, tenant_slug: str, request_id: str) 
         action = admin_svc.DsarAction(expected)
         subject_id = int(row.subject_user_id)
         override_detail: dict[str, Any] = {}
-        if (
-            action is admin_svc.DsarAction.ERASE
-            and svc.Source(row.source) is svc.Source.PUBLIC_FORM
-            and not await svc.subject_email_matches(
-                async_dal, dal, subject_user_id=subject_id, row=row
-            )
+        if svc.Source(row.source) is svc.Source.PUBLIC_FORM and not await svc.subject_email_matches(
+            async_dal, dal, subject_user_id=subject_id, row=row
         ):
-            # An unauthenticated requester only proved control of THEIR mailbox: erasing a linked
-            # account needs that mailbox to be the account's, or a recorded admin override.
+            # An unauthenticated requester only proved control of THEIR mailbox: acting on a linked
+            # account (export hands that account's data to the admin who relays it to the
+            # requester; erase/do-not-sell alter it) needs that mailbox to be the account's, or a
+            # recorded admin override. Applies to EVERY act action.
             reason = svc.clean_text(data.overrideReason, "overrideReason", svc.REASON_MAX)
             if not reason:
                 raise ApiError(
@@ -1101,7 +1107,11 @@ async def _intake_public(
 
         def work() -> bool:
             rotated = svc.rotate_pending_public_sync(
-                dal, tenant_id=tenant_id, email=email, request_type=req_type
+                dal,
+                tenant_id=tenant_id,
+                email=email,
+                request_type=req_type,
+                replace_content=(message, regime),
             )
             fresh = rotated is None
             if rotated is None:
@@ -1234,17 +1244,20 @@ def _verification_invalid() -> tuple[Any, int]:
 
 
 async def _preview(token: str) -> tuple[Any, int]:
-    """Non-consuming: the type/regime/expiry the token would verify, or the uniform 400."""
+    """Non-consuming: the type/regime/message/expiry the token would verify, or the uniform 400."""
     async_dal, dal = _dal()
-    row = await svc.preview_verification_token(async_dal, dal, token)
-    if row is None:
+    previewed = await svc.preview_verification_token(async_dal, dal, token)
+    if previewed is None:
         return _verification_invalid()
+    row, outcome = previewed
     return jsonify_dto(
         VerifyPreviewResponse(
             success=True,
             valid=True,
             requestType=int(row.request_type),
-            regime=int(row.regime),
+            regime=outcome.regime,
+            message=outcome.message,
+            contentChanged=outcome.content_changed,
             expiresAt=_iso(row.verification_expires_at),
         )
     )

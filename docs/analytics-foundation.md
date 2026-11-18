@@ -100,6 +100,8 @@ Purge by `retention_days`: delete rows where the row's time column + `retention_
 
 - Art. 17: `member_daily`, `member_sessions`, `member_signals_daily` are DELETE rules keyed on
   the user UUID in `services/erasure_registry.py` (schema-qualified `analytics_fp.*` names).
+- Erasure (`erasure_executor.record_erasure_exclusions`, same transaction) inserts `(user_uuid, reason_code=4 erased)` into `data_use_exclusions` for every in-scope user token, `ON CONFLICT DO NOTHING` on the `(user_uuid, reason_code)` primary key. Idempotent; uuid token only.
+- **`svc_analytics`' writer MUST check `data_use_exclusions` before every layer A upsert** (it has SELECT via `analytics_writer`) and drop the event for any excluded user token, so a late-arriving event can never re-create rows for an erased or objecting subject.
 - `data_use_exclusions` is retained on erasure (suppression list, pseudonymous token only) so an
   erased/objecting user is never re-included.
 - Do-not-sell is a global per-user preference (cookie_consent); GDPR objection/erasure must

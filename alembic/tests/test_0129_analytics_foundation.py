@@ -28,7 +28,7 @@ requires_docker = pytest.mark.skipif(
 _ROOT = Path(__file__).resolve().parents[2]
 _PATH = _ROOT / "alembic" / "versions" / "0129_analytics_foundation.py"
 _REV = "0129_analytics_foundation"
-_PREV = "0127_tenant_license_key"
+_PREV = "0128_dsar_pending_draft"
 
 FP_TABLES = (
     "community_hourly",

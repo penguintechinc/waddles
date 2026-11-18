@@ -1,84 +1,23 @@
-import { useState, useEffect } from 'react';
-import { analyticsApi } from '../../services/api';
 import PlatformSummaryCards from '../../components/analytics/PlatformSummaryCards';
 import ReputationTierChart from '../../components/analytics/ReputationTierChart';
 import PlatformGrowthChart from '../../components/analytics/PlatformGrowthChart';
 import ActivitySegmentChart from '../../components/analytics/ActivitySegmentChart';
 import CommunityHealthTable from '../../components/analytics/CommunityHealthTable';
+import { AnalyticsPanel } from '../../components/analytics/AnalyticsStates';
+import { allZero, usePlatformAnalytics } from '../../components/analytics/usePlatformAnalytics';
 
+/**
+ * Super-admin platform analytics. Each widget loads and fails independently (no page-level
+ * error banner); empty data renders "No data yet" and an undeployed backend renders a neutral note.
+ */
 function SuperAdminAnalytics() {
-  const [overview, setOverview] = useState(null);
-  const [repData, setRepData] = useState(null);
-  const [growthData, setGrowthData] = useState(null);
-  const [activityData, setActivityData] = useState(null);
-  const [healthData, setHealthData] = useState(null);
-  const [growthPeriod, setGrowthPeriod] = useState('90d');
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
-
-  useEffect(() => {
-    loadAll();
-  }, []);
-
-  useEffect(() => {
-    loadGrowth();
-  }, [growthPeriod]);
-
-  const loadAll = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-
-      const results = await Promise.allSettled([
-        analyticsApi.getPlatformOverview(),
-        analyticsApi.getPlatformReputation(),
-        analyticsApi.getPlatformGrowth(growthPeriod),
-        analyticsApi.getPlatformActivity(),
-        analyticsApi.getCommunityHealth(),
-      ]);
-
-      const [overviewRes, repRes, growthRes, activityRes, healthRes] = results;
-      if (overviewRes.status === 'fulfilled') setOverview(overviewRes.value.data);
-      if (repRes.status === 'fulfilled') setRepData(repRes.value.data);
-      if (growthRes.status === 'fulfilled') setGrowthData(growthRes.value.data);
-      if (activityRes.status === 'fulfilled') setActivityData(activityRes.value.data);
-      if (healthRes.status === 'fulfilled') setHealthData(healthRes.value.data);
-
-      // Never fail silently: surface the first rejected platform-analytics call.
-      const failed = results.find((r) => r.status === 'rejected');
-      if (failed && failed.status === 'rejected') {
-        setError(failed.reason?.response?.data?.error?.message || 'Failed to load analytics');
-      }
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  const loadGrowth = async () => {
-    if (loading) return;
-    try {
-      const res = await analyticsApi.getPlatformGrowth(growthPeriod);
-      setGrowthData(res.data);
-    } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to load growth analytics');
-    }
-  };
-
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gold-400"></div>
-      </div>
-    );
-  }
-
-  if (error) {
-    return (
-      <div className="p-4 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300">
-        {error}
-      </div>
-    );
-  }
+  const { widgets, period: growthPeriod, changePeriod, retry } = usePlatformAnalytics('90d');
+  const { overview: ov, reputation: rep, growth: gr, activity: act, health: hl } = widgets;
+  const overview = ov.data;
+  const repData = rep.data;
+  const growthData = gr.data;
+  const activityData = act.data;
+  const healthData = hl.data;
 
   // Normalize overview — handle both new analyticsApi shape and legacy superAdminApi shape
   const summaryData = overview
@@ -93,10 +32,11 @@ function SuperAdminAnalytics() {
   // Normalize reputation data — new shape uses buckets, legacy uses reputationTiers
   const repNormalized = repData
     ? {
-        buckets: repData.buckets || repData.tiers || (repData.reputationTiers || []).map((t) => ({
-          label: t.label,
-          count: t.count,
-        })),
+        buckets: repData.buckets ||
+          repData.tiers ||
+          (repData.reputationTiers || repData.histogram?.map((h) => ({ label: h.range, count: h.count })) || []).map(
+            (t) => ({ label: t.label, count: t.count }),
+          ),
         stats: repData.stats || repData.statistics || {},
       }
     : null;
@@ -146,15 +86,47 @@ function SuperAdminAnalytics() {
   const maxPlatformCount = Math.max(...platformBreakdown.map((p) => p.count), 1);
   const maxTypeCount = Math.max(...communityTypes.map((t) => t.count), 1);
 
+  const summaryEmpty = !summaryData || allZero(Object.values(summaryData));
+  const repEmpty = !repNormalized || (repNormalized.buckets.length === 0 && allZero([repNormalized.stats.total]));
+  const activityEmpty = !activityNormalized || allZero(Object.values(activityNormalized));
+
   return (
     <div>
       <h1 className="text-2xl font-bold gradient-text mb-6">Platform Analytics</h1>
 
-      <PlatformSummaryCards data={summaryData} />
+      <AnalyticsPanel
+        loading={ov.loading}
+        failure={ov.failure}
+        empty={summaryEmpty}
+        onRetry={() => retry('overview')}
+        testId="widget-overview"
+        className="mb-8"
+      >
+        <PlatformSummaryCards data={summaryData} />
+      </AnalyticsPanel>
 
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 mb-8">
-        <ReputationTierChart data={repNormalized} />
-        <ActivitySegmentChart data={activityNormalized} />
+        <AnalyticsPanel
+          title="Reputation Distribution"
+          loading={rep.loading}
+          failure={rep.failure}
+          empty={repEmpty}
+          onRetry={() => retry('reputation')}
+          testId="widget-reputation"
+        >
+          <ReputationTierChart data={repNormalized} />
+        </AnalyticsPanel>
+        <AnalyticsPanel
+          title="Activity Breakdown"
+          loading={act.loading}
+          failure={act.failure}
+          empty={activityEmpty}
+          emptyTitle="No events yet"
+          onRetry={() => retry('activity')}
+          testId="widget-activity"
+        >
+          <ActivitySegmentChart data={activityNormalized} />
+        </AnalyticsPanel>
       </div>
 
       {/* Platform Breakdown (legacy superadmin-specific data) */}
@@ -205,13 +177,28 @@ function SuperAdminAnalytics() {
         </div>
       )}
 
-      <PlatformGrowthChart
-        data={growthNormalized}
-        period={growthPeriod}
-        onPeriodChange={setGrowthPeriod}
-      />
+      <AnalyticsPanel
+        title="Platform Growth"
+        loading={gr.loading}
+        failure={gr.failure}
+        empty={false}
+        onRetry={() => retry('growth')}
+        testId="widget-growth"
+        className="mb-8"
+      >
+        <PlatformGrowthChart data={growthNormalized} period={growthPeriod} onPeriodChange={changePeriod} />
+      </AnalyticsPanel>
 
-      <CommunityHealthTable data={communities} />
+      <AnalyticsPanel
+        title="Community Health"
+        loading={hl.loading}
+        failure={hl.failure}
+        empty={communities.length === 0}
+        onRetry={() => retry('health')}
+        testId="widget-health"
+      >
+        <CommunityHealthTable data={communities} />
+      </AnalyticsPanel>
     </div>
   );
 }

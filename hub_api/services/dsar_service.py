@@ -124,6 +124,7 @@ class EventType(IntEnum):
     CONTACT_PURGED = 11
     VERIFICATION_RESENT = 12
     SUBJECT_LINKED = 13
+    CONTENT_REPLACED = 14
 
 
 class ActorKind(IntEnum):
@@ -763,16 +764,68 @@ async def _pending_by_token(async_dal: Any, dal: Any, token: str, now: datetime)
     return row
 
 
+@dataclass(slots=True, frozen=True)
+class VerifyOutcome:
+    """What redeeming a token WOULD commit: the single source for the preview and the consume.
+
+    `message` is the plaintext the request will hold afterwards (`None` when absent). `commit` is
+    the column set the claiming UPDATE adds: empty when no draft exists, the draft's content plus
+    the draft-clearing columns when the draft is bound to the token, and only the draft-clearing
+    columns (a discard, never a commit) for a draft bound to some other token.
+    """
+
+    regime: int
+    message: str | None
+    content_changed: bool
+    commit: dict[str, Any]
+
+
+def verify_outcome(row: Any, token_hash: str) -> VerifyOutcome:
+    """Compute what the request's content becomes if `token_hash` is redeemed (pure, no writes).
+
+    A draft counts only when `pending_token_hash` equals the redeemed hash (constant-time); any
+    other draft is discarded. Preview and consume both call this so they cannot drift.
+    """
+    committed = crypto.decrypt(row.message_enc, row_id=row.public_id) if row.message_enc else None
+    if row.pending_regime is None:
+        return VerifyOutcome(int(row.regime), committed, False, {})
+    clear: dict[str, Any] = {
+        "pending_message_enc": None,
+        "pending_regime": None,
+        "pending_token_hash": None,
+    }
+    bound = row.pending_token_hash is not None and hmac_equal(
+        str(row.pending_token_hash), token_hash
+    )
+    if not bound:
+        return VerifyOutcome(int(row.regime), committed, False, clear)
+    draft = (
+        crypto.decrypt(row.pending_message_enc, row_id=row.public_id)
+        if row.pending_message_enc
+        else None
+    )
+    regime = int(row.pending_regime)
+    return VerifyOutcome(
+        regime,
+        draft,
+        draft != committed or regime != int(row.regime),
+        {"message_enc": row.pending_message_enc, "regime": regime, **clear},
+    )
+
+
 async def preview_verification_token(async_dal: Any, dal: Any, token: str) -> Any | None:
-    """NON-consuming look at a token: the pending row it would verify, or `None`.
+    """NON-consuming look at a token: `(row, VerifyOutcome)` it would verify, or `None`.
 
     Backs the confirm page (`GET .../verify`): mail scanners and link prefetchers that follow the
     emailed link must not burn the single-use token, so only `consume_verification_token` (POST)
-    changes state. Callers expose only the request type, regime and token expiry.
+    changes state. The outcome is EXACTLY what the POST will commit (regime + message); callers
+    expose the request type, that regime/message and the token expiry.
     """
     row = await _pending_by_token(async_dal, dal, token, now_utc())
     telemetry.verification_outcomes.add(1, {"outcome": "preview_ok" if row else "preview_invalid"})
-    return row
+    if row is None:
+        return None
+    return row, verify_outcome(row, crypto.hash_token(token).hex())
 
 
 async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bool:
@@ -790,21 +843,37 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
         logger.debug("dsar.verification_invalid")
         return False
     token_hash = crypto.hash_token(token).hex()
+    outcome = verify_outcome(row, token_hash)
+    committed_regime = outcome.regime
     claimed = await async_dal.update_async(
         (dal.dsar_requests.id == row.id)
         & (dal.dsar_requests.verification_token_hash == token_hash)
         & (dal.dsar_requests.status == int(RequestStatus.VERIFICATION_PENDING)),
         status=int(RequestStatus.VERIFIED),
         verified_at=now,
-        due_at=compute_due_at(row.regime, now),
+        due_at=compute_due_at(committed_regime, now),
         expires_at=None,
         verification_token_hash=None,
         verification_expires_at=None,
         updated_at=now,
+        **outcome.commit,
     )
     if not claimed:
         telemetry.verification_outcomes.add(1, {"outcome": "invalid"})
         return False
+    if outcome.content_changed:
+        await record_event(
+            async_dal,
+            dal,
+            tenant_id=int(row.tenant_id),
+            request_id=int(row.id),
+            event_type=EventType.CONTENT_REPLACED,
+            actor_kind=ActorKind.PUBLIC_REQUESTER,
+            detail={
+                "fields": ["message", "regime"],
+                "message_present": outcome.message is not None,
+            },
+        )
     await record_event(
         async_dal,
         dal,
@@ -821,7 +890,12 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
 
 
 def rotate_pending_public_sync(
-    dal: Any, *, tenant_id: int, email: str, request_type: RequestType
+    dal: Any,
+    *,
+    tenant_id: int,
+    email: str,
+    request_type: RequestType,
+    replace_content: tuple[str | None, Regime] | None = None,
 ) -> tuple[Any, str] | None:
     """New token for the newest still-pending request of `email` AND `request_type` (no commit).
 
@@ -829,6 +903,14 @@ def rotate_pending_public_sync(
     requester can never be sent a link that verifies a different request (e.g. an attacker's
     pending ERASE for the same address). `None` when nothing matching is pending. The old token
     stops working (its hash is overwritten); the mail only ever goes to the email's owner.
+
+    `replace_content=(message, regime)` (a fresh submit reusing the row) NEVER touches the committed
+    `message_enc`/`regime`: the new content is stored as a DRAFT (`pending_message_enc` encrypted under
+    the row's public_id, NULL when absent; `pending_regime`) tied to the token minted here, and
+    `consume_verification_token` commits it only when that latest token is redeemed, i.e. by the
+    mailbox owner. The draft is bound to this token by `pending_token_hash`. A bare resend passes
+    `None` and CLEARS any draft (an earlier submitter's content must not ride a link it did not
+    create).
     """
     now = now_utc()
     rows = dal(
@@ -842,13 +924,29 @@ def rotate_pending_public_sync(
         return None
     row = rows[0]
     token = _new_token()
+    new_hash = crypto.hash_token(token).hex()
+    content: dict[str, Any] = {
+        "pending_message_enc": None,
+        "pending_regime": None,
+        "pending_token_hash": None,
+    }
+    if replace_content is not None:
+        message, regime = replace_content
+        content = {
+            "pending_message_enc": (
+                crypto.encrypt(message, row_id=row.public_id) if message else None
+            ),
+            "pending_regime": int(regime),
+            "pending_token_hash": new_hash,
+        }
     updated = dal(
         (dal.dsar_requests.id == row.id)
         & (dal.dsar_requests.status == int(RequestStatus.VERIFICATION_PENDING))
     ).update(
-        verification_token_hash=crypto.hash_token(token).hex(),
+        verification_token_hash=new_hash,
         verification_expires_at=now + timedelta(minutes=verify_token_ttl_minutes()),
         updated_at=now,
+        **content,
     )
     if not updated:
         return None
@@ -959,6 +1057,9 @@ async def _purge_contact(async_dal: Any, dal: Any, row_id: int) -> None:
         contact_email_enc=None,
         contact_email_hash=None,
         message_enc=None,
+        pending_message_enc=None,
+        pending_regime=None,
+        pending_token_hash=None,
         response_notes=None,  # admin free text may quote the requester: purged with the contact data
         verification_token_hash=None,
         verification_expires_at=None,

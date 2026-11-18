@@ -48,6 +48,11 @@ from enum import StrEnum
 #: Written into NOT NULL text columns that must stop identifying the subject but cannot be NULL.
 ERASED_PLACEHOLDER = "[erased]"
 
+#: `data_use_exclusions.reason_code` written for every erased subject token (alembic 0129 enum:
+#: 1 do_not_sell, 2 gpc, 3 objection, 4 erased, 5 age_not_adult).
+EXCLUSION_REASON_ERASED = 4
+EXCLUSIONS_TABLE = "data_use_exclusions"
+
 
 class Key(StrEnum):
     """How a column identifies the erased subject."""

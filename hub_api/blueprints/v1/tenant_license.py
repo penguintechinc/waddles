@@ -5,7 +5,8 @@ equal the JWT's tenant, mismatch = 403) then `require_scope("tenant:admin")`.
 
 - `GET    /license` -- status only: `{configured, fingerprint, setAt}`.
 - `PUT    /license` -- write-only `{licenseKey}`: seals and stores it; the response never echoes it.
-- `DELETE /license` -- clears it (the tenant's pool then fails loud as `no_tenant_license`).
+- `DELETE /license` -- clears it (the tenant becomes a Free tenant: its pool resolves to
+  "not licensed", `limit: null`).
 
 The key is a credential: it is never returned, logged or audited (only its fingerprint is).
 

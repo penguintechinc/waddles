@@ -272,9 +272,36 @@ async def test_operator_override_never_blocked_but_counted_and_audited(env: Any)
     _assert_consistent(env, env.cs[1])
 
 
-async def test_operator_override_proceeds_without_known_pool(env: Any) -> None:
-    res = await _alloc(env, env.cs[0], PRO, source=svc.SOURCE_OPERATOR_OVERRIDE)
-    assert res.changed and res.limit is None
+async def test_operator_override_without_known_pool_is_unavailable(env: Any) -> None:
+    """Outage / never-seen pool: the operator cannot verify the tenant is licensed -> 503."""
+    with pytest.raises(svc.PoolUnavailable):
+        await _alloc(env, env.cs[0], PRO, source=svc.SOURCE_OPERATOR_OVERRIDE)
+    assert _active(env, env.cs[0]) is None
+
+
+async def test_operator_override_on_unlicensed_tenant_is_refused_and_audited(env: Any) -> None:
+    """regression: Free tenant (pool limit None) cannot hold Premium, even via the operator."""
+    await _set_pool(env, PRO, None)
+    with pytest.raises(svc.TenantNotLicensed):
+        await _alloc(env, env.cs[0], PRO, source=svc.SOURCE_OPERATOR_OVERRIDE)
+    assert _active(env, env.cs[0]) is None
+    _assert_consistent(env, env.cs[0])
+    blocked = env.audit.events[-1]
+    assert blocked.action == "license.community_tier_allocation_blocked"
+    assert blocked.outcome is AuditOutcome.DENIED
+
+
+async def test_grandfathered_premium_keeps_tier_after_pool_becomes_unlicensed(env: Any) -> None:
+    """Existing premium communities are never stripped when the tenant turns out Free."""
+    await _set_pool(env, PRO, 1)
+    await _alloc(env, env.cs[0], PRO)
+    await _set_pool(env, PRO, None)
+    assert _community(env, env.cs[0]).license_tier == "premium"
+    assert await svc.resolve_effective_tier(env.adal, env.dal, env.tenant, env.cs[0]) == "premium"
+    res = await _alloc(env, env.cs[0], PRO)  # idempotent re-PUT is not a new slot
+    assert res.changed is False
+    with pytest.raises(svc.TenantNotLicensed):
+        await _alloc(env, env.cs[1], PRO)
 
 
 async def test_pool_unavailable_propagates_for_tenant_admin(env: Any) -> None:
@@ -285,11 +312,11 @@ async def test_pool_unavailable_propagates_for_tenant_admin(env: Any) -> None:
         await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool)
 
 
-async def test_not_licensed_pool_blocks_with_zero_limit(env: Any) -> None:
+async def test_not_licensed_pool_is_tenant_tier_required_not_exhausted(env: Any) -> None:
     await _set_pool(env, PRO, None)
-    with pytest.raises(svc.PoolExhausted) as exc:
+    with pytest.raises(svc.TenantNotLicensed) as exc:
         await _alloc(env, env.cs[0], PRO)
-    assert exc.value.limit == 0
+    assert exc.value.required_tier == PRO
 
 
 async def test_unlimited_pool_never_blocks(env: Any) -> None:
@@ -411,9 +438,10 @@ async def test_new_slot_without_a_known_pool_is_unavailable_not_free(env: Any) -
     assert res.tier_code == FREE
 
 
-async def test_operator_override_proceeds_without_a_known_pool(env: Any) -> None:
-    res = await _alloc(env, env.cs[3], PRO, pool=_DownPool(), source=svc.SOURCE_OPERATOR_OVERRIDE)
-    assert res.changed and res.overage >= 1
+async def test_operator_override_with_pool_source_down_is_unavailable(env: Any) -> None:
+    with pytest.raises(svc.PoolUnavailable):
+        await _alloc(env, env.cs[3], PRO, pool=_DownPool(), source=svc.SOURCE_OPERATOR_OVERRIDE)
+    assert _active(env, env.cs[3]) is None
 
 
 async def test_release_refreshes_the_utilization_gauge(env: Any) -> None:

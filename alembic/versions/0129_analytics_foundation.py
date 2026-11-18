@@ -32,7 +32,7 @@ Downgrade drops every table/schema but REFUSES while any data table is non-empty
 idempotently on the next upgrade). All DDL is idempotent; `SET LOCAL lock_timeout` bounds waits.
 
 Revision ID: 0129_analytics_foundation
-Revises: 0127_tenant_license_key
+Revises: 0128_dsar_pending_draft
 Create Date: 2026-11-18
 """
 
@@ -45,7 +45,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0129_analytics_foundation"
-down_revision = "0127_tenant_license_key"
+down_revision = "0128_dsar_pending_draft"
 branch_labels = None
 depends_on = None
 

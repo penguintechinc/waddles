@@ -1423,6 +1423,8 @@ class TestPublicSubmitAndVerify:
                 "valid": True,
                 "requestType": 1,
                 "regime": 1,
+                "message": None,
+                "contentChanged": False,
                 "expiresAt": body["expiresAt"],
             }
         assert _rows(db)[0].status == int(S.VERIFICATION_PENDING)
@@ -1613,7 +1615,8 @@ class TestUnverifiedIsNeverActionable:
         db.dal.commit()
         response = await client.post(
             f"{_base()}/{item['id']}/act",
-            json={"action": "export"},
+            # requester email (bob) != linked account (alice): every act action needs the override
+            json={"action": "export", "overrideReason": "identity confirmed out of band"},
             headers=_headers(world["admin"]),
         )
         assert response.status_code == 200

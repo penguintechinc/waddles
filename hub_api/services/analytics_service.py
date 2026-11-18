@@ -49,31 +49,61 @@ def _sanitized_upstream_message(body: Any, status_code: int) -> str:
     return f"Request rejected by analytics-core (HTTP {status_code})"
 
 
+CODE_ANALYTICS_UNAVAILABLE = "ANALYTICS_UNAVAILABLE"
+CODE_ANALYTICS_UPSTREAM_ERROR = "ANALYTICS_UPSTREAM_ERROR"
+CODE_FEATURE_NOT_ENABLED = "FEATURE_NOT_ENABLED"
+ANALYTICS_UNAVAILABLE_MESSAGE = "Analytics are not available on this deployment yet"
+
+
+def analytics_error(message: str, status_code: int, code: str) -> tuple[dict[str, Any], int]:
+    """`api_error` envelope with an explicit machine-readable `error.code`.
+
+    The webui classifies on `error.code` (ANALYTICS_UNAVAILABLE -> neutral info
+    state, anything else -> real error), so analytics failures carry a stable
+    code instead of the generic `ERROR_<status>`.
+    """
+    body, status = api_error(message, status_code)
+    body["error"]["code"] = code  # type: ignore[index]
+    return body, status
+
+
 def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
     """Map a failed `analytics-core` call to the right client-facing response.
 
     Only {400, 404, 409, 422, 429} are client-meaningful: they pass through
     with that status but the body is RE-WRAPPED via `api_error` from the
     upstream `error.message` (never the raw upstream body, which could leak
-    analytics-core internals). Transport failures, 5xx, and every other 4xx
-    -- notably 401/403, which mean hub-api's OWN service-key auth failed, not
-    the end-client's token -- map to 502 naming `analytics-core`.
+    analytics-core internals). URL-unset (503 `service_unavailable`) maps to 503
+    `ANALYTICS_UNAVAILABLE` (backend not deployed). Transport failures (refused/timeout)
+    stay a loud 502 (gh-894) naming `analytics-core` as unreachable, but carry the same
+    `ANALYTICS_UNAVAILABLE` code so the webui renders the neutral info state. 5xx and
+    every other 4xx -- notably
+    401/403, which mean hub-api's OWN service-key auth failed, not the end-client's
+    token -- stay REAL errors: 502 `ANALYTICS_UPSTREAM_ERROR` naming `analytics-core`.
     """
-    if (
-        result.status_code == 503
-        and isinstance(result.body, dict)
-        and result.body.get("error") == "service_unavailable"
+    if result.transport_error:
+        # Unreachable upstream: fail loud as 502 (gh-894 contract), UI-classifiable code.
+        return analytics_error(
+            "Upstream dependency analytics-core unreachable",
+            502,
+            CODE_ANALYTICS_UNAVAILABLE,
+        )
+    if result.status_code == 503 and (
+        isinstance(result.body, dict) and result.body.get("error") == "service_unavailable"
     ):
-        return {"error": "service_unavailable", "service": str(result.body.get("service", ""))}, 503
-    if not result.transport_error and result.status_code in _CLIENT_4XX_PASSTHROUGH:
+        # Backend not configured (URL unset): one recognizable, UI-classifiable code.
+        return analytics_error(ANALYTICS_UNAVAILABLE_MESSAGE, 503, CODE_ANALYTICS_UNAVAILABLE)
+    if result.status_code in _CLIENT_4XX_PASSTHROUGH:
         return api_error(
             _sanitized_upstream_message(result.body, result.status_code), result.status_code
         )
-    if result.transport_error:
-        message = "Upstream dependency analytics-core is unreachable or timed out"
-    else:
-        message = f"Upstream dependency analytics-core returned HTTP {result.status_code}"
-    return api_error(message, 502)
+    # A configured upstream that answers with 5xx / 401 / 403 / other 4xx is a REAL
+    # error (never swallowed into the "unavailable" state): 502 with its own code.
+    return analytics_error(
+        f"Upstream dependency analytics-core returned HTTP {result.status_code}",
+        502,
+        CODE_ANALYTICS_UPSTREAM_ERROR,
+    )
 
 
 def _relay(result: ProxyResult) -> tuple[dict[str, Any], int]:

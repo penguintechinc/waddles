@@ -243,6 +243,7 @@ def run_registry_erasure(dal: Any, subject: ErasureSubject) -> RegistryResult:
             if changed:
                 key = scrubbed_key(rule.table)
                 result.counts[key] = result.counts.get(key, 0) + changed
+    record_erasure_exclusions(dal, subject, catalog)
     result.tables_examined = len(examined)
     result.tables_absent = tuple(sorted(absent))
     result.rules_skipped = tuple(skipped)
@@ -256,6 +257,35 @@ def run_registry_erasure(dal: Any, subject: ErasureSubject) -> RegistryResult:
         },
     )
     return result
+
+
+def record_erasure_exclusions(
+    dal: Any, subject: ErasureSubject, catalog: dict[str, frozenset[str]]
+) -> int:
+    """Insert `(user_uuid, ERASED)` into `data_use_exclusions` for each in-scope uuid token.
+
+    Same transaction as the erasure (no commit here). Without this the RETAIN rule on the
+    suppression list is fail-open: a late analytics event could re-create layer A rows for an
+    erased subject. Idempotent (existing key skipped); stores the uuid token only, never PII.
+    Returns the number of tokens examined (0 when the table is absent from this deployment).
+    """
+    present = catalog.get(registry.EXCLUSIONS_TABLE)
+    if present is None or not {"user_uuid", "reason_code"} <= present:
+        return 0
+    tokens = _uuid_tokens(subject.user_uuids)
+    reason = registry.EXCLUSION_REASON_ERASED
+    table = registry.EXCLUSIONS_TABLE
+    is_sqlite = getattr(dal, "_dbname", "") == "sqlite"
+    on_conflict = "" if is_sqlite else " ON CONFLICT DO NOTHING"
+    cast = "" if is_sqlite else "::uuid"
+    for token in tokens:  # tokens are canonical uuids (validated above), safe to inline
+        dal.executesql(
+            f"INSERT INTO {table} (user_uuid, reason_code) "  # noqa: S608  # nosec B608
+            f"SELECT '{token}'{cast}, {reason} WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {table} WHERE user_uuid = '{token}' AND reason_code = {reason})"
+            f"{on_conflict}"
+        )
+    return len(tokens)
 
 
 def collect_object_urls(dal: Any, subject: ErasureSubject) -> tuple[str, ...]:

@@ -129,6 +129,47 @@ def _active(env: Any, community_id: int) -> Any:
     return env.dal((t.community_id == community_id) & (t.released_at == None)).select().first()  # noqa: E711
 
 
+def _no_key_provider(env: Any) -> Any:
+    """Real lib provider + service adapter for a tenant with NO license key (non-bypass host)."""
+    from flask_core.license_pool import LicenseServerPoolProvider
+
+    from services.pool_provider import ServicePoolProvider
+
+    async def _resolver(_tenant_id: int) -> None:
+        return None
+
+    return ServicePoolProvider(
+        LicenseServerPoolProvider(
+            env.store,  # type: ignore[arg-type]
+            _resolver,
+            lambda: False,
+            base_url="https://license.example.test",
+        ),
+        is_bypass=lambda: False,
+    )
+
+
+def _outage_provider(env: Any) -> Any:
+    """Real lib provider whose key resolver blows up: a genuine failure, not "Free"."""
+    from flask_core.license_pool import LicenseServerPoolProvider
+
+    from services.pool_provider import ServicePoolProvider
+
+    async def _resolver(_tenant_id: int) -> str:
+        raise RuntimeError("license key store down")
+
+    return ServicePoolProvider(
+        LicenseServerPoolProvider(
+            env.store,  # type: ignore[arg-type]
+            _resolver,
+            lambda: False,
+            base_url="https://license.example.test",
+            max_attempts=1,
+        ),
+        is_bypass=lambda: False,
+    )
+
+
 class TestPool:
     async def test_pool_read_exact_field_set(self, env: Any) -> None:
         await _pool(env, PRO, 2)
@@ -208,10 +249,50 @@ class TestAllocate:
         assert (await _put_tier(env, env.pids[2], PRO))[0] == 200
         assert (await _put_tier(env, env.pids[3], PRO))[0] == 402
 
-    async def test_unlicensed_tier_is_402_with_zero_limit(self, env: Any) -> None:
+    async def test_unlicensed_tier_is_402_tenant_tier_required(self, env: Any) -> None:
         await _pool(env, PRO, None)
         status, body = await _put_tier(env, env.pids[0], PRO)
-        assert status == 402 and body["error"]["details"]["limit"] == 0
+        assert status == 402 and body["error"]["code"] == "TENANT_TIER_REQUIRED"
+        assert body["error"]["message"] == (
+            "Premium communities require a Professional or Enterprise license"
+        )
+        assert body["error"]["details"] == {"requiredTenantTier": "professional", "upgrade": True}
+        assert _active(env, env.ids[0]) is None
+
+    async def test_free_tenant_without_license_key_is_402_not_503(self, env: Any) -> None:
+        """regression: no license key = Free tenant, never "license server unavailable"."""
+        env.app.config["POOL_PROVIDER"] = _no_key_provider(env)
+        status, body = await _put_tier(env, env.pids[0], PRO)
+        assert status == 402 and body["error"]["code"] == "TENANT_TIER_REQUIRED"
+        assert _active(env, env.ids[0]) is None
+        # releasing to Free stays possible
+        assert (await _put_tier(env, env.pids[0], FREE))[0] == 200
+
+    async def test_free_tenant_pool_read_is_200_limit_null(self, env: Any) -> None:
+        env.app.config["POOL_PROVIDER"] = _no_key_provider(env)
+        response = await env.client.get(f"{BASE}/license/pool", headers=_h())
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["tiers"][0]["limit"] is None and body["tiers"][0]["used"] == 0
+
+    async def test_license_server_outage_is_still_503(self, env: Any) -> None:
+        env.app.config["POOL_PROVIDER"] = _outage_provider(env)
+        status, body = await _put_tier(env, env.pids[0], PRO)
+        assert status == 503 and body["error"]["code"] == "TEAM_POOL_UNAVAILABLE"
+        response = await env.client.get(f"{BASE}/license/pool", headers=_h())
+        assert response.status_code == 503
+
+    async def test_existing_premium_is_grandfathered_when_tenant_is_unlicensed(
+        self, env: Any
+    ) -> None:
+        await _pool(env, PRO, 1)
+        assert (await _put_tier(env, env.pids[0], PRO))[0] == 200
+        await _pool(env, PRO, None)
+        assert _active(env, env.ids[0]) is not None
+        assert await svc.resolve_effective_tier(env.adal, env.dal, env.tenant, env.ids[0]) == (
+            "premium"
+        )
+        assert (await _put_tier(env, env.pids[1], PRO))[0] == 402
 
     async def test_release_frees_a_slot(self, env: Any) -> None:
         await _pool(env, PRO, 1)
@@ -335,6 +416,7 @@ class TestList:
 
     async def test_never_lists_another_tenants_allocations(self, env: Any) -> None:
         await _pool(env, PRO, 5)
+        await env.store.put(env.other, PRO, 5, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
         await _put_tier(env, env.pids[0], PRO)
         c = env.dal.communities
         foreign_id = int(env.dal(c.public_id == env.foreign_pid).select(c.id).first().id)

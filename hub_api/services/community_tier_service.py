@@ -136,6 +136,17 @@ class PoolExhausted(Exception):  # noqa: N818 - domain name; maps to HTTP 402 in
         self.used = used
 
 
+class TenantNotLicensed(Exception):  # noqa: N818 - domain name; maps to HTTP 402 in the API layer
+    """The tenant is Free (no license / pool resolves to "not licensed"): no Premium communities."""
+
+    def __init__(self, required_tier: int) -> None:
+        """Carry the tier code that was requested."""
+        super().__init__(
+            f"tenant is not licensed for {TIER_NAMES.get(required_tier, required_tier)} communities"
+        )
+        self.required_tier = required_tier
+
+
 class PoolUnavailable(Exception):  # noqa: N818 - domain name; maps to HTTP 503 in the API layer
     """The pool limit could not be determined (never seen / no team axis / server error)."""
 
@@ -617,8 +628,10 @@ async def allocate(
 
     ``tier``: 1 = Free (releases any allocation, never blocked), 2 = Premium.
     Raises :class:`PoolExhausted` when a NEW Premium slot would exceed the pool,
-    :class:`PoolUnavailable` when the pool cannot be determined (operator overrides proceed
-    without a known limit), :class:`CommunityNotInTenant` for a foreign/missing community.
+    :class:`TenantNotLicensed` when the tenant has no Premium pool at all (Free tenant: both the
+    tenant admin and the operator override are refused), :class:`PoolUnavailable` when the pool
+    cannot be determined (a genuine failure), :class:`CommunityNotInTenant` for a foreign/missing
+    community. Operator overrides are never blocked by pool EXHAUSTION (counted as overage).
     ``audit`` (an ``AuditService``) is written AFTER the commit; ``None`` skips auditing.
     """
     _validate(tier, source, reason)
@@ -637,9 +650,9 @@ async def allocate(
                     info = await pool.get_pool(tenant_id, tier)
                     limit, pool_source = info.limit, info.source
                 except PoolUnavailable:
-                    # Not fatal yet: an idempotent re-PUT of the same tier (no new slot) and
-                    # operator overrides proceed; consuming a NEW slot without a known pool
-                    # raises PoolUnavailable inside the job.
+                    # Not fatal yet: an idempotent re-PUT of the same tier (no new slot)
+                    # proceeds; consuming a NEW slot without a known pool raises
+                    # PoolUnavailable inside the job.
                     logger.warning("community_tier_pool_unavailable tier=%s", tier_label)
             outcome = await _allocate_job(
                 async_dal,
@@ -702,6 +715,31 @@ async def allocate(
             return outcome
         except PoolUnavailable:
             result_label = "pool_unavailable"
+            raise
+        except TenantNotLicensed:
+            result_label = "not_licensed"
+            logger.info(
+                "community_tier_not_licensed tenant_id=%s community_id=%s tier=%s source=%s",
+                tenant_id,
+                community_id,
+                tier_label,
+                source_label,
+            )
+            await _record(
+                audit,
+                _audit_event(
+                    action=AuditAction.LICENSE_COMMUNITY_TIER_ALLOCATION_BLOCKED,
+                    outcome=AuditOutcome.DENIED,
+                    actor=actor,
+                    tenant_id=tenant_id,
+                    community_id=community_id,
+                    tier_code=tier,
+                    previous_tier_code=TIER_CODE_FREE,
+                    source=source,
+                    reason=reason,
+                    extra={"pool_limit": None, "denied": "tenant_not_licensed"},
+                ),
+            )
             raise
         except PoolExhausted as exc:
             result_label = "blocked"
@@ -816,13 +854,14 @@ async def _allocate_job(
                     usage.used, eff_limit, usage.overage,
                 )  # fmt: skip
 
-            if not operator:
-                if pool_source is None:
-                    raise PoolUnavailable("team pool could not be determined")
-                if eff_limit is None:
-                    raise PoolExhausted(tier, 0, used)
-                if eff_limit != UNLIMITED and used >= eff_limit:
-                    raise PoolExhausted(tier, eff_limit, used)
+            # Premium needs a licensed tenant for EVERY source (tenant admin and operator alike);
+            # only pool EXHAUSTION is waived for the operator override (counted as overage).
+            if pool_source is None:
+                raise PoolUnavailable("team pool could not be determined")
+            if eff_limit is None:
+                raise TenantNotLicensed(tier)
+            if not operator and eff_limit != UNLIMITED and used >= eff_limit:
+                raise PoolExhausted(tier, eff_limit, used)
             prev_used = None
             if current is not None:
                 _release(dal, current, actor=actor, reason=RELEASE_TIER_CHANGE, now=now)
@@ -844,10 +883,8 @@ async def _allocate_job(
             dal.commit()
             used_after = used + 1
             overage = 0
-            if eff_limit is not None and eff_limit != UNLIMITED:
+            if eff_limit != UNLIMITED:
                 overage = max(0, used_after - eff_limit)
-            elif eff_limit is None:
-                overage = used_after
             return AllocationResult(
                 community_id, tier, previous, True, public_id, used_after, eff_limit, overage,
                 prev_used,

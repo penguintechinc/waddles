@@ -156,14 +156,43 @@ async def test_other_tenant_bypass_host_operator_row_still_honoured(
 async def test_default_tenant_off_bypass_host_is_unchanged(
     app: Quart, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Non-bypass hosts: no in-code pool; no license key -> fail loud (503 semantics)."""
+    """Non-bypass hosts: no in-code pool; no license key -> Free tenant (limit None)."""
     default_id = _seed_default_tenant(app)
     monkeypatch.setattr(pp, "current_request_host", lambda: "waddles.example.com")
 
     async def _no_key(*_: Any) -> None:
         return None
 
+    class _NoStatus:
+        configured = False
+
+    async def _unconfigured(*_: Any) -> _NoStatus:
+        return _NoStatus()
+
     monkeypatch.setattr("services.tenant_license_service.get_tenant_license_key", _no_key)
+    monkeypatch.setattr("services.tenant_license_service.get_license_status", _unconfigured)
+    info = await pp.get_pool_provider(app).get_pool(default_id, svc.TIER_CODE_PREMIUM)
+    assert info.limit is None  # no key = Free tenant (402 TENANT_TIER_REQUIRED upstream)
+
+
+async def test_stored_but_unreadable_key_is_unavailable_not_free(
+    app: Quart, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A key that exists but cannot be opened is an outage (503), never silently Free."""
+    default_id = _seed_default_tenant(app)
+    monkeypatch.setattr(pp, "current_request_host", lambda: "waddles.example.com")
+
+    async def _no_key(*_: Any) -> None:
+        return None
+
+    class _Status:
+        configured = True
+
+    async def _configured(*_: Any) -> _Status:
+        return _Status()
+
+    monkeypatch.setattr("services.tenant_license_service.get_tenant_license_key", _no_key)
+    monkeypatch.setattr("services.tenant_license_service.get_license_status", _configured)
     with pytest.raises(svc.PoolUnavailable):
         await pp.get_pool_provider(app).get_pool(default_id, svc.TIER_CODE_PREMIUM)
 

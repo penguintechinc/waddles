@@ -129,3 +129,38 @@ def test_a_malformed_uuid_token_is_dropped_never_queried(adal: AsyncDAL, token: 
     dal.commit()
     assert "economy_ledger" not in result.counts  # the malformed token was dropped, not queried
     assert _one(dal, "SELECT to_regclass('economy_ledger') IS NOT NULL") is True
+
+
+def test_erasure_records_exclusion_and_deletes_layer_a_idempotently(adal: AsyncDAL) -> None:  # noqa: F811
+    """Alembic 0129: erasure deletes analytics_fp rows AND writes the ERASED suppression row."""
+    dal = adal.dal
+    mine, other = str(uuid.uuid4()), str(uuid.uuid4())
+    for token in (mine, other):
+        _q(
+            dal,
+            "INSERT INTO analytics_fp.member_daily (community_id, user_uuid, day) "
+            "VALUES (1, %s::uuid, '2026-11-17')",
+            [token],
+        )
+    subject = ErasureSubject(user_id=424_242, user_uuids=(mine,))
+    first = executor.run_registry_erasure(dal, subject)
+    dal.commit()
+    assert first.counts["analytics_fp.member_daily"] == 1
+    count = "SELECT COUNT(*) FROM analytics_fp.member_daily WHERE user_uuid = %s::uuid"
+    assert _one(dal, count, [mine]) == 0
+    assert _one(dal, count, [other]) == 1  # bystander kept
+    sql = "SELECT COUNT(*) FROM data_use_exclusions WHERE user_uuid = %s::uuid AND reason_code = 4"
+    assert _one(dal, sql, [mine]) == 1
+    assert _one(dal, sql, [other]) == 0
+    executor.run_registry_erasure(dal, subject)  # erasing twice is idempotent
+    dal.commit()
+    assert _one(dal, sql, [mine]) == 1
+    cols = {
+        r[0]
+        for r in _q(
+            dal,
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'data_use_exclusions'",
+        )
+    }
+    assert cols == {"user_uuid", "reason_code", "since"}  # token only: no PII column exists
