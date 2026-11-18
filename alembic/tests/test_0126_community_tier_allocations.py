@@ -43,7 +43,7 @@ def test_history_has_one_head_and_0126_is_in_its_ancestry() -> None:
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
-    assert heads == ["0127_tenant_license_key"]
+    assert len(heads) == 1
     ancestry = {r.revision for r in script.walk_revisions(base="base", head=heads[0])}
     assert _REV in ancestry
 

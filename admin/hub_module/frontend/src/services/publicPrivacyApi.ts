@@ -37,7 +37,12 @@ export interface AltchaChallenge {
 export interface VerifyPreview {
   valid: boolean;
   requestType: number;
+  /** The regime the request will hold once THIS link is confirmed (a draft bound to it, else the current one). */
   regime: number;
+  /** Plain-text message the request will hold once confirmed; render escaped (never as HTML). */
+  message: string | null;
+  /** True when confirming changes the stored content (a resubmission waiting on this link). */
+  contentChanged: boolean;
   expiresAt: string | null;
 }
 

@@ -14,7 +14,7 @@ afterEach(() => vi.unstubAllGlobals());
 
 describe('publicPrivacyApi review hardening', () => {
   it('previewVerification POSTs the token in the body, never in the URL', async () => {
-    fetchMock.mockResolvedValue(json(200, { valid: true, requestType: 2, regime: 1, expiresAt: null }));
+    fetchMock.mockResolvedValue(json(200, { valid: true, requestType: 2, regime: 1, message: null, contentChanged: false, expiresAt: null }));
     const out = await publicPrivacyApi.previewVerification('secret-token');
     const [url, init] = fetchMock.mock.calls[0]!;
     expect(url).toBe('/api/v1/public/privacy-requests/verify/preview');
