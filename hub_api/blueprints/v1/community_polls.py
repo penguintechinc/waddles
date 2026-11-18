@@ -26,7 +26,7 @@ polls_bp = Blueprint("v1_community_polls", __name__, url_prefix="/api/v1/admin")
 FEATURE_COMMUNITY_POLLS = "waddles.community.polls"
 
 
-@polls_bp.route("/<int:community_id>/polls", methods=["GET"])
+@polls_bp.route("/<cuuid:community_id>/polls", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.polls:read")  # type: ignore[misc]
 async def list_polls(community_id: int) -> tuple[dict[str, object], int]:
@@ -40,7 +40,7 @@ async def list_polls(community_id: int) -> tuple[dict[str, object], int]:
     return await proxy.get_polls(community_id, request.headers.get("Authorization"))
 
 
-@polls_bp.route("/<int:community_id>/polls/<int:poll_id>", methods=["GET"])
+@polls_bp.route("/<cuuid:community_id>/polls/<int:poll_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.polls:read")  # type: ignore[misc]
 async def get_poll(community_id: int, poll_id: int) -> tuple[dict[str, object], int]:
@@ -52,7 +52,7 @@ async def get_poll(community_id: int, poll_id: int) -> tuple[dict[str, object], 
     return await proxy.get_poll(community_id, poll_id, request.headers.get("Authorization"))
 
 
-@polls_bp.route("/<int:community_id>/polls", methods=["POST"])
+@polls_bp.route("/<cuuid:community_id>/polls", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.polls:write")  # type: ignore[misc]
 async def create_poll(community_id: int) -> tuple[dict[str, object], int]:
@@ -65,7 +65,7 @@ async def create_poll(community_id: int) -> tuple[dict[str, object], int]:
     return await proxy.create_poll(community_id, payload, request.headers.get("Authorization"))
 
 
-@polls_bp.route("/<int:community_id>/polls/<int:poll_id>", methods=["DELETE"])
+@polls_bp.route("/<cuuid:community_id>/polls/<int:poll_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.polls:write")  # type: ignore[misc]
 async def delete_poll(community_id: int, poll_id: int) -> tuple[dict[str, object], int]:

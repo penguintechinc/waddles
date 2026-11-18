@@ -585,7 +585,7 @@ async def make_unavailable(
 # ---------------------------------------------------------------------------
 
 
-@marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["GET"])
+@marketplace_lifecycle_bp.route("/community/<cuuid:community_id>/bundles", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activated(
@@ -619,7 +619,7 @@ async def list_activated(
     )
 
 
-@marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["POST"])
+@marketplace_lifecycle_bp.route("/community/<cuuid:community_id>/bundles", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateBundleRequest)
 @validate_response(MessageResponse, 201)
@@ -668,7 +668,7 @@ async def activate_bundle(
 
 
 @marketplace_lifecycle_bp.route(
-    "/community/<int:community_id>/bundles/<app_id>", methods=["DELETE"]
+    "/community/<cuuid:community_id>/bundles/<app_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -698,7 +698,7 @@ async def deactivate_bundle(
 # ---------------------------------------------------------------------------
 
 
-@marketplace_lifecycle_bp.route("/community/<int:community_id>/resolved", methods=["GET"])
+@marketplace_lifecycle_bp.route("/community/<cuuid:community_id>/resolved", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ResolvedBundlesResponse)
 async def get_resolved_bundles(

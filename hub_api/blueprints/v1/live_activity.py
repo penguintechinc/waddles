@@ -40,7 +40,7 @@ live_activity_bp = Blueprint("v1_live_activity", __name__, url_prefix="/api/v1")
 DEFAULT_LIST_LIMIT = 50
 
 
-@live_activity_bp.route("/community/<int:community_id>/live-activity", methods=["GET"])
+@live_activity_bp.route("/community/<cuuid:community_id>/live-activity", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.live_activity:read")  # type: ignore[misc]
 @validate_response(svc.LiveActivityListResponse)
@@ -60,7 +60,7 @@ async def list_live_activity(
     return svc.LiveActivityListResponse(success=True, events=events)
 
 
-@live_activity_bp.route("/community/<int:community_id>/live-activity/stream", methods=["GET"])
+@live_activity_bp.route("/community/<cuuid:community_id>/live-activity/stream", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.live_activity:read")  # type: ignore[misc]
 async def stream_live_activity(community_id: int) -> Response | tuple[dict[str, object], int]:

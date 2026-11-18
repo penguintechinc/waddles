@@ -21,6 +21,7 @@ green again.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -36,6 +37,7 @@ from config import HubAPIConfig
 from services import oauth_service
 from services.global_identity import grant_global_admin_sync
 from services.install_state_binding import bound_state
+from tests.community_ids import public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -392,7 +394,11 @@ def _seed_member_community(
     bind_community_tier_tables(dal, migrate=True)
     tenant = dal(dal.tenants.slug == TENANT_SLUG).select().first()
     cid: int = dal.communities.insert(
-        name=name, display_name=name, tenant_id=tenant.id, is_active=True
+        name=name,
+        display_name=name,
+        tenant_id=tenant.id,
+        is_active=True,
+        public_id=str(uuid.uuid4()),
     )
     dal.community_members.insert(
         community_id=cid, user_id=str(user_id), role="member", is_active=True
@@ -442,6 +448,17 @@ class TestMeCommunityLicenseTier:
             "released-c": 1,
         }
         assert set(comms["pro-c"]) == {"id", "name", "displayName", "role", "licenseTier"}
+
+    async def test_me_community_id_is_the_public_uuid(self, client: Any, auth_db: Any) -> None:
+        """`user.communities[].id` is `communities.public_id` (UUID), never the numeric id."""
+        uid = _seed_user(auth_db, email="u1@example.com", username="u1")
+        cid = _seed_member_community(auth_db, uid, "uuid-c")
+        comms = await _me_communities(client, uid)
+        exposed = comms["uuid-c"]["id"]
+        assert isinstance(exposed, str)
+        assert exposed == public_id(auth_db, cid)
+        assert str(uuid.UUID(exposed)) == exposed
+        assert exposed != str(cid)
 
     async def test_tiers_do_not_leak_between_users(self, client: Any, auth_db: Any) -> None:
         a = _seed_user(auth_db, email="a@example.com", username="a")
@@ -541,7 +558,11 @@ class TestMeCommunityLicenseTier:
         """regression: communities[].role is the stored role; owners must read 'community-owner'."""
         user_id = _seed_user(auth_db, email="owner@example.com", username="owner1")
         community_id = auth_db.dal.communities.insert(
-            name="owned", display_name="Owned", platform="discord", is_active=True
+            name="owned",
+            display_name="Owned",
+            platform="discord",
+            is_active=True,
+            public_id=str(uuid.uuid4()),
         )
         auth_db.dal.community_members.insert(
             community_id=community_id,

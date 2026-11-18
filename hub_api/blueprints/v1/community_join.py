@@ -30,7 +30,7 @@ class JoinCommunityResponse:
     joined: bool
 
 
-@community_join_bp.route("/<int:community_id>/join", methods=["POST"])
+@community_join_bp.route("/<cuuid:community_id>/join", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 async def join_community(community_id: int) -> tuple[Any, int]:
     """Join an open community (idempotent); tenant comes from the token only."""

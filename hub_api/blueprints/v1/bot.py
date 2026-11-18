@@ -236,7 +236,7 @@ class ShoutoutHistoryResponse:
     pagination: ShoutoutPagination
 
 
-@bot_bp.route("/<int:community_id>/shoutout/config", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/shoutout/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
 @validate_response(ShoutoutConfigResponse)
@@ -251,7 +251,7 @@ async def get_shoutout_config(community_id: int) -> Any:
     return ShoutoutConfigResponse(success=True, config=config)
 
 
-@bot_bp.route("/<int:community_id>/shoutout/config", methods=["PUT"])
+@bot_bp.route("/<cuuid:community_id>/shoutout/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
 @validate_request(ShoutoutConfigRequest)
@@ -279,7 +279,7 @@ async def update_shoutout_config(data: ShoutoutConfigRequest, community_id: int)
     return ShoutoutConfigResponse(success=True, config=config)
 
 
-@bot_bp.route("/<int:community_id>/shoutout/creators", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/shoutout/creators", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
 @validate_response(ShoutoutCreatorsResponse)
@@ -292,7 +292,7 @@ async def get_shoutout_creators(community_id: int) -> Any:
     return ShoutoutCreatorsResponse(success=True, creators=creators)
 
 
-@bot_bp.route("/<int:community_id>/shoutout/creators", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/shoutout/creators", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
 @validate_request(ShoutoutCreatorRequest)
@@ -329,7 +329,7 @@ async def add_shoutout_creator(data: ShoutoutCreatorRequest, community_id: int) 
     return {"success": True, "creator": dataclasses.asdict(creator)}
 
 
-@bot_bp.route("/<int:community_id>/shoutout/creators/<int:creator_id>", methods=["DELETE"])
+@bot_bp.route("/<cuuid:community_id>/shoutout/creators/<int:creator_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
 @validate_response(ShoutoutMessageResponse)
@@ -346,7 +346,7 @@ async def remove_shoutout_creator(community_id: int, creator_id: int) -> Any:
     return ShoutoutMessageResponse(success=True, message="Creator removed")
 
 
-@bot_bp.route("/<int:community_id>/shoutout/history", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/shoutout/history", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
 @validate_response(ShoutoutHistoryResponse)
@@ -421,7 +421,7 @@ def _chatter_dto(config: dict[str, Any]) -> AIChatterConfigDTO:
     return AIChatterConfigDTO(**{k: v for k, v in config.items() if k in known})
 
 
-@bot_bp.route("/<int:community_id>/ai-chatter/config", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/ai-chatter/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_CHATTER_READ)  # type: ignore[misc]
 @validate_response(AIChatterConfigResponse)
@@ -436,7 +436,7 @@ async def get_ai_chatter_config(community_id: int) -> Any:
     return AIChatterConfigResponse(success=True, config=_chatter_dto(config))
 
 
-@bot_bp.route("/<int:community_id>/ai-chatter/config", methods=["PUT"])
+@bot_bp.route("/<cuuid:community_id>/ai-chatter/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_CHATTER_WRITE)  # type: ignore[misc]
 @validate_request(AIChatterConfigRequest)
@@ -1060,7 +1060,7 @@ class CommandLogResponse:
     log: list[bot_rcon.CommandLogEntry]
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_response(ServersResponse)
@@ -1073,7 +1073,7 @@ async def list_rcon_servers(community_id: int) -> Any:
     return ServersResponse(servers=servers)
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(ServerCreateRequest)
@@ -1106,7 +1106,7 @@ async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> An
     return ServerResponse(server=server), 201
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>", methods=["PUT"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(ServerUpdateRequest)
@@ -1141,7 +1141,7 @@ async def update_rcon_server(data: ServerUpdateRequest, community_id: int, serve
     return ServerResponse(server=server)
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>", methods=["DELETE"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -1157,7 +1157,7 @@ async def delete_rcon_server(community_id: int, server_id: int) -> Any:
     return MessageResponse(message="Server deleted")
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/test", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/test", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(TestConnectionRequest)
@@ -1176,7 +1176,7 @@ async def test_rcon_connection(
         return _error(str(exc), 404, "NOT_FOUND")
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/command", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/command", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(ExecuteCommandRequest)
@@ -1196,7 +1196,7 @@ async def execute_rcon_command(
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/kick", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/kick", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(KickPlayerRequest)
@@ -1219,7 +1219,7 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/ban", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/ban", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(BanPlayerRequest)
@@ -1243,7 +1243,7 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/channels", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def get_rcon_channels(community_id: int, server_id: int) -> Any:
@@ -1255,7 +1255,7 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
     return await bot_rcon.get_channels(_dal(), community_id, server_id)
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/move", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/move", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(MoveUserRequest)
@@ -1273,7 +1273,7 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/message", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/message", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_request(SendMessageRequest)
@@ -1296,7 +1296,7 @@ async def send_rcon_message(data: SendMessageRequest, community_id: int, server_
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<int:community_id>/rcon/log", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @validate_response(CommandLogResponse)
@@ -1319,7 +1319,7 @@ async def get_rcon_command_log(community_id: int) -> Any:
     return CommandLogResponse(log=entries)
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/policy", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/policy", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
@@ -1331,7 +1331,7 @@ async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
     return await bot_rcon.get_access_policy(_dal(), community_id, server_id)
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/policy", methods=["PUT"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/policy", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
@@ -1349,7 +1349,7 @@ async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
     return await bot_rcon.update_access_policy(_dal(), community_id, server_id, policy)
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/enforce", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/enforce", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
@@ -1361,7 +1361,7 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
     return await bot_rcon.trigger_enforcement(_dal(), community_id, server_id)
 
 
-@bot_bp.route("/<int:community_id>/rcon/servers/<int:server_id>/access-log", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/access-log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
@@ -1380,7 +1380,7 @@ async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
 # -- Member routes (requireAuth only in Node -- no requireCommunityAdmin) --
 
 
-@bot_bp.route("/<int:community_id>/rcon/info", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/info", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @validate_response(ServersMemberResponse)
@@ -1393,7 +1393,7 @@ async def list_rcon_info(community_id: int) -> Any:
     return ServersMemberResponse(servers=servers)
 
 
-@bot_bp.route("/<int:community_id>/rcon/info/<int:server_id>/status", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/info/<int:server_id>/status", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
@@ -1405,7 +1405,7 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
     return await bot_rcon.get_server_status(_dal(), community_id, server_id)
 
 
-@bot_bp.route("/<int:community_id>/rcon/info/<int:server_id>/players", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/info/<int:server_id>/players", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 async def get_rcon_player_list(community_id: int, server_id: int) -> Any:

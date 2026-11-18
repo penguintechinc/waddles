@@ -403,7 +403,7 @@ class CommandsResponse:
 # ── Routes ───────────────────────────────────────────────────────────────
 
 
-@admin_bp.route("/<int:community_id>/settings", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/settings", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_SETTINGS_MANAGE)  # type: ignore[misc]
 @validate_response(SettingsResponse)
@@ -432,7 +432,7 @@ async def get_settings(community_id: int) -> SettingsResponse | tuple[dict[str, 
     )
 
 
-@admin_bp.route("/<int:community_id>/settings", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/settings", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_SETTINGS_MANAGE)  # type: ignore[misc]
 @validate_request(UpdateSettingsRequest)
@@ -462,7 +462,7 @@ async def update_settings(
     return MessageResponse(success=True, message="Settings updated")
 
 
-@admin_bp.route("/<int:community_id>/members", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/members", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_MEMBERS_VIEW)  # type: ignore[misc]
 @validate_response(MembersResponse)
@@ -510,7 +510,7 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
     )
 
 
-@admin_bp.route("/<int:community_id>/members/<int:user_id>/role", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/members/<int:user_id>/role", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_MEMBERS_ROLES)  # type: ignore[misc]
 @validate_request(UpdateRoleRequest)
@@ -542,7 +542,7 @@ async def update_member_role(
     return MessageResponse(success=True, message="Role updated")
 
 
-@admin_bp.route("/<int:community_id>/members/<int:user_id>/reputation", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/members/<int:user_id>/reputation", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_REPUTATION_MANAGE)  # type: ignore[misc]
 @validate_request(AdjustReputationRequest)
@@ -603,7 +603,7 @@ async def _authorize_reputation_admin(community_id: int) -> Any:
     return ctx
 
 
-@admin_bp.route("/<int:community_id>/reputation/config", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/reputation/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @document_response(ReputationConfigResponse)
 async def get_reputation_config(community_id: int) -> tuple[Any, int]:
@@ -620,7 +620,7 @@ async def get_reputation_config(community_id: int) -> tuple[Any, int]:
     return jsonify_dto(_config_response(cfg))
 
 
-@admin_bp.route("/<int:community_id>/reputation/config", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/reputation/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(ReputationConfigRequest)
 @document_response(ReputationConfigResponse)
@@ -650,7 +650,7 @@ async def put_reputation_config(
     return jsonify_dto(_config_response(cfg))
 
 
-@admin_bp.route("/<int:community_id>/reputation/at-risk", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/reputation/at-risk", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @document_response(AtRiskResponse)
 async def get_reputation_at_risk(community_id: int) -> tuple[Any, int]:
@@ -672,7 +672,7 @@ async def get_reputation_at_risk(community_id: int) -> tuple[Any, int]:
     return jsonify_dto(AtRiskResponse(success=True, members=members))
 
 
-@admin_bp.route("/<int:community_id>/reputation/history", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/reputation/history", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @document_response(HistoryResponse)
 async def get_reputation_history(community_id: int) -> tuple[Any, int]:
@@ -702,7 +702,7 @@ async def get_reputation_history(community_id: int) -> tuple[Any, int]:
     return jsonify_dto(HistoryResponse(success=True, entries=entries))
 
 
-@admin_bp.route("/<int:community_id>/reputation/soft-bans", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/reputation/soft-bans", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @document_response(SoftBansResponse)
 async def list_reputation_soft_bans(community_id: int) -> tuple[Any, int]:
@@ -724,7 +724,7 @@ async def list_reputation_soft_bans(community_id: int) -> tuple[Any, int]:
     return jsonify_dto(SoftBansResponse(success=True, softBans=bans))
 
 
-@admin_bp.route("/<int:community_id>/reputation/soft-bans/<int:user_id>", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/reputation/soft-bans/<int:user_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SoftBanRequest)
 @document_response(MessageResponse)
@@ -759,7 +759,7 @@ async def put_reputation_soft_ban(
     return jsonify_dto(MessageResponse(success=True, message="Soft ban set"))
 
 
-@admin_bp.route("/<int:community_id>/reputation/soft-bans/<int:user_id>", methods=["DELETE"])
+@admin_bp.route("/<cuuid:community_id>/reputation/soft-bans/<int:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @document_response(MessageResponse)
 async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[Any, int]:
@@ -785,7 +785,7 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
     return jsonify_dto(MessageResponse(success=True, message="Soft ban cleared"))
 
 
-@admin_bp.route("/<int:community_id>/members/<int:user_id>", methods=["DELETE"])
+@admin_bp.route("/<cuuid:community_id>/members/<int:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_MEMBERS_REMOVE)  # type: ignore[misc]
 @validate_request(RemoveMemberRequest)
@@ -817,7 +817,7 @@ async def remove_member(
     return MessageResponse(success=True, message="Member removed")
 
 
-@admin_bp.route("/<int:community_id>/temp-password", methods=["POST"])
+@admin_bp.route("/<cuuid:community_id>/temp-password", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_TEMP_PASSWORD)  # type: ignore[misc]
 @validate_request(TempPasswordRequest)
@@ -866,7 +866,7 @@ async def generate_temp_password(data: TempPasswordRequest, community_id: int) -
     )
 
 
-@admin_bp.route("/<int:community_id>/modules", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/modules", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_MODULES_MANAGE)  # type: ignore[misc]
 @validate_response(ModulesResponse)
@@ -896,7 +896,7 @@ async def get_modules(community_id: int) -> ModulesResponse | tuple[dict[str, ob
     return ModulesResponse(success=True, modules=modules)
 
 
-@admin_bp.route("/<int:community_id>/modules/<int:module_id>/config", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/modules/<int:module_id>/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_MODULES_MANAGE)  # type: ignore[misc]
 @validate_request(UpdateModuleConfigRequest)
@@ -923,7 +923,7 @@ async def update_module_config(
     return MessageResponse(success=True, message="Module configuration updated")
 
 
-@admin_bp.route("/<int:community_id>/connected-platforms", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/connected-platforms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_PLATFORMS_MANAGE)  # type: ignore[misc]
 @validate_response(ConnectedPlatformsResponse)
@@ -945,7 +945,7 @@ async def get_connected_platforms(
     )
 
 
-@admin_bp.route("/<int:community_id>/commands", methods=["GET"])
+@admin_bp.route("/<cuuid:community_id>/commands", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_COMMANDS_MANAGE)  # type: ignore[misc]
 @validate_response(CommandsResponse)

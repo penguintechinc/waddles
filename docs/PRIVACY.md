@@ -261,7 +261,7 @@ Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/su
 
 ### DSAR Handling: Two Levels (Inbox in every tier, Bulk/Automation Enterprise)
 
-Self-service data-subject rights (`GET`/`DELETE /api/v1/user/me/data`, above) are available in **every** tier — statutory rights are never tier-gated, and that path is unchanged. Admin-side handling is split in two:
+Self-service data-subject rights (`GET`/`DELETE /api/v1/user/me/data`, above) are available in **every** tier — statutory rights are never tier-gated, and that path is unchanged, except that the self-service export (like the admin export) now emits each community-keyed row's `community_id` as the community's public UUID, never the numeric id (a deleted community maps to `null`). Admin-side handling is split in two:
 
 | Level | Tiers | What | Gate |
 |-------|-------|------|------|

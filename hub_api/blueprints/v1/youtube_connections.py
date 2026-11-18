@@ -54,7 +54,7 @@ youtube_connections_bp = Blueprint("v1_youtube_connections", __name__, url_prefi
 
 #: Tenant-level scope (tenant-owner bundle) -- configuring the tenant's OAuth application.
 SCOPE_TENANT_ADMIN: Final = "tenant:admin"
-_BASE: Final = "/communities/<int:community_id>/provider-connections"
+_BASE: Final = "/communities/<cuuid:community_id>/provider-connections"
 _TOKEN_FIELD_RE: Final = re.compile(r"[\x21-\x7e]+")
 
 

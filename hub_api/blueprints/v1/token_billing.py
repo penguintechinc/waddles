@@ -257,7 +257,7 @@ async def list_token_products() -> TokenProductsResponse:
 # ---------------------------------------------------------------------------
 
 
-@tokens_bp.route("/<int:community_id>/tokens/balances", methods=["GET"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/balances", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(TokenBalancesResponse)
 async def get_balances(
@@ -287,7 +287,7 @@ async def get_balances(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/credit", methods=["POST"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/credit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(CreditTokensRequest)
 @validate_response(TokenLedgerResponse)
@@ -325,7 +325,7 @@ async def credit_tokens(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/debit", methods=["POST"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/debit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(DebitTokensRequest)
 @validate_response(TokenLedgerResponse)
@@ -362,7 +362,7 @@ async def debit_tokens(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/transactions", methods=["GET"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/transactions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(TokenTransactionsResponse)
 async def get_transactions(

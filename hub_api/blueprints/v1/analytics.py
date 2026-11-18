@@ -188,7 +188,7 @@ async def get_my_reputation() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@analytics_bp.route("/community/<int:community_id>/members/<int:user_id>/stats", methods=["GET"])
+@analytics_bp.route("/community/<cuuid:community_id>/members/<int:user_id>/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]
 async def get_member_stats(community_id: int, user_id: int) -> Any:
@@ -205,7 +205,7 @@ async def get_member_stats(community_id: int, user_id: int) -> Any:
 
 
 @analytics_bp.route(
-    "/community/<int:community_id>/members/<int:user_id>/reputation", methods=["GET"]
+    "/community/<cuuid:community_id>/members/<int:user_id>/reputation", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]

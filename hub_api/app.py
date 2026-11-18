@@ -55,6 +55,7 @@ from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.community_common import api_error
+from services.community_public_id import CommunityOpenAPIProvider, install_community_public_ids
 from services.db_routing import mark_replica
 from services.default_tenant import verify_default_tenant_at_startup
 from services.dsar_outbox import run_worker_loop as dsar_outbox_worker_loop
@@ -239,6 +240,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         swagger_ui_path=None,
         redoc_ui_path=None,
         scalar_ui_path=None,
+        openapi_provider_class=CommunityOpenAPIProvider,
         info=Info(title=cfg.module_name, version=cfg.module_version),
     )
 
@@ -270,6 +272,9 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     # before the blueprints so it's unmistakably "the whole app", not
     # scoped to whichever blueprint happens to be registered first.
     rate_limiter = install_rate_limiting(app, cfg)
+    # Community path ids are public UUIDs (`<cuuid:community_id>`); translated to the internal
+    # numeric id after rate limiting, before any blueprint/auth hook runs.
+    install_community_public_ids(app)
 
     app.register_blueprint(create_health_blueprint(cfg.module_name, cfg.module_version))
     app.register_blueprint(create_mcp_blueprint())

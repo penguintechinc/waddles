@@ -144,7 +144,7 @@ def _activation_dto(row: Any, version: str | None = None) -> ActivationDTO:
     )
 
 
-@bundle_activation_bp.route("/<int:community_id>/activation", methods=["GET"])
+@bundle_activation_bp.route("/<cuuid:community_id>/activation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activation(
@@ -163,7 +163,7 @@ async def list_activation(
 
 
 @bundle_activation_bp.route(
-    "/<int:community_id>/activation/<app_id>/access-grants", methods=["GET"]
+    "/<cuuid:community_id>/activation/<app_id>/access-grants", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(AccessGrantsResponse)
@@ -200,7 +200,7 @@ async def activation_access_grants(
     return access_grants_response(blocks, requested, approved, dangerous)
 
 
-@bundle_activation_bp.route("/<int:community_id>/activation", methods=["POST"])
+@bundle_activation_bp.route("/<cuuid:community_id>/activation", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateRequest)
 @validate_response(ActivateResponse, 201)
@@ -249,7 +249,7 @@ async def activate(
     )
 
 
-@bundle_activation_bp.route("/<int:community_id>/activation/<app_id>", methods=["DELETE"])
+@bundle_activation_bp.route("/<cuuid:community_id>/activation/<app_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def deactivate(

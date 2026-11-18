@@ -479,7 +479,7 @@ async def list_communities() -> ListCommunitiesResponse:
     )
 
 
-@platform_bp.route("/communities/<int:community_id>", methods=["GET"])
+@platform_bp.route("/communities/<cuuid:community_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 # NOT @validate_response -- nested `community: CommunityDetailDTO` +
@@ -520,7 +520,7 @@ async def get_community(community_id: int) -> tuple[Any, int]:
     )
 
 
-@platform_bp.route("/communities/<int:community_id>", methods=["PUT"])
+@platform_bp.route("/communities/<cuuid:community_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(UpdateCommunityRequest)
@@ -545,7 +545,7 @@ async def update_community(
     return MessageResponse(success=True, message="Community updated")
 
 
-@platform_bp.route("/communities/<int:community_id>", methods=["DELETE"])
+@platform_bp.route("/communities/<cuuid:community_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(DeactivateUserRequest)

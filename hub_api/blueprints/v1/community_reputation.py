@@ -71,7 +71,7 @@ def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     return {"status": "success", "data": data, "meta": {"version": 1}}, 200
 
 
-@reputation_bp.route("/<int:community_id>/reputation/me", methods=["GET"])
+@reputation_bp.route("/<cuuid:community_id>/reputation/me", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.reputation:read")  # type: ignore[misc]
 async def get_my_reputation(community_id: int) -> tuple[dict[str, Any], int]:
@@ -97,7 +97,7 @@ async def get_my_reputation(community_id: int) -> tuple[dict[str, Any], int]:
     return _envelope(asdict(snapshot))
 
 
-@reputation_bp.route("/<int:community_id>/reputation/leaderboard", methods=["GET"])
+@reputation_bp.route("/<cuuid:community_id>/reputation/leaderboard", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.reputation:read")  # type: ignore[misc]
 async def get_reputation_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:

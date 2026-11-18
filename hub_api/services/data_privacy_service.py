@@ -516,7 +516,11 @@ async def export_user_data(
     exists = await async_dal.select_async(dal(dal.hub_users.id == user_id), dal.hub_users.id)
     if not exists:
         raise not_found("User not found")
-    return await collect_user_data(async_dal, dal, user_id=user_id)
+    data, failures = await collect_user_data(async_dal, dal, user_id=user_id)
+    # Community-keyed rows carry the numeric community PK; the export is a client-facing
+    # boundary, so emit the public UUID only (same remap as the admin DSAR export).
+    await remap_community_ids(async_dal, dal, data)
+    return data, failures
 
 
 async def request_data_deletion(

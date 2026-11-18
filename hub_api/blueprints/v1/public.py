@@ -406,7 +406,7 @@ async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object
     )
 
 
-@public_bp.route("/communities/<int:community_id>", methods=["GET"])
+@public_bp.route("/communities/<cuuid:community_id>", methods=["GET"])
 @validate_response(GetCommunityResponse)
 @reads_from_replica("public.get_community")
 async def get_community(community_id: int) -> GetCommunityResponse | tuple[dict[str, object], int]:

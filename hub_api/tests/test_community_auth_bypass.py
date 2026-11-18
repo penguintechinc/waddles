@@ -29,6 +29,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints import register_blueprints
+from services.community_public_id import install_community_public_ids
 
 # The login stub (M1 placeholder, migration plan phase M1) is the one
 # route in the whole v1/v2 surface deliberately unauthenticated -- login
@@ -59,20 +60,32 @@ from blueprints import register_blueprints
 # authenticated `/authorize` route (CSRF binding), it stores nothing without
 # a valid state, and its HTML response never contains token material. An
 # unauthenticated hit therefore returns 400 (bad/missing state), not 401.
+#: A well-formed community public id no seeded row holds (resolves to the unknown sentinel).
+SAMPLE_COMMUNITY_UUID = "00000000-0000-4000-8000-00000000c0de"
+
 _EXEMPT_PATHS = {
     ("POST", "/api/v1/auth/login"),
-    ("GET", "/api/v1/public/communities/1/profile"),
-    ("GET", "/api/v1/public/communities/1"),
+    ("GET", f"/api/v1/public/communities/{SAMPLE_COMMUNITY_UUID}/profile"),
+    ("GET", f"/api/v1/public/communities/{SAMPLE_COMMUNITY_UUID}"),
     ("GET", "/api/v1/connections/callback/<provider>"),
 }
+
+
+class _NoCommunities:
+    """Async DAL stand-in: the sweep seeds no communities, so every public-id lookup misses."""
+
+    async def select_async(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+        return []
 
 
 @pytest.fixture
 def app(tenant_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_public_ids(quart_app)
     register_blueprints(quart_app)
     quart_app.config["dal"] = tenant_db
+    quart_app.config["async_dal"] = _NoCommunities()
     # A configured (real ES256) machine-JWT verifier: the connection token route no longer has an
     # X-Service-Key path, and with NO verifier it answers 503 (a deliberate fail-closed deployment
     # fault, covered in tests/test_machine_auth_bound.py). The sweep asserts the *unauthenticated*
@@ -95,7 +108,8 @@ def _community_routes(app: Quart) -> list[tuple[str, str]]:
     for rule in app.url_map.iter_rules():
         if "community" not in rule.endpoint:
             continue
-        path = rule.rule.replace("<int:community_id>", "1").replace("<int:channel_id>", "1")
+        path = rule.rule.replace("<cuuid:community_id>", SAMPLE_COMMUNITY_UUID)
+        path = path.replace("<int:community_id>", "1").replace("<int:channel_id>", "1")
         path = path.replace("<int:poll_id>", "1").replace("<int:form_id>", "1")
         path = path.replace("<int:announcement_id>", "1").replace("<int:item_id>", "1")
         path = path.replace("<int:giveaway_id>", "1").replace("<int:user_id>", "1")
@@ -117,6 +131,7 @@ def _discovery_app() -> Quart:
     """Throwaway app used only to enumerate routes at collection time (no DAL, never served)."""
     discovery_app = Quart(__name__)
     QuartSchema(discovery_app)
+    install_community_public_ids(discovery_app)
     register_blueprints(discovery_app)
     return discovery_app
 

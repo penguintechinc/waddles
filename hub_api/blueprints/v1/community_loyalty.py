@@ -115,7 +115,7 @@ def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
 # ===== Admin: config =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/config", methods=["GET"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
 async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
@@ -141,7 +141,7 @@ async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
     return _envelope(asdict(config))
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/config", methods=["PUT"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:write")  # type: ignore[misc]
 async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
@@ -173,7 +173,7 @@ async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
 # ===== Admin: leaderboard =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/leaderboard", methods=["GET"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/leaderboard", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
 @reads_from_replica("community_loyalty.get_leaderboard")
@@ -203,7 +203,7 @@ async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
 # ===== Admin: balance adjustment =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/user/<platform_user_id>/balance", methods=["PUT"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/user/<platform_user_id>/balance", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:admin")  # type: ignore[misc]
 async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict[str, Any], int]:
@@ -249,7 +249,7 @@ async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict
 # ===== Admin: wipe / stats =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/wipe", methods=["POST"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/wipe", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:admin")  # type: ignore[misc]
 async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
@@ -262,7 +262,7 @@ async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
     return _envelope({"affected": affected})
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/stats", methods=["GET"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
 @reads_from_replica("community_loyalty.get_stats")

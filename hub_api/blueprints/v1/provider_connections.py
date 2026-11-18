@@ -492,7 +492,7 @@ async def _admin_guard(community_id: int) -> tuple[int, int | None]:
 # Admin routes
 # --------------------------------------------------------------------------
 
-_BASE = "/communities/<int:community_id>/provider-connections"
+_BASE = "/communities/<cuuid:community_id>/provider-connections"
 _ONE = _BASE + "/<int:connection_id>"
 
 

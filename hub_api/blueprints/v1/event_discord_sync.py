@@ -115,7 +115,7 @@ async def _admin_gate(community_id: int) -> tuple[dict[str, object], int] | None
 
 
 @event_discord_sync_admin_bp.route(
-    "/communities/<int:community_id>/calendar/event-sync", methods=["GET"]
+    "/communities/<cuuid:community_id>/calendar/event-sync", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
@@ -131,7 +131,7 @@ async def get_event_sync(
 
 
 @event_discord_sync_admin_bp.route(
-    "/communities/<int:community_id>/calendar/event-sync", methods=["PUT"]
+    "/communities/<cuuid:community_id>/calendar/event-sync", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]

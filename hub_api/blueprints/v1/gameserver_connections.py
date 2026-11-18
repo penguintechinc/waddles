@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 gameserver_connections_bp = Blueprint("v1_gameserver_connections", __name__, url_prefix="/api/v1")
 
-_BASE = "/communities/<int:community_id>/gameserver-connections"
+_BASE = "/communities/<cuuid:community_id>/gameserver-connections"
 _ONE = _BASE + "/<int:connection_id>"
 
 

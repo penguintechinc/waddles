@@ -116,7 +116,7 @@ async def _require_admin(community_id: int) -> tuple[int, int]:
     return int(ctx.tenant_id), user_id
 
 
-@media_byok_admin_bp.route("/<int:community_id>/media/byok-keys", methods=["GET"])
+@media_byok_admin_bp.route("/<cuuid:community_id>/media/byok-keys", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MediaByokStatusResponse)
 async def get_media_byok_status(
@@ -139,7 +139,7 @@ async def get_media_byok_status(
     )
 
 
-@media_byok_admin_bp.route("/<int:community_id>/media/byok-keys", methods=["PUT"])
+@media_byok_admin_bp.route("/<cuuid:community_id>/media/byok-keys", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SetMediaByokRequest)
 @validate_response(MediaByokKeyDTO)
@@ -168,7 +168,7 @@ async def set_media_byok_key(
     return _key_dto(info)
 
 
-@media_byok_admin_bp.route("/<int:community_id>/media/byok-keys/<provider>", methods=["DELETE"])
+@media_byok_admin_bp.route("/<cuuid:community_id>/media/byok-keys/<provider>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MediaMessageResponse)
 async def delete_media_byok_key(

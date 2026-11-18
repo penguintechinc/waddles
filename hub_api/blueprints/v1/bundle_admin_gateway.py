@@ -47,7 +47,7 @@ logger = logging.getLogger(__name__)
 bundle_admin_gateway_bp = Blueprint(
     "v1_bundle_admin_gateway",
     __name__,
-    url_prefix="/api/v1/apps/community/<int:community_id>/bundles/<app_id>",
+    url_prefix="/api/v1/apps/community/<cuuid:community_id>/bundles/<app_id>",
 )
 
 _APP_ID_RE = re.compile(r"^waddles\.[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$")

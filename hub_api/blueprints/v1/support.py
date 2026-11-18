@@ -270,7 +270,7 @@ def _comment_dto(row: Any) -> CommentDTO:
 # ---------------------------------------------------------------------------
 
 
-@support_admin_bp.route("/<int:community_id>/support/categories", methods=["GET"])
+@support_admin_bp.route("/<cuuid:community_id>/support/categories", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 async def list_categories(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/categories` -- open to any authenticated tenant member."""
@@ -281,7 +281,7 @@ async def list_categories(community_id: int) -> tuple[dict[str, object], int]:
     return {"categories": [asdict(_category_dto(r)) for r in rows]}, 200
 
 
-@support_admin_bp.route("/<int:community_id>/support/categories", methods=["POST"])
+@support_admin_bp.route("/<cuuid:community_id>/support/categories", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(CreateCategoryRequest)
@@ -306,7 +306,9 @@ async def create_category(
     return {"category": asdict(_category_dto(row))}, 201
 
 
-@support_admin_bp.route("/<int:community_id>/support/categories/<int:category_id>", methods=["PUT"])
+@support_admin_bp.route(
+    "/<cuuid:community_id>/support/categories/<int:category_id>", methods=["PUT"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
 @validate_request(UpdateCategoryRequest)
@@ -334,7 +336,7 @@ async def update_category(
 
 
 @support_admin_bp.route(
-    "/<int:community_id>/support/categories/<int:category_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/support/categories/<int:category_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -355,7 +357,7 @@ async def delete_category(community_id: int, category_id: int) -> tuple[dict[str
 # ---------------------------------------------------------------------------
 
 
-@support_admin_bp.route("/<int:community_id>/support/tickets", methods=["GET"])
+@support_admin_bp.route("/<cuuid:community_id>/support/tickets", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
 async def list_tickets(community_id: int) -> tuple[dict[str, object], int]:
@@ -380,7 +382,7 @@ async def list_tickets(community_id: int) -> tuple[dict[str, object], int]:
     return {"tickets": tickets, "total": total, "limit": limit, "offset": offset}, 200
 
 
-@support_admin_bp.route("/<int:community_id>/support/tickets/<int:ticket_id>", methods=["GET"])
+@support_admin_bp.route("/<cuuid:community_id>/support/tickets/<int:ticket_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
 async def get_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, object], int]:
@@ -401,7 +403,7 @@ async def get_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, objec
 
 
 @support_admin_bp.route(
-    "/<int:community_id>/support/tickets/<int:ticket_id>/status", methods=["PUT"]
+    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/status", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -421,7 +423,7 @@ async def update_ticket_status(
 
 
 @support_admin_bp.route(
-    "/<int:community_id>/support/tickets/<int:ticket_id>/assign", methods=["PUT"]
+    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/assign", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -441,7 +443,7 @@ async def assign_ticket(
 
 
 @support_admin_bp.route(
-    "/<int:community_id>/support/tickets/<int:ticket_id>/priority", methods=["PUT"]
+    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/priority", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -461,7 +463,7 @@ async def update_ticket_priority(
 
 
 @support_admin_bp.route(
-    "/<int:community_id>/support/tickets/<int:ticket_id>/comments", methods=["POST"]
+    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/comments", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -490,7 +492,7 @@ async def add_comment(
     return {"comment": asdict(_comment_dto(row))}, 201
 
 
-@support_admin_bp.route("/<int:community_id>/support/stats", methods=["GET"])
+@support_admin_bp.route("/<cuuid:community_id>/support/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
 @reads_from_replica("support.get_ticket_stats")
@@ -519,7 +521,7 @@ async def get_ticket_stats(community_id: int) -> tuple[dict[str, object], int]:
 # ---------------------------------------------------------------------------
 
 
-@support_member_bp.route("/<int:community_id>/support/submit", methods=["POST"])
+@support_member_bp.route("/<cuuid:community_id>/support/submit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(CreateTicketRequest)
 async def submit_ticket(
@@ -549,7 +551,7 @@ async def submit_ticket(
     return {"ticket": asdict(_ticket_dto(row, None))}, 201
 
 
-@support_member_bp.route("/<int:community_id>/support/my-tickets", methods=["GET"])
+@support_member_bp.route("/<cuuid:community_id>/support/my-tickets", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 async def get_my_tickets(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/my-tickets`."""
@@ -561,7 +563,9 @@ async def get_my_tickets(community_id: int) -> tuple[dict[str, object], int]:
     return {"tickets": [asdict(_ticket_dto(row, name)) for row, name in pairs]}, 200
 
 
-@support_member_bp.route("/<int:community_id>/support/my-tickets/<int:ticket_id>", methods=["GET"])
+@support_member_bp.route(
+    "/<cuuid:community_id>/support/my-tickets/<int:ticket_id>", methods=["GET"]
+)
 @tenant_middleware  # type: ignore[misc]
 async def get_my_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/my-tickets/<ticketId>` -- reporter-only (SECURITY FIX)."""
@@ -586,7 +590,7 @@ async def get_my_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, ob
 
 
 @support_member_bp.route(
-    "/<int:community_id>/support/my-tickets/<int:ticket_id>/comments", methods=["POST"]
+    "/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_request(AddOwnCommentRequest)

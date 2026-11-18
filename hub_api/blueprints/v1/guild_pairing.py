@@ -155,7 +155,7 @@ async def _feature_gate_and_tenant_check(community_id: int) -> tuple[dict[str, o
 # ---------------------------------------------------------------------------
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["GET"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/guild-pairings", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
 @validate_response(GuildPairingListResponse)
@@ -170,7 +170,7 @@ async def list_pairings(
     return GuildPairingListResponse(success=True, pairings=pairings)
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["POST"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/guild-pairings", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
 @validate_response(GuildPairingResponse, status_code=201)
@@ -250,7 +250,7 @@ def _install_redirect_uri() -> str:
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/discord/server-install/authorize", methods=["POST"]
+    "/communities/<cuuid:community_id>/discord/server-install/authorize", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
@@ -308,7 +308,7 @@ async def start_server_install(
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["PATCH"]
+    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>", methods=["PATCH"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
@@ -347,7 +347,7 @@ async def update_pairing(
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["DELETE"]
+    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
@@ -369,7 +369,7 @@ async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
+    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
     methods=["GET"],
 )
 @tenant_middleware  # type: ignore[misc]
@@ -391,7 +391,7 @@ async def list_bindings(
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
+    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
     methods=["POST"],
 )
 @tenant_middleware  # type: ignore[misc]
@@ -426,7 +426,7 @@ async def create_binding(
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings/<int:binding_id>",
+    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>/role-bindings/<int:binding_id>",
     methods=["DELETE"],
 )
 @tenant_middleware  # type: ignore[misc]
@@ -451,7 +451,7 @@ async def delete_binding(community_id: int, pairing_id: int, binding_id: int) ->
 # ---------------------------------------------------------------------------
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/discord/roles", methods=["GET"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/roles", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
 @validate_response(DiscordGuildRolesResponse)
@@ -481,7 +481,7 @@ async def _list_roles_for_mirror(dal: Any, community_id: int, guild_id: str) -> 
     return await roles_svc.list_guild_roles(dal, community_id, guild_id=guild_id)
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["GET"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/role-mirrors", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
 @validate_response(RoleMirrorMappingListResponse)
@@ -497,7 +497,7 @@ async def list_role_mirrors(
     )
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["POST"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/role-mirrors", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
 @validate_response(RoleMirrorMappingResponse, status_code=201)
@@ -528,7 +528,7 @@ async def create_role_mirror(
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/discord/role-mirrors/<int:mapping_id>", methods=["DELETE"]
+    "/communities/<cuuid:community_id>/discord/role-mirrors/<int:mapping_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]

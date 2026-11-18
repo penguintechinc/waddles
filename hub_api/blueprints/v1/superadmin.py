@@ -426,7 +426,7 @@ async def list_communities() -> CommunitiesResponse:
     )
 
 
-@superadmin_bp.route("/communities/<int:community_id>", methods=["GET"])
+@superadmin_bp.route("/communities/<cuuid:community_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(CommunityDetailResponse)
@@ -525,7 +525,7 @@ async def _request_validation_error(exc: RequestSchemaValidationError) -> Any:
     return body, status
 
 
-@superadmin_bp.route("/communities/<int:community_id>", methods=["PUT"])
+@superadmin_bp.route("/communities/<cuuid:community_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_request(UpdateCommunityRequest)
@@ -600,7 +600,7 @@ async def update_community(
     return MessageResponse(success=True, message="Community updated")
 
 
-@superadmin_bp.route("/communities/<int:community_id>", methods=["DELETE"])
+@superadmin_bp.route("/communities/<cuuid:community_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -618,7 +618,7 @@ async def delete_community(
     return MessageResponse(success=True, message="Community deleted")
 
 
-@superadmin_bp.route("/communities/<int:community_id>/reassign", methods=["POST"])
+@superadmin_bp.route("/communities/<cuuid:community_id>/reassign", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_request(ReassignOwnerRequest)

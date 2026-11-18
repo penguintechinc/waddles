@@ -46,7 +46,7 @@ def _tenant_ok(community_id: int) -> bool:
     return community_in_tenant(current_app.config["dal"], community_id, ctx)
 
 
-@raffle_bp.route("/<int:community_id>/raffle-customization", methods=["GET"])
+@raffle_bp.route("/<cuuid:community_id>/raffle-customization", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:read")  # type: ignore[misc]
 async def list_route(community_id: int) -> tuple[dict[str, object], int]:
@@ -67,7 +67,7 @@ async def list_route(community_id: int) -> tuple[dict[str, object], int]:
     }, 200
 
 
-@raffle_bp.route("/<int:community_id>/raffle-customization/<event_type>", methods=["PUT"])
+@raffle_bp.route("/<cuuid:community_id>/raffle-customization/<event_type>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:write")  # type: ignore[misc]
 async def upsert_route(community_id: int, event_type: str) -> tuple[dict[str, object], int]:
@@ -87,7 +87,7 @@ async def upsert_route(community_id: int, event_type: str) -> tuple[dict[str, ob
     return {"success": True, "customization": asdict(dto)}, 200
 
 
-@raffle_bp.route("/<int:community_id>/raffle-customization/<event_type>", methods=["DELETE"])
+@raffle_bp.route("/<cuuid:community_id>/raffle-customization/<event_type>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:write")  # type: ignore[misc]
 async def delete_route(community_id: int, event_type: str) -> tuple[dict[str, object], int]:
@@ -100,7 +100,7 @@ async def delete_route(community_id: int, event_type: str) -> tuple[dict[str, ob
     return {"success": True}, 200
 
 
-@raffle_bp.route("/<int:community_id>/raffle-customization/<event_type>/upload", methods=["POST"])
+@raffle_bp.route("/<cuuid:community_id>/raffle-customization/<event_type>/upload", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:write")  # type: ignore[misc]
 async def upload_route(community_id: int, event_type: str) -> tuple[dict[str, object], int]:

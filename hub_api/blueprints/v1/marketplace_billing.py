@@ -161,7 +161,7 @@ async def get_pricing() -> svc.PricingConfigDTO:
     )
 
 
-@premium_bp.route("/status/<int:community_id>", methods=["GET"])
+@premium_bp.route("/status/<cuuid:community_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.premium:admin")  # type: ignore[misc]
 async def get_premium_status(community_id: int) -> tuple[dict[str, object], int]:
@@ -463,7 +463,7 @@ async def redeem_discount_code(data: RedeemDiscountCodeRequest) -> tuple[dict[st
 # ---------------------------------------------------------------------------
 
 
-@subscriptions_bp.route("/<int:community_id>/subscriptions", methods=["GET"])
+@subscriptions_bp.route("/<cuuid:community_id>/subscriptions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.subscription:read")  # type: ignore[misc]
 async def list_subscriptions(community_id: int) -> tuple[dict[str, object], int]:
@@ -488,7 +488,7 @@ class SubscribeModuleRequest:
     moduleId: int
 
 
-@subscriptions_bp.route("/<int:community_id>/subscriptions", methods=["POST"])
+@subscriptions_bp.route("/<cuuid:community_id>/subscriptions", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.subscription:write")  # type: ignore[misc]
 @validate_request(SubscribeModuleRequest)
@@ -511,7 +511,9 @@ async def subscribe_module(
     }, 201
 
 
-@subscriptions_bp.route("/<int:community_id>/subscriptions/<int:subscription_id>", methods=["PUT"])
+@subscriptions_bp.route(
+    "/<cuuid:community_id>/subscriptions/<int:subscription_id>", methods=["PUT"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.subscription:write")  # type: ignore[misc]
 async def update_subscription(
@@ -536,7 +538,7 @@ async def update_subscription(
 
 
 @subscriptions_bp.route(
-    "/<int:community_id>/subscriptions/<int:subscription_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/subscriptions/<int:subscription_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.subscription:write")  # type: ignore[misc]

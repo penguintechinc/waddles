@@ -48,7 +48,7 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
-@community_music_bp.route("/<int:community_id>/music", methods=["GET"])
+@community_music_bp.route("/<cuuid:community_id>/music", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(svc.MusicPageDTO)
 async def get_music(community_id: int) -> svc.MusicPageDTO | tuple[dict[str, object], int]:

@@ -262,7 +262,7 @@ def _key_dto(info: config_service.ByokKeyInfo) -> ByokKeyDTO:
 # ---------------------------------------------------------------------------
 
 
-@ai_config_bp.route("/<int:community_id>/ai/config", methods=["GET"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(AIConfigResponse)
 async def get_config(community_id: int) -> AIConfigResponse | tuple[dict[str, object], int]:
@@ -278,7 +278,7 @@ async def get_config(community_id: int) -> AIConfigResponse | tuple[dict[str, ob
     return _config_dto(cfg)
 
 
-@ai_config_bp.route("/<int:community_id>/ai/config", methods=["PUT"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SetAIConfigRequest)
 @validate_response(AIConfigResponse)
@@ -305,7 +305,7 @@ async def set_config(
     return _config_dto(cfg)
 
 
-@ai_config_bp.route("/<int:community_id>/ai/byok-keys", methods=["GET"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/byok-keys", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ListByokKeysResponse)
 async def list_byok_keys(community_id: int) -> ListByokKeysResponse | tuple[dict[str, object], int]:
@@ -321,7 +321,7 @@ async def list_byok_keys(community_id: int) -> ListByokKeysResponse | tuple[dict
     return ListByokKeysResponse(success=True, keys=[_key_dto(k) for k in keys])
 
 
-@ai_config_bp.route("/<int:community_id>/ai/byok-keys", methods=["PUT"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/byok-keys", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SetByokKeyRequest)
 @validate_response(ByokKeyDTO)
@@ -351,7 +351,7 @@ async def set_byok_key(
     return _key_dto(info)
 
 
-@ai_config_bp.route("/<int:community_id>/ai/byok-keys/<provider>", methods=["DELETE"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/byok-keys/<provider>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_byok_key(
@@ -376,7 +376,7 @@ async def delete_byok_key(
 # ---------------------------------------------------------------------------
 
 
-@ai_completions_bp.route("/<int:community_id>/ai/completions", methods=["POST"])
+@ai_completions_bp.route("/<cuuid:community_id>/ai/completions", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(CompletionRequestDTO)
 @validate_response(CompletionResponseDTO)
