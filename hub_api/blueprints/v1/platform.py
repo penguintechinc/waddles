@@ -49,6 +49,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import platform_service as svc
+from services.community_public_id import lookup_public_id, lookup_public_ids
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
@@ -115,7 +116,7 @@ class ListUsersResponse:
 class CommunityMembershipDTO:
     """Community membership DTO (nested in get-user detail)."""
 
-    communityId: int | None
+    communityId: str | None
     communityName: str | None
     role: str | None
     reputationScore: int
@@ -170,7 +171,7 @@ class MessageResponse:
 class CommunityDTO:
     """Community DTO (list row)."""
 
-    id: int
+    id: str
     name: str | None
     displayName: str | None
     description: str | None
@@ -203,7 +204,7 @@ class CommunityOwnerDTO:
 class CommunityDetailDTO:
     """Community detail DTO."""
 
-    id: int
+    id: str
     name: str | None
     displayName: str | None
     description: str | None
@@ -374,6 +375,9 @@ async def get_user(user_id: int) -> tuple[Any, int]:
         result = await svc.get_user(async_dal, dal, user_id=user_id)
     except ApiError as exc:
         return _err(exc)
+    public_ids = await lookup_public_ids(
+        m["community_id"] for m in result["memberships"] if m["community_id"] is not None
+    )
     return jsonify_dto(
         GetUserResponse(
             success=True,
@@ -386,7 +390,11 @@ async def get_user(user_id: int) -> tuple[Any, int]:
                 platformRole=result["platform_role"],
                 memberships=[
                     CommunityMembershipDTO(
-                        communityId=m["community_id"],
+                        communityId=(
+                            None
+                            if m["community_id"] is None
+                            else public_ids[int(m["community_id"])]
+                        ),
                         communityName=m["community_name"],
                         role=m["role"],
                         reputationScore=m["reputation_score"],
@@ -457,11 +465,12 @@ async def list_communities() -> ListCommunitiesResponse:
     rows, total, total_pages = await svc.list_communities(
         async_dal, dal, page=page, limit=limit, search=search, is_active=is_active
     )
+    public_ids = await lookup_public_ids(int(r.id) for r in rows)
     return ListCommunitiesResponse(
         success=True,
         communities=[
             CommunityDTO(
-                id=r.id,
+                id=public_ids[int(r.id)],
                 name=r.name,
                 displayName=r.display_name or r.name,
                 description=r.description,
@@ -497,7 +506,7 @@ async def get_community(community_id: int) -> tuple[Any, int]:
         GetCommunityResponse(
             success=True,
             community=CommunityDetailDTO(
-                id=c.id,
+                id=await lookup_public_id(int(c.id)),
                 name=c.name,
                 displayName=c.display_name or c.name,
                 description=c.description,

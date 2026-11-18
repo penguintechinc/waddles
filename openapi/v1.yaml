@@ -43,7 +43,7 @@ components:
           type: string
         communityId:
           title: Communityid
-          type: integer
+          type: string
         config:
           additionalProperties: true
           title: Config
@@ -253,7 +253,7 @@ components:
           title: Archived At
         community_id:
           title: Community Id
-          type: integer
+          type: string
         content:
           title: Content
           type: string
@@ -1116,7 +1116,7 @@ components:
           title: Channel Name
         community_id:
           title: Community Id
-          type: integer
+          type: string
         content:
           title: Content
           type: string
@@ -1299,7 +1299,7 @@ components:
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           title: Isactive
           type: boolean
@@ -1354,7 +1354,7 @@ components:
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           title: Isactive
           type: boolean
@@ -1768,7 +1768,7 @@ components:
           title: Clientsecret
         communityId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Communityid
         configData:
@@ -2043,7 +2043,7 @@ components:
           type: string
         communityId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Communityid
         config:
@@ -2235,13 +2235,13 @@ components:
       - revokedAt
       title: GlobalInstallDTO
       type: object
-    GuildPairing:
-      description: One `guild_tenant_pairings` row -- the wire-shape DTO for blueprint/API
-        responses.
+    GuildPairingDTO:
+      description: 'Wire shape of one pairing: `community_id` is the community''s
+        PUBLIC UUID.'
       properties:
         community_id:
           title: Community Id
-          type: integer
+          type: string
         created_at:
           anyOf:
           - type: string
@@ -2290,7 +2290,7 @@ components:
       - created_by_user_id
       - created_at
       - updated_at
-      title: GuildPairing
+      title: GuildPairingDTO
       type: object
     HandDTO:
       description: One raised hand with the hub-api-resolved display name (UUIDs elsewhere).
@@ -2748,15 +2748,16 @@ components:
       - score
       title: KnowledgeSearchResultDTO
       type: object
-    KnowledgeSource:
-      description: Response DTO -- one `ai_knowledge_sources` row.
+    KnowledgeSourceDTO:
+      description: 'One knowledge source as exposed over the API: `community_id` is
+        the PUBLIC UUID.'
       properties:
         branch:
           title: Branch
           type: string
         community_id:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Community Id
         created_at:
@@ -2832,7 +2833,7 @@ components:
       - index_errors
       - created_at
       - updated_at
-      title: KnowledgeSource
+      title: KnowledgeSourceDTO
       type: object
     LeaderboardConfig:
       description: Community leaderboard configuration (admin-managed).
@@ -2966,7 +2967,7 @@ components:
           title: Actor
         community_id:
           title: Community Id
-          type: integer
+          type: string
         id:
           title: Id
           type: integer
@@ -3381,7 +3382,7 @@ components:
       properties:
         communityId:
           title: Communityid
-          type: integer
+          type: string
         config:
           additionalProperties: true
           title: Config
@@ -3450,7 +3451,7 @@ components:
           type: array
         communityId:
           title: Communityid
-          type: integer
+          type: string
         createdAt:
           anyOf:
           - type: string
@@ -4045,7 +4046,7 @@ components:
           title: Displayname
         id:
           title: Id
-          type: integer
+          type: string
         logoUrl:
           anyOf:
           - type: string
@@ -4100,7 +4101,7 @@ components:
           title: Displayname
         id:
           title: Id
-          type: integer
+          type: string
         joinMode:
           title: Joinmode
           type: string
@@ -4186,7 +4187,7 @@ components:
       properties:
         communityId:
           title: Communityid
-          type: integer
+          type: string
         createdAt:
           anyOf:
           - type: string
@@ -4250,7 +4251,7 @@ components:
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         name:
           title: Name
           type: string
@@ -4586,13 +4587,13 @@ components:
       - ok
       title: RewrapDTO
       type: object
-    RoleMirrorMapping:
-      description: One `discord_role_mirror_mappings` row -- the wire-shape DTO for
-        API responses.
+    RoleMirrorMappingDTO:
+      description: 'Wire shape of one mirror mapping: `community_id` is the community''s
+        PUBLIC UUID.'
       properties:
         community_id:
           title: Community Id
-          type: integer
+          type: string
         created_at:
           anyOf:
           - type: string
@@ -4645,7 +4646,7 @@ components:
       - last_skipped_not_member
       - last_error
       - created_at
-      title: RoleMirrorMapping
+      title: RoleMirrorMappingDTO
       type: object
     RoleSyncBinding:
       description: One `community_role_sync_bindings` row -- the wire-shape DTO for
@@ -5326,7 +5327,7 @@ components:
           title: Displayname
         id:
           title: Id
-          type: integer
+          type: string
         logoUrl:
           anyOf:
           - type: string
@@ -6215,7 +6216,7 @@ components:
           type: integer
         community_id:
           title: Community Id
-          type: integer
+          type: string
         created_at:
           anyOf:
           - type: string
@@ -6396,7 +6397,7 @@ components:
           title: Appid
         communityId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Communityid
         events:
@@ -6829,7 +6830,7 @@ paths:
                 properties:
                   sources:
                     items:
-                      $ref: '#/components/schemas/KnowledgeSource'
+                      $ref: '#/components/schemas/KnowledgeSourceDTO'
                     title: Sources
                     type: array
                   success:
@@ -6920,7 +6921,7 @@ paths:
                 description: Response body -- Knowledge Source.
                 properties:
                   source:
-                    $ref: '#/components/schemas/KnowledgeSource'
+                    $ref: '#/components/schemas/KnowledgeSourceDTO'
                   success:
                     title: Success
                     type: boolean
@@ -7030,7 +7031,7 @@ paths:
                 description: Response body -- Knowledge Source.
                 properties:
                   source:
-                    $ref: '#/components/schemas/KnowledgeSource'
+                    $ref: '#/components/schemas/KnowledgeSourceDTO'
                   success:
                     title: Success
                     type: boolean
@@ -7675,7 +7676,7 @@ paths:
                     title: Byok Provider
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   on_insufficient_balance:
                     title: On Insufficient Balance
                     type: string
@@ -7742,7 +7743,7 @@ paths:
                     title: Byok Provider
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   on_insufficient_balance:
                     title: On Insufficient Balance
                     type: string
@@ -17378,7 +17379,7 @@ paths:
                 properties:
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   event_sync_enabled:
                     title: Event Sync Enabled
                     type: boolean
@@ -17429,7 +17430,7 @@ paths:
                 properties:
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   event_sync_enabled:
                     title: Event Sync Enabled
                     type: boolean
@@ -17652,7 +17653,7 @@ paths:
                 properties:
                   mappings:
                     items:
-                      $ref: '#/components/schemas/RoleMirrorMapping'
+                      $ref: '#/components/schemas/RoleMirrorMappingDTO'
                     title: Mappings
                     type: array
                   success:
@@ -17684,7 +17685,7 @@ paths:
                 description: Single mirror-mapping response envelope.
                 properties:
                   mapping:
-                    $ref: '#/components/schemas/RoleMirrorMapping'
+                    $ref: '#/components/schemas/RoleMirrorMappingDTO'
                   success:
                     title: Success
                     type: boolean
@@ -17956,7 +17957,7 @@ paths:
                 properties:
                   pairings:
                     items:
-                      $ref: '#/components/schemas/GuildPairing'
+                      $ref: '#/components/schemas/GuildPairingDTO'
                     title: Pairings
                     type: array
                   success:
@@ -17987,7 +17988,7 @@ paths:
                 description: Single-pairing response envelope.
                 properties:
                   pairing:
-                    $ref: '#/components/schemas/GuildPairing'
+                    $ref: '#/components/schemas/GuildPairingDTO'
                   success:
                     title: Success
                     type: boolean
@@ -18043,7 +18044,7 @@ paths:
                 description: Single-pairing response envelope.
                 properties:
                   pairing:
-                    $ref: '#/components/schemas/GuildPairing'
+                    $ref: '#/components/schemas/GuildPairingDTO'
                   success:
                     title: Success
                     type: boolean
@@ -21621,7 +21622,7 @@ paths:
                     type: array
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   success:
                     title: Success
                     type: boolean

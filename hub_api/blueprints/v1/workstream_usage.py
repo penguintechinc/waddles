@@ -23,7 +23,7 @@ from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
-from services.community_public_id import resolve_public_community_id
+from services.community_public_id import lookup_public_ids, resolve_public_community_id
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
 from services.usage_query_service import query_usage
@@ -90,7 +90,7 @@ def _parse_datetime(raw: str | None, *, field_name: str, code: str) -> datetime 
 class UsageRowDTO:
     """One aggregated usage bucket on the wire."""
 
-    communityId: int | None
+    communityId: str | None
     workstreamId: str
     stage: str
     appId: str | None
@@ -160,11 +160,12 @@ async def list_usage(tenant_slug: str) -> UsageListResponse | tuple[dict[str, ob
         logger.warning("usage list refused: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
+    public_ids = await lookup_public_ids(r.community_id for r in rows if r.community_id is not None)
     return UsageListResponse(
         success=True,
         rows=[
             UsageRowDTO(
-                communityId=r.community_id,
+                communityId=None if r.community_id is None else public_ids[r.community_id],
                 workstreamId=r.workstream_id,
                 stage=r.stage,
                 appId=r.app_id,

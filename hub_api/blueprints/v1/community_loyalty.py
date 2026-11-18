@@ -39,6 +39,7 @@ from quart import Blueprint, current_app, request
 
 from services import community_loyalty as loyalty_svc
 from services.community_common import community_in_tenant, is_valid_service_key
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dals, reads_from_replica
 from services.errors import ApiError, bad_request, not_found
@@ -108,6 +109,13 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
+async def _public_dict(dto: Any, community_id: int) -> dict[str, Any]:
+    """`asdict(dto)` with `community_id` swapped for the community's PUBLIC UUID."""
+    body = asdict(dto)
+    body["community_id"] = await lookup_public_id(community_id)
+    return body
+
+
 def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     return {"status": "success", "data": data, "meta": {"version": 1}}, 200
 
@@ -138,7 +146,7 @@ async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
         config = await loyalty_svc.get_config(async_dal, dal, community_id=community_id)
     except ApiError as exc:
         return _err(exc)
-    return _envelope(asdict(config))
+    return _envelope(await _public_dict(config, community_id))
 
 
 @loyalty_bp.route("/<cuuid:community_id>/loyalty/config", methods=["PUT"])
@@ -167,7 +175,7 @@ async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
         )
     except ApiError as exc:
         return _err(exc)
-    return _envelope(asdict(config))
+    return _envelope(await _public_dict(config, community_id))
 
 
 # ===== Admin: leaderboard =====
@@ -243,7 +251,7 @@ async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict
         )
     except ApiError as exc:
         return _err(exc)
-    return _envelope(asdict(balance))
+    return _envelope(await _public_dict(balance, community_id))
 
 
 # ===== Admin: wipe / stats =====
@@ -273,7 +281,7 @@ async def get_stats(community_id: int) -> tuple[dict[str, Any], int]:
 
     async_dal, dal = get_read_dals()
     stats = await loyalty_svc.get_stats(async_dal, dal, community_id=community_id)
-    return _envelope(asdict(stats))
+    return _envelope(await _public_dict(stats, community_id))
 
 
 # ===== Internal (service-to-service, X-Service-Key) =====

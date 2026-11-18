@@ -73,7 +73,11 @@ class TestJoinCommunity:
             f"/api/v1/communities/{public_id(auth_db, cid)}/join", headers=_auth_header(user_id=uid)
         )
         assert response.status_code == 201
-        assert await response.get_json() == {"success": True, "community_id": cid, "joined": True}
+        assert await response.get_json() == {
+            "success": True,
+            "community_id": public_id(auth_db, cid),
+            "joined": True,
+        }
         assert _members(auth_db, cid, uid) == 1
 
     async def test_join_is_idempotent(self, client: Any, auth_db: Any) -> None:

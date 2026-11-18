@@ -218,7 +218,7 @@ class TestListBundles:
         # never returned twice even though both tiers have a matching row.
         assert len(body["bundles"]) == 1
         bundle = body["bundles"][0]
-        assert bundle["communityId"] == community_id
+        assert bundle["communityId"] == public_id(distribution_db, community_id)
         assert bundle["config"] == {"greeting": "yo"}
 
     async def test_disabled_activation_is_excluded(self, client: Any, distribution_db: Any) -> None:

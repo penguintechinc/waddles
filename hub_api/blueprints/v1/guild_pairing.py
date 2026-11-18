@@ -28,6 +28,7 @@ touching the DB.
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Any, cast
@@ -46,6 +47,7 @@ from services import guild_ownership as ownership_svc
 from services import guild_pairing as pairing_svc
 from services import install_state_binding as binding
 from services.community_common import community_in_tenant
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, conflict, not_found, payment_required
 
@@ -65,11 +67,35 @@ FEATURE_GUILD_PAIRING = "waddles.community.guild_pairing"
 
 
 @dataclass(slots=True, frozen=True)
+class GuildPairingDTO:
+    """Wire shape of one pairing: `community_id` is the community's PUBLIC UUID."""
+
+    id: int
+    community_id: str
+    discord_guild_id: str
+    direction: str
+    sync_enabled: bool
+    role_name_prefix: str
+    event_sync_enabled: bool
+    propagate_moderators: bool
+    created_by_user_id: int | None
+    created_at: str | None
+    updated_at: str | None
+
+
+def _pairing_dto(pairing: pairing_svc.GuildPairing, public_community_id: str) -> GuildPairingDTO:
+    """Map a service pairing to its wire DTO, swapping the numeric community id for the UUID."""
+    values = {f.name: getattr(pairing, f.name) for f in dataclasses.fields(pairing)}
+    values["community_id"] = public_community_id
+    return GuildPairingDTO(**values)
+
+
+@dataclass(slots=True, frozen=True)
 class GuildPairingResponse:
     """Single-pairing response envelope."""
 
     success: bool
-    pairing: pairing_svc.GuildPairing
+    pairing: GuildPairingDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -77,7 +103,7 @@ class GuildPairingListResponse:
     """List-of-pairings response envelope."""
 
     success: bool
-    pairings: list[pairing_svc.GuildPairing]
+    pairings: list[GuildPairingDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -105,11 +131,38 @@ class DiscordGuildRolesResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class RoleMirrorMappingDTO:
+    """Wire shape of one mirror mapping: `community_id` is the community's PUBLIC UUID."""
+
+    id: int
+    community_id: str
+    source_guild_id: str
+    source_role_id: str
+    target_guild_id: str
+    target_role_id: str
+    last_synced_at: str | None
+    last_roles_added: int
+    last_roles_removed: int
+    last_skipped_not_member: int
+    last_error: str | None
+    created_at: str | None
+
+
+def _mapping_dto(
+    mapping: mirror_svc.RoleMirrorMapping, public_community_id: str
+) -> RoleMirrorMappingDTO:
+    """Map a service mapping to its wire DTO, swapping the numeric community id for the UUID."""
+    values = {f.name: getattr(mapping, f.name) for f in dataclasses.fields(mapping)}
+    values["community_id"] = public_community_id
+    return RoleMirrorMappingDTO(**values)
+
+
+@dataclass(slots=True, frozen=True)
 class RoleMirrorMappingResponse:
     """Single mirror-mapping response envelope."""
 
     success: bool
-    mapping: mirror_svc.RoleMirrorMapping
+    mapping: RoleMirrorMappingDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -117,7 +170,7 @@ class RoleMirrorMappingListResponse:
     """List-of-mirror-mappings response envelope."""
 
     success: bool
-    mappings: list[mirror_svc.RoleMirrorMapping]
+    mappings: list[RoleMirrorMappingDTO]
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +220,10 @@ async def list_pairings(
     if gate_error is not None:
         return gate_error
     pairings = pairing_svc.list_pairings(_dal(), community_id)
-    return GuildPairingListResponse(success=True, pairings=pairings)
+    public_id = await lookup_public_id(community_id)
+    return GuildPairingListResponse(
+        success=True, pairings=[_pairing_dto(p, public_id) for p in pairings]
+    )
 
 
 @guild_pairing_bp.route("/communities/<cuuid:community_id>/guild-pairings", methods=["POST"])
@@ -227,7 +283,8 @@ async def create_pairing(
     except ApiError as exc:
         logger.warning("create_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return GuildPairingResponse(success=True, pairing=pairing), 201
+    public_id = await lookup_public_id(community_id)
+    return GuildPairingResponse(success=True, pairing=_pairing_dto(pairing, public_id)), 201
 
 
 @dataclass(slots=True, frozen=True)
@@ -343,7 +400,8 @@ async def update_pairing(
     except ApiError as exc:
         logger.warning("update_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return GuildPairingResponse(success=True, pairing=pairing)
+    public_id = await lookup_public_id(community_id)
+    return GuildPairingResponse(success=True, pairing=_pairing_dto(pairing, public_id))
 
 
 @guild_pairing_bp.route(
@@ -492,8 +550,12 @@ async def list_role_mirrors(
     gate_error = await _feature_gate_and_tenant_check(community_id)
     if gate_error is not None:
         return gate_error
+    public_id = await lookup_public_id(community_id)
     return RoleMirrorMappingListResponse(
-        success=True, mappings=mirror_svc.list_mappings(_dal(), community_id)
+        success=True,
+        mappings=[
+            _mapping_dto(m, public_id) for m in mirror_svc.list_mappings(_dal(), community_id)
+        ],
     )
 
 
@@ -524,7 +586,8 @@ async def create_role_mirror(
     except ApiError as exc:
         logger.warning("create_role_mirror rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return RoleMirrorMappingResponse(success=True, mapping=mapping), 201
+    public_id = await lookup_public_id(community_id)
+    return RoleMirrorMappingResponse(success=True, mapping=_mapping_dto(mapping, public_id)), 201
 
 
 @guild_pairing_bp.route(

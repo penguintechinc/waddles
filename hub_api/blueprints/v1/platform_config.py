@@ -28,6 +28,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import platform_config_service as svc
+from services.community_public_id import lookup_public_ids
 from services.errors import ApiError
 
 platform_config_bp = Blueprint(
@@ -58,7 +59,7 @@ class CredentialDTO:
     id: int
     platform: str
     integrationType: str
-    communityId: int | None
+    communityId: str | None
     userId: int | None
     accessToken: str | None
     refreshToken: str | None
@@ -133,12 +134,13 @@ class HubSettingsResponse:
     data: dict[str, str]
 
 
-def _credential_dto(row: svc.CredentialRow) -> CredentialDTO:
+def _credential_dto(row: svc.CredentialRow, public_ids: dict[int, str]) -> CredentialDTO:
+    """Credential DTO; `communityId` is the community's PUBLIC UUID (never the numeric id)."""
     return CredentialDTO(
         id=row.id,
         platform=row.platform,
         integrationType=row.integration_type,
-        communityId=row.community_id,
+        communityId=None if row.community_id is None else public_ids[int(row.community_id)],
         userId=row.user_id,
         accessToken="***" if row.access_token_set else None,
         refreshToken="***" if row.refresh_token_set else None,
@@ -172,7 +174,8 @@ async def get_platform_configs() -> ListPlatformConfigsResponse | tuple[dict[str
         )
     except ApiError as exc:
         return _err(exc)
-    dtos = [_credential_dto(r) for r in rows]
+    public_ids = await lookup_public_ids(r.community_id for r in rows if r.community_id is not None)
+    dtos = [_credential_dto(r, public_ids) for r in rows]
     return ListPlatformConfigsResponse(success=True, data=dtos, count=len(dtos))
 
 

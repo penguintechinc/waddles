@@ -185,6 +185,7 @@ class TestGetConfig:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["preferred_tier"] == "free"
+        assert body["community_id"] == public_id(ai_routing_db, community_id)  # UUID, not int
 
 
 class TestSetConfig:

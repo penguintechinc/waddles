@@ -184,7 +184,7 @@ class TestCreateConnection:
         assert response.status_code == 201
         body = await response.get_json()
         conn = body["data"]
-        assert conn["community_id"] == COMMUNITY_ID
+        assert conn["community_id"] == public_id(automation_db, COMMUNITY_ID)
         assert conn["vendor_id"] is None
         assert conn["token_masked"] == "****1234"
         assert "encrypted_token" not in conn
