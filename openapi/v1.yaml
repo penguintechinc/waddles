@@ -16727,7 +16727,8 @@ paths:
                 title: AltchaChallengeResponse
                 type: object
           description: Self-hosted ALTCHA proof-of-work challenge DTO.
-      summary: Issue a self-hosted ALTCHA proof-of-work challenge.
+      summary: Issue a self-hosted ALTCHA proof-of-work challenge (per-IP limited,
+        fail closed).
   /api/v1/communities/{community_id}/calendar/event-sync:
     get:
       description: ''
