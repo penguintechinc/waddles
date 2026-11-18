@@ -9,9 +9,14 @@ Model (critical-rules.md Licensing Model, team overage):
   402 later); an already-provisioned allocation is NEVER stripped -- shrinking the pool or
   downgrading the tenant only blocks new allocations. Super-admin ``operator_override`` is never
   blocked but still counts (reported as ``overage``).
-- Staleness: an allocation whose community has not been active for 30 days stops counting against
-  the pool (its slot is free); the community keeps its tier, and when it becomes active again
-  (:func:`touch_active`) it simply re-counts, no penalty.
+- Staleness (REPORTING ONLY, automatic reclamation is NOT active): the licensing rule "30 days
+  no-contact frees the slot" needs a real activity signal, and hub-api has none (community activity
+  happens in the data plane, so :func:`touch_active` has no production caller). Until a real
+  signal feeds :func:`touch_active`, EVERY unreleased allocation counts against the pool however
+  old its ``last_active_at`` is; ``stale`` is informational only. A stale allocation keeps both its
+  tier and its slot until the tenant admin or an operator releases it. Counting only fresh rows
+  would let a tenant at its limit re-allocate a whole new pool every 30 days (pool cap defeat).
+  The rule is enabled by wiring a real activity signal (deferred issue), not by a toggle.
 
 Concurrency (same pattern as ``services/free_tier_caps.py``): the guarded section is ONE
 synchronous executor job on one thread-local pydal connection: take
@@ -197,7 +202,12 @@ class AllocationResult:
 
 @dataclass(slots=True, frozen=True)
 class TierUsage:
-    """Per-tier pool usage (``stale_excluded`` allocations do not count toward ``used``)."""
+    """Per-tier pool usage.
+
+    ``used`` counts EVERY unreleased allocation; ``stale_excluded`` (legacy name, kept for API
+    stability) is the informational count of those whose ``last_active_at`` is older than
+    :data:`STALE_AFTER`. Stale rows are INCLUDED in ``used`` (no activity signal is wired yet).
+    """
 
     tier_code: int
     used: int
@@ -241,14 +251,18 @@ def _compute_usage(used: int, stale: int, limit: int | None, tier_code: int) -> 
 
 
 def _count_active(dal: Any, tenant_id: int, tier_code: int, now: datetime) -> tuple[int, int]:
-    """SQL-side ``(used, stale)`` counts of a tier's active allocations (no ledger load)."""
+    """SQL-side ``(used, stale)`` counts of a tier's unreleased allocations (no ledger load).
+
+    ``used`` is EVERY unreleased row (stale ones keep their slot: no activity signal is wired, see
+    the module docstring); ``stale`` is a subset count for reporting only.
+    """
     t = dal.community_tier_allocations
     base = (t.tenant_id == tenant_id) & (t.tier_code == tier_code) & (t.released_at == None)  # noqa: E711
     total = int(dal(base).count())
     cutoff = now - STALE_AFTER
     # a NULL last_active_at never satisfies ">=", so it counts as stale (matches `_is_stale`)
-    used = int(dal(base & (t.last_active_at >= cutoff)).count())
-    return used, total - used
+    fresh = int(dal(base & (t.last_active_at >= cutoff)).count())
+    return total, total - fresh
 
 
 def _end_read(dal: Any) -> None:
@@ -446,10 +460,11 @@ async def resolve_effective_tier(
 ) -> str:
     """Return ``max(tenant tier, active allocation)`` as a tier name; fail closed to ``free``.
 
-    Keyed by numeric ids. A stale allocation still confers its tier (staleness frees the pool
-    slot only; entitlements are never stripped). Any error logs ERROR (exception type only) and
-    reports ``free``. ``tenant_tier`` overrides the entitlement lookup (tests / callers that
-    already hold the tenant tier); default is ``flask_core.feature_flags.get_tier``.
+    Keyed by numeric ids. A stale allocation still confers its tier AND keeps its pool slot
+    (automatic reclamation is not active; entitlements are never stripped). Any error logs
+    ERROR (exception type only) and reports ``free``. ``tenant_tier`` overrides the entitlement
+    lookup (tests / callers that already hold the tenant tier); default is
+    ``flask_core.feature_flags.get_tier``.
     """
     try:
         bind_community_tier_tables(dal)
@@ -478,7 +493,9 @@ async def resolve_effective_tier(
 async def pool_usage(
     async_dal: Any, dal: Any, tenant_id: int, *, pool: PoolProvider
 ) -> dict[int, TierUsage]:
-    """Per-tier used/limit/available/overage/stale-excluded counts for the tenant's team pool.
+    """Per-tier used/limit/available/overage/stale counts for the tenant's team pool.
+
+    ``used`` includes stale allocations (they keep their slot until released).
 
     Raises :class:`PoolUnavailable` when a pool cannot be determined (no silent zero).
     """
@@ -503,7 +520,10 @@ async def pool_usage(
 
 
 async def touch_active(async_dal: Any, dal: Any, community_id: int) -> bool:
-    """Mark the community's active allocation as recently active (re-counts it if it was stale).
+    """Mark the community's active allocation as recently active (clears its stale flag).
+
+    Count is unaffected (stale rows already count). No production caller exists yet; it becomes
+    the slot-reclamation signal once a real activity feed is wired.
 
     Cheap and rate-limited: an in-process 5 minute short-circuit, then a DB write only when
     ``last_active_at`` is older than :data:`TOUCH_MIN_INTERVAL`. Returns True when a row was

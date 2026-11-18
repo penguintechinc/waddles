@@ -152,22 +152,81 @@ def _both(env: Any) -> svc.StorePoolProvider:
     return env.pool
 
 
-async def test_stale_rows_excluded_then_recount_on_touch(env: Any) -> None:
+async def _age(env: Any, community: int, days: int) -> None:
+    """Backdate one allocation's `last_active_at` (days past now)."""
+    t = env.dal.community_tier_allocations
+    env.dal(t.community_id == community).update(last_active_at=svc.now_utc() - timedelta(days=days))
+    env.dal.commit()
+
+
+async def _free_tenant_tier(_slug: str) -> str:
+    return "free"
+
+
+async def test_stale_rows_keep_their_slot_and_tier_until_released_and_touch_clears_flag(
+    env: Any,
+) -> None:
+    """Contract change (staleness-pool-cap-defeat fix): stale rows still COUNT toward the pool.
+
+    Previously stale rows were excluded from `used`, so a tenant at its limit could re-allocate a
+    whole new pool every 30 days; no activity signal feeds `touch_active`, so reclamation is off.
+    """
+    await _set_pool(env, PRO, 2)
+    await _set_pool(env, ENT, 0)
+    await _alloc(env, env.cs[0], PRO)
+    await _alloc(env, env.cs[1], PRO)
+    for c in env.cs[:2]:
+        await _age(env, c, svc.STALE_AFTER.days + 1)  # 31 days past last_active_at
+
+    # (3) usage still reports used == limit and still reports the stale count
+    usage = (await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool))[PRO]
+    assert (usage.used, usage.limit, usage.available, usage.overage) == (2, 2, 0, 0)
+    assert usage.stale_excluded == 2
+
+    # (1) a NEW allocation for another community is blocked
+    with pytest.raises(svc.PoolExhausted) as exc:
+        await _alloc(env, env.cs[2], PRO)
+    assert (exc.value.limit, exc.value.used) == (2, 2)
+    assert _active(env, env.cs[2]) is None
+    assert env.audit.events[-1].action == "license.community_tier_allocation_blocked"
+
+    # (2) the old allocations still confer their tier (never stripped)
+    for c in env.cs[:2]:
+        assert _community(env, c).license_tier == "professional"
+        assert (
+            await svc.resolve_effective_tier(
+                env.adal, env.dal, env.tenant, c, tenant_tier=_free_tenant_tier
+            )
+            == "professional"
+        )
+
+    # (4) releasing one frees exactly one slot; the next allocation succeeds, a further one fails
+    await _alloc(env, env.cs[0], FREE)
+    usage = (await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool))[PRO]
+    assert (usage.used, usage.available, usage.stale_excluded) == (1, 1, 1)
+    await _alloc(env, env.cs[2], PRO)
+    with pytest.raises(svc.PoolExhausted):
+        await _alloc(env, env.cs[3], PRO)
+
+    # (5) touch_active refreshes last_active_at and clears the stale flag; count is unchanged
+    before = (await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool))[PRO]
+    assert (before.used, before.stale_excluded) == (2, 1)
+    assert await svc.touch_active(env.adal, env.dal, env.cs[1]) is True
+    row = _active(env, env.cs[1])
+    assert not svc._is_stale(row, svc.now_utc())  # noqa: SLF001
+    after = (await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool))[PRO]
+    assert (after.used, after.stale_excluded) == (2, 0)
+
+
+async def test_stale_pro_row_counts_for_tier_change_prev_used(env: Any) -> None:
+    """Tier change from a stale Pro row: the vacated tier's count (gauge) reflects real usage."""
     await _set_pool(env, PRO, 2)
     await _set_pool(env, ENT, 1)
     await _alloc(env, env.cs[0], PRO)
     await _alloc(env, env.cs[1], PRO)
-    old = svc.now_utc() - svc.STALE_AFTER - timedelta(days=1)
-    t = env.dal.community_tier_allocations
-    env.dal(t.community_id == env.cs[0]).update(last_active_at=old)
-    env.dal.commit()
-    usage = (await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool))[PRO]
-    assert (usage.used, usage.stale_excluded, usage.available) == (1, 1, 1)
-    await _alloc(env, env.cs[2], PRO)  # freed slot is usable
-    assert _community(env, env.cs[0]).license_tier == "professional"  # tier never stripped
-    assert await svc.touch_active(env.adal, env.dal, env.cs[0]) is True
-    usage = (await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool))[PRO]
-    assert (usage.used, usage.stale_excluded, usage.overage) == (3, 0, 1)  # re-counts, no penalty
+    await _age(env, env.cs[1], 40)
+    res = await _alloc(env, env.cs[0], ENT)
+    assert res.changed and res.previous_used == 1  # cs[1] (stale) still counted in Pro
 
 
 async def test_touch_active_rate_limited(env: Any) -> None:
@@ -408,7 +467,7 @@ async def test_pool_store_put_is_an_upsert_and_evicts_only_license_server_rows(
     assert (await env.store.get(env.tenant, ENT)).limit_count == 4
 
 
-async def test_pool_usage_counts_in_sql_and_excludes_stale(env: Any) -> None:
+async def test_pool_usage_counts_in_sql_and_reports_stale_but_includes_it(env: Any) -> None:
     await _set_pool(env, PRO, 3)
     await _set_pool(env, ENT, 3)
     await _alloc(env, env.cs[0], PRO)
@@ -417,4 +476,5 @@ async def test_pool_usage_counts_in_sql_and_excludes_stale(env: Any) -> None:
     env.dal(t.community_id == env.cs[1]).update(last_active_at=svc.now_utc() - timedelta(days=45))
     env.dal.commit()
     usage = await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool)
-    assert (usage[PRO].used, usage[PRO].stale_excluded, usage[PRO].available) == (1, 1, 2)
+    # contract change: stale rows are reported AND still counted in `used`
+    assert (usage[PRO].used, usage[PRO].stale_excluded, usage[PRO].available) == (2, 1, 1)

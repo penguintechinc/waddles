@@ -192,6 +192,27 @@ class TestAllocate:
         assert _active(env, env.ids[1]) is None
         assert env.audit.events[-1].action == "license.community_tier_allocation_blocked"
 
+    async def test_stale_allocations_still_fill_the_pool_402_then_release_frees_one(
+        self, env: Any
+    ) -> None:
+        """Regression: 31 days of inactivity must NOT free pool slots (pool cap defeat)."""
+        await _pool(env, PRO, 2)
+        await _pool(env, ENT, 0)
+        assert (await _put_tier(env, env.pids[0], PRO))[0] == 200
+        assert (await _put_tier(env, env.pids[1], PRO))[0] == 200
+        t = env.dal.community_tier_allocations
+        env.dal(t.tier_code == PRO).update(last_active_at=svc.now_utc() - timedelta(days=31))
+        env.dal.commit()
+        status, body = await _put_tier(env, env.pids[2], PRO)
+        assert status == 402 and body["error"]["code"] == "TEAM_POOL_EXHAUSTED"
+        assert body["error"]["details"]["used"] == 2 and body["error"]["details"]["limit"] == 2
+        assert _active(env, env.ids[2]) is None
+        pool = await (await env.client.get(f"{BASE}/license/pool", headers=_h())).get_json()
+        assert (pool["tiers"][0]["used"], pool["tiers"][0]["available"]) == (2, 0)
+        assert (await _put_tier(env, env.pids[0], FREE))[0] == 200
+        assert (await _put_tier(env, env.pids[2], PRO))[0] == 200
+        assert (await _put_tier(env, env.pids[3], PRO))[0] == 402
+
     async def test_unlicensed_tier_is_402_with_zero_limit(self, env: Any) -> None:
         await _pool(env, ENT, None)
         status, body = await _put_tier(env, env.pids[0], ENT)

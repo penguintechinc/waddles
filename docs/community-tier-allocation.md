@@ -9,8 +9,17 @@ A community is **Free**, **Professional** (code 2) or **Enterprise** (code 3).
 | Effective tier | `max(tenant tier, active allocation)`; any error fails closed to Free. |
 | Overage | A NEW Pro/Ent allocation beyond that tier's pool is blocked (`PoolExhausted`, 402 + upgrade path). An existing allocation is NEVER stripped; a smaller pool or tenant downgrade only blocks new allocations. |
 | Operator override | Super admins may set any tier. Never blocked, still counted (reported as `overage`), audited as `license.community_tier_overridden`. |
-| Staleness | An allocation with no contact for 30 days stops counting against the pool; the community keeps its tier. `touch_active` re-counts it, no penalty. |
+| Staleness | Reporting only. Automatic slot reclamation is NOT active (see Staleness below): every unreleased allocation counts against the pool. |
 | Pool unknown | `PoolUnavailable` (503) when a NEW slot would be consumed. Never a silent zero. An idempotent re-PUT of the tier the community already holds succeeds without the pool (no slot consumed); releases (Free) never need it. |
+
+## Staleness
+
+The licensing rule "30 days with no contact frees the slot" needs a real activity signal, and hub-api has none: community activity happens in the data plane and `touch_active` has no production caller. Counting only recently-active rows would let a tenant at its limit allocate a whole new pool every 30 days (pool cap defeat), so **automatic slot reclamation is NOT active**:
+
+- Every allocation with `released_at IS NULL` counts toward `used` for new-allocation checks, `pool_usage`, tier-change checks and the utilization gauge, regardless of `last_active_at`.
+- `stale` (per allocation) and `stale_excluded` (per tier, legacy field name) are informational: `last_active_at` older than 30 days (`STALE_AFTER`). A stale allocation keeps its tier and its slot.
+- A slot is freed only when the tenant admin or an operator releases the allocation (never stripped automatically).
+- The rule will be enabled by wiring a real activity signal into `touch_active` (deferred issue); there is no env/flag toggle for the old behaviour.
 
 ## Tables (alembic `0126_community_tier_allocations`)
 
@@ -27,7 +36,7 @@ allocators for the last slot serialize and exactly one wins.
 
 - `allocate(async_dal, dal, *, tenant_id, community_id, tier, actor, source, pool, reason=None, audit=None)`
 - `resolve_effective_tier(async_dal, dal, tenant_id, community_id)`
-- `pool_usage(async_dal, dal, tenant_id, *, pool)` per-tier used / limit / available / overage / stale_excluded
+- `pool_usage(async_dal, dal, tenant_id, *, pool)` per-tier used / limit / available / overage / stale_excluded (stale rows are included in `used`)
 - `touch_active(async_dal, dal, community_id)` rate-limited (5 min in-process, 1 h in DB)
 - `PoolInfo`, `PoolProvider` (Protocol), `PoolStore`, `StorePoolProvider`, `PoolExhausted`, `PoolUnavailable`
 

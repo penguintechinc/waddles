@@ -225,3 +225,47 @@ async def test_real_postgres_read_paths_never_idle_in_transaction(
 
 async def _free() -> str:
     return "free"
+
+
+async def test_real_postgres_stale_rows_keep_slots_under_race(
+    pg: PgTestDatabase, adal: Any
+) -> None:
+    """Regression: 31-day-old rows still count; racers for a 'freed' slot all lose."""
+    tenant_id, cids = _seed(pg, "stale", RACERS)
+    store = svc.PoolStore(adal, adal.dal)
+    pro = svc.TIER_CODE_PROFESSIONAL
+    await store.put(tenant_id, pro, 2, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
+    await store.put(
+        tenant_id, svc.TIER_CODE_ENTERPRISE, 0, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
+    )
+    pool = svc.StorePoolProvider(store)
+
+    async def _alloc(c: int) -> svc.AllocationResult:
+        return await svc.allocate(
+            adal, adal.dal, tenant_id=tenant_id, community_id=c, tier=pro, actor=None,
+            source=svc.SOURCE_TENANT_ADMIN, pool=pool,
+        )  # fmt: skip
+
+    await _alloc(cids[0])
+    await _alloc(cids[1])
+    conn = psycopg2.connect(pg.dsn)
+    conn.autocommit = True
+    try:
+        conn.cursor().execute(
+            "UPDATE community_tier_allocations SET last_active_at = now() - interval '31 days' "
+            "WHERE tenant_id = %s",
+            (tenant_id,),
+        )
+        results = await asyncio.gather(*[_alloc(c) for c in cids[2:]], return_exceptions=True)
+        assert all(isinstance(r, svc.PoolExhausted) for r in results), results
+        usage = (await svc.pool_usage(adal, adal.dal, tenant_id, pool=pool))[pro]
+        assert (usage.used, usage.available, usage.stale_excluded) == (2, 0, 2)
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT count(*) FROM community_tier_allocations "
+            "WHERE tenant_id = %s AND released_at IS NULL",
+            (tenant_id,),
+        )
+        assert cur.fetchone()[0] == 2
+    finally:
+        conn.close()
