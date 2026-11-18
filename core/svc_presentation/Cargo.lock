@@ -2604,13 +2604,13 @@ version = "0.1.0"
 dependencies = [
  "async-trait",
  "axum",
- "chrono",
  "hex",
  "rand 0.8.8",
  "serde",
  "service_auth",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "time",
  "tracing",
 ]
 
@@ -4163,6 +4163,7 @@ dependencies = [
  "service_auth",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-stream",
  "tokio-tungstenite",

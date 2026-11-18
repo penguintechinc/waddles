@@ -46,6 +46,7 @@ prometheus = "=0.14.0"
 utoipa = { version = "=5.5.0", features = ["axum_extras", "uuid"] }
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
 chrono = { version = "=0.4.45", features = ["serde"] }
+time = "=0.3.55"
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
