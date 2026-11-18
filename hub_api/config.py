@@ -226,6 +226,11 @@ class HubAPIConfig:
     # actual ingress chain; it is never inferred automatically.
     trusted_proxy_hops: int = 0
 
+    # Dedicated MAC key for the login ALTCHA challenge (`ALTCHA_HMAC_KEY`, auto-generated
+    # into waddlebot-secrets by the chart). Never derived from the app/session secret; empty
+    # means the captcha endpoint and verification fail closed (503).
+    altcha_hmac_key: str = ""
+
     # security.md Input Validation -- server-side upper bound on every
     # client-suppliable `?limit=` page-size param. Read by
     # `services/pagination.py::parse_limit()`, the shared helper every
@@ -362,6 +367,7 @@ class HubAPIConfig:
                 1, int(os.getenv("RATE_LIMIT_AUTH_WINDOW_MS", "60000")) // 1000
             ),
             trusted_proxy_hops=max(0, int(os.getenv("TRUSTED_PROXY_HOPS", "0"))),
+            altcha_hmac_key=os.getenv("ALTCHA_HMAC_KEY", ""),
             api_max_page_size=int(os.getenv("API_MAX_PAGE_SIZE", "100")),
             public_webui_url=os.getenv("PUBLIC_WEBUI_URL", "http://localhost:30879").rstrip("/"),
             connections_callback_base_url=(
