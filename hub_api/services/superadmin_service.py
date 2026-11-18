@@ -39,6 +39,7 @@ from flask_core.auth import DEFAULT_TENANT_SLUG
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.global_identity import SYSTEM_TENANT_SLUG
+from services.member_roles import COMMUNITY_OWNER_ROLE
 from services.schema import bind_admin_tables, bind_superadmin_tenant_fields
 
 VALID_COMMUNITY_TYPES = ("shared_interest_group", "gaming", "creator", "corporate", "other")
@@ -202,7 +203,7 @@ async def create_community(
         member_values=lambda cid: dict(
             community_id=cid,
             user_id=str(caller_id),
-            role="owner",
+            role=COMMUNITY_OWNER_ROLE,
             is_active=True,
             joined_at=datetime.now(UTC),
         ),

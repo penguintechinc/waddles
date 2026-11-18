@@ -400,6 +400,13 @@ describe('AuthContext role helpers', () => {
     expect(auth.current.isCommunityAdmin(99)).toBe(false);
   });
 
+  it('isCommunityAdmin accepts a sole community-owner membership but not the non-canonical "owner"', async () => {
+    const owner = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: 4, role: 'community-owner' }] } } });
+    expect(owner.current.isCommunityAdmin(4)).toBe(true);
+    const legacy = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: 4, role: 'owner' }] } } });
+    expect(legacy.current.isCommunityAdmin(4)).toBe(false);
+  });
+
   it('isCommunityAdmin is false for a user whose only role is plain member', async () => {
     const auth = await mountAuth({ data: { success: true, user: { roles: [], communities: [{ id: 2, role: 'member' }] } } });
     expect(auth.current.isCommunityAdmin()).toBe(false);

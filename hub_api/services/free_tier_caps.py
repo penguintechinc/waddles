@@ -59,6 +59,7 @@ from flask_core.tier_catalog import TIER_FREE, TIER_PROFESSIONAL, tier_level
 from services.bundle_install_dal import raw_sql_write
 from services.errors import ApiError
 from services.global_identity import global_admin_ids, grant_global_admin_sync
+from services.member_roles import require_valid_member_role
 
 logger = logging.getLogger(__name__)
 
@@ -224,7 +225,9 @@ async def create_community_capped(
     def _write(d: Any) -> int:
         new_id = int(d.communities.insert(**values))
         if member_values is not None:
-            d.community_members.insert(**member_values(new_id))
+            member = member_values(new_id)
+            require_valid_member_role(member["role"])
+            d.community_members.insert(**member)
         return new_id
 
     return int(
