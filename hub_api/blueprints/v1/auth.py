@@ -57,6 +57,7 @@ from services.session_cookie import (
 )
 
 auth_bp = Blueprint("v1_auth", __name__, url_prefix="/api/v1/auth")
+captcha_bp = Blueprint("v1_captcha", __name__, url_prefix="/api/v1/captcha")
 
 #: ``__Host-`` cookie binding an account-link `state` to the initiating browser.
 LINK_BINDING_COOKIE = binding.cookie_name("oauth_link")
@@ -1062,4 +1063,26 @@ async def passkey_login_finish(
     )
 
 
-BLUEPRINTS: list[Blueprint] = [auth_bp]
+@dataclass(slots=True, frozen=True)
+class AltchaChallengeResponse:
+    """Self-hosted ALTCHA proof-of-work challenge DTO."""
+
+    algorithm: str
+    challenge: str
+    maxnumber: int
+    salt: str
+    signature: str
+
+
+@captcha_bp.route("/challenge", methods=["GET"])
+@validate_response(AltchaChallengeResponse)
+async def get_captcha_challenge() -> AltchaChallengeResponse:
+    """Issue a self-hosted ALTCHA proof-of-work challenge."""
+    async_dal, dal = _dal()
+    settings = await auth_service.get_hub_settings_map(async_dal, dal)
+    hmac_key = settings.get("captcha_secret_key") or _cfg().secret_key
+    challenge = auth_service.create_altcha_challenge(hmac_key)
+    return AltchaChallengeResponse(**challenge)
+
+
+BLUEPRINTS: list[Blueprint] = [auth_bp, captcha_bp]

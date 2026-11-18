@@ -294,11 +294,17 @@ export default function SuperAdminPlatformConfig() {
                         className="input"
                       >
                         <option value="none">None</option>
+                        <option value="altcha">ALTCHA (Self-Hosted Proof-of-Work)</option>
                         <option value="recaptcha_v2">reCAPTCHA v2</option>
                         <option value="turnstile">Cloudflare Turnstile</option>
                       </select>
                     </div>
-                    {settings.captcha_provider && settings.captcha_provider !== 'none' && (
+                    {settings.captcha_provider === 'altcha' && (
+                      <p className="text-sm text-navy-300">
+                        ALTCHA runs locally via <code className="text-sky-300">/api/v1/captcha/challenge</code> and requires no external API keys.
+                      </p>
+                    )}
+                    {(settings.captcha_provider === 'recaptcha_v2' || settings.captcha_provider === 'turnstile') && (
                       <>
                         <div>
                           <label htmlFor="super-admin-platform-config-site-key" className="block text-sm font-medium text-sky-200 mb-1">Site Key</label>
