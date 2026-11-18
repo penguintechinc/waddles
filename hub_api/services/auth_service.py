@@ -24,6 +24,10 @@ header only, never decoded client-side; see `AuthContext.jsx`).
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
+import json
 import logging
 import secrets
 import time
@@ -105,10 +109,81 @@ async def get_hub_settings_map(async_dal: Any, dal: Any) -> dict[str, str]:
     return {row.setting_key: row.setting_value for row in rows}
 
 
+_ALTCHA_MAX_NUMBER = 50_000
+_ALTCHA_TTL_SECONDS = 300
+
+
+def create_altcha_challenge(
+    hmac_key: str,
+    *,
+    max_number: int = _ALTCHA_MAX_NUMBER,
+    ttl_seconds: int = _ALTCHA_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Build an ALTCHA SHA-256 proof-of-work challenge signed with `hmac_key`."""
+    expires = int(time.time()) + ttl_seconds
+    salt = f"{secrets.token_hex(12)}?expires={expires}"
+    secret_number = secrets.randbelow(max_number + 1)
+    challenge = hashlib.sha256(f"{salt}{secret_number}".encode()).hexdigest()
+    signature = hmac.new(hmac_key.encode(), challenge.encode(), hashlib.sha256).hexdigest()
+    return {
+        "algorithm": "SHA-256",
+        "challenge": challenge,
+        "maxnumber": max_number,
+        "salt": salt,
+        "signature": signature,
+    }
+
+
+def verify_altcha_payload(payload_b64: str, hmac_key: str) -> bool:
+    """Verify a base64-encoded ALTCHA widget payload. Fails closed on any error."""
+    if not payload_b64 or not hmac_key:
+        return False
+    try:
+        raw = base64.b64decode(payload_b64, validate=True)
+        data = json.loads(raw.decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return False
+    if not isinstance(data, dict):
+        return False
+
+    algorithm = data.get("algorithm")
+    challenge = data.get("challenge")
+    salt = data.get("salt")
+    signature = data.get("signature")
+    number = data.get("number")
+    if (
+        algorithm != "SHA-256"
+        or not isinstance(challenge, str)
+        or not isinstance(salt, str)
+        or not isinstance(signature, str)
+        or isinstance(number, bool)
+        or not isinstance(number, int)
+        or number < 0
+    ):
+        return False
+
+    expected_sig = hmac.new(hmac_key.encode(), challenge.encode(), hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(signature, expected_sig):
+        return False
+
+    if "?expires=" in salt:
+        try:
+            expires = int(salt.rsplit("?expires=", 1)[1].split("&", 1)[0])
+        except ValueError:
+            return False
+        if expires < int(time.time()):
+            return False
+
+    computed = hashlib.sha256(f"{salt}{number}".encode()).hexdigest()
+    return hmac.compare_digest(computed, challenge)
+
+
 async def validate_captcha(
     provider: str, secret_key: str, token: str, remote_ip: str | None
 ) -> bool:
-    """Validate a CAPTCHA token against Turnstile or reCAPTCHA. Fails closed on any error."""
+    """Validate a CAPTCHA token (ALTCHA, Turnstile, or reCAPTCHA). Fails closed on any error."""
+    if provider == "altcha":
+        return verify_altcha_payload(token, secret_key)
     url = (
         "https://challenges.cloudflare.com/turnstile/v0/siteverify"
         if provider == "turnstile"
@@ -360,10 +435,13 @@ async def register(
 
     captcha_provider = settings.get("captcha_provider", "none")
     captcha_secret = settings.get("captcha_secret_key", "")
-    if captcha_provider != "none" and captcha_secret:
+    if captcha_provider == "altcha" or (captcha_provider != "none" and captcha_secret):
+        secret_for_check = (
+            (captcha_secret or cfg.secret_key) if captcha_provider == "altcha" else captcha_secret
+        )
         if not captcha_token:
             raise bad_request("CAPTCHA verification required")
-        if not await validate_captcha(captcha_provider, captcha_secret, captcha_token, remote_ip):
+        if not await validate_captcha(captcha_provider, secret_for_check, captcha_token, remote_ip):
             raise bad_request("CAPTCHA verification failed")
 
     allowed_domains = [
