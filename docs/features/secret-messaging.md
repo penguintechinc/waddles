@@ -20,7 +20,7 @@ Send a message that its recipient can read exactly once, in the Waddles web UI. 
 | Helm | `autoProvisionedKeys.oneTimeSecret` generates the key into the Secret `waddlebot-ots-encryption-key` on alpha and local only. It is generated once and never rotated. On any other tier the chart fails unless you pre-create that Secret or set `externalSecret: true`. |
 | User identity | Targets are `hub_users.uuid` values, never usernames. Requires the `hub_users.uuid` column (PR #434). |
 | Database | Migration `0045_one_time_secrets` creates the `one_time_secrets` table. |
-| Scopes | `secret_messaging:create` to create, `secret_messaging:pull` to pull. Tenant comes from the JWT only. |
+| Scopes | `secret_messaging:create` to create (plus `secret_messaging:create_internal` for numeric community ids, bundle service token only), `secret_messaging:pull` to pull. Tenant comes from the JWT only. |
 
 ## Create a secret
 
@@ -28,12 +28,12 @@ Send a message that its recipient can read exactly once, in the Waddles web UI. 
 POST /api/v1/one-time-secrets
 Content-Type: application/json
 
-{"communityId": 12, "targetUserUuid": "UUID-OF-RECIPIENT", "message": "text", "ttlSeconds": 86400}
+{"communityId": "COMMUNITY-PUBLIC-UUID", "targetUserUuid": "UUID-OF-RECIPIENT", "message": "text", "ttlSeconds": 86400}
 ```
 
 | Field | Rule |
 |---|---|
-| `communityId` | Must belong to the caller's tenant, else 404. |
+| `communityId` | The community public UUID; must belong to the caller's tenant, else 404. A numeric internal id is accepted only when the token also carries scope `secret_messaging:create_internal` (granted solely to the secret bundle's operator-minted service token, never to users); otherwise 403 `NUMERIC_COMMUNITY_ID_FORBIDDEN`. |
 | `targetUserUuid` | Must match a known user, else 404. |
 | `message` | 1 to 4000 characters. |
 | `ttlSeconds` | 60 to 604800 (7 days). Default 86400 (24 hours). |
@@ -69,6 +69,27 @@ The token goes in the request body, never in a URL or query string, so it stays 
 | After reveal | The message shows with a **Copy** button. It is held in page memory only, never stored or logged. |
 | Errors | `You are not the intended recipient of this secret.` (403). `This secret was already viewed or has expired.` (410). A network failure shows a retry button. With no token: `No secret link detected. Open the link you were sent.` |
 
+## Service token (secret bundle) -- one-time operator step
+
+The `!secret` bundle calls this endpoint with the stage secret-ref `SECRET_MESSAGING_SERVICE_TOKEN`
+(value `Bearer <jwt>`). Nothing in the repo or chart mints or provisions this token: it is a
+static, operator-created credential, so a deploy does not re-mint it and an existing token keeps
+only the scopes it was minted with. The bundle sends the numeric community id (the data plane
+never gives bundles the public UUID), so the token MUST carry BOTH scopes:
+
+| Scope | Purpose |
+|---|---|
+| `secret_messaging:create` | Call the create endpoint. |
+| `secret_messaging:create_internal` | Address the community by numeric id. No role bundle or `*:action` wildcard grants it; user tokens never hold it. |
+
+Existing alpha/beta deployments MUST re-mint the token once with both scopes (same tenant, lifetime
+within the service-token ceiling, via `flask_core.auth.create_jwt_token(scope="secret_messaging:create secret_messaging:create_internal", ...)`
+run inside the hub-api container where the signing key ring is installed) and replace the
+`SECRET_MESSAGING_SERVICE_TOKEN` secret value. Never paste the token into shell history, logs or
+the repo. Until replaced, `!secret` fails safe: hub-api returns 403 `NUMERIC_COMMUNITY_ID_FORBIDDEN`,
+the bundle replies "Couldn't store the secret; your message was left as-is.", and nothing is stored
+or deleted.
+
 ## Security properties
 
 - The message is stored as AES-256-GCM ciphertext bound to its row id. The link token is stored only as a SHA-256 hash, so a database read yields neither.
@@ -83,6 +104,7 @@ The token goes in the request body, never in a URL or query string, so it stays 
 | API returns 404 `FEATURE_DISABLED` | Flag is off for the tenant. | Enable `waddles.secret-messaging`. |
 | hub-api errors about `ONE_TIME_SECRET_ENCRYPTION_KEY` | Key missing or not 64 hex characters. | Provide the key through the chart Secret. |
 | `helm` fails on `autoProvisionedKeys.oneTimeSecret` | Non-alpha tier with no pre-created Secret. | Pre-create the Secret or set `externalSecret: true`. |
+| `!secret` replies "Couldn't store the secret"; hub-api logs 403 `NUMERIC_COMMUNITY_ID_FORBIDDEN` | Service token lacks `secret_messaging:create_internal`. | Re-mint the token with both scopes (see above). |
 | Recipient gets 403 | Logged in as a different user. | Log in as the intended recipient and retry; the secret is still there. |
 
 ## Source
