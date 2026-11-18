@@ -76,6 +76,18 @@ export default function PublicPrivacyVerify() {
             {REGIME_LABEL[preview?.regime] ? ` (${REGIME_LABEL[preview.regime]})` : ''}. We only start processing it
             after you confirm. If you did not make this request, close this page and nothing will happen.
           </p>
+          {preview?.contentChanged && (
+            <Alert tone="warning" title="This link updates your request">
+              Confirming applies the details shown below, which differ from the request already on file.
+            </Alert>
+          )}
+          {preview?.message ? (
+            <div data-testid="verify-message">
+              <p className="text-sm text-fg-muted">Your message:</p>
+              {/* Plain text child: React escapes it; never render the message as HTML. */}
+              <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-3">{preview.message}</blockquote>
+            </div>
+          ) : null}
           {state === 'error' && <Alert tone="danger">We could not confirm right now. Please try again.</Alert>}
           <Button onClick={confirm} loading={state === 'busy'} disabled={state === 'busy'}>Confirm your email</Button>
         </>

@@ -296,12 +296,20 @@ class VerifyBody:
 
 @dataclass(slots=True, frozen=True)
 class VerifyPreviewResponse:
-    """Non-consuming confirm-page data: what the link would verify. No PII, no tenant internals."""
+    """Non-consuming confirm-page data: EXACTLY what `POST .../verify` will commit.
+
+    `regime`/`message` are the content the request holds once this token is confirmed (the draft
+    bound to this token when there is one, else the committed content); `message` is plain text the
+    client MUST render escaped; `contentChanged` is true when that differs from what is stored now.
+    No tenant internals, no email.
+    """
 
     success: bool
     valid: bool
     requestType: int
     regime: int
+    message: str | None
+    contentChanged: bool
     expiresAt: str | None
 
 
@@ -1236,17 +1244,20 @@ def _verification_invalid() -> tuple[Any, int]:
 
 
 async def _preview(token: str) -> tuple[Any, int]:
-    """Non-consuming: the type/regime/expiry the token would verify, or the uniform 400."""
+    """Non-consuming: the type/regime/message/expiry the token would verify, or the uniform 400."""
     async_dal, dal = _dal()
-    row = await svc.preview_verification_token(async_dal, dal, token)
-    if row is None:
+    previewed = await svc.preview_verification_token(async_dal, dal, token)
+    if previewed is None:
         return _verification_invalid()
+    row, outcome = previewed
     return jsonify_dto(
         VerifyPreviewResponse(
             success=True,
             valid=True,
             requestType=int(row.request_type),
-            regime=int(row.regime),
+            regime=outcome.regime,
+            message=outcome.message,
+            contentChanged=outcome.content_changed,
             expiresAt=_iso(row.verification_expires_at),
         )
     )

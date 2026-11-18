@@ -131,7 +131,14 @@ function mountVerify(url) {
   );
 }
 
-const PREVIEW = { valid: true, requestType: 2, regime: 1, expiresAt: '2030-01-01T00:00:00Z' };
+const PREVIEW = {
+  valid: true,
+  requestType: 2,
+  regime: 1,
+  message: null,
+  contentChanged: false,
+  expiresAt: '2030-01-01T00:00:00Z',
+};
 const confirmBtn = () => screen.findByRole('button', { name: 'Confirm your email' });
 
 describe('verify page', () => {
@@ -151,6 +158,28 @@ describe('verify page', () => {
     expect(await screen.findByTestId('verify-ok')).toBeTruthy();
     expect(api.verify).toHaveBeenCalledTimes(1);
     expect(api.verify).toHaveBeenCalledWith('abc123');
+  });
+
+  it('shows the draft regime and message as ESCAPED text and flags the change', async () => {
+    api.previewVerification.mockResolvedValue({
+      ...PREVIEW,
+      regime: 2,
+      message: '<img src=x onerror=alert(1)> hello',
+      contentChanged: true,
+    });
+    mountVerify('/privacy-request/verify#token=abc123');
+    await confirmBtn();
+    const box = screen.getByTestId('verify-message');
+    expect(box.textContent).toContain('<img src=x onerror=alert(1)> hello');
+    expect(box.querySelector('img')).toBeNull(); // rendered as text, never parsed as HTML
+    expect(screen.getByText('This link updates your request')).toBeTruthy();
+  });
+
+  it('shows no message block or change notice when nothing differs', async () => {
+    mountVerify('/privacy-request/verify#token=abc123');
+    await confirmBtn();
+    expect(screen.queryByTestId('verify-message')).toBeNull();
+    expect(screen.queryByText('This link updates your request')).toBeNull();
   });
 
   it('reads the token from the query string too', async () => {

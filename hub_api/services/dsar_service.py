@@ -764,16 +764,68 @@ async def _pending_by_token(async_dal: Any, dal: Any, token: str, now: datetime)
     return row
 
 
+@dataclass(slots=True, frozen=True)
+class VerifyOutcome:
+    """What redeeming a token WOULD commit: the single source for the preview and the consume.
+
+    `message` is the plaintext the request will hold afterwards (`None` when absent). `commit` is
+    the column set the claiming UPDATE adds: empty when no draft exists, the draft's content plus
+    the draft-clearing columns when the draft is bound to the token, and only the draft-clearing
+    columns (a discard, never a commit) for a draft bound to some other token.
+    """
+
+    regime: int
+    message: str | None
+    content_changed: bool
+    commit: dict[str, Any]
+
+
+def verify_outcome(row: Any, token_hash: str) -> VerifyOutcome:
+    """Compute what the request's content becomes if `token_hash` is redeemed (pure, no writes).
+
+    A draft counts only when `pending_token_hash` equals the redeemed hash (constant-time); any
+    other draft is discarded. Preview and consume both call this so they cannot drift.
+    """
+    committed = crypto.decrypt(row.message_enc, row_id=row.public_id) if row.message_enc else None
+    if row.pending_regime is None:
+        return VerifyOutcome(int(row.regime), committed, False, {})
+    clear: dict[str, Any] = {
+        "pending_message_enc": None,
+        "pending_regime": None,
+        "pending_token_hash": None,
+    }
+    bound = row.pending_token_hash is not None and hmac_equal(
+        str(row.pending_token_hash), token_hash
+    )
+    if not bound:
+        return VerifyOutcome(int(row.regime), committed, False, clear)
+    draft = (
+        crypto.decrypt(row.pending_message_enc, row_id=row.public_id)
+        if row.pending_message_enc
+        else None
+    )
+    regime = int(row.pending_regime)
+    return VerifyOutcome(
+        regime,
+        draft,
+        draft != committed or regime != int(row.regime),
+        {"message_enc": row.pending_message_enc, "regime": regime, **clear},
+    )
+
+
 async def preview_verification_token(async_dal: Any, dal: Any, token: str) -> Any | None:
-    """NON-consuming look at a token: the pending row it would verify, or `None`.
+    """NON-consuming look at a token: `(row, VerifyOutcome)` it would verify, or `None`.
 
     Backs the confirm page (`GET .../verify`): mail scanners and link prefetchers that follow the
     emailed link must not burn the single-use token, so only `consume_verification_token` (POST)
-    changes state. Callers expose only the request type, regime and token expiry.
+    changes state. The outcome is EXACTLY what the POST will commit (regime + message); callers
+    expose the request type, that regime/message and the token expiry.
     """
     row = await _pending_by_token(async_dal, dal, token, now_utc())
     telemetry.verification_outcomes.add(1, {"outcome": "preview_ok" if row else "preview_invalid"})
-    return row
+    if row is None:
+        return None
+    return row, verify_outcome(row, crypto.hash_token(token).hex())
 
 
 async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bool:
@@ -791,40 +843,8 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
         logger.debug("dsar.verification_invalid")
         return False
     token_hash = crypto.hash_token(token).hex()
-    commit: dict[str, Any] = {}
-    committed_regime = int(row.regime)
-    content_changed = False
-    draft_bound = (
-        row.pending_regime is not None
-        and row.pending_token_hash is not None
-        and hmac_equal(str(row.pending_token_hash), token_hash)
-    )
-    if row.pending_regime is not None and not draft_bound:
-        # A draft not created under THIS token is never committed, only discarded.
-        commit = {
-            "pending_message_enc": None,
-            "pending_regime": None,
-            "pending_token_hash": None,
-        }
-    if draft_bound:
-        # The draft was created under exactly the token redeemed now: its mailbox owner commits it.
-        committed_regime = int(row.pending_regime)
-        commit = {
-            "message_enc": row.pending_message_enc,
-            "regime": committed_regime,
-            "pending_message_enc": None,
-            "pending_regime": None,
-            "pending_token_hash": None,
-        }
-        old_message = (
-            crypto.decrypt(row.message_enc, row_id=row.public_id) if row.message_enc else None
-        )
-        new_message = (
-            crypto.decrypt(row.pending_message_enc, row_id=row.public_id)
-            if row.pending_message_enc
-            else None
-        )
-        content_changed = old_message != new_message or int(row.regime) != committed_regime
+    outcome = verify_outcome(row, token_hash)
+    committed_regime = outcome.regime
     claimed = await async_dal.update_async(
         (dal.dsar_requests.id == row.id)
         & (dal.dsar_requests.verification_token_hash == token_hash)
@@ -836,12 +856,12 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
         verification_token_hash=None,
         verification_expires_at=None,
         updated_at=now,
-        **commit,
+        **outcome.commit,
     )
     if not claimed:
         telemetry.verification_outcomes.add(1, {"outcome": "invalid"})
         return False
-    if content_changed:
+    if outcome.content_changed:
         await record_event(
             async_dal,
             dal,
@@ -851,7 +871,7 @@ async def consume_verification_token(async_dal: Any, dal: Any, token: str) -> bo
             actor_kind=ActorKind.PUBLIC_REQUESTER,
             detail={
                 "fields": ["message", "regime"],
-                "message_present": commit["message_enc"] is not None,
+                "message_present": outcome.message is not None,
             },
         )
     await record_event(

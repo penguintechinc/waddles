@@ -1423,6 +1423,8 @@ class TestPublicSubmitAndVerify:
                 "valid": True,
                 "requestType": 1,
                 "regime": 1,
+                "message": None,
+                "contentChanged": False,
                 "expiresAt": body["expiresAt"],
             }
         assert _rows(db)[0].status == int(S.VERIFICATION_PENDING)

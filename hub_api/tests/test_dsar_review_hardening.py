@@ -586,6 +586,79 @@ class TestResubmitContentIsDraftUntilLatestTokenConsumed:
         assert row.message_enc is None
 
 
+class TestPreviewEqualsWhatVerifyCommits:
+    """regression: the confirm page previewed the committed content while POST committed a draft."""
+
+    @staticmethod
+    async def _preview(client: Any, token: str) -> dict[str, Any]:
+        res = await client.post(f"{PUB}/verify/preview", json={"token": token})
+        assert res.status_code == 200
+        return dict(await res.get_json())
+
+    @staticmethod
+    def _committed(db: Any) -> tuple[int, str | None]:
+        row = _rows(db)[0]
+        msg = svc.crypto.decrypt(row.message_enc, row_id=row.public_id) if row.message_enc else None
+        return int(row.regime), msg
+
+    async def test_no_draft_preview_shows_committed_content_and_matches_commit(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["regime"], prev["message"], prev["contentChanged"]) == (1, "orig", False)
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_bound_draft_preview_shows_the_draft_and_matches_commit(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft text", regime=2)
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["regime"], prev["message"], prev["contentChanged"]) == (2, "draft text", True)
+        assert self._committed(db) == (1, "orig")  # preview wrote nothing
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_bound_draft_without_message_previews_no_message(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", regime=1)
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["message"], prev["contentChanged"]) == (None, True)
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_mismatched_hash_draft_preview_shows_committed_and_matches_commit(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        db.dal(db.dal.dsar_requests.id == _rows(db)[0].id).update(pending_token_hash="0" * 64)
+        db.dal.commit()
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["regime"], prev["message"], prev["contentChanged"]) == (1, "orig", False)
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_get_and_post_preview_agree_and_message_is_text_only_json(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="<b>hi</b>", regime=1)
+        token = notifier.last_token()
+        via_post = await self._preview(client, token)
+        got = await client.get(f"{PUB}/verify?token={token}")
+        assert got.status_code == 200 and dict(await got.get_json()) == via_post
+        assert via_post["message"] == "<b>hi</b>"  # stored/returned verbatim; client escapes
+        assert "application/json" in got.headers["Content-Type"]
+
+
 class TestConcurrency:
     async def test_two_admins_acting_at_once_execute_exactly_once(
         self, client: Any, db: Any, world: dict[str, int], monkeypatch: pytest.MonkeyPatch
