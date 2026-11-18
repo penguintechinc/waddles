@@ -7,6 +7,8 @@ Runs the real `upgrade()` against a real (sqlite) database through alembic's own
 from __future__ import annotations
 
 import importlib.util
+import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -73,7 +75,16 @@ def test_seals_plaintext_and_roundtrips(engine, monkeypatch) -> None:
     t = _tokens(engine)
     assert t[1] != PLAIN and PLAIN not in t[1]
     assert t[2] is None and t[3] == ""
-    monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[2] / "hub_api"))
+    repo = Path(__file__).resolve().parents[2]
+    monkeypatch.syspath_prepend(str(repo / "hub_api"))
+    if "flask_core" not in sys.modules:
+        # Same lightweight package stub alembic/env.py installs: the real flask_core
+        # __init__ eagerly imports heavy deps this job does not install. Without it this
+        # test only passed when an earlier test on the same xdist worker had run env.py.
+        stub = types.ModuleType("flask_core")
+        stub.__path__ = [str(repo / "libs" / "flask_core" / "flask_core")]
+        stub.__package__ = "flask_core"
+        monkeypatch.setitem(sys.modules, "flask_core", stub)
     from services.github_sync_service import decrypt_token
 
     assert decrypt_token(t[1]) == PLAIN
