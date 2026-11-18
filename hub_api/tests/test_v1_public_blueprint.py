@@ -221,7 +221,7 @@ class TestCommunities:
         )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["community"]["id"] == community_id
+        assert body["community"]["id"] == public_id(platform_db, community_id)
 
     async def test_spotlighted_excludes_support_type(self, client: Any, platform_db: Any) -> None:
         _seed_community(platform_db, tenant_id=1, name="creator-a", community_type="creator")

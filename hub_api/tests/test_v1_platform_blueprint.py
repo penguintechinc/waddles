@@ -26,7 +26,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.platform import platform_bp
-from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -316,7 +316,7 @@ class TestCommunities:
         )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["community"]["id"] == community_id
+        assert body["community"]["id"] == public_id(platform_db, community_id)
         assert body["community"]["owner"] is None
 
     async def test_update_community(self, client: Any, platform_db: Any) -> None:

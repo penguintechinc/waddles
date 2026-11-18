@@ -49,6 +49,7 @@ from services.ai_routing.errors import ToolCallDeniedError, ai_disabled_by_deplo
 from services.ai_routing.models import AIRequest
 from services.ai_routing.router import route_completion
 from services.community_access import require_community_admin, require_community_member
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_scopes, get_current_user_id
 from services.errors import ApiError
 from services.scope_registry import SCOPE_AI_ROUTING_MANAGE
@@ -157,7 +158,7 @@ class AIConfigResponse:
     """`GET`/`PUT` `.../ai/config` response."""
 
     success: bool
-    community_id: int
+    community_id: str
     preferred_tier: str
     byok_provider: str | None
     on_insufficient_balance: str
@@ -236,10 +237,11 @@ class CompletionResponseDTO:
     fallback_reason: str | None
 
 
-def _config_dto(cfg: config_service.AIConfig) -> AIConfigResponse:
+async def _config_dto(cfg: config_service.AIConfig) -> AIConfigResponse:
+    """Config DTO; `community_id` is the community's PUBLIC UUID, never the numeric id."""
     return AIConfigResponse(
         success=True,
-        community_id=cfg.community_id,
+        community_id=await lookup_public_id(cfg.community_id),
         preferred_tier=cfg.preferred_tier,
         byok_provider=cfg.byok_provider,
         on_insufficient_balance=cfg.on_insufficient_balance,
@@ -275,7 +277,7 @@ async def get_config(community_id: int) -> AIConfigResponse | tuple[dict[str, ob
     except ApiError as exc:
         return _err(exc)
     cfg = await config_service.get_ai_config(async_dal, dal, community_id=community_id)
-    return _config_dto(cfg)
+    return await _config_dto(cfg)
 
 
 @ai_config_bp.route("/<cuuid:community_id>/ai/config", methods=["PUT"])
@@ -302,7 +304,7 @@ async def set_config(
         )
     except ApiError as exc:
         return _err(exc)
-    return _config_dto(cfg)
+    return await _config_dto(cfg)
 
 
 @ai_config_bp.route("/<cuuid:community_id>/ai/byok-keys", methods=["GET"])

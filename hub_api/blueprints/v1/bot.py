@@ -49,6 +49,7 @@ from quart_schema import validate_request, validate_response
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
 from services.community_public_id import (
+    lookup_public_ids,
     resolve_public_community_id,
     to_internal_community_id,
 )
@@ -476,11 +477,47 @@ async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: i
 
 
 @dataclass(slots=True, frozen=True)
+class KnowledgeSourceDTO:
+    """One knowledge source as exposed over the API: `community_id` is the PUBLIC UUID."""
+
+    id: int
+    community_id: str | None
+    vendor_id: int | None
+    module_id: int | None
+    source_name: str
+    source_type: str
+    source_url: str | None
+    branch: str
+    docs_path: str
+    refresh_interval: str
+    is_active: bool
+    last_indexed_at: str | None
+    indexed_page_count: int
+    index_errors: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
+async def _source_dtos(
+    sources: list[bot_ai_knowledge.KnowledgeSource],
+) -> list[KnowledgeSourceDTO]:
+    """Map service sources to DTOs with ONE batched public-id lookup (fails loud if missing)."""
+    public = await lookup_public_ids(s.community_id for s in sources if s.community_id is not None)
+    out: list[KnowledgeSourceDTO] = []
+    for src in sources:
+        values = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)}
+        cid = values["community_id"]
+        values["community_id"] = None if cid is None else public[cid]
+        out.append(KnowledgeSourceDTO(**values))
+    return out
+
+
+@dataclass(slots=True, frozen=True)
 class KnowledgeSourcesResponse:
     """Response body -- Knowledge Sources."""
 
     success: bool
-    sources: list[bot_ai_knowledge.KnowledgeSource]
+    sources: list[KnowledgeSourceDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -508,7 +545,7 @@ class KnowledgeSourceResponse:
     """Response body -- Knowledge Source."""
 
     success: bool
-    source: bot_ai_knowledge.KnowledgeSource
+    source: KnowledgeSourceDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -726,7 +763,7 @@ async def list_knowledge_sources() -> Any:
         if denied:
             return denied
     sources = await asyncio.to_thread(bot_ai_knowledge.list_knowledge_sources, _dal(), community_id)
-    return KnowledgeSourcesResponse(success=True, sources=sources)
+    return KnowledgeSourcesResponse(success=True, sources=await _source_dtos(sources))
 
 
 @bot_bp.route("/ai-knowledge/sources", methods=["POST"])
@@ -769,7 +806,7 @@ async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
         # pattern: the route responds before this completes.
         asyncio.create_task(_index_source_background(dal, source.id))
 
-    return KnowledgeSourceResponse(success=True, source=source), 201
+    return KnowledgeSourceResponse(success=True, source=(await _source_dtos([source]))[0]), 201
 
 
 async def _index_source_background(dal: Any, source_id: int) -> None:
@@ -805,7 +842,7 @@ async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id:
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         return _error(str(exc), exc.status, "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST")
-    return KnowledgeSourceResponse(success=True, source=source)
+    return KnowledgeSourceResponse(success=True, source=(await _source_dtos([source]))[0])
 
 
 @bot_bp.route("/ai-knowledge/sources/<int:source_id>", methods=["DELETE"])

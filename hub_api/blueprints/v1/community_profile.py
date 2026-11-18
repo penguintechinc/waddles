@@ -32,6 +32,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import community_profile_service as svc
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id, get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request
@@ -55,7 +56,7 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 class CommunityProfileDTO:
     """Community profile DTO -- matches Node's `formatCommunity()` shape (camelCase)."""
 
-    id: int
+    id: str
     name: str
     displayName: str | None
     description: str | None
@@ -119,9 +120,10 @@ class SimpleSuccessResponse:
     success: bool
 
 
-def _to_dto(profile: svc.CommunityProfile) -> CommunityProfileDTO:
+async def _to_dto(profile: svc.CommunityProfile) -> CommunityProfileDTO:
+    """Profile DTO; `id` is the community's PUBLIC UUID (never the numeric id)."""
     return CommunityProfileDTO(
-        id=profile.id,
+        id=await lookup_public_id(profile.id),
         name=profile.name,
         displayName=profile.display_name,
         description=profile.description,
@@ -156,7 +158,7 @@ async def get_community_profile(community_id: int) -> tuple[Any, int]:
     )
     if profile is None:
         return cast("tuple[Any, int]", error_response("Community not found", 404, "NOT_FOUND"))
-    return jsonify_dto(CommunityProfileResponse(success=True, community=_to_dto(profile)))
+    return jsonify_dto(CommunityProfileResponse(success=True, community=await _to_dto(profile)))
 
 
 @community_profile_bp.route("/admin/<cuuid:community_id>/profile", methods=["PUT"])
@@ -189,7 +191,7 @@ async def update_community_profile(
         )
     except ApiError as exc:
         return _err(exc)
-    return jsonify_dto(CommunityProfileResponse(success=True, community=_to_dto(profile)))
+    return jsonify_dto(CommunityProfileResponse(success=True, community=await _to_dto(profile)))
 
 
 @community_profile_bp.route("/admin/<cuuid:community_id>/logo", methods=["POST"])

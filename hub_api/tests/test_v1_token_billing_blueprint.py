@@ -32,7 +32,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.token_billing import token_products_bp, tokens_bp
 from config import HubAPIConfig
-from tests.community_ids import cpath, install_community_ids
+from tests.community_ids import cpath, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token, role_kind_fields
 
 
@@ -223,6 +223,7 @@ class TestBalanceAuthz:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["balances"][0]["balance"] == 7
+        assert body["community_id"] == public_id(token_billing_db, community_id)  # UUID, not int
 
     async def test_member_of_community_a_cannot_read_community_b(
         self, client: Any, token_billing_db: Any

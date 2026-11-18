@@ -37,7 +37,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
 from services import distribution_service as svc
-from services.community_public_id import resolve_public_community_id
+from services.community_public_id import lookup_public_ids, resolve_public_community_id
 from services.errors import ApiError
 from services.schema import bind_app_bundle_tables
 
@@ -114,7 +114,7 @@ class DistributionBundleDTO:
     """One bundle's `{entrypoint, config, spec}` for the requested stage."""
 
     appId: str
-    communityId: int | None
+    communityId: str | None
     entrypoint: str | None
     spec: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
@@ -175,13 +175,16 @@ async def list_distribution_bundles() -> (
         async_dal, read_dal, tenant_id=ctx.tenant_id, community_id=community_id, stage=stage
     )
 
+    public_ids = await lookup_public_ids(
+        row.community_id for row in rows if row.community_id is not None
+    )
     return DistributionBundlesResponse(
         success=True,
         stage=stage,
         bundles=[
             DistributionBundleDTO(
                 appId=row.app_id,
-                communityId=row.community_id,
+                communityId=None if row.community_id is None else public_ids[row.community_id],
                 entrypoint=row.entrypoint,
                 spec=row.spec,
                 config=row.config,

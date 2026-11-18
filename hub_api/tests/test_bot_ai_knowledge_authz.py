@@ -65,6 +65,8 @@ def _src(dal: Any, **kw: Any) -> int:
     kw.setdefault("source_type", "manual")
     sid: int = dal.ai_knowledge_sources.insert(is_active=True, **kw)
     dal.commit()
+    if kw.get("community_id") is not None:
+        public_id(dal, kw["community_id"])  # responses carry the community UUID
     return sid
 
 

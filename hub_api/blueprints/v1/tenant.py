@@ -170,7 +170,7 @@ class CommunityDTO:
     only for the legacy `/admin/<id>` links in `TenantCommunities.jsx`.
     """
 
-    id: int
+    id: str
     publicId: str
     name: str
     displayName: str
@@ -248,8 +248,11 @@ def _tenant_dto(row: Any) -> TenantDTO:
 
 
 def _community_dto(row: Any) -> CommunityDTO:
+    """Community DTO; `id` carries the PUBLIC UUID (same as `publicId`), never the numeric id."""
+    if not row.public_id:
+        raise RuntimeError("community row missing public_id")
     return CommunityDTO(
-        id=row.id,
+        id=str(row.public_id),
         publicId=str(row.public_id),
         name=row.name,
         displayName=row.display_name or row.name,

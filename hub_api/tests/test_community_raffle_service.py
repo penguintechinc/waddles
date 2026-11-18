@@ -13,8 +13,18 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 import services.community_raffle as raffle_svc
 from services.community_raffle import delete_customization, store_sound, upsert_customization
+from tests.community_ids import public_id
+
+
+@pytest.fixture(autouse=True)
+def _seed_public_id(community_db: Any) -> None:
+    """Responses carry the community UUID: give the fixture community one."""
+    dal, community_id = community_db
+    public_id(dal, community_id)
 
 
 class TestUpsertUpdateExistingRow:

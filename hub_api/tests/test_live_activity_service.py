@@ -12,19 +12,29 @@ from __future__ import annotations
 import asyncio
 import dataclasses
 import json
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from pydal import DAL
+from pydal import DAL, Field
 
 from services import live_activity as svc
+
+PUBLIC_IDS = {1: str(uuid.uuid4()), 2: str(uuid.uuid4())}
 
 
 @pytest.fixture
 def dal() -> Any:
     db = DAL("sqlite:memory")
     svc._ensure_table(db, migrate=True)
+    # Events carry the community's PUBLIC UUID: seed communities 1 and 2 with one each.
+    db.define_table(
+        "communities", Field("name"), Field("public_id", "string", length=36), migrate=True
+    )
+    for n in (1, 2):
+        db.communities.insert(name=f"c{n}", public_id=PUBLIC_IDS[n])
+    db.commit()
     yield db
     db.close()
 
@@ -76,6 +86,7 @@ class TestListRecentEvents:
             "occurred_at",
         }
         assert "channel_id" not in dataclasses.asdict(event)
+        assert event.community_id == PUBLIC_IDS[1]
 
 
 def _decode_frame(frame: bytes) -> dict[str, Any]:
@@ -110,7 +121,7 @@ class TestEventStream:
         frame = await asyncio.wait_for(gen.__anext__(), timeout=2.0)
         payload = _decode_frame(frame)
         assert payload["actor"] == "new-arrival"
-        assert payload["community_id"] == 1
+        assert payload["community_id"] == PUBLIC_IDS[1]  # public UUID, never the numeric id
         await gen.aclose()
 
     async def test_multiple_new_rows_emitted_oldest_first_in_one_poll(self, dal: Any) -> None:

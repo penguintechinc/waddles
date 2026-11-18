@@ -38,6 +38,7 @@ from decimal import Decimal
 from typing import Any
 
 from services.community_authz import member_scopes_sync
+from services.community_public_id import lookup_public_ids_sync
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.global_identity import is_global_admin_sync
 from services.scope_registry import SCOPE_BILLING_MANAGE
@@ -124,7 +125,7 @@ def calculate_monthly_bill(
 class PremiumStatusDTO:
     """Response shape for `GET /premium/status/<communityId>`."""
 
-    communityId: int
+    communityId: str
     status: str
     stripeSubscriptionId: str | None
     paypalSubscriptionId: str | None
@@ -148,7 +149,7 @@ def get_premium_status(dal: Any, community_id: int) -> PremiumStatusDTO | None:
     if row is None:
         return None
     return PremiumStatusDTO(
-        communityId=community_id,
+        communityId=lookup_public_ids_sync(dal, [community_id])[community_id],
         status=row.status,
         stripeSubscriptionId=row.stripe_subscription_id,
         paypalSubscriptionId=row.paypal_subscription_id,

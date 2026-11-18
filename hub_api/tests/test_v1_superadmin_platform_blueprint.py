@@ -12,6 +12,7 @@ scope_is_403` went red (200 instead of 403); reverted, green again.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -21,7 +22,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
 from services.tenant_key_provisioning import TenantKeyProvisioningError
-from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -160,7 +161,7 @@ class TestCommunityManagement:
         )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["community"]["id"] == community_id
+        assert body["community"]["id"] == public_id(admin_db, community_id)
 
     async def test_create_community_success(self, client: Any) -> None:
         response = await client.post(
@@ -171,6 +172,8 @@ class TestCommunityManagement:
         assert response.status_code == 201
         body = await response.get_json()
         assert body["community"]["name"] == "new-community"
+        assert isinstance(body["community"]["id"], str)
+        uuid.UUID(body["community"]["id"])  # public UUID, never the numeric id
 
     async def test_create_community_stores_canonical_owner_role(
         self, client: Any, admin_db: Any
@@ -193,9 +196,15 @@ class TestCommunityManagement:
             headers=_headers(),
             json={"name": "Reassign Me", "platform": "discord"},
         )
-        community_id = (await created.get_json())["community"]["id"]
+        created_uuid = (await created.get_json())["community"]["id"]  # public UUID, not numeric
+        community_id = int(
+            admin_db.dal(admin_db.dal.communities.public_id == created_uuid)
+            .select(admin_db.dal.communities.id)
+            .first()
+            .id
+        )
         response = await client.post(
-            cpath(admin_db, "/api/v1/superadmin/communities/{community_id}/reassign", community_id),
+            f"/api/v1/superadmin/communities/{created_uuid}/reassign",
             headers=_headers(),
             json={"newOwnerName": "newowner"},
         )

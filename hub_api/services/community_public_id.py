@@ -23,6 +23,7 @@ from __future__ import annotations
 import re
 import uuid
 from collections import OrderedDict
+from collections.abc import Iterable
 from typing import Any
 
 from quart import Quart, current_app, request
@@ -201,6 +202,55 @@ async def lookup_public_id(community_id: int) -> str:
     if not rows or not rows[0].public_id:
         raise RuntimeError(f"community {community_id} has no public_id")
     return str(rows[0].public_id)
+
+
+async def lookup_public_ids(community_ids: Iterable[int]) -> dict[int, str]:
+    """Public UUIDs for many internal community ids in ONE query (no N+1 on list responses).
+
+    Every requested id must resolve; a community without a `public_id` raises `RuntimeError`
+    (fail loud, PII-free message) rather than leaking the numeric id.
+    """
+    wanted = sorted({int(cid) for cid in community_ids})
+    if not wanted:
+        return {}
+    async_dal = current_app.config["async_dal"]
+    dal = current_app.config["dal"]
+    if "communities" not in dal.tables:
+        bind_auth_tables(dal)
+    elif "public_id" not in dal.communities.fields:
+        bind_tenant_tables(dal)
+    rows = await async_dal.select_async(
+        dal(dal.communities.id.belongs(wanted)),
+        dal.communities.id,
+        dal.communities.public_id,
+    )
+    found = {int(r.id): str(r.public_id) for r in rows if r.public_id}
+    missing = [cid for cid in wanted if cid not in found]
+    if missing:
+        raise RuntimeError(f"{len(missing)} community row(s) missing public_id: {missing[:5]}")
+    return found
+
+
+def lookup_public_ids_sync(dal: Any, community_ids: Iterable[int]) -> dict[int, str]:
+    """Sync-DAL twin of `lookup_public_ids` for services that hold a pydal `dal` (ONE query).
+
+    Fails loud (`RuntimeError`, PII-free) when any community has no `public_id`.
+    """
+    wanted = sorted({int(cid) for cid in community_ids})
+    if not wanted:
+        return {}
+    if "communities" not in dal.tables:
+        bind_auth_tables(dal)
+    elif "public_id" not in dal.communities.fields:
+        bind_tenant_tables(dal)
+    rows = dal(dal.communities.id.belongs(wanted)).select(
+        dal.communities.id, dal.communities.public_id
+    )
+    found = {int(r.id): str(r.public_id) for r in rows if r.public_id}
+    missing = [cid for cid in wanted if cid not in found]
+    if missing:
+        raise RuntimeError(f"{len(missing)} community row(s) missing public_id: {missing[:5]}")
+    return found
 
 
 def register_default_converter() -> None:

@@ -27,6 +27,7 @@ from services.default_tenant import (
     verify_default_tenant_at_startup,
 )
 from services.global_identity import SYSTEM_TENANT_SLUG
+from tests.community_ids import public_id
 from tests.test_v1_public_blueprint import _test_config
 
 
@@ -51,9 +52,9 @@ def _make_app(db: Any, slug: str) -> Quart:
     return app
 
 
-def _seed_public_community(db: Any, tenant_slug: str, name: str) -> None:
+def _seed_public_community(db: Any, tenant_slug: str, name: str) -> int:
     tenant = db.dal(db.dal.tenants.slug == tenant_slug).select().first()
-    db.dal.communities.insert(
+    cid: int = db.dal.communities.insert(
         name=name,
         display_name=name.title(),
         is_active=True,
@@ -64,6 +65,8 @@ def _seed_public_community(db: Any, tenant_slug: str, name: str) -> None:
         created_at=datetime.now(UTC),
     )
     db.dal.commit()
+    public_id(db, cid)  # responses carry the community UUID
+    return cid
 
 
 def test_config_default_comes_from_the_single_constant(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -83,7 +86,7 @@ class TestPublicEndpointsWithOnlyReservedTenants:
     """Alpha shape: tenants = {default, system}. Public endpoints must return data."""
 
     async def test_communities_listed(self, alpha_db: Any) -> None:
-        _seed_public_community(alpha_db, DEFAULT_TENANT_SLUG, "visible")
+        cid = _seed_public_community(alpha_db, DEFAULT_TENANT_SLUG, "visible")
         _seed_public_community(alpha_db, SYSTEM_TENANT_SLUG, "operator-plane")
         client = _make_app(alpha_db, DEFAULT_TENANT_SLUG).test_client()
 
@@ -92,6 +95,7 @@ class TestPublicEndpointsWithOnlyReservedTenants:
         assert response.status_code == 200
         body = await response.get_json()
         assert [c["name"] for c in body["communities"]] == ["visible"]
+        assert body["communities"][0]["id"] == public_id(alpha_db, cid)  # UUID, not numeric
 
     async def test_spotlighted_and_live_streams_ok(self, alpha_db: Any) -> None:
         _seed_public_community(alpha_db, DEFAULT_TENANT_SLUG, "visible")

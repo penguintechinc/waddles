@@ -38,6 +38,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from services.community_public_id import lookup_public_ids_sync
+
 #: Poll cadence for the SSE generator -- matches this port task's own spec
 #: ("~1s"). Overridable per-call (tests pass a much shorter interval so
 #: the suite doesn't wait a full second per assertion).
@@ -92,7 +94,7 @@ class LiveActivityEvent:
     """
 
     id: int
-    community_id: int
+    community_id: str
     platform: str
     actor: str | None
     message_in: str | None
@@ -108,10 +110,11 @@ class LiveActivityListResponse:
     events: list[LiveActivityEvent]
 
 
-def _to_event(row: Any) -> LiveActivityEvent:
+def _to_event(row: Any, public_community_id: str) -> LiveActivityEvent:
+    """Event DTO; `community_id` is the community's PUBLIC UUID (never the numeric id)."""
     return LiveActivityEvent(
         id=row.id,
-        community_id=row.community_id,
+        community_id=public_community_id,
         platform=row.platform,
         actor=row.actor,
         message_in=row.message_in,
@@ -126,7 +129,8 @@ def list_recent_events(dal: Any, *, community_id: int, limit: int) -> list[LiveA
     rows = dal(dal.live_activity_events.community_id == community_id).select(
         orderby=~dal.live_activity_events.id, limitby=(0, limit)
     )
-    return [_to_event(row) for row in rows]
+    public_id = lookup_public_ids_sync(dal, [community_id])[community_id]
+    return [_to_event(row, public_id) for row in rows]
 
 
 def _max_id(dal: Any, *, community_id: int) -> int:
@@ -180,6 +184,7 @@ async def event_stream(
     `data:`-frame payload), adapted from that module's Valkey pub/sub push
     model to a DB poll loop -- no pub/sub broker is wired for this table.
     """
+    public_id = (await asyncio.to_thread(lookup_public_ids_sync, dal, [community_id]))[community_id]
     last_seen = await asyncio.to_thread(_max_id, dal, community_id=community_id)
     yield b": keepalive\n\n"
     while True:
@@ -188,7 +193,7 @@ async def event_stream(
         )
         if rows:
             for row in rows:
-                event = _to_event(row)
+                event = _to_event(row, public_id)
                 last_seen = event.id
                 yield _sse_frame(event)
         else:

@@ -50,6 +50,7 @@ from quart import Blueprint, Response, current_app, jsonify, request
 
 from services import github_sync_service as svc
 from services.community_authz import require_community_admin, require_valid_community_id
+from services.community_public_id import lookup_public_ids
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request
 from services.schema import bind_github_sync_tables
@@ -169,7 +170,13 @@ async def list_connections(community_id: str) -> tuple[dict[str, object], int]:
         return guard
     async_dal, dal = _dal()
     connections = await svc.get_repo_connections(async_dal, dal, community_id=guard)
-    return {"status": "success", "data": [_connection_dict(c) for c in connections]}, 200
+    public_ids = await lookup_public_ids(
+        c.community_id for c in connections if c.community_id is not None
+    )
+    return {
+        "status": "success",
+        "data": [_connection_dict(c, public_ids) for c in connections],
+    }, 200
 
 
 @github_sync_admin_bp.route("/<cuuid:community_id>/github-sync/connections", methods=["POST"])
@@ -200,7 +207,10 @@ async def create_connection(
         )
     except ApiError as exc:
         return _err(exc)
-    return _ok({"status": "success", "data": _connection_created_dict(connection)}, 201)
+    public_ids = await lookup_public_ids(
+        [] if connection.community_id is None else [connection.community_id]
+    )
+    return _ok({"status": "success", "data": _connection_created_dict(connection, public_ids)}, 201)
 
 
 @github_sync_admin_bp.route(
@@ -337,7 +347,7 @@ class RepoConnectionDTO:
     """
 
     id: int
-    community_id: int | None
+    community_id: str | None
     vendor_id: int | None
     module_id: int | None
     repo_owner: str
@@ -352,19 +362,24 @@ class RepoConnectionDTO:
     token_masked: str
 
 
-def _connection_created_dict(c: svc.RepoConnection) -> dict[str, object]:
+def _connection_created_dict(
+    c: svc.RepoConnection, public_ids: dict[int, str]
+) -> dict[str, object]:
     """Shape a freshly created connection, revealing `webhook_secret` once (never re-served)."""
-    body = _connection_dict(c)
+    body = _connection_dict(c, public_ids)
     body["webhook_secret"] = c.webhook_secret
     return body
 
 
-def _connection_dict(c: svc.RepoConnection) -> dict[str, object]:
-    """Shape a `RepoConnection` via `RepoConnectionDTO` (no raw token)."""
+def _connection_dict(c: svc.RepoConnection, public_ids: dict[int, str]) -> dict[str, object]:
+    """Shape a `RepoConnection` via `RepoConnectionDTO` (no raw token).
+
+    `community_id` is the community's PUBLIC UUID (from the batched `public_ids` map).
+    """
     return asdict(
         RepoConnectionDTO(
             id=c.id,
-            community_id=c.community_id,
+            community_id=None if c.community_id is None else public_ids[c.community_id],
             vendor_id=c.vendor_id,
             module_id=c.module_id,
             repo_owner=c.repo_owner,

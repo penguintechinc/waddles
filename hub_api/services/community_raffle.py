@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from .community_common import ensure_community_tables
+from .community_public_id import lookup_public_ids_sync
 
 VALID_EVENT_TYPES = frozenset(
     {
@@ -41,7 +42,7 @@ class RaffleCustomization:
     """One `community_raffle_sounds` row."""
 
     id: int
-    community_id: int
+    community_id: str
     event_type: str
     sound_url: str | None
     sound_filename: str | None
@@ -53,10 +54,16 @@ class RaffleCustomization:
     updated_at: str | None
 
 
-def _to_dto(row: Any) -> RaffleCustomization:
+def _public_id(dal: Any, community_id: int) -> str:
+    """Public UUID for one community id (fails loud when the row has none)."""
+    return lookup_public_ids_sync(dal, [community_id])[int(community_id)]
+
+
+def _to_dto(row: Any, public_community_id: str) -> RaffleCustomization:
+    """Customization DTO; `community_id` is the community's PUBLIC UUID."""
     return RaffleCustomization(
         id=row.id,
-        community_id=row.community_id,
+        community_id=public_community_id,
         event_type=row.event_type,
         sound_url=row.sound_url,
         sound_filename=row.sound_filename,
@@ -75,7 +82,8 @@ def get_customizations(dal: Any, community_id: int) -> dict[str, RaffleCustomiza
     rows = dal(dal.community_raffle_sounds.community_id == community_id).select(
         orderby=dal.community_raffle_sounds.event_type
     )
-    return {r.event_type: _to_dto(r) for r in rows}
+    public_id = _public_id(dal, community_id)
+    return {r.event_type: _to_dto(r, public_id) for r in rows}
 
 
 def upsert_customization(
@@ -108,7 +116,7 @@ def upsert_customization(
             created_at=datetime.utcnow(),
         )
         dal.commit()
-        return _to_dto(dal.community_raffle_sounds[new_id])
+        return _to_dto(dal.community_raffle_sounds[new_id], _public_id(dal, community_id))
 
     fields: dict[str, Any] = {"updated_at": datetime.utcnow()}
     if message_template is not None:
@@ -117,7 +125,7 @@ def upsert_customization(
         fields["is_active"] = is_active
     dal(dal.community_raffle_sounds.id == existing.id).update(**fields)
     dal.commit()
-    return _to_dto(dal.community_raffle_sounds[existing.id])
+    return _to_dto(dal.community_raffle_sounds[existing.id], _public_id(dal, community_id))
 
 
 def delete_customization(dal: Any, community_id: int, event_type: str) -> bool | None:
@@ -198,8 +206,8 @@ def store_sound(
             community_id=community_id, event_type=event_type, created_at=datetime.utcnow(), **fields
         )
         dal.commit()
-        return _to_dto(dal.community_raffle_sounds[new_id]), None
+        return _to_dto(dal.community_raffle_sounds[new_id], _public_id(dal, community_id)), None
 
     dal(dal.community_raffle_sounds.id == existing.id).update(**fields)
     dal.commit()
-    return _to_dto(dal.community_raffle_sounds[existing.id]), None
+    return _to_dto(dal.community_raffle_sounds[existing.id], _public_id(dal, community_id)), None

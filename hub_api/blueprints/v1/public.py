@@ -36,6 +36,7 @@ from quart_schema import validate_response
 from config import HubAPIConfig
 from services import landing_stats_cache
 from services import public_service as svc
+from services.community_public_id import lookup_public_id, lookup_public_ids
 from services.db_routing import get_read_dals, reads_from_replica, record_primary_read
 from services.default_tenant import DefaultTenantMissingError
 from services.errors import ApiError
@@ -159,7 +160,7 @@ class StatsWarmingResponse:
 class SpotlightedCommunityDTO:
     """Spotlighted community DTO."""
 
-    id: int
+    id: str
     name: str | None
     displayName: str | None
     description: str | None
@@ -191,7 +192,7 @@ class PaginationDTO:
 class PublicCommunityDTO:
     """Public community DTO (list row)."""
 
-    id: int
+    id: str
     name: str | None
     displayName: str | None
     description: str | None
@@ -214,7 +215,7 @@ class ListCommunitiesResponse:
 class PublicCommunityDetailDTO:
     """Public community detail DTO."""
 
-    id: int
+    id: str
     name: str | None
     displayName: str | None
     description: str | None
@@ -351,11 +352,12 @@ async def get_spotlighted_communities() -> (
         logger.debug("public.api_error status=%s", exc.status_code)
         return _err(exc)
     rows = await svc.get_spotlighted_communities(async_dal, dal, ctx)
+    public_ids = await lookup_public_ids(int(r.id) for r in rows)
     return SpotlightedCommunitiesResponse(
         success=True,
         communities=[
             SpotlightedCommunityDTO(
-                id=r.id,
+                id=public_ids[int(r.id)],
                 name=r.name,
                 displayName=r.display_name or r.name,
                 description=r.description,
@@ -385,11 +387,12 @@ async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object
     rows, total, total_pages = await svc.list_communities(
         async_dal, dal, ctx, page=page, limit=limit
     )
+    public_ids = await lookup_public_ids(int(r.id) for r in rows)
     return ListCommunitiesResponse(
         success=True,
         communities=[
             PublicCommunityDTO(
-                id=r.id,
+                id=public_ids[int(r.id)],
                 name=r.name,
                 displayName=r.display_name or r.name,
                 description=r.description,
@@ -421,7 +424,7 @@ async def get_community(community_id: int) -> GetCommunityResponse | tuple[dict[
     return GetCommunityResponse(
         success=True,
         community=PublicCommunityDetailDTO(
-            id=row.id,
+            id=await lookup_public_id(int(row.id)),
             name=row.name,
             displayName=row.display_name or row.name,
             description=row.description,
