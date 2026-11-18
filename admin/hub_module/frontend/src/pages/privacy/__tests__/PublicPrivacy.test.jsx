@@ -175,6 +175,19 @@ describe('verify page', () => {
     expect(screen.getByText('This link updates your request')).toBeTruthy();
   });
 
+  it('labels the message as unverified third-party text and warns before the confirm button', async () => {
+    api.previewVerification.mockResolvedValue({ ...PREVIEW, message: 'call 555-0100 http://x.test', contentChanged: false });
+    mountVerify('/privacy-request/verify#token=abc123');
+    await confirmBtn();
+    expect(screen.getByText('Text submitted with this request by whoever filed it (not verified)')).toBeTruthy();
+    expect(screen.queryByText('Your message:')).toBeNull();
+    const box = screen.getByTestId('verify-message');
+    expect(box.querySelector('a')).toBeNull(); // no auto-linking
+    expect(screen.getByTestId('verify-warning').textContent).toBe(
+      'If you did not make this request, do not confirm. Close this page and no action will be taken.',
+    );
+  });
+
   it('shows no message block or change notice when nothing differs', async () => {
     mountVerify('/privacy-request/verify#token=abc123');
     await confirmBtn();

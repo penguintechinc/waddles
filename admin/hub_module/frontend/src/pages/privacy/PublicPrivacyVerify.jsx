@@ -82,12 +82,19 @@ export default function PublicPrivacyVerify() {
             </Alert>
           )}
           {preview?.message ? (
-            <div data-testid="verify-message">
-              <p className="text-sm text-fg-muted">Your message:</p>
-              {/* Plain text child: React escapes it; never render the message as HTML. */}
-              <blockquote className="whitespace-pre-wrap break-words border-l-2 pl-3">{preview.message}</blockquote>
+            <div data-testid="verify-message" className="rounded border border-dashed p-3 opacity-80">
+              <p className="text-xs text-fg-muted">
+                Text submitted with this request by whoever filed it (not verified)
+              </p>
+              {/* Plain text child: React escapes it. No linkify / tel detection, whitespace kept. */}
+              <pre className="mt-1 whitespace-pre-wrap break-words font-sans text-sm" data-detect-links="false">
+                {preview.message}
+              </pre>
             </div>
           ) : null}
+          <p data-testid="verify-warning" className="font-semibold">
+            If you did not make this request, do not confirm. Close this page and no action will be taken.
+          </p>
           {state === 'error' && <Alert tone="danger">We could not confirm right now. Please try again.</Alert>}
           <Button onClick={confirm} loading={state === 'busy'} disabled={state === 'busy'}>Confirm your email</Button>
         </>
