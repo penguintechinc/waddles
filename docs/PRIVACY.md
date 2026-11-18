@@ -63,6 +63,8 @@ Users can update (`PATCH /api/v1/cookie/preferences`) or withdraw (`DELETE /api/
 
 A `Sec-GPC: 1` (Global Privacy Control) request header is honoured server-side: it forces `doNotSell` on and `marketing` off regardless of the request body. A missing header is never read as consent. ("Do Not Track" is not a supported signal.)
 
+**Analytics suppression list.** A do-not-sell opt-out, a GPC signal, a marketing-consent withdrawal and an erasure also write the subject's uuid token and a reason code (no PII) into `data_use_exclusions`, in the **same transaction** as the consent/erasure change, so the analytics pipeline never processes an opted-out or erased subject; an explicit opt-back-in or marketing re-grant removes only its own reason (an erasure exclusion is never removed). A default-OFF reconciler (`waddles.analytics-exclusions-reconcile`) re-creates any missing row. See `docs/analytics-foundation.md`.
+
 ---
 
 ## Data Deletion (GDPR Article 17 — Right to Erasure)

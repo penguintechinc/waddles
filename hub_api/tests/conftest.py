@@ -622,6 +622,20 @@ def seed_super_admin(
     dal.commit()
 
 
+def create_exclusions_table(dal: Any) -> None:
+    """Create the sqlite twin of `public.data_use_exclusions` (alembic 0129) on `dal`.
+
+    The suppression list is raw SQL (not a pydal-bound table) in production, so sqlite test
+    harnesses that exercise consent / DSAR writes must create it explicitly.
+    """
+    dal.executesql(
+        "CREATE TABLE IF NOT EXISTS data_use_exclusions (user_uuid TEXT NOT NULL, "
+        "reason_code INTEGER NOT NULL, since TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "PRIMARY KEY (user_uuid, reason_code))"
+    )
+    dal.commit()
+
+
 @pytest.fixture
 def privacy_db(tmp_path: Any) -> Any:
     """`auth_db`'s tables PLUS the Privacy/Compliance group's own.
@@ -647,6 +661,7 @@ def privacy_db(tmp_path: Any) -> Any:
     )
     bind_auth_tables(dal, migrate=True)
     bind_privacy_tables(dal, migrate=True)
+    create_exclusions_table(dal)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     for table_name in dal.tables:

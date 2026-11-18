@@ -309,6 +309,7 @@ async def save_consent(data: SaveConsentRequest) -> tuple[Any, int]:
         ip_address=request.remote_addr,
         user_agent=request.headers.get("User-Agent"),
         version=version,
+        gpc_applied=gpc_applied,
     )
 
     response, status = jsonify_dto(
@@ -465,7 +466,7 @@ async def update_preferences(data: UpdatePreferencesRequest) -> tuple[Any, int]:
         }
         preferences, gpc_applied = svc.apply_gpc(request, requested)
         record = await svc.update_preferences(
-            async_dal, dal, user_id=user_id, preferences=preferences
+            async_dal, dal, user_id=user_id, preferences=preferences, gpc_applied=gpc_applied
         )
     except ApiError as exc:
         # PII-free: only the static status/code, never exc.message or the subject id.

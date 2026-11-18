@@ -48,6 +48,9 @@ from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
+from services.analytics_exclusions_service import (
+    run_reconcile_loop as run_exclusions_reconcile_loop,
+)
 from services.audit_http import AUDIT_SERVICE_CONFIG_KEY, install_audit_hooks
 from services.audit_service import get_audit_service
 from services.ban_suppression import run_purge_loop
@@ -530,6 +533,15 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             app.config["source_group_reconcile_task"] = asyncio.create_task(
                 run_reconcile_loop(install_dal, is_ready=lambda: bootstrap_status.is_ready)
             )
+        # Rebuilds MISSING analytics exclusions (data_use_exclusions) from the consent rows and the
+        # erasure ledger so a dropped write self-heals. Add-only, bounded batches, advisory-locked
+        # so one replica works at a time; the pass itself is gated by the default-OFF flag
+        # `waddles.analytics-exclusions-reconcile`. A failed pass is logged at ERROR and retried.
+        app.config["analytics_exclusions_reconcile_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["analytics_exclusions_reconcile_task"] = asyncio.create_task(
+                run_exclusions_reconcile_loop(async_dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -603,6 +615,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping source group reconcile task on shutdown: {exc}")
+        exclusions_task = app.config.get("analytics_exclusions_reconcile_task")
+        if exclusions_task is not None:
+            exclusions_task.cancel()
+            try:
+                await exclusions_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(
+                        f"Error stopping analytics exclusions reconcile on shutdown: {exc}"
+                    )
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:
