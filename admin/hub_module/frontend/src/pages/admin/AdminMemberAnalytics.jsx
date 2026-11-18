@@ -1,6 +1,9 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { analyticsApi } from '../../services/api';
+import { AnalyticsEmpty, AnalyticsFailureState } from '../../components/analytics/AnalyticsStates';
+import { allZero } from '../../components/analytics/usePlatformAnalytics';
+import { classifyAnalyticsError } from '../../components/analytics/classifyAnalyticsError';
 import {
   ChatBubbleLeftIcon,
   ClockIcon,
@@ -9,33 +12,48 @@ import {
   ArrowLeftIcon,
 } from '@heroicons/react/24/outline';
 
+/**
+ * Per-member analytics for a community admin. The member lookup 404 ("Member not found") is a real
+ * not-found; any other 404 (no analytics rows) is "No analytics for this member yet". An undeployed
+ * analytics backend is a neutral note, never a red banner.
+ */
 function AdminMemberAnalytics() {
   const { communityId, userId } = useParams();
-  const [stats, setStats] = useState(null);
-  const [reputation, setReputation] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [state, setState] = useState({ loading: true, stats: null, reputation: null, statsFailure: null, repFailure: null });
+
+  const loadData = async () => {
+    setState({ loading: true, stats: null, reputation: null, statsFailure: null, repFailure: null });
+    const [statsRes, repRes] = await Promise.allSettled([
+      analyticsApi.getMemberStats(communityId, userId),
+      analyticsApi.getMemberReputation(communityId, userId),
+    ]);
+    setState({
+      loading: false,
+      stats: statsRes.status === 'fulfilled' ? statsRes.value.data ?? null : null,
+      reputation: repRes.status === 'fulfilled' ? repRes.value.data ?? null : null,
+      statsFailure: statsRes.status === 'rejected' ? classifyAnalyticsError(statsRes.reason, { notFound: true }) : null,
+      repFailure: repRes.status === 'rejected' ? classifyAnalyticsError(repRes.reason, { notFound: true }) : null,
+    });
+  };
 
   useEffect(() => {
     loadData();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [communityId, userId]);
 
-  const loadData = async () => {
-    try {
-      setLoading(true);
-      setError(null);
-      const [statsRes, repRes] = await Promise.all([
-        analyticsApi.getMemberStats(communityId, userId),
-        analyticsApi.getMemberReputation(communityId, userId),
-      ]);
-      setStats(statsRes.data);
-      setReputation(repRes.data);
-    } catch (err) {
-      setError(err.response?.data?.error?.message || err.response?.data?.error || 'Failed to load member analytics');
-    } finally {
-      setLoading(false);
-    }
-  };
+  const { loading, stats, reputation, statsFailure, repFailure } = state;
+
+  const backLink = (
+    <div className="mb-6">
+      <Link
+        to={`/admin/${communityId}/members`}
+        className="flex items-center gap-2 text-sm text-navy-400 hover:text-sky-300 transition-colors"
+      >
+        <ArrowLeftIcon className="w-4 h-4" />
+        Back to Members
+      </Link>
+    </div>
+  );
 
   if (loading) {
     return (
@@ -45,10 +63,18 @@ function AdminMemberAnalytics() {
     );
   }
 
-  if (error) {
+  if (statsFailure) {
+    const unknownMember = statsFailure.kind === 'not-found' && /(member|community) not found/i.test(statsFailure.message);
     return (
-      <div className="p-4 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300">
-        {error}
+      <div>
+        {backLink}
+        <div className="card p-6" data-testid="widget-member-analytics">
+          {unknownMember ? (
+            <AnalyticsEmpty title={statsFailure.message} description="Check that the member belongs to this community." testId="analytics-not-found" />
+          ) : (
+            <AnalyticsFailureState failure={statsFailure} onRetry={loadData} emptyTitle="No analytics for this member yet" />
+          )}
+        </div>
       </div>
     );
   }
@@ -62,19 +88,11 @@ function AdminMemberAnalytics() {
   const reputationScore = reputation?.reputation ?? reputation?.score ?? '—';
   const timeline = stats?.activity_30d || stats?.activity || [];
   const communityRepList = reputation?.communities || [];
+  const statsEmpty = allZero([messages, watchMinutes]) && timeline.length === 0 && !firstSeen && !lastSeen;
 
   return (
     <div>
-      {/* Back link */}
-      <div className="mb-6">
-        <Link
-          to={`/admin/${communityId}/members`}
-          className="flex items-center gap-2 text-sm text-navy-400 hover:text-sky-300 transition-colors"
-        >
-          <ArrowLeftIcon className="w-4 h-4" />
-          Back to Members
-        </Link>
-      </div>
+      {backLink}
 
       {/* Header */}
       <div className="flex items-center gap-4 mb-8">
@@ -96,6 +114,12 @@ function AdminMemberAnalytics() {
         </div>
       </div>
 
+      {statsEmpty ? (
+        <div className="card p-6 mb-8" data-testid="widget-member-analytics">
+          <AnalyticsEmpty title="No analytics for this member yet" description="Activity will appear here once they take part." />
+        </div>
+      ) : (
+      <>
       {/* Stat Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <div className="card p-6 border-l-4 border-l-sky-400">
@@ -160,7 +184,16 @@ function AdminMemberAnalytics() {
         </div>
       )}
 
+      </>
+      )}
+
       {/* Reputation across communities */}
+      {repFailure && repFailure.kind !== 'not-found' && (
+        <div className="card p-6" data-testid="widget-member-reputation">
+          <h2 className="text-lg font-semibold text-sky-100 mb-4">Reputation History</h2>
+          <AnalyticsFailureState failure={repFailure} onRetry={loadData} />
+        </div>
+      )}
       {communityRepList.length > 0 && (
         <div className="card p-6">
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Reputation History</h2>

@@ -280,6 +280,8 @@ describe('SuperAdminAnalytics -> /api/v1/analytics/platform/*', () => {
   it('surfaces a failed call instead of silently falling back', async () => {
     stub({});
     mount(<SuperAdminAnalytics />);
-    expect(await screen.findByText(/Failed to load analytics/)).toBeInTheDocument();
+    // Per-widget errors (one per failed call), each with its own Retry; the page is not blanked.
+    expect((await screen.findAllByRole('alert')).length).toBe(5);
+    expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(5);
   });
 });
