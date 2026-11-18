@@ -733,6 +733,13 @@ async fn publish_resolved_inner<A: EventAppender, M: SpineMetrics + ?Sized, D: D
 
     let entry_id = appender.append(&stream, &env).await?;
     metrics.stream_event_written(&platform, source_id);
+    // Analytics producer: metadata only, flag-gated, never fails or blocks the publish.
+    if let Some(a) = crate::analytics::get() {
+        a.observe(
+            &env.event,
+            resolved.as_ref().map(|r| (r.tenant_id, r.community_id)),
+        );
+    }
     if latency_on {
         // First door -> XADD acknowledged: receive, permissions lookup, identity encryption,
         // binding, append. An implausible t0 only skips this sample.
