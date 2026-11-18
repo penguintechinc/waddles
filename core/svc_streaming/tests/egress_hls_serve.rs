@@ -10,8 +10,8 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use chrono::Utc;
 use http_body_util::BodyExt;
+use time::OffsetDateTime;
 use tower::ServiceExt;
 use uuid::Uuid;
 
@@ -35,7 +35,7 @@ fn temp_data_dir(tag: &str) -> std::path::PathBuf {
 #[tokio::test]
 async fn listing_endpoint_returns_registered_pipelines_as_json() {
     let pipeline_id = Uuid::new_v4();
-    let started_at = Utc::now();
+    let started_at = OffsetDateTime::now_utc();
     let state = HlsRouterState::new(
         std::env::temp_dir(),
         Arc::new(FakeRegistry(vec![RunningPipeline {

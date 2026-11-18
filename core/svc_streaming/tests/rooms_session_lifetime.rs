@@ -65,7 +65,7 @@ fn claims_of(token: &str) -> RoomClaims {
 /// The same claims re-signed with the room key, but already expired.
 fn expired_twin(token: &str) -> String {
     let mut c = claims_of(token);
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     c.iat = now - 600;
     c.exp = now - 300;
     rtc_common::test_token_keys().sign(&c).unwrap()
@@ -139,7 +139,7 @@ async fn publisher_count(l: &Live) -> usize {
 #[tokio::test]
 async fn session_outlives_token_and_holder_can_end_it_with_the_expired_token() {
     let l = start((43100, 43119), 300).await;
-    let at_token_expiry = chrono::Utc::now().timestamp() + 31;
+    let at_token_expiry = time::OffsetDateTime::now_utc().unix_timestamp() + 31;
     // Past the 30 s join-token expiry the session is still there (and sweep keeps it).
     assert_eq!(l.svc.sweep_at(at_token_expiry).await, 0);
     assert_eq!(publisher_count(&l).await, 1);
@@ -242,7 +242,7 @@ async fn leave_and_room_close_end_sessions_not_token_expiry() {
 #[tokio::test]
 async fn idle_publisher_is_reaped_after_the_idle_timeout_only() {
     let l = start((43220, 43239), 300).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     // No RTP ever arrives: before the idle timeout nothing is reaped...
     assert_eq!(l.svc.sweep_at(now + 100).await, 0);
     assert_eq!(publisher_count(&l).await, 1);
@@ -254,7 +254,7 @@ async fn idle_publisher_is_reaped_after_the_idle_timeout_only() {
 #[tokio::test]
 async fn idle_timeout_zero_disables_idle_reaping() {
     let l = start((43250, 43269), 0).await;
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     assert_eq!(l.svc.sweep_at(now + 10_000).await, 0);
     assert_eq!(publisher_count(&l).await, 1);
 }

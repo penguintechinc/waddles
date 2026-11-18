@@ -317,7 +317,9 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     // Reaping. Live WebRTC sessions use a 24h session lease decoupled from the
     // short-lived join token TTL: sweeping past the 30s join token expiry does
     // not kill the active session, while sweeping past the 24h lease reaps it.
-    let reaped_at_token_ttl = svc.sweep_at(chrono::Utc::now().timestamp() + 60).await;
+    let reaped_at_token_ttl = svc
+        .sweep_at(time::OffsetDateTime::now_utc().unix_timestamp() + 60)
+        .await;
     assert_eq!(reaped_at_token_ttl, 0, "active session outlives join token");
     let (_, info) = host_call(
         &host,
@@ -329,7 +331,9 @@ async fn subscriber_sessions_are_replaced_per_participant_and_reaped() {
     // Nothing else is reaped while sessions are live and within the 24h lease.
     assert_eq!(svc.sweep().await, 0);
     let _ = pc2.close().await;
-    let reaped_at_lease = svc.sweep_at(chrono::Utc::now().timestamp() + 86_401).await;
+    let reaped_at_lease = svc
+        .sweep_at(time::OffsetDateTime::now_utc().unix_timestamp() + 86_401)
+        .await;
     assert_eq!(
         reaped_at_lease, 3,
         "publisher + 2 subscribers reaped after 24h lease"

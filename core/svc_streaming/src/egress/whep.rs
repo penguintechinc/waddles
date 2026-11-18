@@ -282,7 +282,8 @@ impl WhepState {
 
     /// [`Self::sweep_at`] as of now.
     pub async fn sweep(&self) -> usize {
-        self.sweep_at(chrono::Utc::now().timestamp()).await
+        self.sweep_at(time::OffsetDateTime::now_utc().unix_timestamp())
+            .await
     }
 
     /// Spawns the periodic expiry sweep.
