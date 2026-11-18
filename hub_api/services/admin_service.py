@@ -42,12 +42,13 @@ from flask_core.tenancy import TenantContext
 from services import community_authz
 from services import community_reputation_service as reputation_svc
 from services.errors import bad_request, forbidden, not_found
+from services.member_roles import ASSIGNABLE_MEMBER_ROLES
 from services.schema import bind_admin_tables
 from services.scope_registry import KIND_ADMIN, SCOPE_REPUTATION_MANAGE, effective_scopes
 
 SALT_ROUNDS = 12  # matches adminController.js's own SALT_ROUNDS
 
-VALID_MEMBER_ROLES = ("community-admin", "moderator", "vip", "member")
+VALID_MEMBER_ROLES = ASSIGNABLE_MEMBER_ROLES
 
 
 def _ensure_tables(dal: Any) -> None:

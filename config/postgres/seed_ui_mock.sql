@@ -45,7 +45,7 @@ INSERT INTO community_members (community_id, user_id, platform, platform_user_id
                                role, reputation, is_active)
 SELECT c.id, u.id::text, c.platform, 'demo-' || u.id,
        u.display_name,
-       CASE WHEN u.id = 9001 THEN 'owner' WHEN u.id = 9002 THEN 'moderator' ELSE 'member' END,
+       CASE WHEN u.id = 9001 THEN 'community-owner' WHEN u.id = 9002 THEN 'moderator' ELSE 'member' END,
        600 + (u.id - 9000) * 35, true
 FROM communities c
 JOIN hub_users u ON u.id BETWEEN 9001 AND 9006

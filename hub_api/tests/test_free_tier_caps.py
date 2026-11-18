@@ -232,7 +232,25 @@ class TestCommunityAtomicity:
     ) -> None:
         assert (await _post_community(client, "first")).status_code == 201
         members = admin_db.dal(admin_db.dal.community_members.id > 0).select()
-        assert [(m.user_id, m.role) for m in members] == [("1", "owner")]
+        assert [(m.user_id, m.role) for m in members] == [("1", "community-owner")]
+
+    @pytest.mark.parametrize("bad_role", ["owner", "admin", "Community-Owner", ""])
+    async def test_non_canonical_member_role_is_rejected_and_nothing_stored(
+        self, admin_db: Any, gates: Any, bad_role: str
+    ) -> None:
+        # regression: community owners got role 'owner' (gates expect 'community-owner')
+        with pytest.raises(ApiError) as exc:
+            await free_tier_caps.create_community_capped(
+                admin_db,
+                admin_db.dal,
+                tenant_slug=TENANT_SLUG,
+                tenant_id=_tenant_id(admin_db),
+                values={"name": "typo", "display_name": "Typo", "is_active": True},
+                member_values=lambda cid: {"community_id": cid, "user_id": "1", "role": bad_role},
+            )
+        assert exc.value.status_code == 400
+        assert admin_db.dal(admin_db.dal.communities.id > 0).count() == 0
+        assert admin_db.dal(admin_db.dal.community_members.id > 0).count() == 0
 
     async def test_null_is_global_counts_as_user_created(self, admin_db: Any) -> None:
         # regression: review LOW -- NULL is_global must count (is_global IS NOT TRUE)
