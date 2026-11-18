@@ -73,20 +73,25 @@ def _upstream_error(result: ProxyResult) -> tuple[dict[str, Any], int]:
     Only {400, 404, 409, 422, 429} are client-meaningful: they pass through
     with that status but the body is RE-WRAPPED via `api_error` from the
     upstream `error.message` (never the raw upstream body, which could leak
-    analytics-core internals). URL-unset (503 `service_unavailable`) and transport
-    failures map to 503 `ANALYTICS_UNAVAILABLE` (the "backend not deployed/reachable"
-    state the webui renders as an info message). 5xx and every other 4xx -- notably
+    analytics-core internals). URL-unset (503 `service_unavailable`) maps to 503
+    `ANALYTICS_UNAVAILABLE` (backend not deployed). Transport failures (refused/timeout)
+    stay a loud 502 (gh-894) naming `analytics-core` as unreachable, but carry the same
+    `ANALYTICS_UNAVAILABLE` code so the webui renders the neutral info state. 5xx and
+    every other 4xx -- notably
     401/403, which mean hub-api's OWN service-key auth failed, not the end-client's
     token -- stay REAL errors: 502 `ANALYTICS_UPSTREAM_ERROR` naming `analytics-core`.
     """
-    if (
-        result.status_code == 503
-        and isinstance(result.body, dict)
-        and result.body.get("error") == "service_unavailable"
-    ) or result.transport_error:
-        # Backend not configured (URL unset) or unreachable: one recognizable,
-        # UI-classifiable code. Transport failures are collapsed 502 -> 503 so
-        # the webui treats "not deployed" and "not reachable" identically.
+    if result.transport_error:
+        # Unreachable upstream: fail loud as 502 (gh-894 contract), UI-classifiable code.
+        return analytics_error(
+            "Upstream dependency analytics-core unreachable",
+            502,
+            CODE_ANALYTICS_UNAVAILABLE,
+        )
+    if result.status_code == 503 and (
+        isinstance(result.body, dict) and result.body.get("error") == "service_unavailable"
+    ):
+        # Backend not configured (URL unset): one recognizable, UI-classifiable code.
         return analytics_error(ANALYTICS_UNAVAILABLE_MESSAGE, 503, CODE_ANALYTICS_UNAVAILABLE)
     if result.status_code in _CLIENT_4XX_PASSTHROUGH:
         return api_error(

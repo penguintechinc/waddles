@@ -63,11 +63,12 @@ class TestUpstreamError:
         assert body["success"] is False
         assert body["error"]["code"] == "ANALYTICS_UNAVAILABLE"
 
-    def test_transport_error_is_503_unavailable(self) -> None:
+    def test_transport_error_is_502_with_unavailable_code(self) -> None:
         body, status = _upstream_error(
             ProxyResult(ok=False, status_code=502, body=None, transport_error=True)
         )
-        assert (status, body["error"]["code"]) == (503, "ANALYTICS_UNAVAILABLE")
+        assert (status, body["error"]["code"]) == (502, "ANALYTICS_UNAVAILABLE")
+        assert "unreachable" in body["error"]["message"]
 
     def test_upstream_500_stays_a_real_502(self) -> None:
         body, status = _upstream_error(ProxyResult(ok=False, status_code=500, body=None))

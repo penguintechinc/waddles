@@ -509,10 +509,11 @@ class TestMaskedFailure:
         response = await client.get(
             "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
         )
-        assert response.status_code == 503
+        assert response.status_code == 502
         err = (await response.get_json())["error"]
         assert err["code"] == "ANALYTICS_UNAVAILABLE"
-        assert err["message"] == "Analytics are not available on this deployment yet"
+        assert "analytics-core" in err["message"]
+        assert "unreachable" in err["message"]
 
     async def test_url_unset_is_503_analytics_unavailable(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch

@@ -18,7 +18,8 @@ Envelope: `{success:false, error:{code, message, timestamp}}`.
 
 | Status | `error.code` | Meaning |
 |---|---|---|
-| 503 | `ANALYTICS_UNAVAILABLE` | `ANALYTICS_CORE_API_URL` unset (backend not deployed) or transport error/timeout. Transport failures are collapsed 502 -> 503 so the UI treats both alike |
+| 503 | `ANALYTICS_UNAVAILABLE` | `ANALYTICS_CORE_API_URL` unset (backend not deployed) |
+| 502 | `ANALYTICS_UNAVAILABLE` | Upstream unreachable (connection refused/timeout). Fails loud as 502 (gh-894, never 200-empty) but carries the same code so the UI shows the neutral unavailable state |
 | 502 | `ANALYTICS_UPSTREAM_ERROR` | A configured upstream answered 5xx/401/403/other 4xx. A real error, never swallowed into "unavailable" |
 | 402 | `FEATURE_NOT_ENABLED` | `waddles.analytics.community_health` flag off (Professional+) |
 | 400/404/409/422/429 | `ERROR_<status>` | Client-meaningful upstream 4xx, message re-wrapped |
