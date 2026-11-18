@@ -481,6 +481,23 @@ describe('SuperAdminCommunities license tier', () => {
     expect(screen.getByRole('heading', { name: 'Edit Community' })).toBeInTheDocument();
   });
 
+  it('shows the 402 TENANT_TIER_REQUIRED message with the operator-pool hint in the dialog', async () => {
+    superAdminApi.updateCommunity.mockRejectedValue({
+      response: {
+        status: 402,
+        data: { error: { code: 'TENANT_TIER_REQUIRED', message: 'Premium communities require a Professional or Enterprise license' } },
+      },
+    });
+    const m = await openEdit();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
+    fireEvent.change(m.getByLabelText('Reason for tier change'), { target: { value: 'other' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    const box = await m.findByText(/Premium communities require a Professional or Enterprise license/);
+    expect(box.closest('[role="alert"]')).not.toBeNull();
+    expect(box.textContent).toContain("On operator deployments set the tenant's pool first (License pools)");
+    expect(screen.getByRole('heading', { name: 'Edit Community' })).toBeInTheDocument();
+  });
+
   it('surfaces a 400 backend message in the dialog', async () => {
     superAdminApi.updateCommunity.mockRejectedValue({ response: { status: 400, data: { error: { message: 'reasonCode is invalid' } } } });
     const m = await openEdit();

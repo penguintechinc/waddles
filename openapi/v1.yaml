@@ -23819,14 +23819,34 @@ paths:
           content:
             application/json:
               schema:
-                description: 'Non-consuming confirm-page data: what the link would
-                  verify. No PII, no tenant internals.'
+                description: 'Non-consuming confirm-page data: EXACTLY what `POST
+                  .../verify` will commit.
+
+
+                  `regime`/`message` are the content the request holds once this token
+                  is confirmed (the draft
+
+                  bound to this token when there is one, else the committed content);
+                  `message` is plain text the
+
+                  client MUST render escaped; `contentChanged` is true when that differs
+                  from what is stored now.
+
+                  No tenant internals, no email.'
                 properties:
+                  contentChanged:
+                    title: Contentchanged
+                    type: boolean
                   expiresAt:
                     anyOf:
                     - type: string
                     - type: 'null'
                     title: Expiresat
+                  message:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Message
                   regime:
                     title: Regime
                     type: integer
@@ -23844,11 +23864,25 @@ paths:
                 - valid
                 - requestType
                 - regime
+                - message
+                - contentChanged
                 - expiresAt
                 title: VerifyPreviewResponse
                 type: object
-          description: 'Non-consuming confirm-page data: what the link would verify.
-            No PII, no tenant internals.'
+          description: 'Non-consuming confirm-page data: EXACTLY what `POST .../verify`
+            will commit.
+
+
+            `regime`/`message` are the content the request holds once this token is
+            confirmed (the draft
+
+            bound to this token when there is one, else the committed content); `message`
+            is plain text the
+
+            client MUST render escaped; `contentChanged` is true when that differs
+            from what is stored now.
+
+            No tenant internals, no email.'
       summary: NON-consuming preview of `?token=` (mail scanners prefetch GET links;
         only POST consumes).
     post:
@@ -23913,14 +23947,34 @@ paths:
           content:
             application/json:
               schema:
-                description: 'Non-consuming confirm-page data: what the link would
-                  verify. No PII, no tenant internals.'
+                description: 'Non-consuming confirm-page data: EXACTLY what `POST
+                  .../verify` will commit.
+
+
+                  `regime`/`message` are the content the request holds once this token
+                  is confirmed (the draft
+
+                  bound to this token when there is one, else the committed content);
+                  `message` is plain text the
+
+                  client MUST render escaped; `contentChanged` is true when that differs
+                  from what is stored now.
+
+                  No tenant internals, no email.'
                 properties:
+                  contentChanged:
+                    title: Contentchanged
+                    type: boolean
                   expiresAt:
                     anyOf:
                     - type: string
                     - type: 'null'
                     title: Expiresat
+                  message:
+                    anyOf:
+                    - type: string
+                    - type: 'null'
+                    title: Message
                   regime:
                     title: Regime
                     type: integer
@@ -23938,11 +23992,25 @@ paths:
                 - valid
                 - requestType
                 - regime
+                - message
+                - contentChanged
                 - expiresAt
                 title: VerifyPreviewResponse
                 type: object
-          description: 'Non-consuming confirm-page data: what the link would verify.
-            No PII, no tenant internals.'
+          description: 'Non-consuming confirm-page data: EXACTLY what `POST .../verify`
+            will commit.
+
+
+            `regime`/`message` are the content the request holds once this token is
+            confirmed (the draft
+
+            bound to this token when there is one, else the committed content); `message`
+            is plain text the
+
+            client MUST render escaped; `contentChanged` is true when that differs
+            from what is stored now.
+
+            No tenant internals, no email.'
       summary: Same preview as the GET with the token in the body (never in a URL
         or access log).
   /api/v1/public/signup-settings:
@@ -27167,8 +27235,8 @@ paths:
                 3 do_not_sell); erase needs confirm.
 
 
-                `overrideReason` is required to erase on a PUBLIC-form request whose
-                requester''s verified email
+                `overrideReason` is required to act (export/erase/do-not-sell) on
+                a PUBLIC-form request whose requester''s verified email
 
                 does not match the linked account''s email; it is recorded in the
                 event trail.'

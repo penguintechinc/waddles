@@ -39,7 +39,14 @@ from flask_core.auth import DEFAULT_TENANT_SLUG
 from opentelemetry import metrics
 
 from services import community_tier_service
-from services.errors import ApiError, bad_request, conflict, forbidden, not_found
+from services.errors import (
+    ApiError,
+    bad_request,
+    conflict,
+    forbidden,
+    not_found,
+    tenant_tier_required,
+)
 from services.free_tier_caps import create_community_capped, create_tenant_capped
 from services.global_identity import SYSTEM_TENANT_SLUG
 from services.member_roles import COMMUNITY_OWNER_ROLE
@@ -272,7 +279,9 @@ async def update_community(
     `is_premium` is derived from the tier and can never be written directly. `license_tier`
     (1 free / 2 premium) goes through
     `community_tier_service.allocate(source=operator_override)`: never blocked by a full pool,
-    counted as overage and audited, with `reason_code` as the audit reason.
+    counted as overage and audited, with `reason_code` as the audit reason. The tenant must still
+    be licensed (402 `TENANT_TIER_REQUIRED` for a Free tenant; on bypass domains set its pool
+    first) and its pool determinable (503 `TEAM_POOL_UNAVAILABLE`).
     """
     _ensure_tables(dal)
     community = await get_community(async_dal, dal, community_id=community_id)  # 404 if missing
@@ -313,6 +322,14 @@ async def update_community(
             )
         except ApiError:
             raise
+        except community_tier_service.TenantNotLicensed:
+            raise tenant_tier_required() from None
+        except community_tier_service.PoolUnavailable:
+            raise ApiError(
+                "The team pool for this tenant could not be determined",
+                503,
+                "TEAM_POOL_UNAVAILABLE",
+            ) from None
         except Exception as exc:
             # The allocation commits BEFORE its audit event is written, so an audit-sink failure
             # leaves the override applied but unaudited: never report success, make it loud.

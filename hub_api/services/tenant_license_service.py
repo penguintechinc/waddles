@@ -10,10 +10,12 @@ variable inside `set_tenant_license_key()` before sealing.
 
 `get_tenant_license_key` is the real `license_key_resolver` for
 `flask_core.license_pool.LicenseServerPoolProvider`: an unreadable key (vault open failure, bad
-seal version) logs the exception TYPE at ERROR and returns None so the provider fails loud with
-``PoolUnavailable('no_tenant_license')``; infrastructure errors (DB) propagate and are treated by
-the provider as transient. Setting, replacing or clearing a key also evicts the tenant's cached
-``license_server`` pool rows (never ``operator_set`` rows) in the same transaction.
+seal version) logs the exception TYPE at ERROR and returns None; the pool provider's resolver
+detects a stored-but-unreadable key and fails loud with ``PoolUnavailable``, while an absent key
+means a Free tenant (``PoolInfo(limit=None)``). Infrastructure errors (DB) propagate and are
+treated by the provider as transient. Setting, replacing or clearing a key also evicts the
+tenant's cached ``license_server`` pool rows (never ``operator_set`` rows) in the same
+transaction.
 """
 
 from __future__ import annotations
@@ -99,8 +101,8 @@ async def get_tenant_license_key(async_dal: Any, dal: Any, tenant_id: int) -> st
     """Return the tenant's decrypted license key, or None when unset/unreadable.
 
     A corrupt/undecryptable row or a seal version < 1 logs the exception type only and yields
-    None (the pool provider then raises ``PoolUnavailable('no_tenant_license')``): a loud failure
-    for the pool, never a default key. Database errors propagate (transient for the provider).
+    None (the pool provider's resolver then raises, surfacing 503): a loud failure for the pool,
+    never a default key or a silent "Free". Database errors propagate (transient for the provider).
     """
     bind_tenant_license_key_tables(dal)
 

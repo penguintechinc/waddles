@@ -119,12 +119,16 @@ def _make_key_resolver(async_dal: Any, dal: Any) -> Any:
     async def _resolve(tenant_id: int) -> str | None:
         try:
             from services.tenant_license_service import (  # type: ignore[import-not-found,unused-ignore]
+                get_license_status,
                 get_tenant_license_key,
             )
         except ImportError:
             logger.warning("pool_provider: tenant_license_service unavailable; no license key")
             return None
         key: str | None = await get_tenant_license_key(async_dal, dal, tenant_id)
+        if key is None and (await get_license_status(async_dal, dal, tenant_id)).configured:
+            # A key IS stored but cannot be opened: a genuine failure (-> 503), never "Free".
+            raise RuntimeError("tenant license key is configured but unreadable")
         return key
 
     return _resolve

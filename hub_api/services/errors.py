@@ -69,3 +69,21 @@ def payment_required(message: str = "This feature requires a higher plan") -> Ap
     `flask_core.feature_flags`.
     """
     return ApiError(message, 402, "FEATURE_NOT_ENABLED")
+
+
+#: Wire message for a Free tenant asked to hold Premium communities (402 TENANT_TIER_REQUIRED).
+TENANT_TIER_REQUIRED_MESSAGE = "Premium communities require a Professional or Enterprise license"
+
+
+def tenant_tier_required() -> ApiError:
+    """402 -- the tenant is Free (no license / no Premium pool): it cannot have Premium communities.
+
+    Same envelope for the tenant-admin and the operator-override paths; the UI keys on the
+    `TENANT_TIER_REQUIRED` code and `details.requiredTenantTier` / `details.upgrade`.
+    """
+    return ApiError(
+        TENANT_TIER_REQUIRED_MESSAGE,
+        402,
+        "TENANT_TIER_REQUIRED",
+        {"requiredTenantTier": "professional", "upgrade": True},
+    )

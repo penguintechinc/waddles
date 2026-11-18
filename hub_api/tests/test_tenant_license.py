@@ -14,7 +14,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import Any
 
 import pytest
-from flask_core.license_pool import LicenseServerPoolProvider, PoolUnavailable
+from flask_core.license_pool import LicenseServerPoolProvider
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -326,8 +326,8 @@ async def test_resolver_feeds_pool_provider_for_real(env: Any, license_server: s
     assert _Entitlements.seen[-1]["license_key"] == KEY_A
 
     calls = len(_Entitlements.seen)
-    with pytest.raises(PoolUnavailable, match="no_tenant_license"):
-        await provider.get_pool(env.other, 2)  # tenant without a key
+    free = await provider.get_pool(env.other, 2)  # tenant without a key = Free tenant
+    assert free.limit is None
     assert len(_Entitlements.seen) == calls  # never reached the server without a key
 
 

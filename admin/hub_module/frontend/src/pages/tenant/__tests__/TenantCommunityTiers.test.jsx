@@ -88,6 +88,47 @@ describe('TenantCommunityTiers', () => {
     expect(await screen.findByText(/not licensed/)).toBeInTheDocument();
   });
 
+  describe('Free tenant (pool limit null = not licensed)', () => {
+    const FREE_POOL = { ...POOL, tiers: [{ tier: 2, limit: null, used: 0, available: 0, overage: 0 }] };
+
+    it('shows the licence-required panel and disables the Premium select of Free communities', async () => {
+      api.getPool.mockResolvedValue(FREE_POOL);
+      api.listAllocations.mockResolvedValue({ allocations: [], meta: { total: 0, limit: 200, offset: 0 } });
+      mount();
+      const panel = await screen.findByTestId('tenant-tier-required');
+      expect(panel.textContent).toContain('Premium communities require a Professional or Enterprise license');
+      expect(panel.textContent).toMatch(/Upgrade to Professional or Enterprise/);
+      expect(select('Seal Society')).toBeDisabled();
+      expect(select('Penguin Club')).toBeDisabled();
+      expect(screen.queryByTestId('pool-unavailable')).not.toBeInTheDocument();
+    });
+
+    it('keeps a grandfathered Premium community releasable to Free', async () => {
+      api.getPool.mockResolvedValue({ ...FREE_POOL, tiers: [{ tier: 2, limit: null, used: 1, available: 0, overage: 1 }] });
+      mount();
+      await screen.findByTestId('tenant-tier-required');
+      expect(select('Penguin Club')).not.toBeDisabled();
+      expect(select('Penguin Club')).toHaveValue('2');
+      expect(select('Seal Society')).toBeDisabled();
+    });
+
+    it('does not show the panel for a licensed pool', async () => {
+      mount();
+      await screen.findByText('Penguin Club');
+      expect(screen.queryByTestId('tenant-tier-required')).not.toBeInTheDocument();
+    });
+  });
+
+  it('maps a 402 TENANT_TIER_REQUIRED to the licence message, not the pool-full panel', async () => {
+    api.setTier.mockRejectedValue(httpErr(402, 'TENANT_TIER_REQUIRED', { requiredTenantTier: 'professional', upgrade: true }));
+    mount();
+    await screen.findByText('Seal Society');
+    fireEvent.change(select('Seal Society'), { target: { value: '2' } });
+    const msg = await screen.findByText('Premium communities require a Professional or Enterprise license');
+    expect(msg.closest('[role="alert"]')).not.toBeNull();
+    expect(screen.queryByTestId('pool-exhausted')).not.toBeInTheDocument();
+  });
+
   it('shows a stale badge with the observed time', async () => {
     api.getPool.mockResolvedValue({ ...POOL, stale: true });
     mount();

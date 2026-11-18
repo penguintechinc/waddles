@@ -398,6 +398,267 @@ class TestEraseOnPublicRequestNeedsEmailMatchOrOverride:
         assert res.status_code == 200
 
 
+class TestEveryActActionOnPublicRequestNeedsEmailMatchOrOverride:
+    """regression: only ERASE was email-gated; export/do-not-sell on a mismatched link were open."""
+
+    @pytest.mark.parametrize(("req_type", "action"), [(1, "export"), (3, "do_not_sell")])
+    async def test_mismatched_email_refuses_and_override_is_audited(
+        self,
+        client: Any,
+        db: Any,
+        world: dict[str, int],
+        notifier: FakeNotifier,
+        req_type: int,
+        action: str,
+    ) -> None:
+        await _verified_public(client, notifier, email="attacker@example.org", req_type=req_type)
+        req_id = str(_rows(db)[0].public_id)
+        link = await client.patch(
+            f"{_base()}/{req_id}",
+            json={"subjectUserId": _uuid_of(db, world["alice"])},
+            headers=_headers(world["admin"]),
+        )
+        assert link.status_code == 200
+        res = await client.post(
+            f"{_base()}/{req_id}/act", json={"action": action}, headers=_headers(world["admin"])
+        )
+        body = await res.get_json()
+        assert res.status_code == 422 and body["error"]["code"] == "DSAR_SUBJECT_EMAIL_MISMATCH"
+        assert "alice@example.com" not in str(body)  # no account data in the refusal
+        assert _rows(db)[0].status == int(S.VERIFIED)
+        ok = await client.post(
+            f"{_base()}/{req_id}/act",
+            json={"action": action, "overrideReason": "ID verified by phone"},
+            headers=_headers(world["admin"]),
+        )
+        assert ok.status_code == 200
+        acted = [e for e in _events(db) if e.event_type == int(E.ACTION_EXECUTED)][-1]
+        assert acted.detail["email_override"] is True
+        assert acted.detail["override_reason"] == "ID verified by phone"
+
+    async def test_matching_email_exports_without_override(
+        self, client: Any, db: Any, world: dict[str, int], notifier: FakeNotifier
+    ) -> None:
+        await _verified_public(client, notifier, email="Alice@Example.com", req_type=1)
+        req_id = str(_rows(db)[0].public_id)
+        await client.patch(
+            f"{_base()}/{req_id}",
+            json={"subjectUserId": _uuid_of(db, world["alice"])},
+            headers=_headers(world["admin"]),
+        )
+        res = await client.post(
+            f"{_base()}/{req_id}/act", json={"action": "export"}, headers=_headers(world["admin"])
+        )
+        assert res.status_code == 200
+
+
+class TestResubmitContentIsDraftUntilLatestTokenConsumed:
+    """regression: a resubmit rewrote the committed message/regime of a pending request.
+
+    Only the mailbox owner redeeming the LATEST token may commit new content; an unauthenticated
+    resubmit alone changes nothing that admins or the row's committed columns hold.
+    """
+
+    @staticmethod
+    def _plain(row: Any) -> str | None:
+        if not row.message_enc:
+            return None
+        return str(svc.crypto.decrypt(row.message_enc, row_id=row.public_id))
+
+    async def test_resubmit_leaves_committed_content_and_stores_a_draft(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="victim words", regime=1)
+        await _public_submit(client, email="v@example.org", message="attacker text", regime=2)
+        row = _rows(db)[0]
+        assert len(_rows(db)) == 1
+        assert self._plain(row) == "victim words" and int(row.regime) == 1  # unchanged
+        assert int(row.pending_regime) == 2
+        assert svc.crypto.decrypt(row.pending_message_enc, row_id=row.public_id) == "attacker text"
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+        assert svc.decrypt_contact(row) == (None, None)  # pending: admins see nothing
+
+    async def test_old_token_is_dead_and_latest_token_commits_the_draft(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="victim words", regime=1)
+        first = notifier.last_token()
+        await _public_submit(client, email="v@example.org", message="second text", regime=2)
+        latest = notifier.last_token()
+        assert (await client.post(f"{PUB}/verify", json={"token": first})).status_code == 400
+        row = _rows(db)[0]
+        assert self._plain(row) == "victim words" and int(row.status) == int(S.VERIFICATION_PENDING)
+        assert (await client.post(f"{PUB}/verify", json={"token": latest})).status_code == 200
+        row = _rows(db)[0]
+        assert self._plain(row) == "second text" and int(row.regime) == 2
+        assert row.pending_message_enc is None and row.pending_regime is None
+        evt = [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+        assert len(evt) == 1
+        assert evt[0].detail == {"fields": ["message", "regime"], "message_present": True}
+        assert "second text" not in str(evt[0].detail)
+
+    async def test_draft_without_message_clears_the_committed_message_on_consume(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="planted")
+        await _public_submit(client, email="v@example.org")
+        assert self._plain(_rows(db)[0]) == "planted"  # not yet committed
+        await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        row = _rows(db)[0]
+        assert row.message_enc is None and svc.decrypt_contact(row)[1] is None
+
+    async def test_plain_verify_without_resubmit_is_unchanged_and_emits_no_content_event(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig" and int(row.status) == int(S.VERIFIED)
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+
+    async def test_identical_resubmit_commits_without_a_content_event(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="same", regime=1)
+        await _public_submit(client, email="v@example.org", message="same", regime=1)
+        await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+        assert self._plain(_rows(db)[0]) == "same"
+
+    async def test_bare_resend_clears_the_draft_so_it_never_commits(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        """regression: a resend kept an attacker's draft that the owner's resend link then committed."""
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="attacker", regime=2)
+        assert (await _resend(client, email="v@example.org", req_type=1)).status_code == 202
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig"
+        assert row.pending_message_enc is None and row.pending_regime is None
+        assert row.pending_token_hash is None
+        assert (
+            await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        ).status_code == 200
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig" and int(row.regime) == 1
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+
+    async def test_draft_is_bound_to_the_token_it_was_created_under(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        row = _rows(db)[0]
+        token = notifier.last_token()
+        assert row.pending_token_hash == svc.crypto.hash_token(token).hex()
+        assert row.pending_token_hash == row.verification_token_hash
+
+    async def test_draft_with_a_different_token_hash_is_discarded_not_committed(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        db.dal(db.dal.dsar_requests.id == _rows(db)[0].id).update(pending_token_hash="0" * 64)
+        db.dal.commit()
+        assert (
+            await client.post(f"{PUB}/verify", json={"token": notifier.last_token()})
+        ).status_code == 200
+        row = _rows(db)[0]
+        assert self._plain(row) == "orig" and int(row.regime) == 1
+        assert row.pending_message_enc is None and row.pending_regime is None
+        assert row.pending_token_hash is None
+        assert not [e for e in _events(db) if e.event_type == int(E.CONTENT_REPLACED)]
+
+    async def test_closing_an_unverified_request_purges_the_draft(
+        self, client: Any, db: Any, world: dict[str, int]
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig")
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        res = await client.patch(
+            f"{_base()}/{_rows(db)[0].public_id}",
+            json={"status": int(S.REJECTED)},
+            headers=_headers(world["admin"]),
+        )
+        assert res.status_code == 200
+        row = _rows(db)[0]
+        assert row.pending_message_enc is None and row.pending_regime is None
+        assert row.pending_token_hash is None
+        assert row.message_enc is None
+
+
+class TestPreviewEqualsWhatVerifyCommits:
+    """regression: the confirm page previewed the committed content while POST committed a draft."""
+
+    @staticmethod
+    async def _preview(client: Any, token: str) -> dict[str, Any]:
+        res = await client.post(f"{PUB}/verify/preview", json={"token": token})
+        assert res.status_code == 200
+        return dict(await res.get_json())
+
+    @staticmethod
+    def _committed(db: Any) -> tuple[int, str | None]:
+        row = _rows(db)[0]
+        msg = svc.crypto.decrypt(row.message_enc, row_id=row.public_id) if row.message_enc else None
+        return int(row.regime), msg
+
+    async def test_no_draft_preview_shows_committed_content_and_matches_commit(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["regime"], prev["message"], prev["contentChanged"]) == (1, "orig", False)
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_bound_draft_preview_shows_the_draft_and_matches_commit(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft text", regime=2)
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["regime"], prev["message"], prev["contentChanged"]) == (2, "draft text", True)
+        assert self._committed(db) == (1, "orig")  # preview wrote nothing
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_bound_draft_without_message_previews_no_message(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", regime=1)
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["message"], prev["contentChanged"]) == (None, True)
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_mismatched_hash_draft_preview_shows_committed_and_matches_commit(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="orig", regime=1)
+        await _public_submit(client, email="v@example.org", message="draft", regime=2)
+        db.dal(db.dal.dsar_requests.id == _rows(db)[0].id).update(pending_token_hash="0" * 64)
+        db.dal.commit()
+        token = notifier.last_token()
+        prev = await self._preview(client, token)
+        assert (prev["regime"], prev["message"], prev["contentChanged"]) == (1, "orig", False)
+        await client.post(f"{PUB}/verify", json={"token": token})
+        assert self._committed(db) == (prev["regime"], prev["message"])
+
+    async def test_get_and_post_preview_agree_and_message_is_text_only_json(
+        self, client: Any, db: Any, notifier: FakeNotifier
+    ) -> None:
+        await _public_submit(client, email="v@example.org", message="<b>hi</b>", regime=1)
+        token = notifier.last_token()
+        via_post = await self._preview(client, token)
+        got = await client.get(f"{PUB}/verify?token={token}")
+        assert got.status_code == 200 and dict(await got.get_json()) == via_post
+        assert via_post["message"] == "<b>hi</b>"  # stored/returned verbatim; client escapes
+        assert "application/json" in got.headers["Content-Type"]
+
+
 class TestConcurrency:
     async def test_two_admins_acting_at_once_execute_exactly_once(
         self, client: Any, db: Any, world: dict[str, int], monkeypatch: pytest.MonkeyPatch
