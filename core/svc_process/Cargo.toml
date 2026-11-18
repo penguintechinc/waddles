@@ -78,7 +78,7 @@ tracing = "=0.1.44"
 # RFC 3339 timestamps for envelope `ts` (`src/execute.rs`) and the `clock`
 # host capability's `now-rfc3339` op (`src/capabilities.rs`). Same version
 # pin `core/svc_action` uses for the identical purpose.
-chrono = { version = "=0.4.45", features = ["serde"] }
+time = "=0.3.55"
 # `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
 # (spec SS4.9) -- this crate no longer depends on `tracing-subscriber`,
 # `opentelemetry`, `opentelemetry-otlp`, `opentelemetry_sdk`, or
