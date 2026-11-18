@@ -255,10 +255,10 @@ async function run<T>(request: () => Promise<T>): Promise<T> {
 /** Which route family a call goes through: the admin console or the member voice view. */
 export type CallsScope = 'admin' | 'member';
 
-const roomsBase = (scope: CallsScope, communityId: number): string =>
+const roomsBase = (scope: CallsScope, communityId: string): string =>
   scope === 'admin' ? `/api/v1/admin/${communityId}/calls/rooms` : `/api/v1/community/${communityId}/interact/voice/rooms`;
 
-const adminRoom = (communityId: number, roomId: string): string => {
+const adminRoom = (communityId: string, roomId: string): string => {
   const id = uuid(roomId, 'Room id');
   return `/api/v1/admin/${communityId}/calls/rooms/${id}`;
 };
@@ -267,14 +267,14 @@ const adminRoom = (communityId: number, roomId: string): string => {
 const checkedRoomId = (roomId: string): string => uuid(roomId, 'Room id');
 
 /** `GET .../rooms` (admin or member family): every live room of the community. */
-export function fetchRooms(scope: CallsScope, communityId: number): Promise<CallRoom[]> {
+export function fetchRooms(scope: CallsScope, communityId: string): Promise<CallRoom[]> {
   return run(async () => parseRooms((await apiClient.get<unknown>(roomsBase(scope, communityId))).data));
 }
 
 /** `POST .../rooms`: the caller-supplied name becomes the room `label`. */
 export function createRoom(
   scope: CallsScope,
-  communityId: number,
+  communityId: string,
   input: { roomName: string; maxParticipants?: number },
 ): Promise<CallRoom> {
   return run(async () => {
@@ -286,26 +286,26 @@ export function createRoom(
 }
 
 /** `GET /admin/.../rooms/:id`. */
-export function fetchRoom(communityId: number, roomId: string): Promise<CallRoom> {
+export function fetchRoom(communityId: string, roomId: string): Promise<CallRoom> {
   return run(async () => parseRoom((await apiClient.get<unknown>(adminRoom(communityId, roomId))).data));
 }
 
 /** `DELETE /admin/.../rooms/:id`. */
-export function deleteRoom(communityId: number, roomId: string): Promise<void> {
+export function deleteRoom(communityId: string, roomId: string): Promise<void> {
   return run(async () => {
     await apiClient.delete(adminRoom(communityId, roomId));
   });
 }
 
 /** `POST /admin/.../rooms/:id/{lock,unlock}`. */
-export function setRoomLocked(communityId: number, roomId: string, locked: boolean): Promise<void> {
+export function setRoomLocked(communityId: string, roomId: string, locked: boolean): Promise<void> {
   return run(async () => {
     await apiClient.post(`${adminRoom(communityId, roomId)}/${locked ? 'lock' : 'unlock'}`);
   });
 }
 
 /** `GET /admin/.../rooms/:id/participants`: names resolved by hub-api. */
-export function fetchParticipants(communityId: number, roomId: string): Promise<CallParticipantList> {
+export function fetchParticipants(communityId: string, roomId: string): Promise<CallParticipantList> {
   return run(async () => {
     const body = expectRecord((await apiClient.get<unknown>(`${adminRoom(communityId, roomId)}/participants`)).data, 'participants');
     return {
@@ -316,7 +316,7 @@ export function fetchParticipants(communityId: number, roomId: string): Promise<
 }
 
 /** `GET /communities/:id/calls/rooms/:room/participants` (member): names + media state, no moderation internals. */
-export function fetchMemberParticipants(communityId: number, roomId: string): Promise<CallParticipantList> {
+export function fetchMemberParticipants(communityId: string, roomId: string): Promise<CallParticipantList> {
   return run(async () => {
     const id = uuid(roomId, 'Room id');
     const body = expectRecord(
@@ -331,7 +331,7 @@ export function fetchMemberParticipants(communityId: number, roomId: string): Pr
 }
 
 /** `POST /admin/.../rooms/:id/kick` with the participant UUID. */
-export function kickParticipant(communityId: number, roomId: string, participantId: string): Promise<void> {
+export function kickParticipant(communityId: string, roomId: string, participantId: string): Promise<void> {
   return run(async () => {
     await apiClient.post(`${adminRoom(communityId, roomId)}/kick`, { identity: uuid(participantId, 'Participant id') });
   });
@@ -339,7 +339,7 @@ export function kickParticipant(communityId: number, roomId: string, participant
 
 /** `POST /admin/.../rooms/:id/{mute,unmute}`; resolves to the participant's resulting muted state. */
 export function setParticipantMuted(
-  communityId: number,
+  communityId: string,
   roomId: string,
   participantId: string,
   muted: boolean,
@@ -353,7 +353,7 @@ export function setParticipantMuted(
 }
 
 /** `POST /admin/.../rooms/:id/mute-all`; resolves to how many publishers were muted. */
-export function muteAll(communityId: number, roomId: string): Promise<number> {
+export function muteAll(communityId: string, roomId: string): Promise<number> {
   return run(async () => {
     const { data } = await apiClient.post<unknown>(`${adminRoom(communityId, roomId)}/mute-all`);
     return readNumber(expectRecord(data, 'mute-all'), 'muted', 'mute-all');
@@ -361,7 +361,7 @@ export function muteAll(communityId: number, roomId: string): Promise<number> {
 }
 
 /** `GET /admin/.../rooms/:id/raised-hands`: the queue, oldest first. */
-export function fetchRaisedHands(communityId: number, roomId: string): Promise<RaisedHand[]> {
+export function fetchRaisedHands(communityId: string, roomId: string): Promise<RaisedHand[]> {
   return run(async () => {
     const body = expectRecord((await apiClient.get<unknown>(`${adminRoom(communityId, roomId)}/raised-hands`)).data, 'raised hands');
     return readArray(body, 'raised_hands', 'raised hands').map((hand) => parseHand(hand));
@@ -369,7 +369,7 @@ export function fetchRaisedHands(communityId: number, roomId: string): Promise<R
 }
 
 /** `POST /admin/.../rooms/:id/acknowledge-hand` (body `user_id` is the participant UUID). */
-export function acknowledgeHand(communityId: number, roomId: string, participantId: string): Promise<RaisedHand> {
+export function acknowledgeHand(communityId: string, roomId: string, participantId: string): Promise<RaisedHand> {
   return run(async () => {
     const { data } = await apiClient.post<unknown>(`${adminRoom(communityId, roomId)}/acknowledge-hand`, {
       user_id: uuid(participantId, 'Participant id'),
@@ -379,7 +379,7 @@ export function acknowledgeHand(communityId: number, roomId: string, participant
 }
 
 /** `POST /admin/.../rooms/:id/reset-hands`; resolves to how many hands were cleared. */
-export function resetHands(communityId: number, roomId: string): Promise<number> {
+export function resetHands(communityId: string, roomId: string): Promise<number> {
   return run(async () => {
     const { data } = await apiClient.post<unknown>(`${adminRoom(communityId, roomId)}/reset-hands`);
     return readNumber(expectRecord(data, 'reset hands'), 'cleared', 'reset hands');
@@ -387,7 +387,7 @@ export function resetHands(communityId: number, roomId: string): Promise<number>
 }
 
 /** `POST /community/.../voice/rooms/:id/join`: registers the caller as a participant and mints a room token. */
-export function joinRoom(communityId: number, roomId: string): Promise<JoinedRoom> {
+export function joinRoom(communityId: string, roomId: string): Promise<JoinedRoom> {
   return run(async () => {
     const id = checkedRoomId(roomId);
     const body = expectRecord((await apiClient.post<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/join`)).data, 'join');
@@ -407,7 +407,7 @@ export function joinRoom(communityId: number, roomId: string): Promise<JoinedRoo
 }
 
 /** `POST /community/.../voice/rooms/:id/leave`. */
-export function leaveRoom(communityId: number, roomId: string): Promise<void> {
+export function leaveRoom(communityId: string, roomId: string): Promise<void> {
   return run(async () => {
     const id = checkedRoomId(roomId);
     await apiClient.post(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/leave`);
@@ -415,7 +415,7 @@ export function leaveRoom(communityId: number, roomId: string): Promise<void> {
 }
 
 /** `POST /community/.../voice/rooms/:id/raise-hand`: idempotent, the original queue spot is kept. */
-export function raiseHand(communityId: number, roomId: string): Promise<RaisedHand> {
+export function raiseHand(communityId: string, roomId: string): Promise<RaisedHand> {
   return run(async () => {
     const id = checkedRoomId(roomId);
     const { data } = await apiClient.post<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/raise-hand`);
@@ -424,7 +424,7 @@ export function raiseHand(communityId: number, roomId: string): Promise<RaisedHa
 }
 
 /** `POST /community/.../voice/rooms/:id/lower-hand`; `lowered` is false when no hand was raised. */
-export function lowerHand(communityId: number, roomId: string): Promise<boolean> {
+export function lowerHand(communityId: string, roomId: string): Promise<boolean> {
   return run(async () => {
     const id = checkedRoomId(roomId);
     const { data } = await apiClient.post<unknown>(`/api/v1/community/${communityId}/interact/voice/rooms/${id}/lower-hand`);
@@ -454,12 +454,12 @@ function parseTownHall(raw: unknown): TownHall {
 }
 
 /** `GET /api/v1/communities/:id/town-hall`: the Town Hall (member); lazily created, idempotent, never expires. */
-export function fetchTownHall(communityId: number): Promise<TownHall> {
+export function fetchTownHall(communityId: string): Promise<TownHall> {
   return run(async () => parseTownHall((await apiClient.get<unknown>(`/api/v1/communities/${communityId}/town-hall`)).data));
 }
 
 /** `POST /api/v1/communities/:id/town-hall`: ensure the Town Hall exists; same result as the GET. */
-export function ensureTownHall(communityId: number): Promise<TownHall> {
+export function ensureTownHall(communityId: string): Promise<TownHall> {
   return run(async () => parseTownHall((await apiClient.post<unknown>(`/api/v1/communities/${communityId}/town-hall`)).data));
 }
 
@@ -472,7 +472,7 @@ export interface MyHand {
 }
 
 /** `GET /api/v1/communities/:id/calls/rooms/:room/hands/mine` (member): own hand and its acknowledgement. */
-export function fetchMyHand(communityId: number, roomId: string): Promise<MyHand> {
+export function fetchMyHand(communityId: string, roomId: string): Promise<MyHand> {
   return run(async () => {
     const id = checkedRoomId(roomId);
     const { data } = await apiClient.get<unknown>(`/api/v1/communities/${communityId}/calls/rooms/${id}/hands/mine`);

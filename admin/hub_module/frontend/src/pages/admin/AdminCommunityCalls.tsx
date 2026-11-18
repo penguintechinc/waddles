@@ -7,6 +7,7 @@ import { CreateRoomForm } from '../../components/calls/CreateRoomForm';
 import { RoomDetail } from '../../components/calls/RoomDetail';
 import { useCallRooms, useCreateRoom, useDeleteRoom, useSetLocked } from '../../hooks/useCalls';
 import { roomTitle, type CallRoom, type CallsApiError } from '../../services/callsApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 /** People currently in a room: speakers (publishers) plus listeners (subscribers). */
 function headcount(room: CallRoom): number {
@@ -14,7 +15,7 @@ function headcount(room: CallRoom): number {
 }
 
 /** Admin console for community call rooms: room list by label, plus the moderator pane for the selected room. */
-function CommunityCalls({ communityId }: { communityId: number }) {
+function CommunityCalls({ communityId }: { communityId: string }) {
   const rooms = useCallRooms('admin', communityId);
   const create = useCreateRoom('admin', communityId);
   const remove = useDeleteRoom(communityId);
@@ -169,8 +170,8 @@ function CommunityCalls({ communityId }: { communityId: number }) {
 /** Route wrapper: validates `:communityId` before any request is made. */
 export default function AdminCommunityCalls() {
   const { communityId } = useParams<{ communityId: string }>();
-  const id = Number(communityId);
-  if (!Number.isInteger(id) || id <= 0) {
+  const id = parseCommunityId(communityId);
+  if (id === null) {
     return <ErrorState title="Unknown community" message="This calls link is not valid." />;
   }
   return <CommunityCalls communityId={id} />;

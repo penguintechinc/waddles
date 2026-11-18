@@ -7,6 +7,7 @@ import { useLiveActivityBackfill } from '../../hooks/useCommunityActivity';
 import { mergeEvents } from '../../components/community/liveActivityMerge';
 import { parseLiveActivityEvent, type LiveActivityEvent } from '../../services/communityActivityApi';
 import { getErrorMessage } from '../../components/ui/errors';
+import { parseCommunityId } from '../../lib/communityId';
 
 const BACKFILL_LIMIT = 50;
 
@@ -22,7 +23,7 @@ const CONNECTION_LABEL: Record<ConnectionState, { label: string; dot: string }> 
  * Subscribes to the SSE feed (same-origin, cookie auth) and accumulates new events.
  * A frame that does not parse is reported to the page rather than dropped silently.
  */
-function useLiveStream(communityId: number) {
+function useLiveStream(communityId: string) {
   const [streamed, setStreamed] = useState<LiveActivityEvent[]>([]);
   const [connection, setConnection] = useState<ConnectionState>('connecting');
   const [frameError, setFrameError] = useState<string | null>(null);
@@ -50,7 +51,7 @@ function useLiveStream(communityId: number) {
 }
 
 /** Backfill (TanStack Query) plus the live SSE tail for one community. */
-function LiveActivityFeed({ communityId }: { communityId: number }) {
+function LiveActivityFeed({ communityId }: { communityId: string }) {
   const backfill = useLiveActivityBackfill(communityId, BACKFILL_LIMIT);
   const { streamed, connection, frameError } = useLiveStream(communityId);
   const status = CONNECTION_LABEL[connection];
@@ -110,8 +111,8 @@ function LiveActivityFeed({ communityId }: { communityId: number }) {
 /** Admin live-activity page: validates the route param, then renders the feed. */
 export default function LiveActivity() {
   const { communityId } = useParams<{ communityId: string }>();
-  const id = Number(communityId);
-  if (!Number.isInteger(id) || id <= 0) {
+  const id = parseCommunityId(communityId);
+  if (id === null) {
     return <ErrorState title="Unknown community" message="This live activity link is not valid." />;
   }
   return <LiveActivityFeed communityId={id} />;

@@ -13,7 +13,7 @@ const NO_SESSION = {
  * `overrides` lets tests inject fake devices / peer connections.
  */
 export function useCallSession(
-  communityId: number,
+  communityId: string,
   roomId: string,
   overrides?: Pick<SessionDeps, 'devices' | 'media'>,
 ): { session: CallSession | null; snapshot: CallSnapshot } {

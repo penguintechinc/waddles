@@ -3,12 +3,12 @@ import {
   WireShapeError,
   expectRecord,
   readArray,
-  readNumber,
   readOptNumber,
   readOptString,
   readString,
   type WireRecord,
 } from '../lib/wire';
+import { isCommunityId } from '../lib/communityId';
 
 // Typed reads for "my communities" and public community details, built ONLY on
 // routes hub-api serves:
@@ -20,7 +20,8 @@ import {
 
 /** One community the signed-in user belongs to, as served by `/auth/me`. */
 export interface MyCommunity {
-  id: number;
+  /** Community public_id (UUID); the numeric key never reaches the webui. */
+  id: string;
   name: string;
   displayName: string;
   role: string;
@@ -28,7 +29,8 @@ export interface MyCommunity {
 
 /** Public-facing community fields from `/public/communities/:id` and the list route. */
 export interface PublicCommunity {
-  id: number;
+  /** Community public_id (UUID). */
+  id: string;
   name: string | null;
   displayName: string;
   description: string | null;
@@ -48,11 +50,18 @@ export class SessionExpiredError extends Error {
   }
 }
 
+/** Reads a community UUID from a wire record; throws (never falls back) if absent or not a UUID. */
+function readCommunityId(row: WireRecord, key: string, what: string): string {
+  const value = readString(row, key, what);
+  if (!isCommunityId(value)) throw new WireShapeError(what, `${key} is not a community UUID`);
+  return value;
+}
+
 function parseMyCommunity(raw: unknown): MyCommunity {
   const row = expectRecord(raw, 'auth/me communities[]');
   const name = readString(row, 'name', 'auth/me communities[]');
   return {
-    id: readNumber(row, 'id', 'auth/me communities[]'),
+    id: readCommunityId(row, 'id', 'auth/me communities[]'),
     name,
     displayName: readOptString(row, 'displayName') ?? name,
     role: readString(row, 'role', 'auth/me communities[]'),
@@ -64,9 +73,9 @@ export function parsePublicCommunity(raw: unknown, what = 'public community'): P
   const row: WireRecord = expectRecord(raw, what);
   const name = readOptString(row, 'name');
   return {
-    id: readNumber(row, 'id', what),
+    id: readCommunityId(row, 'id', what),
     name,
-    displayName: readOptString(row, 'displayName') ?? name ?? `Community ${readNumber(row, 'id', what)}`,
+    displayName: readOptString(row, 'displayName') ?? name ?? `Community ${readCommunityId(row, 'id', what)}`,
     description: readOptString(row, 'description'),
     logoUrl: readOptString(row, 'logoUrl'),
     bannerUrl: readOptString(row, 'bannerUrl'),
@@ -87,7 +96,7 @@ export async function fetchMyCommunities(): Promise<MyCommunity[]> {
 }
 
 /** `GET /api/v1/public/communities/:id`. */
-export async function fetchPublicCommunity(communityId: number): Promise<PublicCommunity> {
+export async function fetchPublicCommunity(communityId: string): Promise<PublicCommunity> {
   const { data } = await apiClient.get<unknown>(`/api/v1/public/communities/${communityId}`);
   const body = expectRecord(data, 'public community');
   if (!('community' in body)) throw new WireShapeError('public community', 'missing "community"');

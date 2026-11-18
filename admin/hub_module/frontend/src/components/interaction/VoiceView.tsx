@@ -8,11 +8,12 @@ import { CreateRoomForm } from '../calls/CreateRoomForm';
 import { useCallRooms, useCreateRoom } from '../../hooks/useCalls';
 import { roomTitle, type CallRoom, type CallsApiError } from '../../services/callsApi';
 import type { SessionDeps } from '../../services/media/callSession';
+import { parseCommunityId } from '../../lib/communityId';
 
 /** Channel record handed over by the community interaction page. */
 export interface VoiceChannel {
   /** Route param (string) or number; validated before any request. */
-  communityId: number | string;
+  communityId: string | string;
   name?: string;
   allowAdHocVoice?: boolean;
 }
@@ -24,8 +25,8 @@ function headcount(room: CallRoom): number {
 
 /** Member voice channel: rooms listed by label; opening one shows the real audio/video call view. */
 export default function VoiceView({ channel, overrides }: { channel: VoiceChannel; overrides?: Pick<SessionDeps, 'devices' | 'media'> }) {
-  const communityId = Number(channel.communityId);
-  if (!Number.isInteger(communityId) || communityId <= 0) {
+  const communityId = parseCommunityId(channel.communityId);
+  if (communityId === null) {
     return <ErrorState title="Unknown community" message="This voice channel link is not valid." />;
   }
   return <VoiceRooms channel={channel} communityId={communityId} overrides={overrides} />;
@@ -38,7 +39,7 @@ function VoiceRooms({
   overrides,
 }: {
   channel: VoiceChannel;
-  communityId: number;
+  communityId: string;
   overrides: Pick<SessionDeps, 'devices' | 'media'> | undefined;
 }) {
   const { isCommunityAdmin } = useAuthView();

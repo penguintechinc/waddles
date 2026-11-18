@@ -40,7 +40,7 @@ export default function CommunityChat() {
 
     // Join the new channel
     socket.emit('chat:join', {
-      communityId: parseInt(id),
+      communityId: id,
       channelName: activeChannel,
     });
 
@@ -50,7 +50,7 @@ export default function CommunityChat() {
     // Cleanup: leave channel on unmount or channel change
     return () => {
       socket.emit('chat:leave', {
-        communityId: parseInt(id),
+        communityId: id,
         channelName: activeChannel,
       });
     };
@@ -155,7 +155,7 @@ export default function CommunityChat() {
 
     setLoading(true);
     socket.emit('chat:history', {
-      communityId: parseInt(id),
+      communityId: id,
       channelName: activeChannel,
       limit: 50,
     });
@@ -170,7 +170,7 @@ export default function CommunityChat() {
       }
 
       socket.emit('chat:message', {
-        communityId: parseInt(id),
+        communityId: id,
         channelName: activeChannel,
         content,
         type: 'text',

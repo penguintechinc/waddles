@@ -89,33 +89,33 @@ function rethrow(err: unknown): never {
   throw err;
 }
 
-const base = (communityId: number, appId: string) =>
+const base = (communityId: string, appId: string) =>
   `/api/v1/apps/community/${communityId}/bundles/${encodeURIComponent(appId)}`;
 
 export const bundleAdminApi = {
   /** `GET .../admin` -- community moderator+. */
-  descriptor: (communityId: number, appId: string) =>
+  descriptor: (communityId: string, appId: string) =>
     apiClient
       .get<BundleDescriptor>(`${base(communityId, appId)}/admin`)
       .then((res) => res.data)
       .catch(rethrow),
 
   /** `GET .../config` -- community moderator+; 404 `bundle_has_no_config` when schema-less. */
-  getConfig: (communityId: number, appId: string) =>
+  getConfig: (communityId: string, appId: string) =>
     apiClient
       .get<BundleConfig>(`${base(communityId, appId)}/config`)
       .then((res) => res.data)
       .catch(rethrow),
 
   /** `PUT .../config` -- community admin; 409 on a stale `expectedVersion`, 422 on schema errors. */
-  saveConfig: (communityId: number, appId: string, config: Record<string, unknown>, expectedVersion: number) =>
+  saveConfig: (communityId: string, appId: string, config: Record<string, unknown>, expectedVersion: number) =>
     apiClient
       .put<BundleConfig>(`${base(communityId, appId)}/config`, { config, expectedVersion })
       .then((res) => res.data)
       .catch(rethrow),
 
   /** `GET .../config/history` -- newest first, metadata only. */
-  history: (communityId: number, appId: string, limit = 20) =>
+  history: (communityId: string, appId: string, limit = 20) =>
     apiClient
       .get<{ success: boolean; versions: BundleConfigHistoryEntry[] }>(
         `${base(communityId, appId)}/config/history`,

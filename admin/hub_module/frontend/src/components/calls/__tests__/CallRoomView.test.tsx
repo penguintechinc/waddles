@@ -12,11 +12,11 @@ import { ADA, GRACE, ROOM_ID, envelope, handWire, httpError, participantWire, ro
 import { FakePeerConnection, answerResponse, fakeDevices, fakeMediaDeps, resetFakeRtc } from '../../../test/fakeRtc';
 
 const TOKEN = 'room-token-SECRET-value';
-const MEMBER = `/api/v1/community/7/interact/voice/rooms/${ROOM_ID}`;
-const MEMBER_ROOMS = '/api/v1/community/7/interact/voice/rooms';
-const MEMBER_PARTICIPANTS = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/participants`;
-const MY_HAND = `/api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`;
-const ADMIN = `/api/v1/admin/7/calls/rooms/${ROOM_ID}`;
+const MEMBER = `/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms/${ROOM_ID}`;
+const MEMBER_ROOMS = '/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms';
+const MEMBER_PARTICIPANTS = `/api/v1/communities/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/participants`;
+const MY_HAND = `/api/v1/communities/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/hands/mine`;
+const ADMIN = `/api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}`;
 const SELF = '11111111-1111-4111-8111-111111111111';
 
 const joinOk = {
@@ -84,7 +84,7 @@ function renderRoom(options: { moderator?: boolean; fetchImpl?: MediaFetch; devi
   const view = render(
     <QueryClientProvider client={createTestQueryClient()}>
       <CallRoomView
-        communityId={7}
+        communityId={'00000007-0000-4000-8000-000000000000'}
         room={{ roomId: ROOM_ID, label: 'Town Hall' }}
         moderator={options.moderator ?? false}
         {...(options.onLeft ? { onLeft: options.onLeft } : {})}

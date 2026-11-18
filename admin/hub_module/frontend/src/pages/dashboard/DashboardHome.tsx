@@ -57,7 +57,7 @@ function MyCommunitiesGrid({ communities, searchTerm }: MyCommunitiesGridProps) 
 
 interface DiscoverResultsProps {
   term: string;
-  joinedIds: ReadonlySet<number>;
+  joinedIds: ReadonlySet<string>;
 }
 
 /** Public communities matching the search that the user has not joined yet. */

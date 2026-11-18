@@ -7,7 +7,7 @@ import { avatarInitial, formatEntryValue } from './leaderboardFormat';
 import { PeriodSelector } from './PeriodSelector';
 
 export interface LeaderboardCardProps {
-  communityId: number;
+  communityId: string;
   type?: LeaderboardType;
   title?: string;
   limit?: number;

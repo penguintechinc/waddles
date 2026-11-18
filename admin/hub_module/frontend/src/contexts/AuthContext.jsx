@@ -220,14 +220,14 @@ export function AuthProvider({ children }) {
     // /auth/me `communities[].licenseTier`. A missing/unknown value is Free. UX hint only: the
     // server's tier gates are authoritative.
     communityTier: (communityId) => {
-      const c = user?.communities?.find((x) => x.id === Number(communityId));
+      const c = user?.communities?.find((x) => x.id === communityId);
       return c?.licenseTier === 2 ? 2 : 1;
     },
     // Community-level admin check (for any community, or a specific one)
     isCommunityAdmin: (communityId) => {
       const adminRoles = ['community-owner', 'community-admin', 'moderator'];
       if (communityId) {
-        return user?.communities?.some(c => c.id === Number(communityId) && adminRoles.includes(c.role));
+        return user?.communities?.some(c => c.id === communityId && adminRoles.includes(c.role));
       }
       return user?.communities?.some(c => adminRoles.includes(c.role));
     },

@@ -4,6 +4,7 @@ import { Badge, Card, CardBody, CardHeader, EmptyState, ErrorState, LoadingState
 import { useMusicQueue } from '../../hooks/useMusicQueue';
 import { useFeatureFlagStatus } from '../../lib/useFeatureFlag';
 import { safeHttpsUrl, type MusicTrack, type TopEntry } from '../../services/musicQueueApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 /** Formats milliseconds as m:ss; null for a missing or invalid duration. */
 function formatDuration(ms: number | null): string | null {
@@ -139,7 +140,7 @@ function MusicBody({ nowPlaying, queue, history, topArtists, topSongs }: MusicBo
 }
 
 /** Fetches and renders one community's music queue; shows not-found on a 404. */
-function MusicQueueView({ communityId }: { communityId: number }) {
+function MusicQueueView({ communityId }: { communityId: string }) {
   const query = useMusicQueue(communityId);
   const status = (query.error as { response?: { status?: number } } | null)?.response?.status;
   if (query.isError && status === 404) {
@@ -175,9 +176,9 @@ function MusicQueueView({ communityId }: { communityId: number }) {
 export default function MusicQueue() {
   const { communityId } = useParams<{ communityId: string }>();
   const { enabled, isLoading } = useFeatureFlagStatus('waddles.music.queue-page');
-  const id = Number(communityId);
+  const id = parseCommunityId(communityId);
   if (isLoading) return <LoadingState label="Loading" />;
-  if (!enabled || !Number.isInteger(id) || id <= 0) {
+  if (!enabled || id === null) {
     return <ErrorState title="Page not found" message="This page is not available." />;
   }
   return (

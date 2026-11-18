@@ -3,9 +3,9 @@ import { BundleAdminError, type ConfigFieldError } from '../../services/bundleAd
 
 /** TanStack Query keys shared by the settings grid and detail panel. */
 export const settingsKeys = {
-  descriptor: (c: number, a: string) => ['bundle-admin-descriptor', c, a] as const,
-  config: (c: number, a: string) => ['bundle-admin-config', c, a] as const,
-  history: (c: number, a: string) => ['bundle-admin-history', c, a] as const,
+  descriptor: (c: string, a: string) => ['bundle-admin-descriptor', c, a] as const,
+  config: (c: string, a: string) => ['bundle-admin-config', c, a] as const,
+  history: (c: string, a: string) => ['bundle-admin-history', c, a] as const,
 };
 
 /** Human message for a gateway failure; 404 no-config is handled by the caller, not here. */

@@ -84,11 +84,11 @@ function parseSource(raw: unknown): IngestSource {
   };
 }
 
-const base = (communityId: string | number) => `/api/v1/communities/${encodeURIComponent(String(communityId))}/ingest-sources`;
+const base = (communityId: string) => `/api/v1/communities/${encodeURIComponent(String(communityId))}/ingest-sources`;
 
 export const tenantIngestSourcesApi = {
   /** `GET /api/v1/communities/{communityId}/ingest-sources` (scope tenant:read), cursor-paginated. */
-  list: async (communityId: string | number, params: { cursor?: string; limit?: number } = {}): Promise<IngestSourcePage> => {
+  list: async (communityId: string, params: { cursor?: string; limit?: number } = {}): Promise<IngestSourcePage> => {
     const { data } = await apiClient.get<unknown>(base(communityId), { params });
     const body = expectRecord(data, 'ingest source list');
     const meta = expectRecord(body['meta'] ?? {}, 'ingest source list meta');
@@ -99,7 +99,7 @@ export const tenantIngestSourcesApi = {
   },
 
   /** `POST /api/v1/communities/{communityId}/ingest-sources` (scope tenant:admin) -> 201. */
-  create: async (communityId: string | number, input: CreateIngestSourceInput): Promise<IngestSource> => {
+  create: async (communityId: string, input: CreateIngestSourceInput): Promise<IngestSource> => {
     const { data } = await apiClient.post<unknown>(base(communityId), {
       platform: input.platform,
       sourceId: input.sourceId.trim(),
@@ -109,13 +109,13 @@ export const tenantIngestSourcesApi = {
   },
 
   /** `PATCH /api/v1/communities/{communityId}/ingest-sources/{sourceUuid}` -- only `label` and `enabled`. */
-  update: async (communityId: string | number, ingestSourceId: string, input: UpdateIngestSourceInput): Promise<IngestSource> => {
+  update: async (communityId: string, ingestSourceId: string, input: UpdateIngestSourceInput): Promise<IngestSource> => {
     const { data } = await apiClient.patch<unknown>(`${base(communityId)}/${encodeURIComponent(ingestSourceId)}`, input);
     return parseSource(expectRecord(data, 'update ingest source')['ingestSource']);
   },
 
   /** `DELETE /api/v1/communities/{communityId}/ingest-sources/{sourceUuid}` -> 204. */
-  remove: async (communityId: string | number, ingestSourceId: string): Promise<void> => {
+  remove: async (communityId: string, ingestSourceId: string): Promise<void> => {
     await apiClient.delete(`${base(communityId)}/${encodeURIComponent(ingestSourceId)}`);
   },
 };

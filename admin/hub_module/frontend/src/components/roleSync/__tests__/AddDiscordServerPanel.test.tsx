@@ -36,7 +36,7 @@ function mount(props: { canManage?: boolean; onPaired?: (p: GuildPairing) => voi
   const invalidate = vi.spyOn(queryClient, 'invalidateQueries');
   render(
     <QueryClientProvider client={queryClient}>
-      <AddDiscordServerPanel communityId={42} canManage={props.canManage ?? true} onPaired={props.onPaired} />
+      <AddDiscordServerPanel communityId={'0000002a-0000-4000-8000-000000000000'} canManage={props.canManage ?? true} onPaired={props.onPaired} />
     </QueryClientProvider>,
   );
   return { invalidate };
@@ -72,7 +72,7 @@ describe('AddDiscordServerPanel', () => {
     fireEvent.click(screen.getAllByLabelText('Enable role sync for this server')[0]!);
     fireEvent.click(screen.getByRole('button', { name: 'Add Discord server' }));
     await waitFor(() => expect(assign).toHaveBeenCalledWith('https://discord.com/oauth2/authorize?x=1'));
-    expect(api.startServerInstall).toHaveBeenCalledWith(42, { sync_enabled: false });
+    expect(api.startServerInstall).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', { sync_enabled: false });
   });
 
   it('install: 503 DISCORD_NOT_CONFIGURED shows the not-configured message and does not redirect', async () => {
@@ -89,12 +89,12 @@ describe('AddDiscordServerPanel', () => {
     const { invalidate } = mount({ onPaired });
     pair();
     expect(await screen.findByRole('status')).toHaveTextContent('777888999');
-    expect(api.createPairing).toHaveBeenCalledWith(42, {
+    expect(api.createPairing).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', {
       discord_guild_id: '777888999',
       sync_enabled: true,
       direction: 'discord_to_twitch',
     });
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: roleSyncKeys.pairings(42) });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: roleSyncKeys.pairings('0000002a-0000-4000-8000-000000000000') });
     expect(screen.getByLabelText('Discord server ID')).toHaveValue('');
     expect(onPaired).toHaveBeenCalledWith(PAIRING);
   });

@@ -15,7 +15,7 @@ import { HandsQueue } from './HandsQueue';
 import { ParticipantList } from './ParticipantList';
 
 export interface RoomDetailProps {
-  communityId: number;
+  communityId: string;
   room: Pick<CallRoom, 'roomId' | 'label'>;
   onNotice: (text: string) => void;
   onActionError: (error: CallsApiError) => void;

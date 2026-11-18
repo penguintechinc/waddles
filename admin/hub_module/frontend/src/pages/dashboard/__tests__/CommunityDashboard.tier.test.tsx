@@ -27,21 +27,21 @@ vi.mock('../../../components/ui', async (orig) => {
 function serve() {
   mockApiGet((url) => {
     if (url === '/api/v1/auth/me') {
-      return { success: true, user: { id: 1, communities: [{ id: 7, name: 'acme', displayName: 'Acme', role: 'community-admin' }] } };
+      return { success: true, user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'community-admin' }] } };
     }
-    if (url === '/api/v1/public/communities/7') {
-      return { success: true, community: { id: 7, name: 'acme', displayName: 'Acme HQ', description: 'd', platform: 'discord', memberCount: 1, joinMode: 'open', createdAt: '2025-01-01T00:00:00Z' } };
+    if (url === '/api/v1/public/communities/00000007-0000-4000-8000-000000000000') {
+      return { success: true, community: { id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme HQ', description: 'd', platform: 'discord', memberCount: 1, joinMode: 'open', createdAt: '2025-01-01T00:00:00Z' } };
     }
-    if (url === '/api/v1/communities/7/streams') return { success: true, streams: [] };
-    if (url === '/api/v1/admin/7/announcements') return { success: true, data: [], pagination: {} };
-    if (url.startsWith('/api/v1/community/7/leaderboard/')) {
+    if (url === '/api/v1/communities/00000007-0000-4000-8000-000000000000/streams') return { success: true, streams: [] };
+    if (url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/announcements') return { success: true, data: [], pagination: {} };
+    if (url.startsWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/')) {
       return { success: true, leaderboard: [], pagination: { offset: 0, limit: 5, total: 0, has_more: false }, period: 'weekly' };
     }
     return unexpectedUrl(url);
   });
 }
 
-const render = () => renderWithProviders(<CommunityDashboard />, { route: '/dashboard/community/7', path: '/dashboard/community/:id' });
+const render = () => renderWithProviders(<CommunityDashboard />, { route: '/dashboard/community/00000007-0000-4000-8000-000000000000', path: '/dashboard/community/:id' });
 
 describe('CommunityDashboard bot score tier', () => {
   beforeEach(() => vi.spyOn(console, 'error').mockImplementation(() => {}));

@@ -14,7 +14,7 @@ import { answerResponse, fakeDevices, fakeMediaDeps, resetFakeRtc } from '../../
 const auth = vi.hoisted(() => ({ admin: false }));
 vi.mock('../../../contexts/AuthContext', () => ({ useAuth: () => ({ isCommunityAdmin: () => auth.admin }) }));
 
-const BASE = '/api/v1/community/7/interact/voice/rooms';
+const BASE = '/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms';
 const SELF = '11111111-1111-4111-8111-111111111111';
 
 const roomsOk = { success: true, rooms: [roomWire(), roomWire({ room_id: OTHER_ROOM_ID, label: 'Late night', locked: true, publisher_ids: [], subscriber_count: 1 })] };
@@ -38,10 +38,10 @@ const callRoutes = {
   [`GET ${BASE}`]: roomsOk,
   [`POST ${BASE}/${ROOM_ID}/join`]: joinOk,
   [`POST ${BASE}/${ROOM_ID}/leave`]: { success: true, message: 'Left room' },
-  [`GET /api/v1/communities/7/calls/rooms/${ROOM_ID}/hands/mine`]: { success: true, participant_id: SELF, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null },
+  [`GET /api/v1/communities/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/hands/mine`]: { success: true, participant_id: SELF, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null },
 };
 
-function renderView(channel: { communityId: number | string; name?: string; allowAdHocVoice?: boolean } = { communityId: '7', name: 'Voice lounge' }) {
+function renderView(channel: { communityId: string; name?: string; allowAdHocVoice?: boolean } = { communityId: '00000007-0000-4000-8000-000000000000', name: 'Voice lounge' }) {
   const fetchImpl = vi.fn(async (_url: string, init: RequestInit) => (init.method === 'DELETE' ? new Response(null, { status: 204 }) : answerResponse('/rtc/rooms/r/sessions/s')));
   return render(
     <QueryClientProvider client={createTestQueryClient()}>
@@ -92,8 +92,8 @@ describe('VoiceView', () => {
     auth.admin = true;
     serve({
       ...callRoutes,
-      [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/participants`]: roster,
-      [`GET /api/v1/admin/7/calls/rooms/${ROOM_ID}/raised-hands`]: { success: true, count: 0, raised_hands: [] },
+      [`GET /api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/participants`]: roster,
+      [`GET /api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM_ID}/raised-hands`]: { success: true, count: 0, raised_hands: [] },
     });
     renderView();
     fireEvent.click(await screen.findByRole('button', { name: 'Open Town hall' }));
@@ -105,7 +105,7 @@ describe('VoiceView', () => {
 
   it('refreshes the list on demand and cancels the create form', async () => {
     const { get } = serve({ [`GET ${BASE}`]: roomsOk });
-    renderView({ communityId: 7, allowAdHocVoice: true });
+    renderView({ communityId: '00000007-0000-4000-8000-000000000000', allowAdHocVoice: true });
     await screen.findByText('Town hall');
     fireEvent.click(screen.getByRole('button', { name: 'Refresh' }));
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2));
@@ -116,7 +116,7 @@ describe('VoiceView', () => {
 
   it('creates an ad-hoc room with room_name when the channel allows it', async () => {
     const { post } = serve({ [`GET ${BASE}`]: roomsOk, [`POST ${BASE}`]: roomWire() });
-    renderView({ communityId: 7, name: 'Voice lounge', allowAdHocVoice: true });
+    renderView({ communityId: '00000007-0000-4000-8000-000000000000', name: 'Voice lounge', allowAdHocVoice: true });
     fireEvent.click(await screen.findByRole('button', { name: 'Create room' }));
     fireEvent.change(screen.getByLabelText(/Room name/), { target: { value: 'hangout' } });
     fireEvent.click(within(screen.getByRole('region', { name: 'Create a room' })).getByRole('button', { name: 'Create room' }));
@@ -126,7 +126,7 @@ describe('VoiceView', () => {
 
   it('shows the server message when creating a room fails, keeps the form open, and dismisses the banner', async () => {
     serve({ [`GET ${BASE}`]: roomsOk, [`POST ${BASE}`]: httpError(429, envelope('RATE_LIMITED', 'Room limit reached')) });
-    renderView({ communityId: 7, allowAdHocVoice: true });
+    renderView({ communityId: '00000007-0000-4000-8000-000000000000', allowAdHocVoice: true });
     fireEvent.click(await screen.findByRole('button', { name: 'Create room' }));
     fireEvent.change(screen.getByLabelText(/Room name/), { target: { value: 'one more' } });
     fireEvent.click(within(screen.getByRole('region', { name: 'Create a room' })).getByRole('button', { name: 'Create room' }));
@@ -142,14 +142,14 @@ describe('VoiceView', () => {
     expect(await screen.findByTestId('voice-no-rooms')).toHaveTextContent('A moderator can open a room for the community.');
     expect(screen.queryByRole('button', { name: 'Create room' })).not.toBeInTheDocument();
     unmount();
-    renderView({ communityId: 7, allowAdHocVoice: true });
+    renderView({ communityId: '00000007-0000-4000-8000-000000000000', allowAdHocVoice: true });
     expect(await screen.findByTestId('voice-no-rooms')).toHaveTextContent('Create a room to start a conversation.');
   });
 
   describe('failure states', () => {
     it('flag off (402) shows "not enabled for this community" and no create button', async () => {
       serve({ [`GET ${BASE}`]: httpError(402, envelope('FEATURE_NOT_ENABLED', 'Calls / RTC is not enabled for this plan')) });
-      renderView({ communityId: 7, allowAdHocVoice: true });
+      renderView({ communityId: '00000007-0000-4000-8000-000000000000', allowAdHocVoice: true });
       expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Calls are not enabled for this community');
       expect(screen.queryByRole('button', { name: 'Create room' })).not.toBeInTheDocument();
       expect(screen.queryByTestId('voice-no-rooms')).not.toBeInTheDocument();
@@ -183,7 +183,7 @@ describe('VoiceView', () => {
 
   it('defaults the heading to "Voice" when the channel has no name', async () => {
     serve({ [`GET ${BASE}`]: roomsOk });
-    renderView({ communityId: 7 });
+    renderView({ communityId: '00000007-0000-4000-8000-000000000000' });
     expect(await screen.findByRole('heading', { name: 'Voice' })).toBeInTheDocument();
   });
 });
