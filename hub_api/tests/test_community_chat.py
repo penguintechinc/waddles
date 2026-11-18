@@ -113,3 +113,7 @@ class TestChatHistory:
         body = await response.get_json()
         assert body["channels"][0]["name"] == "general"
         assert body["channels"][0]["message_count"] == 0
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

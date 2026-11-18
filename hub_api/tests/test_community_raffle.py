@@ -204,3 +204,7 @@ class TestUpload:
         body = await response.get_json()
         assert body["success"] is True
         assert body["customization"]["sound_format"] == "mp3"
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

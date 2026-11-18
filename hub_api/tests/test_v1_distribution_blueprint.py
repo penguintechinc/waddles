@@ -22,7 +22,6 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.distribution import distribution_bp
-from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_token
 
 
@@ -30,10 +29,9 @@ from tests.conftest import TENANT_SLUG, make_token
 def app(distribution_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    quart_app.register_blueprint(distribution_bp)
     quart_app.config["dal"] = distribution_db.dal
     quart_app.config["async_dal"] = distribution_db
-    install_community_ids(quart_app, distribution_db.dal)
-    quart_app.register_blueprint(distribution_bp)
     return quart_app
 
 
@@ -129,26 +127,14 @@ class TestInputValidation:
         )
         assert response.status_code == 400
 
-    @pytest.mark.parametrize("raw", ["not-a-uuid", "42"])
-    async def test_non_uuid_community_id_is_400(self, client: Any, raw: str) -> None:
-        """`community_id` is the community public UUID; a numeric id is rejected too."""
+    async def test_non_integer_community_id_is_400(self, client: Any) -> None:
         response = await client.get(
-            f"/api/v1/distribution/bundles?stage=ingest&community_id={raw}",
+            "/api/v1/distribution/bundles?stage=ingest&community_id=not-an-int",
             headers=_headers(),
         )
         assert response.status_code == 400
         body = await response.get_json()
         assert body["error"]["code"] == "INVALID_COMMUNITY_ID"
-
-    async def test_unknown_uuid_community_lists_nothing(self, client: Any) -> None:
-        """A well-formed UUID no community owns behaves like an unknown numeric id did: empty."""
-        response = await client.get(
-            "/api/v1/distribution/bundles?stage=ingest"
-            "&community_id=00000000-0000-4000-8000-00000000dead",
-            headers=_headers(),
-        )
-        assert response.status_code == 200
-        assert (await response.get_json())["bundles"] == []
 
 
 class TestListBundles:
@@ -207,9 +193,8 @@ class TestListBundles:
         )
         dal.commit()
 
-        cuuid = public_id(distribution_db, community_id)
         response = await client.get(
-            f"/api/v1/distribution/bundles?stage=ingest&community_id={cuuid}",
+            f"/api/v1/distribution/bundles?stage=ingest&community_id={community_id}",
             headers=_headers(),
         )
         assert response.status_code == 200
@@ -218,8 +203,48 @@ class TestListBundles:
         # never returned twice even though both tiers have a matching row.
         assert len(body["bundles"]) == 1
         bundle = body["bundles"][0]
-        assert bundle["communityId"] == public_id(distribution_db, community_id)
+        assert bundle["communityId"] == community_id
         assert bundle["config"] == {"greeting": "yo"}
+
+    async def test_real_response_is_consumable_by_bundle_poller(
+        self, client: Any, distribution_db: Any
+    ) -> None:
+        """Machine endpoint: `BundlePoller` parses the REAL response (numeric id)."""
+        import httpx
+        from flask_core import stage_runner
+
+        _seed_bundle(distribution_db)
+        tenant_id, community_id = _seed_community(distribution_db)
+        distribution_db.dal.app_activations.insert(
+            community_id=community_id,
+            tenant_id=tenant_id,
+            app_id="waddles.core.demo.echo",
+            enabled=True,
+            config={"greeting": "yo"},
+        )
+        distribution_db.dal.commit()
+
+        async def _serve(request: httpx.Request) -> httpx.Response:
+            real = await client.get(
+                f"/api/v1/distribution/bundles?{request.url.query.decode()}",
+                headers=_headers(),
+            )
+            return httpx.Response(real.status_code, json=await real.get_json())
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_serve)) as http:
+            poller = stage_runner.BundlePoller(
+                http,
+                "http://hub-api/api/v1/distribution/bundles",
+                stage="ingest",
+                jwt_provider=lambda: "t.o.k",
+                community_id=community_id,
+            )
+            bundles = await poller.poll_once()
+
+        assert [(b.app_id, b.community_id) for b in bundles] == [
+            ("waddles.core.demo.echo", community_id)
+        ]
+        assert isinstance(bundles[0].community_id, int)
 
     async def test_disabled_activation_is_excluded(self, client: Any, distribution_db: Any) -> None:
         _seed_bundle(distribution_db)
@@ -234,9 +259,8 @@ class TestListBundles:
         )
         dal.commit()
 
-        cuuid = public_id(distribution_db, community_id)
         response = await client.get(
-            f"/api/v1/distribution/bundles?stage=ingest&community_id={cuuid}",
+            f"/api/v1/distribution/bundles?stage=ingest&community_id={community_id}",
             headers=_headers(),
         )
         body = await response.get_json()
@@ -275,16 +299,15 @@ class TestListBundles:
         )
         dal.commit()
 
-        cuuid = public_id(distribution_db, community_id)
         response = await client.get(
-            f"/api/v1/distribution/bundles?stage=ingest&community_id={cuuid}",
+            f"/api/v1/distribution/bundles?stage=ingest&community_id={community_id}",
             headers=_headers(),
         )
         body = await response.get_json()
         assert body["bundles"] == []
 
         action_response = await client.get(
-            f"/api/v1/distribution/bundles?stage=action&community_id={cuuid}",
+            f"/api/v1/distribution/bundles?stage=action&community_id={community_id}",
             headers=_headers(),
         )
         action_body = await action_response.get_json()

@@ -533,3 +533,7 @@ class TestPrivilegeHardening:
         row = dal(dal.guild_tenant_pairings.id == pairing_id).select().first()
         assert row.ownership_verified_at is not None
         assert row.propagate_moderators is False
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

@@ -625,3 +625,7 @@ class TestVendorOwnedConfusedDeputy:
         assert r.status_code == 200
         dal.commit()
         assert dal.ai_knowledge_sources[sid].encrypted_token == "keep"
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

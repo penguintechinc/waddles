@@ -139,7 +139,7 @@ const mockedRoleSyncApi = vi.mocked(roleSyncApi);
 
 const PAIRING: GuildPairing = {
   id: 7,
-  community_id: 42,
+  community_id: '0000002a-0000-4000-8000-000000000000',
   discord_guild_id: '555000111',
   direction: 'bidirectional',
   sync_enabled: true,

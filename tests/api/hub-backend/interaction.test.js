@@ -9,7 +9,8 @@ const request = require('supertest');
 const API_BASE_URL = global.TEST_CONFIG.API_BASE_URL;
 const ADMIN_USER = global.TEST_CONFIG.ADMIN_USER;
 
-const COMMUNITY_ID = 1;
+// Community ids are public UUIDs on the API (never the numeric id).
+const COMMUNITY_ID = process.env.TEST_COMMUNITY_ID || '00000001-0000-4000-8000-000000000000';
 
 describe('Interaction API', () => {
   let authToken;

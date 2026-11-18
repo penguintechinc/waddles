@@ -352,3 +352,7 @@ async def test_activate_conflict_warning_names_owner_and_is_still_201(
     assert warning["code"] == "command_conflict"
     assert warning["appId"] == app_b
     assert warning["ownerAppId"] == app_a
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

@@ -644,3 +644,7 @@ class TestRadioStations:
             headers=headers,
         )
         assert remove_again.status_code == 404
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

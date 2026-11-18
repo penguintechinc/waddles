@@ -518,3 +518,7 @@ def test_flag_is_client_visible_and_baselined_off() -> None:
         "FLAG_WADDLES_COMMUNITY_TIER_ALLOCATION"
         in (root / "templates" / "configmap.yaml").read_text()
     )
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

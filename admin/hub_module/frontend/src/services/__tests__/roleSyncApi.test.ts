@@ -2,6 +2,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { apiClient } from '../../lib/apiClient';
+import { WireShapeError } from '../../lib/wire';
 import {
   COMMUNITY_ROLES,
   SUBSCRIBER_TIERS,
@@ -14,9 +15,26 @@ describe('roleSyncApi', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('listPairings GETs the community path and unwraps pairings', async () => {
-    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { success: true, pairings: [{ id: 1 }] } });
-    await expect(roleSyncApi.listPairings('00000007-0000-4000-8000-000000000000')).resolves.toEqual([{ id: 1 }]);
+    const get = vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { success: true, pairings: [{ id: 1, community_id: '00000007-0000-4000-8000-000000000000' }] } });
+    await expect(roleSyncApi.listPairings('00000007-0000-4000-8000-000000000000')).resolves.toEqual([{ id: 1, community_id: '00000007-0000-4000-8000-000000000000' }]);
     expect(get).toHaveBeenCalledWith('/api/v1/communities/00000007-0000-4000-8000-000000000000/guild-pairings');
+  });
+
+  it.each([
+    ['numeric', 7],
+    ['missing', undefined],
+    ['non-UUID string', 'abc'],
+  ])('listPairings throws WireShapeError on a %s community_id', async (_label, bad) => {
+    vi.spyOn(apiClient, 'get').mockResolvedValue({ data: { success: true, pairings: [{ id: 1, community_id: bad }] } });
+    await expect(roleSyncApi.listPairings('00000007-0000-4000-8000-000000000000')).rejects.toBeInstanceOf(WireShapeError);
+  });
+
+  it('listMirrors validates community_id and throws on a numeric one', async () => {
+    const get = vi.spyOn(apiClient, 'get');
+    get.mockResolvedValueOnce({ data: { success: true, mappings: [{ id: 1, community_id: '00000007-0000-4000-8000-000000000000' }] } });
+    await expect(roleSyncApi.listMirrors('00000007-0000-4000-8000-000000000000')).resolves.toHaveLength(1);
+    get.mockResolvedValueOnce({ data: { success: true, mappings: [{ id: 1, community_id: 7 }] } });
+    await expect(roleSyncApi.listMirrors('00000007-0000-4000-8000-000000000000')).rejects.toBeInstanceOf(WireShapeError);
   });
 
   it('listBindings GETs role-bindings and unwraps bindings', async () => {

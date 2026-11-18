@@ -137,3 +137,7 @@ class TestJoinCommunity:
         )
         assert response.status_code == 404
         assert _members(auth_db, cid, uid) == 0
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

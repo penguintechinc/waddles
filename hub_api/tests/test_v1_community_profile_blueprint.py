@@ -165,6 +165,8 @@ class TestGetCommunityProfile:
         assert body["success"] is True
         assert body["community"]["restricted"] is False
         assert body["community"]["visibility"] == "public"
+        # the community is identified by its public UUID, never the numeric primary key
+        assert body["community"]["id"] == public_id(auth_db, community_id)
 
     async def test_registered_only_restricted_for_anonymous(
         self, client: Any, auth_db: Any

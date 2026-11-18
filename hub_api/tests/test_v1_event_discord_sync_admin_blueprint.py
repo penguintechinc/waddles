@@ -160,3 +160,7 @@ async def test_no_pairings_is_404(client: Any, auth_headers: Any, event_sync_db:
         client, auth_headers(scope="community.guild_pairing:write"), community_id, {"enabled": True}
     )
     assert resp.status_code == 404
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

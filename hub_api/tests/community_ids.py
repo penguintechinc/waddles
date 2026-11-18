@@ -102,3 +102,40 @@ def install_community_ids(app: Quart, dal: Any) -> None:
         app.config["async_dal"] = _SyncAsyncDal(dal)
     app.config.setdefault("dal", dal)
     install_community_public_ids(app)
+
+
+_COMMUNITY_KEYS = frozenset({"communityId", "community_id"})
+_UUID_RE = __import__("re").compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", __import__("re").I
+)
+
+
+def assert_no_numeric_community_ids(body: Any, *, expect_at_least: int = 1) -> int:
+    """Walk a JSON response: every `communityId`/`community_id` must be a UUID string (or null).
+
+    Fails when a numeric community id leaks, and when fewer than `expect_at_least` community id
+    keys were examined (a response with none proves nothing -- zero examined is a failure).
+    Returns the number of community id keys examined.
+    """
+    examined = 0
+
+    def walk(node: Any, path: str) -> None:
+        nonlocal examined
+        if isinstance(node, dict):
+            for key, value in node.items():
+                here = f"{path}.{key}"
+                if key in _COMMUNITY_KEYS and value is not None:
+                    examined += 1
+                    assert isinstance(value, str) and _UUID_RE.match(
+                        value
+                    ), f"{here} must be a community UUID string, got {value!r}"
+                walk(value, here)
+        elif isinstance(node, list):
+            for idx, item in enumerate(node):
+                walk(item, f"{path}[{idx}]")
+
+    walk(body, "$")
+    assert (
+        examined >= expect_at_least
+    ), f"examined {examined} community id keys, expected >= {expect_at_least}"
+    return examined

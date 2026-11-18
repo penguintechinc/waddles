@@ -41,7 +41,7 @@ describe('CreateCommunity', () => {
   it('creates on the served super-admin route and opens the new community', async () => {
     const post = vi
       .spyOn(apiClient, 'post')
-      .mockResolvedValue(ok({ success: true, community: { id: 42, name: 'penguin-pals', displayName: 'Penguin Pals' } }, 201));
+      .mockResolvedValue(ok({ success: true, community: { id: '0000002a-0000-4000-8000-000000000000', name: 'penguin-pals', displayName: 'Penguin Pals' } }, 201));
     renderPage();
     fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'Penguin Pals' } });
     fireEvent.click(screen.getByRole('button', { name: /create/i }));
@@ -51,6 +51,15 @@ describe('CreateCommunity', () => {
     expect(url).toBe('/api/v1/superadmin/communities');
     expect(body).toMatchObject({ name: 'penguin-pals', platform: 'discord', isPublic: true, communityType: 'creator' });
     expect(post.mock.calls.map(([u]) => u)).not.toContain('/api/v1/communities/create');
+  });
+
+  it('refuses a numeric community id in the create response instead of navigating to it', async () => {
+    vi.spyOn(apiClient, 'post').mockResolvedValue(ok({ success: true, community: { id: 42, name: 'x', displayName: null } }, 201));
+    renderPage();
+    fireEvent.change(screen.getByTestId('community-name-input'), { target: { value: 'x' } });
+    fireEvent.click(screen.getByRole('button', { name: /create/i }));
+    expect(await screen.findByTestId('community-form-error')).toBeInTheDocument();
+    expect(screen.queryByText('community dashboard')).not.toBeInTheDocument();
   });
 
   it('shows the server error and stays on the form', async () => {

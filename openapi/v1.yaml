@@ -2036,14 +2036,17 @@ components:
       title: DiscordStatsDTO
       type: object
     DistributionBundleDTO:
-      description: One bundle's `{entrypoint, config, spec}` for the requested stage.
+      description: 'One bundle''s `{entrypoint, config, spec}` for the requested stage.
+
+
+        `communityId` is the numeric internal id (machine endpoint, see module docstring).'
       properties:
         appId:
           title: Appid
           type: string
         communityId:
           anyOf:
-          - type: string
+          - type: integer
           - type: 'null'
           title: Communityid
         config:

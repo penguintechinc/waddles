@@ -608,3 +608,7 @@ class TestPostToPlatformDirect:
             ok, err = await _post_to_platform("discord", {"title": "x"})
         assert ok is False
         assert err is not None
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

@@ -571,3 +571,7 @@ class TestStats:
         assert body["open"] == 1
         assert body["resolved"] == 1
         assert body["avg_resolution_seconds"] is not None
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

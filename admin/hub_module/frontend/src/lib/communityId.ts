@@ -3,6 +3,8 @@
  * crosses the API boundary. This module is the single place the webui validates one.
  */
 
+import { WireShapeError } from './wire';
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** True when `value` is a canonical UUID string, the only accepted community id shape. */
@@ -23,5 +25,11 @@ export function requireCommunityId(raw: unknown, context: string): string {
   if (!isCommunityId(raw)) {
     throw new Error(`${context}: expected a community UUID, got ${JSON.stringify(raw)}`);
   }
+  return raw;
+}
+
+/** Validates a community id read off an API response; throws `WireShapeError` when not a UUID. */
+export function requireWireCommunityId(raw: unknown, what: string): string {
+  if (!isCommunityId(raw)) throw new WireShapeError(what, 'is not a community UUID');
   return raw;
 }

@@ -486,3 +486,7 @@ class TestInternalRoutes:
             body={"community_id": community_id},
         )
         assert response.status_code == 400
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

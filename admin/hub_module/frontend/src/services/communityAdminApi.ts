@@ -1,5 +1,6 @@
 import { apiClient } from '../lib/apiClient';
-import { expectRecord, isRecord, readNumber, readOptString, readString } from '../lib/wire';
+import { requireWireCommunityId } from '../lib/communityId';
+import { expectRecord, isRecord, readOptString, readString } from '../lib/wire';
 
 // Community creation via the only served route:
 //   POST /api/v1/superadmin/communities   (scope communities:admin, 201)
@@ -22,7 +23,8 @@ export interface CreateCommunityPayload {
 }
 
 export interface CreatedCommunity {
-  id: number;
+  /** Community public UUID (the numeric id never crosses the API). */
+  id: string;
   name: string;
   displayName: string | null;
 }
@@ -32,7 +34,7 @@ export async function createCommunity(payload: CreateCommunityPayload): Promise<
   const { data } = await apiClient.post<unknown>('/api/v1/superadmin/communities', payload);
   const community = expectRecord(expectRecord(data, 'create community')['community'], 'create community community');
   return {
-    id: readNumber(community, 'id', 'create community'),
+    id: requireWireCommunityId(community['id'], 'create community id'),
     name: readString(community, 'name', 'create community'),
     displayName: readOptString(community, 'displayName'),
   };

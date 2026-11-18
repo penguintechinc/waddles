@@ -1234,3 +1234,7 @@ class TestMemberChannels:
         )
         assert response.status_code == 201
         assert (await response.get_json())["channel"]["name"] == "self-created-3"
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

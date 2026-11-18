@@ -8,7 +8,7 @@ import { roleSyncApi, type GuildPairing, type RoleMirrorMapping } from '../../..
 
 const pairing = (id: number, guild: string): GuildPairing => ({
   id,
-  community_id: 7,
+  community_id: '00000007-0000-4000-8000-000000000000',
   discord_guild_id: guild,
   direction: 'bidirectional',
   sync_enabled: true,
@@ -23,7 +23,7 @@ const PAIRINGS = [pairing(1, '111'), pairing(2, '222')];
 
 const mapping = (over: Partial<RoleMirrorMapping> = {}): RoleMirrorMapping => ({
   id: 5,
-  community_id: 7,
+  community_id: '00000007-0000-4000-8000-000000000000',
   source_guild_id: '111',
   source_role_id: '10',
   target_guild_id: '222',

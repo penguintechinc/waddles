@@ -21,11 +21,17 @@ resolves the tenant-wide `app_tenant_availability` fallback only. A
 stage-runner's own service JWT is minted with the `tenant` claim it's
 scoped to (its `RUNNER_TENANT_SLUG` config) -- this endpoint never lets a
 caller widen scope beyond its own token's tenant.
+
+MACHINE endpoint, deliberately numeric: `community_id` (query) and `communityId`
+(response) are the internal numeric community id, like the internal service-key routes and the
+data-plane keys (Valkey stream keys, `bundle_stream_key`) the stage-runner builds from them.
+It is authenticated by a service JWT with `distribution:read`, is never called by a browser,
+and its only consumer (`flask_core.stage_runner`) has no mapping from a public UUID back to
+the numeric key. Browser/CLI/mobile-facing routes use community public UUIDs instead.
 """
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -37,11 +43,8 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
 from services import distribution_service as svc
-from services.community_public_id import lookup_public_ids, resolve_public_community_id
 from services.errors import ApiError
 from services.schema import bind_app_bundle_tables
-
-logger = logging.getLogger(__name__)
 
 distribution_bp = Blueprint("v1_distribution", __name__, url_prefix="/api/v1/distribution")
 
@@ -90,18 +93,16 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
-async def _parse_community_id(raw: str | None) -> int | None:
-    """Resolve the optional `community_id` query param (a community public UUID).
-
-    Returns the internal numeric id (unknown UUID -> a value no row holds, so the listing is
-    simply empty, same as an unknown numeric id before); raises `ApiError` on a non-UUID value.
-    """
+def _parse_community_id(raw: str | None) -> int | None:
+    """Parse the optional `community_id` query param; raises `ApiError` on a non-int value."""
     if raw is None or raw == "":
         return None
-    resolved = await resolve_public_community_id(raw)
-    if resolved is None:
-        raise ApiError("community_id must be a community UUID", 400, "INVALID_COMMUNITY_ID")
-    return resolved
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise ApiError(
+            f"community_id {raw!r} must be an integer", 400, "INVALID_COMMUNITY_ID"
+        ) from exc
 
 
 # ---------------------------------------------------------------------------
@@ -111,10 +112,13 @@ async def _parse_community_id(raw: str | None) -> int | None:
 
 @dataclass(slots=True, frozen=True)
 class DistributionBundleDTO:
-    """One bundle's `{entrypoint, config, spec}` for the requested stage."""
+    """One bundle's `{entrypoint, config, spec}` for the requested stage.
+
+    `communityId` is the numeric internal id (machine endpoint, see module docstring).
+    """
 
     appId: str
-    communityId: str | None
+    communityId: int | None
     entrypoint: str | None
     spec: dict[str, Any] = field(default_factory=dict)
     config: dict[str, Any] = field(default_factory=dict)
@@ -162,9 +166,8 @@ async def list_distribution_bundles() -> (
         )
 
     try:
-        community_id = await _parse_community_id(request.args.get("community_id"))
+        community_id = _parse_community_id(request.args.get("community_id"))
     except ApiError as exc:
-        logger.warning("distribution list refused: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
     ctx = get_tenant_context(request)
@@ -175,16 +178,13 @@ async def list_distribution_bundles() -> (
         async_dal, read_dal, tenant_id=ctx.tenant_id, community_id=community_id, stage=stage
     )
 
-    public_ids = await lookup_public_ids(
-        row.community_id for row in rows if row.community_id is not None
-    )
     return DistributionBundlesResponse(
         success=True,
         stage=stage,
         bundles=[
             DistributionBundleDTO(
                 appId=row.app_id,
-                communityId=None if row.community_id is None else public_ids[row.community_id],
+                communityId=row.community_id,
                 entrypoint=row.entrypoint,
                 spec=row.spec,
                 config=row.config,

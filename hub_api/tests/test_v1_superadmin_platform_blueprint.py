@@ -22,7 +22,13 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.superadmin import superadmin_bp
 from services.tenant_key_provisioning import TenantKeyProvisioningError
-from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
+from tests.community_ids import (
+    UNKNOWN_PUBLIC_ID,
+    assert_no_numeric_community_ids,
+    cpath,
+    install_community_ids,
+    public_id,
+)
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -136,6 +142,14 @@ class TestDashboard:
         assert len(body["recentCommunities"]) == 2
 
 
+def _is_uuid_str(value: Any) -> bool:
+    """Whether `value` is a canonical UUID string (community `id` on the superadmin API)."""
+    try:
+        return isinstance(value, str) and str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
 class TestCommunityManagement:
     async def test_list_communities_filters_by_search(self, client: Any, admin_db: Any) -> None:
         _seed_community(admin_db, name="acme-community", display_name="Acme")
@@ -146,6 +160,8 @@ class TestCommunityManagement:
         body = await response.get_json()
         assert body["pagination"]["total"] == 1
         assert body["communities"][0]["name"] == "acme-community"
+        assert_no_numeric_community_ids(body, expect_at_least=0)
+        assert _is_uuid_str(body["communities"][0]["id"])
 
     async def test_get_community_not_found_is_404(self, client: Any) -> None:
         response = await client.get(

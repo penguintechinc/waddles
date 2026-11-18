@@ -6,12 +6,13 @@ superadmin/activation REST routes the web UI uses, never direct SQL -- binds it 
 testing Discord guild, activates the Rust `!ping` bundle, and switches ALL accrual off for that
 community. Reputation and economy are SERVICE bundles (activated tenant-wide, so a per-community
 deactivation cannot stop them): the supported per-community off switch is the bundle community
-config `accrual_enabled: false` (bundle-admin gateway ``PUT /api/v1/apps/community/<id>/bundles/
+config `accrual_enabled: false` (bundle-admin gateway ``PUT /api/v1/apps/community/<community-uuid>/bundles/
 <app_id>/config``), honoured by the reputation-accrual app and the reputation and economy service
 bundles (versions >= 1.0.1 / 1.1.2 / 1.0.2). The seeder sets it on all three and verifies it by reading
 the saved config back. Game/loyalty APP bundles that mint are additionally deactivated here if the
-community has them activated. Prints the numeric community id the owner puts in
-``latencyCanary.communityId``.
+community has them activated. Prints the community PUBLIC UUID (the API never exposes the numeric id); the owner
+resolves the numeric data-plane id for ``latencyCanary.communityId`` from it (see
+docs/observability/command-latency.md).
 
     kubectl --context dal2alpha -n waddlebot port-forward svc/waddlebot-hub-api-v3 18080:8080 &
     export WADDLES_ADMIN_TOKEN=...            # default-tenant admin JWT; read from env, never an argument
@@ -36,6 +37,7 @@ import re
 import sys
 import urllib.error
 import urllib.request
+import uuid
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from urllib.parse import urlparse
@@ -81,7 +83,7 @@ class Refused(Exception):
 class Result:
     """What the seeder did, for the summary line and tests."""
 
-    community_id: int
+    community_id: str
     created: bool
     ping_activated: bool
     deactivated: tuple[str, ...]
@@ -131,12 +133,20 @@ def make_http(base: str, token: str) -> Http:
     return call
 
 
+def _is_uuid(value: str) -> bool:
+    """Whether `value` is a canonical UUID string (community ids are public UUIDs on the API)."""
+    try:
+        return str(uuid.UUID(value)) == value.lower()
+    except ValueError:
+        return False
+
+
 def _ok(status: int, what: str) -> None:
     if not 200 <= status < 300:
         raise RuntimeError(f"{what} failed with HTTP {status}")
 
 
-def find_community(http: Http, guild_id: str) -> int | None:
+def find_community(http: Http, guild_id: str) -> str | None:
     """The existing discord community bound to this guild (any name), if any."""
     status, body = http(
         "GET", "/api/v1/superadmin/communities?platform=discord&limit=100&search=", None
@@ -148,12 +158,13 @@ def find_community(http: Http, guild_id: str) -> int | None:
     for row in rows:
         if isinstance(row, dict) and str(row.get("platformServerId")) == guild_id:
             cid = row.get("id")
-            if isinstance(cid, int):
-                return cid
+            if not isinstance(cid, str) or not _is_uuid(cid):
+                raise RuntimeError("list communities: community id is not a UUID")  # noqa: TRY004
+            return cid
     return None
 
 
-def create_community(http: Http, guild_id: str) -> int:
+def create_community(http: Http, guild_id: str) -> str:
     """Creates the dedicated canary community bound to the testing guild (private, non-public)."""
     status, body = http(
         "POST",
@@ -170,12 +181,12 @@ def create_community(http: Http, guild_id: str) -> int:
     _ok(status, "create community")
     community = body.get("community")
     cid = community.get("id") if isinstance(community, dict) else None
-    if not isinstance(cid, int):
-        raise RuntimeError("create community: no id in response")  # noqa: TRY004
+    if not isinstance(cid, str) or not _is_uuid(cid):
+        raise RuntimeError("create community: no UUID id in response")  # noqa: TRY004
     return cid
 
 
-def active_app_ids(http: Http, community_id: int) -> list[str]:
+def active_app_ids(http: Http, community_id: str) -> list[str]:
     """App ids currently activated for the community."""
     status, body = http(
         "GET", f"/api/v1/apps/community/{community_id}/activation", None
@@ -193,12 +204,12 @@ def is_denied_app(app_id: str, deny: Sequence[str]) -> bool:
     return ".service." not in low and any(p in low for p in deny)
 
 
-def _bundle_config_path(community_id: int, app_id: str) -> str:
+def _bundle_config_path(community_id: str, app_id: str) -> str:
     return f"/api/v1/apps/community/{community_id}/bundles/{app_id}/config"
 
 
 def read_accrual_config(
-    http: Http, community_id: int, app_id: str
+    http: Http, community_id: str, app_id: str
 ) -> tuple[int, dict[str, object]] | None:
     """The saved (version, config) of one accrual bundle, or None when it is not active here.
 
@@ -223,7 +234,7 @@ def read_accrual_config(
 
 
 def disable_accrual(
-    http: Http, community_id: int, *, dry_run: bool
+    http: Http, community_id: str, *, dry_run: bool
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Sets `accrual_enabled: false` on every accrual bundle active here, then reads each back.
 
@@ -371,7 +382,7 @@ def main(
         f"deactivated={list(res.deactivated)} activations_examined={res.examined} "
         f"accrual_off={len(res.accrual_off)}/{len(ACCRUAL_BUNDLES)} accrual_changed={list(res.accrual_changed)}"
     )
-    print(f"latencyCanary.communityId: {res.community_id}")
+    print(f"latencyCanary community public id (UUID): {res.community_id}")
     return EXIT_OK
 
 

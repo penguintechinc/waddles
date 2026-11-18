@@ -837,3 +837,7 @@ class TestCrossTenantIsolation:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["bundles"] == []
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

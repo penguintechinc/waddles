@@ -452,3 +452,7 @@ async def test_enabled_app_is_unaffected(client: Any, ai_routing_db: Any) -> Non
         f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config", headers=headers
     )
     assert response.status_code == 200
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

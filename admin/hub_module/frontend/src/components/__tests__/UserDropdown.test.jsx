@@ -181,7 +181,7 @@ describe('UserDropdown content', () => {
     mount();
     open();
     expect(menu().getByRole('menuitem', { name: 'One' })).toHaveAttribute('href', '/dashboard/community/00000001-0000-4000-8000-000000000000');
-    expect(menu().getByRole('menuitem', { name: 'Community 00000002-0000-4000-8000-000000000000' })).toBeInTheDocument();
+    expect(menu().getByRole('menuitem', { name: 'Unnamed community' })).toBeInTheDocument();
     expect(menu().queryByText('View All Communities')).not.toBeInTheDocument();
   });
 

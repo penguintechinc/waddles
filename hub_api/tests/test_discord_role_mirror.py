@@ -1013,3 +1013,7 @@ class TestRoutes:
             headers=auth_headers(scope="community.guild_pairing:read"),
         )
         assert r.status_code == 404
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

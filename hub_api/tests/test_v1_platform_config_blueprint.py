@@ -25,6 +25,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.platform_config import platform_config_bp
 from config import HubAPIConfig
+from tests.community_ids import assert_no_numeric_community_ids, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -54,9 +55,10 @@ def _test_config() -> HubAPIConfig:
 def app(platform_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(platform_config_bp)
     quart_app.config["dal"] = platform_db.dal
     quart_app.config["async_dal"] = platform_db
+    install_community_ids(quart_app, platform_db.dal)
+    quart_app.register_blueprint(platform_config_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
 
@@ -112,6 +114,24 @@ class TestScopeEnforcement:
 
 
 class TestGetPlatformConfigs:
+    async def test_community_bound_credential_exposes_uuid_not_numeric_id(
+        self, client: Any, platform_db: Any
+    ) -> None:
+        """`communityId` is the community public UUID; no numeric community id key leaks."""
+        community_id = platform_db.dal.communities.insert(name="acme", display_name="Acme")
+        platform_db.dal.commit()
+        row_id = _seed_bot_credential(platform_db)
+        platform_db.dal(platform_db.dal.platform_integrations.id == row_id).update(
+            community_id=community_id
+        )
+        platform_db.dal.commit()
+        response = await client.get("/api/v1/superadmin/platform-config", headers=_admin_headers())
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["data"][0]["communityId"] == public_id(platform_db, community_id)
+        assert assert_no_numeric_community_ids(body) == 1
+
+
     async def test_masks_tokens(self, client: Any, platform_db: Any) -> None:
         _seed_bot_credential(platform_db)
         response = await client.get("/api/v1/superadmin/platform-config", headers=_admin_headers())

@@ -1,4 +1,5 @@
 import { apiClient } from '../lib/apiClient';
+import { requireWireCommunityId } from '../lib/communityId';
 
 // Typed client for the guild-pairing / role-sync binding CRUD --
 // mirrors `hub_api/blueprints/v1/guild_pairing.py` + `services/guild_pairing.py`
@@ -8,8 +9,8 @@ import { apiClient } from '../lib/apiClient';
 // snake_case as-is through `quart-schema` -- these interfaces mirror that
 // wire shape verbatim rather than guessing a transform that doesn't exist.
 //
-// `communityId`/`pairingId`/`bindingId` are numeric platform identifiers
-// (never PII); `discordGuildId`/`discordRoleId` are Discord snowflakes.
+// `community_id` is the community public UUID (validated on every response via
+// `WireShapeError`); `pairingId`/`bindingId` are numeric row identifiers (never PII); `discordGuildId`/`discordRoleId` are Discord snowflakes.
 
 /** Body for `POST .../guild-pairings` -- hub-api validates the guild ID and bot membership. */
 export interface CreateGuildPairingPayload {
@@ -58,7 +59,7 @@ export const COMMUNITY_ROLES: readonly CommunityRole[] = ['community-admin', 'mo
 /** One `guild_tenant_pairings` row. */
 export interface GuildPairing {
   id: number;
-  community_id: number;
+  community_id: string;
   discord_guild_id: string;
   direction: GuildPairingDirection;
   sync_enabled: boolean;
@@ -130,7 +131,7 @@ export interface DiscordRole {
 /** One cross-guild role mirror mapping (`discord_role_mirror_mappings`) + last sync counters. */
 export interface RoleMirrorMapping {
   id: number;
-  community_id: number;
+  community_id: string;
   source_guild_id: string;
   source_role_id: string;
   target_guild_id: string;
@@ -150,6 +151,12 @@ export interface CreateRoleMirrorPayload {
   target_role_id: string;
 }
 
+/** Fails loudly when a response row's `community_id` is not a community UUID. */
+function checkedRow<T extends { community_id: string }>(row: T, what: string): T {
+  requireWireCommunityId(row?.community_id, `${what} community_id`);
+  return row;
+}
+
 export const roleSyncApi = {
   /** `GET .../discord/roles?guild_id=` -- a paired guild's roles; requires `community.guild_pairing:read`. */
   listGuildRoles: (communityId: string, guildId: string) =>
@@ -166,7 +173,7 @@ export const roleSyncApi = {
       .get<{ success: boolean; mappings: RoleMirrorMapping[] }>(
         `/api/v1/communities/${communityId}/discord/role-mirrors`,
       )
-      .then((res) => res.data.mappings),
+      .then((res) => res.data.mappings.map((m) => checkedRow(m, 'role mirror'))),
 
   /** `POST .../discord/role-mirrors` -- one-way source -> target mapping; requires `...:write`. */
   createMirror: (communityId: string, payload: CreateRoleMirrorPayload) =>
@@ -175,7 +182,7 @@ export const roleSyncApi = {
         `/api/v1/communities/${communityId}/discord/role-mirrors`,
         payload,
       )
-      .then((res) => res.data.mapping),
+      .then((res) => checkedRow(res.data.mapping, 'role mirror')),
 
   /** `DELETE .../discord/role-mirrors/<mappingId>`. */
   deleteMirror: (communityId: string, mappingId: number) =>
@@ -185,7 +192,7 @@ export const roleSyncApi = {
   listPairings: (communityId: string) =>
     apiClient
       .get<GuildPairingListResponse>(`/api/v1/communities/${communityId}/guild-pairings`)
-      .then((res) => res.data.pairings),
+      .then((res) => res.data.pairings.map((p) => checkedRow(p, 'guild pairing'))),
 
   /**
    * `POST /api/v1/communities/<communityId>/guild-pairings` -- pair a Discord
@@ -194,7 +201,7 @@ export const roleSyncApi = {
   createPairing: (communityId: string, payload: CreateGuildPairingPayload) =>
     apiClient
       .post<GuildPairingResponse>(`/api/v1/communities/${communityId}/guild-pairings`, payload)
-      .then((res) => res.data.pairing),
+      .then((res) => checkedRow(res.data.pairing, 'guild pairing')),
 
   /**
    * `POST .../discord/server-install/authorize` -- returns the Discord OAuth
@@ -215,7 +222,7 @@ export const roleSyncApi = {
         `/api/v1/communities/${communityId}/guild-pairings/${pairingId}`,
         payload,
       )
-      .then((res) => res.data.pairing),
+      .then((res) => checkedRow(res.data.pairing, 'guild pairing')),
 
   /** `GET .../guild-pairings/<pairingId>/role-bindings` -- requires `community.guild_pairing:read`. */
   listBindings: (communityId: string, pairingId: number) =>

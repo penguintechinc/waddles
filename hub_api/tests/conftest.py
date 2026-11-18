@@ -2149,3 +2149,68 @@ def bundle_data_pg_conn(bundle_data_pg_url: str) -> Any:
             pg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(pg_sql.Identifier(db_name))
         )
     cleanup_conn.close()
+
+
+@pytest.fixture(autouse=True)
+def _uuid_community_response_guard(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
+    """Opt-in guard against numeric community ids in JSON responses.
+
+    In a module that sets `UUID_COMMUNITY_RESPONSES = True`, every JSON response read through
+    `get_json()` must carry community ids as UUID strings (never a numeric id), except internal
+    service-key routes. The per-module denominator is enforced by the module-scope fixture below,
+    so zero examined is a failure.
+    """
+    module = request.module
+    if not getattr(module, "UUID_COMMUNITY_RESPONSES", False):
+        yield
+        return
+
+    from quart.testing.client import QuartClient
+    from quart.wrappers.response import Response
+
+    from tests.community_ids import assert_no_numeric_community_ids
+
+    original_get_json = Response.get_json
+    original_open = QuartClient.open
+
+    async def tagged_open(self: Any, path: str, *args: Any, **kwargs: Any) -> Any:
+        response = await original_open(self, path, *args, **kwargs)
+        response.__dict__["_probe_path"] = str(path)
+        return response
+
+    async def guarded(self: Any, *args: Any, **kwargs: Any) -> Any:
+        body = await original_get_json(self, *args, **kwargs)
+        # Internal service-key routes are machine routes: numeric community ids by design.
+        if "/api/v1/internal/" in self.__dict__.get("_probe_path", ""):
+            return body
+        examined = assert_no_numeric_community_ids(body, expect_at_least=0)
+        module.__dict__["_community_ids_examined"] = (
+            module.__dict__.get("_community_ids_examined", 0) + examined
+        )
+        return body
+
+    Response.get_json = guarded  # type: ignore[method-assign]
+    QuartClient.open = tagged_open  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        Response.get_json = original_get_json  # type: ignore[method-assign]
+        QuartClient.open = original_open  # type: ignore[method-assign]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _uuid_community_guard_denominator(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
+    """Fail a guarded module whose full run examined zero community id keys (a vacuous guard)."""
+    yield
+    module = request.module
+    if not getattr(module, "UUID_COMMUNITY_RESPONSES", False):
+        return
+    if request.config.getoption("keyword", default="") or request.config.getoption(
+        "markexpr", default=""
+    ):
+        return  # a -k/-m subset may legitimately touch no community-id response
+    examined = module.__dict__.get("_community_ids_examined", 0)
+    assert examined >= 1, (
+        f"{module.__name__}: UUID_COMMUNITY_RESPONSES guard examined {examined} community id "
+        "keys across the module (zero examined proves nothing)"
+    )

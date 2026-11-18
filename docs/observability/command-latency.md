@@ -188,7 +188,7 @@ Provide these four values (the only owner inputs):
 |---|---|---|
 | Testing guild id (snowflake) | Discord: Developer Mode -> right-click the testing server -> Copy Server ID | `latencyCanary.guildId` (**quoted string**) and `CANARY_GUILD_ID` for the seeder |
 | Canary channel id (snowflake) | a dedicated, otherwise unused text channel in that guild the bot can read and post in -> Copy Channel ID | `latencyCanary.channelId` (**quoted string**) |
-| Canary community id (int) | printed by the seeder below | `latencyCanary.communityId` |
+| Canary community id (int) | the seeder prints the community's public UUID (the API never exposes the numeric id); resolve the numeric data-plane id with `SELECT id FROM communities WHERE public_id = '<uuid>'` | `latencyCanary.communityId` |
 | Default tenant id (int) | already `1` on alpha | `latencyCanary.tenantId` (pre-filled) |
 
 1. Make sure the Waddles bot is in the testing guild with View Channel + Send Messages + Read History on the canary
@@ -203,7 +203,7 @@ Provide these four values (the only owner inputs):
    and **switches accrual off for the community**: reputation and economy are SERVICE bundles activated
    tenant-wide, so a per-community deactivation cannot stop them. The supported per-community off switch is the
    bundle community config `accrual_enabled: false` (hub-api bundle-admin gateway `PUT
-   /api/v1/apps/community/<id>/bundles/<app_id>/config`), read from `get-context().config_json` by the
+   /api/v1/apps/community/<community-uuid>/bundles/<app_id>/config`), read from `get-context().config_json` by the
    `waddles.core.app.reputation-accrual` app (event-driven reputation accrual, `process` stage) and by the
    `waddles.core.service.reputation` (`adjust`, `apply_moderation`) and `waddles.core.service.economy`
    (`adjust_balance` credits, `pay_pot`, `exchange`) service bundles, which refuse minting with `forbidden` in an
@@ -211,7 +211,7 @@ Provide these four values (the only owner inputs):
    keeps accrual ON. The seeder sets it on all three, reads each back, and fails if one is not confirmed `false`,
    if a bundle predates the switch (needs reputation-accrual >= 1.0.1, reputation >= 1.1.2, economy >= 1.0.2
    deployed first), or if zero accrual bundles were examined. Any minting game/loyalty APP bundle activated for the
-   community is deactivated too (service bundles are never touched). It prints `latencyCanary.communityId: <n>`.
+   community is deactivated too (service bundles are never touched). It prints the community public UUID (`latencyCanary community public id (UUID): <uuid>`).
 3. Edit `k8s/helm/waddlebot/values-dal2alpha.yaml` -> `latencyCanary`: set `communityId`, `guildId`, `channelId`,
    then `enabled: true`. (`enabled: true` with any placeholder left makes `helm upgrade` fail loud.)
 4. Deploy (`make dal2alpha-deploy`). Verify: `waddles_canary_e2e_seconds` has samples, a `!ping` reply appears in the
