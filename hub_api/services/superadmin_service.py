@@ -270,7 +270,7 @@ async def update_community(
     `fields` are already-validated update deltas (camelCase->column); a `None` value means
     "set NULL" (the route only passes None for the nullable `description`/`seat_limit`).
     `is_premium` is derived from the tier and can never be written directly. `license_tier`
-    (1 free / 2 professional / 3 enterprise) goes through
+    (1 free / 2 premium) goes through
     `community_tier_service.allocate(source=operator_override)`: never blocked by a full pool,
     counted as overage and audited, with `reason_code` as the audit reason.
     """
@@ -288,7 +288,7 @@ async def update_community(
         raise bad_request("No updates provided")
     if license_tier is not None:
         if license_tier not in community_tier_service.TIER_NAMES:
-            raise bad_request("licenseTier must be 1 (free), 2 (professional) or 3 (enterprise)")
+            raise bad_request("licenseTier must be 1 (free) or 2 (premium)")
         if reason_code not in TIER_OVERRIDE_REASON_CODES:
             raise bad_request(
                 "reasonCode is required with licenseTier and must be one of: "

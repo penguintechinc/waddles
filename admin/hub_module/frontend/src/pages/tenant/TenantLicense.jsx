@@ -119,7 +119,7 @@ function TenantLicense() {
     <div className="max-w-2xl">
       <h1 className="text-2xl font-bold text-sky-100 mb-2">License</h1>
       <p className="text-sm text-navy-300 mb-6">
-        Your license key unlocks team pools for Professional and Enterprise community tiers. The key is
+        Your license key unlocks the pool of Premium communities (one pool size per tenant). The key is
         write-only: once saved it is never shown again, only a short fingerprint.
       </p>
 

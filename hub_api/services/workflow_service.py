@@ -12,10 +12,10 @@ hub-api-owned logic ride along with the proxying, both ported here:
    and (hardening beyond Node) also `update`, `test` and webhook creation --
    every path that mutates or runs a workflow (`require_workflow_tier`). The gate is the
    community's EFFECTIVE tier
-   (`community_tier_service.resolve_effective_tier`: max(tenant tier,
-   allocated community tier), keyed by numeric ids, fail-closed to
-   Free); the per-community `license_key`/`license_expires_at`
-   requirement was dropped (an allocated Professional/Enterprise tier
+   (`community_tier_service.resolve_effective_tier`: Premium iff the
+   community has an active allocation -- the tenant tier never uplifts it --
+   keyed by numeric ids, fail-closed to Free); the per-community `license_key`/`license_expires_at`
+   requirement was dropped (an allocated Premium tier
    unlocks workflows like every other feature).
 
 2. `get_workflow_or_403()` -- SECURITY FIX, not a faithful-port item.
@@ -46,17 +46,16 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
-from flask_core.tier_catalog import TIER_PROFESSIONAL, tier_level
 
-from services.community_tier_service import resolve_effective_tier
+from services.community_tier_service import TIER_NAME_PREMIUM, resolve_effective_tier
 from services.errors import ApiError, forbidden, not_found
 
 logger = logging.getLogger(__name__)
 
 _DEFAULT_BASE_URL = "http://workflow-core:8070"
 _DEFAULT_TIMEOUT_SECONDS = 10.0
-#: Workflows need Professional or higher (old Node `workflowTiers`: pro/enterprise/premium).
-_WORKFLOW_MIN_TIER = TIER_PROFESSIONAL
+#: Workflows need a Premium community (old Node `workflowTiers`: pro/enterprise/premium).
+_WORKFLOW_REQUIRED_TIER = TIER_NAME_PREMIUM
 
 
 @dataclass(slots=True, frozen=True)
@@ -145,8 +144,8 @@ async def validate_license(
 ) -> LicenseCheckResult:
     """Port of `workflowController.js::validateLicense()`, now an effective-tier gate.
 
-    Valid when the community's effective tier (max of tenant tier and community allocation,
-    numeric-id keyed) is Professional or higher. No per-community license key is required. An
+    Valid when the community's effective tier (Premium via allocation only, numeric-id keyed) is
+    Premium. No per-community license key is required. An
     unknown, INACTIVE or other-tenant community (when the caller's validated `tenant` slug is
     given) and any lookup failure all produce the SAME denial as Free -- no existence or tier
     oracle -- logged at ERROR (type only) for failures; never a 500.
@@ -169,7 +168,7 @@ async def validate_license(
         logger.error("workflow_license_check_failed error_type=%s", type(exc).__name__)
         return denied
 
-    if tier_level(tier) < tier_level(_WORKFLOW_MIN_TIER):
+    if tier != _WORKFLOW_REQUIRED_TIER:
         return denied
     return LicenseCheckResult(True)
 

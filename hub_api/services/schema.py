@@ -1459,27 +1459,6 @@ def bind_admin_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
     bind_auth_tables(dal, migrate=migrate)
     bind_privacy_tables(dal, migrate=migrate)
     _define_audit_log(dal, migrate=migrate)
-    bind_tenant_do_not_sell_table(dal, migrate=migrate)
-
-
-def bind_tenant_do_not_sell_table(dal: Any, *, migrate: bool = False) -> None:
-    """Bind `tenant_do_not_sell` (alembic 0125): a tenant admin's DSAR Do-Not-Sell, per tenant.
-
-    Idempotent. `UNIQUE (tenant_id, user_id)` is enforced by Postgres (the writer also catches a
-    race); the pydal table is declared without it so the sqlite test backend stays simple.
-    """
-    if "tenant_do_not_sell" in dal.tables:
-        return
-    dal.define_table(
-        "tenant_do_not_sell",
-        Field("public_id", "string", length=36, notnull=True, unique=True),
-        Field("tenant_id", "integer", notnull=True),
-        Field("user_id", "integer", notnull=True),
-        Field("source_code", "integer", notnull=True),
-        Field("recorded_by", "integer"),
-        Field("created_at", "datetime", notnull=True),
-        migrate=migrate,
-    )
 
 
 def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:

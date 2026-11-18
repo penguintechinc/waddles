@@ -9,7 +9,7 @@ Clients: `services/tenantDsarInboxApi.ts` (inbox), `services/tenantPrivacyApi.ts
 | Tab | What | Tier |
 |---|---|---|
 | Inbox | Request table, filters, detail view, admin-entered requests | every tier |
-| Manual lookup | Export / erase / Do-Not-Sell for ONE user by UUID | every tier |
+| Manual lookup | Export / erase / Do-Not-Sell for ONE user by UUID (Do-Not-Sell is the user's global opt-out, opt-out only; the user can withdraw it in their own consent controls) | every tier |
 | Bulk | Same actions over many users | Enterprise |
 
 ## Inbox

@@ -19,7 +19,7 @@ from services.audit_events import AuditOutcome
 from services.schema import bind_community_tier_tables
 from tests.conftest import TENANT_SLUG
 
-PRO, ENT, FREE = svc.TIER_CODE_PROFESSIONAL, svc.TIER_CODE_ENTERPRISE, svc.TIER_CODE_FREE
+PRO, FREE = svc.TIER_CODE_PREMIUM, svc.TIER_CODE_FREE  # PRO = the one pooled tier (Premium)
 
 
 class RecordingAudit:
@@ -98,7 +98,7 @@ def _assert_consistent(env: Any, cid: int) -> None:
     row, alloc = _community(env, cid), _active(env, cid)
     tier = int(alloc.tier_code) if alloc else FREE
     assert (row.license_tier or "free") == svc.TIER_NAMES[tier]
-    assert bool(row.is_premium) is (tier >= PRO)
+    assert bool(row.is_premium) is (tier == PRO)
 
 
 async def test_allocate_within_pool_updates_denormalized_columns(env: Any) -> None:
@@ -132,7 +132,6 @@ async def test_concurrent_allocators_for_last_slot_exactly_one_wins(env: Any) ->
 
 async def test_shrinking_pool_keeps_rows_and_only_blocks_new(env: Any) -> None:
     await _set_pool(env, PRO, 3)
-    await _set_pool(env, ENT, 0)
     for c in env.cs[:3]:
         await _alloc(env, c, PRO)
     await _set_pool(env, PRO, 1)  # downgrade: over by 2
@@ -159,10 +158,6 @@ async def _age(env: Any, community: int, days: int) -> None:
     env.dal.commit()
 
 
-async def _free_tenant_tier(_slug: str) -> str:
-    return "free"
-
-
 async def test_stale_rows_keep_their_slot_and_tier_until_released_and_touch_clears_flag(
     env: Any,
 ) -> None:
@@ -172,7 +167,6 @@ async def test_stale_rows_keep_their_slot_and_tier_until_released_and_touch_clea
     whole new pool every 30 days; no activity signal feeds `touch_active`, so reclamation is off.
     """
     await _set_pool(env, PRO, 2)
-    await _set_pool(env, ENT, 0)
     await _alloc(env, env.cs[0], PRO)
     await _alloc(env, env.cs[1], PRO)
     for c in env.cs[:2]:
@@ -192,13 +186,8 @@ async def test_stale_rows_keep_their_slot_and_tier_until_released_and_touch_clea
 
     # (2) the old allocations still confer their tier (never stripped)
     for c in env.cs[:2]:
-        assert _community(env, c).license_tier == "professional"
-        assert (
-            await svc.resolve_effective_tier(
-                env.adal, env.dal, env.tenant, c, tenant_tier=_free_tenant_tier
-            )
-            == "professional"
-        )
+        assert _community(env, c).license_tier == "premium"
+        assert await svc.resolve_effective_tier(env.adal, env.dal, env.tenant, c) == "premium"
 
     # (4) releasing one frees exactly one slot; the next allocation succeeds, a further one fails
     await _alloc(env, env.cs[0], FREE)
@@ -216,17 +205,6 @@ async def test_stale_rows_keep_their_slot_and_tier_until_released_and_touch_clea
     assert not svc._is_stale(row, svc.now_utc())  # noqa: SLF001
     after = (await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool))[PRO]
     assert (after.used, after.stale_excluded) == (2, 0)
-
-
-async def test_stale_pro_row_counts_for_tier_change_prev_used(env: Any) -> None:
-    """Tier change from a stale Pro row: the vacated tier's count (gauge) reflects real usage."""
-    await _set_pool(env, PRO, 2)
-    await _set_pool(env, ENT, 1)
-    await _alloc(env, env.cs[0], PRO)
-    await _alloc(env, env.cs[1], PRO)
-    await _age(env, env.cs[1], 40)
-    res = await _alloc(env, env.cs[0], ENT)
-    assert res.changed and res.previous_used == 1  # cs[1] (stale) still counted in Pro
 
 
 async def test_touch_active_rate_limited(env: Any) -> None:
@@ -252,35 +230,39 @@ async def test_free_never_blocked_and_releases_slot(env: Any) -> None:
     assert released.release_reason_code == svc.RELEASE_DEALLOC
 
 
-async def test_tier_change_blocked_leaves_old_allocation(env: Any) -> None:
+async def test_pool_usage_has_exactly_one_premium_entry(env: Any) -> None:
     await _set_pool(env, PRO, 2)
-    await _set_pool(env, ENT, 1)
     await _alloc(env, env.cs[0], PRO)
-    await _alloc(env, env.cs[1], ENT)
-    with pytest.raises(svc.PoolExhausted):
-        await _alloc(env, env.cs[0], ENT)
-    assert int(_active(env, env.cs[0]).tier_code) == PRO
-    _assert_consistent(env, env.cs[0])
-
-
-async def test_tier_change_success_releases_old_with_reason(env: Any) -> None:
-    await _set_pool(env, PRO, 1)
-    await _set_pool(env, ENT, 1)
-    await _alloc(env, env.cs[0], PRO)
-    res = await _alloc(env, env.cs[0], ENT)
-    assert res.changed and res.previous_tier_code == PRO
-    assert int(_active(env, env.cs[0]).tier_code) == ENT
-    _assert_consistent(env, env.cs[0])
-    t = env.dal.community_tier_allocations
-    old = env.dal((t.community_id == env.cs[0]) & (t.tier_code == PRO)).select().first()
-    assert old.released_at is not None and old.release_reason_code == svc.RELEASE_TIER_CHANGE
     usage = await svc.pool_usage(env.adal, env.dal, env.tenant, pool=env.pool)
-    assert usage[PRO].used == 0 and usage[ENT].used == 1
+    assert list(usage) == [PRO] and svc.POOLED_TIER_CODES == (PRO,)
+    assert usage[PRO].used == 1
+
+
+async def test_only_tiers_free_and_premium_exist(env: Any) -> None:
+    assert svc.TIER_NAMES == {1: "free", 2: "premium"}
+    assert not hasattr(svc, "TIER_CODE_PROFESSIONAL") and not hasattr(svc, "TIER_CODE_ENTERPRISE")
+    await _set_pool(env, PRO, 5)
+    with pytest.raises(ValueError):
+        await _alloc(env, env.cs[0], 3)  # the removed Enterprise code is rejected
+    with pytest.raises(ValueError):
+        await env.store.put(env.tenant, 3, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
+
+
+async def test_allocate_within_pool_then_blocked_beyond_with_required_tier_premium(
+    env: Any,
+) -> None:
+    await _set_pool(env, PRO, 1)
+    ok = await _alloc(env, env.cs[0], PRO)
+    assert ok.changed and (ok.used, ok.limit) == (1, 1)
+    _assert_consistent(env, env.cs[0])
+    assert _community(env, env.cs[0]).license_tier == "premium"
+    with pytest.raises(svc.PoolExhausted) as exc:
+        await _alloc(env, env.cs[1], PRO)
+    assert exc.value.required_tier == 2
 
 
 async def test_operator_override_never_blocked_but_counted_and_audited(env: Any) -> None:
     await _set_pool(env, PRO, 1)
-    await _set_pool(env, ENT, 0)
     await _alloc(env, env.cs[0], PRO)
     res = await _alloc(env, env.cs[1], PRO, source=svc.SOURCE_OPERATOR_OVERRIDE)
     assert res.changed and res.overage == 1 and res.used == 2
@@ -291,7 +273,7 @@ async def test_operator_override_never_blocked_but_counted_and_audited(env: Any)
 
 
 async def test_operator_override_proceeds_without_known_pool(env: Any) -> None:
-    res = await _alloc(env, env.cs[0], ENT, source=svc.SOURCE_OPERATOR_OVERRIDE)
+    res = await _alloc(env, env.cs[0], PRO, source=svc.SOURCE_OPERATOR_OVERRIDE)
     assert res.changed and res.limit is None
 
 
@@ -338,33 +320,41 @@ async def test_foreign_community_rejected_numeric_keys_only(env: Any) -> None:
         await _alloc(env, env.cs[0], PRO, reason="free text with spaces")
 
 
-async def test_effective_tier_is_max_and_fails_closed(env: Any) -> None:
-    async def tenant_free(_slug: str) -> str:
-        return "free"
-
-    async def tenant_ent(_slug: str) -> str:
-        return "enterprise"
-
-    async def boom(_slug: str) -> str:
-        raise RuntimeError("license server down")
-
-    await _set_pool(env, PRO, 1)
+async def test_effective_tier_premium_iff_active_allocation_and_fails_closed(env: Any) -> None:
+    await _set_pool(env, PRO, 2)
     await _alloc(env, env.cs[0], PRO)
+    await _alloc(env, env.cs[2], PRO, source=svc.SOURCE_OPERATOR_OVERRIDE)
     a, d, t = env.adal, env.dal, env.tenant
-    assert (
-        await svc.resolve_effective_tier(a, d, t, env.cs[0], tenant_tier=tenant_free)
-        == "professional"
-    )
-    assert await svc.resolve_effective_tier(a, d, t, env.cs[1], tenant_tier=tenant_free) == "free"
-    assert (
-        await svc.resolve_effective_tier(a, d, t, env.cs[0], tenant_tier=tenant_ent) == "enterprise"
-    )
-    assert await svc.resolve_effective_tier(a, d, t, env.cs[0], tenant_tier=boom) == "free"
+    assert await svc.resolve_effective_tier(a, d, t, env.cs[0]) == "premium"
+    assert await svc.resolve_effective_tier(a, d, t, env.cs[2]) == "premium"  # operator override
+    assert await svc.resolve_effective_tier(a, d, t, env.cs[1]) == "free"  # no allocation
+    # (f) the tenant's own license tier never uplifts a community: no tenant-tier input exists
+    import inspect
+
+    assert "tenant_tier" not in inspect.signature(svc.resolve_effective_tier).parameters
     # a community of another tenant never confers its tier here
-    assert (
-        await svc.resolve_effective_tier(a, d, env.other, env.cs[0], tenant_tier=tenant_free)
-        == "free"
-    )
+    assert await svc.resolve_effective_tier(a, d, env.other, env.cs[0]) == "free"
+    # a released allocation drops back to free
+    await _alloc(env, env.cs[0], FREE)
+    assert await svc.resolve_effective_tier(a, d, t, env.cs[0]) == "free"
+
+
+async def test_effective_tier_counts_backfill_rows_and_fails_closed_on_error(
+    env: Any, caplog: Any
+) -> None:
+    await _set_pool(env, PRO, 5)
+    await _alloc(env, env.cs[3], PRO, source=svc.SOURCE_BACKFILL)
+    assert await svc.resolve_effective_tier(env.adal, env.dal, env.tenant, env.cs[3]) == "premium"
+
+    class _BrokenDal:
+        def __getattr__(self, name: str) -> Any:
+            raise RuntimeError("db down")
+
+    with caplog.at_level("ERROR"):
+        assert await svc.resolve_effective_tier(env.adal, _BrokenDal(), env.tenant, env.cs[3]) == (
+            "free"
+        )
+    assert "community_tier_resolve_failed error_type=RuntimeError" in caplog.text
 
 
 async def test_pool_store_upsert_roundtrip(env: Any) -> None:
@@ -432,9 +422,9 @@ async def test_release_refreshes_the_utilization_gauge(env: Any) -> None:
     await _set_pool(env, PRO, 2)
     await _alloc(env, env.cs[0], PRO)
     await _alloc(env, env.cs[1], PRO)
-    assert tel._state[(env.tenant, "professional")] == (2, 2)  # noqa: SLF001
+    assert tel._state[(env.tenant, "premium")] == (2, 2)  # noqa: SLF001
     await _alloc(env, env.cs[0], FREE)
-    assert tel._state[(env.tenant, "professional")] == (1, 2)  # noqa: SLF001
+    assert tel._state[(env.tenant, "premium")] == (1, 2)  # noqa: SLF001
 
 
 async def test_audit_failure_is_loud_retried_and_counted(env: Any, caplog: Any) -> None:
@@ -458,18 +448,17 @@ async def test_pool_store_put_is_an_upsert_and_evicts_only_license_server_rows(
 ) -> None:
     await env.store.put(env.tenant, PRO, 1, svc.POOL_SOURCE_LICENSE_SERVER, svc.now_utc())
     await env.store.put(env.tenant, PRO, 9, svc.POOL_SOURCE_LICENSE_SERVER, svc.now_utc())
-    await env.store.put(env.tenant, ENT, 4, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
     t = env.dal.tenant_license_pools
-    assert env.dal(t.tenant_id == env.tenant).count() == 2
+    assert env.dal(t.tenant_id == env.tenant).count() == 1
     assert (await env.store.get(env.tenant, PRO)).limit_count == 9
+    await env.store.put(env.other, PRO, 4, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
     assert await env.store.delete_license_server_rows(env.tenant) == 1
     assert await env.store.get(env.tenant, PRO) is None
-    assert (await env.store.get(env.tenant, ENT)).limit_count == 4
+    assert (await env.store.get(env.other, PRO)).limit_count == 4  # operator rows untouched
 
 
 async def test_pool_usage_counts_in_sql_and_reports_stale_but_includes_it(env: Any) -> None:
     await _set_pool(env, PRO, 3)
-    await _set_pool(env, ENT, 3)
     await _alloc(env, env.cs[0], PRO)
     await _alloc(env, env.cs[1], PRO)
     t = env.dal.community_tier_allocations

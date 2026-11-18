@@ -62,7 +62,7 @@ function DashboardBody({ membership }: { membership: MyCommunity }) {
         <div className="space-y-6">
           {isOwnerOrAdmin ? (
             <ServedFeature feature="bot-score" fallbackClassName="card py-8">
-              <BotScoreCard communityId={communityId} isPremium={communityTier(communityId) >= TIER.professional} />
+              <BotScoreCard communityId={communityId} isPremium={communityTier(communityId) >= TIER.premium} />
             </ServedFeature>
           ) : null}
           <CommunityReputationPanel communityId={communityId} />

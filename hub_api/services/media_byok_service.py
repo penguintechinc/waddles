@@ -1,7 +1,7 @@
 """Media (Gemini) BYOK key management, effective-tier resolution, and the internal resolver core.
 
 Harness media generation (`docs/superpowers/specs/2026-11-06-harness-media-generation.md`) is
-Professional-or-higher AND BYOK-only: there is no platform-funded media key. A community's Gemini
+Premium-community AND BYOK-only: there is no platform-funded media key. A community's Gemini
 key lives in the existing `ai_byok_keys` store (AES-256-GCM, `AI_BYOK_ENCRYPTION_KEY`, provider
 `gemini`) -- the AI router/config paths never select it (`config_service._VALID_PROVIDERS`).
 
@@ -9,7 +9,7 @@ Invariants this module owns:
 
 * the plaintext key leaves this module ONLY through `resolve_media_key` (the internal resolver);
   every other accessor returns `key_last4` metadata;
-* tier is `max(tenant_tier, community_tier)`, resolved here from trusted server state (the single
+* tier is the community's own (Premium iff allocated), resolved from trusted server state (the one
   `community_tier_service.resolve_effective_tier`, numeric-id keyed), never from a caller-supplied
   value, and fails closed to `free` on anything unresolvable;
 * every lookup is tenant-bound: a community that is not in the stated tenant never resolves.
@@ -22,13 +22,16 @@ from dataclasses import dataclass
 from typing import Any, Final
 
 import httpx
-from flask_core.tier_catalog import TIER_FREE, tier_level
 
 from services.ai_routing import config_service
 from services.ai_routing.config_service import ByokKeyInfo
 from services.ai_routing.errors import invalid_byok_key, provider_error
 from services.community_authz import community_belongs_to_tenant
-from services.community_tier_service import resolve_effective_tier
+from services.community_tier_service import (
+    TIER_NAME_FREE,
+    TIER_NAME_PREMIUM,
+    resolve_effective_tier,
+)
 from services.errors import ApiError, bad_request
 
 logger = logging.getLogger(__name__)
@@ -41,7 +44,7 @@ SUPPORTED_MEDIA_PROVIDERS: Final = frozenset({MEDIA_PROVIDER_GEMINI})
 GEMINI_MODELS_URL: Final = "https://generativelanguage.googleapis.com/v1beta/models"
 
 #: Minimum effective tier for any media generation (spec §1).
-MIN_MEDIA_TIER: Final = "professional"
+MIN_MEDIA_TIER: Final = TIER_NAME_PREMIUM
 #: Upper bound on a pasted API key; real Gemini keys are ~40 chars.
 MAX_KEY_CHARS: Final = 512
 
@@ -64,12 +67,12 @@ class CommunityScopeError(Exception):
 
 
 def tier_meets_media_floor(tier: str) -> bool:
-    """True when `tier` is Professional or higher; an unknown tier is below the floor."""
-    return bool(tier_level(tier) >= tier_level(MIN_MEDIA_TIER))
+    """True only for the Premium community tier; Free or an unknown tier is below the floor."""
+    return tier == MIN_MEDIA_TIER
 
 
 async def effective_tier(async_dal: Any, dal: Any, *, tenant_id: int, community_id: int) -> str:
-    """`max(tenant_tier, community allocation)` for a community INSIDE `tenant_id`; fails closed.
+    """Premium iff allocated (tenant tier never uplifts), for a community INSIDE `tenant_id`.
 
     Delegates to the single resolver (`community_tier_service.resolve_effective_tier`), keyed by
     numeric tenant and community ids -- never a tenant slug. A resolver failure reports `free`
@@ -82,14 +85,14 @@ async def effective_tier(async_dal: Any, dal: Any, *, tenant_id: int, community_
         )
     except Exception as exc:  # noqa: BLE001 - an entitlement gate fails closed to free
         logger.error("media_byok_tier_scope_check_failed error_type=%s", type(exc).__name__)
-        return str(TIER_FREE)
+        return TIER_NAME_FREE
     if not belongs:
         raise CommunityScopeError("community not in tenant")
     try:
         return await resolve_effective_tier(async_dal, dal, tenant_id, community_id)
     except Exception as exc:  # noqa: BLE001 - belt and braces; the resolver already fails closed
         logger.error("media_byok_tier_resolve_failed error_type=%s", type(exc).__name__)
-        return str(TIER_FREE)
+        return TIER_NAME_FREE
 
 
 async def _validate_gemini_key(api_key: str) -> None:
@@ -118,15 +121,13 @@ async def _validate_gemini_key(api_key: str) -> None:
 async def require_media_entitlement(
     async_dal: Any, dal: Any, *, tenant_id: int, community_id: int
 ) -> None:
-    """Raise 402 `TIER_REQUIRED` unless the community's effective tier is Professional or higher."""
+    """Raise 402 `TIER_REQUIRED` unless the community's effective tier is Premium."""
     try:
         tier = await effective_tier(async_dal, dal, tenant_id=tenant_id, community_id=community_id)
     except CommunityScopeError as exc:
         raise ApiError("Community not found", 404, "NOT_FOUND") from exc
     if not tier_meets_media_floor(tier):
-        raise ApiError(
-            "Media generation requires the Professional tier or higher", 402, "TIER_REQUIRED"
-        )
+        raise ApiError("Media generation requires a Premium community", 402, "TIER_REQUIRED")
 
 
 def _require_provider(provider: str) -> None:
@@ -201,7 +202,7 @@ async def resolve_media_key(
     """Tier-gate then decrypt the community's active key for the Rust media host.
 
     Order is fixed and fail-closed: scope check (raises `CommunityScopeError`) -> effective tier
-    (`tier_required` below Professional) -> key lookup (`not_configured` when absent/inactive).
+    (`tier_required` below Premium) -> key lookup (`not_configured` when absent/inactive).
     The community-level key is the only level stored today; a tenant-level fallback is deferred
     (the stored scope is the community). Returns the plaintext ONLY on `ok`; the caller must never
     log or persist it.

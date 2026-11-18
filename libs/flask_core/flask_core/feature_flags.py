@@ -84,7 +84,7 @@ async def get_tier(
     """
     Resolve the effective license tier (``free``/``professional``/``enterprise``).
 
-    ``max(tenant_tier, community_tier)``, cascading down -- the same
+    The TENANT's licence tier (a community never changes it) -- the same
     resolution `feature_enabled` enforces, exposed for callers that need the
     tier itself (a `flags.tier` host capability, an admin UI badge). A
     hardcoded bypass domain reports ``enterprise`` exactly where it would skip

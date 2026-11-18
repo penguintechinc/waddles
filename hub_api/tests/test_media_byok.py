@@ -39,7 +39,7 @@ from services import media_byok_service as svc
 from services.ai_routing.errors import invalid_byok_key
 from services.schema import _define_audit_log
 from tests._dataplane_grpc import DataplaneClient, serving_dataplane
-from tests.ai_routing_helpers import ensure_tier_tables, grant_tier
+from tests.ai_routing_helpers import ensure_tier_tables, grant_tier, patch_tenant_tier
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
@@ -66,11 +66,8 @@ def _env(monkeypatch: pytest.MonkeyPatch, ai_routing_db: Any) -> None:
         if api_key == "bad-key":
             raise invalid_byok_key("gemini rejected this API key")
 
-    async def _free_tenant(*, tenant: str, community: int | None = None) -> str:
-        return "free"
-
     monkeypatch.setattr(svc, "_validate_gemini_key", _valid)
-    monkeypatch.setattr(tier_svc, "get_tier", _free_tenant)
+    patch_tenant_tier(monkeypatch, "free")
 
 
 @pytest.fixture
@@ -109,8 +106,7 @@ def _set_tier(db: Any, community_id: int, tier: str | None) -> None:
         & (dal.community_tier_allocations.released_at == None)  # noqa: E711
     ).update(released_at=now)
     code = {
-        "professional": tier_svc.TIER_CODE_PROFESSIONAL,
-        "enterprise": tier_svc.TIER_CODE_ENTERPRISE,
+        "premium": tier_svc.TIER_CODE_PREMIUM,
     }.get(tier or "")
     if code is not None:
         grant_tier(dal, community_id, code)
@@ -121,7 +117,7 @@ def _tenant_id(db: Any, slug: str) -> int:
     return int(db.dal(db.dal.tenants.slug == slug).select().first().id)
 
 
-def _admin(db: Any, *, tenant: str = TENANT_SLUG, tier: str | None = "professional") -> tuple:
+def _admin(db: Any, *, tenant: str = TENANT_SLUG, tier: str | None = "premium") -> tuple:
     community_id = seed_community(db, tenant_slug=tenant)
     _set_tier(db, community_id, tier)
     seed_membership(db, community_id=community_id, user_id=801, role="community-owner")
@@ -145,7 +141,7 @@ class TestByokDedicatedScope:
         self, app: Quart, ai_routing_db: Any
     ) -> None:
         cid = seed_community(ai_routing_db)
-        _set_tier(ai_routing_db, cid, "professional")
+        _set_tier(ai_routing_db, cid, "premium")
         seed_scoped_member(
             ai_routing_db,
             community_id=cid,
@@ -217,20 +213,19 @@ class TestAdminApi:
         assert r.status_code == 402
         assert ai_routing_db.dal(ai_routing_db.dal.ai_byok_keys).count() == 0
 
-    async def test_tenant_tier_lifts_free_community(
+    async def test_tenant_tier_never_lifts_free_community(
         self, app: Quart, ai_routing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _pro(*, tenant: str, community: int | None = None) -> str:
-            return "professional"
-
-        monkeypatch.setattr(tier_svc, "get_tier", _pro)
-        headers, cid = _admin(ai_routing_db, tier=None)
-        r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
-            headers=headers,
-            json={"provider": "gemini", "api_key": PLAINTEXT},
-        )
-        assert r.status_code == 200
+        """Regression: a Professional/Enterprise TENANT with no allocation is still Free (402)."""
+        for tenant_tier in ("professional", "enterprise"):
+            patch_tenant_tier(monkeypatch, tenant_tier)
+            headers, cid = _admin(ai_routing_db, tier=None)
+            r = await app.test_client().put(
+                f"/api/v1/admin/{cid}/media/byok-keys",
+                headers=headers,
+                json={"provider": "gemini", "api_key": PLAINTEXT},
+            )
+            assert r.status_code == 402
 
     async def test_rejected_key_not_stored(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
@@ -305,7 +300,9 @@ _BYOK = "/waddles.hub.internal.v1.MediaService/ResolveByok"
 _TIER = "/waddles.hub.internal.v1.MediaService/GetEffectiveTier"
 _TIER_NAMES = {
     media_pb2.MEDIA_TIER_FREE: "free",
-    media_pb2.MEDIA_TIER_PROFESSIONAL: "professional",
+    # Community Premium is reported as the lowest paid media enum (PROFESSIONAL); the proto's
+    # ENTERPRISE value is never emitted any more.
+    media_pb2.MEDIA_TIER_PROFESSIONAL: "premium",
     media_pb2.MEDIA_TIER_ENTERPRISE: "enterprise",
 }
 
@@ -360,7 +357,7 @@ class TestResolver:
         r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert (r.status, _TIER_NAMES[r.tier], r.api_key) == (
             media_pb2.BYOK_STATUS_OK,
-            "professional",
+            "premium",
             PLAINTEXT,
         )
         rows = _audit_rows(ai_routing_db)
@@ -376,7 +373,7 @@ class TestResolver:
         r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert (r.status, _TIER_NAMES[r.tier], r.HasField("api_key")) == (
             media_pb2.BYOK_STATUS_NOT_CONFIGURED,
-            "professional",
+            "premium",
             False,
         )
 
@@ -519,15 +516,15 @@ class TestEffectiveTier:
         ("tenant_tier", "community_tier", "expected"),
         [
             ("free", None, "free"),
-            ("free", "professional", "professional"),
-            ("professional", "free", "professional"),
-            ("professional", "enterprise", "enterprise"),
-            ("enterprise", "free", "enterprise"),
+            ("free", "premium", "premium"),
+            ("professional", None, "free"),
+            ("enterprise", None, "free"),
+            ("professional", "premium", "premium"),
             ("free", "bogus", "free"),
             ("bogus", None, "free"),
         ],
     )
-    async def test_max_of_tenant_and_community(
+    async def test_premium_only_via_allocation_tenant_never_uplifts(
         self,
         ai_routing_db: Any,
         issuer: ServiceJwtIssuer,
@@ -537,10 +534,7 @@ class TestEffectiveTier:
         community_tier: str | None,
         expected: str,
     ) -> None:
-        async def _t(*, tenant: str, community: int | None = None) -> str:
-            return tenant_tier
-
-        monkeypatch.setattr(tier_svc, "get_tier", _t)
+        patch_tenant_tier(monkeypatch, tenant_tier)
         _, cid = _admin(ai_routing_db, tier=community_tier)
         token = _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE)
         r = await _tier_call(dp, token, _tenant_id(ai_routing_db, TENANT_SLUG), cid)
@@ -556,11 +550,11 @@ class TestEffectiveTier:
     ) -> None:
         """Tier lookup fails -> Free (never a paid tier, never an RPC error) + an ERROR record."""
 
-        async def _boom(*, tenant: str, community: int | None = None) -> str:
-            raise RuntimeError("license gate down")
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("allocation store down")
 
-        monkeypatch.setattr(tier_svc, "get_tier", _boom)
-        _, cid = _admin(ai_routing_db, tier="enterprise")
+        monkeypatch.setattr(tier_svc, "_community_active_row", _boom)
+        _, cid = _admin(ai_routing_db, tier="premium")
         tid = _tenant_id(ai_routing_db, TENANT_SLUG)
         with caplog.at_level(logging.ERROR):
             r = await _tier_call(dp, _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE), tid, cid)
@@ -583,7 +577,7 @@ class TestEffectiveTier:
             raise RuntimeError("db down")
 
         monkeypatch.setattr(svc, "community_belongs_to_tenant", _boom)
-        _, cid = _admin(ai_routing_db, tier="enterprise")
+        _, cid = _admin(ai_routing_db, tier="premium")
         tid = _tenant_id(ai_routing_db, TENANT_SLUG)
         with caplog.at_level(logging.ERROR):
             tier = await svc.effective_tier(
@@ -599,15 +593,12 @@ class TestEffectiveTier:
         dal = ai_routing_db.dal
         twin_tid = int(dal.tenants.insert(slug="acme-twin", display_name="Acme Corp"))
         dal.commit()
-        _, granted = _admin(ai_routing_db, tier="professional")
+        _, granted = _admin(ai_routing_db, tier="premium")
         tid = _tenant_id(ai_routing_db, TENANT_SLUG)
         twin_cid = seed_community(ai_routing_db, tenant_slug="acme-twin")
 
-        async def _lic(*, tenant: str, community: int | None = None) -> str:
-            return "enterprise" if tenant == TENANT_SLUG else "free"
-
         got = await svc.effective_tier(ai_routing_db, dal, tenant_id=tid, community_id=granted)
-        assert got == "professional"
+        assert got == "premium"
         twin = await svc.effective_tier(
             ai_routing_db, dal, tenant_id=twin_tid, community_id=twin_cid
         )
@@ -617,9 +608,9 @@ class TestEffectiveTier:
             await svc.effective_tier(ai_routing_db, dal, tenant_id=twin_tid, community_id=granted)
         dal(dal.tenants.id == tid).update(slug="acme-renamed")
         dal.commit()
-        monkeypatch.setattr(tier_svc, "get_tier", _lic)  # license keyed to the OLD slug
+        patch_tenant_tier(monkeypatch, {TENANT_SLUG: "enterprise"})  # license keyed to the OLD slug
         renamed = await svc.effective_tier(ai_routing_db, dal, tenant_id=tid, community_id=granted)
-        assert renamed == "professional"
+        assert renamed == "premium"
 
     async def test_refusals(
         self, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient

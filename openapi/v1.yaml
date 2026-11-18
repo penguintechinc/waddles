@@ -1421,9 +1421,8 @@ components:
           type: integer
         licenseTier:
           default: 1
-          description: 'The community''s own allocated tier: 1 Free, 2 Professional,
-            3 Enterprise (no active allocation = 1). The effective tier also includes
-            the tenant''s tier (gates apply the max server-side), so treat this as
+          description: 'The community''s own tier: 1 Free, 2 Premium (no active allocation
+            = 1; the tenant''s own tier never uplifts a community). Treat this as
             a display/UX hint only, never an authorization decision: backend gates
             remain authoritative.'
           title: Licensetier
@@ -3742,8 +3741,8 @@ components:
       title: PoolDTO
       type: object
     PoolTierDTO:
-      description: 'One tier''s pool. `limit`: null = not licensed, -1 = unlimited.
-        `tier`: 2 Pro / 3 Ent.'
+      description: 'The Premium pool. `limit`: null = not licensed, -1 = unlimited.
+        `tier` is always 2.'
       properties:
         available:
           anyOf:
@@ -10376,8 +10375,8 @@ paths:
                 title: MediaByokKeyDTO
                 type: object
           description: Masked key record -- never carries the real key.
-      summary: '`PUT .../media/byok-keys` -- Professional+ required; validated against
-        Gemini first.'
+      summary: '`PUT .../media/byok-keys` -- Premium community required; validated
+        against Gemini first.'
   /api/v1/admin/{community_id}/media/byok-keys/{provider}:
     delete:
       description: ''
@@ -26072,7 +26071,7 @@ paths:
                 title: AllocationListResponse
                 type: object
           description: Response DTO for `GET /communities/tier-allocations`.
-      summary: Active Pro/Ent allocations of the tenant's communities (paginated;
+      summary: Active Premium allocations of the tenant's communities (paginated;
         `tier`/`source`).
   /api/v1/tenant/{tenant_slug}/communities/{community_uuid}/tier:
     put:
@@ -26094,8 +26093,7 @@ paths:
           application/json:
             schema:
               additionalProperties: false
-              description: 'Request DTO for `PUT ./tier`: `tier` is 1 Free, 2 Professional
-                or 3 Enterprise.'
+              description: 'Request DTO for `PUT ./tier`: `tier` is 1 Free or 2 Premium.'
               properties:
                 tier:
                   title: Tier
@@ -26151,8 +26149,8 @@ paths:
                 type: object
           description: Response DTO for `PUT /communities/<uuid>/tier` (`limit` null
             = not licensed / Free).
-      summary: Allocate (or release, tier 1) a community's tier from the tenant's
-        team pool.
+      summary: Allocate (tier 2) or release (tier 1) a community's Premium slot from
+        the team pool.
   /api/v1/tenant/{tenant_slug}/kms:
     delete:
       description: '

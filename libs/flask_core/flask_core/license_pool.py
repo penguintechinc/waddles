@@ -1,11 +1,11 @@
 """Per-tenant, per-tier community-entitlement POOL limits (Team/OU axis).
 
-A tenant admin allocates Professional/Enterprise entitlements to communities
-out of a pool whose size is licensed per tenant. This module answers "how big
-is tenant T's pool for tier X" and fails LOUD when it cannot know:
+A tenant admin allocates Premium entitlements to communities out of ONE pool
+whose size is licensed per tenant. This module answers "how big is tenant T's
+Premium pool" and fails LOUD when it cannot know:
 
 * License-server deployments: the tenant's own license key is POSTed to
-  ``/api/v2/entitlements`` and ``team.<tier>.limit`` is read (ASSUMED future
+  ``/api/v2/entitlements`` and ``team.premium.limit`` is read (ASSUMED future
   contract, see ``TEAM_AXIS_KEY`` / ``TIER_RESPONSE_KEYS`` and
   ``docs/license-pool.md``; the live server has no team axis yet).
 * Bypass domains (hardcoded, never env/flag driven): NO license-server call;
@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 # --- ASSUMED license-server contract (verify against alpha; see docs) -------
 ENTITLEMENTS_PATH = "/api/v2/entitlements"
 TEAM_AXIS_KEY = "team"
-TIER_RESPONSE_KEYS: dict[int, str] = {2: "professional", 3: "enterprise"}
+TIER_RESPONSE_KEYS: dict[int, str] = {2: "premium"}
 UNLIMITED = -1
 
 SOURCE_LICENSE_SERVER = 1
@@ -112,7 +112,7 @@ class PoolStore(Protocol):
 
 
 class PoolProvider(Protocol):
-    """Contract consumed by the tier-allocation service (tier_code 2=pro, 3=ent)."""
+    """Contract consumed by the tier-allocation service (tier_code 2 = premium, the only pool)."""
 
     async def get_pool(self, tenant_id: int, tier_code: int) -> PoolInfo:
         """Return the pool or raise PoolUnavailable."""
@@ -333,7 +333,7 @@ class LicenseServerPoolProvider:
         return await asyncio.shield(task)
 
     async def _refresh(self, tenant_id: int) -> dict[int, int | None]:
-        """Fetch, parse and persist both tiers; record telemetry; raise _Refused on failure."""
+        """Fetch, parse and persist the premium pool; record telemetry; raise _Refused on failure."""
         started = time.monotonic()
         outcome = "success"
         try:

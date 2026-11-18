@@ -67,7 +67,7 @@ async def test_missing_license_key_raises_the_services_pool_unavailable(
     monkeypatch.setattr("services.tenant_license_service.get_tenant_license_key", _no_key)
     provider = pp.get_pool_provider(app)
     with pytest.raises(svc.PoolUnavailable):
-        await provider.get_pool(1, svc.TIER_CODE_PROFESSIONAL)
+        await provider.get_pool(1, svc.TIER_CODE_PREMIUM)
 
 
 async def test_bypass_host_without_operator_row_is_an_unlicensed_pool(
@@ -77,8 +77,107 @@ async def test_bypass_host_without_operator_row_is_an_unlicensed_pool(
 
     bind_community_tier_tables(app.config["dal"], migrate=True)
     monkeypatch.setattr(pp, "current_request_host", lambda: "app.penguincloud.io")
-    info = await pp.get_pool_provider(app).get_pool(1, svc.TIER_CODE_ENTERPRISE)
+    info = await pp.get_pool_provider(app).get_pool(1, svc.TIER_CODE_PREMIUM)
     assert isinstance(info, svc.PoolInfo) and info.limit is None and info.source == "operator_set"
+
+
+def _seed_default_tenant(app: Quart) -> int:
+    """Insert the reserved `default` tenant; return its numeric id (distinct from tenant 1)."""
+    from services.schema import bind_community_tier_tables
+
+    dal = app.config["dal"]
+    bind_community_tier_tables(dal, migrate=True)
+    tid = int(dal.tenants.insert(slug="default", display_name="Default", is_active=True))
+    dal.commit()
+    return tid
+
+
+async def test_default_tenant_on_bypass_host_gets_unlimited_premium_in_code(
+    app: Quart, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    default_id = _seed_default_tenant(app)
+    monkeypatch.setattr(pp, "current_request_host", lambda: "waddles.penguintech.cloud")
+    info = await pp.get_pool_provider(app).get_pool(default_id, svc.TIER_CODE_PREMIUM)
+    assert (info.limit, info.stale, info.source) == (svc.UNLIMITED, False, "bypass_default")
+    dal = app.config["dal"]
+    assert dal(dal.tenant_license_pools).count() == 0  # computed in code, never stored
+
+
+async def test_default_tenant_bypass_pool_never_402s_allocation(
+    app: Quart, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    default_id = _seed_default_tenant(app)
+    dal = app.config["dal"]
+    cids = [
+        int(dal.communities.insert(name=f"d{i}", tenant_id=default_id, is_premium=False))
+        for i in range(4)
+    ]
+    dal.commit()
+    monkeypatch.setattr(pp, "current_request_host", lambda: "waddles.app")
+    provider = pp.get_pool_provider(app)
+    for cid in cids:
+        res = await svc.allocate(
+            app.config["async_dal"], dal, tenant_id=default_id, community_id=cid,
+            tier=svc.TIER_CODE_PREMIUM, actor=None, source=svc.SOURCE_TENANT_ADMIN, pool=provider,
+        )  # fmt: skip
+        assert res.changed and res.limit == svc.UNLIMITED and res.overage == 0
+    usage = await svc.pool_usage(app.config["async_dal"], dal, default_id, pool=provider)
+    assert list(usage) == [svc.TIER_CODE_PREMIUM]
+    assert usage[svc.TIER_CODE_PREMIUM].unlimited and usage[svc.TIER_CODE_PREMIUM].used == 4
+
+
+async def test_other_tenant_on_bypass_host_without_operator_row_is_not_licensed(
+    app: Quart, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    default_id = _seed_default_tenant(app)
+    other = int(
+        app.config["dal"](app.config["dal"].tenants.slug == "acme-corp").select().first().id
+    )
+    assert other != default_id
+    monkeypatch.setattr(pp, "current_request_host", lambda: "waddles.penguintech.cloud")
+    info = await pp.get_pool_provider(app).get_pool(other, svc.TIER_CODE_PREMIUM)
+    assert info.limit is None and info.source == "operator_set"  # -> 402 "not licensed" as before
+
+
+async def test_other_tenant_bypass_host_operator_row_still_honoured(
+    app: Quart, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_default_tenant(app)
+    dal = app.config["dal"]
+    other = int(dal(dal.tenants.slug == "acme-corp").select().first().id)
+    await svc.PoolStore(app.config["async_dal"], dal).put(
+        other, svc.TIER_CODE_PREMIUM, 3, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
+    )
+    monkeypatch.setattr(pp, "current_request_host", lambda: "app.penguincloud.io")
+    info = await pp.get_pool_provider(app).get_pool(other, svc.TIER_CODE_PREMIUM)
+    assert (info.limit, info.source) == (3, "operator_set")
+
+
+async def test_default_tenant_off_bypass_host_is_unchanged(
+    app: Quart, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Non-bypass hosts: no in-code pool; no license key -> fail loud (503 semantics)."""
+    default_id = _seed_default_tenant(app)
+    monkeypatch.setattr(pp, "current_request_host", lambda: "waddles.example.com")
+
+    async def _no_key(*_: Any) -> None:
+        return None
+
+    monkeypatch.setattr("services.tenant_license_service.get_tenant_license_key", _no_key)
+    with pytest.raises(svc.PoolUnavailable):
+        await pp.get_pool_provider(app).get_pool(default_id, svc.TIER_CODE_PREMIUM)
+
+
+async def test_default_tenant_not_seeded_gets_no_bypass_pool(
+    app: Quart, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A missing default-tenant row never grants the unlimited pool to anyone."""
+    from services.schema import bind_community_tier_tables
+
+    bind_community_tier_tables(app.config["dal"], migrate=True)
+    monkeypatch.setattr(pp, "current_request_host", lambda: "waddles.penguintech.cloud")
+    info = await pp.get_pool_provider(app).get_pool(1, svc.TIER_CODE_PREMIUM)
+    assert info.limit is None and info.source == "operator_set"
 
 
 @pytest.mark.parametrize(

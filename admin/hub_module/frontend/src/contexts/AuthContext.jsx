@@ -216,12 +216,12 @@ export function AuthProvider({ children }) {
     scopes: Array.isArray(user?.scopes) ? user.scopes : [],
     tenantSlug: typeof user?.tenantSlug === 'string' ? user.tenantSlug : null,
     hasScope: (scope) => Array.isArray(user?.scopes) && user.scopes.includes(scope),
-    // License tier (1 Free, 2 Professional, 3 Enterprise) of one of the caller's communities, from
+    // License tier (1 Free, 2 Premium) of one of the caller's communities, from
     // /auth/me `communities[].licenseTier`. A missing/unknown value is Free. UX hint only: the
     // server's tier gates are authoritative.
     communityTier: (communityId) => {
       const c = user?.communities?.find((x) => x.id === Number(communityId));
-      return c?.licenseTier === 2 || c?.licenseTier === 3 ? c.licenseTier : 1;
+      return c?.licenseTier === 2 ? 2 : 1;
     },
     // Community-level admin check (for any community, or a specific one)
     isCommunityAdmin: (communityId) => {

@@ -1,7 +1,7 @@
-"""Community tier allocations + per-tenant license pool cache (Pro/Ent team entitlements).
+"""Community tier allocations + per-tenant license pool cache (Premium team entitlements).
 
-A community's tier is Free (no row, consumes no pool slot, never blocked), Professional (2) or
-Enterprise (3). Pro/Ent are *allocated* from the tenant's license pool (team axis):
+A community's tier is Free (no row, consumes no pool slot, never blocked) or Premium (2).
+Premium is *allocated* from the tenant's ONE license pool (team axis):
 
 - `community_tier_allocations`: append-style ledger. At most ONE active (`released_at IS NULL`)
   row per community (partial unique). A release stamps `released_at`; rows are never deleted by the
@@ -10,7 +10,8 @@ Enterprise (3). Pro/Ent are *allocated* from the tenant's license pool (team axi
   becomes active again simply re-counts).
 - `tenant_license_pools`: the last pool limit observed per (tenant, axis, tier): from the license
   server (online), an offline entitlement file, or set by an operator. `limit_count` NULL = not
-  licensed, -1 = unlimited. `axis_code` 3 = team.
+  licensed, -1 = unlimited. `axis_code` 3 = team; `tier_code` is 2 only (one Premium pool per
+  tenant). The bypass-domain default tenant's unlimited pool is computed in code, never stored.
 - `communities.license_tier` / `communities.is_premium` become DENORMALIZED copies of the active
   allocation, written in the same transaction as the ledger row. They are not dropped here.
 
@@ -19,10 +20,9 @@ Enum codes (SMALLINT, never strings/booleans): source_code 1 tenant_admin / 2 op
 1 license_server / 2 offline file / 3 operator_set.
 
 Backfill: every community that is premium (`is_premium IS TRUE`, or `license_tier` one of
-enterprise / professional / pro / premium) and has no active allocation gets a row (source 3,
-last_active_at = now): tier 3 when `license_tier` is `enterprise`, else tier 2 (Professional is only
-the fallback for `is_premium` with no/unknown tier string, so Enterprise communities are never
-downgraded). The backfill is idempotent (`NOT EXISTS` guard). The tables use plain `CREATE TABLE`
+enterprise / professional / pro / premium) and has no active allocation gets ONE Premium row
+(tier 2, source 3, last_active_at = now). The backfill is idempotent (`NOT EXISTS` guard). The
+tables use plain `CREATE TABLE`
 so a pre-existing table of unknown shape fails loudly instead of silently skipping its
 constraints. `SET LOCAL lock_timeout` bounds every lock wait (FK / ALTER on the hot tables).
 `communities.public_id` already exists (0084) and is not touched.
@@ -33,7 +33,7 @@ neither read nor enforce) unless `ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1` is set.
 `communities.license_tier`/`is_premium` columns are left exactly as they are.
 
 Revision ID: 0126_community_tier_allocations
-Revises: 0125_tenant_do_not_sell
+Revises: 0124_dsar_open_public_unique
 Create Date: 2026-11-17
 """
 
@@ -46,7 +46,7 @@ import sqlalchemy as sa
 from alembic import op
 
 revision = "0126_community_tier_allocations"
-down_revision = "0125_tenant_do_not_sell"
+down_revision = "0124_dsar_open_public_unique"
 branch_labels = None
 depends_on = None
 
@@ -68,7 +68,7 @@ CREATE TABLE community_tier_allocations (
     last_active_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
     created_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
     updated_at           TIMESTAMPTZ NOT NULL DEFAULT now(),
-    CONSTRAINT ck_cta_tier CHECK (tier_code IN (2, 3)),
+    CONSTRAINT ck_cta_tier CHECK (tier_code = 2),
     CONSTRAINT ck_cta_source CHECK (source_code BETWEEN 1 AND 3),
     CONSTRAINT ck_cta_release_reason
         CHECK (release_reason_code IS NULL OR release_reason_code BETWEEN 1 AND 3)
@@ -104,7 +104,7 @@ CREATE TABLE tenant_license_pools (
     observed_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
     source_code  SMALLINT NOT NULL,
     set_by       INTEGER REFERENCES hub_users(id) ON DELETE SET NULL,
-    CONSTRAINT ck_tlp_tier CHECK (tier_code IN (2, 3)),
+    CONSTRAINT ck_tlp_tier CHECK (tier_code = 2),
     CONSTRAINT ck_tlp_axis CHECK (axis_code = 3),
     CONSTRAINT ck_tlp_source CHECK (source_code BETWEEN 1 AND 3),
     CONSTRAINT ck_tlp_limit CHECK (limit_count IS NULL OR limit_count >= -1),
@@ -122,8 +122,7 @@ CREATE TABLE tenant_license_pools (
 INSERT INTO community_tier_allocations
     (tenant_id, community_id, tier_code, source_code, allocated_at, last_active_at)
 SELECT c.tenant_id, c.id,
-       CASE WHEN lower(btrim(c.license_tier)) = 'enterprise' THEN 3 ELSE 2 END,
-       3, now(), now()
+       2, 3, now(), now()
   FROM communities c
  WHERE (c.is_premium IS TRUE
         OR lower(btrim(c.license_tier)) IN ('enterprise', 'professional', 'pro', 'premium'))
@@ -152,7 +151,7 @@ _COUNT = (
 
 
 def upgrade() -> None:
-    """Create the ledger and pool tables, then backfill allocations for premium communities."""
+    """Create the ledger and pool tables, then backfill Premium allocations."""
     for statement in _UPGRADE:
         op.execute(statement)
 

@@ -14,7 +14,7 @@ export interface AuthView {
   isSuperAdmin: boolean;
   /** Whether the caller administers the given community (false when the context cannot say). */
   isCommunityAdmin: (communityId: number) => boolean;
-  /** License tier code (1 Free, 2 Professional, 3 Enterprise) of one of the caller's communities; missing = 1. UX hint only. */
+  /** License tier code (1 Free, 2 Premium) of one of the caller's communities; missing = 1. UX hint only. */
   communityTier: (communityId: number) => number;
   /** Re-fetches `/auth/me` into the context (skipped by the context if fresh). */
   refreshUser: () => Promise<void>;
@@ -43,7 +43,7 @@ function narrowCommunityTier(fn: unknown): (communityId: number) => number {
   if (typeof fn !== 'function') return () => 1;
   return (communityId) => {
     const tier: unknown = Reflect.apply(fn, undefined, [communityId]);
-    return tier === 2 || tier === 3 ? tier : 1;
+    return tier === 2 ? 2 : 1;
   };
 }
 

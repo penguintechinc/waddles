@@ -132,7 +132,7 @@ class CommunityDTO:
     isPublic: bool
     communityType: str
     isPremium: bool
-    #: 1 free / 2 professional / 3 enterprise (`isPremium` is derived from it).
+    #: 1 free / 2 premium (`isPremium` is derived: tier == 2).
     licenseTier: int
     seatLimit: int | None
     createdAt: str | None
@@ -230,7 +230,7 @@ class UpdateCommunityRequest:
     # Contract: ABSENT = unchanged; explicit null = unlimited (NULL); a blank string is
     # rejected, not coerced; only a strict non-negative JSON integer is accepted.
     seatLimit: Annotated[int | None, Field(strict=True, ge=0)] = None
-    # Operator tier override: 1 free / 2 professional / 3 enterprise. Requires `reasonCode`
+    # Operator tier override: 1 free / 2 premium (3 or other -> 400). Requires `reasonCode`
     # and the global-admin scope; never blocked by a full pool (counted + audited instead).
     licenseTier: Annotated[int | None, Field(strict=True)] = None
     reasonCode: Annotated[str | None, Field(max_length=64)] = None
@@ -321,21 +321,22 @@ class UpdateTenantRequest:
 #: the canonical names from `TIER_NAMES` plus the legacy strings older rows may still hold.
 _TIER_CODE_BY_NAME: dict[str, int] = {
     **{name: code for code, name in community_tier_service.TIER_NAMES.items()},
-    "pro": community_tier_service.TIER_CODE_PROFESSIONAL,
-    "premium": community_tier_service.TIER_CODE_PROFESSIONAL,
+    "pro": community_tier_service.TIER_CODE_PREMIUM,
+    "professional": community_tier_service.TIER_CODE_PREMIUM,
+    "enterprise": community_tier_service.TIER_CODE_PREMIUM,
 }
 
 
 def _license_tier_code(row: Any) -> int:
-    """Tier code (1/2/3) from the denormalized `license_tier` string (legacy names mapped).
+    """Tier code (1 free / 2 premium) from the denormalized `license_tier` string (legacy mapped).
 
-    pro/professional/premium -> 2, enterprise -> 3, anything else -> 1 (Free). A row with no
-    `license_tier` at all that predates the column but is `is_premium` stays Professional.
+    pro/professional/premium/enterprise (legacy strings) -> 2, anything else -> 1 (Free).
+    A row with no `license_tier` that predates the column but is `is_premium` stays Premium.
     """
     name = str(row.license_tier or "").strip().lower()
     if not name:
         return (
-            community_tier_service.TIER_CODE_PROFESSIONAL
+            community_tier_service.TIER_CODE_PREMIUM
             if row.is_premium
             else community_tier_service.TIER_CODE_FREE
         )
@@ -544,7 +545,7 @@ async def update_community(
         return _err(
             ApiError(
                 "isPremium is derived from the community's tier and cannot be set; "
-                "send licenseTier (1 free, 2 professional, 3 enterprise) with a reasonCode",
+                "send licenseTier (1 free, 2 premium) with a reasonCode",
                 400,
                 "VALIDATION_ERROR",
             )
@@ -570,7 +571,7 @@ async def update_community(
         fields["seat_limit"] = data.seatLimit
     license_tier = data.licenseTier
     if "licenseTier" in present and license_tier is None:
-        return _err(ApiError("licenseTier must be 1, 2 or 3 when present", 400, "VALIDATION_ERROR"))
+        return _err(ApiError("licenseTier must be 1 or 2 when present", 400, "VALIDATION_ERROR"))
     if license_tier is not None:
         if not is_system_tenant_request():
             return system_tenant_denied()

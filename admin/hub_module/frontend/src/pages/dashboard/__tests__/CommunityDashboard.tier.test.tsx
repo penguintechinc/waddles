@@ -46,7 +46,7 @@ const render = () => renderWithProviders(<CommunityDashboard />, { route: '/dash
 describe('CommunityDashboard bot score tier', () => {
   beforeEach(() => vi.spyOn(console, 'error').mockImplementation(() => {}));
 
-  it.each([[1, 'false'], [2, 'true'], [3, 'true']])('tier %s -> isPremium=%s', async (tier, expected) => {
+  it.each([[1, 'false'], [2, 'true']])('tier %s -> isPremium=%s', async (tier, expected) => {
     tierRef.value = tier;
     serve();
     render();

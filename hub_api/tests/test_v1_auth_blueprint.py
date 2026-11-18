@@ -423,19 +423,22 @@ async def _me_communities(client: Any, user_id: int) -> dict[str, Any]:
 
 
 class TestMeCommunityLicenseTier:
-    async def test_tiers_free_pro_released_and_exact_fields(
+    async def test_tiers_free_premium_unknown_released_and_exact_fields(
         self, client: Any, auth_db: Any
     ) -> None:
         uid = _seed_user(auth_db, email="t1@example.com", username="t1")
         _seed_member_community(auth_db, uid, "free-c")
         _seed_member_community(auth_db, uid, "pro-c", tier=2)
-        _seed_member_community(auth_db, uid, "ent-c", tier=3)
+        # An unknown stored code (the old 3 / Enterprise, or garbage) displays as Free (1).
+        _seed_member_community(auth_db, uid, "legacy3-c", tier=3)
+        _seed_member_community(auth_db, uid, "garbage-c", tier=99)
         _seed_member_community(auth_db, uid, "released-c", tier=2, released=True)
         comms = await _me_communities(client, uid)
         assert {k: v["licenseTier"] for k, v in comms.items()} == {
             "free-c": 1,
             "pro-c": 2,
-            "ent-c": 3,
+            "legacy3-c": 1,
+            "garbage-c": 1,
             "released-c": 1,
         }
         assert set(comms["pro-c"]) == {"id", "name", "displayName", "role", "licenseTier"}

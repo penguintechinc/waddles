@@ -19,7 +19,7 @@ function AdminAnalytics() {
   const [message, setMessage] = useState(null);
   // UX hint only: the server's tier gates are authoritative (an ungated client still gets 402/403).
   const tier = communityTier(communityId);
-  const isPremium = tier >= TIER.professional;
+  const isPremium = tier >= TIER.premium;
   const [pollInterval, setPollInterval] = useState(null);
 
   useEffect(() => {
@@ -301,9 +301,9 @@ function AdminAnalytics() {
           <div className="flex items-center gap-3">
             <SparklesIcon className="w-6 h-6 text-gold-400" />
             <div>
-              <div className="font-medium text-gold-300">Advanced analytics requires Professional</div>
+              <div className="font-medium text-gold-300">Advanced analytics requires Premium</div>
               <div className="text-sm text-gold-200">
-                Health scores, bad actor detection and retention analytics require the Professional tier (this community is on Free). Ask your tenant administrator to allocate a Professional slot
+                Health scores, bad actor detection and retention analytics require Premium (this community is on Free). Ask your tenant administrator to allocate a Premium slot
               </div>
             </div>
           </div>

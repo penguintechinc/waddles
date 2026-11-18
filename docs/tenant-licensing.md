@@ -2,7 +2,7 @@
 
 Each tenant can carry its OWN license key. The key is the credential the license-pool provider
 (`libs/flask_core/flask_core/license_pool.py`, see `docs/license-pool.md`) POSTs to the license
-server to learn that tenant's team-axis pool (Professional / Enterprise slots).
+server to learn that tenant's team-axis pool (the single Premium slot pool).
 
 ## Storage
 
@@ -34,7 +34,7 @@ Operator (`tenants:admin`, global admin), keyed by numeric tenant id like `/supe
 | Route | Effect |
 |---|---|
 | `GET /api/v1/superadmin/tenants/<id>/license-pools` | stored pool rows + `bypassDomain` |
-| `PUT /api/v1/superadmin/tenants/<id>/license-pools/<2\|3>` `{limit}` | writes `operator_set` row (`null` = not licensed, `-1` = unlimited, `>= 0`); audit `license.tenant_pool_set` |
+| `PUT /api/v1/superadmin/tenants/<id>/license-pools/2` `{limit}` | writes `operator_set` row (`null` = not licensed, `-1` = unlimited, `>= 0`); audit `license.tenant_pool_set` |
 
 The operator PUT is allowed ONLY when the request host is a hardcoded bypass domain
 (`flask_core.entitlement.is_bypass_domain`); elsewhere it returns 409

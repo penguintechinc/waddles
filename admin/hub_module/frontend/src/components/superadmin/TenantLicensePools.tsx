@@ -8,8 +8,8 @@ import { isRecord } from '../../lib/wire';
 import { NOT_ALLOWED_MESSAGE, draftToLimit } from './licensePoolDraft';
 import type { Draft } from './licensePoolDraft';
 
-type PoolTierCode = 2 | 3;
-const TIERS: readonly PoolTierCode[] = [2, 3];
+type PoolTierCode = 2;
+const TIERS: readonly PoolTierCode[] = [2];
 
 type LoadState = 'loading' | 'ready' | 'forbidden' | 'error';
 
@@ -38,7 +38,7 @@ interface Props {
 }
 
 /**
- * Operator dialog for one tenant's team pools (Professional = 2, Enterprise = 3). Editing is only
+ * Operator dialog for one tenant's Premium community pool (tier 2; one pool per tenant). Editing is only
  * possible on bypass-domain deployments; the server decides (`bypassDomain` in the GET and a 409
  * `POOL_OPERATOR_SET_NOT_ALLOWED` on PUT), the client never guesses the deployment mode.
  */
@@ -57,7 +57,6 @@ export default function TenantLicensePools({ tenantId, tenantSlug, onClose }: Pr
     setData(res);
     setDrafts({
       2: toDraft(res.pools.find((p) => p.tierCode === 2)),
-      3: toDraft(res.pools.find((p) => p.tierCode === 3)),
     });
     setLocked(!res.bypassDomain);
   }, []);

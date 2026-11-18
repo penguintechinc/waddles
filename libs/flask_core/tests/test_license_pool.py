@@ -26,7 +26,7 @@ from flask_core.license_pool import (
 )
 
 LICENSE_LEAK_CANARY = "canary-not-a-real-key-for-log-leak-test"
-PRO, ENT = 2, 3
+PRO = 2  # the single pooled tier (premium)
 
 
 class MemoryStore:
@@ -126,7 +126,7 @@ class Server:
                 pass
 
 
-GOOD = {"team": {"professional": {"limit": 5}, "enterprise": {"limit": -1}}}
+GOOD = {"team": {"premium": {"limit": 5}}}
 
 
 @pytest.fixture
@@ -171,7 +171,7 @@ async def test_bypass_uses_operator_row_and_never_calls_http(server: Server) -> 
     p = make(server.url, store, clock, bypass=True)
     info = await p.get_pool(1, PRO)
     assert (info.limit, info.source, info.stale) == (7, "operator_set", False)
-    missing = await p.get_pool(1, ENT)
+    missing = await p.get_pool(2, PRO)  # other tenant, no operator row: not licensed
     assert missing.limit is None
     assert server.calls == 0
 
@@ -179,8 +179,8 @@ async def test_bypass_uses_operator_row_and_never_calls_http(server: Server) -> 
 async def test_success_cached_within_ttl_and_unlimited(server: Server) -> None:
     store, clock = MemoryStore(), Clock()
     p = make(server.url, store, clock)
-    a = await p.get_pool(1, ENT)
-    assert a.limit == -1 and a.source == "license_server" and not a.stale
+    a = await p.get_pool(1, PRO)
+    assert a.limit == 5 and a.source == "license_server" and not a.stale
     b = await p.get_pool(1, PRO)
     assert b.limit == 5
     assert server.calls == 1
@@ -297,57 +297,30 @@ async def test_license_key_never_logged(server: Server, caplog) -> None:
     assert LICENSE_LEAK_CANARY not in caplog.text
 
 
-# -- entitlement hook -------------------------------------------------------
+# -- entitlement: tenant tier never uplifts / is never uplifted by a community -----
 class _Flag:
     def is_enabled(self, *a: Any, **k: Any) -> bool:
         return True
 
 
 class _Gate:
+    def __init__(self, tier: str) -> None:
+        self._tier = tier
+
     def resolve_tier(self) -> str:
-        return "free"
+        return self._tier
 
 
-class _Source:
-    def __init__(self) -> None:
-        self.calls: list[tuple[int, int]] = []
+async def test_effective_tier_is_tenant_tier_only_no_community_hook() -> None:
+    """The generic community-tier hook is gone: a community id never changes the tier."""
+    import flask_core.entitlement as ent
 
-    async def community_tier(self, tenant_id: int, community_id: int) -> str | None:
-        self.calls.append((tenant_id, community_id))
-        return "enterprise"
-
-
-async def test_entitlement_hook_inert_without_source_and_numeric_with_source() -> None:
-    plain = EntitlementClient(flag_gate=_Flag(), license_gate=_Gate())
-    assert await plain.effective_tier(tenant="acme", community=9, tenant_id=7) == "free"
-    src = _Source()
-    c = EntitlementClient(
-        flag_gate=_Flag(), license_gate=_Gate(), community_tier_source=src
-    )
-    # numeric id supplied explicitly: the slug string is irrelevant to the lookup
-    assert (
-        await c.effective_tier(tenant="acme", community=9, tenant_id=7) == "enterprise"
-    )
-    assert src.calls == [(7, 9)]
-
-
-async def test_entitlement_hook_never_coerces_slug_to_tenant_id(
-    caplog: pytest.LogCaptureFixture,
-) -> None:
-    """Regression: digits-only slug '1' must NOT become tenant id 1; no id => no uplift."""
-    src = _Source()
-    c = EntitlementClient(
-        flag_gate=_Flag(), license_gate=_Gate(), community_tier_source=src
-    )
-    with caplog.at_level("ERROR"):
-        assert await c.effective_tier(tenant="1", community=9) == "free"
-        assert await c.effective_tier(tenant="acme", community=9) == "free"
-        assert await c.effective_tier(tenant="1", community=9, tenant_id=True) == "free"  # type: ignore[arg-type]
-    assert src.calls == []
-    assert "no_tenant_id" in caplog.text
-    # slug '1' with the real id 42: the source sees 42, never 1
-    assert await c.effective_tier(tenant="1", community=9, tenant_id=42) == "enterprise"
-    assert src.calls == [(42, 9)]
+    assert not hasattr(ent, "CommunityTierSource")
+    for tier in ("free", "professional", "enterprise"):
+        c = EntitlementClient(flag_gate=_Flag(), license_gate=_Gate(tier))
+        assert not hasattr(c, "community_tier_source")
+        assert await c.effective_tier(tenant="acme", community=9, tenant_id=7) == tier
+        assert await c.effective_tier(tenant="acme") == tier
 
 
 def test_poolinfo_poolrow_construction_and_frozen() -> None:
@@ -359,7 +332,7 @@ def test_poolinfo_poolrow_construction_and_frozen() -> None:
         info.limit = 4  # type: ignore[misc]
 
 
-@pytest.mark.parametrize("bad", [0, 1, 4, -1])
+@pytest.mark.parametrize("bad", [0, 1, 3, 4, -1])
 async def test_invalid_tier_code_raises_value_error(server: Server, bad: int) -> None:
     p = make(server.url, MemoryStore(), Clock())
     with pytest.raises(ValueError):
@@ -399,9 +372,9 @@ async def test_grace_never_applies_to_403_or_missing_key_and_evicts(
 async def test_operator_rows_survive_eviction() -> None:
     store, clock = MemoryStore(), Clock()
     await store.put(1, PRO, 4, lp.SOURCE_OPERATOR_SET, clock())
-    await store.put(1, ENT, 4, lp.SOURCE_LICENSE_SERVER, clock())
-    assert await store.delete_license_server_rows(1) == 1
-    assert (1, PRO) in store.rows
+    await store.put(2, PRO, 4, lp.SOURCE_LICENSE_SERVER, clock())
+    assert await store.delete_license_server_rows(2) == 1
+    assert (1, PRO) in store.rows and (2, PRO) not in store.rows
 
 
 async def test_naive_observed_at_is_normalized_not_typeerror(server: Server) -> None:
@@ -409,9 +382,9 @@ async def test_naive_observed_at_is_normalized_not_typeerror(server: Server) -> 
     await store.put(1, PRO, 3, lp.SOURCE_OFFLINE, dt.datetime(2026, 11, 17))  # noqa: DTZ001 - naive on purpose
     info = await make(server.url, store, clock).get_pool(1, PRO)
     assert info.limit == 3 and info.observed_at.tzinfo is not None
-    await store.put(1, ENT, 3, lp.SOURCE_LICENSE_SERVER, dt.datetime(2026, 11, 16))  # noqa: DTZ001 - naive on purpose
+    await store.put(2, PRO, 3, lp.SOURCE_LICENSE_SERVER, dt.datetime(2026, 11, 16))  # noqa: DTZ001 - naive on purpose
     server.script = [(500, {})]
-    stale = await make(server.url, store, clock).get_pool(1, ENT)
+    stale = await make(server.url, store, clock).get_pool(2, PRO)
     assert stale.stale and stale.limit == 3
 
 
@@ -447,3 +420,19 @@ def test_base_url_validation_accepts() -> None:
     assert lp.validate_base_url("http://127.0.0.1:9", allow_loopback_http=True)
     with pytest.raises(ValueError):
         lp.validate_base_url("http://example.com", allow_loopback_http=True)
+
+
+async def test_unlimited_and_not_licensed_premium_limits(server: Server) -> None:
+    """`team.premium.limit` -1 = unlimited; null/absent premium entry = not licensed."""
+    server.script = [(200, {"team": {"premium": {"limit": -1}}})]
+    assert (await make(server.url, MemoryStore(), Clock()).get_pool(1, PRO)).limit == -1
+    for body in ({"team": {"premium": {"limit": None}}}, {"team": {}}):
+        server.script = [(200, body)]
+        assert (await make(server.url, MemoryStore(), Clock()).get_pool(1, PRO)).limit is None
+
+
+async def test_legacy_professional_enterprise_keys_are_ignored(server: Server) -> None:
+    """Only `team.premium` is read: the old per-tier keys never produce a pool."""
+    server.script = [(200, {"team": {"professional": {"limit": 9}, "enterprise": {"limit": 9}}})]
+    assert (await make(server.url, MemoryStore(), Clock()).get_pool(1, PRO)).limit is None
+    assert lp.TIER_RESPONSE_KEYS == {2: "premium"}

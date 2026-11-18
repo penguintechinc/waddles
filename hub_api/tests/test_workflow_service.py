@@ -148,7 +148,7 @@ class TestErrorFromProxy:
 
 
 TENANT = "acme-corp"
-PRO, ENT = tier_svc.TIER_CODE_PROFESSIONAL, tier_svc.TIER_CODE_ENTERPRISE
+PREMIUM = tier_svc.TIER_CODE_PREMIUM
 
 
 @pytest.fixture(autouse=True)
@@ -172,7 +172,7 @@ def _community(db: Any, *, tenant_slug: str = TENANT, **extra: Any) -> int:
 
 
 class TestValidateLicense:
-    """Workflows gate on the effective tier (>= Professional); NO per-community license key."""
+    """Workflows gate on the community's Premium tier (allocation only); no license key."""
 
     async def test_community_not_found(self, wf_db: Any) -> None:
         result = await validate_license(wf_db, wf_db.dal, community_id=999)
@@ -182,7 +182,7 @@ class TestValidateLicense:
 
     async def test_inactive_community_denied_like_free(self, wf_db: Any) -> None:
         cid = _community(wf_db)
-        await set_tier(wf_db, cid, ENT)
+        await set_tier(wf_db, cid, PREMIUM)
         assert (await validate_license(wf_db, wf_db.dal, community_id=cid)).valid is True
         await wf_db.update_async(wf_db.dal.communities.id == cid, is_active=False)
         result = await validate_license(wf_db, wf_db.dal, community_id=cid)
@@ -191,7 +191,7 @@ class TestValidateLicense:
 
     async def test_other_tenant_caller_gets_the_free_denial(self, wf_db: Any) -> None:
         cid = _community(wf_db)
-        await set_tier(wf_db, cid, ENT)
+        await set_tier(wf_db, cid, PREMIUM)
         own = await validate_license(wf_db, wf_db.dal, community_id=cid, tenant=TENANT)
         other = await validate_license(wf_db, wf_db.dal, community_id=cid, tenant="other-corp")
         assert own.valid is True
@@ -205,7 +205,7 @@ class TestValidateLicense:
         with pytest.raises(ApiError) as exc:
             await require_workflow_tier(wf_db, wf_db.dal, community_id=cid)
         assert exc.value.status_code == 403
-        await set_tier(wf_db, cid, PRO)
+        await set_tier(wf_db, cid, PREMIUM)
         await require_workflow_tier(wf_db, wf_db.dal, community_id=cid)
 
     async def test_free_denied(self, wf_db: Any) -> None:
@@ -214,13 +214,10 @@ class TestValidateLicense:
         assert result.valid is False
         assert result.reason == "Workflows not included in current license tier"
 
-    @pytest.mark.parametrize("tier_code", [PRO, ENT])
-    async def test_allocated_paid_tier_allowed_without_license_key(
-        self, wf_db: Any, tier_code: int
-    ) -> None:
+    async def test_allocated_premium_allowed_without_license_key(self, wf_db: Any) -> None:
         """Allocation honored (tenant Free); no license_key / expiry anywhere on the row."""
         cid = _community(wf_db, license_key=None, license_expires_at=None)
-        await set_tier(wf_db, cid, tier_code)
+        await set_tier(wf_db, cid, PREMIUM)
         result = await validate_license(wf_db, wf_db.dal, community_id=cid)
         assert result.valid is True
         assert result.reason is None
@@ -232,7 +229,7 @@ class TestValidateLicense:
             license_key="lic-1",
             license_expires_at=datetime.now(UTC) - timedelta(days=1),
         )
-        await set_tier(wf_db, cid, PRO)
+        await set_tier(wf_db, cid, PREMIUM)
         assert (await validate_license(wf_db, wf_db.dal, community_id=cid)).valid is True
 
     async def test_legacy_key_without_allocation_does_not_grant(self, wf_db: Any) -> None:
@@ -245,28 +242,27 @@ class TestValidateLicense:
         )
         assert (await validate_license(wf_db, wf_db.dal, community_id=cid)).valid is False
 
-    @pytest.mark.parametrize(
-        ("tenant_tier", "allowed"), [("professional", True), ("enterprise", True), ("free", False)]
-    )
-    async def test_tenant_tier_uplift_honored(
-        self, wf_db: Any, monkeypatch: pytest.MonkeyPatch, tenant_tier: str, allowed: bool
+    @pytest.mark.parametrize("tenant_tier", ["free", "professional", "enterprise"])
+    async def test_tenant_tier_never_uplifts_a_community(
+        self, wf_db: Any, monkeypatch: pytest.MonkeyPatch, tenant_tier: str
     ) -> None:
+        """Regression: a Professional/Enterprise TENANT with no allocation is still Free."""
         cid = _community(wf_db)
         patch_tenant_tier(monkeypatch, {TENANT: tenant_tier})
         result = await validate_license(wf_db, wf_db.dal, community_id=cid)
-        assert result.valid is allowed
+        assert result.valid is False
 
     async def test_resolver_failure_denies_and_logs_error(
         self, wf_db: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """Tier lookup blows up -> Free for the gate (denied, no raise) and an ERROR record."""
         cid = _community(wf_db)
-        await set_tier(wf_db, cid, ENT)
+        await set_tier(wf_db, cid, PREMIUM)
 
-        async def _boom(*, tenant: str, community: int | None = None) -> str:
-            raise RuntimeError("license gate down")
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("allocation store down")
 
-        monkeypatch.setattr(tier_svc, "get_tier", _boom)
+        monkeypatch.setattr(tier_svc, "_community_active_row", _boom)
         with caplog.at_level(logging.ERROR):
             result = await validate_license(wf_db, wf_db.dal, community_id=cid)
         assert result.valid is False
@@ -280,7 +276,7 @@ class TestValidateLicense:
         dal.commit()
         granted = _community(wf_db)
         twin = _community(wf_db, tenant_slug="acme-twin")
-        await set_tier(wf_db, granted, PRO)
+        await set_tier(wf_db, granted, PREMIUM)
         assert (await validate_license(wf_db, dal, community_id=granted)).valid is True
         assert (await validate_license(wf_db, dal, community_id=twin)).valid is False
 
@@ -289,7 +285,7 @@ class TestValidateLicense:
     ) -> None:
         dal = wf_db.dal
         kept, free = _community(wf_db), _community(wf_db)
-        await set_tier(wf_db, kept, PRO)
+        await set_tier(wf_db, kept, PREMIUM)
         dal(dal.tenants.slug == TENANT).update(slug="acme-renamed")
         dal.commit()
         patch_tenant_tier(monkeypatch, {TENANT: "enterprise"})  # license keyed to the OLD slug

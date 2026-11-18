@@ -23,10 +23,7 @@ const COMMUNITIES = [
   { id: 2, publicId: U2, name: 'Seal Society' },
 ];
 const POOL = {
-  tiers: [
-    { tier: 2, limit: 5, used: 3, available: 2, overage: 0 },
-    { tier: 3, limit: -1, used: 1, available: null, overage: 0 },
-  ],
+  tiers: [{ tier: 2, limit: 5, used: 3, available: 2, overage: 0 }],
   observedAt: '2026-11-17T10:00:00Z',
   stale: false,
   source: 'license_server',
@@ -54,22 +51,41 @@ beforeEach(() => {
 });
 
 describe('TenantCommunityTiers', () => {
-  it('renders pool meters, unlimited text and the communities with their current tier', async () => {
+  it('renders ONE Premium pool meter and the communities with their current tier', async () => {
     mount();
     await screen.findByText('Penguin Club');
     expect(api.getPool).toHaveBeenCalledWith('acme');
-    const pro = within(screen.getByTestId('pool-tier-2'));
-    expect(pro.getByText('3 of 5 used')).toBeInTheDocument();
-    expect(pro.getByText('Available: 2')).toBeInTheDocument();
-    expect(within(screen.getByTestId('pool-tier-3')).getByText('1 of unlimited used')).toBeInTheDocument();
+    expect(api.listAllocations).toHaveBeenCalledWith('acme', expect.objectContaining({ tier: 2 }));
+    const pool = within(screen.getByTestId('pool-tier-2'));
+    expect(pool.getByText('Premium communities: 3 of 5 used')).toBeInTheDocument();
+    expect(pool.getByText('Available: 2')).toBeInTheDocument();
+    expect(pool.getByTestId('pool-source').textContent).toBe('Source: license server');
+    expect(screen.queryByTestId('pool-tier-3')).not.toBeInTheDocument();
+    expect(screen.queryByText(/Professional|Enterprise/)).not.toBeInTheDocument();
     expect(select('Penguin Club')).toHaveValue('2');
     expect(select('Seal Society')).toHaveValue('1');
+    const options = within(select('Seal Society')).getAllByRole('option').map((o) => o.textContent);
+    expect(options).toEqual(['Free', 'Premium']);
+  });
+
+  it('shows unlimited text for a -1 limit', async () => {
+    api.getPool.mockResolvedValue({ ...POOL, tiers: [{ tier: 2, limit: -1, used: 1, available: null, overage: 0 }] });
+    mount();
+    expect(await screen.findByText('Premium communities: 1 in use, unlimited')).toBeInTheDocument();
+    expect(screen.getByText('Available: unlimited')).toBeInTheDocument();
+  });
+
+  it('shows Unlimited (operator deployment) for the bypass_default source', async () => {
+    api.getPool.mockResolvedValue({ ...POOL, tiers: [{ tier: 2, limit: -1, used: 0, available: null, overage: 0 }], source: 'bypass_default' });
+    mount();
+    expect(await screen.findByText(/Unlimited \(operator deployment\)/)).toBeInTheDocument();
+    expect(screen.getByTestId('pool-source').textContent).toBe('Source: operator deployment');
   });
 
   it('shows not licensed for a null limit', async () => {
-    api.getPool.mockResolvedValue({ ...POOL, tiers: [{ tier: 3, limit: null, used: 0, available: 0, overage: 0 }] });
+    api.getPool.mockResolvedValue({ ...POOL, tiers: [{ tier: 2, limit: null, used: 0, available: 0, overage: 0 }] });
     mount();
-    expect(await screen.findByText(/Not licensed/)).toBeInTheDocument();
+    expect(await screen.findByText(/not licensed/)).toBeInTheDocument();
   });
 
   it('shows a stale badge with the observed time', async () => {
@@ -79,10 +95,11 @@ describe('TenantCommunityTiers', () => {
     expect(badge.textContent).toMatch(/Stale: last observed/);
   });
 
-  it('warns in text when a tier is over its limit', async () => {
+  it('warns in text when the Premium pool is over its limit', async () => {
     api.getPool.mockResolvedValue({ ...POOL, tiers: [{ tier: 2, limit: 2, used: 4, available: 0, overage: 2 }] });
     mount();
     expect(await screen.findByText(/Over limit by 2/)).toBeInTheDocument();
+    expect(screen.getByText(/Over limit by 2/)).toHaveClass('text-red-300');
   });
 
   it('allocates a tier by community UUID, announces the result and reloads usage', async () => {
@@ -91,7 +108,7 @@ describe('TenantCommunityTiers', () => {
     const poolCalls = api.getPool.mock.calls.length;
     fireEvent.change(select('Seal Society'), { target: { value: '2' } });
     await waitFor(() => expect(api.setTier).toHaveBeenCalledWith('acme', U2, 2));
-    expect(await screen.findByText('Seal Society is now Professional (was Free).')).toBeInTheDocument();
+    expect(await screen.findByText('Seal Society is now Premium (was Free).')).toBeInTheDocument();
     expect(api.getPool.mock.calls.length).toBeGreaterThan(poolCalls);
     expect(screen.getByTestId('tiers-live')).toHaveAttribute('aria-live', 'polite');
   });
@@ -113,7 +130,7 @@ describe('TenantCommunityTiers', () => {
     await screen.findByText('Seal Society');
     fireEvent.change(select('Seal Society'), { target: { value: '2' } });
     const panel = await screen.findByTestId('pool-exhausted');
-    expect(panel.textContent).toContain('Your Professional pool is full (5 of 5).');
+    expect(panel.textContent).toContain('Your Premium pool is full (5 of 5).');
     expect(panel.textContent).toContain('Release a slot or upgrade your license.');
     expect(screen.queryByText(/Failed to change tier/)).not.toBeInTheDocument();
   });
@@ -124,7 +141,7 @@ describe('TenantCommunityTiers', () => {
     const box = await screen.findByTestId('pool-unavailable');
     expect(box.textContent).toBe("Team licensing isn't available from the license server yet; contact your platform administrator.");
     expect(select('Seal Society')).toBeDisabled();
-    expect(screen.queryByText(/Team license pool/)).not.toBeInTheDocument();
+    expect(screen.queryByText(/Premium community pool/)).not.toBeInTheDocument();
   });
 
   it('shows the not-enabled state when the flag is off (404)', async () => {
@@ -150,7 +167,7 @@ describe('TenantCommunityTiers', () => {
     api.setTier.mockRejectedValue(httpErr(409, 'CONFLICT'));
     mount();
     await screen.findByText('Seal Society');
-    fireEvent.change(select('Seal Society'), { target: { value: '3' } });
+    fireEvent.change(select('Seal Society'), { target: { value: '2' } });
     expect(await screen.findByText(/changed by someone else/)).toBeInTheDocument();
   });
 
@@ -165,7 +182,7 @@ describe('TenantCommunityTiers', () => {
     await screen.findByText('Penguin Club');
     fireEvent.change(select('Penguin Club'), { target: { value: '1' } });
     const dialog = await screen.findByRole('dialog');
-    expect(dialog.textContent).toMatch(/removes access to Professional-tier features/);
+    expect(dialog.textContent).toMatch(/this community loses Premium features/);
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument();
     expect(api.setTier).not.toHaveBeenCalled();
@@ -183,7 +200,7 @@ describe('TenantCommunityTiers', () => {
   it('never sends numeric community ids', async () => {
     mount();
     await screen.findByText('Seal Society');
-    fireEvent.change(select('Seal Society'), { target: { value: '3' } });
+    fireEvent.change(select('Seal Society'), { target: { value: '2' } });
     await waitFor(() => expect(api.setTier).toHaveBeenCalled());
     expect(typeof api.setTier.mock.calls[0][1]).toBe('string');
   });

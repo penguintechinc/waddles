@@ -71,14 +71,14 @@ async def test_real_postgres_race_for_last_slot_one_winner(pg: PgTestDatabase, a
     tenant_id, cids = _seed(pg, "race", RACERS)
     store = svc.PoolStore(adal, adal.dal)
     await store.put(
-        tenant_id, svc.TIER_CODE_PROFESSIONAL, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
+        tenant_id, svc.TIER_CODE_PREMIUM, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
     )
     pool = svc.StorePoolProvider(store)
     results = await asyncio.gather(
         *[
             svc.allocate(
                 adal, adal.dal, tenant_id=tenant_id, community_id=c,
-                tier=svc.TIER_CODE_PROFESSIONAL, actor=None,
+                tier=svc.TIER_CODE_PREMIUM, actor=None,
                 source=svc.SOURCE_TENANT_ADMIN, pool=pool,
             )
             for c in cids
@@ -100,7 +100,7 @@ async def test_real_postgres_race_for_last_slot_one_winner(pg: PgTestDatabase, a
         assert cur.fetchone()[0] == 1
         cur.execute(
             "SELECT count(*) FROM communities WHERE tenant_id = %s AND is_premium IS TRUE "
-            "AND license_tier = 'professional'",
+            "AND license_tier = 'premium'",
             (tenant_id,),
         )
         assert cur.fetchone()[0] == 1  # denormalized copy written in the same txn
@@ -108,14 +108,14 @@ async def test_real_postgres_race_for_last_slot_one_winner(pg: PgTestDatabase, a
         conn.close()
 
 
-async def test_real_postgres_tier_change_blocked_keeps_old_and_usage(
+async def test_real_postgres_within_pool_then_blocked_and_usage_single_tier(
     pg: PgTestDatabase, adal: Any
 ) -> None:
-    tenant_id, cids = _seed(pg, "chg", 2)
+    tenant_id, cids = _seed(pg, "chg", 3)
     store = svc.PoolStore(adal, adal.dal)
-    now = svc.now_utc()
-    await store.put(tenant_id, svc.TIER_CODE_PROFESSIONAL, 2, svc.POOL_SOURCE_LICENSE_SERVER, now)
-    await store.put(tenant_id, svc.TIER_CODE_ENTERPRISE, 1, svc.POOL_SOURCE_LICENSE_SERVER, now)
+    await store.put(
+        tenant_id, svc.TIER_CODE_PREMIUM, 2, svc.POOL_SOURCE_LICENSE_SERVER, svc.now_utc()
+    )
     pool = svc.StorePoolProvider(store)
 
     async def alloc(c: int, tier: int) -> svc.AllocationResult:
@@ -124,14 +124,16 @@ async def test_real_postgres_tier_change_blocked_keeps_old_and_usage(
             source=svc.SOURCE_TENANT_ADMIN, pool=pool,
         )  # fmt: skip
 
-    await alloc(cids[0], svc.TIER_CODE_PROFESSIONAL)
-    await alloc(cids[1], svc.TIER_CODE_ENTERPRISE)
-    with pytest.raises(svc.PoolExhausted):
-        await alloc(cids[0], svc.TIER_CODE_ENTERPRISE)
+    await alloc(cids[0], svc.TIER_CODE_PREMIUM)
+    await alloc(cids[1], svc.TIER_CODE_PREMIUM)
+    with pytest.raises(svc.PoolExhausted) as exc:
+        await alloc(cids[2], svc.TIER_CODE_PREMIUM)
+    assert exc.value.required_tier == svc.TIER_CODE_PREMIUM
     usage = await svc.pool_usage(adal, adal.dal, tenant_id, pool=pool)
-    assert usage[svc.TIER_CODE_PROFESSIONAL].used == 1
-    assert usage[svc.TIER_CODE_ENTERPRISE].used == 1
-    assert (await store.get(tenant_id, svc.TIER_CODE_ENTERPRISE)).limit_count == 1
+    assert list(usage) == [svc.TIER_CODE_PREMIUM]
+    assert usage[svc.TIER_CODE_PREMIUM].used == 2
+    await alloc(cids[0], svc.TIER_CODE_FREE)  # release frees the slot
+    await alloc(cids[2], svc.TIER_CODE_PREMIUM)
 
 
 class _StalePrefetch:
@@ -150,13 +152,13 @@ async def test_real_postgres_pool_shrink_after_prefetch_blocks_allocation(
     tenant_id, cids = _seed(pg, "shrink", RACERS)
     store = svc.PoolStore(adal, adal.dal)
     await store.put(
-        tenant_id, svc.TIER_CODE_PROFESSIONAL, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
+        tenant_id, svc.TIER_CODE_PREMIUM, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
     )
     results = await asyncio.gather(
         *[
             svc.allocate(
                 adal, adal.dal, tenant_id=tenant_id, community_id=c,
-                tier=svc.TIER_CODE_PROFESSIONAL, actor=None,
+                tier=svc.TIER_CODE_PREMIUM, actor=None,
                 source=svc.SOURCE_TENANT_ADMIN, pool=_StalePrefetch(100),
             )
             for c in cids
@@ -175,7 +177,7 @@ async def test_real_postgres_concurrent_pool_upserts_leave_one_row(
     await asyncio.gather(
         *[
             store.put(
-                tenant_id, svc.TIER_CODE_PROFESSIONAL, n, svc.POOL_SOURCE_LICENSE_SERVER,
+                tenant_id, svc.TIER_CODE_PREMIUM, n, svc.POOL_SOURCE_LICENSE_SERVER,
                 svc.now_utc(),
             )
             for n in range(RACERS)
@@ -196,18 +198,13 @@ async def test_real_postgres_read_paths_never_idle_in_transaction(
     tenant_id, cids = _seed(pg, "idle", 1)
     store = svc.PoolStore(adal, adal.dal)
     await store.put(
-        tenant_id, svc.TIER_CODE_PROFESSIONAL, 3, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
-    )
-    await store.put(
-        tenant_id, svc.TIER_CODE_ENTERPRISE, 3, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
+        tenant_id, svc.TIER_CODE_PREMIUM, 3, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
     )
     pool = svc.StorePoolProvider(store)
-    await store.get(tenant_id, svc.TIER_CODE_PROFESSIONAL)
+    await store.get(tenant_id, svc.TIER_CODE_PREMIUM)
     await svc.pool_usage(adal, adal.dal, tenant_id, pool=pool)
     await svc.touch_active(adal, adal.dal, cids[0])
-    await svc.resolve_effective_tier(
-        adal, adal.dal, tenant_id, cids[0], tenant_tier=lambda _s: _free()
-    )
+    await svc.resolve_effective_tier(adal, adal.dal, tenant_id, cids[0])
     conn = psycopg2.connect(pg.dsn)
     conn.autocommit = True
     try:
@@ -223,21 +220,14 @@ async def test_real_postgres_read_paths_never_idle_in_transaction(
         conn.close()
 
 
-async def _free() -> str:
-    return "free"
-
-
 async def test_real_postgres_stale_rows_keep_slots_under_race(
     pg: PgTestDatabase, adal: Any
 ) -> None:
     """Regression: 31-day-old rows still count; racers for a 'freed' slot all lose."""
     tenant_id, cids = _seed(pg, "stale", RACERS)
     store = svc.PoolStore(adal, adal.dal)
-    pro = svc.TIER_CODE_PROFESSIONAL
+    pro = svc.TIER_CODE_PREMIUM
     await store.put(tenant_id, pro, 2, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
-    await store.put(
-        tenant_id, svc.TIER_CODE_ENTERPRISE, 0, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
-    )
     pool = svc.StorePoolProvider(store)
 
     async def _alloc(c: int) -> svc.AllocationResult:

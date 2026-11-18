@@ -94,7 +94,7 @@ describe('SuperAdminCommunities listing', () => {
     expect(penguins.getByText(/Discord/)).toBeInTheDocument();
     expect(penguins.getByText('Alice')).toBeInTheDocument();
     expect(penguins.getByText('42')).toBeInTheDocument();
-    expect(penguins.getByText('Professional')).toBeInTheDocument();
+    expect(penguins.getByText('Premium')).toBeInTheDocument();
     expect(penguins.getByText('Active')).toBeInTheDocument();
     expect(penguins.getByText(new Date('2026-02-03T12:00:00Z').toLocaleDateString())).toBeInTheDocument();
 
@@ -422,17 +422,17 @@ describe('SuperAdminCommunities license tier', () => {
     return modal('Edit Community');
   }
 
-  it('offers Free / Professional / Enterprise with operator-override helper text', async () => {
+  it('offers only Free / Premium with operator-override helper text', async () => {
     const m = await openEdit();
     const options = within(m.getByLabelText('License tier')).getAllByRole('option').map((o) => o.textContent);
-    expect(options).toEqual(['Free', 'Professional', 'Enterprise']);
+    expect(options).toEqual(['Free', 'Premium']);
     expect(m.getByText(/Operator override: not blocked by the tenant's pool; counts against it and is audited\./)).toBeInTheDocument();
   });
 
   it('does not ask for a reason until the tier changes', async () => {
     const m = await openEdit();
     expect(m.queryByLabelText('Reason for tier change')).not.toBeInTheDocument();
-    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '3' } });
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
     expect(m.getByLabelText('Reason for tier change')).toBeInTheDocument();
     fireEvent.change(m.getByLabelText('License tier'), { target: { value: '1' } });
     expect(m.queryByLabelText('Reason for tier change')).not.toBeInTheDocument();
@@ -473,7 +473,7 @@ describe('SuperAdminCommunities license tier', () => {
   it('shows the global-admin message on 403 and keeps the dialog open', async () => {
     superAdminApi.updateCommunity.mockRejectedValue({ response: { status: 403, data: {} } });
     const m = await openEdit();
-    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '3' } });
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
     fireEvent.change(m.getByLabelText('Reason for tier change'), { target: { value: 'other' } });
     fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
     const alertBox = await m.findByText(/requires global admin access/);
@@ -493,12 +493,12 @@ describe('SuperAdminCommunities license tier', () => {
       reply([{ ...COMMUNITIES[0], licenseTier: undefined }, COMMUNITIES[1]]),
     );
     await loaded();
-    expect(rowOf('Penguin Club').getByText('Professional')).toBeInTheDocument();
+    expect(rowOf('Penguin Club').getByText('Premium')).toBeInTheDocument();
   });
 
-  it('shows Enterprise as a badge in the list', async () => {
+  it('maps an unknown tier code (3) to a Free badge in the list', async () => {
     superAdminApi.getCommunities.mockResolvedValue(reply([{ ...COMMUNITIES[0], licenseTier: 3 }]));
     await loaded();
-    expect(rowOf('Penguin Club').getByText('Enterprise')).toBeInTheDocument();
+    expect(rowOf('Penguin Club').getByText('Free')).toBeInTheDocument();
   });
 });

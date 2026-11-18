@@ -57,11 +57,11 @@ export interface AllocationFilters {
 const base = (slug: string): string => `/api/v1/tenant/${encodeURIComponent(slug)}`;
 
 export const tenantCommunityTiersApi = {
-  /** GET the tenant's per-tier team pool (limit / used / available / overage). */
+  /** GET the tenant's single Premium (tier 2) pool (limit / used / available / overage). */
   getPool: (slug: string): Promise<PoolResponse> =>
     apiClient.get<PoolResponse>(`${base(slug)}/license/pool`).then((r) => r.data),
 
-  /** GET active Pro/Ent allocations (Free communities have no row). */
+  /** GET active Premium (tier 2) allocations (Free communities have no row); pass `tier: 2`. */
   listAllocations: (slug: string, filters: AllocationFilters = {}): Promise<AllocationsResponse> => {
     const params: Record<string, string | number> = {};
     for (const [k, v] of Object.entries(filters)) {
@@ -70,8 +70,8 @@ export const tenantCommunityTiersApi = {
     return apiClient.get<AllocationsResponse>(`${base(slug)}/communities/tier-allocations`, { params }).then((r) => r.data);
   },
 
-  /** PUT a community's tier by its UUID (1 releases the slot). */
-  setTier: (slug: string, communityPublicId: string, tier: number): Promise<SetTierResult> =>
+  /** PUT a community's tier by its UUID (1 Free releases the slot, 2 Premium; never any other code). */
+  setTier: (slug: string, communityPublicId: string, tier: 1 | 2): Promise<SetTierResult> =>
     apiClient
       .put<SetTierResult>(`${base(slug)}/communities/${encodeURIComponent(communityPublicId)}/tier`, { tier })
       .then((r) => r.data),

@@ -281,10 +281,9 @@ class CommunityMembershipDTO:
         int,
         PydanticField(
             description=(
-                "The community's own allocated tier: 1 Free, 2 Professional, 3 Enterprise "
-                "(no active allocation = 1). The effective tier also includes the tenant's tier "
-                "(gates apply the max server-side), so treat this as a display/UX hint only, "
-                "never an authorization decision: backend gates remain authoritative."
+                "The community's own tier: 1 Free, 2 Premium (no active allocation = 1; the "
+                "tenant's own tier never uplifts a community). Treat this as a display/UX hint "
+                "only, never an authorization decision: backend gates remain authoritative."
             )
         ),
     ] = 1

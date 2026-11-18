@@ -48,7 +48,7 @@ _OWNER = " ".join(sorted({*SCOPE_BUNDLES["global"]["viewer"], *SCOPE_BUNDLES["te
 async def test_tenant_owner_bundle_is_403_on_get_and_put(env: Any, tenant: str) -> None:
     url = f"/api/v1/superadmin/tenants/{env.tenant}/license-pools"
     assert (await env.client.get(url, headers=_hdr(_OWNER, tenant))).status_code == 403
-    put = await env.client.put(f"{url}/3", headers=_hdr(_OWNER, tenant), json={"limit": -1})
+    put = await env.client.put(f"{url}/2", headers=_hdr(_OWNER, tenant), json={"limit": -1})
     assert put.status_code == 403
 
 

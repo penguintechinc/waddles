@@ -1,28 +1,26 @@
 /**
  * Single UI source for community license tier codes, names and colors. Mirrors
- * docs/community-tier-allocation.md: the API speaks int codes only (1 Free, 2 Professional,
- * 3 Enterprise), never names.
+ * docs/community-tier-allocation.md: the API speaks int codes only (1 Free, 2 Premium),
+ * never names. Communities have only these two tiers (one Premium pool per tenant).
  */
 
-export const TIER = { free: 1, professional: 2, enterprise: 3 } as const;
+export const TIER = { free: 1, premium: 2 } as const;
 
-export type TierCode = 1 | 2 | 3;
+export type TierCode = 1 | 2;
 
 export const TIER_LABEL: Record<number, string> = {
   1: 'Free',
-  2: 'Professional',
-  3: 'Enterprise',
+  2: 'Premium',
 };
 
 /** Badge classes per tier (text + border + tint, so the tier never relies on color alone: the label is always shown). */
 export const TIER_BADGE_CLASS: Record<number, string> = {
   1: 'bg-navy-700/40 text-navy-300 border-navy-600',
-  2: 'bg-sky-500/20 text-sky-300 border-sky-500/40',
-  3: 'bg-gold-500/20 text-gold-300 border-gold-500/40',
+  2: 'bg-gold-500/20 text-gold-300 border-gold-500/40',
 };
 
 /** Tiers an admin can pick, in ascending order. */
-export const TIER_OPTIONS: readonly TierCode[] = [1, 2, 3];
+export const TIER_OPTIONS: readonly TierCode[] = [1, 2];
 
 /** Operator-override reason tokens accepted by the server (a closed set, never free text). */
 export const REASON_CODES = [
@@ -49,7 +47,7 @@ export const REASON_LABEL: Record<ReasonCode, string> = {
 
 /** Coerces any wire value to a valid tier code; a missing or unknown value is Free (1). */
 export function normalizeTier(value: unknown): TierCode {
-  return value === 2 || value === 3 ? value : 1;
+  return value === 2 ? 2 : 1;
 }
 
 /** Human label for a tier code (unknown codes read as Free, matching the server's fail-closed rule). */

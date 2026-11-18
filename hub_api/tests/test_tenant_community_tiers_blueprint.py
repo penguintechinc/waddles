@@ -20,7 +20,7 @@ from services import community_tier_service as svc
 from services.schema import bind_community_tier_tables
 from tests.conftest import TENANT_SLUG, make_user_token
 
-PRO, ENT, FREE = svc.TIER_CODE_PROFESSIONAL, svc.TIER_CODE_ENTERPRISE, svc.TIER_CODE_FREE
+PRO, FREE = svc.TIER_CODE_PREMIUM, svc.TIER_CODE_FREE  # PRO = the one pooled tier (Premium)
 OTHER_SLUG = "other-corp"
 BASE = f"/api/v1/tenant/{TENANT_SLUG}"
 FULL_SCOPE = "tenant:admin tenant.community_tier:read tenant.community_tier:allocate"
@@ -132,7 +132,6 @@ def _active(env: Any, community_id: int) -> Any:
 class TestPool:
     async def test_pool_read_exact_field_set(self, env: Any) -> None:
         await _pool(env, PRO, 2)
-        await _pool(env, ENT, -1)
         r = await _put_tier(env, env.pids[0], PRO)
         assert r[0] == 200, r
         response = await env.client.get(f"{BASE}/license/pool", headers=_h())
@@ -140,14 +139,12 @@ class TestPool:
         body = await response.get_json()
         assert set(body) == {"success", "tiers", "observedAt", "stale", "source"}
         assert body["stale"] is False and body["source"] == "operator_set"
-        pro, ent = body["tiers"]
+        (pro,) = body["tiers"]  # exactly ONE pool: Premium
         assert set(pro) == {"tier", "limit", "used", "available", "overage"}
         assert (pro["tier"], pro["limit"], pro["used"], pro["available"]) == (PRO, 2, 1, 1)
-        assert (ent["tier"], ent["limit"], ent["used"]) == (ENT, -1, 0)
 
     async def test_pool_not_licensed_tier_has_null_limit(self, env: Any) -> None:
         await _pool(env, PRO, None)
-        await _pool(env, ENT, 0)
         body = await (await env.client.get(f"{BASE}/license/pool", headers=_h())).get_json()
         assert body["tiers"][0]["limit"] is None
 
@@ -158,8 +155,7 @@ class TestPool:
 
     async def test_pool_stale_flag_is_reported(self, env: Any) -> None:
         old = svc.now_utc() - timedelta(days=30)
-        for tier in (PRO, ENT):
-            await env.store.put(env.tenant, tier, 1, svc.POOL_SOURCE_LICENSE_SERVER, old)
+        await env.store.put(env.tenant, PRO, 1, svc.POOL_SOURCE_LICENSE_SERVER, old)
         body = await (await env.client.get(f"{BASE}/license/pool", headers=_h())).get_json()
         assert body["stale"] is True and body["source"] == "license_server"
 
@@ -176,7 +172,7 @@ class TestAllocate:
         assert body["previousTier"] == FREE and body["changed"] is True
         assert (body["used"], body["limit"], body["overage"]) == (1, 2, 0)
         row = env.dal.communities[env.ids[0]]
-        assert row.license_tier == "professional" and row.is_premium
+        assert row.license_tier == "premium" and row.is_premium
         assert _active(env, env.ids[0]).source_code == svc.SOURCE_TENANT_ADMIN
         assert env.audit.events[-1].action == "license.community_tier_allocated"
 
@@ -197,7 +193,6 @@ class TestAllocate:
     ) -> None:
         """Regression: 31 days of inactivity must NOT free pool slots (pool cap defeat)."""
         await _pool(env, PRO, 2)
-        await _pool(env, ENT, 0)
         assert (await _put_tier(env, env.pids[0], PRO))[0] == 200
         assert (await _put_tier(env, env.pids[1], PRO))[0] == 200
         t = env.dal.community_tier_allocations
@@ -214,8 +209,8 @@ class TestAllocate:
         assert (await _put_tier(env, env.pids[3], PRO))[0] == 402
 
     async def test_unlicensed_tier_is_402_with_zero_limit(self, env: Any) -> None:
-        await _pool(env, ENT, None)
-        status, body = await _put_tier(env, env.pids[0], ENT)
+        await _pool(env, PRO, None)
+        status, body = await _put_tier(env, env.pids[0], PRO)
         assert status == 402 and body["error"]["details"]["limit"] == 0
 
     async def test_release_frees_a_slot(self, env: Any) -> None:
@@ -237,15 +232,22 @@ class TestAllocate:
         assert status == 503 and body["error"]["code"] == "TEAM_POOL_UNAVAILABLE"
         assert _active(env, env.ids[0]) is None
 
-    async def test_pro_to_ent_change_keeps_old_slot_when_ent_full(self, env: Any) -> None:
-        await _pool(env, PRO, 1)
-        await _pool(env, ENT, 0)
-        await _put_tier(env, env.pids[0], PRO)
-        status, _ = await _put_tier(env, env.pids[0], ENT)
-        assert status == 402
-        assert _active(env, env.ids[0]).tier_code == PRO
+    async def test_tier_3_is_400_invalid_tier(self, env: Any) -> None:
+        await _pool(env, PRO, 5)
+        for tier in (3, 4, 0, -1):
+            status, body = await _put_tier(env, env.pids[0], tier)
+            assert status == 400 and body["error"]["code"] == "INVALID_TIER", (tier, body)
+        assert _active(env, env.ids[0]) is None
 
-    @pytest.mark.parametrize("tier", [0, 4, -1, "2", 2.5, True, None])
+    async def test_402_details_carry_required_tier_2(self, env: Any) -> None:
+        await _pool(env, PRO, 0)
+        status, body = await _put_tier(env, env.pids[0], PRO)
+        assert status == 402 and body["error"]["code"] == "TEAM_POOL_EXHAUSTED"
+        assert body["error"]["details"] == {
+            "requiredTier": 2, "limit": 0, "used": 0, "upgrade": True,
+        }  # fmt: skip
+
+    @pytest.mark.parametrize("tier", [0, 3, 4, -1, "2", 2.5, True, None])
     async def test_invalid_tier_is_400(self, env: Any, tier: Any) -> None:
         await _pool(env, PRO, 5)
         status, _ = await _put_tier(env, env.pids[0], tier)
@@ -282,9 +284,8 @@ class TestAllocate:
 class TestList:
     async def _seed(self, env: Any) -> None:
         await _pool(env, PRO, 5)
-        await _pool(env, ENT, 5)
         await _put_tier(env, env.pids[0], PRO)
-        await _put_tier(env, env.pids[1], ENT)
+        await _put_tier(env, env.pids[1], PRO)
         await _put_tier(env, env.pids[2], PRO)
 
     async def _get(self, env: Any, qs: str = "", **kw: Any) -> tuple[int, Any]:
@@ -311,24 +312,22 @@ class TestList:
     async def test_filters_and_pagination(self, env: Any) -> None:
         await self._seed(env)
         _, by_tier = await self._get(env, f"?tier={PRO}")
-        assert by_tier["meta"]["total"] == 2
+        assert by_tier["meta"]["total"] == 3
         assert {a["tier"] for a in by_tier["allocations"]} == {PRO}
         _, none = await self._get(env, f"?source={svc.SOURCE_OPERATOR_OVERRIDE}")
         assert none["allocations"] == [] and none["meta"]["total"] == 0
-        _, empty_tier = await self._get(env, f"?tier={FREE}")
-        assert empty_tier["allocations"] == []
         _, page = await self._get(env, "?limit=1&offset=1")
         assert len(page["allocations"]) == 1 and page["meta"] == {
             "total": 3,
             "limit": 1,
             "offset": 1,
         }
-        _, combo = await self._get(env, f"?tier={ENT}&source={svc.SOURCE_TENANT_ADMIN}")
-        assert [a["communityId"] for a in combo["allocations"]] == [env.pids[1]]
+        _, combo = await self._get(env, f"?tier={PRO}&source={svc.SOURCE_TENANT_ADMIN}")
+        assert combo["meta"]["total"] == 3
 
     @pytest.mark.parametrize(
-        "qs", ["?tier=9", "?tier=abc", "?tier=-1", "?source=0", "?source=x", "?limit=0",
-               "?limit=201", "?limit=x", "?offset=-1", "?offset=x"]
+        "qs", ["?tier=9", "?tier=1", "?tier=3", "?tier=abc", "?tier=-1", "?source=0", "?source=x",
+               "?limit=0", "?limit=201", "?limit=x", "?offset=-1", "?offset=x"]
     )  # fmt: skip
     async def test_invalid_query_values_are_400(self, env: Any, qs: str) -> None:
         status, _ = await self._get(env, qs)

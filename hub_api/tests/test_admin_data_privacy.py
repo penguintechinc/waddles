@@ -36,7 +36,6 @@ in-process, the named test re-run, then dropped):
 from __future__ import annotations
 
 import asyncio
-import logging
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -55,10 +54,6 @@ import blueprints.v1.admin_data_privacy as admin_module
 from blueprints.v1.admin_data_privacy import admin_data_privacy_bp
 from services import admin_data_privacy_service as svc
 from services import data_privacy_service as privacy
-from services.cookie_consent_service import (
-    DNS_SOURCE_TENANT_ADMIN_DSAR,
-    effective_do_not_sell,
-)
 from services.global_identity import grant_global_admin_sync
 from services.schema import bind_admin_privacy_tables, bind_tenant_tables
 from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token
@@ -1145,14 +1140,6 @@ class TestErase:
         assert response.status_code == 404
 
 
-def _tenant_dns(db: Any, *, tenant_id: int, user_id: int) -> list[Any]:
-    """The `tenant_do_not_sell` rows of `(tenant_id, user_id)`."""
-    t = db.dal.tenant_do_not_sell
-    rows = db.dal((t.tenant_id == tenant_id) & (t.user_id == user_id)).select().as_list()
-    db.dal.commit()
-    return rows
-
-
 def _global_dns(db: Any, user_id: int, *, value: bool = True) -> None:
     """Give `user_id` their OWN global cookie-consent preference (`doNotSell=value`)."""
     db.dal.cookie_consent.insert(
@@ -1164,8 +1151,30 @@ def _global_dns(db: Any, user_id: int, *, value: bool = True) -> None:
     db.dal.commit()
 
 
+def _consent_rows(db: Any, user_id: int) -> list[Any]:
+    """Every global `cookie_consent` row of `user_id`."""
+    rows = db.dal(db.dal.cookie_consent.user_id == user_id).select().as_list()
+    db.dal.commit()
+    return rows
+
+
+def _cookie_app(db: Any) -> Quart:
+    """A Quart app carrying only the subject's own cookie-consent routes, on the same DB."""
+    from blueprints.v1.cookie_consent import cookie_consent_bp
+
+    quart_app = Quart(__name__)
+    QuartSchema(quart_app)
+    quart_app.register_blueprint(cookie_consent_bp)
+    quart_app.config["dal"] = db.dal
+    quart_app.config["async_dal"] = db
+    quart_app.config["HUB_API_CONFIG"] = None
+    return quart_app
+
+
 class TestDoNotSell:
-    async def test_writes_only_the_tenant_record(
+    """Do-Not-Sell is the user's GLOBAL consent preference; the admin action is opt-out only."""
+
+    async def test_tenant_admin_sets_the_users_global_opt_out(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         response = await client.put(
@@ -1174,23 +1183,30 @@ class TestDoNotSell:
         )
 
         assert response.status_code == 200
-        rows = _tenant_dns(db, tenant_id=ACME_ID, user_id=world["alice"])
-        assert len(rows) == 1
-        assert rows[0]["source_code"] == DNS_SOURCE_TENANT_ADMIN_DSAR
-        assert rows[0]["recorded_by"] == world["admin"]
-        # The user's own global consent record is never created or changed by an admin.
-        assert db.dal(db.dal.cookie_consent.user_id == world["alice"]).count() == 0
-        assert db.dal(db.dal.cookie_audit_log.user_id == world["alice"]).count() == 0
+        [row] = _consent_rows(db, world["alice"])
+        assert row["preferences"]["doNotSell"] is True
+        assert row["preferences"]["marketing"] is False
+        assert row["preferences"]["analytics"] is False
+        assert row["consent_method"] == "admin_dsar"
+        audit = db.dal(db.dal.cookie_audit_log.user_id == world["alice"]).select().first()
+        assert audit.action == "ADMIN_DO_NOT_SELL"
         assert [(r.action, r.details["outcome"]) for r in _audit_rows(db)] == [
             ("dsar.do_not_sell", "completed")
         ]
 
-    async def test_existing_global_consent_row_is_left_untouched(
+    async def test_updates_existing_records_and_forces_marketing_off(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        prefs = {"necessary": True, "analytics": True, "marketing": True, "doNotSell": False}
         db.dal.cookie_consent.insert(
-            user_id=world["alice"], consent_id="cid-1", preferences=prefs, consent_version="1.0"
+            user_id=world["alice"],
+            consent_id="cid-1",
+            preferences={
+                "necessary": True,
+                "analytics": True,
+                "marketing": True,
+                "doNotSell": False,
+            },
+            consent_version="1.0",
         )
         db.dal.commit()
 
@@ -1201,10 +1217,11 @@ class TestDoNotSell:
 
         assert response.status_code == 200
         row = db.dal(db.dal.cookie_consent.consent_id == "cid-1").select().first()
-        assert row.preferences == prefs
-        assert len(_tenant_dns(db, tenant_id=ACME_ID, user_id=world["alice"])) == 1
+        assert row.preferences["doNotSell"] is True
+        assert row.preferences["marketing"] is False
+        assert row.preferences["analytics"] is True  # only the sale/sharing categories change
 
-    async def test_is_idempotent_and_one_way(
+    async def test_is_idempotent(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
@@ -1213,35 +1230,81 @@ class TestDoNotSell:
 
         assert (await first.get_json())["result"]["status"] == "completed"
         assert (await second.get_json())["result"]["status"] == "already_done"
-        assert len(_tenant_dns(db, tenant_id=ACME_ID, user_id=world["alice"])) == 1
+        assert len(_consent_rows(db, world["alice"])) == 1
+
+    async def test_user_who_already_opted_out_reports_already_done(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        _global_dns(db, world["alice"])
+
+        response = await client.put(
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
+        )
+
+        assert (await response.get_json())["result"]["status"] == "already_done"
+
+    async def test_admin_can_never_opt_a_user_back_in(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """One-way: the only admin write sets doNotSell=True; it never clears it."""
+        url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
+        for _ in range(2):
+            await client.put(url, headers=_headers(world["admin"]))
+        assert all(r["preferences"]["doNotSell"] is True for r in _consent_rows(db, world["alice"]))
+
+    async def test_subject_withdraws_via_cookie_consent_route_and_reapply_works(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """The subject keeps control: explicit doNotSell=False flips it back; DSAR reapplies."""
+        url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
+        assert (await (await client.put(url, headers=_headers(world["admin"]))).get_json())[
+            "result"
+        ]["status"] == "completed"
+
+        # The subject's path: GET /api/v1/cookie (signed in) returns the admin-created record's
+        # consent id; POST /api/v1/cookie with that id and an explicit doNotSell=false wins.
+        # (PATCH /preferences never writes doNotSell from the body, by design.)
+        subject = _cookie_app(db).test_client()
+        current = await subject.get("/api/v1/cookie", headers=_headers(world["alice"]))
+        consent_id = (await current.get_json())["data"]["consentId"]
+        withdrawn = await subject.post(
+            "/api/v1/cookie",
+            headers={**_headers(world["alice"]), "Cookie": f"waddlebot_consent_id={consent_id}"},
+            json={"preferences": {"functional": True, "analytics": True, "doNotSell": False}},
+        )
+        assert withdrawn.status_code == 200
+        assert all(
+            r["preferences"]["doNotSell"] is False for r in _consent_rows(db, world["alice"])
+        )
+
+        again = await client.put(url, headers=_headers(world["admin"]))
+        assert (await again.get_json())["result"]["status"] == "completed"
+        assert all(r["preferences"]["doNotSell"] is True for r in _consent_rows(db, world["alice"]))
 
     async def test_admin_opt_out_survives_a_later_self_service_preferences_update(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        """A later self-service consent edit never touches the tenant record."""
-        from blueprints.v1.cookie_consent import cookie_consent_bp
-
-        _global_dns(db, world["alice"], value=False)  # the user's own record, opted back in
+        """Consent writes are key-by-key: an edit that omits doNotSell keeps the opt-out."""
         await client.put(
             _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
             headers=_headers(world["admin"]),
         )
-        quart_app = Quart(__name__)
-        QuartSchema(quart_app)
-        quart_app.register_blueprint(cookie_consent_bp)
-        quart_app.config["dal"] = db.dal
-        quart_app.config["async_dal"] = db
-        quart_app.config["HUB_API_CONFIG"] = None
 
-        response = await quart_app.test_client().patch(
-            "/api/v1/cookie/preferences",
-            headers=_headers(world["alice"]),
-            json={"preferences": {"functional": True, "analytics": True, "doNotSell": False}},
+        response = (
+            await _cookie_app(db)
+            .test_client()
+            .patch(
+                "/api/v1/cookie/preferences",
+                headers=_headers(world["alice"]),
+                json={"preferences": {"functional": True, "analytics": True}},
+            )
         )
 
         assert response.status_code == 200
-        assert len(_tenant_dns(db, tenant_id=ACME_ID, user_id=world["alice"])) == 1
-        assert await effective_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=world["alice"])
+        [row] = _consent_rows(db, world["alice"])
+        assert row["preferences"]["doNotSell"] is True
+        assert row["preferences"]["analytics"] is True
 
     async def test_only_the_target_user_is_changed(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
@@ -1254,123 +1317,67 @@ class TestDoNotSell:
             headers=_headers(world["admin"]),
         )
 
-        assert _tenant_dns(db, tenant_id=ACME_ID, user_id=bob) == []
-        assert db.dal(db.dal.cookie_consent.user_id == bob).count() == 0
+        assert _consent_rows(db, bob) == []
 
-    async def test_tenant_a_admin_does_not_change_tenant_b_state(
+    async def test_new_record_adopts_the_active_policy_version(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        """regression: a tenant admin's DSAR Do-Not-Sell used to apply in EVERY tenant."""
-        _member(db, community_id=world["other_community"], user_id=world["alice"])
+        db.dal.cookie_policy_versions.insert(version="2.3", content="policy", is_active=True)
+        db.dal.commit()
+
         await client.put(
             _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
             headers=_headers(world["admin"]),
         )
 
-        assert await effective_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=world["alice"])
-        assert not await effective_do_not_sell(
-            db, db.dal, tenant_id=OTHER_ID, user_id=world["alice"]
-        )
-        assert _tenant_dns(db, tenant_id=OTHER_ID, user_id=world["alice"]) == []
+        assert _consent_rows(db, world["alice"])[0]["consent_version"] == "2.3"
 
-    async def test_users_own_global_opt_out_still_applies_in_every_tenant(
-        self, db: Any, world: dict[str, int]
-    ) -> None:
-        _global_dns(db, world["alice"])
-
-        for tenant_id in (ACME_ID, OTHER_ID):
-            assert await effective_do_not_sell(
-                db, db.dal, tenant_id=tenant_id, user_id=world["alice"]
-            )
-
-    @pytest.mark.parametrize(
-        ("global_pref", "tenant_a", "tenant_b", "expect_a", "expect_b"),
-        [
-            (False, False, False, False, False),
-            (False, True, False, True, False),
-            (False, False, True, False, True),
-            (True, False, False, True, True),
-            (True, True, False, True, True),
-            (False, True, True, True, True),
-        ],
-    )
-    async def test_effective_do_not_sell_truth_table(
-        self,
-        db: Any,
-        world: dict[str, int],
-        global_pref: bool,
-        tenant_a: bool,
-        tenant_b: bool,
-        expect_a: bool,
-        expect_b: bool,
-    ) -> None:
-        user = world["alice"]
-        if global_pref:
-            _global_dns(db, user)
-        else:
-            _global_dns(db, user, value=False)  # an explicit opt-back-in is not an opt-out
-        if tenant_a:
-            await svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=user)
-        if tenant_b:
-            await svc.apply_do_not_sell(db, db.dal, tenant_id=OTHER_ID, user_id=user)
-
-        assert await effective_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=user) is expect_a
-        assert await effective_do_not_sell(db, db.dal, tenant_id=OTHER_ID, user_id=user) is expect_b
-
-    async def test_already_done_ignores_global_preference_and_other_tenants(
-        self, db: Any, world: dict[str, int]
-    ) -> None:
-        """Apply returns True for THIS tenant's first write despite opt-outs elsewhere."""
-        user = world["alice"]
-        _global_dns(db, user)
-        assert await svc.apply_do_not_sell(db, db.dal, tenant_id=OTHER_ID, user_id=user) is True
-        assert await svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=user) is True
-        assert await svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=user) is False
-
-    async def test_erasure_deletes_the_users_tenant_records(
+    async def test_foreign_tenant_user_is_not_found_and_untouched(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        alice = world["alice"]
-        await svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=alice)
-        await svc.apply_do_not_sell(db, db.dal, tenant_id=OTHER_ID, user_id=alice)
-        bob = _user(db, name="bob")
-        _member(db, community_id=world["acme_community"], user_id=bob)
-        await svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=bob, recorded_by=alice)
+        """A tenant admin cannot opt out a user outside its tenant (uniform 404)."""
+        foreign = await client.put(
+            _base() + f"/users/{_uuid(world['mallory'])}/do-not-sell",
+            headers=_headers(world["admin"]),
+        )
+        unknown = await client.put(
+            _base() + f"/users/{UNKNOWN_UUID}/do-not-sell", headers=_headers(world["admin"])
+        )
+
+        assert foreign.status_code == unknown.status_code == 404
+        assert _consent_rows(db, world["mallory"]) == []
+
+    async def test_concurrent_double_apply_never_aborts_and_ends_opted_out(
+        self, db: Any, world: dict[str, int]
+    ) -> None:
+        user = world["alice"]
+        _global_dns(db, user, value=False)
+        outcomes = await asyncio.gather(
+            *[svc.apply_do_not_sell(db, db.dal, user_id=user) for _ in range(8)]
+        )
+
+        assert any(outcomes)
+        assert all(r["preferences"]["doNotSell"] is True for r in _consent_rows(db, user))
+        assert await svc.apply_do_not_sell(db, db.dal, user_id=user) is False
+
+    async def test_erasure_retains_the_consent_record_as_before(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """Art. 5(2): the global consent row + audit log outlive erasure (unchanged behaviour)."""
+        await client.put(
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
+        )
 
         response = await client.post(
-            _base() + f"/users/{_uuid(alice)}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
 
         assert response.status_code == 200
-        assert db.dal(db.dal.tenant_do_not_sell.user_id == alice).count() == 0
-        # a row recorded BY the erased user about someone else stays (pseudonymous actor ref)
-        assert db.dal(db.dal.tenant_do_not_sell.user_id == bob).count() == 1
-
-    async def test_concurrent_double_apply_records_once_and_reports_already_done(
-        self, db: Any, world: dict[str, int]
-    ) -> None:
-        user = world["alice"]
-        outcomes = await asyncio.gather(
-            *[svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=user) for _ in range(8)]
-        )
-
-        assert sorted(outcomes) == [False] * 7 + [True]
-        assert len(_tenant_dns(db, tenant_id=ACME_ID, user_id=user)) == 1
-
-    async def test_insert_failure_propagates_and_rolls_back(
-        self, db: Any, world: dict[str, int]
-    ) -> None:
-        def boom(*a: Any, **kw: Any) -> Any:
-            raise RuntimeError("db down")
-
-        with (
-            mock.patch.object(db.dal.tenant_do_not_sell, "insert", boom),
-            pytest.raises(RuntimeError),
-        ):
-            await svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=world["alice"])
-        assert _tenant_dns(db, tenant_id=ACME_ID, user_id=world["alice"]) == []
+        assert len(_consent_rows(db, world["alice"])) == 1
+        assert db.dal(db.dal.cookie_audit_log.user_id == world["alice"]).count() == 1
 
 
 class TestBulk:
@@ -1888,21 +1895,6 @@ class TestAdversarialReviewFixes:
         assert [r["community_id"] for r in data["chat_messages"]] == [expected]
         assert "id" not in data["account"][0]
 
-    async def test_do_not_sell_already_done_is_not_a_cross_tenant_oracle(
-        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
-    ) -> None:
-        """Another tenant's record (or the user's global choice) never shows up as already_done."""
-        _member(db, community_id=world["other_community"], user_id=world["alice"])
-        await svc.apply_do_not_sell(db, db.dal, tenant_id=OTHER_ID, user_id=world["alice"])
-        _global_dns(db, world["alice"])
-        url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
-        first = await client.put(url, headers=_headers(world["admin"]))
-        second = await client.put(url, headers=_headers(world["admin"]))
-
-        assert (await first.get_json())["result"]["status"] == "completed"
-        assert (await first.get_json())["result"]["detail"] is None
-        assert (await second.get_json())["result"]["status"] == "already_done"
-
     async def test_do_not_sell_single_tenant_user_keeps_already_done(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
@@ -1982,68 +1974,24 @@ class TestAdversarialReviewFixes:
 class TestAdversarialReviewFixesAreaD:
     """Adversarial-review area D: consent fail-closed, export scope, failure audit, NUL, PK."""
 
-    async def test_effective_binds_unbound_table_and_does_not_raise(self, tmp_path: Any) -> None:
-        from services.cookie_consent_service import has_tenant_do_not_sell
-        from services.schema import bind_privacy_tables
-
-        fresh = AsyncDAL(f"sqlite://{tmp_path / 'fresh3.db'}", pool_size=1)
-        try:
-            bind_privacy_tables(fresh.dal, migrate=True)
-            assert "tenant_do_not_sell" not in fresh.dal.tables
-            # Production schema comes from alembic 0125; stand in for it on sqlite.
-            fresh.dal.executesql(
-                "CREATE TABLE tenant_do_not_sell (id INTEGER PRIMARY KEY AUTOINCREMENT,"
-                " public_id VARCHAR(36), tenant_id INTEGER, user_id INTEGER,"
-                " source_code INTEGER, recorded_by INTEGER, created_at TIMESTAMP)"
-            )
-            fresh.dal.commit()
-            assert await has_tenant_do_not_sell(fresh, fresh.dal, tenant_id=1, user_id=5) is False
-            assert "tenant_do_not_sell" in fresh.dal.tables
-        finally:
-            fresh.dal.close()
-
-    @pytest.mark.parametrize("failing", ["has_global_do_not_sell", "has_tenant_do_not_sell"])
-    async def test_effective_do_not_sell_fails_closed_on_lookup_error(
-        self,
-        db: Any,
-        world: dict[str, int],
-        caplog: pytest.LogCaptureFixture,
-        failing: str,
-    ) -> None:
-        import services.cookie_consent_service as ccs
-
-        async def boom(*a: Any, **kw: Any) -> bool:
-            raise ConnectionError("secret-dsn-detail")
-
-        with (
-            mock.patch.object(ccs, failing, boom),
-            caplog.at_level(logging.ERROR, logger=ccs.__name__),
-        ):
-            assert await effective_do_not_sell(
-                db, db.dal, tenant_id=ACME_ID, user_id=world["alice"]
-            )
-        record = next(r for r in caplog.records if r.levelno == logging.ERROR)
-        assert record.error_type == "ConnectionError"  # type: ignore[attr-defined]
-        assert "secret-dsn-detail" not in caplog.text and record.exc_info is None
-
-    async def test_export_shows_only_this_tenants_do_not_sell_record(
+    async def test_export_carries_the_global_do_not_sell_state_and_no_other_tenants_data(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         alice = world["alice"]
-        await svc.apply_do_not_sell(db, db.dal, tenant_id=OTHER_ID, user_id=alice)
+        _member(db, community_id=world["other_community"], user_id=alice)
+        _global_dns(db, alice)
 
-        def export() -> Any:
-            return client.get(
-                _base() + f"/users/{_uuid(alice)}/export", headers=_headers(world["admin"])
-            )
+        response = await client.get(
+            _base() + f"/users/{_uuid(alice)}/export", headers=_headers(world["admin"])
+        )
 
-        body = await (await export()).get_json()
-        assert body["result"]["data"]["tenant_do_not_sell"] == []  # tenant B's record never shows
-
-        await svc.apply_do_not_sell(db, db.dal, tenant_id=ACME_ID, user_id=alice)
-        rows = (await (await export()).get_json())["result"]["data"]["tenant_do_not_sell"]
-        assert len(rows) == 1
-        assert set(rows[0]) == {"public_id", "source_code", "created_at"}  # no numeric ids
+        data = (await response.get_json())["result"]["data"]
+        assert [r["preferences"]["doNotSell"] for r in data["cookie_consent"]] == [True]
+        assert not [key for key in data if "tenant" in key]
+        other = _community_public_id(db, world["other_community"])
+        assert other not in {
+            r["community_id"] for rows in data.values() for r in rows if "community_id" in r
+        }
 
     async def test_failed_item_audited_and_bulk_loop_continues(
         self, db: Any, world: dict[str, int]

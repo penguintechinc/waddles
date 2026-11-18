@@ -214,14 +214,10 @@ async def test_operator_pool_put_on_bypass_host_audited(env: Any) -> None:
     ]
     row = await pools.PoolStore(env.adal, env.dal).get(env.tenant, 2)
     assert row is not None and row.source_code == pools.POOL_SOURCE_OPERATOR_SET and row.set_by == 1
-    r = await c.put(
-        f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/3",
-        headers=_ops(BYPASS_HOST),
-        json={"limit": -1},
-    )
-    assert (await r.get_json())["pools"][1]["limit"] == -1
+    r = await c.put(url, headers=_ops(BYPASS_HOST), json={"limit": -1})
+    assert [p["limit"] for p in (await r.get_json())["pools"]] == [-1]
     r = await c.put(url, headers=_ops(BYPASS_HOST), json={"limit": None})
-    assert [p["limit"] for p in (await r.get_json())["pools"]] == [None, -1]
+    assert [p["limit"] for p in (await r.get_json())["pools"]] == [None]
     r = await c.get(
         f"/api/v1/superadmin/tenants/{env.tenant}/license-pools", headers=_ops(BYPASS_HOST)
     )
@@ -246,6 +242,7 @@ async def test_operator_pool_put_conflict_off_bypass_host(env: Any) -> None:
     ("tier", "payload", "status"),
     [
         (1, {"limit": 3}, 400),
+        (3, {"limit": 3}, 400),  # no Enterprise pool any more
         (4, {"limit": 3}, 400),
         (2, {"limit": -2}, 400),
         (2, {"limit": "x"}, 400),
@@ -286,9 +283,7 @@ class _Entitlements(BaseHTTPRequestHandler):
     def do_POST(self) -> None:  # noqa: N802
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         type(self).seen.append(body)
-        out = json.dumps(
-            {"team": {"professional": {"limit": 4}, "enterprise": {"limit": -1}}}
-        ).encode()
+        out = json.dumps({"team": {"premium": {"limit": 4}}}).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(out)))
@@ -387,12 +382,12 @@ async def test_key_change_evicts_license_server_pools_but_keeps_operator_rows(en
     store = pools.PoolStore(env.adal, env.dal)
     now = pools.now_utc()
     await store.put(env.tenant, 2, 4, pools.POOL_SOURCE_LICENSE_SERVER, now)
-    await store.put(env.tenant, 3, 6, pools.POOL_SOURCE_OPERATOR_SET, now)
+    await store.put(env.other, 2, 6, pools.POOL_SOURCE_OPERATOR_SET, now)
     await svc.set_tenant_license_key(
         env.adal, env.dal, tenant_id=env.tenant, license_key=KEY_A, actor=None
     )
     assert await store.get(env.tenant, 2) is None  # cached pool gone on key set
-    assert (await store.get(env.tenant, 3)).limit_count == 6
+    assert (await store.get(env.other, 2)).limit_count == 6
     await store.put(env.tenant, 2, 4, pools.POOL_SOURCE_LICENSE_SERVER, now)
     await svc.set_tenant_license_key(
         env.adal, env.dal, tenant_id=env.tenant, license_key=KEY_B, actor=None
@@ -401,7 +396,7 @@ async def test_key_change_evicts_license_server_pools_but_keeps_operator_rows(en
     await store.put(env.tenant, 2, 4, pools.POOL_SOURCE_LICENSE_SERVER, now)
     await svc.clear_tenant_license_key(env.adal, env.dal, tenant_id=env.tenant, actor=None)
     assert await store.get(env.tenant, 2) is None  # ...and on clear
-    assert (await store.get(env.tenant, 3)).limit_count == 6
+    assert (await store.get(env.other, 2)).limit_count == 6
 
 
 async def test_seal_version_below_one_is_rejected_on_read(

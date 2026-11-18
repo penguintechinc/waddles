@@ -2,7 +2,8 @@
 
 - `GET /api/v1/superadmin/tenants/<tenant_id>/license-pools` -- the stored team-axis pool rows.
 - `PUT /api/v1/superadmin/tenants/<tenant_id>/license-pools/<tier_code>` `{limit}` -- the global
-  admin sets a tenant's Professional (2) / Enterprise (3) pool BY HAND. Allowed ONLY on a
+  admin sets a tenant's Premium (2) pool BY HAND (the only pool;
+  any other tier is 400). Allowed ONLY on a
   hardcoded bypass-domain host (`flask_core.entitlement.is_bypass_domain`, evaluated from the
   request host); anywhere else a licensed pool comes from the license server and an operator
   cannot override it -> 409 `POOL_OPERATOR_SET_NOT_ALLOWED`.
@@ -157,7 +158,7 @@ async def put_license_pool(
     async_dal, dal = current_app.config["async_dal"], current_app.config["dal"]
     try:
         if tier_code not in pools.POOLED_TIER_CODES:
-            raise bad_request("tier_code must be 2 (professional) or 3 (enterprise)")
+            raise bad_request("tier_code must be 2 (premium)")
         limit = lic.require_valid_limit(data.limit)
         if not _on_bypass_domain():
             raise ApiError(

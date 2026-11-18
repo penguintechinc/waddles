@@ -1,14 +1,14 @@
 # Community tier allocation
 
-A community is **Free**, **Professional** (code 2) or **Enterprise** (code 3).
+A community is **Free** (code 1) or **Premium** (code 2). There is exactly ONE pool per tenant (Premium).
 
 | Rule | Behaviour |
 |------|-----------|
 | Free | No allocation row, consumes no pool slot, never blocked. |
-| Pro/Ent | Allocated by a tenant admin from the tenant's team-axis pool (`tenant_license_pools`). |
-| Effective tier | `max(tenant tier, active allocation)`; any error fails closed to Free. |
-| Overage | A NEW Pro/Ent allocation beyond that tier's pool is blocked (`PoolExhausted`, 402 + upgrade path). An existing allocation is NEVER stripped; a smaller pool or tenant downgrade only blocks new allocations. |
-| Operator override | Super admins may set any tier. Never blocked, still counted (reported as `overage`), audited as `license.community_tier_overridden`. |
+| Premium | Allocated by a tenant admin from the tenant's single team-axis pool (`tenant_license_pools`, tier 2). |
+| Effective tier | `premium` iff the community has an active allocation (any source: tenant admin, operator override, backfill), else `free`; any error fails closed to Free. The tenant-level license tier does NOT uplift a community: the pool is the entitlement. |
+| Overage | A NEW Premium allocation beyond the pool is blocked (`PoolExhausted`, 402 + upgrade path). An existing allocation is NEVER stripped; a smaller pool or tenant downgrade only blocks new allocations. |
+| Operator override | Super admins may set Free or Premium. Never blocked, still counted (reported as `overage`), audited as `license.community_tier_overridden`. |
 | Staleness | Reporting only. Automatic slot reclamation is NOT active (see Staleness below): every unreleased allocation counts against the pool. |
 | Pool unknown | `PoolUnavailable` (503) when a NEW slot would be consumed. Never a silent zero. An idempotent re-PUT of the tier the community already holds succeeds without the pool (no slot consumed); releases (Free) never need it. |
 
@@ -24,9 +24,9 @@ The licensing rule "30 days with no contact frees the slot" needs a real activit
 ## Tables (alembic `0126_community_tier_allocations`)
 
 - `community_tier_allocations`: ledger, one active row per community (partial unique on `community_id WHERE released_at IS NULL`). Codes: `source_code` 1 tenant_admin / 2 operator_override / 3 backfill; `release_reason_code` 1 dealloc / 2 tier_change / 3 community_deleted.
-- `tenant_license_pools`: last observed pool per `(tenant, axis=3 team, tier)`. `limit_count` NULL = not licensed, -1 = unlimited. `source_code` 1 license_server / 2 offline / 3 operator_set.
+- `tenant_license_pools`: last observed pool per `(tenant, axis=3 team, tier=2)` (CHECK `tier_code = 2`). `limit_count` NULL = not licensed, -1 = unlimited. `source_code` 1 license_server / 2 offline / 3 operator_set. The bypass-domain default tenant's unlimited pool (`source` `bypass_default`) is computed in code and never stored.
 - `communities.license_tier` / `is_premium` are denormalized copies, written in the same transaction as the ledger row.
-- Backfill: every premium community (`is_premium`, or `license_tier` enterprise/professional/pro/premium) without an active allocation gets a row (source 3): Enterprise (3) when `license_tier` is `enterprise`, else Professional (2, the fallback for `is_premium` with no tier string). Downgrade REFUSES while either table holds rows unless `ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1`; it leaves the denormalized columns as they are. Both migrations set `lock_timeout` and use plain `CREATE TABLE`.
+- Backfill: every premium community (`is_premium`, or `license_tier` enterprise/professional/pro/premium) without an active allocation gets ONE Premium row (tier 2, source 3). Downgrade REFUSES while either table holds rows unless `ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE=1`; it leaves the denormalized columns as they are. Both migrations set `lock_timeout` and use plain `CREATE TABLE`.
 
 ## Service (`hub_api/services/community_tier_service.py`)
 
@@ -36,8 +36,9 @@ allocators for the last slot serialize and exactly one wins.
 
 - `allocate(async_dal, dal, *, tenant_id, community_id, tier, actor, source, pool, reason=None, audit=None)`
 - `resolve_effective_tier(async_dal, dal, tenant_id, community_id)`
-- `pool_usage(async_dal, dal, tenant_id, *, pool)` per-tier used / limit / available / overage / stale_excluded (stale rows are included in `used`)
+- `pool_usage(async_dal, dal, tenant_id, *, pool)` one entry (`TIER_CODE_PREMIUM`): used / limit / available / overage / stale_excluded (stale rows are included in `used`)
 - `touch_active(async_dal, dal, community_id)` rate-limited (5 min in-process, 1 h in DB)
+- Constants: `TIER_CODE_FREE = 1`, `TIER_CODE_PREMIUM = 2`, `TIER_NAMES`, `POOLED_TIER_CODES = (2,)`.
 - `PoolInfo`, `PoolProvider` (Protocol), `PoolStore`, `StorePoolProvider`, `PoolExhausted`, `PoolUnavailable`
 
 ## Telemetry and audit
@@ -56,10 +57,10 @@ a 500) and logs `community_tier_resolve_failed error_type=...` at ERROR. The den
 
 | Gate | File | Requires effective tier |
 |------|------|-------------------------|
-| Workflows (create / publish / execute) | `hub_api/services/workflow_service.py` | Professional+ (no per-community `license_key` / `license_expires_at`) |
-| Premium local-metered AI | `hub_api/services/ai_routing/router.py` | Enterprise |
-| BYOK AI | `hub_api/services/ai_routing/router.py` | Professional+ (2026-11-06 decision, unchanged) |
-| Media (Gemini) BYOK + tier RPC | `hub_api/services/media_byok_service.py` (via `grpc_internal/dataplane_servicers.py`) | Professional+ |
+| Workflows (create / publish / execute) | `hub_api/services/workflow_service.py` | Premium |
+| Premium local-metered AI | `hub_api/services/ai_routing/router.py` | Premium |
+| BYOK AI | `hub_api/services/ai_routing/router.py` | Premium |
+| Media (Gemini) BYOK + tier RPC | `hub_api/services/media_byok_service.py` (via `grpc_internal/dataplane_servicers.py`) | Premium |
 
 ## API
 
@@ -76,9 +77,9 @@ Scopes: `tenant:admin` AND `tenant.community_tier:read` (GETs) / `tenant.communi
 
 | Route | Purpose |
 |-------|---------|
-| `GET license/pool` | `{tiers:[{tier,limit,used,available,overage}], observedAt, stale, source}`; tier 2/3; `limit` null = not licensed, -1 = unlimited |
-| `GET communities/tier-allocations?tier=&source=&limit=&offset=` | `{allocations:[{communityId,tier,source,allocatedAt,stale}], meta:{total,limit,offset}}`; active Pro/Ent rows only; invalid filter = 400 |
-| `PUT communities/<community_uuid>/tier` body `{tier}` | 1 = Free (releases), 2, 3 -> `{communityId,tier,previousTier,changed,used,limit,overage}` |
+| `GET license/pool` | `{tiers:[{tier,limit,used,available,overage}], observedAt, stale, source}`; `tiers` has exactly ONE element (tier 2); `limit` null = not licensed, -1 = unlimited |
+| `GET communities/tier-allocations?tier=&source=&limit=&offset=` | `{allocations:[{communityId,tier,source,allocatedAt,stale}], meta:{total,limit,offset}}`; active Premium rows only; `tier` accepts 2 only; invalid filter = 400 |
+| `PUT communities/<community_uuid>/tier` body `{tier}` | 1 = Free (releases), 2 = Premium; anything else = 400 `INVALID_TIER` -> `{communityId,tier,previousTier,changed,used,limit,overage}` |
 
 Errors: `402 TEAM_POOL_EXHAUSTED` (`error.details`: `requiredTier`, `limit`, `used`, `upgrade: true` -- no pricing/upgrade URL is
 configured in hub-api yet, so none is sent), `503 TEAM_POOL_UNAVAILABLE` (pool unknown, fail loud), `404` unknown / other-tenant /
@@ -86,15 +87,14 @@ malformed UUID or flag OFF, `400` invalid `tier` or query value.
 
 ### Tier hint in `GET /api/v1/auth/me`
 
-Each `communities[]` item carries `licenseTier` (1 Free, 2 Professional, 3 Enterprise): the community's own active
+Each `communities[]` item carries `licenseTier` (1 Free, 2 Premium): the community's own active
 allocation (`released_at IS NULL`), read for all the user's communities in ONE batched query; no active allocation = 1.
-It is a display/UX hint for the webui (e.g. unlocking premium community admin pages): the effective tier also includes the
-tenant's tier, and the backend gates (above) stay authoritative. A lookup error logs `community_tier_lookup_failed
+It is a display/UX hint for the webui (e.g. unlocking premium community admin pages): the backend gates (above) stay authoritative. A lookup error logs `community_tier_lookup_failed
 error_type=...` at ERROR and reports 1 for every community; `/auth/me` never fails because of it.
 
 ### Superadmin override (`PUT /api/v1/superadmin/communities/<id>`)
 
-- `licenseTier` (1/2/3) requires `reasonCode` (one of `support_request`, `sales_agreement`, `trial_extension`,
+- `licenseTier` (1/2) requires `reasonCode` (one of `support_request`, `sales_agreement`, `trial_extension`,
   `billing_correction`, `partner_program`, `data_correction`, `other`: the audit reason is a short token, never free text) and the
   global-admin scope `users:admin` on top of `communities:admin`. It allocates with `source=operator_override`: never blocked,
   counted as `overage`, audited `license.community_tier_overridden`. The caller's validated tenant must also be the

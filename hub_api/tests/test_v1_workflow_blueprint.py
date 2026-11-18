@@ -247,8 +247,8 @@ def _seed_admin(
         name=f"community-{community_id}",
         display_name=f"Community {community_id}",
     )
-    if licensed:  # an allocated Professional tier unlocks workflows; no license key needed
-        grant_tier(dal, community_id, tier_svc.TIER_CODE_PROFESSIONAL)
+    if licensed:  # an allocated Premium tier unlocks workflows; no license key needed
+        grant_tier(dal, community_id, tier_svc.TIER_CODE_PREMIUM)
     role_id = dal.community_roles.insert(
         community_id=community_id,
         name="admin",

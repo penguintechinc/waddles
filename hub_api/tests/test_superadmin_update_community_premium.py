@@ -1,7 +1,7 @@
 # ruff: noqa: F811
 """`PUT /superadmin/communities/<id>`: tier override + absent-vs-null field semantics.
 
-The Premium checkbox was replaced by a Free/Professional/Enterprise `licenseTier`:
+The Premium checkbox was replaced by a Free(1)/Premium(2) `licenseTier` (3 or anything else is 400):
 
 * `isPremium` in a request is a 400 (it is derived from the tier and returned read-only);
 * `licenseTier` needs a `reasonCode`, the global-admin scope, and goes through
@@ -29,7 +29,7 @@ from tests.test_v1_superadmin_platform_blueprint import (  # noqa: F401
     provisioned,
 )
 
-PRO, ENT, FREE = svc.TIER_CODE_PROFESSIONAL, svc.TIER_CODE_ENTERPRISE, svc.TIER_CODE_FREE
+PREMIUM, FREE = svc.TIER_CODE_PREMIUM, svc.TIER_CODE_FREE
 REASON = "support_request"
 
 
@@ -189,11 +189,13 @@ class TestLicenseTierOverride:
         self, client: Any, admin_db: Any, audit: RecordingAudit
     ) -> None:
         cid = _community(admin_db)
-        status, _ = await _put(client, cid, {"licenseTier": PRO, "reasonCode": REASON}, user_id=1)
+        status, _ = await _put(
+            client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON}, user_id=1
+        )
         assert status == 200
         row, alloc = _row(admin_db, cid), _active(admin_db, cid)
-        assert alloc.tier_code == PRO and alloc.source_code == svc.SOURCE_OPERATOR_OVERRIDE
-        assert row.license_tier == "professional" and row.is_premium
+        assert alloc.tier_code == PREMIUM and alloc.source_code == svc.SOURCE_OPERATOR_OVERRIDE
+        assert row.license_tier == "premium" and row.is_premium
         event = audit.events[-1]
         assert event.action == "license.community_tier_overridden"
         assert REASON in str(event)
@@ -202,32 +204,29 @@ class TestLicenseTierOverride:
         self, client: Any, admin_db: Any, audit: RecordingAudit
     ) -> None:
         store = svc.PoolStore(admin_db, admin_db.dal)
-        await store.put(_tenant_id(admin_db), PRO, 0, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
+        await store.put(
+            _tenant_id(admin_db), PREMIUM, 0, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc()
+        )
         cid = _community(admin_db)
-        status, _ = await _put(client, cid, {"licenseTier": PRO, "reasonCode": REASON})
+        status, _ = await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
         assert status == 200
-        assert _active(admin_db, cid).tier_code == PRO
-        # Enterprise pool was never recorded at all (PoolUnavailable): operator still proceeds.
-        cid2 = _community(admin_db, name="second")
-        status, _ = await _put(client, cid2, {"licenseTier": ENT, "reasonCode": REASON})
-        assert status == 200
-        assert _row(admin_db, cid2).license_tier == "enterprise"
+        assert _active(admin_db, cid).tier_code == PREMIUM
+        assert _row(admin_db, cid).license_tier == "premium"
 
     async def test_override_counts_toward_pool_usage(self, client: Any, admin_db: Any) -> None:
         store = svc.PoolStore(admin_db, admin_db.dal)
         tid = _tenant_id(admin_db)
-        await store.put(tid, PRO, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
-        await store.put(tid, ENT, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
+        await store.put(tid, PREMIUM, 1, svc.POOL_SOURCE_OPERATOR_SET, svc.now_utc())
         for i in range(2):
             cid = _community(admin_db, name=f"c{i}")
-            status, _ = await _put(client, cid, {"licenseTier": PRO, "reasonCode": REASON})
+            status, _ = await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
             assert status == 200
         usage = await svc.pool_usage(admin_db, admin_db.dal, tid, pool=svc.StorePoolProvider(store))
-        assert usage[PRO].used == 2 and usage[PRO].overage == 1
+        assert usage[PREMIUM].used == 2 and usage[PREMIUM].overage == 1
 
     async def test_downgrade_to_free_releases_the_slot(self, client: Any, admin_db: Any) -> None:
         cid = _community(admin_db)
-        await _put(client, cid, {"licenseTier": ENT, "reasonCode": REASON})
+        await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
         status, _ = await _put(client, cid, {"licenseTier": FREE, "reasonCode": REASON})
         assert status == 200
         row = _row(admin_db, cid)
@@ -239,13 +238,20 @@ class TestLicenseTierOverride:
         status, _ = await _put(
             client,
             cid,
-            {"licenseTier": PRO, "reasonCode": REASON, "seatLimit": None, "displayName": "Both"},
+            {
+                "licenseTier": PREMIUM,
+                "reasonCode": REASON,
+                "seatLimit": None,
+                "displayName": "Both",
+            },
         )
         assert status == 200
         row = _row(admin_db, cid)
         assert row.seat_limit is None and row.display_name == "Both" and row.is_premium
 
-    @pytest.mark.parametrize("body", [{"licenseTier": PRO}, {"licenseTier": PRO, "reasonCode": ""}])
+    @pytest.mark.parametrize(
+        "body", [{"licenseTier": PREMIUM}, {"licenseTier": PREMIUM, "reasonCode": ""}]
+    )
     async def test_tier_without_reason_is_400(
         self, client: Any, admin_db: Any, body: dict[str, Any]
     ) -> None:
@@ -258,11 +264,11 @@ class TestLicenseTierOverride:
     async def test_free_free_text_reason_is_400(self, client: Any, admin_db: Any) -> None:
         cid = _community(admin_db)
         status, _ = await _put(
-            client, cid, {"licenseTier": PRO, "reasonCode": "Customer asked nicely"}
+            client, cid, {"licenseTier": PREMIUM, "reasonCode": "Customer asked nicely"}
         )
         assert status == 400
 
-    @pytest.mark.parametrize("tier", [0, 4, -1, 99, "2", 2.5, True, None])
+    @pytest.mark.parametrize("tier", [0, 3, 4, -1, 99, "2", 2.5, True, None])
     async def test_invalid_tier_code_is_400(self, client: Any, admin_db: Any, tier: Any) -> None:
         cid = _community(admin_db)
         status, _ = await _put(client, cid, {"licenseTier": tier, "reasonCode": REASON})
@@ -274,7 +280,7 @@ class TestLicenseTierOverride:
         status, _ = await _put(
             client,
             cid,
-            {"licenseTier": PRO, "reasonCode": REASON},
+            {"licenseTier": PREMIUM, "reasonCode": REASON},
             scope="communities:admin",
         )
         assert status == 403
@@ -287,11 +293,11 @@ class TestLicenseTierOverride:
         self, client: Any, admin_db: Any
     ) -> None:
         cid = _seed_community(admin_db)  # no tenant_id
-        status, _ = await _put(client, cid, {"licenseTier": PRO, "reasonCode": REASON})
+        status, _ = await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
         assert status == 400
 
     async def test_unknown_community_is_404(self, client: Any) -> None:
-        status, _ = await _put(client, 9999, {"licenseTier": PRO, "reasonCode": REASON})
+        status, _ = await _put(client, 9999, {"licenseTier": PREMIUM, "reasonCode": REASON})
         assert status == 404
 
 
@@ -312,7 +318,7 @@ class TestOperatorActionAuthorization:
             status, _ = await _put(
                 client,
                 cid,
-                {"licenseTier": ENT, "reasonCode": REASON},
+                {"licenseTier": PREMIUM, "reasonCode": REASON},
                 scope=self._tenant_owner_scope(),
                 tenant=tenant,
             )
@@ -337,7 +343,7 @@ class TestOperatorActionAuthorization:
         status, body = await _put(
             client,
             cid,
-            {"licenseTier": ENT, "reasonCode": REASON},
+            {"licenseTier": PREMIUM, "reasonCode": REASON},
             scope="*:admin users:admin",
             tenant=TENANT_SLUG,
         )
@@ -353,7 +359,7 @@ class TestOperatorActionAuthorization:
 
         monkeypatch.setattr("blueprints.v1.superadmin.get_audit_service", lambda: Boom())
         cid = _community(admin_db)
-        status, body = await _put(client, cid, {"licenseTier": PRO, "reasonCode": REASON})
+        status, body = await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
         assert status == 500 and body["error"]["code"] == "TIER_OVERRIDE_FAILED"
 
 
@@ -361,7 +367,9 @@ class TestLegacyTierMapping:
     @pytest.mark.parametrize(
         ("stored", "expected"),
         [
-            ("pro", PRO), ("professional", PRO), ("Premium", PRO), ("enterprise", ENT),
+            ("pro", PREMIUM), ("professional", PREMIUM), ("Premium", PREMIUM),
+            ("enterprise", PREMIUM),
+            ("premium", PREMIUM),
             ("free", FREE), ("garbage", FREE), (None, FREE),
         ],
     )  # fmt: skip
@@ -378,12 +386,12 @@ class TestLegacyTierMapping:
 class TestListExposesTier:
     async def test_list_carries_tier_and_derived_premium(self, client: Any, admin_db: Any) -> None:
         cid = _community(admin_db)
-        await _put(client, cid, {"licenseTier": ENT, "reasonCode": REASON})
+        await _put(client, cid, {"licenseTier": PREMIUM, "reasonCode": REASON})
         _community(admin_db, name="plain")
         response = await client.get("/api/v1/superadmin/communities", headers=_headers())
         body = await response.get_json()
         by_name = {c["name"]: c for c in body["communities"]}
-        assert by_name["acme-community"]["licenseTier"] == ENT
+        assert by_name["acme-community"]["licenseTier"] == PREMIUM
         assert by_name["acme-community"]["isPremium"] is True
         assert by_name["plain"]["licenseTier"] == FREE
         assert by_name["plain"]["isPremium"] is False
@@ -399,4 +407,4 @@ class TestListExposesTier:
         _community(admin_db, is_premium=True)
         response = await client.get("/api/v1/superadmin/communities", headers=_headers())
         body = await response.get_json()
-        assert body["communities"][0]["licenseTier"] == PRO
+        assert body["communities"][0]["licenseTier"] == PREMIUM

@@ -68,8 +68,8 @@ export const operatorLicensePoolsApi = {
   get: (tenantId: number): Promise<OperatorPoolsResponse> =>
     apiClient.get<OperatorPoolsResponse>(`/api/v1/superadmin/tenants/${tenantId}/license-pools`).then((r) => r.data),
 
-  /** PUT a pool size for tier 2 or 3; `limit` null clears to not-licensed, -1 is unlimited. */
-  set: (tenantId: number, tierCode: 2 | 3, limit: number | null): Promise<OperatorPoolsResponse> =>
+  /** PUT a pool size for tier 2 (Premium); `limit` null clears to not-licensed, -1 is unlimited. */
+  set: (tenantId: number, tierCode: 2, limit: number | null): Promise<OperatorPoolsResponse> =>
     apiClient
       .put<OperatorPoolsResponse>(`/api/v1/superadmin/tenants/${tenantId}/license-pools/${tierCode}`, { limit })
       .then((r) => r.data),

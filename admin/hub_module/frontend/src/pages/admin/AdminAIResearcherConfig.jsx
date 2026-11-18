@@ -6,10 +6,14 @@ import { TIER } from '../../services/communityTierConstants';
 
 const AI_PROVIDERS = [
   { id: 'ollama', name: 'Ollama', tier: 'free' },
+  { id: 'waddleai', name: 'WaddleAI', tier: 'free' },
   { id: 'openai', name: 'OpenAI', tier: 'premium' },
   { id: 'anthropic', name: 'Anthropic', tier: 'premium' },
   { id: 'gemini', name: 'Google Gemini', tier: 'premium' },
 ];
+
+/** Providers a Free community may point a custom endpoint at (mirrors the server rule; UX hint only). */
+const FREE_CUSTOM_ENDPOINT_PROVIDERS = ['ollama', 'waddleai'];
 
 const RESPONSE_DESTINATIONS = [
   { id: 'same_chat', name: 'Same Chat Channel', description: 'Send responses in the same channel' },
@@ -48,11 +52,11 @@ function AdminAIResearcherConfig() {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
-  // UX hints only: the server's tier gates (ai_routing/router.py) are authoritative. Premium AI
-  // providers need Enterprise; BYOK (custom endpoint) and bot detection need Professional or higher.
+  // UX hints only: the server's tier gates (ai_routing/router.py) are authoritative. Free may use a
+  // custom endpoint only for Ollama or WaddleAI; Premium adds BYOK for OpenAI, Gemini, Anthropic.
+  // Bot detection needs Premium.
   const tier = communityTier(communityId);
-  const isEnterprise = tier >= TIER.enterprise;
-  const isPro = tier >= TIER.professional;
+  const isPremium = tier >= TIER.premium;
 
   useEffect(() => {
     fetchConfig();
@@ -222,17 +226,17 @@ function AdminAIResearcherConfig() {
                 className="w-full px-4 py-2 bg-navy-800 border border-navy-600 rounded-lg text-sky-100 focus:border-sky-500 focus:ring-1 focus:ring-sky-500"
               >
                 {AI_PROVIDERS.map((provider) => {
-                  const isLocked = provider.tier === 'premium' && !isEnterprise;
+                  const isLocked = provider.tier === 'premium' && !isPremium;
                   return (
                     <option key={provider.id} value={provider.id} disabled={isLocked}>
-                      {provider.name} {isLocked ? '(requires Enterprise)' : ''}
+                      {provider.name} {isLocked ? '(Requires Premium)' : ''}
                     </option>
                   );
                 })}
               </select>
-              {!isEnterprise && (
+              {!isPremium && (
                 <p className="text-xs text-navy-500 mt-1">
-                  Premium AI providers require the Enterprise tier
+                  Free communities can use Ollama or WaddleAI. OpenAI, Gemini and Anthropic (bring your own key) require Premium
                 </p>
               )}
             </div>
@@ -261,7 +265,7 @@ function AdminAIResearcherConfig() {
         </div>
 
         {/* Custom Endpoint (Premium Only) */}
-        {isPro && config.customEndpoint !== null && (
+        {(isPremium || FREE_CUSTOM_ENDPOINT_PROVIDERS.includes(config.aiProvider)) && config.customEndpoint !== null && (
           <div className="card p-6 border-sky-500/30">
             <div className="flex items-center gap-2 mb-4">
               <h2 className="text-lg font-semibold text-sky-100">Custom AI Endpoint</h2>
@@ -492,10 +496,10 @@ function AdminAIResearcherConfig() {
           <div className="flex items-center justify-between mb-4">
             <div className="flex items-center gap-2">
               <h2 className="text-lg font-semibold text-sky-100">Bot Detection</h2>
-              {isPro && (
-                <span className="badge badge-gold text-xs">Professional+</span>
+              {isPremium && (
+                <span className="badge badge-gold text-xs">Premium</span>
               )}
-              {!isPro && (
+              {!isPremium && (
                 <svg className="w-5 h-5 text-gold-400" fill="currentColor" viewBox="0 0 20 20">
                   <path fillRule="evenodd" d="M5 9V7a5 5 0 0110 0v2a2 2 0 012 2v5a2 2 0 01-2 2H5a2 2 0 01-2-2v-5a2 2 0 012-2zm8-2v2H7V7a3 3 0 016 0z" clipRule="evenodd" />
                 </svg>
@@ -506,13 +510,13 @@ function AdminAIResearcherConfig() {
               type="checkbox"
               checked={config.botDetectionEnabled}
               onChange={(e) => updateConfig('botDetectionEnabled', e.target.checked)}
-              disabled={!isPro}
+              disabled={!isPremium}
               className="w-5 h-5 rounded border-navy-600 text-sky-500 focus:ring-sky-500 disabled:opacity-50"
             />
           </div>
-          {!isPro && (
+          {!isPremium && (
             <div className="mb-4 p-3 bg-gold-500/10 border border-gold-500/30 rounded-lg text-sm text-gold-300">
-              Advanced bot detection requires the Professional tier
+              Advanced bot detection requires the Premium tier
             </div>
           )}
           {config.botDetectionEnabled && (

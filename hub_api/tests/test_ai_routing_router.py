@@ -37,11 +37,10 @@ from services import token_billing_service, token_ledger
 from services.ai_routing import config_service, router
 from services.ai_routing.errors import ApiError
 from services.ai_routing.models import AIRequest, AIResponse
-from tests.ai_routing_helpers import patch_tenant_tier, seed_community, set_enterprise, set_tier
+from tests.ai_routing_helpers import patch_tenant_tier, seed_community, set_premium, set_tier
 
 FREE_CODE = tier_svc.TIER_CODE_FREE
-PRO_CODE = tier_svc.TIER_CODE_PROFESSIONAL
-ENT_CODE = tier_svc.TIER_CODE_ENTERPRISE
+PREMIUM_CODE = tier_svc.TIER_CODE_PREMIUM
 
 
 def _patch_feature_flags(
@@ -96,7 +95,7 @@ def router_db(ai_routing_db: Any) -> Any:
 
 
 async def _set_enterprise(async_dal: Any, community_id: int) -> None:
-    await set_enterprise(async_dal, community_id)
+    await set_premium(async_dal, community_id)
 
 
 class TestBaseGate:
@@ -516,87 +515,58 @@ class TestByokTier:
         assert exc_info.value.code == "AI_BYOK_KEY_MISSING"
 
 
-class TestByokProfessionalFloor:
-    """BYOK entitlement floor is Professional (2026-11-06 decision), premium stays Enterprise.
+class TestPremiumCommunityFloor:
+    """Communities are only Free or Premium (2026-11-18): Premium comes ONLY from an allocation.
 
-    Every case drives the single resolver (`resolve_effective_tier`) over real allocation rows and
-    a stubbed tenant-tier license gate.
+    Every case drives the single resolver (`resolve_effective_tier`) over real allocation rows.
+    The tenant-level tier (stubbed Professional/Enterprise below) never uplifts a community.
     """
 
     @pytest.mark.parametrize(
-        ("tier_code", "byok", "premium"),
-        [
-            (None, False, False),
-            (FREE_CODE, False, False),
-            (PRO_CODE, True, False),
-            (ENT_CODE, True, True),
-        ],
+        ("tier_code", "premium"), [(None, False), (FREE_CODE, False), (PREMIUM_CODE, True)]
     )
     async def test_allocation_floor(
-        self, router_db: Any, tier_code: int | None, byok: bool, premium: bool
+        self, router_db: Any, tier_code: int | None, premium: bool
     ) -> None:
         async_dal, community_id = router_db
         if tier_code is not None and tier_code != FREE_CODE:
             await set_tier(async_dal, community_id, tier_code)
         assert (
-            await router._is_professional_or_higher(
-                async_dal, async_dal.dal, community_id=community_id
-            )
-            is byok
-        )
-        assert (
-            await router._is_enterprise_tier(async_dal, async_dal.dal, community_id=community_id)
+            await router._is_premium_tier(async_dal, async_dal.dal, community_id=community_id)
             is premium
         )
 
-    @pytest.mark.parametrize(
-        ("tenant_tier", "byok", "premium"),
-        [("free", False, False), ("professional", True, False), ("enterprise", True, True)],
-    )
-    async def test_tenant_tier_uplift_honored(
-        self,
-        router_db: Any,
-        monkeypatch: pytest.MonkeyPatch,
-        tenant_tier: str,
-        byok: bool,
-        premium: bool,
+    @pytest.mark.parametrize("tenant_tier", ["free", "professional", "enterprise"])
+    async def test_tenant_tier_never_uplifts_a_community(
+        self, router_db: Any, monkeypatch: pytest.MonkeyPatch, tenant_tier: str
     ) -> None:
-        """Tenant tier X, community Free (no allocation) -> entitled per X."""
+        """Regression: a Professional/Enterprise TENANT with no allocation is still Free."""
         async_dal, community_id = router_db
         patch_tenant_tier(monkeypatch, {"acme-corp": tenant_tier})
         dal = async_dal.dal
+        assert not await router._is_premium_tier(async_dal, dal, community_id=community_id)
         assert (
-            await router._is_professional_or_higher(async_dal, dal, community_id=community_id)
-            is byok
+            await router._community_effective_tier(async_dal, dal, community_id=community_id)
+            == "free"
         )
-        assert (
-            await router._is_enterprise_tier(async_dal, dal, community_id=community_id) is premium
+        assert not await router._byok_entitled(
+            async_dal, dal, tenant="acme-corp", community_id=community_id, provider="openai"
         )
-
-    async def test_free_tenant_pro_allocation_is_byok_not_premium(self, router_db: Any) -> None:
-        async_dal, community_id = router_db
-        await set_tier(async_dal, community_id, PRO_CODE)
-        dal = async_dal.dal
-        assert await router._is_professional_or_higher(async_dal, dal, community_id=community_id)
-        assert not await router._is_enterprise_tier(async_dal, dal, community_id=community_id)
 
     async def test_inactive_community_resolves_free_even_with_allocation(
         self, router_db: Any
     ) -> None:
         async_dal, community_id = router_db
-        await set_tier(async_dal, community_id, ENT_CODE)
+        await set_premium(async_dal, community_id)
         dal = async_dal.dal
-        assert await router._is_enterprise_tier(async_dal, dal, community_id=community_id)
+        assert await router._is_premium_tier(async_dal, dal, community_id=community_id)
         await async_dal.update_async(dal.communities.id == community_id, is_active=False)
-        assert not await router._is_enterprise_tier(async_dal, dal, community_id=community_id)
-        assert not await router._is_professional_or_higher(
-            async_dal, dal, community_id=community_id
-        )
+        assert not await router._is_premium_tier(async_dal, dal, community_id=community_id)
 
     async def test_other_tenant_slug_gets_the_same_denial_as_free(self, router_db: Any) -> None:
-        """A caller of tenant B naming tenant A's Enterprise community gets Free (no oracle)."""
+        """A caller of tenant B naming tenant A's Premium community gets Free (no oracle)."""
         async_dal, community_id = router_db
-        await set_tier(async_dal, community_id, ENT_CODE)
+        await set_premium(async_dal, community_id)
         dal = async_dal.dal
         own = await router._community_effective_tier(
             async_dal, dal, community_id=community_id, tenant="acme-corp"
@@ -607,40 +577,38 @@ class TestByokProfessionalFloor:
         unknown = await router._community_effective_tier(
             async_dal, dal, community_id=987654, tenant="acme-corp"
         )
-        assert own == "enterprise"
+        assert own == "premium"
         assert other == unknown == "free"
+        for tenant, cid in (("other-corp", community_id), ("acme-corp", 987654)):
+            assert not await router._byok_entitled(
+                async_dal, dal, tenant=tenant, community_id=cid, provider="openai"
+            )
 
     async def test_legacy_denormalized_column_is_not_a_gate(self, router_db: Any) -> None:
         """Writing `communities.license_tier` directly (nothing real does) grants nothing."""
         async_dal, community_id = router_db
         await async_dal.update_async(
             async_dal.dal.communities.id == community_id,
-            license_tier="enterprise",
+            license_tier="premium",
             is_premium=True,
         )
-        dal = async_dal.dal
-        assert not await router._is_professional_or_higher(
-            async_dal, dal, community_id=community_id
+        assert not await router._is_premium_tier(
+            async_dal, async_dal.dal, community_id=community_id
         )
-        assert not await router._is_enterprise_tier(async_dal, dal, community_id=community_id)
 
     async def test_resolver_failure_denies_and_logs_error(
         self, router_db: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
     ) -> None:
         """A broken tier lookup is Free for the gate decision (never a 500, never paid) + ERROR."""
         async_dal, community_id = router_db
-        await set_enterprise(async_dal, community_id)
+        await set_premium(async_dal, community_id)
 
-        async def _boom(*, tenant: str, community: int | None = None) -> str:
-            raise RuntimeError("license gate down")
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("allocation store down")
 
-        monkeypatch.setattr(tier_svc, "get_tier", _boom)
-        # The community allocation alone is Enterprise, but the resolver fails closed as a whole.
+        monkeypatch.setattr(tier_svc, "_community_active_row", _boom)
         with caplog.at_level(logging.ERROR):
-            assert not await router._is_professional_or_higher(
-                async_dal, async_dal.dal, community_id=community_id
-            )
-            assert not await router._is_enterprise_tier(
+            assert not await router._is_premium_tier(
                 async_dal, async_dal.dal, community_id=community_id
             )
         errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
@@ -656,7 +624,7 @@ class TestByokProfessionalFloor:
 
         monkeypatch.setattr(async_dal, "select_async", _boom)
         with caplog.at_level(logging.ERROR):
-            assert not await router._is_enterprise_tier(
+            assert not await router._is_premium_tier(
                 async_dal, async_dal.dal, community_id=community_id
             )
         assert any("ConnectionError" in r.getMessage() for r in caplog.records)
@@ -670,25 +638,110 @@ class TestByokProfessionalFloor:
         twin = dal.tenants.insert(slug="acme-twin", display_name="Acme Corp", is_active=True)
         twin_community = dal.communities.insert(name="acme", tenant_id=twin, is_active=True)
         dal.commit()
-        await set_enterprise(async_dal, community_id)
-        assert await router._is_enterprise_tier(async_dal, dal, community_id=community_id)
-        assert not await router._is_enterprise_tier(async_dal, dal, community_id=twin_community)
+        await set_premium(async_dal, community_id)
+        assert await router._is_premium_tier(async_dal, dal, community_id=community_id)
+        assert not await router._is_premium_tier(async_dal, dal, community_id=twin_community)
 
     async def test_slug_change_cannot_cross_grant_or_revoke(
         self, router_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """Renaming a tenant slug keeps the allocation; the old slug's uplift does not follow."""
+        """Renaming a tenant slug keeps the allocation; the old slug's license does not follow."""
         async_dal, community_id = router_db
         dal = async_dal.dal
-        await set_tier(async_dal, community_id, PRO_CODE)
+        await set_premium(async_dal, community_id)
         dal(dal.tenants.slug == "acme-corp").update(slug="acme-renamed")
         dal.commit()
-        patch_tenant_tier(monkeypatch, {"acme-corp": "enterprise"})  # the OLD slug's license
-        assert await router._is_professional_or_higher(async_dal, dal, community_id=community_id)
-        assert not await router._is_enterprise_tier(async_dal, dal, community_id=community_id)
+        patch_tenant_tier(monkeypatch, {"acme-corp": "enterprise"})
+        assert await router._is_premium_tier(async_dal, dal, community_id=community_id)
 
     async def test_unknown_community_fails_closed(self, router_db: Any) -> None:
         async_dal, _ = router_db
-        assert not await router._is_professional_or_higher(
-            async_dal, async_dal.dal, community_id=987654
+        assert not await router._is_premium_tier(async_dal, async_dal.dal, community_id=987654)
+
+
+class TestProviderRules:
+    """FREE: custom endpoint only for Ollama/WaddleAI. PREMIUM adds OpenAI, Gemini, Anthropic."""
+
+    def test_constants(self) -> None:
+        assert router.FREE_CUSTOM_ENDPOINT_PROVIDERS == {"ollama", "waddleai"}
+        assert router.PREMIUM_BYOK_PROVIDERS == {"openai", "gemini", "anthropic"}
+
+    @pytest.mark.parametrize(
+        ("provider", "tier", "allowed"),
+        [
+            ("ollama", "free", True),
+            ("waddleai", "free", True),
+            ("openai", "free", False),
+            ("gemini", "free", False),
+            ("anthropic", "free", False),
+            ("ollama", "premium", True),
+            ("waddleai", "premium", True),
+            ("openai", "premium", True),
+            ("gemini", "premium", True),
+            ("anthropic", "premium", True),
+            ("mistral", "premium", False),
+            ("mistral", "free", False),
+            ("", "premium", False),
+            (None, "premium", False),
+            ("OpenAI", "premium", False),
+            ("openai", "enterprise", False),
+        ],
+    )
+    def test_matrix(self, provider: str | None, tier: str, allowed: bool) -> None:
+        assert router.provider_allowed_for_tier(provider, tier) is allowed
+
+    @pytest.mark.parametrize(
+        ("provider", "premium", "entitled"),
+        [
+            ("ollama", False, True),
+            ("waddleai", False, True),
+            ("openai", False, False),
+            ("gemini", False, False),
+            ("anthropic", False, False),
+            ("openai", True, True),
+            ("gemini", True, True),
+            ("anthropic", True, True),
+            ("mistral", True, False),
+            ("mistral", False, False),
+        ],
+    )
+    async def test_byok_entitled_over_real_allocations(
+        self,
+        router_db: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+        premium: bool,
+        entitled: bool,
+    ) -> None:
+        async_dal, community_id = router_db
+        _patch_feature_flags(monkeypatch)
+        if premium:
+            await set_premium(async_dal, community_id)
+        assert (
+            await router._byok_entitled(
+                async_dal,
+                async_dal.dal,
+                tenant="acme-corp",
+                community_id=community_id,
+                provider=provider,
+            )
+            is entitled
         )
+
+    async def test_free_openai_byok_interactive_is_denied_with_clear_error(
+        self, router_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async_dal, community_id = router_db
+        _patch_feature_flags(monkeypatch)
+        with pytest.raises(ApiError) as exc_info:
+            await router.route_completion(
+                async_dal,
+                async_dal.dal,
+                tenant="acme-corp",
+                community_id=community_id,
+                actor_user_id=1,
+                ai_request=AIRequest(prompt="hi", requested_tier="byok", byok_provider="openai"),
+                idempotency_key="k1",
+            )
+        assert exc_info.value.status_code == 403
+        assert "Premium adds OpenAI, Gemini, Anthropic" in exc_info.value.message

@@ -45,13 +45,12 @@ operation here is fenced by four independent controls, in this order:
    counts and enum outcomes only. Denied attempts (cross-tenant, shared
    identity) are audited too.
 
-Do-Not-Sell is TENANT-scoped when an admin records it: one `tenant_do_not_sell` row per
-`(tenant, user)` (alembic 0125). The user's OWN choice (cookie banner / GPC) stays their global
-`cookie_consent.preferences["doNotSell"]`; the effective state inside a tenant is
-`global OR that tenant's record` (`cookie_consent_service.effective_do_not_sell`). The admin action
-is ONE-WAY (opt-out only) -- withdrawing an opt-out is the subject's own consent decision, never an
-admin's. Existing global `doNotSell` rows are not migrated (an admin's earlier action cannot be told
-apart from the user's own choice) and keep applying in every tenant.
+Do-Not-Sell is a GLOBAL per-user preference (`cookie_consent.preferences["doNotSell"]`), the same
+flag the user's own banner / GPC signal sets. The admin action is ONE-WAY (opt-out only): it can
+never opt a user back in; withdrawing is the subject's own consent decision through the
+cookie-consent routes. A tenant admin can only act on users inside its own tenant (uniform 404
+otherwise). Nothing in the backend yet gates a sale/sharing decision on the flag; any future
+decision must read the user's global preference.
 
 Uses the pydal query builder throughout (never raw `%s` SQL) -- Gotcha
 #1, `hub_api/PORTING.md`.
@@ -60,10 +59,7 @@ Uses the pydal query builder throughout (never raw `%s` SQL) -- Gotcha
 from __future__ import annotations
 
 import asyncio
-import contextvars
-import functools
 import logging
-import threading
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -72,7 +68,11 @@ from typing import Any
 from uuid import uuid4
 
 from services import data_privacy_service as privacy
-from services.cookie_consent_service import DNS_SOURCE_TENANT_ADMIN_DSAR
+from services.cookie_consent_service import (
+    default_preferences,
+    get_current_policy,
+    log_audit_event,
+)
 from services.errors import ApiError, bad_request
 from services.global_identity import is_global_admin
 from services.platform_account import (
@@ -81,7 +81,6 @@ from services.platform_account import (
     is_platform_account_sync,
 )
 from services.safe_parse import parse_uuid
-from services.schema import bind_tenant_do_not_sell_table
 
 logger = logging.getLogger(__name__)
 
@@ -402,92 +401,77 @@ async def _audit_denied(
         logger.exception("dsar.audit_denied_write_failed", extra={"reason": reason})
 
 
-async def apply_do_not_sell(
-    async_dal: Any,
-    dal: Any,
-    *,
-    tenant_id: int,
-    user_id: int,
-    recorded_by: int | None = None,
-    source_code: int = DNS_SOURCE_TENANT_ADMIN_DSAR,
-) -> bool:
-    """Record a TENANT-scoped Do-Not-Sell for `user_id`. Returns `True` if a record was written.
+async def apply_do_not_sell(async_dal: Any, dal: Any, *, user_id: int) -> bool:
+    """Opt `user_id` out of sale/sharing. Returns `True` if anything changed.
 
-    Writes one `tenant_do_not_sell` row for `(tenant_id, user_id)` and nothing else: the user's own
-    global preference (`cookie_consent`) is never touched, so one tenant's admin cannot change the
-    user's state in another tenant (`effective_do_not_sell`). Idempotent: an existing record for
-    THIS tenant returns `False`; the user's global preference and other tenants' records are
-    deliberately not consulted, so the result never reveals them. A concurrent duplicate is
-    `ON CONFLICT DO NOTHING` (Postgres) and reported as already recorded.
+    Every `cookie_consent` row for the user gets `doNotSell=True` and
+    `marketing=False`; a user with no consent row yet gets a new privacy-
+    maximal one (`consent_method="admin_dsar"`), so the opt-out survives
+    until the user's first banner interaction. Each change is mirrored into
+    the subject-visible `cookie_audit_log` (best-effort, same helper the
+    self-service consent flow uses). Idempotent.
+
+    The opt-out is durable: `cookie_consent_service` merges later self-service
+    writes (`update_preferences`, `save_consent`, `revoke_consent`) key-by-key,
+    so none of them drops `doNotSell` (pinned by
+    `tests/test_admin_data_privacy.py::TestDoNotSell`).
     """
-    bind_tenant_do_not_sell_table(dal)
-    loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(
-        async_dal.executor,
-        functools.partial(
-            contextvars.copy_context().run,
-            _record_tenant_dns_sync,
+    rows = await async_dal.select_async(dal(dal.cookie_consent.user_id == user_id))
+    now = datetime.now(UTC)
+    changed = False
+    for row in rows:
+        preferences = dict(row.preferences or {})
+        if preferences.get("doNotSell") is True and preferences.get("marketing") is False:
+            continue
+        previous_marketing = preferences.get("marketing")
+        preferences["doNotSell"] = True
+        preferences["marketing"] = False
+        await async_dal.update_async(
+            dal.cookie_consent.consent_id == row.consent_id,
+            preferences=preferences,
+            updated_at=now,
+        )
+        await log_audit_event(
+            async_dal,
             dal,
-            tenant_id,
-            user_id,
-            source_code,
-            recorded_by,
-        ),
-    )
+            consent_id=row.consent_id,
+            user_id=user_id,
+            action="ADMIN_DO_NOT_SELL",
+            version=row.consent_version,
+            category="marketing",
+            previous_value=previous_marketing if isinstance(previous_marketing, bool) else None,
+            new_value=False,
+        )
+        changed = True
 
-
-#: Serializes the non-Postgres (sqlite test backend) check-then-insert path across threads.
-_DNS_LOCAL_LOCK = threading.Lock()
-_DNS_PG_INSERT = (
-    "INSERT INTO tenant_do_not_sell (public_id, tenant_id, user_id, source_code, recorded_by,"
-    " created_at) VALUES (%s, %s, %s, %s, %s, %s) ON CONFLICT (tenant_id, user_id) DO NOTHING"
-    " RETURNING id"
-)
-
-
-def _record_tenant_dns_sync(
-    dal: Any, tenant_id: int, user_id: int, source_code: int, recorded_by: int | None
-) -> bool:
-    """Insert one `tenant_do_not_sell` row atomically; `False` when it already existed.
-
-    Postgres: a single `INSERT ... ON CONFLICT (tenant_id, user_id) DO NOTHING RETURNING id`, so a
-    concurrent duplicate neither raises nor aborts the surrounding transaction (the bulk loop keeps
-    going). Other backends (sqlite tests, no composite unique) use a lock-serialized
-    check-then-insert. Commits on success and rolls back on any failure.
-    """
-    table = dal.tenant_do_not_sell
-    try:
-        if getattr(dal, "_dbname", "") == "postgres":
-            rows = dal.executesql(
-                _DNS_PG_INSERT,
-                [
-                    str(uuid4()),
-                    tenant_id,
-                    user_id,
-                    source_code,
-                    recorded_by,
-                    datetime.now(UTC),
-                ],
-            )
-            inserted = bool(rows)
-        else:
-            with _DNS_LOCAL_LOCK:
-                exists = dal((table.tenant_id == tenant_id) & (table.user_id == user_id)).count()
-                inserted = not exists
-                if inserted:
-                    table.insert(
-                        public_id=str(uuid4()),
-                        tenant_id=tenant_id,
-                        user_id=user_id,
-                        source_code=source_code,
-                        recorded_by=recorded_by,
-                        created_at=datetime.now(UTC),
-                    )
-        dal.commit()
-    except Exception:
-        dal.rollback()
-        raise
-    return inserted
+    if not rows:
+        policy = await get_current_policy(async_dal, dal)
+        version = policy.version if policy else "admin-dsar"
+        consent_id = str(uuid4())
+        await async_dal.insert_async(
+            dal.cookie_consent,
+            user_id=user_id,
+            consent_id=consent_id,
+            preferences={**default_preferences(), "doNotSell": True},
+            consent_version=version,
+            consent_method="admin_dsar",
+            consented_at=now,
+            updated_at=now,
+            expires_at=None,
+        )
+        await log_audit_event(
+            async_dal,
+            dal,
+            consent_id=consent_id,
+            user_id=user_id,
+            action="ADMIN_DO_NOT_SELL",
+            version=version,
+            category="marketing",
+            previous_value=None,
+            new_value=False,
+        )
+        changed = True
+    return changed
 
 
 def _erase_refusal(actor: DsarActor, user_id: int, scope: TenantScope) -> str | None:
@@ -511,29 +495,6 @@ _REFUSAL_DETAIL = {
 }
 
 
-async def _tenant_dns_export(
-    async_dal: Any, dal: Any, *, tenant_id: int, user_id: int
-) -> list[dict[str, Any]]:
-    """`tenant_id`'s own Do-Not-Sell record for `user_id` (empty if none): source and timestamp."""
-    bind_tenant_do_not_sell_table(dal)
-    t = dal.tenant_do_not_sell
-    rows = await async_dal.select_async(
-        dal((t.tenant_id == tenant_id) & (t.user_id == user_id)),
-        t.public_id,
-        t.source_code,
-        t.created_at,
-        limitby=(0, 1),
-    )
-    return [
-        {
-            "public_id": str(r.public_id),
-            "source_code": int(r.source_code),
-            "created_at": r.created_at.isoformat() if r.created_at else None,
-        }
-        for r in rows
-    ]
-
-
 async def _export_one(
     async_dal: Any,
     dal: Any,
@@ -552,18 +513,6 @@ async def _export_one(
         row["public_id"] = user_uuid
     # Community-keyed rows likewise carry the numeric community PK; emit the public UUID.
     await privacy.remap_community_ids(async_dal, dal, data)
-    # Do-Not-Sell: the user's own GLOBAL preference is already in `cookie_consent`; add ONLY the
-    # acting tenant's record (never another tenant's), without any numeric id.
-    try:
-        data["tenant_do_not_sell"] = await _tenant_dns_export(
-            async_dal, dal, tenant_id=tenant_id, user_id=user_id
-        )
-    except Exception:  # noqa: BLE001 - an incomplete export is reported, never silently complete
-        logger.exception("dsar.export_tenant_dns_failed", extra={"tenant_id": tenant_id})
-        failures = [
-            *failures,
-            {"source": "tenant_do_not_sell", "error": privacy.EXPORT_SOURCE_FAILED},
-        ]
     result = DsarResult(
         user_uuid=user_uuid,
         status=DsarStatus.PARTIAL if failures else DsarStatus.COMPLETED,
@@ -680,12 +629,8 @@ async def _process_user(
             changed = await apply_do_not_sell(
                 async_dal,
                 dal,
-                tenant_id=actor.tenant_id,
                 user_id=user_id,
-                recorded_by=actor.user_id,
             )
-            # Do-Not-Sell is recorded per tenant, so "already opted out" only ever reflects THIS
-            # tenant's own earlier record; another tenant's actions are never visible here.
             result = DsarResult(
                 user_uuid=user_uuid,
                 status=DsarStatus.COMPLETED if changed else DsarStatus.ALREADY_DONE,

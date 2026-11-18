@@ -22,7 +22,6 @@ const resp = (over: Partial<OperatorPoolsResponse> = {}): OperatorPoolsResponse 
   bypassDomain: true,
   pools: [
     { tierCode: 2, limit: 5, source: 'operator_set', observedAt: '2026-11-01T00:00:00Z' },
-    { tierCode: 3, limit: null, source: 'operator_set', observedAt: '2026-11-01T00:00:00Z' },
   ],
   ...over,
 });
@@ -31,8 +30,8 @@ const httpErr = (status: number, code?: string, message?: string) => ({
 });
 
 const mount = () => render(<TenantLicensePools tenantId={5} tenantSlug="acme" onClose={vi.fn()} />);
-const input = (tier: number) => screen.getByLabelText(new RegExp(`${tier === 2 ? 'Professional' : 'Enterprise'} pool size`)) as HTMLInputElement;
-const save = (tier: number) => fireEvent.click(screen.getByRole('button', { name: tier === 2 ? 'Save Professional' : 'Save Enterprise' }));
+const input = (_tier: number) => screen.getByLabelText(/Premium pool size/) as HTMLInputElement;
+const save = (_tier: number) => fireEvent.click(screen.getByRole('button', { name: 'Save Premium' }));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -50,36 +49,44 @@ describe('draftToLimit', () => {
 });
 
 describe('TenantLicensePools', () => {
-  it('loads and shows current pools per tier (unlimited / not licensed wording)', async () => {
+  it('loads and shows ONE Premium pool (no Professional/Enterprise rows)', async () => {
     mount();
     expect(screen.getByRole('status', { name: 'Loading license pools' })).toBeTruthy();
     expect((await screen.findByTestId('pool-current-2')).textContent).toContain('Current: 5');
-    expect(screen.getByTestId('pool-current-3').textContent).toContain('not licensed');
+    expect(screen.queryByTestId('pool-current-3')).toBeNull();
+    expect(screen.getAllByRole('form')).toHaveLength(1);
+    expect(screen.queryByText(/Professional|Enterprise/)).toBeNull();
     expect(api.get).toHaveBeenCalledWith(5);
     expect(input(2).value).toBe('5');
-    expect(input(3).placeholder).toBe('Not licensed');
     expect(screen.queryByTestId('pools-locked')).toBeNull();
   });
 
-  it('sets Professional to a number', async () => {
-    api.set.mockResolvedValue(resp({ pools: [{ tierCode: 2, limit: 9, source: 'operator_set', observedAt: 'x' }, { tierCode: 3, limit: null, source: 'operator_set', observedAt: 'x' }] }));
+  it('shows not licensed wording for a null limit', async () => {
+    api.get.mockResolvedValue(resp({ pools: [{ tierCode: 2, limit: null, source: 'operator_set', observedAt: 'x' }] }));
+    mount();
+    expect((await screen.findByTestId('pool-current-2')).textContent).toContain('not licensed');
+    expect(input(2).placeholder).toBe('Not licensed');
+  });
+
+  it('sets the Premium pool to a number', async () => {
+    api.set.mockResolvedValue(resp({ pools: [{ tierCode: 2, limit: 9, source: 'operator_set', observedAt: 'x' }] }));
     mount();
     await screen.findByTestId('pool-current-2');
     fireEvent.change(input(2), { target: { value: '9' } });
     save(2);
     await waitFor(() => expect(api.set).toHaveBeenCalledWith(5, 2, 9));
-    expect(await screen.findByText('Professional pool saved.')).toBeTruthy();
+    expect(await screen.findByText('Premium pool saved.')).toBeTruthy();
   });
 
-  it('Unlimited shortcut sends -1 for Enterprise', async () => {
+  it('Unlimited shortcut sends -1 for the Premium pool', async () => {
     api.set.mockResolvedValue(resp());
     mount();
-    await screen.findByTestId('pool-current-3');
-    const form = screen.getByRole('form', { name: 'Enterprise pool' });
+    await screen.findByTestId('pool-current-2');
+    const form = screen.getByRole('form', { name: 'Premium pool' });
     fireEvent.click(form.querySelector('button[type=button]') as HTMLButtonElement);
-    expect(input(3).value).toBe('-1');
-    save(3);
-    await waitFor(() => expect(api.set).toHaveBeenCalledWith(5, 3, -1));
+    expect(input(2).value).toBe('-1');
+    save(2);
+    await waitFor(() => expect(api.set).toHaveBeenCalledWith(5, 2, -1));
   });
 
   it('Not licensed sends null', async () => {
@@ -108,14 +115,14 @@ describe('TenantLicensePools', () => {
     save(2);
     expect((await screen.findByTestId('pools-locked')).textContent).toBe(NOT_ALLOWED_MESSAGE);
     expect(input(2).disabled).toBe(true);
-    expect((screen.getByRole('button', { name: 'Save Enterprise' }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole('button', { name: 'Save Premium' }) as HTMLButtonElement).disabled).toBe(true);
   });
 
   it('bypassDomain=false from the GET starts locked', async () => {
     api.get.mockResolvedValue(resp({ bypassDomain: false }));
     mount();
     expect((await screen.findByTestId('pools-locked')).textContent).toBe(NOT_ALLOWED_MESSAGE);
-    expect(input(3).disabled).toBe(true);
+    expect(input(2).disabled).toBe(true);
   });
 
   it('403 on load shows forbidden', async () => {

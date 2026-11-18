@@ -325,9 +325,6 @@ RULES: tuple[Rule, ...] = (
     delete("support_ticket_comments", hub("author_user_id")),
     delete("tenant_admins", hub("user_id")),
     delete("tenant_members", hub("user_id")),
-    # Tenant-scoped Do-Not-Sell (alembic 0125): the row is the subject's own opt-out preference.
-    delete("tenant_do_not_sell", hub("user_id")),
-    ref("tenant_do_not_sell", "recorded_by", reason=_ACTOR),
     delete("user_access_tokens", hub("user_id")),
     delete("user_calendar_settings", hub("hub_user_id")),
     delete("user_labels", hub("user_id")),

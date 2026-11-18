@@ -12,6 +12,7 @@ from typing import Any
 
 import httpx
 import pytest
+from flask_core import feature_flags
 
 from services import community_tier_service as tier_svc
 from services import token_ledger
@@ -41,7 +42,7 @@ def ensure_tier_tables(dal: Any) -> None:
 
 
 def patch_tenant_tier(monkeypatch: pytest.MonkeyPatch, tier: str | dict[str, str] = "free") -> None:
-    """Stub the license gate (`get_tier`) the single resolver asks for the TENANT tier.
+    """Stub the license gate (`get_tier`): the TENANT tier, which must NOT uplift a community.
 
     `tier` is a fixed tier name, or a `{tenant_slug: tier}` map (unlisted slugs -> `free`) so a
     test can prove the tenant uplift is bound to the right tenant.
@@ -50,7 +51,10 @@ def patch_tenant_tier(monkeypatch: pytest.MonkeyPatch, tier: str | dict[str, str
     async def _fake(*, tenant: str, community: int | None = None) -> str:
         return tier if isinstance(tier, str) else tier.get(tenant, "free")
 
-    monkeypatch.setattr(tier_svc, "get_tier", _fake)
+    # The community resolver no longer consults the tenant tier at all (communities are only
+    # Free/Premium via an allocation); the stub stays installed on the license-gate entry point so
+    # a regression that re-introduced a tenant uplift would be visible to the tests.
+    monkeypatch.setattr(feature_flags, "get_tier", _fake)
 
 
 def seed_community(ai_routing_db: Any) -> tuple[Any, int]:
@@ -87,9 +91,13 @@ def grant_tier(dal: Any, community_id: int, tier_code: int) -> None:
     dal.commit()
 
 
-async def set_enterprise(async_dal: Any, community_id: int) -> None:
-    """Allocate the Enterprise tier to the community (premium AI entitlement half)."""
-    await set_tier(async_dal, community_id, tier_svc.TIER_CODE_ENTERPRISE)
+async def set_premium(async_dal: Any, community_id: int) -> None:
+    """Allocate the Premium tier to the community (premium AI entitlement half)."""
+    await set_tier(async_dal, community_id, tier_svc.TIER_CODE_PREMIUM)
+
+
+#: Legacy name kept so the many older suites that call it keep working; it is Premium now.
+set_enterprise = set_premium
 
 
 async def credit_premium(

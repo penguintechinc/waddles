@@ -74,7 +74,6 @@ def gates(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeFlagGate, FakeLicenseGat
         flag_gate=flag,
         license_gate=lic,
         tier_requirements={},
-        community_tier_source=None,
         feature_registry=FeatureRegistry(),
     )
     monkeypatch.setattr(feature_flags_module, "get_entitlement_client", lambda: client)

@@ -40,7 +40,7 @@ function AdminBotDetection() {
   const [botScoreLoading, setBotScoreLoading] = useState(true);
   // UX hint only: the server's tier gates are authoritative (an ungated client still gets 402/403).
   const tier = communityTier(communityId);
-  const isPremium = tier >= TIER.professional;
+  const isPremium = tier >= TIER.premium;
 
   useEffect(() => {
     fetchDetections();
@@ -155,7 +155,7 @@ function AdminBotDetection() {
   }
 
   if (!isPremium) {
-    return <TierLocked feature="Bot Detection" requiredTier={TIER.professional} currentTier={tier} />;
+    return <TierLocked feature="Bot Detection" requiredTier={TIER.premium} currentTier={tier} />;
   }
 
   return (

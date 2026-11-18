@@ -21,7 +21,7 @@ requires_docker = pytest.mark.skipif(
 _ROOT = Path(__file__).resolve().parents[2]
 _PATH = _ROOT / "alembic" / "versions" / "0126_community_tier_allocations.py"
 _REV = "0126_community_tier_allocations"
-_PREV = "0125_tenant_do_not_sell"
+_PREV = "0124_dsar_open_public_unique"
 
 
 def _load() -> ModuleType:
@@ -43,7 +43,7 @@ def test_history_has_one_head_and_0126_is_in_its_ancestry() -> None:
     cfg.set_main_option("script_location", str(_ROOT / "alembic"))
     script = ScriptDirectory.from_config(cfg)
     heads = script.get_heads()
-    assert len(heads) == 1
+    assert heads == ["0127_tenant_license_key"]
     ancestry = {r.revision for r in script.walk_revisions(base="base", head=heads[0])}
     assert _REV in ancestry
 
@@ -59,6 +59,8 @@ def test_upgrade_and_downgrade_emit_expected_ddl() -> None:
     assert "lock_timeout" in up and "ix_cta_community" in up and "ix_tlp_set_by" in up
     assert "ux_cta_active_community" in up and "WHERE released_at IS NULL" in up
     assert "ADD COLUMN public_id" not in up  # communities.public_id is 0084's
+    assert up.count("CHECK (tier_code = 2)") == 2  # ledger + pools: Premium (2) only
+    assert "tier_code IN (2, 3)" not in up
     with (
         mock.patch.object(module.op, "execute") as execute,
         mock.patch.object(module.op, "get_bind") as get_bind,
@@ -133,13 +135,14 @@ def test_real_postgres_constraints_backfill_idempotent_and_roundtrip() -> None:
                 "FROM community_tier_allocations ORDER BY community_id"
             )
             rows = cur.fetchall()
-            # Enterprise stays Enterprise; Professional/unknown-premium -> Professional
+            # every premium-ish community (flag true, or a premium-ish tier string) -> ONE
+            # Premium row; is_premium false / NULL with no tier string -> no row
             assert sorted((r[0], r[1], r[2], r[3]) for r in rows) == sorted(
                 [
                     (ids["prem"], 2, 3, None),
-                    (ids["ent"], 3, 3, None),
+                    (ids["ent"], 2, 3, None),
                     (ids["pro"], 2, 3, None),
-                    (ids["tieronly"], 3, 3, None),
+                    (ids["tieronly"], 2, 3, None),
                 ]
             )
 
@@ -158,17 +161,19 @@ def test_real_postgres_constraints_backfill_idempotent_and_roundtrip() -> None:
                     ins, (tenant_id, ids["free"], 1, 1)
                 )  # tier 1 (free) never stored
             with pytest.raises(psycopg2.errors.CheckViolation):
+                cur.execute(ins, (tenant_id, ids["free"], 3, 1))  # no tier 3 any more
+            with pytest.raises(psycopg2.errors.CheckViolation):
                 cur.execute(ins, (tenant_id, ids["free"], 4, 1))
             with pytest.raises(psycopg2.errors.CheckViolation):
                 cur.execute(ins, (tenant_id, ids["free"], 2, 9))
             with pytest.raises(psycopg2.errors.UniqueViolation):
-                cur.execute(ins, (tenant_id, ids["prem"], 3, 1))  # 2nd active row
+                cur.execute(ins, (tenant_id, ids["prem"], 2, 1))  # 2nd active row
             cur.execute(
                 "UPDATE community_tier_allocations SET released_at = now(), "
                 "release_reason_code = 1 WHERE community_id = %s",
                 (ids["prem"],),
             )
-            cur.execute(ins, (tenant_id, ids["prem"], 3, 1))  # allowed once released
+            cur.execute(ins, (tenant_id, ids["prem"], 2, 1))  # allowed once released
             cur.execute("SELECT public_id FROM community_tier_allocations LIMIT 1")
             assert cur.fetchone()[0] is not None
 
@@ -183,13 +188,18 @@ def test_real_postgres_constraints_backfill_idempotent_and_roundtrip() -> None:
             with pytest.raises(psycopg2.errors.CheckViolation):
                 cur.execute(pool, (tenant_id, 1, 3, 5, 1))  # only the team axis
             with pytest.raises(psycopg2.errors.CheckViolation):
-                cur.execute(pool, (tenant_id, 3, 3, -2, 1))
-            cur.execute(pool, (tenant_id, 3, 3, None, 3))  # NULL = not licensed
+                cur.execute(pool, (tenant_id, 3, 3, 5, 1))  # no tier-3 pool any more
+            with pytest.raises(psycopg2.errors.CheckViolation):
+                cur.execute(pool, (tenant_id, 3, 2, -2, 1))
+            cur.execute(
+                "DELETE FROM tenant_license_pools WHERE tenant_id = %s", (tenant_id,)
+            )
+            cur.execute(pool, (tenant_id, 3, 2, None, 3))  # NULL = not licensed
             # the downgrade must REFUSE while the ledger/pools hold rows
             with pytest.raises(Exception):  # noqa: B017 - CLI wrapper error type varies
                 alembic_cli("downgrade", _PREV, dsn=db.dsn)
             cur.execute("SELECT count(*) FROM tenant_license_pools")
-            assert cur.fetchone()[0] == 2
+            assert cur.fetchone()[0] == 1
         finally:
             conn.close()
         os.environ["ALEMBIC_ALLOW_DESTRUCTIVE_DOWNGRADE"] = "1"

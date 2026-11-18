@@ -1,11 +1,12 @@
-"""Community tier allocation: Pro/Ent entitlements drawn from a tenant's team-axis license pool.
+"""Community tier allocation: Premium entitlements drawn from a tenant's team-axis license pool.
 
 Model (critical-rules.md Licensing Model, team overage):
 
-- A community is Free (no allocation row, consumes no pool slot, never blocked), Professional
-  (code 2) or Enterprise (code 3). Pro/Ent are *allocated* from the tenant's pool.
-- Effective tier = ``max(tenant tier, active allocation)``, failing closed to Free.
-- Overage: a NEW Pro/Ent allocation beyond that tier's pool is BLOCKED (:class:`PoolExhausted`,
+- A community is Free (code 1: no allocation row, consumes no pool slot, never blocked) or
+  Premium (code 2). Premium is *allocated* from the tenant's ONE Premium pool.
+- Effective tier = Premium iff the community has an active allocation, else Free (failing closed
+  to Free). The tenant's own license tier does NOT uplift a community: the pool is the entitlement.
+- Overage: a NEW Premium allocation beyond the pool is BLOCKED (:class:`PoolExhausted`,
   402 later); an already-provisioned allocation is NEVER stripped -- shrinking the pool or
   downgrading the tenant only blocks new allocations. Super-admin ``operator_override`` is never
   blocked but still counts (reported as ``overage``).
@@ -29,8 +30,7 @@ connection idles in a transaction holding a stale snapshot.
 A per-community lock is taken first (fixed order: community, then pool) so two concurrent changes
 to one community cannot both pass.
 
-Everything is keyed by NUMERIC ids (tenant/community/user), never slugs, except the one tenant
-slug lookup :func:`resolve_effective_tier` needs to ask the entitlement client for the tenant tier.
+Everything is keyed by NUMERIC ids (tenant/community/user), never slugs.
 ``communities.license_tier`` / ``is_premium`` are denormalized copies written in the same
 transaction as the ledger row.
 """
@@ -42,18 +42,9 @@ import logging
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final, Literal, Protocol
-
-from flask_core.feature_flags import get_tier
-from flask_core.tier_catalog import (
-    TIER_ENTERPRISE,
-    TIER_FREE,
-    TIER_PROFESSIONAL,
-    tier_level,
-)
 
 from services import community_tier_telemetry as telemetry
 from services.audit_events import (
@@ -68,16 +59,17 @@ from services.schema import bind_community_tier_tables
 
 logger = logging.getLogger(__name__)
 
-#: Tier codes. Free is implicit (no row); only 2/3 are ever stored.
+#: Tier codes. Free is implicit (no row); only 2 (Premium) is ever stored.
 TIER_CODE_FREE: Final[int] = 1
-TIER_CODE_PROFESSIONAL: Final[int] = 2
-TIER_CODE_ENTERPRISE: Final[int] = 3
+TIER_CODE_PREMIUM: Final[int] = 2
+TIER_NAME_FREE: Final[str] = "free"
+TIER_NAME_PREMIUM: Final[str] = "premium"
 TIER_NAMES: Final[dict[int, str]] = {
-    TIER_CODE_FREE: TIER_FREE,
-    TIER_CODE_PROFESSIONAL: TIER_PROFESSIONAL,
-    TIER_CODE_ENTERPRISE: TIER_ENTERPRISE,
+    TIER_CODE_FREE: TIER_NAME_FREE,
+    TIER_CODE_PREMIUM: TIER_NAME_PREMIUM,
 }
-POOLED_TIER_CODES: Final[tuple[int, int]] = (TIER_CODE_PROFESSIONAL, TIER_CODE_ENTERPRISE)
+#: The single pooled tier: exactly one Premium pool per tenant.
+POOLED_TIER_CODES: Final[tuple[int]] = (TIER_CODE_PREMIUM,)
 
 #: ``tenant_license_pools.axis_code``: the team axis (nodes/seats are other axes, not stored here).
 AXIS_TEAM: Final[int] = 3
@@ -104,7 +96,10 @@ RELEASE_COMMUNITY_DELETED: Final[int] = 3
 POOL_SOURCE_LICENSE_SERVER: Final[int] = 1
 POOL_SOURCE_OFFLINE: Final[int] = 2
 POOL_SOURCE_OPERATOR_SET: Final[int] = 3
-PoolSourceName = Literal["license_server", "offline", "operator_set"]
+#: In-code pool source (bypass-domain default tenant: unlimited Premium). NEVER stored in
+#: ``tenant_license_pools`` (not in :data:`_POOL_SOURCE_BY_CODE`, outside the table's CHECK).
+POOL_SOURCE_BYPASS_DEFAULT: Final[int] = 4
+PoolSourceName = Literal["license_server", "offline", "operator_set", "bypass_default"]
 _POOL_SOURCE_BY_CODE: Final[dict[int, PoolSourceName]] = {
     POOL_SOURCE_LICENSE_SERVER: "license_server",
     POOL_SOURCE_OFFLINE: "offline",
@@ -281,7 +276,7 @@ def _community_active_row(dal: Any, community_id: int) -> Any | None:
 def _write_denormalized(dal: Any, community_id: int, tier_code: int) -> None:
     """Keep ``communities.license_tier`` / ``is_premium`` equal to the allocation (same txn)."""
     dal(dal.communities.id == community_id).update(
-        license_tier=TIER_NAMES[tier_code], is_premium=tier_code >= TIER_CODE_PROFESSIONAL
+        license_tier=TIER_NAMES[tier_code], is_premium=tier_code == TIER_CODE_PREMIUM
     )
 
 
@@ -352,7 +347,7 @@ class PoolStore:
     ) -> None:
         """Upsert the pool row (one per tenant/axis/tier) in a single committed job."""
         if tier_code not in POOLED_TIER_CODES:
-            raise ValueError("pools exist only for professional (2) and enterprise (3)")
+            raise ValueError("the only pool is premium (2)")
         if limit_count is not None and limit_count < UNLIMITED:
             raise ValueError("limit_count must be None, -1 (unlimited) or >= 0")
         if source_code not in _POOL_SOURCE_BY_CODE:
@@ -439,38 +434,19 @@ class StorePoolProvider:
         )
 
 
-async def _tenant_slug(async_dal: Any, dal: Any, tenant_id: int) -> str | None:
-    def _job() -> str | None:
-        try:
-            row = dal(dal.tenants.id == tenant_id).select(dal.tenants.slug).first()
-            return None if row is None or not row.slug else str(row.slug)
-        finally:
-            _end_read(dal)
-
-    return await asyncio.get_running_loop().run_in_executor(async_dal.executor, _job)
-
-
 async def resolve_effective_tier(
-    async_dal: Any,
-    dal: Any,
-    tenant_id: int,
-    community_id: int,
-    *,
-    tenant_tier: Callable[[str], Awaitable[str]] | None = None,
+    async_dal: Any, dal: Any, tenant_id: int, community_id: int
 ) -> str:
-    """Return ``max(tenant tier, active allocation)`` as a tier name; fail closed to ``free``.
+    """Return ``'premium'`` iff the community has an active allocation, else ``'free'``.
 
-    Keyed by numeric ids. A stale allocation still confers its tier AND keeps its pool slot
-    (automatic reclamation is not active; entitlements are never stripped). Any error logs
-    ERROR (exception type only) and reports ``free``. ``tenant_tier`` overrides the entitlement
-    lookup (tests / callers that already hold the tenant tier); default is
-    ``flask_core.feature_flags.get_tier``.
+    Keyed by numeric ids. Any active (unreleased) allocation counts, whatever its source
+    (tenant admin, operator override or backfill) and however stale: automatic reclamation is not
+    active, so entitlements are never stripped. The tenant-level license tier does NOT uplift a
+    community (the pool is the entitlement). Fails closed: any error logs ERROR (exception type
+    only) and reports ``free``.
     """
     try:
         bind_community_tier_tables(dal)
-        slug = await _tenant_slug(async_dal, dal, tenant_id)
-        resolver = tenant_tier or (lambda s: get_tier(tenant=s))
-        tenant_name: str = await resolver(slug) if slug else TIER_FREE
 
         def _job() -> int:
             try:
@@ -482,18 +458,18 @@ async def resolve_effective_tier(
                 _end_read(dal)
 
         code = await asyncio.get_running_loop().run_in_executor(async_dal.executor, _job)
-        community_name: str = TIER_NAMES.get(code, TIER_FREE)
-        best: str = max(tenant_name, community_name, key=tier_level)
-        return best if best in (TIER_FREE, TIER_PROFESSIONAL, TIER_ENTERPRISE) else TIER_FREE
+        return TIER_NAME_PREMIUM if code == TIER_CODE_PREMIUM else TIER_NAME_FREE
     except Exception as exc:  # noqa: BLE001 - tier resolution fails closed, never raises
         logger.error("community_tier_resolve_failed error_type=%s", type(exc).__name__)
-        return str(TIER_FREE)
+        return TIER_NAME_FREE
 
 
 async def pool_usage(
     async_dal: Any, dal: Any, tenant_id: int, *, pool: PoolProvider
 ) -> dict[int, TierUsage]:
-    """Per-tier used/limit/available/overage/stale counts for the tenant's team pool.
+    """Used/limit/available/overage/stale counts for the tenant's single Premium team pool.
+
+    The mapping holds exactly one entry (``TIER_CODE_PREMIUM``).
 
     ``used`` includes stale allocations (they keep their slot until released).
 
@@ -639,9 +615,8 @@ async def allocate(
 ) -> AllocationResult:
     """Set a community's tier from the tenant pool, atomically (lock -> count -> write -> commit).
 
-    ``tier``: 1 = Free (releases any allocation, never blocked), 2 = Professional, 3 = Enterprise.
-    Raises :class:`PoolExhausted` when a NEW Pro/Ent slot would exceed the pool (the previous
-    allocation, e.g. on a Pro->Ent change with Ent full, is left untouched),
+    ``tier``: 1 = Free (releases any allocation, never blocked), 2 = Premium.
+    Raises :class:`PoolExhausted` when a NEW Premium slot would exceed the pool,
     :class:`PoolUnavailable` when the pool cannot be determined (operator overrides proceed
     without a known limit), :class:`CommunityNotInTenant` for a foreign/missing community.
     ``audit`` (an ``AuditService``) is written AFTER the commit; ``None`` skips auditing.

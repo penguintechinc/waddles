@@ -12,6 +12,11 @@ over the DB-backed :class:`services.community_tier_service.PoolStore` and caches
   unless ``TRUSTED_FORWARDED_HOST`` is set AND the peer is in ``TRUSTED_PROXY_CIDRS``), then
   normalized by :func:`normalized_request_host` (lowercase, port stripped, userinfo/odd forms
   rejected -> no bypass).
+* **Default-tenant bypass pool**: on a bypass-domain host the DEFAULT tenant (the numeric id of the
+  configured ``default_tenant_slug`` row, resolved once and compared by id) gets an UNLIMITED
+  Premium pool computed in code (``limit=-1``, ``stale=False``, ``source='bypass_default'``): no
+  ``tenant_license_pools`` row and no license-server call. Every other tenant on a bypass host
+  keeps the operator-set pool (or "not licensed"); non-bypass hosts are unchanged.
 * **Base URL**: ``LICENSE_SERVER_URL`` (the same env ``flask_core.entitlement`` and
   ``config.py`` use), defaulting to the public license server; validated by
   ``flask_core.license_pool.validate_base_url`` (https only, no userinfo/query/fragment; plain
@@ -21,17 +26,29 @@ over the DB-backed :class:`services.community_tier_service.PoolStore` and caches
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import re
-from typing import Any
+from collections.abc import Callable
+from typing import Any, Literal
 
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.entitlement import is_bypass_domain
 from flask_core.feature_flags import current_request_host
 from flask_core.license_pool import LicenseServerPoolProvider, validate_base_url
 from flask_core.license_pool import PoolUnavailable as LibPoolUnavailable
 
-from services.community_tier_service import PoolInfo, PoolProvider, PoolStore, PoolUnavailable
+from services.community_tier_service import (
+    POOLED_TIER_CODES,
+    UNLIMITED,
+    PoolInfo,
+    PoolProvider,
+    PoolStore,
+    PoolUnavailable,
+    _end_read,
+    now_utc,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +57,9 @@ POOL_PROVIDER_CONFIG_KEY = "POOL_PROVIDER"
 _CACHE_KEY = "_pool_provider_cache"
 _DEFAULT_LICENSE_SERVER_URL = "https://license.penguintech.io"
 
+
+#: `PoolInfo.source` label of the in-code bypass-domain default-tenant pool (never stored).
+_BYPASS_DEFAULT_SOURCE: Literal["bypass_default"] = "bypass_default"
 
 _HOST_RE = re.compile(r"^[a-z0-9]([a-z0-9.-]{0,251}[a-z0-9])?$")
 
@@ -110,20 +130,69 @@ def _make_key_resolver(async_dal: Any, dal: Any) -> Any:
     return _resolve
 
 
+class DefaultTenantIdResolver:
+    """Resolves (and caches) the NUMERIC id of the default tenant from its configured slug.
+
+    The slug is only used for this one lookup; every comparison afterwards is by numeric id. A
+    missing row is not cached (a late seed is picked up) and yields ``None`` (no bypass pool).
+    """
+
+    def __init__(self, async_dal: Any, dal: Any, slug: str) -> None:
+        """Bind the shared pydal handle and the configured default-tenant slug."""
+        self._async_dal = async_dal
+        self._dal = dal
+        self._slug = slug
+        self._id: int | None = None
+
+    async def get(self) -> int | None:
+        """Return the default tenant's numeric id, or ``None`` when no such tenant row exists."""
+        if self._id is not None:
+            return self._id
+        dal, slug = self._dal, self._slug
+
+        def _job() -> int | None:
+            try:
+                row = dal(dal.tenants.slug == slug).select(dal.tenants.id).first()
+                return None if row is None else int(row.id)
+            finally:
+                _end_read(dal)
+
+        found = await asyncio.get_running_loop().run_in_executor(self._async_dal.executor, _job)
+        self._id = found
+        return found
+
+
 class ServicePoolProvider:
     """Adapts the license lib's provider to the service's own types.
 
     The lib and `community_tier_service` each define `PoolUnavailable` / `PoolInfo`; the service
     only catches its own, so without this a license-server outage would surface as a 500 instead
-    of the fail-loud 503.
+    of the fail-loud 503. Also serves the in-code unlimited Premium pool of the default tenant on
+    a bypass-domain host (see the module docstring).
     """
 
-    def __init__(self, inner: LicenseServerPoolProvider) -> None:
-        """Wrap the lib provider."""
+    def __init__(
+        self,
+        inner: LicenseServerPoolProvider,
+        *,
+        default_tenant_id: Callable[[], Any] | None = None,
+        is_bypass: Callable[[], bool] = request_is_bypass_domain,
+    ) -> None:
+        """Wrap the lib provider; `default_tenant_id` is an async `() -> int | None` resolver."""
         self._inner = inner
+        self._default_tenant_id = default_tenant_id
+        self._is_bypass = is_bypass
 
     async def get_pool(self, tenant_id: int, tier_code: int) -> PoolInfo:
         """Return the pool as a service `PoolInfo`; lib `PoolUnavailable` becomes the service's."""
+        if tier_code in POOLED_TIER_CODES and self._default_tenant_id is not None:
+            if self._is_bypass() and tenant_id == await self._default_tenant_id():
+                return PoolInfo(
+                    limit=UNLIMITED,
+                    observed_at=now_utc(),
+                    stale=False,
+                    source=_BYPASS_DEFAULT_SOURCE,
+                )
         try:
             info = await self._inner.get_pool(tenant_id, tier_code)
         except LibPoolUnavailable as exc:
@@ -142,6 +211,8 @@ def get_pool_provider(app: Any) -> PoolProvider:
     if cached is not None:
         return cached  # type: ignore[no-any-return]
     async_dal, dal = app.config["async_dal"], app.config["dal"]
+    cfg = app.config.get("HUB_API_CONFIG")
+    default_slug = str(getattr(cfg, "default_tenant_slug", None) or DEFAULT_TENANT_SLUG)
     provider = ServicePoolProvider(
         LicenseServerPoolProvider(
             PoolStore(async_dal, dal),  # type: ignore[arg-type]
@@ -149,7 +220,8 @@ def get_pool_provider(app: Any) -> PoolProvider:
             request_is_bypass_domain,
             base_url=_license_server_url(),
             allow_loopback_http=_allow_loopback_http(),
-        )
+        ),
+        default_tenant_id=DefaultTenantIdResolver(async_dal, dal, default_slug).get,
     )
     app.config[_CACHE_KEY] = provider
     return provider

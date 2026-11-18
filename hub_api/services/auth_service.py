@@ -998,6 +998,11 @@ _TIER_LOOKUP_FAILED = metrics.get_meter("waddles.hub_api.auth").create_counter(
 )
 
 
+#: Community tier codes `/auth/me` reports: 1 Free, 2 Premium (anything else displays as Free).
+_TIER_CODE_FREE = 1
+_KNOWN_TIER_CODES = frozenset({1, 2})
+
+
 async def _community_tier_codes(
     async_dal: Any,
     dal: Any,
@@ -1005,12 +1010,13 @@ async def _community_tier_codes(
     *,
     tenant_by_community: dict[int, int] | None = None,
 ) -> dict[int, int]:
-    """Map community id -> active allocated tier code (1/2/3), batched in chunked queries.
+    """Map community id -> active allocated tier code (1 Free / 2 Premium), chunked + batched.
 
     Callers pass only the CALLER'S OWN community ids (their memberships). When
     `tenant_by_community` is given, an allocation whose `tenant_id` differs from the community's
     own tenant is ignored (same rule as `resolve_effective_tier`). Communities with no active
-    allocation are absent (callers treat that as Free = 1). Fails safe for display: any lookup
+    allocation are absent (callers treat that as Free = 1); any other stored code is
+    coerced to 1 with a DEBUG log. Fails safe for display: any lookup
     error logs ERROR (exception type only), bumps `waddles_auth_me_tier_lookup_failed_total` and
     returns ``{}`` so ``/auth/me`` never fails on it -- never silently.
     """
@@ -1036,7 +1042,11 @@ async def _community_tier_codes(
                     r.tenant_id
                 ):
                     continue
-                out[cid] = int(r.tier_code)
+                code = int(r.tier_code)
+                if code not in _KNOWN_TIER_CODES:
+                    logger.debug("community_tier_code_unknown community_id=%d code=%d", cid, code)
+                    code = _TIER_CODE_FREE
+                out[cid] = code
         return out
     except Exception as exc:  # noqa: BLE001 - display hint only; never fail /auth/me
         logger.error("community_tier_lookup_failed error_type=%s", type(exc).__name__)

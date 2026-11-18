@@ -21,20 +21,21 @@ async function tierFn(communities) {
 
 describe('AuthContext.communityTier', () => {
   it('returns the licenseTier of the matching community (string route param ok)', async () => {
-    const tier = await tierFn([{ id: 7, licenseTier: 3 }, { id: 8, licenseTier: 2 }]);
-    expect(tier('7')).toBe(3);
-    expect(tier(8)).toBe(2);
+    const tier = await tierFn([{ id: 7, licenseTier: 2 }, { id: 8, licenseTier: 1 }]);
+    expect(tier('7')).toBe(2);
+    expect(tier(8)).toBe(1);
   });
 
   it('treats a missing, unknown or out-of-range value as Free', async () => {
-    const tier = await tierFn([{ id: 7 }, { id: 8, licenseTier: 9 }, { id: 9, licenseTier: 'x' }]);
+    const tier = await tierFn([{ id: 7 }, { id: 8, licenseTier: 9 }, { id: 10, licenseTier: 3 }, { id: 9, licenseTier: 'x' }]);
     expect(tier(7)).toBe(1);
     expect(tier(8)).toBe(1);
     expect(tier(9)).toBe(1);
+    expect(tier(10)).toBe(1);
   });
 
   it('is Free for a community the caller does not belong to', async () => {
-    const tier = await tierFn([{ id: 7, licenseTier: 3 }]);
+    const tier = await tierFn([{ id: 7, licenseTier: 2 }]);
     expect(tier(99)).toBe(1);
   });
 });

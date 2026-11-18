@@ -1,5 +1,5 @@
 # ruff: noqa: N815  # camelCase wire DTOs: the /api/v1 JSON contract
-"""v1 `tenant_community_tiers` group -- tenant-admin allocation of Pro/Ent slots to communities.
+"""v1 `tenant_community_tiers` group -- tenant-admin allocation of Premium slots to communities.
 
 Mount: `/api/v1/tenant/<tenant_slug>/...`. Every route is `tenant_middleware` (outermost),
 then `require_scope("tenant:admin", <per-action scope>)`, then the URL slug must equal the JWT's
@@ -7,12 +7,14 @@ tenant, then the `waddles.community-tier-allocation` rollout flag (OFF = uniform
 feature's existence never leaks). The flag gates ONLY this tenant-admin API; the superadmin
 override (`PUT /api/v1/superadmin/communities/<id>`) is never flag-gated.
 
-- `GET /license/pool` -- the tenant's team-axis pool per tier (`limit` null = not licensed,
-  -1 = unlimited), with when it was observed and whether it is stale.
-- `GET /communities/tier-allocations` -- active Pro/Ent allocations (Free has no row), paginated,
-  filterable by `tier` and `source`; invalid filter values are 400.
+- `GET /license/pool` -- the tenant's ONE team-axis Premium pool (`tiers` holds exactly one entry,
+  tier 2; `limit` null = not licensed, -1 = unlimited), with when it was observed and whether it
+  is stale.
+- `GET /communities/tier-allocations` -- active Premium allocations (Free has no row), paginated,
+  filterable by `tier` (2 only) and `source`; invalid filter values are 400.
 - `PUT /communities/<community_uuid>/tier` -- set a community's tier (1 Free releases its slot,
-  2 Professional, 3 Enterprise) via `community_tier_service.allocate(source=tenant_admin)`.
+  2 Premium) via `community_tier_service.allocate(source=tenant_admin)`; any other tier is 400
+  `INVALID_TIER`.
 
 Errors: 402 `TEAM_POOL_EXHAUSTED` (`requiredTier`, `limit`, `used`, `upgrade`), 503
 `TEAM_POOL_UNAVAILABLE` (the pool size could not be determined -- never a silent zero), 404 for an
@@ -58,7 +60,8 @@ FEATURE_COMMUNITY_TIER_ALLOCATION: Final[str] = "waddles.community-tier-allocati
 
 _DEFAULT_LIMIT: Final[int] = 50
 _MAX_LIMIT: Final[int] = 200
-_VALID_TIERS: Final[frozenset[int]] = frozenset(svc.TIER_NAMES)
+_VALID_TIERS: Final[frozenset[int]] = frozenset(svc.TIER_NAMES)  # 1 Free, 2 Premium
+_VALID_FILTER_TIERS: Final[frozenset[int]] = frozenset(svc.POOLED_TIER_CODES)  # 2 only
 _VALID_SOURCES: Final[frozenset[int]] = frozenset(
     {svc.SOURCE_TENANT_ADMIN, svc.SOURCE_OPERATOR_OVERRIDE, svc.SOURCE_BACKFILL}
 )
@@ -66,7 +69,7 @@ _VALID_SOURCES: Final[frozenset[int]] = frozenset(
 
 @dataclass(slots=True, frozen=True)
 class PoolTierDTO:
-    """One tier's pool. `limit`: null = not licensed, -1 = unlimited. `tier`: 2 Pro / 3 Ent."""
+    """The Premium pool. `limit`: null = not licensed, -1 = unlimited. `tier` is always 2."""
 
     tier: int
     limit: int | None
@@ -117,7 +120,7 @@ class AllocationListResponse:
 
 @dataclass(slots=True, frozen=True)
 class SetTierRequest:
-    """Request DTO for `PUT ./tier`: `tier` is 1 Free, 2 Professional or 3 Enterprise."""
+    """Request DTO for `PUT ./tier`: `tier` is 1 Free or 2 Premium."""
 
     __pydantic_config__ = ConfigDict(extra="forbid")
 
@@ -286,11 +289,11 @@ async def get_pool(tenant_slug: str) -> PoolResponse | tuple[dict[str, object], 
 async def list_allocations(
     tenant_slug: str,
 ) -> AllocationListResponse | tuple[dict[str, object], int]:
-    """Active Pro/Ent allocations of the tenant's communities (paginated; `tier`/`source`)."""
+    """Active Premium allocations of the tenant's communities (paginated; `tier`/`source`)."""
     async_dal, dal = _dal()
     try:
         tenant_id, _ = await _tenant(tenant_slug)
-        tier = _int_param("tier", _VALID_TIERS)
+        tier = _int_param("tier", _VALID_FILTER_TIERS)
         source = _int_param("source", _VALID_SOURCES)
         limit, offset = _page_params()
     except ApiError as exc:
@@ -358,12 +361,12 @@ def _pool_unavailable() -> tuple[dict[str, object], int]:
 async def set_community_tier(
     data: SetTierRequest, tenant_slug: str, community_uuid: str
 ) -> SetTierResponse | tuple[dict[str, object], int]:
-    """Allocate (or release, tier 1) a community's tier from the tenant's team pool."""
+    """Allocate (tier 2) or release (tier 1) a community's Premium slot from the team pool."""
     async_dal, dal = _dal()
     try:
         tenant_id, _ = await _tenant(tenant_slug)
         if data.tier not in _VALID_TIERS:
-            raise bad_request(f"tier must be one of {sorted(_VALID_TIERS)}")
+            raise ApiError(f"tier must be one of {sorted(_VALID_TIERS)}", 400, "INVALID_TIER")
         community_id = await _resolve_community(tenant_id, community_uuid)
         result = await svc.allocate(
             async_dal,

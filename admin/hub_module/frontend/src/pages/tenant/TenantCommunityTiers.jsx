@@ -10,8 +10,8 @@ const PAGE_SIZE = 50;
 const ALLOCATION_PAGE = 200;
 
 /**
- * Tenant-admin page: shows the tenant's per-tier team pool and lets the admin allocate
- * Free / Professional / Enterprise to each community. Server-side gates are authoritative; this is
+ * Tenant-admin page: shows the tenant's single Premium pool and lets the admin allocate
+ * Free or Premium to each community. Server-side gates are authoritative; this is
  * a presentation layer over `/api/v1/tenant/<slug>/license/pool` and `.../communities/<uuid>/tier`.
  */
 function TenantCommunityTiers() {
@@ -34,7 +34,7 @@ function TenantCommunityTiers() {
     const map = {};
     let offset = 0;
     for (;;) {
-      const res = await tenantCommunityTiersApi.listAllocations(tenantSlug, { limit: ALLOCATION_PAGE, offset });
+      const res = await tenantCommunityTiersApi.listAllocations(tenantSlug, { tier: 2, limit: ALLOCATION_PAGE, offset });
       for (const a of res.allocations || []) map[a.communityId] = normalizeTier(a.tier);
       offset += ALLOCATION_PAGE;
       if (!res.meta || offset >= res.meta.total || (res.allocations || []).length === 0) break;
@@ -106,7 +106,7 @@ function TenantCommunityTiers() {
       if (c.kind === 'exhausted') {
         const d = c.details || {};
         setExhausted({
-          tier: normalizeTier(d.requiredTier ?? to),
+          tier: 2,
           limit: d.limit ?? null,
           used: d.used ?? null,
         });
@@ -180,7 +180,7 @@ function TenantCommunityTiers() {
         {pool && (
           <section aria-label="License pool" className="space-y-3">
             <div className="flex items-center gap-3 flex-wrap">
-              <h2 className="text-lg font-semibold text-sky-100">Team license pool</h2>
+              <h2 className="text-lg font-semibold text-sky-100">Premium community pool</h2>
               {pool.stale && (
                 <span className="badge border border-amber-500/40 text-amber-300" data-testid="pool-stale">
                   Stale{pool.observedAt ? `: last observed ${new Date(pool.observedAt).toLocaleString()}` : ''}
@@ -191,8 +191,8 @@ function TenantCommunityTiers() {
               )}
             </div>
             <div className="grid gap-4 sm:grid-cols-2">
-              {(pool.tiers || []).map((row) => (
-                <PoolMeter key={row.tier} row={row} />
+              {(pool.tiers || []).filter((row) => row.tier === 2).map((row) => (
+                <PoolMeter key={row.tier} row={row} source={pool.source} />
               ))}
             </div>
           </section>
@@ -201,7 +201,7 @@ function TenantCommunityTiers() {
         {exhausted && (
           <div role="alert" className="card p-4 border border-gold-500/40 text-gold-200" data-testid="pool-exhausted">
             <p className="font-semibold">
-              Your {TIER_LABEL[exhausted.tier]} pool is full
+              Your Premium pool is full
               {exhausted.used !== null && exhausted.limit !== null ? ` (${exhausted.used} of ${exhausted.limit})` : ''}.
             </p>
             <p className="text-sm">Release a slot or upgrade your license.</p>
@@ -284,7 +284,7 @@ function TenantCommunityTiers() {
     <div className="p-4 sm:p-6 space-y-6">
       <div>
         <h1 className="text-sky-100 text-2xl font-bold">Community tiers</h1>
-        <p className="text-sky-400 text-sm mt-1">Allocate Professional and Enterprise slots from your pool to communities.</p>
+        <p className="text-sky-400 text-sm mt-1">Allocate Premium slots from your pool to communities, or keep them on Free.</p>
       </div>
       {body}
       <ConfirmDialog pending={pending} onCancel={() => setPending(null)} onConfirm={confirmPending} busy={savingId !== null} />
