@@ -865,6 +865,21 @@ infrastructure:
     # initialization -- SeaweedFS's S3 API is AWS-S3-compatible so the stock
     # aws-cli works unmodified (no SeaweedFS-specific client needed).
     bucketInitImage: docker.io/amazon/aws-cli:2.37.6@sha256:82905aa8fdab6e2403b40dceec12dc33aea2535a4c2a6f13d596d98501951105
+    # seaweedfs-bucket-init post-install/post-upgrade hook Job tunables. Invariant (enforced by
+    # a template `fail`): totalBudgetSeconds <= activeDeadlineSeconds - 60, and activeDeadlineSeconds
+    # must stay below the deploy timeout (scripts/ci/check-helm-hook-job-timeouts.py).
+    bucketInitJob:
+      callTimeoutSeconds: 30      # per aws call, readiness probe included (aws-cli v2 python cold start is slow on a small CPU limit)
+      waitMaxSeconds: 180         # wall-clock retry window for the S3 readiness probe
+      totalBudgetSeconds: 480     # whole-script budget; script exits itself before the Job deadline
+      activeDeadlineSeconds: 600  # Job-wide deadline (scheduling + pull + script + termination)
+      resources:
+        requests:
+          memory: "128Mi"
+          cpu: "100m"
+        limits:
+          memory: "256Mi"
+          cpu: "500m"
     s3Port: 8333
     masterPort: 9333
     bucketName: "waddlebot-assets"

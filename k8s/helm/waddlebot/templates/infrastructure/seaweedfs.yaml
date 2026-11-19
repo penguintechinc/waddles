@@ -43,6 +43,10 @@ spec:
 # transient case where the SeaweedFS pod is created but not yet Ready. Weight
 # "1" runs it before core-bundle-seeder-job.yaml's weight "5" in case seeded
 # bundles ever need the buckets to exist first.
+{{- $bij := .Values.infrastructure.seaweedfs.bucketInitJob }}
+{{- if gt (int $bij.totalBudgetSeconds) (sub (int $bij.activeDeadlineSeconds) 60) }}
+{{- fail (printf "infrastructure.seaweedfs.bucketInitJob.totalBudgetSeconds (%d) must be <= activeDeadlineSeconds (%d) - 60" (int $bij.totalBudgetSeconds) (int $bij.activeDeadlineSeconds)) }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -62,10 +66,12 @@ spec:
   # Bounded so this post-install/post-upgrade HOOK can never hang `helm --wait`
   # past the deploy timeout (#1391 class). activeDeadlineSeconds spans the WHOLE Job (pod
   # scheduling, image pull, termination), and 300s was hit on dal2alpha (DeadlineExceeded, no
-  # script log), so it is 600s. The script's own TOTAL_BUDGET (480s) is strictly below this with
-  # a 120s margin, so the script always exits itself first with an `elapsed/budget` log line.
+  # script log), so it defaults to 600s. The script's own TOTAL_BUDGET (default 480s) must stay
+  # strictly below this with >=60s margin (enforced by `fail` above), so the script always exits
+  # itself first with an `elapsed/budget` log line.
   # scripts/ci/check-helm-hook-job-timeouts.py enforces the deadline < deploy timeout statically.
-  activeDeadlineSeconds: 600
+  # Tunables: infrastructure.seaweedfs.bucketInitJob.* in values.yaml.
+  activeDeadlineSeconds: {{ int $bij.activeDeadlineSeconds }}
   # FAILED Jobs (and their pods/logs) stay inspectable for 24h; hook-succeeded above only
   # deletes on success. NOTE: on DeadlineExceeded the Job controller itself reaps running pods,
   # so diagnosability comes from the script's own per-call timeouts (it fails first, with logs).
@@ -105,13 +111,16 @@ spec:
           # Fail FAST and DIAGNOSABLY: the Job controller reaps the pod on
           # activeDeadlineSeconds (no logs survive), so the script enforces ONE total budget
           # (TOTAL_BUDGET) strictly below that deadline minus a margin for scheduling/image pull/
-          # termination (activeDeadlineSeconds 600 - 120 = 480). The budget is checked before every
+          # termination (default activeDeadlineSeconds 600 - 120 = 480). The budget is checked before every
           # call and caps each call's timeout to the remaining time, so a stall makes THIS script
           # exit non-zero with an `elapsed/budget` log line, leaving a Failed pod whose logs
           # `kubectl logs` can still read.
-          TOTAL_BUDGET=480
-          CALL_TIMEOUT=30
-          WAIT_MAX=90
+          TOTAL_BUDGET={{ int $bij.totalBudgetSeconds }}
+          # Per-call cap (also used by the readiness wait loop): aws-cli v2 is a python cold start
+          # and list-buckets is authenticated, so ~10s was intermittently killed on dal2alpha.
+          CALL_TIMEOUT={{ int $bij.callTimeoutSeconds }}
+          # Wall-clock seconds to keep retrying the readiness probe (time-based, not sleep-counted).
+          WAIT_MAX={{ int $bij.waitMaxSeconds }}
           START_TS=$(date +%s)
           log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) bucket-init: $*"; }
           elapsed() { echo $(( $(date +%s) - START_TS )); }
@@ -136,16 +145,30 @@ spec:
           }
           # Bounded wait for the S3 gateway (post-hook can fire before SeaweedFS is Ready).
           log "waiting for S3 endpoint ${ENDPOINT} (max ${WAIT_MAX}s, total budget ${TOTAL_BUDGET}s)"
-          waited=0
-          until err=$(timeout "$(capped_timeout 10)" aws --endpoint-url "$ENDPOINT" s3api list-buckets 2>&1 >/dev/null); do
+          WAIT_START=$(date +%s)
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
             budget_check "waiting for S3 endpoint ${ENDPOINT}"
+            call_to=$(capped_timeout "${CALL_TIMEOUT}")
+            t0=$(date +%s)
+            rc=0
+            err=$(timeout "${call_to}" aws --endpoint-url "$ENDPOINT" s3api list-buckets 2>&1 >/dev/null) || rc=$?
+            [ "${rc}" -eq 0 ] && break
+            took=$(( $(date +%s) - t0 ))
+            case "${rc}" in
+              124) why="timeout after ${call_to}s (killed by our own per-call cap; not refused/TLS/403)" ;;
+              *) why="aws exited rc=${rc} (refused/TLS/auth: see stderr)" ;;
+            esac
+            log "attempt ${attempt} failed rc=${rc} took=${took}s: ${why}; stderr: $(echo "${err}" | tail -n 3)"
+            waited=$(( $(date +%s) - WAIT_START ))
             if [ "${waited}" -ge "${WAIT_MAX}" ]; then
-              log "ERROR: S3 endpoint ${ENDPOINT} not ready after ${WAIT_MAX}s elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s; last error: $(echo "${err}" | tail -n 3)"
+              log "ERROR: S3 endpoint ${ENDPOINT} not ready after ${waited}s/${WAIT_MAX}s attempts=${attempt} last_rc=${rc} elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s; last error: $(echo "${err}" | tail -n 3)"
               exit 1
             fi
             sleep 3
-            waited=$((waited + 3))
           done
+          waited=$(( $(date +%s) - WAIT_START ))
           log "S3 endpoint ready after ${waited}s (elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s)"
           # "recordings" (svc-streaming egress) and bundleExecutor.bucketName
           # ("waddles-bundles", core/bundle_executor's BUNDLE_BUCKET_NAME) --
@@ -205,12 +228,7 @@ spec:
               name: waddlebot-secrets
               key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
         resources:
-          requests:
-            memory: "64Mi"
-            cpu: "100m"
-          limits:
-            memory: "128Mi"
-            cpu: "200m"
+          {{- toYaml $bij.resources | nindent 10 }}
         volumeMounts:
         {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
       volumes:

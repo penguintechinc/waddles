@@ -358,13 +358,13 @@ docker-compose ps
 
 ### Helm hook Job `seaweedfs-bucket-init` failed or hit DeadlineExceeded
 
-- Every aws call in the Job is bounded (`timeout` 30s each; S3 readiness wait max 90s) so a stall makes the
+- Every aws call in the Job is bounded (`timeout` 30s each, including the readiness probe; S3 readiness wait max 180s wall-clock; tune via `infrastructure.seaweedfs.bucketInitJob.*`) so a stall makes the
   script itself fail with timestamped logs. The Job controller reaps running pods on
   `activeDeadlineSeconds` (600; the script self-terminates at `TOTAL_BUDGET`=480s with an `elapsed/budget` log line), so the script's own bounds are what keep logs available.
 - Failed Jobs/pods are kept (hook-delete-policy `before-hook-creation,hook-succeeded` + `ttlSecondsAfterFinished: 86400`):
   `kubectl -n <ns> logs job/seaweedfs-bucket-init` and `kubectl -n <ns> describe pod -l job-name=seaweedfs-bucket-init`
   (a rate-limited Docker Hub pull of the aws-cli image shows as ImagePullBackOff/ErrImagePull in events, not logs; set `global.imagePullSecrets` to a pre-created pull Secret name, which this Job honours).
-- Success ends with `bucket-init: N/N buckets verified`; any other N/M, or "S3 endpoint <url> not ready after 90s", is a failure.
+- Success ends with `bucket-init: N/N buckets verified`; any other N/M, or "S3 endpoint <url> not ready after Ns" (per-attempt log lines show `rc=124` = our own timeout vs another rc = refused/TLS/403), is a failure.
 
 ### Common Issues
 

@@ -60,7 +60,10 @@ def test_script_is_bounded_and_counts_buckets(values: str | None) -> None:
         if re.match(r"\s*aws\s", ln) or re.search(r"\|\|\s*aws\s", ln)
     ]
     assert not bare, f"unwrapped aws calls: {bare}"
-    assert 'timeout "$(capped_timeout 10)" aws' in script and "WAIT_MAX" in script
+    # Readiness wait is capped by CALL_TIMEOUT (not a hardcoded 10s) and logs rc + per-attempt time.
+    assert 'timeout "${call_to}" aws' in script and "WAIT_MAX" in script
+    assert "capped_timeout 10" not in script
+    assert "rc=${rc}" in script and "took=${took}s" in script and "124)" in script
     assert "not ready after" in script and "${ENDPOINT}" in script
     assert "buckets verified" in script and "${VERIFIED}" in script
     # Configured bucket count must equal the number of names in the for-loop.
@@ -93,6 +96,7 @@ def test_total_budget_is_strictly_below_job_deadline(values: str | None) -> None
     assert 0 < budget <= deadline - 60, (budget, deadline)
     call_timeout = int(re.search(r"^\s*CALL_TIMEOUT=(\d+)", script, re.M).group(1))  # type: ignore[union-attr]
     wait_max = int(re.search(r"^\s*WAIT_MAX=(\d+)", script, re.M).group(1))  # type: ignore[union-attr]
+    assert call_timeout >= 30, "per-call timeout must be >= 30s (aws-cli cold start)"
     assert call_timeout < budget and wait_max < budget
     assert "budget_check()" in script and "capped_timeout()" in script
     assert 'budget_check "bucket ${bucket}"' in script
@@ -108,3 +112,21 @@ def test_image_pull_secrets_omitted_when_empty() -> None:
 def test_image_pull_secrets_honoured_when_set() -> None:
     job = _job("values-alpha.yaml", "global.imagePullSecrets[0].name=dockerhub-pull")
     assert job["spec"]["template"]["spec"]["imagePullSecrets"] == [{"name": "dockerhub-pull"}]
+
+
+def test_cpu_resources_raised_for_aws_cli_cold_start() -> None:
+    res = _job("values-alpha.yaml")["spec"]["template"]["spec"]["containers"][0]["resources"]
+    assert res["requests"]["cpu"] == "100m" and res["limits"]["cpu"] == "500m"
+
+
+def test_budget_overrides_render_and_invariant_is_enforced() -> None:
+    script = _script(_job("values-alpha.yaml", "infrastructure.seaweedfs.bucketInitJob.callTimeoutSeconds=45"))
+    assert re.search(r"^\s*CALL_TIMEOUT=45$", script, re.M)
+    if not _HELM:
+        pytest.skip("helm CLI not available")
+    bad = subprocess.run(
+        [_HELM, "template", "waddlebot", str(_CHART), "--kube-version", "1.30.0", "--values",
+         str(_CHART / "values-alpha.yaml"), "--set", "infrastructure.seaweedfs.bucketInitJob.totalBudgetSeconds=590"],
+        capture_output=True, text=True, check=False,
+    )
+    assert bad.returncode != 0 and "totalBudgetSeconds" in bad.stderr
