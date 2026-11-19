@@ -56,9 +56,9 @@ pub fn env_flag_value(key: &str) -> Option<bool> {
 
 /// Feature-flag evaluation over a license client: PostHog snapshot, then the `FLAG_*` ENV
 /// baseline, then OFF. The license-bypass domain answers LICENSE/entitlement checks only
-/// (`tier`/`check_feature`) and never forces a feature flag or kill-switch -- the library's own
-/// `flag_enabled` returns `true` for every key under bypass, so it is deliberately not used for
-/// the value (user decision 2026-11-12).
+/// (`tier`/`check_feature`) and never forces a feature flag or kill-switch (user decision
+/// 2026-11-12). The library's `flag_enabled` evaluates the PostHog snapshot normally
+/// (penguin-libs ad096f5d) but has no ENV baseline, so this resolver supplies it.
 pub trait PosthogFlag {
     /// Resolves `key`: PostHog snapshot, else ENV baseline, else `false`.
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
@@ -68,7 +68,7 @@ impl PosthogFlag for Arc<penguin_licensing::LicenseClient> {
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             // Side effect only: `validate` schedules a background refresh when the snapshot is
-            // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
+            // stale or missing, on bypass domains too.
             let _ = self.validate().await;
             self.snapshot()
                 .and_then(|snap| snap.flags.get(key).copied())

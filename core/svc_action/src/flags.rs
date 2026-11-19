@@ -1,8 +1,9 @@
 //! Spec §13.5 PostHog flag keys this crate gates on, resolved through
 //! [`PosthogFlag::flag_on`]: the PostHog snapshot value if seen, else the
-//! `FLAG_*` ENV baseline, else OFF (never-seen flags are OFF). The library's own
-//! `LicenseClient::flag_enabled` is deliberately NOT used -- it returns `true`
-//! for every key under a license-bypass domain, and bypass is LICENSE-only.
+//! `FLAG_*` ENV baseline, else OFF (never-seen flags are OFF). Domain bypass is
+//! LICENSE-only (`tier`/`check_feature`); `LicenseClient::flag_enabled` also evaluates the
+//! PostHog snapshot normally (penguin-libs ad096f5d) but has no ENV baseline, so this
+//! resolver adds it.
 //! Both flags below are `min_tier: free` (spec: "core product, no entitlement
 //! gate"), so no `check_feature` license-tier check is needed.
 //!
@@ -90,9 +91,9 @@ pub use bundle_host_http::egress::FeatureFlag;
 /// Feature-flag evaluation over a license client: PostHog snapshot, then the
 /// `FLAG_*` ENV baseline, then OFF. The license-bypass domain answers
 /// LICENSE/entitlement checks only (`tier`/`check_feature`) and never forces a
-/// feature flag or kill-switch -- the library's own `flag_enabled` returns
-/// `true` for every key under bypass, so it is deliberately not used for
-/// the value (user decision 2026-11-12).
+/// feature flag or kill-switch (user decision 2026-11-12). The library's `flag_enabled`
+/// evaluates the PostHog snapshot normally (penguin-libs ad096f5d) but has no ENV
+/// baseline, so this resolver supplies PostHog, then ENV, then OFF.
 pub trait PosthogFlag {
     /// Resolves `key`: PostHog snapshot, else ENV baseline, else `false`.
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
@@ -119,7 +120,7 @@ impl PosthogFlag for Arc<penguin_licensing::LicenseClient> {
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             // Side effect only: `validate` schedules a background refresh when the snapshot is
-            // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
+            // stale or missing, on bypass domains too.
             let _ = self.validate().await;
             self.snapshot()
                 .and_then(|snap| snap.flags.get(key).copied())
@@ -377,11 +378,9 @@ impl FlagSource for Arc<penguin_licensing::LicenseClient> {
             let _ = self.validate().await;
             let snap = self.snapshot()?;
             let value = snap.flags.get(key).copied();
-            // `fetched_at` is penguin-licensing's (chrono) timestamp; read it through its
-            // inherent epoch accessors so this crate never names a chrono type.
-            let fetched_nanos = i128::from(snap.fetched_at.timestamp()) * 1_000_000_000
-                + i128::from(snap.fetched_at.timestamp_subsec_nanos());
-            let age_nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos() - fetched_nanos;
+            // `fetched_at` is a `time::OffsetDateTime` (penguin-licensing).
+            let age_nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+                - snap.fetched_at.unix_timestamp_nanos();
             let fresh = u64::try_from(age_nanos)
                 .map(|n| std::time::Duration::from_nanos(n) < self.config().cache_ttl)
                 .unwrap_or(false);

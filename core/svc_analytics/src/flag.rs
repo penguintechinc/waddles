@@ -76,8 +76,9 @@ impl FlagGate {
             Self::Licensed { client, env_on } => {
                 // Precedence: PostHog value if seen (an explicit OFF beats the ENV baseline),
                 // else the ENV baseline, else OFF. Bypass domains are license-only (2026-11-12):
-                // the library's `flag_enabled` reads `true` for every key under bypass, so read
-                // the PostHog snapshot directly (refreshed by `spawn_refresh`).
+                // `flag_enabled` evaluates the PostHog snapshot normally (penguin-libs ad096f5d)
+                // but has no ENV baseline, so read the snapshot directly (refreshed by
+                // `spawn_refresh`) and fall back to the ENV baseline here.
                 client
                     .as_ref()
                     .and_then(|c| c.snapshot())
@@ -231,8 +232,8 @@ mod tests {
             "precondition: bypass is active on this client"
         );
         assert!(
-            c.flag_enabled(FLAG_KEY).await,
-            "license bypass enables every license feature"
+            !c.flag_enabled(FLAG_KEY).await,
+            "bypass no longer forces feature flags (penguin-licensing ad096f5d)"
         );
         let g = FlagGate::Licensed {
             client: Some(c),

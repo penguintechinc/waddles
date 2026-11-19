@@ -2861,15 +2861,15 @@ dependencies = [
 [[package]]
 name = "penguin-licensing"
 version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=7110125df28045322e7c4c527d1d1be806f2f086#7110125df28045322e7c4c527d1d1be806f2f086"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=ad096f5d867629f4b62347c94db812d33b720f6e#ad096f5d867629f4b62347c94db812d33b720f6e"
 dependencies = [
  "arc-swap",
- "chrono",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tracing",
  "url",
@@ -4488,7 +4488,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "32497e9a4c7b38532efcdebeef879707aa9f794296a4f0244f6f69e9bc8574bd"
 dependencies = [
  "fastrand",
- "getrandom 0.4.3",
+ "getrandom 0.3.4",
  "once_cell",
  "rustix",
  "windows-sys 0.61.2",

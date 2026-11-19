@@ -29,9 +29,9 @@ use penguin_licensing::{LicenseClient, LicenseConfig, LicenseError};
 /// Feature-flag evaluation over a license client: PostHog snapshot, then the
 /// `FLAG_*` ENV baseline, then OFF. The license-bypass domain answers
 /// LICENSE/entitlement checks only (`tier`/`check_feature`) and never forces a
-/// feature flag or kill-switch -- the library's own `flag_enabled` returns
-/// `true` for every key under bypass, so it is deliberately not used for
-/// the value (user decision 2026-11-12).
+/// feature flag or kill-switch (user decision 2026-11-12). The library's `flag_enabled`
+/// evaluates the PostHog snapshot normally (penguin-libs ad096f5d) but has no ENV
+/// baseline, so this resolver supplies PostHog, then ENV, then OFF.
 pub trait PosthogFlag {
     /// Resolves `key`: PostHog snapshot, else ENV baseline, else `false`.
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
@@ -58,7 +58,7 @@ impl PosthogFlag for Arc<LicenseClient> {
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             // Side effect only: `validate` schedules a background refresh when the snapshot is
-            // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
+            // stale or missing, on bypass domains too.
             let _ = self.validate().await;
             self.snapshot()
                 .and_then(|snap| snap.flags.get(key).copied())
@@ -191,9 +191,8 @@ pub const DISABLE_EXECUTOR_SHARDING_FLAG: &str = "waddles.disable-executor-shard
 
 /// Production [`FeatureGate`] for [`DISABLE_EXECUTOR_SHARDING_FLAG`]:
 /// `enabled()` answers "is sharding on?" (the negated raw flag), and a
-/// bypassed (PenguinTech-domain) client reads as sharding ON -- the same
-/// bypass-awareness [`DbBundleConfigGate`] needs, since bypass makes every
-/// raw flag read `true`.
+/// bypassed (PenguinTech-domain) client is evaluated like any other: an unseen
+/// kill switch is OFF, so sharding is ON, and PostHog/ENV can still flip it.
 pub struct ExecutorShardingGate(Arc<LicenseClient>);
 
 impl ExecutorShardingGate {
@@ -232,8 +231,8 @@ impl FeatureGate for ExecutorShardingGate {
 pub const DISABLE_MULTI_TENANT_WATERMARK_FLAG: &str = "waddles.core.disable-multi-tenant-watermark";
 
 /// Production [`FeatureGate`] for [`DISABLE_MULTI_TENANT_WATERMARK_FLAG`] --
-/// same bypass-aware negation shape as [`DbBundleConfigGate`] (see that
-/// type's own doc for the full bypass-awareness rationale, identical here).
+/// same negation shape as [`DbBundleConfigGate`] (see that type's own doc;
+/// bypass is license-only and never forces the raw flag, identical here).
 pub struct MultiTenantWatermarkGate(Arc<LicenseClient>);
 
 impl MultiTenantWatermarkGate {
@@ -586,8 +585,8 @@ impl crate::ai::TierSource for LicenseTierSource {
 pub const DISABLE_PII_TOKENIZATION_FLAG: &str = "waddles.core.disable-pii-tokenization";
 
 /// Production [`FeatureGate`] for [`DISABLE_PII_TOKENIZATION_FLAG`] -- same
-/// bypass-aware negation shape as [`DbBundleConfigGate`] (see that type's
-/// own doc for the full bypass-awareness rationale, identical here).
+/// negation shape as [`DbBundleConfigGate`] (see that type's own doc;
+/// bypass is license-only and never forces the raw flag, identical here).
 pub struct PiiTokenizationGate(Arc<LicenseClient>);
 
 impl PiiTokenizationGate {
@@ -752,11 +751,9 @@ impl FlagSource for Arc<LicenseClient> {
             let _ = self.validate().await;
             let snap = self.snapshot()?;
             let value = snap.flags.get(key).copied();
-            // `fetched_at` is penguin-licensing's (chrono) timestamp; read it through its
-            // inherent epoch accessors so this crate never names a chrono type.
-            let fetched_nanos = i128::from(snap.fetched_at.timestamp()) * 1_000_000_000
-                + i128::from(snap.fetched_at.timestamp_subsec_nanos());
-            let age_nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos() - fetched_nanos;
+            // `fetched_at` is a `time::OffsetDateTime` (penguin-licensing).
+            let age_nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+                - snap.fetched_at.unix_timestamp_nanos();
             let fresh = u64::try_from(age_nanos)
                 .map(|n| std::time::Duration::from_nanos(n) < self.config().cache_ttl)
                 .unwrap_or(false);
@@ -872,7 +869,7 @@ fn unseen_fallback(key: &str, default_value: bool) -> bool {
 /// §7.4/§6.5). Order: `capability_enabled == false` short-circuits straight
 /// to `default_value` (never an error, matching `flags::Host::enabled`'s
 /// own "fail-open to default, never an exception" mandate); otherwise
-/// bypass short-circuits to `true`; otherwise **PostHog wins whenever it
+/// domain bypass is license-only and does not short-circuit; **PostHog wins whenever it
 /// defines the flag** -- a fresh snapshot's value ("posthog-live"), or a
 /// stale-but-present snapshot's value ("posthog-cached", since the flag
 /// server being unreachable right now must not un-set an already-known
@@ -1737,12 +1734,11 @@ mod tests {
         );
     }
 
-    /// Bypass-awareness regression test, identical rationale to
+    /// Bypass regression test, identical rationale to
     /// `db_bundle_config_gate_stays_enabled_under_the_hardcoded_domain_
-    /// bypass`: a bypassed client's `flag_enabled` reads `true` for ANY
-    /// key, so a naive negation would report tokenization DISABLED for
-    /// every PenguinTech-owned deployment -- the opposite of the intended
-    /// "every feature unlocked" bypass meaning.
+    /// bypass`: bypass is license-only and never forces the raw
+    /// `disable-*` flag, so an unseen kill switch stays OFF and
+    /// tokenization stays enabled on every PenguinTech-owned deployment.
     #[tokio::test]
     async fn pii_tokenization_gate_stays_enabled_under_the_hardcoded_domain_bypass() {
         let client = {
@@ -1783,15 +1779,13 @@ mod tests {
         );
     }
 
-    /// Bypass-awareness regression test: `build_license_client`'s hardcoded
+    /// Bypass regression test: `build_license_client`'s hardcoded
     /// self-domain bypass (see `build_license_client_hardcoded_domain_
-    /// bypasses_flag_checks` above) makes `flag_enabled` read `true` for
-    /// ANY key on this client, including
-    /// [`DISABLE_DB_BUNDLE_CONFIG_FLAG`] -- naively negating that raw
-    /// `true` would report the DB-driven path DISABLED for every
-    /// deployment of this service, permanently, which is the exact bug
-    /// this test guards against. `DbBundleConfigGate::enabled` must check
-    /// `bypass_active()` first and report `true` (DB path enabled).
+    /// bypasses_flag_checks` above) is license-only and does not force
+    /// [`DISABLE_DB_BUNDLE_CONFIG_FLAG`]: `flag_enabled` evaluates the
+    /// PostHog snapshot normally (penguin-libs ad096f5d), so the unseen
+    /// kill switch reads OFF and `DbBundleConfigGate::enabled` reports
+    /// `true` (DB path enabled) on bypass domains.
     #[tokio::test]
     async fn db_bundle_config_gate_stays_enabled_under_the_hardcoded_domain_bypass() {
         let client = {
