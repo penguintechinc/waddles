@@ -12,9 +12,14 @@ Commands:
       Delete compiled/skipped rows, record `last_error` on failed ones. Exit 1 if any item
       failed or the report examined a different number of items than the manifest held
       (a gate that cannot fail is not a gate).
-  enqueue-all-active
-      Queue every signed, currently-active version (the per-release enqueue Job). Inserts
-      rows only -- it never compiles, so it never gates `helm upgrade`.
+  enqueue-all-active [--revive-dead-letters]
+      Queue every signed, currently-active version (the per-release enqueue Job). It never
+      compiles, so it never gates `helm upgrade`. With --revive-dead-letters (the Helm Job
+      passes it) active versions whose row hit the attempt cap get a fresh round of attempts.
+  requeue-failed [--app-id ID] [--error-like TEXT] [--max N] [--dry-run] [--yes]
+      Operator tool: reset dead-lettered rows (attempts at the cap). Prints the match count
+      and changes nothing unless --yes is given; more than --max matches (default 500) exits 2
+      before writing anything.
 """
 
 from __future__ import annotations
@@ -66,15 +71,42 @@ async def _export(install_dal: Any, out: Path, *, limit: int) -> int:
     return 0
 
 
-async def _enqueue_all_active(install_dal: Any) -> int:
+async def _enqueue_all_active(install_dal: Any, *, revive_dead_letters: bool = False) -> int:
     """Queue every signed, active version; counts are logged (examined is the denominator)."""
-    summary = await svc.enqueue_all_active(install_dal)
+    summary = await svc.enqueue_all_active(install_dal, revive_dead_letters=revive_dead_letters)
     logger.info(
-        "precompile-queue: enqueue-all-active examined=%d queued=%d already_pending=%d",
+        "precompile-queue: enqueue-all-active examined=%d queued=%d already_pending=%d revived=%d",
         summary.examined,
         summary.queued,
         summary.already_pending,
+        summary.revived,
     )
+    return 0
+
+
+async def _requeue_failed(
+    install_dal: Any,
+    *,
+    app_id: str | None,
+    error_like: str | None,
+    cap: int,
+    apply: bool,
+) -> int:
+    """Count (and with `apply`, reset) dead-lettered rows; exit 2 when the cap is exceeded."""
+    try:
+        summary = await svc.requeue_failed(
+            install_dal, app_id=app_id, error_like=error_like, cap=cap, dry_run=not apply
+        )
+    except svc.RequeueCapExceededError as exc:
+        logger.error("precompile-queue: requeue-failed refused: %s", exc)
+        print(f"REFUSED: {exc}", file=sys.stderr)
+        return 2
+    if summary.dry_run:
+        print(
+            f"dry-run: {summary.matched} dead-lettered row(s) match; re-run with --yes to requeue"
+        )
+    else:
+        print(f"requeued {summary.requeued} of {summary.matched} matching dead-lettered row(s)")
     return 0
 
 
@@ -110,7 +142,7 @@ async def _ack(install_dal: Any, report: dict[str, Any]) -> int:
 
 
 def _parser() -> argparse.ArgumentParser:
-    """Argument parser for the three queue commands."""
+    """Argument parser for the queue commands."""
     parser = argparse.ArgumentParser(description="bundle precompile queue steps")
     sub = parser.add_subparsers(dest="command", required=True)
     exp = sub.add_parser("export")
@@ -119,7 +151,14 @@ def _parser() -> argparse.ArgumentParser:
     ack = sub.add_parser("ack")
     ack.add_argument("--report", type=Path, required=True)
     ack.add_argument("--manifest", type=Path, default=None)
-    sub.add_parser("enqueue-all-active")
+    enq = sub.add_parser("enqueue-all-active")
+    enq.add_argument("--revive-dead-letters", action="store_true")
+    req = sub.add_parser("requeue-failed")
+    req.add_argument("--app-id", default=None)
+    req.add_argument("--error-like", default=None)
+    req.add_argument("--max", dest="cap", type=int, default=svc.DEFAULT_REQUEUE_CAP)
+    req.add_argument("--dry-run", action="store_true")
+    req.add_argument("--yes", action="store_true")
     return parser
 
 
@@ -134,7 +173,17 @@ async def _run(args: argparse.Namespace) -> int:
         if args.command == "export":
             return await _export(install_dal, args.out, limit=args.limit)
         if args.command == "enqueue-all-active":
-            return await _enqueue_all_active(install_dal)
+            return await _enqueue_all_active(
+                install_dal, revive_dead_letters=args.revive_dead_letters
+            )
+        if args.command == "requeue-failed":
+            return await _requeue_failed(
+                install_dal,
+                app_id=args.app_id,
+                error_like=args.error_like,
+                cap=args.cap,
+                apply=args.yes and not args.dry_run,
+            )
         return await _ack(install_dal, report)
     finally:
         await install_dal.close()

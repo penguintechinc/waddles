@@ -126,6 +126,7 @@ def test_enqueue_job_is_per_revision_and_only_enqueues(values: str) -> None:
         "-m",
         "cli.precompile_queue",
         "enqueue-all-active",
+        "--revive-dead-letters",
     ]
 
 
