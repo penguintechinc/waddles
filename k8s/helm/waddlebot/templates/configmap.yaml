@@ -118,6 +118,13 @@ data:
   {{- if not (hasPrefix "FLAG_" $key) }}
   {{- fail (printf "config.dataPlaneFlagBaselines key %q must start with FLAG_" $key) }}
   {{- end }}
+  {{- if contains "_DISABLE_" $key }}
+  {{- fail (printf "config.dataPlaneFlagBaselines key %q is a kill switch (waddles.*.disable-*): never ENV-baseline it on; unset = mechanism ON" $key) }}
+  {{- end }}
+  {{- /* Licensed (tier/entitlement-gated) flags are never env-baselined: the license server decides. */}}
+  {{- if has $key (list "FLAG_WADDLES_COMMUNITY_CONNECTIONS" "FLAG_WADDLES_COMPLIANCE_EXTERNAL_KMS" "FLAG_WADDLES_AUTH_SSO_SAML" "FLAG_WADDLES_AUTH_SSO_CUSTOM" "FLAG_WADDLES_HUB_API_SSO" "FLAG_WADDLES_TENANCY_WHITELABEL" "FLAG_WADDLES_AI_BYOK") }}
+  {{- fail (printf "config.dataPlaneFlagBaselines key %q is a licensed flag: licensed flags are never ENV-baselined" $key) }}
+  {{- end }}
   {{ $key }}: {{ $value | quote }}
   {{- end }}
   # Command-latency canary (alpha only; docs/observability/command-latency.md "Synthetic canary").

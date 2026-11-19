@@ -670,3 +670,51 @@ async fn img(
     ))
     .await
 }
+
+/// PINNING TEST (licensed-capability gate): a `FLAG_WADDLES_HARNESS_MEDIA_GENERATION=true` ENV
+/// baseline turns the feature FLAG on (real `HarnessMediaGenerationGate`) but must NEVER grant the
+/// `media` capability below Professional: the host-side tier gate
+/// (`bundle_host_media::tier::require_professional`, via `MediaHost::preflight`) refuses first
+/// and the provider is never reached. Tier is entitlement; it is not env-overridable.
+#[tokio::test]
+async fn env_flag_baseline_true_does_not_grant_media_capability_below_professional_tier() {
+    let (f, base) = fake_gemini().await;
+    let b = memory();
+    let var = "FLAG_WADDLES_HARNESS_MEDIA_GENERATION";
+    let cfg = penguin_licensing::LicenseConfig::new("waddles-test-media-pin").unwrap();
+    let client = penguin_licensing::LicenseClient::new(cfg).unwrap();
+    // SAFETY: no other test in this binary reads this variable (they use `Flag(bool)`).
+    unsafe { std::env::set_var(var, "true") };
+    let gate = svc_process::license::HarnessMediaGenerationGate::new(Arc::clone(&client));
+    assert!(
+        gate.enabled().await,
+        "precondition: the ENV baseline turned the FLAG on"
+    );
+    let host = MediaHost::new(
+        Arc::new(FixedTier(Ok(Tier::Free))),
+        Arc::new(FixedCreds(Some(GOOD_KEY))),
+        Arc::new(provider(base, Duration::from_secs(10))),
+        b.store.clone(),
+        b.jobs.clone(),
+        Arc::new(SystemClock),
+        MediaConfig::default(),
+    );
+    let w = MediaWiring::new(Arc::new(host), Arc::new(gate), Duration::from_secs(5), 4);
+    let result = caps("a", true, COMMUNITY, Some(w))
+        .handle(call(
+            "a",
+            "media.generate_image",
+            serde_json::json!({"prompt": "a cat"}),
+        ))
+        .await;
+    unsafe { std::env::remove_var(var) };
+    let e = result.unwrap_err();
+    assert_eq!(
+        (e.code.as_str(), e.message.as_str()),
+        ("tier_required", "professional")
+    );
+    assert!(
+        f.posts.lock().unwrap().is_empty(),
+        "the provider must never be reached"
+    );
+}

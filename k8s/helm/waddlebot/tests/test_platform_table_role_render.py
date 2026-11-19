@@ -92,7 +92,10 @@ def test_disabled_by_default_renders_no_credential_anywhere(
 ) -> None:
     docs = _render()
     text = yaml.safe_dump_all(docs)
-    # FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY (alpha flag baseline) is not a credential.
+    # Broad check restored: nothing containing PLATFORM_TABLE may render, except the single exact
+    # flag key FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY (alpha flag baseline, not a credential).
+    allowed = "FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY"
+    assert "PLATFORM_TABLE" not in text.replace(allowed, ""), "credential-like PLATFORM_TABLE leaked"
     assert "DB_PLATFORM_TABLE" not in text and _KEY not in text
     assert "DB_PLATFORM_TABLE_PASSWORD" not in _secret(docs, "-db-migrate-secret")
     assert not [k for k in _process_env(docs) if k.startswith("BUNDLE_PLATFORM_TABLE")]

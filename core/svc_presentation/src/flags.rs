@@ -203,6 +203,60 @@ pub fn captions_flag(
 mod tests {
     use super::*;
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/licensing_mock.rs"
+    ));
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_unset_flag_is_off() {
+        let client = seeded_client(r#"{"waddles.other":true}"#, true).await;
+        assert!(client.bypass_active());
+        let flag = image_upload_flag(&Some(client));
+        assert!(!flag.enabled().await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_explicitly_off_flag_stays_off() {
+        let client = seeded_client(r#"{"waddles.core.overlay-captions":false}"#, true).await;
+        assert!(client.bypass_active());
+        let flag = captions_flag(&Some(client));
+        assert!(!flag.enabled().await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_license_check_passes() {
+        let client = seeded_client("{}", true).await;
+        assert!(client.bypass_active());
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
+    }
+
+    // regression: env must not beat an explicit PostHog OFF (3b)
+    // The std lock serializes process-global env access; the test is single-threaded.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn explicit_posthog_off_beats_env_baseline_true() {
+        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = ENV_LOCK
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let client = seeded_client(r#"{"waddles.core.overlay-captions":false}"#, false).await;
+        let var = env_flag_var_name(CAPTIONS_FLAG);
+        // SAFETY: this is the only test in the crate touching this variable; ENV_LOCK serializes it.
+        unsafe { std::env::set_var(&var, "true") };
+        let off = captions_flag(&Some(client)).enabled().await;
+        let unseen = captions_flag(&Some(seeded_client("{}", false).await))
+            .enabled()
+            .await;
+        unsafe { std::env::remove_var(&var) };
+        assert!(!off, "explicit PostHog OFF beats FLAG_*=true");
+        assert!(unseen, "an unseen key falls to the ENV baseline");
+    }
+
     #[tokio::test]
     async fn static_flag_reports_its_fixed_value() {
         assert!(StaticFlag(true).enabled().await);

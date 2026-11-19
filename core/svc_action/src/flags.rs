@@ -1,11 +1,10 @@
 //! Spec §13.5 PostHog flag keys this crate gates on, resolved through
-//! `penguin_licensing::LicenseClient::flag_enabled` with that crate's own
-//! last-known-cached/fail-closed-to-OFF semantics -- see its module doc
-//! ("Graceful degradation on outage: ... nothing cached → community/free
-//! tier with flags and gated features defaulting OFF"). Both flags below
-//! are `min_tier: free` (spec: "core product, no entitlement gate"), so
-//! `flag_enabled` alone is sufficient for either -- no `check_feature`
-//! license-tier check is needed.
+//! [`PosthogFlag::flag_on`]: the PostHog snapshot value if seen, else the
+//! `FLAG_*` ENV baseline, else OFF (never-seen flags are OFF). The library's own
+//! `LicenseClient::flag_enabled` is deliberately NOT used -- it returns `true`
+//! for every key under a license-bypass domain, and bypass is LICENSE-only.
+//! Both flags below are `min_tier: free` (spec: "core product, no entitlement
+//! gate"), so no `check_feature` license-tier check is needed.
 //!
 //! [`FeatureFlag`] is a narrow trait wrapping one flag's live state --
 //! the same per-dependency-seam pattern this crate already uses for every
@@ -97,9 +96,26 @@ pub use bundle_host_http::egress::FeatureFlag;
 pub trait PosthogFlag {
     /// Resolves `key`: PostHog snapshot, else ENV baseline, else `false`.
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+
+    /// The PostHog snapshot's explicit value for `key`; `None` when PostHog never defined it.
+    fn posthog_value<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<bool>> + Send + 'a>>;
 }
 
 impl PosthogFlag for Arc<penguin_licensing::LicenseClient> {
+    fn posthog_value<'a>(
+        &'a self,
+        key: &'a str,
+    ) -> Pin<Box<dyn Future<Output = Option<bool>> + Send + 'a>> {
+        Box::pin(async move {
+            let _ = self.validate().await;
+            self.snapshot()
+                .and_then(|snap| snap.flags.get(key).copied())
+        })
+    }
+
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             // Side effect only: `validate` schedules a background refresh when the snapshot is
@@ -342,7 +358,8 @@ impl FeatureFlag for AllFlags {
 /// from a snapshot fetched within `cache_ttl`; `None` means no snapshot
 /// has ever been fetched. Named alias so [`FlagSource::flag_value`]'s
 /// return type doesn't trip `clippy::type_complexity`.
-pub type FlagValueFuture<'a> = Pin<Box<dyn Future<Output = Option<(bool, bool)>> + Send + 'a>>;
+pub type FlagValueFuture<'a> =
+    Pin<Box<dyn Future<Output = Option<(Option<bool>, bool)>> + Send + 'a>>;
 
 pub trait FlagSource: Send + Sync {
     /// Resolves `key`'s raw value plus whether it came from a *fresh*
@@ -359,7 +376,7 @@ impl FlagSource for Arc<penguin_licensing::LicenseClient> {
             // comes from the snapshot -- bypass never forces it.
             let _ = self.validate().await;
             let snap = self.snapshot()?;
-            let value = snap.flags.get(key).copied().unwrap_or(false);
+            let value = snap.flags.get(key).copied();
             // `fetched_at` is penguin-licensing's (chrono) timestamp; read it through its
             // inherent epoch accessors so this crate never names a chrono type.
             let fetched_nanos = i128::from(snap.fetched_at.timestamp()) * 1_000_000_000
@@ -415,12 +432,13 @@ fn env_flag_var_name(key: &str) -> String {
 /// rationale (makes PostHog optional) and the truthy/falsy parsing rules.
 /// `None` for unset or an unrecognized value.
 ///
-/// **LICENSE-flag immunity:** wired *only* into [`resolve_flag_with`]'s
-/// plain FEATURE-flag path -- the [`FeatureFlag`] implementations above
-/// ([`LicenseFlag`], [`DisableDbBundleConfigFlag`],
-/// [`DisableMultiTenantWatermarkFlag`])
-/// call `LicenseClient::flag_enabled` directly and never pass through this
-/// function or [`resolve_flag_with`] at all.
+/// **Entitlement immunity:** this ENV baseline feeds FEATURE-flag resolution
+/// only ([`PosthogFlag::flag_on`], which backs [`LicenseFlag`],
+/// [`DisableDbBundleConfigFlag`] and [`DisableMultiTenantWatermarkFlag`], and
+/// [`resolve_flag_with`]). It never reaches `LicenseClient::tier` /
+/// `check_feature` / `check_tier`, so an env var can never grant an entitlement
+/// or tier. Kill switches (`disable-*`) follow the same order but treat absence
+/// as "mechanism ON".
 fn env_flag_value(key: &str) -> Option<bool> {
     let var = env_flag_var_name(key);
     match std::env::var(&var) {
@@ -439,6 +457,21 @@ fn env_flag_value(key: &str) -> Option<bool> {
         },
         Err(_) => None,
     }
+}
+
+/// True for opt-out kill-switch keys (`{product}.disable-{mechanism}`), the only
+/// keys whose caller-supplied default may be honoured when a flag is unseen.
+fn is_kill_switch_key(key: &str) -> bool {
+    key.rsplit('.')
+        .next()
+        .is_some_and(|leaf| leaf.starts_with("disable-"))
+}
+
+/// Final fallback for an unseen flag with no ENV baseline: OFF, except that a
+/// `disable-*` kill switch honours the caller's default (ON-by-absence policy).
+/// A caller default of `true` for any other key never fails open.
+fn unseen_fallback(key: &str, default_value: bool) -> bool {
+    default_value && is_kill_switch_key(key)
 }
 
 /// Resolves one `flags.enabled(key, default_value)` host-call -- see
@@ -460,7 +493,7 @@ pub async fn resolve_flag_with<F: FlagSource>(
             "flags.enabled: FLAGS_CAPABILITY_ENABLED=false, using caller default"
         );
         record_flag_eval("capability_disabled");
-        return default_value;
+        return unseen_fallback(key, default_value);
     }
     let Some(source) = source else {
         if let Some(value) = env_flag_value(key) {
@@ -480,10 +513,10 @@ pub async fn resolve_flag_with<F: FlagSource>(
             "flags.enabled: no license client configured and no ENV baseline set, using caller default"
         );
         record_flag_eval("default");
-        return default_value;
+        return unseen_fallback(key, default_value);
     };
     match source.flag_value(key).await {
-        None => {
+        None | Some((None, _)) => {
             if let Some(value) = env_flag_value(key) {
                 tracing::debug!(
                     key,
@@ -501,9 +534,9 @@ pub async fn resolve_flag_with<F: FlagSource>(
                 "flags.enabled: never-seen (no snapshot ever fetched) and no ENV baseline set, using caller default"
             );
             record_flag_eval("default");
-            default_value
+            unseen_fallback(key, default_value)
         }
-        Some((value, true)) => {
+        Some((Some(value), true)) => {
             tracing::debug!(
                 key,
                 value,
@@ -513,7 +546,7 @@ pub async fn resolve_flag_with<F: FlagSource>(
             record_flag_eval("posthog-live");
             value
         }
-        Some((value, false)) => {
+        Some((Some(value), false)) => {
             tracing::debug!(
                 key,
                 value,
@@ -541,7 +574,11 @@ fn shared_flags_license_client() -> Option<Arc<penguin_licensing::LicenseClient>
 pub async fn command_latency_kill_switch_wanted() -> bool {
     let env = command_latency::switch::env_baseline_disabled();
     match shared_flags_license_client() {
-        Some(c) => env || c.flag_on(command_latency::switch::FLAG_KEY).await,
+        // PostHog value if seen (an explicit OFF beats `FLAG_*=true`), else the ENV baseline.
+        Some(c) => c
+            .posthog_value(command_latency::switch::FLAG_KEY)
+            .await
+            .unwrap_or(env),
         None => env,
     }
 }
@@ -585,6 +622,11 @@ pub async fn resolve_flag(key: &str, default_value: bool) -> bool {
 mod flags_capability_tests {
     use super::*;
     use tokio::sync::Mutex;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/licensing_mock.rs"
+    ));
 
     /// `std::env` is process-global; serialize this module's `FLAG_*`
     /// env-mutating tests against each other (same rationale as
@@ -730,7 +772,7 @@ mod flags_capability_tests {
         let key = "waddles.test-posthog-live-beats-env";
         let var = env_flag_var_name(key);
         let source = FakeFlagSource {
-            value: Some((false, true)), // PostHog: live, flag OFF
+            value: Some((Some(false), true)), // PostHog: live, flag OFF
         };
         let result = await_with_env_var(
             &var,
@@ -793,8 +835,12 @@ mod flags_capability_tests {
             "no client, no ENV baseline -> caller default (false)"
         );
         assert!(
-            resolve_flag_with::<FakeFlagSource>(None, true, key, true).await,
-            "no client, no ENV baseline -> caller default (true)"
+            !resolve_flag_with::<FakeFlagSource>(None, true, key, true).await,
+            "no client, no ENV baseline, default=true on a non-kill-switch key -> still OFF"
+        );
+        assert!(
+            resolve_flag_with::<FakeFlagSource>(None, true, "waddles.disable-x", true).await,
+            "a disable-* kill switch honours the caller default"
         );
     }
 
@@ -841,7 +887,7 @@ mod flags_capability_tests {
     }
 
     struct FakeFlagSource {
-        value: Option<(bool, bool)>,
+        value: Option<(Option<bool>, bool)>,
     }
 
     impl FlagSource for FakeFlagSource {
@@ -854,7 +900,7 @@ mod flags_capability_tests {
     #[tokio::test]
     async fn live_enabled_flag_resolves_true() {
         let source = FakeFlagSource {
-            value: Some((true, true)),
+            value: Some((Some(true), true)),
         };
         assert!(resolve_flag_with(Some(&source), true, "waddles.command-8ball", false).await);
     }
@@ -862,7 +908,7 @@ mod flags_capability_tests {
     #[tokio::test]
     async fn live_disabled_flag_resolves_false_even_with_a_true_default() {
         let source = FakeFlagSource {
-            value: Some((false, true)),
+            value: Some((Some(false), true)),
         };
         assert!(!resolve_flag_with(Some(&source), true, "waddles.command-8ball", true).await);
     }
@@ -870,53 +916,184 @@ mod flags_capability_tests {
     #[tokio::test]
     async fn stale_cached_value_wins_over_the_caller_default() {
         let source = FakeFlagSource {
-            value: Some((true, false)),
+            value: Some((Some(true), false)),
         };
         assert!(resolve_flag_with(Some(&source), true, "waddles.command-roll", false).await);
     }
 
     #[tokio::test]
-    async fn never_seen_snapshot_falls_back_to_caller_default() {
+    async fn never_seen_snapshot_is_off_even_with_a_true_default_except_kill_switches() {
         let source = FakeFlagSource { value: None };
         assert!(!resolve_flag_with(Some(&source), true, "waddles.command-lurk", false).await);
-        assert!(resolve_flag_with(Some(&source), true, "waddles.command-lurk", true).await);
+        assert!(
+            !resolve_flag_with(Some(&source), true, "waddles.command-lurk", true).await,
+            "default=true must not fail open for a non-kill-switch key"
+        );
+        assert!(resolve_flag_with(Some(&source), true, "waddles.disable-lurk", true).await);
+    }
+
+    /// 3c: a snapshot exists but the key is unseen -> the ENV baseline is consulted, then OFF.
+    #[tokio::test]
+    async fn snapshot_present_but_key_unseen_consults_env_then_off() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = "waddles.test-unseen-in-snapshot";
+        let var = env_flag_var_name(key);
+        let source = FakeFlagSource {
+            value: Some((None, true)),
+        };
+        assert!(
+            await_with_env_var(
+                &var,
+                "true",
+                resolve_flag_with(Some(&source), true, key, false)
+            )
+            .await,
+            "unseen key in a present snapshot must fall to the ENV baseline"
+        );
+        unsafe { std::env::remove_var(&var) };
+        assert!(!resolve_flag_with(Some(&source), true, key, false).await);
+        assert!(
+            !resolve_flag_with(Some(&source), true, key, true).await,
+            "default=true must not fail open for an unseen non-kill-switch key"
+        );
+        assert!(
+            resolve_flag_with(Some(&source), true, "waddles.disable-unseen", true).await,
+            "kill switches keep ON-by-absence via the caller default"
+        );
+    }
+
+    /// 3c with a real client holding a real snapshot that does not define the key.
+    #[tokio::test]
+    async fn real_snapshot_without_the_key_follows_env_baseline_not_caller_default() {
+        let _guard = ENV_LOCK.lock().await;
+        let client = seeded_client(r#"{"waddles.other":true}"#, false).await;
+        let key = "waddles.test-real-unseen";
+        let var = env_flag_var_name(key);
+        assert!(!resolve_flag_with(Some(&client), true, key, true).await);
+        assert!(
+            await_with_env_var(
+                &var,
+                "true",
+                resolve_flag_with(Some(&client), true, key, false)
+            )
+            .await
+        );
+    }
+
+    /// 2/3b: an explicit PostHog OFF beats `FLAG_*=true` (real client, real snapshot).
+    #[tokio::test]
+    async fn explicit_posthog_off_beats_env_baseline_true() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = "waddles.test-explicit-off";
+        let var = env_flag_var_name(key);
+        let client = seeded_client(r#"{"waddles.test-explicit-off":false}"#, false).await;
+        assert!(!await_with_env_var(&var, "true", client.flag_on(key)).await);
+        assert!(
+            !await_with_env_var(
+                &var,
+                "true",
+                resolve_flag_with(Some(&client), true, key, true)
+            )
+            .await
+        );
+        assert_eq!(client.posthog_value(key).await, Some(false));
+    }
+
+    /// 3b: the command-latency kill switch (`env || posthog` before the fix): explicit PostHog
+    /// OFF must beat `FLAG_..._TELEMETRY=true`.
+    #[tokio::test]
+    async fn command_latency_kill_switch_explicit_posthog_off_beats_env_true() {
+        let _guard = ENV_LOCK.lock().await;
+        let key = command_latency::switch::FLAG_KEY;
+        let client = seeded_client(
+            r#"{"waddles.disable-command-latency-telemetry":false}"#,
+            false,
+        )
+        .await;
+        let env = command_latency::switch::env_baseline_disabled();
+        assert!(!env);
+        let wanted = await_with_env_var(command_latency::switch::ENV_BASELINE, "true", async {
+            let env = command_latency::switch::env_baseline_disabled();
+            client.posthog_value(key).await.unwrap_or(env)
+        })
+        .await;
+        assert!(!wanted, "explicit PostHog OFF keeps the mechanism ON");
     }
 
     #[tokio::test]
     async fn capability_disabled_env_toggle_short_circuits_to_caller_default() {
         let source = FakeFlagSource {
-            value: Some((true, true)),
+            value: Some((Some(true), true)),
         };
         assert!(!resolve_flag_with(Some(&source), false, "waddles.command-count", false).await);
     }
 
     #[tokio::test]
-    async fn no_license_client_falls_back_to_caller_default() {
+    async fn no_license_client_is_off_even_with_a_true_default_except_kill_switches() {
         assert!(
             !resolve_flag_with::<FakeFlagSource>(None, true, "waddles.command-8ball", false).await
         );
         assert!(
-            resolve_flag_with::<FakeFlagSource>(None, true, "waddles.command-8ball", true).await
+            !resolve_flag_with::<FakeFlagSource>(None, true, "waddles.command-8ball", true).await,
+            "no snapshot at all + default=true must not fail open"
+        );
+        assert!(
+            resolve_flag_with::<FakeFlagSource>(None, true, "waddles.disable-8ball", true).await
         );
     }
 
     // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
-    async fn bypass_domain_unset_flag_is_off_explicit_off_stays_off_license_passes() {
-        let cfg = penguin_licensing::LicenseConfig::new("waddles-test-flags-bypass")
-            .expect("default LicenseConfig::new never fails")
-            .with_bypass_domain("waddles.app")
-            .with_deployment_domain("svc.waddles.app");
-        let client = penguin_licensing::LicenseClient::new(cfg).expect("client builds");
+    async fn bypass_client_unset_flag_is_off() {
+        let client = seeded_client(r#"{"waddles.other":true}"#, true).await;
         assert!(client.bypass_active(), "precondition: bypassed client");
-        let key = "waddles.regression-bypass-license-only";
+        let key = "waddles.regression-bypass-unset";
         assert!(!client.flag_on(key).await, "unset flag is OFF on bypass");
+        assert!(!resolve_flag_with(Some(&client), true, key, true).await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_explicitly_off_flag_stays_off() {
+        let key = "waddles.regression-bypass-explicit-off";
+        let client =
+            seeded_client(r#"{"waddles.regression-bypass-explicit-off":false}"#, true).await;
+        assert!(client.bypass_active());
+        assert_eq!(client.posthog_value(key).await, Some(false));
         assert!(
-            !resolve_flag_with(Some(&client), true, key, false).await,
-            "flags.enabled default OFF on bypass"
+            !client.flag_on(key).await,
+            "explicit OFF stays OFF on bypass"
         );
+        assert!(!resolve_flag_with(Some(&client), true, key, true).await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_license_check_passes() {
+        let client = seeded_client("{}", true).await;
+        assert!(client.bypass_active());
         assert!(client.check_feature("any-licensed-feature").await);
         assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
+    }
+
+    // regression: bypass domains are license-only; kill switches are ON-by-absence
+    #[tokio::test]
+    async fn bypass_client_disable_kill_switch_follows_posthog_not_bypass() {
+        let key = DISABLE_DB_BUNDLE_CONFIG_FLAG;
+        let unset = seeded_client("{}", true).await;
+        assert!(unset.bypass_active());
+        assert!(
+            DisableDbBundleConfigFlag::new(unset).enabled().await,
+            "unset kill switch under bypass -> mechanism ON"
+        );
+        let off = seeded_client(r#"{"waddles.core.disable-db-bundle-config":false}"#, true).await;
+        assert!(DisableDbBundleConfigFlag::new(off).enabled().await);
+        let on = seeded_client(r#"{"waddles.core.disable-db-bundle-config":true}"#, true).await;
+        assert_eq!(on.posthog_value(key).await, Some(true));
+        assert!(
+            !DisableDbBundleConfigFlag::new(on).enabled().await,
+            "an explicit ON kill switch opts out even under bypass"
+        );
     }
 
     /// Proves [`FlagSource`]'s blanket `Arc<LicenseClient>` impl reaches a
@@ -924,12 +1101,15 @@ mod flags_capability_tests {
     /// same proof style as this module's own
     /// `license_flag_reaches_a_real_cold_client_and_fails_closed_to_off`.
     #[tokio::test]
-    async fn real_cold_license_client_never_seen_falls_back_to_caller_default() {
+    async fn real_cold_license_client_never_seen_is_off_for_feature_flags() {
         let cfg = penguin_licensing::LicenseConfig::new("waddles-test-flags-capability")
             .expect("default LicenseConfig::new never fails");
         let client = penguin_licensing::LicenseClient::new(cfg)
             .expect("LicenseClient::new with a valid default config never fails");
-        assert!(resolve_flag_with(Some(&client), true, "waddles.command-8ball", true).await);
+        assert!(
+            !resolve_flag_with(Some(&client), true, "waddles.command-8ball", true).await,
+            "cold client + default=true on a non-kill-switch key stays OFF"
+        );
         assert!(!resolve_flag_with(Some(&client), true, "waddles.command-8ball", false).await);
     }
 

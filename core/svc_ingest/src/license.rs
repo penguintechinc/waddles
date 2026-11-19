@@ -78,6 +78,26 @@ impl PosthogFlag for Arc<penguin_licensing::LicenseClient> {
     }
 }
 
+/// The PostHog snapshot's explicit value for `key`, or `None` when PostHog has never defined it
+/// (no snapshot yet, or the key is unseen). Never forced by the bypass domain (license-only).
+pub async fn posthog_flag_value(
+    client: &Arc<penguin_licensing::LicenseClient>,
+    key: &str,
+) -> Option<bool> {
+    // Side effect only: schedules a background refresh when the snapshot is stale or missing.
+    let _ = client.validate().await;
+    client
+        .snapshot()
+        .and_then(|snap| snap.flags.get(key).copied())
+}
+
+/// Flag precedence: an explicit PostHog value wins (so an explicit OFF beats `FLAG_*=true`),
+/// else the ENV baseline, else OFF.
+#[must_use]
+pub fn posthog_then_env(posthog: Option<bool>, env_baseline: bool) -> bool {
+    posthog.unwrap_or(env_baseline)
+}
+
 /// Resolves a flag with an optional client: no client => ENV baseline, else OFF.
 pub async fn flag_on_opt(
     client: Option<&Arc<penguin_licensing::LicenseClient>>,
@@ -207,6 +227,162 @@ mod tests {
     // `cargo test` threads don't race on the same variables. Scoped to
     // this file: no other module touches `LICENSE_*`/`POSTHOG_*`.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/licensing_mock.rs"
+    ));
+
+    fn set_env(var: &str, val: &str) {
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::set_var(var, val) };
+    }
+
+    fn unset_env(var: &str) {
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var(var) };
+    }
+
+    #[test]
+    fn posthog_then_env_precedence_table() {
+        assert!(
+            !posthog_then_env(Some(false), true),
+            "explicit OFF beats env ON"
+        );
+        assert!(
+            posthog_then_env(Some(true), false),
+            "explicit ON beats env OFF"
+        );
+        assert!(posthog_then_env(None, true), "unseen -> env baseline");
+        assert!(!posthog_then_env(None, false), "unseen, no baseline -> OFF");
+    }
+
+    // regression: env must not beat an explicit PostHog OFF (3b)
+    #[tokio::test]
+    async fn explicit_posthog_off_beats_env_true_for_flag_on() {
+        crate::crypto::ensure_installed();
+        let _guard = ENV_LOCK.lock().unwrap();
+        let key = "waddles.test-explicit-off";
+        let client = seeded_client(r#"{"waddles.test-explicit-off":false}"#, false).await;
+        set_env(&env_flag_var_name(key), "true");
+        let got = client.flag_on(key).await;
+        unset_env(&env_flag_var_name(key));
+        assert!(!got);
+    }
+
+    // regression: env must not beat an explicit PostHog OFF (3b) -- canary flag site
+    #[tokio::test]
+    async fn explicit_posthog_off_beats_env_true_for_canary_enabled() {
+        crate::crypto::ensure_installed();
+        let _guard = ENV_LOCK.lock().unwrap();
+        let client = seeded_client(r#"{"waddles.command-latency-canary":false}"#, false).await;
+        set_env(command_latency::canary::ENV_BASELINE, "true");
+        let got = crate::canary::canary_enabled(Some(&client)).await;
+        let unseen = seeded_client("{}", false).await;
+        let unseen_got = crate::canary::canary_enabled(Some(&unseen)).await;
+        unset_env(command_latency::canary::ENV_BASELINE);
+        assert!(!got, "explicit PostHog OFF beats FLAG_*=true");
+        assert!(unseen_got, "unseen key falls to the ENV baseline");
+        assert!(!crate::canary::canary_enabled(Some(&unseen)).await);
+    }
+
+    // regression: env must not beat an explicit PostHog OFF (3b) -- command-latency kill switch
+    #[tokio::test]
+    async fn explicit_posthog_off_beats_env_true_for_kill_switch_wanted() {
+        crate::crypto::ensure_installed();
+        let _guard = ENV_LOCK.lock().unwrap();
+        let client = seeded_client(
+            r#"{"waddles.disable-command-latency-telemetry":false}"#,
+            false,
+        )
+        .await;
+        set_env(command_latency::switch::ENV_BASELINE, "true");
+        let got = crate::canary::kill_switch_wanted(Some(&client)).await;
+        let unseen = seeded_client("{}", false).await;
+        let unseen_got = crate::canary::kill_switch_wanted(Some(&unseen)).await;
+        unset_env(command_latency::switch::ENV_BASELINE);
+        assert!(!got, "explicit PostHog OFF keeps the mechanism ON");
+        assert!(unseen_got, "unseen key falls to the ENV baseline");
+        assert!(!crate::canary::kill_switch_wanted(Some(&unseen)).await);
+    }
+
+    // regression: env must not beat an explicit PostHog OFF (3b) -- analytics producer site
+    #[tokio::test]
+    async fn explicit_posthog_off_beats_env_true_for_analytics_flag_wanted() {
+        crate::crypto::ensure_installed();
+        let _guard = ENV_LOCK.lock().unwrap();
+        let client = seeded_client(r#"{"waddles.analytics-stream":false}"#, false).await;
+        assert!(!crate::analytics::flag_wanted(Some(&client), true).await);
+        let unseen = seeded_client("{}", false).await;
+        assert!(crate::analytics::flag_wanted(Some(&unseen), true).await);
+        assert!(!crate::analytics::flag_wanted(Some(&unseen), false).await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_unset_flag_is_off() {
+        crate::crypto::ensure_installed();
+        let _guard = ENV_LOCK.lock().unwrap();
+        unset_env(&env_flag_var_name(RUST_DATA_PLANE_FLAG));
+        let client = seeded_client(r#"{"waddles.other":true}"#, true).await;
+        assert!(client.bypass_active());
+        assert!(!rust_data_plane_enabled(Some(&client)).await);
+        assert!(!crate::analytics::flag_wanted(Some(&client), false).await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_explicitly_off_flag_stays_off() {
+        crate::crypto::ensure_installed();
+        let _guard = ENV_LOCK.lock().unwrap();
+        unset_env(&env_flag_var_name(RUST_DATA_PLANE_FLAG));
+        let client = seeded_client(r#"{"waddles.core.rust-data-plane":false}"#, true).await;
+        assert!(client.bypass_active());
+        assert_eq!(
+            posthog_flag_value(&client, RUST_DATA_PLANE_FLAG).await,
+            Some(false)
+        );
+        assert!(!rust_data_plane_enabled(Some(&client)).await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_license_check_passes() {
+        crate::crypto::ensure_installed();
+        let client = seeded_client("{}", true).await;
+        assert!(client.bypass_active());
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
+    }
+
+    // regression: bypass domains are license-only; kill switch ON-by-absence under bypass
+    #[tokio::test]
+    async fn bypass_client_kill_switch_follows_posthog_not_bypass() {
+        crate::crypto::ensure_installed();
+        let _guard = ENV_LOCK.lock().unwrap();
+        unset_env(command_latency::switch::ENV_BASELINE);
+        let unset = seeded_client("{}", true).await;
+        assert!(unset.bypass_active());
+        assert!(
+            !crate::canary::kill_switch_wanted(Some(&unset)).await,
+            "unset kill switch under bypass -> telemetry stays ON"
+        );
+        let on = seeded_client(
+            r#"{"waddles.disable-command-latency-telemetry":true}"#,
+            true,
+        )
+        .await;
+        assert!(
+            crate::canary::kill_switch_wanted(Some(&on)).await,
+            "an explicit ON kill switch opts out even under bypass"
+        );
+        let off = seeded_client(
+            r#"{"waddles.disable-command-latency-telemetry":false}"#,
+            true,
+        )
+        .await;
+        assert!(!crate::canary::kill_switch_wanted(Some(&off)).await);
+    }
 
     fn clear_license_env() {
         for var in [

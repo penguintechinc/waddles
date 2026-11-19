@@ -18,7 +18,6 @@ use command_latency::metrics::metrics;
 use command_latency::Outcome;
 use penguin_spine::{PlatformEvent, Source};
 
-use crate::license::PosthogFlag;
 use crate::outbound_ops::{OutboundAction, OutboundEntry};
 
 /// The poll cadence while waiting for the result list.
@@ -276,22 +275,26 @@ pub async fn kill_switch_wanted(
 ) -> bool {
     let env = command_latency::switch::env_baseline_disabled();
     match client {
-        Some(c) => env || c.flag_on(command_latency::switch::FLAG_KEY).await,
+        Some(c) => crate::license::posthog_then_env(
+            crate::license::posthog_flag_value(c, command_latency::switch::FLAG_KEY).await,
+            env,
+        ),
         None => env,
     }
 }
 
-/// Whether the canary flag is ON: the ENV baseline, or the PostHog flag -- never forced by the bypass domain
+/// Whether the canary flag is ON: the PostHog value if seen, else the ENV baseline -- never forced by the bypass domain
 /// (a canary that drives the real pipeline must be switched on deliberately, default OFF).
 pub async fn canary_enabled(
     client: Option<&std::sync::Arc<penguin_licensing::LicenseClient>>,
 ) -> bool {
-    if canary::env_baseline_enabled() {
-        return true;
-    }
+    let env = canary::env_baseline_enabled();
     match client {
-        Some(c) => c.flag_on(canary::FLAG_KEY).await,
-        None => false,
+        Some(c) => crate::license::posthog_then_env(
+            crate::license::posthog_flag_value(c, canary::FLAG_KEY).await,
+            env,
+        ),
+        None => env,
     }
 }
 

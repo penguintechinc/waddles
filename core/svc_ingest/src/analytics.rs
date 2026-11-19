@@ -36,7 +36,6 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
-use crate::license::PosthogFlag;
 
 const ENV_TOKEN_TIMEOUT_MS: &str = "ANALYTICS_TOKENIZE_TIMEOUT_MS";
 const ENV_TOKEN_CONCURRENCY: &str = "ANALYTICS_TOKENIZE_CONCURRENCY";
@@ -901,18 +900,18 @@ fn env_baseline_on() -> bool {
     )
 }
 
-/// ENV baseline or the PostHog flag -- never the license bypass domain (a data-collecting
+/// PostHog value if seen, else the ENV baseline -- never the license bypass domain (a data-collecting
 /// producer must be switched on deliberately, default OFF), same rule as the canary.
 pub async fn flag_wanted(
     client: Option<&Arc<penguin_licensing::LicenseClient>>,
     env_on: bool,
 ) -> bool {
-    if env_on {
-        return true;
-    }
     match client {
-        Some(c) => c.flag_on(FLAG_KEY).await,
-        None => false,
+        Some(c) => crate::license::posthog_then_env(
+            crate::license::posthog_flag_value(c, FLAG_KEY).await,
+            env_on,
+        ),
+        None => env_on,
     }
 }
 

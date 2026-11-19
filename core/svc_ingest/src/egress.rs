@@ -304,6 +304,25 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
 
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/licensing_mock.rs"
+    ));
+
+    // regression: bypass domains are license-only; the PII-detokenization kill switch is
+    // ON-by-absence (mechanism enabled) and only an explicit PostHog ON opts out, bypass or not.
+    #[tokio::test]
+    async fn bypass_client_detokenization_kill_switch_follows_posthog_not_bypass() {
+        crate::crypto::ensure_installed();
+        let unset = seeded_client("{}", true).await;
+        assert!(unset.bypass_active());
+        assert!(KillSwitch::License(unset).detokenization_enabled().await);
+        let off = seeded_client(r#"{"waddles.core.disable-pii-detokenization":false}"#, true).await;
+        assert!(KillSwitch::License(off).detokenization_enabled().await);
+        let on = seeded_client(r#"{"waddles.core.disable-pii-detokenization":true}"#, true).await;
+        assert!(!KillSwitch::License(on).detokenization_enabled().await);
+    }
+
     /// Counts calls and records the tenant each one named; resolves from `names`, or fails.
     struct CountingResolver {
         calls: AtomicUsize,

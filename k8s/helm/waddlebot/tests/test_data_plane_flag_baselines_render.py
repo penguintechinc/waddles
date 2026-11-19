@@ -72,3 +72,39 @@ def test_non_flag_key_fails_render() -> None:
     )
     assert out.returncode != 0
     assert "must start with FLAG_" in out.stderr
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "FLAG_WADDLES_DISABLE_COMMAND_LATENCY_TELEMETRY",
+        "FLAG_WADDLES_CORE_DISABLE_DB_BUNDLE_CONFIG",
+    ],
+)
+def test_kill_switch_key_fails_render(key: str) -> None:
+    """A `_DISABLE_` (kill switch) key must fail the render: unset = mechanism ON."""
+    out = _render(
+        "--set", "global.deploymentTier=alpha",
+        "--set", f"config.dataPlaneFlagBaselines.{key}=true",
+    )
+    assert out.returncode != 0
+    assert "kill switch" in out.stderr
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "FLAG_WADDLES_COMMUNITY_CONNECTIONS",
+        "FLAG_WADDLES_COMPLIANCE_EXTERNAL_KMS",
+        "FLAG_WADDLES_AUTH_SSO_SAML",
+        "FLAG_WADDLES_TENANCY_WHITELABEL",
+    ],
+)
+def test_licensed_flag_key_fails_render(key: str) -> None:
+    """A licensed (tier-gated) flag must fail the render: never env-baselined."""
+    out = _render(
+        "--set", "global.deploymentTier=alpha",
+        "--set", f"config.dataPlaneFlagBaselines.{key}=true",
+    )
+    assert out.returncode != 0
+    assert "licensed flag" in out.stderr
