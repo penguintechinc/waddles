@@ -809,12 +809,18 @@ mod tests {
                 .await
                 .unwrap(),
         );
+        // Unique per call even when the wall clock is coarse: a process-wide counter makes the
+        // id collision-free across parallel tests (nanos alone collide on CI runners, and the
+        // NX `put_new` then silently keeps ANOTHER test's record under our id).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let id = format!("3{n}");
-        store
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A snowflake is at most 20 digits: 1 prefix + 4 (seq) + 15 (nanos mod 1e15).
+        let id = format!("3{:04}{:015}", seq % 10_000, n % 1_000_000_000_000_000);
+        let stored = store
             .put_new(
                 &id,
                 &crate::interaction_store::InteractionRecord {
@@ -827,6 +833,10 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            stored,
+            "test interaction id {id} collided with an existing record"
+        );
         let client = GuardedClient::new(
             GuardedLimits {
                 max_redirects: 0,

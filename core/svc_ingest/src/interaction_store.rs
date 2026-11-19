@@ -436,11 +436,14 @@ mod tests {
     }
 
     fn unique_id() -> String {
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        format!("9{n}")
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A snowflake is at most 20 digits: 1 prefix + 4 (seq) + 15 (nanos mod 1e15).
+        format!("9{:04}{:015}", seq % 10_000, n % 1_000_000_000_000_000)
     }
 
     #[tokio::test]
