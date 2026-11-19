@@ -850,6 +850,9 @@ async fn build_stage_capabilities(
         commands: false,
         bundles: true,
     });
+    // Community PUBLIC UUID for the bundle context (user-facing links): replica only, bounded
+    // LRU + TTL cache; absent on any miss/failure.
+    let _ = bundle_config_db::community_public_id::install_global_from_env();
     // `db` host capability (v1 + v2 `db2.*`): see `try_build_db_wiring`'s doc for
     // its two distinct unwired outcomes.
     let bundle_db_cfg = bundle_host_db::ConnectConfig {

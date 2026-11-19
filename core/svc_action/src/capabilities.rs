@@ -1101,6 +1101,9 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Connectio
     /// [`Self::with_bundle_config`] (hub-api not configured) -- `get-context` then carries no
     /// `config_json` (the guest sees `{}`), exactly as before this feature.
     bundle_config: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
+    /// Test/override seam for the community public-id cache; `None` falls back to the
+    /// process-wide cache installed at startup (`bundle_config_db::community_public_id`).
+    community_public_ids: Option<Arc<bundle_config_db::community_public_id::CommunityPublicIds>>,
     /// Operational toggle (`crate::flags::EGRESS_VIA_DISPATCHER_FLAG`);
     /// `None` until [`Self::with_egress_dispatcher_flag`] -- reads as OFF
     /// (fail-safe to the inline egress path).
@@ -1155,6 +1158,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             surface: None,
             stage_metrics: stage_metrics::stage_metrics(),
             bundle_config: None,
+            community_public_ids: None,
             egress_dispatcher_flag: None,
             tool: None,
             pin_keys: None,
@@ -1299,6 +1303,40 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     ) -> Self {
         self.bundle_config = cache;
         self
+    }
+
+    /// Overrides the community public-id cache (tests); production uses the process-wide one.
+    #[must_use]
+    pub fn with_community_public_ids(
+        mut self,
+        cache: Option<Arc<bundle_config_db::community_public_id::CommunityPublicIds>>,
+    ) -> Self {
+        self.community_public_ids = cache;
+        self
+    }
+
+    /// Adds `community_public_id` (the community's PUBLIC UUID) to the `get-context` reply, so a
+    /// bundle can build user-facing links without ever seeing a numeric id in a URL. Same guard as
+    /// the numeric ids (`tenant_id >= 1 && community_id >= 1`, host-derived from the verified
+    /// envelope); a miss, a database failure or no installed cache leaves the key absent -- never
+    /// fabricated, never blocking (bounded + cached; see `bundle_config_db::community_public_id`).
+    async fn attach_community_public_id(&self, scope: &InvokeScope, ctx: &mut serde_json::Value) {
+        if scope.tenant_id < 1 || scope.community_id < 1 {
+            return;
+        }
+        let Some(cache) = self
+            .community_public_ids
+            .clone()
+            .or_else(bundle_config_db::community_public_id::global)
+        else {
+            return;
+        };
+        if let Some(id) = cache
+            .lookup(i64::from(scope.tenant_id), i64::from(scope.community_id))
+            .await
+        {
+            ctx[bundle_config_db::community_public_id::CONTEXT_KEY] = serde_json::json!(id);
+        }
     }
 
     /// Adds `config_json` (the merged live config of this app for the invoke's community) to the
@@ -3468,6 +3506,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             CapabilityKind::Context => {
                 let mut ctx = self.handle_context(scope)?;
                 self.attach_config_json(scope, &mut ctx).await;
+                self.attach_community_public_id(scope, &mut ctx).await;
                 Ok(ctx)
             }
             CapabilityKind::Log => self.handle_log(scope, &call.args),
@@ -4254,6 +4293,57 @@ mod tests {
         ] {
             assert_eq!(normalize_web_base_url(bad), None, "{bad:?}");
         }
+    }
+
+    /// Fake replica source: answers `community 7 of tenant 10`, errors for community 9.
+    struct PubIds;
+
+    #[async_trait::async_trait]
+    impl bundle_config_db::community_public_id::PublicIdSource for PubIds {
+        async fn fetch(&self, tenant_id: i64, community_id: i64) -> Result<Option<String>, String> {
+            match (tenant_id, community_id) {
+                (10, 7) => Ok(Some("0B6B0A52-5F0E-4F6A-9A39-1B6A3D6D9F01".into())),
+                (_, 9) => Err("connection".into()),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    /// `get-context` carries the community's PUBLIC UUID only for the verified scope, and the
+    /// key stays absent (never the numeric id) on a miss, an error, or a no-scope invoke.
+    #[tokio::test]
+    async fn get_context_carries_community_public_id_only_when_resolved() {
+        let key = bundle_config_db::community_public_id::CONTEXT_KEY;
+        let cache = Arc::new(
+            bundle_config_db::community_public_id::CommunityPublicIds::new(
+                Arc::new(PubIds),
+                bundle_config_db::community_public_id::CacheConfig::default(),
+            ),
+        );
+        let h = caps(FakeRelayQueue::default()).with_community_public_ids(Some(cache));
+        let at = |t: i32, c: i32| {
+            let mut s = scope();
+            s.tenant_id = t;
+            s.community_id = c;
+            s
+        };
+        let s = at(10, 7);
+        let mut ctx = serde_json::json!({});
+        h.attach_community_public_id(&s, &mut ctx).await;
+        assert_eq!(ctx[key], "0b6b0a52-5f0e-4f6a-9a39-1b6a3d6d9f01");
+        assert_ne!(ctx[key], serde_json::json!(7));
+        for (t, c) in [(10, 8), (10, 9), (10, 0), (0, 7), (7, 7)] {
+            let s = at(t, c);
+            let mut ctx = serde_json::json!({});
+            h.attach_community_public_id(&s, &mut ctx).await;
+            assert!(ctx.get(key).is_none(), "({t},{c})");
+        }
+        // No cache installed anywhere: absent, no panic.
+        let bare = caps(FakeRelayQueue::default());
+        let s = at(10, 7);
+        let mut ctx = serde_json::json!({});
+        bare.attach_community_public_id(&s, &mut ctx).await;
+        assert!(ctx.get(key).is_none());
     }
 
     /// The bundle context carries `web_base_url` only when the platform configured one.

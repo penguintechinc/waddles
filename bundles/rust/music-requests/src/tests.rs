@@ -253,14 +253,20 @@ impl Clock for TestClock {
     }
 }
 
-/// Fixed platform context.
-struct TestPlatform(i32, Option<String>);
+/// The public UUID every test community resolves to unless a test says otherwise.
+const PUB: &str = "0b6b0a52-5f0e-4f6a-9a39-1b6a3d6d9f01";
+
+/// Fixed platform context: numeric scope, web base URL, and the host-supplied public UUID.
+struct TestPlatform(i32, Option<String>, Option<String>);
 impl Platform for TestPlatform {
     fn community_id(&self) -> i32 {
         self.0
     }
     fn web_base_url(&self) -> Option<String> {
         self.1.clone()
+    }
+    fn community_public_id(&self) -> Option<String> {
+        self.2.clone()
     }
 }
 
@@ -272,11 +278,20 @@ struct Rig {
 
 /// Builds a rig for community `cid` with an optional web base URL.
 fn rig_with(cid: i32, base: Option<&str>) -> Rig {
+    rig_with_public(cid, base, Some(PUB))
+}
+
+/// Like [`rig_with`] with an explicit host-supplied public id (`None` = host could not supply it).
+fn rig_with_public(cid: i32, base: Option<&str>, public_id: Option<&str>) -> Rig {
     let clock = Arc::new(TestClock(Mutex::new(1_800_000_000_000)));
     let svc = Service::new(
         Arc::new(FakeDb::default()),
         clock.clone(),
-        Arc::new(TestPlatform(cid, base.map(str::to_string))),
+        Arc::new(TestPlatform(
+            cid,
+            base.map(str::to_string),
+            public_id.map(str::to_string),
+        )),
     );
     Rig {
         reg: build_registry(Arc::new(svc)),
@@ -294,6 +309,7 @@ fn ctx(actor: Option<&str>, scopes: &[&str]) -> ToolContext {
         idempotency_key: Some("k1".into()),
         actor: actor.map(str::to_string),
         actor_scopes: scopes.iter().map(|s| s.to_string()).collect(),
+        participant: None,
     }
 }
 
@@ -677,12 +693,8 @@ fn import_is_one_shot_validated_and_requires_empty_community() {
         .map(|i| json!({"title": format!("T{i}")}))
         .collect();
     assert!(
-        r3.err(
-            &admin(),
-            "requests.import",
-            json!({"items": too_many})
-        )
-        .contains("at most 100")
+        r3.err(&admin(), "requests.import", json!({"items": too_many}))
+            .contains("at most 100")
     );
     assert_eq!(
         r3.err(
@@ -748,12 +760,15 @@ fn config_and_dj_toggle_are_scoped_and_bounded() {
 }
 
 #[test]
-fn page_link_uses_base_url_and_numeric_community() {
+fn page_link_uses_base_url_and_the_public_community_uuid() {
     let r = rig();
+    let url = r.ok(&member(ALICE), "page.link", json!({}))["url"].clone();
     assert_eq!(
-        r.ok(&member(ALICE), "page.link", json!({}))["url"],
-        "https://app.example.org/community/7/music"
+        url,
+        format!("https://app.example.org/community/{PUB}/music")
     );
+    // The numeric id (7) never appears in the user-facing link.
+    assert!(!url.as_str().unwrap().contains("/community/7/"));
     let none = rig_with(7, None);
     assert_eq!(
         none.err(&member(ALICE), "page.link", json!({})),
@@ -772,8 +787,27 @@ fn page_link_uses_base_url_and_numeric_community() {
     let dev = rig_with(3, Some("http://localhost:8080"));
     assert_eq!(
         dev.ok(&member(ALICE), "page.link", json!({}))["url"],
-        "http://localhost:8080/community/3/music"
+        format!("http://localhost:8080/community/{PUB}/music")
     );
+}
+
+#[test]
+fn page_link_omits_the_link_when_the_public_id_is_absent_or_not_a_uuid() {
+    // No fallback to the numeric id: absent or malformed public id => `link_not_configured`.
+    for pid in [
+        None,
+        Some(""),
+        Some("7"),
+        Some("not-a-uuid"),
+        Some("dotdot-x"),
+    ] {
+        let r = rig_with_public(7, Some("https://app.example.org"), pid);
+        assert_eq!(
+            r.err(&member(ALICE), "page.link", json!({})),
+            "link_not_configured",
+            "{pid:?}"
+        );
+    }
 }
 
 #[test]
@@ -978,7 +1012,7 @@ fn failed_advance_batch_rolls_back_history_and_counts() {
     let svc = Service::new(
         db.clone(),
         Arc::new(TestClock(Mutex::new(1_800_000_000_000))),
-        Arc::new(TestPlatform(1, None)),
+        Arc::new(TestPlatform(1, None, None)),
     );
     let reg = build_registry(Arc::new(svc));
     reg.call_with(

@@ -73,13 +73,16 @@ def _m0107() -> ModuleType:
     return _load("0107_bundle_config_db_reads.py", "migration_0107")
 
 
-def _can_select_communities(db: PgTestDatabase, role: str) -> bool:
-    """The exact 0055 negative probe: does `SELECT 1 FROM communities` succeed as `role`?"""
+def _can_select_communities(db: PgTestDatabase, role: str, column: str = "name") -> bool:
+    """The 0055 negative probe: can `role` read `communities.column` (default the NON-granted `name`)?
+
+    (0132 column-grants svc-process `id, tenant_id, public_id`, so `SELECT 1` would now succeed;
+    `name` stays denied for it and allowed for svc-action's table-level grant.)"""
     conn = _connect(db, role, db.service_role_passwords[role])
     try:
         with conn.cursor() as cur:
             try:
-                cur.execute("SELECT 1 FROM communities")
+                cur.execute(f"SELECT {column} FROM communities")
             except psycopg2.errors.InsufficientPrivilege:
                 return False
             return True
@@ -109,7 +112,12 @@ def test_metadata_head_and_catalog() -> None:
     heads = ScriptDirectory.from_config(cfg).get_heads()
     assert len(heads) == 1, f"alembic heads: {heads}"
     by_name = {r.name: r for r in load_service_roles_module().load_catalog().roles}
-    assert "communities" not in by_name[_PROCESS].columns
+    # 0132 later column-grants svc-process (id, tenant_id, public_id) -- never table-level.
+    assert by_name[_PROCESS].columns["communities"]["SELECT"] == (
+        "id",
+        "tenant_id",
+        "public_id",
+    )
     assert "communities" not in by_name[_PROCESS].tables
     assert "communities" in by_name[_ACTION].tables  # pre-existing, untouched by 0108
     # What 0108 revokes is exactly what 0107 granted svc-process on `communities`.
@@ -136,7 +144,7 @@ def test_head_denies_svc_process_communities_and_keeps_svc_action(
     assert not _can_select_communities(real_chain, _PROCESS), (
         "svc-process reached communities"
     )
-    assert _communities_acl(owner, _PROCESS) == 0
+    assert _communities_acl(owner, _PROCESS) == 3  # 0132: id, tenant_id, public_id only
     assert _can_select_communities(real_chain, _ACTION), (
         "svc-action lost its table-level grant"
     )
@@ -157,14 +165,18 @@ def test_downgrade_restores_then_upgrade_revokes_and_0107_leaves_nothing(
     """head -> 0107 (grants back) -> head (revoked) -> 0106 (no column ACL left anywhere)."""
     owner = _owner(real_chain)
     alembic_cli("downgrade", _PRIOR_0107, dsn=real_chain.dsn)
-    assert _can_select_communities(real_chain, _PROCESS), (
+    assert _can_select_communities(real_chain, _PROCESS, "id"), (
         "downgrade must restore the grant"
+    )
+    assert not _can_select_communities(real_chain, _PROCESS, "public_id"), (
+        "0132 is downgraded too: no public_id"
     )
     assert _communities_acl(owner, _PROCESS) == 1 + 1  # id + tenant_id
 
     alembic_cli("upgrade", "head", dsn=real_chain.dsn)
     assert not _can_select_communities(real_chain, _PROCESS)
-    assert _communities_acl(owner, _PROCESS) == 0
+    assert _can_select_communities(real_chain, _PROCESS, "public_id")
+    assert _communities_acl(owner, _PROCESS) == 3  # 0132 re-grants only the lookup columns
 
     alembic_cli("downgrade", _PRIOR_0106, dsn=real_chain.dsn)
     for role in _ROLES:

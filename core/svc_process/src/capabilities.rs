@@ -619,6 +619,9 @@ pub struct StageCapabilities<K: KvBackend = redis::aio::ConnectionManager> {
     /// [`Self::with_bundle_config`] (hub-api not configured) -- `get-context` then carries no
     /// `config_json` (the guest sees `{}`), exactly as before this feature.
     bundle_config: Option<Arc<hub_client::bundle_config::BundleConfigCache>>,
+    /// Test/override seam for the community public-id cache; `None` falls back to the
+    /// process-wide cache installed at startup (`bundle_config_db::community_public_id`).
+    community_public_ids: Option<Arc<bundle_config_db::community_public_id::CommunityPublicIds>>,
     /// The OTel instruments every `host-call` served by this value is timed
     /// into (`waddles_host_call_latency_seconds`). Always the process-wide
     /// set in production; tests swap it via `with_stage_metrics` so they can
@@ -747,6 +750,7 @@ impl<K: KvBackend> StageCapabilities<K> {
             invocation_identity: None,
             verified_scope: None,
             bundle_config: None,
+            community_public_ids: None,
             stage_metrics: stage_metrics::stage_metrics(),
             tool: None,
             tool_caller: None,
@@ -770,6 +774,43 @@ impl<K: KvBackend> StageCapabilities<K> {
     ) -> Self {
         self.bundle_config = cache;
         self
+    }
+
+    /// Overrides the community public-id cache (tests); production uses the process-wide one.
+    #[must_use]
+    pub fn with_community_public_ids(
+        mut self,
+        cache: Option<Arc<bundle_config_db::community_public_id::CommunityPublicIds>>,
+    ) -> Self {
+        self.community_public_ids = cache;
+        self
+    }
+
+    /// Adds `community_public_id` (the community's PUBLIC UUID) to the `get-context` reply, so a
+    /// bundle can build user-facing links without ever seeing a numeric id in a URL. Served ONLY
+    /// for the verified envelope scope (`tenant_id >= 1 && community_id >= 1`); a miss, a database
+    /// failure or no installed cache leaves the key absent -- never fabricated, never blocking
+    /// (the lookup is bounded and cached; see `bundle_config_db::community_public_id`).
+    async fn attach_community_public_id(&self, ctx: &mut serde_json::Value) {
+        let Some((tenant_id, community_id)) = self.verified_scope else {
+            return;
+        };
+        if tenant_id < 1 || community_id < 1 {
+            return;
+        }
+        let Some(cache) = self
+            .community_public_ids
+            .clone()
+            .or_else(bundle_config_db::community_public_id::global)
+        else {
+            return;
+        };
+        if let Some(id) = cache
+            .lookup(i64::from(tenant_id), i64::from(community_id))
+            .await
+        {
+            ctx[bundle_config_db::community_public_id::CONTEXT_KEY] = serde_json::json!(id);
+        }
     }
 
     /// Adds `config_json` (this community's merged live config for this app) to the
@@ -4590,6 +4631,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             CapabilityKind::Context => {
                 let mut ctx = self.handle_context()?;
                 self.attach_config_json(&mut ctx).await;
+                self.attach_community_public_id(&mut ctx).await;
                 Ok(ctx)
             }
             CapabilityKind::Log => self.handle_log(&call.args),
@@ -4940,6 +4982,63 @@ mod tests {
         let mut ctx = c.handle_context().expect("context");
         c.attach_config_json(&mut ctx).await;
         assert!(ctx.get("config_json").is_none());
+    }
+
+    /// Fake replica source: answers `community 7 of tenant 10`, errors for community 9.
+    struct PubIds;
+
+    #[async_trait::async_trait]
+    impl bundle_config_db::community_public_id::PublicIdSource for PubIds {
+        async fn fetch(&self, tenant_id: i64, community_id: i64) -> Result<Option<String>, String> {
+            match (tenant_id, community_id) {
+                (10, 7) => Ok(Some("0B6B0A52-5F0E-4F6A-9A39-1B6A3D6D9F01".into())),
+                (_, 9) => Err("connection".into()),
+                _ => Ok(None),
+            }
+        }
+    }
+
+    fn pub_ids() -> Arc<bundle_config_db::community_public_id::CommunityPublicIds> {
+        Arc::new(
+            bundle_config_db::community_public_id::CommunityPublicIds::new(
+                Arc::new(PubIds),
+                bundle_config_db::community_public_id::CacheConfig::default(),
+            ),
+        )
+    }
+
+    /// `get-context` carries the community's PUBLIC UUID only for the verified scope, and the
+    /// key stays absent (never the numeric id) on a miss, an error, or without a verified scope.
+    #[tokio::test]
+    async fn get_context_carries_community_public_id_only_when_resolved() {
+        let key = bundle_config_db::community_public_id::CONTEXT_KEY;
+        let ok = caps()
+            .with_verified_scope(Some((10, 7)))
+            .with_community_public_ids(Some(pub_ids()));
+        let mut ctx = ok.handle_context().expect("context");
+        ok.attach_community_public_id(&mut ctx).await;
+        assert_eq!(ctx[key], "0b6b0a52-5f0e-4f6a-9a39-1b6a3d6d9f01");
+        assert_ne!(ctx[key], serde_json::json!(7));
+
+        for scope in [
+            Some((10, 8)),
+            Some((10, 9)),
+            Some((10, 0)),
+            Some((0, 7)),
+            None,
+        ] {
+            let c = caps()
+                .with_verified_scope(scope)
+                .with_community_public_ids(Some(pub_ids()));
+            let mut ctx = c.handle_context().expect("context");
+            c.attach_community_public_id(&mut ctx).await;
+            assert!(ctx.get(key).is_none(), "{scope:?}");
+        }
+        // No cache installed anywhere: absent, no panic.
+        let none = caps().with_verified_scope(Some((10, 7)));
+        let mut ctx = none.handle_context().expect("context");
+        none.attach_community_public_id(&mut ctx).await;
+        assert!(ctx.get(key).is_none());
     }
 
     /// A v3 envelope's verified ids reach `get-context`; without them the

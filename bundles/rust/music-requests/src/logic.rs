@@ -115,6 +115,9 @@ pub trait Platform: Send + Sync {
     fn community_id(&self) -> i32;
     /// Platform web base URL when configured.
     fn web_base_url(&self) -> Option<String>;
+    /// The community's PUBLIC UUID when the host supplied it (`None` = unknown). The only
+    /// community identifier allowed in a user-facing URL: the numeric id is never exposed.
+    fn community_public_id(&self) -> Option<String>;
 }
 
 /// `db-v2` transport that can live in the shared tool registry.
@@ -1227,24 +1230,37 @@ impl Service {
         Ok(json!({ "dmca_safe": on, "purged": purged }))
     }
 
-    /// `page.link`: platform web base URL + the numeric community id; fails loud when unset.
+    /// `page.link`: platform web base URL + the community's PUBLIC UUID (never the numeric id,
+    /// which is enumerable and rejected by the webui); fails loud (`link_not_configured`) when
+    /// the base URL, the verified scope or the public id is unavailable -- there is NO fallback
+    /// to the numeric id.
     fn page_link(&self) -> Result<Value, ToolError> {
         let base = self
             .platform
             .web_base_url()
             .map(|b| b.trim().trim_end_matches('/').to_string());
-        let id = self.platform.community_id();
-        match base {
-            Some(b)
+        let scoped = self.platform.community_id() > 0;
+        let public_id = self.platform.community_public_id().filter(|p| is_uuid(p));
+        match (base, public_id) {
+            (Some(b), Some(pid))
                 if (b.starts_with("https://") || b.starts_with("http://"))
                     && b.len() > 8
-                    && id > 0 =>
+                    && scoped =>
             {
-                Ok(json!({ "url": format!("{b}/community/{id}/music") }))
+                Ok(json!({ "url": format!("{b}/community/{pid}/music") }))
             }
             _ => Err(invalid("link_not_configured")),
         }
     }
+}
+
+/// True for a canonical 8-4-4-4-12 hex UUID (defence in depth: the host already validates it).
+fn is_uuid(s: &str) -> bool {
+    s.len() == 36
+        && s.bytes().enumerate().all(|(i, b)| match i {
+            8 | 13 | 18 | 23 => b == b'-',
+            _ => b.is_ascii_hexdigit(),
+        })
 }
 
 /// True when `r` is the same track as `it`: same normalised title+artist, or same non-empty URL.

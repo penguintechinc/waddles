@@ -57,7 +57,7 @@ The actor is read ONLY from the host-injected `__ctx` (never from args).
 | `dj.get` / `dj.set` | `{}` / `{enabled:bool}` | `{enabled}` |
 | `music.stats.top` | `{kind:"artist" or "song", limit?: 1..25 (10)}` | `{items:[{title?,artist,plays}]}` (`title` only for songs), most played first |
 | `settings.set` | `{dmca_safe:bool}` (write tool) | `{dmca_safe, purged:int}`; enabling purges QUEUED non-safe rows (never the playing one) |
-| `page.link` | `{}` | `{url}` = `{PUBLIC_WEBUI_URL}/community/{community_id}/music`; error `link_not_configured` when the platform base URL is not configured |
+| `page.link` | `{}` | `{url}` = `{PUBLIC_WEBUI_URL}/community/{community_public_id}/music` (the community's PUBLIC UUID, never the numeric id); error `link_not_configured` when the platform base URL or the host-supplied public id is unavailable (no fallback to the numeric id) |
 
 ## Public API (hub-api) and UI
 
@@ -68,7 +68,7 @@ NO requester identity anywhere. Webui page `/community/:communityId/music`.
 
 ## Platform context
 
-Both stages add `web_base_url` (from env `PUBLIC_WEBUI_URL`, omitted when unset) to the bundle context JSON.
+Both stages add `web_base_url` (from env `PUBLIC_WEBUI_URL`, omitted when unset) and `community_public_id` (the community's public UUID, omitted when unknown) to the bundle context JSON.
 
 ## DMCA-safe mode
 
@@ -91,7 +91,11 @@ Enabling safe mode purges queued `other` rows and reports `purged`; the now-play
 The stage adds `web_base_url` (env `PUBLIC_WEBUI_URL`; trimmed; `https://`, or `http://` for dev; omitted otherwise) to the
 `context` host-call JSON (`svc_process` and `svc_action`). The WIT `bundle-context` record has no field for it, so the
 executor surfaces it to guests as the host-reserved `web_base_url` key of `config-json` (a community-set key of that name is
-dropped). `page.link` returns `{base}/community/{numeric community_id}/music`, or `link_not_configured` when absent.
+dropped). `page.link` returns `{base}/community/{community_public_id}/music`, or `link_not_configured` when either is absent.
+
+### `community_public_id`
+
+The data plane keys on the numeric community id, which must never appear in a user-facing URL (enumerable; the webui rejects it). The stage therefore looks up `communities.public_id` by `(tenant_id, community_id)` from the read replica (`core/bundle_config_db/src/community_public_id.rs`, bounded LRU + TTL cache, alembic `0132` column grant for svc-process) and folds it into the `context` reply; the executor surfaces it as the host-reserved `community_public_id` key of `config-json` (community-set values are dropped; a non-UUID host value is dropped). A miss, database failure or timeout leaves it absent (never fabricated, never blocks the invocation; metric `waddles_community_public_id_lookups{outcome}`). Bundles read it via `waddle_sdk::context::community_public_id_from_config` / `BundleContext::community_public_id()` and must omit the link when it is `None`.
 
 ## Notes
 

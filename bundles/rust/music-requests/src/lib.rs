@@ -249,6 +249,20 @@ mod component {
         fn community_id(&self) -> i32 {
             context_v2::get_context().community_id
         }
+        /// The community's PUBLIC UUID the host folds into the context config (absent when the
+        /// host could not establish it). Logged PII-free (no ids) when missing.
+        fn community_public_id(&self) -> Option<String> {
+            let ctx = context_v2::get_context();
+            let id = waddle_sdk::context::community_public_id_from_config(&ctx.config_json);
+            if id.is_none() {
+                log::write(
+                    log::Level::Debug,
+                    "music-requests community public id unavailable",
+                    "{}",
+                );
+            }
+            id
+        }
         /// The platform web base URL the host folds into the context config, if set.
         fn web_base_url(&self) -> Option<String> {
             let ctx = context_v2::get_context();
