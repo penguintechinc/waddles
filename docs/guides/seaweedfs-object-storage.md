@@ -99,7 +99,19 @@ lag): [External KMS / BYOK](external-kms-byok.md).
 
 ## Least-Privilege Identities
 
-SeaweedFS's S3 gateway takes a static `identities.json` (rendered at container start from `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`) rather than MinIO's separate root/IAM-policy model. The chart currently provisions a single `waddlebot` identity with `Read, Write, List, Tagging, Admin` — the same blast radius as the old MinIO root credential. Splitting this into per-consumer identities (e.g. a read-only identity for the bundle executor's poller, a write-only identity for upload paths) is tracked as follow-up work once a consumer actually needs it; don't add a second identity speculatively.
+SeaweedFS's S3 gateway takes a static `identities.json` rather than MinIO's root/IAM-policy model. The chart renders one identity per workload in the `s3-identities.json` heredoc (`k8s/helm/waddlebot/templates/infrastructure/seaweedfs.yaml`, ~lines 285-385); each identity's key pair comes from its own env vars (`<PREFIX>_S3_ACCESS_KEY_ID` / `<PREFIX>_S3_SECRET_ACCESS_KEY`). The former single full-access `waddlebot` identity has been removed. The only remaining `Admin` grant is `bucket-init`, which is used by the bucket-init hook Job.
+
+Bucket-scoped actions (`Read:<bucket>`) limit an identity to that bucket. Prefix grants (`Write:<bucket>/<prefix>/*`) need the trailing `*`.
+
+| Identity | Used by | Grants | Condition |
+|---|---|---|---|
+| `hub-api` | hub-api (incl. bundle publish and core-bundle-seeder) | `Read, Write, List, Tagging` on `infrastructure.seaweedfs.bucketName`; `Read, Write, List` on `pipeline.rustDataPlane.bundleExecutor.bucketName` | Always |
+| `svc-bundles-executor` | svc-bundles-executor (bundle poller) | `Read, List` on `pipeline.rustDataPlane.bundleExecutor.bucketName` | Always |
+| `svc-bundles-precompiler` | svc-bundles-precompiler | `Read, List` on `pipeline.rustDataPlane.bundleExecutor.bucketName`; `Write` on `<bundleExecutor bucket>/precompiled/*` | Always. Intended write grant; the template currently lacks the trailing `*`, fix in flight |
+| `hub-api-escrow` | hub-api platform-key escrow (DR copy) | `Read, Write, List` on `infrastructure.seaweedfs.escrow.bucketName` | Always |
+| `bucket-init` | `seaweedfs-bucket-init` hook Job only | `Admin` (all buckets) | Hook only; `BUCKET_INIT_S3_*` env vars |
+| `svc-streaming` | svc-streaming (recordings) | `Read, Write` on the literal bucket `recordings` | Always |
+| `bundle-storage` | Host-mediated bundle storage (never given to a bundle) | `Read, Write, List, Tagging` on `bundleStorage.bucketName` | Only when `bundleStorage.mode` is `bundled` |
 
 ## Bucket Init Hook
 
@@ -407,7 +419,7 @@ aws --endpoint-url http://localhost:8333 s3 ls s3://waddlebot-assets --recursive
 1. **Security**:
    - Use strong access keys in production
    - Keep `infrastructure.seaweedfs.encryption` enabled everywhere outside alpha
-   - Split identities once a consumer needs less than full Read/Write/List/Admin
+   - Keep one least-privilege identity per workload; add grants only when a consumer needs them (see Least-Privilege Identities)
    - Monitor access logs
 
 2. **Performance**:
