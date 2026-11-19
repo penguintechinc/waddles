@@ -101,6 +101,8 @@ lag): [External KMS / BYOK](external-kms-byok.md).
 
 SeaweedFS's S3 gateway takes a static `identities.json` (rendered at container start from `S3_ACCESS_KEY_ID`/`S3_SECRET_ACCESS_KEY`) rather than MinIO's separate root/IAM-policy model. The chart currently provisions a single `waddlebot` identity with `Read, Write, List, Tagging, Admin` — the same blast radius as the old MinIO root credential. Splitting this into per-consumer identities (e.g. a read-only identity for the bundle executor's poller, a write-only identity for upload paths) is tracked as follow-up work once a consumer actually needs it; don't add a second identity speculatively.
 
+**Prefix-scoped grants need a trailing `*`:** SeaweedFS (`weed/s3api/auth_credentials.go` `Identity.CanDo`) matches a wildcard-free action only against `Action:bucket` exactly, so `Write:bucket/prefix` never matches an object write — use `Write:bucket/prefix/*` (wildcard-matched against `Action:bucket/objectKey`).
+
 ## Bucket Init Hook
 
 `seaweedfs-bucket-init` (`k8s/helm/waddlebot/templates/infrastructure/seaweedfs.yaml`) is a Helm `post-install,post-upgrade` hook Job, `before-hook-creation,hook-succeeded` delete policy (Job specs are immutable in-place, so a plain Job breaks every `helm upgrade` once it exists). It waits for the SeaweedFS Deployment/Service/PVC to exist, then idempotently creates `waddlebot-assets` and `recordings`, and applies default SSE-S3 encryption when `encryption.autoEncryptBucket` is set. Uses the stock `amazon/aws-cli` image against the S3 gateway endpoint — no SeaweedFS-specific client.
