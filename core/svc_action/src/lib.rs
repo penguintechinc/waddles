@@ -1440,10 +1440,10 @@ fn try_start_changelog_consumer(
     // `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag` (not the
     // generic `flag_or_closed` + `NegatedFlag` composition) -- this crate's
     // own hardcoded license-bypass domain (`build_license_client` above)
-    // makes `flag_enabled` read `true` for ANY key, so a bare negation
-    // would report the multi-tenant path permanently DISABLED for every
-    // deployment of this service; see `flags::DisableDbBundleConfigFlag`'s
-    // doc.
+    // satisfies license/tier checks only and never forces a flag; these
+    // wrappers resolve PostHog, then ENV, then OFF (the ENV baseline is ours,
+    // not the library's) and apply the opt-out inversion; see
+    // `flags::DisableDbBundleConfigFlag`'s doc.
     let flag: Arc<dyn flags::FeatureFlag> = Arc::new(flags::AllFlags(vec![
         flags::db_bundle_config_flag(&license),
         flags::multi_tenant_watermark_flag(&license),
