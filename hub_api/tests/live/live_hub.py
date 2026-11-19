@@ -75,6 +75,7 @@ from config import HubAPIConfig  # noqa: E402
 from grpc_internal.dataplane_servicers import ProviderConnectionServicer  # noqa: E402
 from grpc_internal.server import build_interceptor_chain  # noqa: E402
 from grpc_internal.service_auth_servicer import ServiceAuthServicer  # noqa: E402
+from services.community_public_id import install_community_public_ids  # noqa: E402
 from services.provider_connections import (  # noqa: E402
     PlatformKeyVault,
     ProviderConnectionService,
@@ -140,10 +141,15 @@ def _sql(container: str, statement: str) -> str:
     return result.stdout.strip()
 
 
-def _seed(container: str) -> dict[str, int]:
-    """One tenant with two communities (A, B) and a second tenant's community (C)."""
+def _seed(container: str) -> dict[str, Any]:
+    """One tenant with two communities (A, B) and a second tenant's community (C).
+
+    Besides each community's numeric id (`a`/`b`/`c`, for internal service-key routes and DB
+    keys), returns its `public_id` UUID (`a_public`/...), which the client-facing
+    `/api/v1/communities/<cuuid:...>` routes require (#1434).
+    """
     _sql(container, "ALTER TABLE communities ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-    ids: dict[str, int] = {}
+    ids: dict[str, Any] = {}
     for key, slug in (("tenant", TENANT_SLUG), ("other_tenant", "live-other")):
         ids[key] = int(
             _sql(container, f"INSERT INTO tenants (slug) VALUES ('{slug}') RETURNING id")  # noqa: S608
@@ -173,13 +179,14 @@ def _seed(container: str) -> dict[str, int]:
         ("b", "live-b", "tenant"),
         ("c", "live-c", "other_tenant"),
     ):
-        ids[key] = int(
-            _sql(
-                container,
-                f"INSERT INTO communities (name, tenant_id) VALUES ('{name}', {ids[tenant]})"  # noqa: S608
-                " RETURNING id",
-            )
+        row = _sql(
+            container,
+            f"INSERT INTO communities (name, tenant_id) VALUES ('{name}', {ids[tenant]})"  # noqa: S608
+            " RETURNING id, public_id",
         )
+        numeric, public = row.split("|")
+        ids[key] = int(numeric)
+        ids[f"{key}_public"] = public.strip().lower()
     return ids
 
 
@@ -208,7 +215,14 @@ async def _serve(manifest_path: Path) -> None:
         # `authorize_community` first proves the community belongs to the caller's tenant
         # (IDOR guard) before honouring the admin token's global-admin scope.
         async_dal.dal.define_table(
-            "communities", Field("tenant_id", "integer"), migrate=False, rname="communities"
+            "communities",
+            Field("tenant_id", "integer"),
+            # `public_id` must be bound: `lookup_community_id` (the cuuid before_request hook)
+            # re-binds the full legacy `tenants`/`communities` field lists when it is missing,
+            # and those reference columns the Alembic-migrated schema no longer has.
+            Field("public_id"),
+            migrate=False,
+            rname="communities",
         )
         async_dal.dal.define_table(
             "tenant_admins",
@@ -243,6 +257,9 @@ async def _serve(manifest_path: Path) -> None:
 
         app = Quart(__name__)
         QuartSchema(app)
+        # Same wiring as app.py: the `cuuid` converter + the before_request hook that maps the
+        # community public UUID in the path to the internal numeric id for the handlers.
+        install_community_public_ids(app)
         app.register_blueprint(provider_connections_bp)
         cfg: HubAPIConfig = hub_config()
         app.config.update(
@@ -296,9 +313,14 @@ async def _serve(manifest_path: Path) -> None:
             "grpc_url": f"http://127.0.0.1:{grpc_port}",
             "admin_token": admin_token,
             "tenant_id": ids["tenant"],
+            # Numeric ids: internal service-key routes + DB keys. `*_public_id`: the UUIDs the
+            # client-facing `/api/v1/communities/<cuuid:...>` routes accept (numeric -> 404).
             "community_a": ids["a"],
             "community_b": ids["b"],
             "community_other_tenant": ids["c"],
+            "community_a_public_id": ids["a_public"],
+            "community_b_public_id": ids["b_public"],
+            "community_other_tenant_public_id": ids["c_public"],
             "pg_container": pg.container,
             "sa_tokens": SA_TOKENS,
             "twitch_bot_tokens": twitch_bot_tokens,
