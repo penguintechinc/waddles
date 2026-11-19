@@ -57,6 +57,7 @@ from quart_schema import validate_request, validate_response
 
 from services import marketplace_lifecycle_service as svc
 from services.community_authz import authorize_community
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.marketplace_author import AuthorDTO, to_author_dto
@@ -276,7 +277,7 @@ class ActivationDTO:
 
     id: int
     appId: str
-    communityId: int
+    communityId: str
     tenantId: int
     enabled: bool
     config: dict[str, Any]
@@ -394,12 +395,13 @@ def _availability_dto(row: Any) -> AvailabilityDTO:
     )
 
 
-def _activation_dto(row: Any) -> ActivationDTO:
+def _activation_dto(row: Any, public_community_id: str) -> ActivationDTO:
+    """Activation DTO; `communityId` is the community's PUBLIC UUID."""
     act, cat = row.app_activations, row.app_catalog
     return ActivationDTO(
         id=act.id,
         appId=act.app_id,
-        communityId=act.community_id,
+        communityId=public_community_id,
         tenantId=act.tenant_id,
         enabled=bool(act.enabled),
         config=dict(act.config or {}),
@@ -585,7 +587,7 @@ async def make_unavailable(
 # ---------------------------------------------------------------------------
 
 
-@marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["GET"])
+@marketplace_lifecycle_bp.route("/community/<cuuid:community_id>/bundles", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activated(
@@ -612,14 +614,15 @@ async def list_activated(
         page=page,
         limit=limit,
     )
+    public_community_id = await lookup_public_id(community_id)
     return ActivationListResponse(
         success=True,
-        bundles=[_activation_dto(r) for r in rows],
+        bundles=[_activation_dto(r, public_community_id) for r in rows],
         pagination=PaginationDTO(page=page, limit=limit, total=total, totalPages=total_pages),
     )
 
 
-@marketplace_lifecycle_bp.route("/community/<int:community_id>/bundles", methods=["POST"])
+@marketplace_lifecycle_bp.route("/community/<cuuid:community_id>/bundles", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateBundleRequest)
 @validate_response(MessageResponse, 201)
@@ -668,7 +671,7 @@ async def activate_bundle(
 
 
 @marketplace_lifecycle_bp.route(
-    "/community/<int:community_id>/bundles/<app_id>", methods=["DELETE"]
+    "/community/<cuuid:community_id>/bundles/<app_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -698,7 +701,7 @@ async def deactivate_bundle(
 # ---------------------------------------------------------------------------
 
 
-@marketplace_lifecycle_bp.route("/community/<int:community_id>/resolved", methods=["GET"])
+@marketplace_lifecycle_bp.route("/community/<cuuid:community_id>/resolved", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ResolvedBundlesResponse)
 async def get_resolved_bundles(

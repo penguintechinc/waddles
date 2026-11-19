@@ -13,7 +13,7 @@ const { test, expect } = require('./fixtures');
 
 const TEST_EMAIL = process.env.HUB_TEST_EMAIL || 'admin@localhost.local';
 const TEST_PASS = process.env.HUB_TEST_PASS || process.env.INITIAL_ADMIN_PASSWORD || 'admin123';
-const COMMUNITY_ID = process.env.TEST_COMMUNITY_ID || '1';
+const COMMUNITY_ID = process.env.TEST_COMMUNITY_ID || '00000001-0000-4000-8000-000000000000' // community public UUID;
 
 // ---------------------------------------------------------------------------
 // Auth / navigation helpers (mirrors community-workflow.spec.js patterns)

@@ -20,6 +20,7 @@ from blueprints.v1.community_interaction import interaction_admin_bp
 from services import scope_registry as reg
 from services.community_authz import member_scopes_sync
 from services.errors import ApiError
+from tests.community_ids import cpath, install_community_ids
 
 MODERATOR_SCOPES = ["channels:moderate", "channels:read", "community:read"]
 
@@ -30,8 +31,9 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(interaction_admin_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(interaction_admin_bp)
     return quart_app
 
 
@@ -96,8 +98,8 @@ async def _put(client: Any, path: str, headers: dict[str, str], body: dict[str, 
     )
 
 
-def _url(community_id: int, role_id: int | None = None) -> str:
-    base = f"/api/v1/admin/{community_id}/interaction/roles"
+def _url(dal: Any, community_id: int, role_id: int | None = None) -> str:
+    base = cpath(dal, "/api/v1/admin/{community_id}/interaction/roles", community_id)
     return base if role_id is None else f"{base}/{role_id}"
 
 
@@ -142,9 +144,9 @@ class TestDeleteProtection:
     async def test_predefined_roles_cannot_be_deleted(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int], name: str
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.delete(
-            _url(community_id, roles[name]), headers=_admin(auth_headers)
+            _url(dal, community_id, roles[name]), headers=_admin(auth_headers)
         )
         assert response.status_code == 409
         assert (await response.get_json())["code"] == "ROLE_PROTECTED"
@@ -154,9 +156,9 @@ class TestDeleteProtection:
     async def test_custom_role_can_be_deleted(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.delete(
-            _url(community_id, roles["vip"]), headers=_admin(auth_headers)
+            _url(dal, community_id, roles["vip"]), headers=_admin(auth_headers)
         )
         assert response.status_code == 200
 
@@ -165,10 +167,10 @@ class TestAdminLocked:
     async def test_admin_scopes_cannot_be_edited(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["community-admin"]),
+            _url(dal, community_id, roles["community-admin"]),
             _admin(auth_headers),
             {"scopes": ["community:read"]},
         )
@@ -178,10 +180,10 @@ class TestAdminLocked:
     async def test_listing_shows_computed_full_set_and_flags(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         reg.register_scopes({"rooms:close": "Close rooms"})
         response = await client.get(
-            _url(community_id),
+            _url(dal, community_id),
             headers=auth_headers(scope="community.interaction:read users:admin", user_id="1"),
         )
         assert response.status_code == 200
@@ -198,10 +200,10 @@ class TestAdminLocked:
     async def test_fixed_predefined_scopes_locked(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["member"]),
+            _url(dal, community_id, roles["member"]),
             _admin(auth_headers),
             {"scopes": ["channels:read"]},
         )
@@ -215,7 +217,7 @@ class TestModeratorEdit:
         dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["moderator"]),
+            _url(dal, community_id, roles["moderator"]),
             _admin(auth_headers),
             {"scopes": ["channels:read", "resource:pin"]},
         )
@@ -226,10 +228,10 @@ class TestModeratorEdit:
     async def test_editor_without_roles_manage_is_403(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["moderator"]),
+            _url(dal, community_id, roles["moderator"]),
             _limited(auth_headers, "channels:read"),
             {"scopes": ["channels:read"]},
         )
@@ -241,7 +243,7 @@ class TestModeratorEdit:
         dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["moderator"]),
+            _url(dal, community_id, roles["moderator"]),
             _limited(auth_headers, "roles:manage channels:read"),
             {"scopes": [*MODERATOR_SCOPES, "resource:pin"]},
         )
@@ -256,7 +258,7 @@ class TestModeratorEdit:
         dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["moderator"]),
+            _url(dal, community_id, roles["moderator"]),
             _limited(auth_headers, "roles:manage channels:read community:read"),
             {"scopes": ["channels:read", "community:read"]},
         )
@@ -270,7 +272,7 @@ class TestModeratorEdit:
         dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["moderator"]),
+            _url(dal, community_id, roles["moderator"]),
             _limited(auth_headers, "roles:manage " + " ".join(MODERATOR_SCOPES)),
             {"scopes": ["channels:read", "community:read"]},
         )
@@ -283,10 +285,10 @@ class TestModeratorEdit:
     async def test_unknown_scope_is_400(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await _put(
             client,
-            _url(community_id, roles["moderator"]),
+            _url(dal, community_id, roles["moderator"]),
             _admin(auth_headers),
             {"scopes": ["bogus:scope"]},
         )
@@ -297,9 +299,9 @@ class TestCustomRoleCrud:
     async def test_create_requires_roles_manage(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.post(
-            _url(community_id),
+            _url(dal, community_id),
             headers={**_limited(auth_headers, "channels:read"), "Content-Type": "application/json"},
             data=json.dumps({"name": "x"}),
         )
@@ -308,9 +310,9 @@ class TestCustomRoleCrud:
     async def test_create_cannot_exceed_editor_scopes(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.post(
-            _url(community_id),
+            _url(dal, community_id),
             headers={
                 **_limited(auth_headers, "roles:manage channels:read"),
                 "Content-Type": "application/json",
@@ -323,20 +325,20 @@ class TestCustomRoleCrud:
     async def test_create_update_delete_round_trip(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         headers = _limited(auth_headers, "roles:manage channels:read channels:send_chat")
         created = await client.post(
-            _url(community_id),
+            _url(dal, community_id),
             headers={**headers, "Content-Type": "application/json"},
             data=json.dumps({"name": "Helper", "scopes": ["channels:read"]}),
         )
         assert created.status_code == 201
         role_id = (await created.get_json())["role"]["id"]
         updated = await _put(
-            client, _url(community_id, role_id), headers, {"scopes": ["channels:send_chat"]}
+            client, _url(dal, community_id, role_id), headers, {"scopes": ["channels:send_chat"]}
         )
         assert updated.status_code == 200
-        deleted = await client.delete(_url(community_id, role_id), headers=headers)
+        deleted = await client.delete(_url(dal, community_id, role_id), headers=headers)
         assert deleted.status_code == 200
 
 
@@ -354,7 +356,8 @@ class TestNoDeletingStrongerRole:
         )
         dal.commit()
         response = await client.delete(
-            _url(community_id, strong), headers=_limited(auth_headers, "roles:manage channels:read")
+            _url(dal, community_id, strong),
+            headers=_limited(auth_headers, "roles:manage channels:read"),
         )
         assert response.status_code == 403
         assert (await response.get_json())["code"] == "SCOPE_ESCALATION"
@@ -363,9 +366,9 @@ class TestNoDeletingStrongerRole:
     async def test_can_delete_custom_role_whose_scopes_editor_holds(
         self, client: Any, auth_headers: Any, community_db: Any, roles: dict[str, int]
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.delete(
-            _url(community_id, roles["vip"]),
+            _url(dal, community_id, roles["vip"]),
             headers=_limited(auth_headers, "roles:manage channels:read"),
         )
         assert response.status_code == 200
@@ -412,9 +415,9 @@ class TestScopeEndpointAndSync:
     async def test_scope_registry_endpoint(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/scopes",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/scopes", community_id),
             headers=auth_headers(scope="community.roles:view", user_id="1"),
         )
         assert response.status_code == 200

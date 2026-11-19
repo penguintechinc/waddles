@@ -16,6 +16,7 @@ from datetime import datetime
 from typing import Any
 
 from .community_common import ensure_community_tables, sql_bool
+from .community_public_id import lookup_public_ids_sync
 from .community_relay import relay_message
 from .errors import ApiError
 from .scope_registry import (
@@ -79,10 +80,16 @@ def _create_server_channel(
 # ── Hub channel CRUD ─────────────────────────────────────────────────────
 
 
-def _channel_dto(row: Any) -> dict[str, Any]:
+def _public_id(dal: Any, community_id: int) -> str:
+    """Public UUID for one community id (fails loud when the row has none)."""
+    return lookup_public_ids_sync(dal, [community_id])[int(community_id)]
+
+
+def _channel_dto(row: Any, public_community_id: str) -> dict[str, Any]:
+    """Channel wire dict; `community_id` is the community's PUBLIC UUID."""
     return {
         "id": row.id,
-        "community_id": row.community_id,
+        "community_id": public_community_id,
         "name": row.name,
         "description": row.description,
         "channel_type": row.channel_type,
@@ -108,7 +115,8 @@ def get_hub_channels(dal: Any, community_id: int) -> list[dict[str, Any]]:
     ).select(
         orderby=dal.hub_channels.channel_type | dal.hub_channels.sort_order | dal.hub_channels.name
     )
-    return [_channel_dto(r) for r in rows]
+    public_id = _public_id(dal, community_id)
+    return [_channel_dto(r, public_id) for r in rows]
 
 
 def can_create_channel(dal: Any, community_id: int, user_id: int, is_admin_like: bool) -> bool:
@@ -212,7 +220,7 @@ def create_hub_channel(
             )
             dal.commit()
 
-    return _channel_dto(dal.hub_channels[channel_id]), None
+    return _channel_dto(dal.hub_channels[channel_id], _public_id(dal, community_id)), None
 
 
 def update_hub_channel(
@@ -243,7 +251,7 @@ def update_hub_channel(
             fields[key] = value.strip() if key == "name" and isinstance(value, str) else value
     dal(query).update(**fields)
     dal.commit()
-    return _channel_dto(dal.hub_channels[channel_id])
+    return _channel_dto(dal.hub_channels[channel_id], _public_id(dal, community_id))
 
 
 def delete_hub_channel(dal: Any, community_id: int, channel_id: int) -> bool:
@@ -518,13 +526,14 @@ def role_kind_of(row: Any) -> int:
     return int(kind)
 
 
-def _role_dto(row: Any) -> dict[str, Any]:
+def _role_dto(row: Any, public_community_id: str) -> dict[str, Any]:
+    """Role wire dict; `community_id` is the community's PUBLIC UUID."""
     claims = row.base_claims or {}
     kind = role_kind_of(row)
     scopes = sorted(effective_scopes(kind, claims.get("scopes", [])))
     return {
         "id": row.id,
-        "community_id": row.community_id,
+        "community_id": public_community_id,
         "name": row.name,
         "display_name": row.display_name,
         "description": row.description,
@@ -545,7 +554,8 @@ def get_community_roles(dal: Any, community_id: int) -> list[dict[str, Any]]:
     rows = dal(dal.community_roles.community_id == community_id).select(
         orderby=(~dal.community_roles.priority, dal.community_roles.name)
     )
-    return [_role_dto(r) for r in rows]
+    public_id = _public_id(dal, community_id)
+    return [_role_dto(r, public_id) for r in rows]
 
 
 def _log_role_change(
@@ -604,7 +614,7 @@ def create_community_role(
     )
     dal.commit()
     _log_role_change("created", community_id, role_id, scopes)
-    return _role_dto(dal.community_roles[role_id]), None
+    return _role_dto(dal.community_roles[role_id], _public_id(dal, community_id)), None
 
 
 def update_community_role(

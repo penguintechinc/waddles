@@ -39,7 +39,7 @@ function CommunityPublicPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
-  const communityId = Number(id);
+  const communityId = id; // opaque community UUID route param; hub-api validates it
   // hub-api serves join REQUESTS for approval-mode communities only; there is no direct-join
   // route for open communities (see UNSERVED_FEATURES['community-open-join']).
   const requiresApproval = community?.joinMode === 'approval';

@@ -25,42 +25,42 @@ describe('LeaderboardCard', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('renders the top rows from the served route and links to the full board', async () => {
-    const get = mockApiGet((url) => (url === '/api/v1/community/7/leaderboard/watch-time' ? page([row(1), row(2, { avatar_url: 'https://x/a.png' })]) : unexpectedUrl(url)));
-    renderWithProviders(<LeaderboardCard communityId={7} title="Top Viewers" limit={5} />);
+    const get = mockApiGet((url) => (url === '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time' ? page([row(1), row(2, { avatar_url: 'https://x/a.png' })]) : unexpectedUrl(url)));
+    renderWithProviders(<LeaderboardCard communityId={'00000007-0000-4000-8000-000000000000'} title="Top Viewers" limit={5} />);
     const rows = await screen.findAllByTestId('leaderboard-card-row');
     expect(rows).toHaveLength(2);
     expect(within(rows[0]!).getByText('u1')).toBeInTheDocument();
     expect(within(rows[0]!).getByText('1m')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/community/7/leaderboard/watch-time', { params: { period: 'weekly', limit: 5, offset: 0 } });
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time', { params: { period: 'weekly', limit: 5, offset: 0 } });
     expect(screen.getByRole('heading', { name: 'Top Viewers' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'View Full Leaderboard' })).toHaveAttribute('href', '/dashboard/community/7/leaderboard?type=watch-time');
+    expect(screen.getByRole('link', { name: 'View Full Leaderboard' })).toHaveAttribute('href', '/dashboard/community/00000007-0000-4000-8000-000000000000/leaderboard?type=watch-time');
   });
 
   it('uses the messages route and a count format for type="messages"', async () => {
-    mockApiGet((url) => (url === '/api/v1/community/7/leaderboard/messages' ? page([row(1, { value: 4321, value_formatted: null })]) : unexpectedUrl(url)));
-    renderWithProviders(<LeaderboardCard communityId={7} type="messages" />);
+    mockApiGet((url) => (url === '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/messages' ? page([row(1, { value: 4321, value_formatted: null })]) : unexpectedUrl(url)));
+    renderWithProviders(<LeaderboardCard communityId={'00000007-0000-4000-8000-000000000000'} type="messages" />);
     expect(await screen.findByText('4,321')).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Messages' })).toBeInTheDocument();
   });
 
   it('re-queries when the period changes', async () => {
     const get = mockApiGet(() => page([row(1)]));
-    renderWithProviders(<LeaderboardCard communityId={7} />);
+    renderWithProviders(<LeaderboardCard communityId={'00000007-0000-4000-8000-000000000000'} />);
     await screen.findByTestId('leaderboard-card-row');
     fireEvent.click(screen.getByRole('button', { name: 'All' }));
-    await waitFor(() => expect(get).toHaveBeenCalledWith('/api/v1/community/7/leaderboard/watch-time', { params: { period: 'alltime', limit: 5, offset: 0 } }));
+    await waitFor(() => expect(get).toHaveBeenCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time', { params: { period: 'alltime', limit: 5, offset: 0 } }));
   });
 
   it('shows empty and error states instead of a blank card', async () => {
     mockApiGet(() => page([]));
-    const first = renderWithProviders(<LeaderboardCard communityId={7} />);
+    const first = renderWithProviders(<LeaderboardCard communityId={'00000007-0000-4000-8000-000000000000'} />);
     expect(await screen.findByText('No data yet for this period')).toBeInTheDocument();
     first.unmount();
 
     mockApiGet(() => {
       throw httpError(500, { error: 'nope' });
     });
-    renderWithProviders(<LeaderboardCard communityId={7} />);
+    renderWithProviders(<LeaderboardCard communityId={'00000007-0000-4000-8000-000000000000'} />);
     const alert = await screen.findByRole('alert');
     expect(within(alert).getByText('nope')).toBeInTheDocument();
     expect(within(alert).getByRole('button', { name: 'Try again' })).toBeInTheDocument();

@@ -79,6 +79,7 @@ from services.calls_proxy import (
     RoomsRpcError,
     StreamingTargetNotConfiguredError,
 )
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError, payment_required
 from services.scope_registry import SCOPE_CALLS_MANAGE
@@ -547,7 +548,7 @@ async def _create_room(
 # ---------------------------------------------------------------------------
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms", methods=["GET"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(RoomsListResponse)
@@ -561,7 +562,7 @@ async def get_call_rooms(community_id: int) -> Any:
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(CreateCallRoomRequest)
@@ -581,7 +582,7 @@ async def create_call_room(community_id: int, data: CreateCallRoomRequest) -> An
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>", methods=["GET"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(RoomResponse)
@@ -596,7 +597,7 @@ async def get_call_room(community_id: int, room_name: str) -> Any:
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>", methods=["DELETE"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -631,7 +632,7 @@ async def _set_locked(community_id: int, room_name: str, locked: bool) -> Any:
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/lock", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/lock", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -640,7 +641,7 @@ async def lock_call_room(community_id: int, room_name: str) -> Any:
     return await _set_locked(community_id, room_name, True)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/unlock", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/unlock", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -649,7 +650,7 @@ async def unlock_call_room(community_id: int, room_name: str) -> Any:
     return await _set_locked(community_id, room_name, False)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/participants", methods=["GET"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/participants", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(ParticipantsResponse)
@@ -678,7 +679,7 @@ async def get_call_participants(community_id: int, room_name: str) -> Any:
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/kick", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/kick", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(ParticipantTargetRequest)
@@ -723,7 +724,7 @@ async def _set_participant_muted(
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/mute", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/mute", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(ParticipantTargetRequest)
@@ -735,7 +736,7 @@ async def mute_call_participant(
     return await _set_participant_muted(community_id, room_name, data, True)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/unmute", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/unmute", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(ParticipantTargetRequest)
@@ -747,7 +748,7 @@ async def unmute_call_participant(
     return await _set_participant_muted(community_id, room_name, data, False)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/mute-all", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/mute-all", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(MuteAllResponse)
@@ -767,7 +768,7 @@ async def mute_all_call_participants(community_id: int, room_name: str) -> Any:
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/raised-hands", methods=["GET"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/raised-hands", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(RaisedHandsResponse)
@@ -791,7 +792,7 @@ async def get_raised_hands(community_id: int, room_name: str) -> Any:
 
 
 @calls_admin_bp.route(
-    "/<int:community_id>/calls/rooms/<room_name>/acknowledge-hand", methods=["POST"]
+    "/<cuuid:community_id>/calls/rooms/<room_name>/acknowledge-hand", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
@@ -814,7 +815,7 @@ async def acknowledge_hand(community_id: int, room_name: str, data: AcknowledgeH
     return await _run(op)
 
 
-@calls_admin_bp.route("/<int:community_id>/calls/rooms/<room_name>/reset-hands", methods=["POST"])
+@calls_admin_bp.route("/<cuuid:community_id>/calls/rooms/<room_name>/reset-hands", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_response(ResetHandsResponse)
@@ -840,7 +841,7 @@ async def reset_hands(community_id: int, room_name: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@member_voice_bp.route("/<int:community_id>/interact/voice/rooms", methods=["GET"])
+@member_voice_bp.route("/<cuuid:community_id>/interact/voice/rooms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_READ)  # type: ignore[misc]
 @validate_response(RoomsListResponse)
@@ -854,7 +855,7 @@ async def list_voice_rooms(community_id: int) -> Any:
     return await _run(op)
 
 
-@member_voice_bp.route("/<int:community_id>/interact/voice/rooms", methods=["POST"])
+@member_voice_bp.route("/<cuuid:community_id>/interact/voice/rooms", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
 @validate_request(CreateCallRoomRequest)
@@ -938,7 +939,7 @@ async def _join(community_id: int, room_id: str) -> JoinResponse:
 
 
 @member_voice_bp.route(
-    "/<int:community_id>/interact/voice/rooms/<room_name>/join", methods=["POST"]
+    "/<cuuid:community_id>/interact/voice/rooms/<room_name>/join", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
@@ -954,7 +955,7 @@ async def join_voice_room(community_id: int, room_name: str) -> Any:
 
 
 @member_voice_bp.route(
-    "/<int:community_id>/interact/voice/rooms/<room_name>/leave", methods=["POST"]
+    "/<cuuid:community_id>/interact/voice/rooms/<room_name>/leave", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
@@ -977,7 +978,7 @@ async def leave_voice_room(community_id: int, room_name: str) -> Any:
 
 
 @member_voice_bp.route(
-    "/<int:community_id>/interact/voice/rooms/<room_name>/raise-hand", methods=["POST"]
+    "/<cuuid:community_id>/interact/voice/rooms/<room_name>/raise-hand", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
@@ -994,7 +995,7 @@ async def raise_voice_hand(community_id: int, room_name: str) -> Any:
 
 
 @member_voice_bp.route(
-    "/<int:community_id>/interact/voice/rooms/<room_name>/lower-hand", methods=["POST"]
+    "/<cuuid:community_id>/interact/voice/rooms/<room_name>/lower-hand", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
@@ -1021,7 +1022,7 @@ async def lower_voice_hand(community_id: int, room_name: str) -> Any:
 # ---------------------------------------------------------------------------
 
 
-@member_calls_bp.route("/<int:community_id>/calls/rooms/<room_id>/hands/mine", methods=["GET"])
+@member_calls_bp.route("/<cuuid:community_id>/calls/rooms/<room_id>/hands/mine", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_READ)  # type: ignore[misc]
 @validate_response(MyHandResponse)
@@ -1051,6 +1052,7 @@ async def _town_hall_response(
     """Describe the Town Hall (participant count is a live figure; no internals)."""
     room = town_hall.room
     listed = await _client.list_participants(community_id, room.room_id)
+    public_community_id = await lookup_public_id(community_id)
     return TownHallResponse(
         room_id=room.room_id,
         label=room.label or call_town_hall.TOWN_HALL_LABEL,
@@ -1059,12 +1061,12 @@ async def _town_hall_response(
         created=town_hall.created,
         join=TownHallJoin(
             method="POST",
-            path=f"/api/v1/community/{community_id}/interact/voice/rooms/{room.room_id}/join",
+            path=f"/api/v1/community/{public_community_id}/interact/voice/rooms/{room.room_id}/join",
         ),
     )
 
 
-@member_calls_bp.route("/<int:community_id>/town-hall", methods=["GET"])
+@member_calls_bp.route("/<cuuid:community_id>/town-hall", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_READ)  # type: ignore[misc]
 @validate_response(TownHallResponse)
@@ -1086,7 +1088,7 @@ async def get_town_hall(community_id: int) -> Any:
     return await _run(op)
 
 
-@member_calls_bp.route("/<int:community_id>/town-hall", methods=["POST"])
+@member_calls_bp.route("/<cuuid:community_id>/town-hall", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_WRITE)  # type: ignore[misc]
 @validate_response(TownHallResponse)
@@ -1102,7 +1104,7 @@ async def post_town_hall(community_id: int) -> Any:
     return await _run(op)
 
 
-@member_calls_bp.route("/<int:community_id>/calls/rooms/<room_id>/participants", methods=["GET"])
+@member_calls_bp.route("/<cuuid:community_id>/calls/rooms/<room_id>/participants", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_READ)  # type: ignore[misc]
 @validate_response(MemberParticipantsResponse)

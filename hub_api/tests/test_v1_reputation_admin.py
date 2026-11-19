@@ -29,6 +29,7 @@ from services.schema import (
     bind_erasure_reputation_tables,
     bind_reputation_policy_tables,
 )
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 OTHER_TENANT = "other-tenant"
@@ -108,10 +109,11 @@ def rep_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 def client(rep_db: Any) -> Any:
     app = Quart(__name__)
     QuartSchema(app)
-    app.register_blueprint(admin_bp)
-    app.register_blueprint(tenant_reputation_bp)
     app.config["dal"] = rep_db.dal
     app.config["async_dal"] = rep_db
+    install_community_ids(app, rep_db.dal)
+    app.register_blueprint(admin_bp)
+    app.register_blueprint(tenant_reputation_bp)
     return app.test_client()
 
 
@@ -175,7 +177,7 @@ def _h(user_id: int, *, scope: str = "", tenant: str = TENANT_SLUG) -> dict[str,
 
 
 @pytest.fixture
-def seeded(rep_db: Any) -> dict[str, int]:
+def seeded(rep_db: Any) -> dict[str, Any]:
     """Community with admin user 1 and plain member user 2; a second same-tenant community."""
     dal = rep_db.dal
     c1 = _community(dal, name="c1")
@@ -183,7 +185,7 @@ def seeded(rep_db: Any) -> dict[str, int]:
     _member(dal, c1, 1, admin=True)
     _member(dal, c1, 2)
     _member(dal, c2, 3, admin=True)  # admin of the OTHER community only
-    return {"c1": c1, "c2": c2}
+    return {"c1": c1, "c2": c2, "c1_pid": public_id(rep_db, c1), "c2_pid": public_id(rep_db, c2)}
 
 
 CONFIG_FIELDS = {
@@ -202,9 +204,9 @@ CONFIG_FIELDS = {
 
 class TestCommunityConfig:
     async def test_defaults_are_off_with_ordered_floors_and_exact_fields(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        r = await client.get(f"/api/v1/admin/{seeded['c1']}/reputation/config", headers=_h(1))
+        r = await client.get(f"/api/v1/admin/{seeded['c1_pid']}/reputation/config", headers=_h(1))
         assert r.status_code == 200
         body = await r.get_json()
         assert set(body) == CONFIG_FIELDS
@@ -217,9 +219,9 @@ class TestCommunityConfig:
         assert (body["scoreMin"], body["scoreMax"], body["scoreDefault"]) == (300, 850, 600)
 
     async def test_community_admin_can_set_and_it_persists(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        url = f"/api/v1/admin/{seeded['c1']}/reputation/config"
+        url = f"/api/v1/admin/{seeded['c1_pid']}/reputation/config"
         r = await client.put(
             url,
             headers=_h(1),
@@ -242,9 +244,9 @@ class TestCommunityConfig:
         assert again["softBanFloor"] == 520 and again["softBanEnabled"] is True
 
     async def test_partial_update_keeps_other_fields(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        url = f"/api/v1/admin/{seeded['c1']}/reputation/config"
+        url = f"/api/v1/admin/{seeded['c1_pid']}/reputation/config"
         await client.put(url, headers=_h(1), json={"hardBanEnabled": True})
         body = await (await client.get(url, headers=_h(1))).get_json()
         assert body["hardBanEnabled"] is True and body["hardBanFloor"] == 400
@@ -260,27 +262,27 @@ class TestCommunityConfig:
         ],
     )
     async def test_out_of_range_or_misordered_is_400(
-        self, client: Any, seeded: dict[str, int], payload: dict[str, int]
+        self, client: Any, seeded: dict[str, Any], payload: dict[str, int]
     ) -> None:
         r = await client.put(
-            f"/api/v1/admin/{seeded['c1']}/reputation/config", headers=_h(1), json=payload
+            f"/api/v1/admin/{seeded['c1_pid']}/reputation/config", headers=_h(1), json=payload
         )
         assert r.status_code == 400
 
-    async def test_plain_member_is_403(self, client: Any, seeded: dict[str, int]) -> None:
+    async def test_plain_member_is_403(self, client: Any, seeded: dict[str, Any]) -> None:
         for method in ("get", "put"):
             kw: dict[str, Any] = {"json": {"softBanEnabled": True}} if method == "put" else {}
             r = await getattr(client, method)(
-                f"/api/v1/admin/{seeded['c1']}/reputation/config", headers=_h(2), **kw
+                f"/api/v1/admin/{seeded['c1_pid']}/reputation/config", headers=_h(2), **kw
             )
             assert r.status_code == 403
 
     async def test_rejected_requests_are_logged_not_silently_swallowed(
-        self, client: Any, seeded: dict[str, int], caplog: pytest.LogCaptureFixture
+        self, client: Any, seeded: dict[str, Any], caplog: pytest.LogCaptureFixture
     ) -> None:
         """Every ApiError the handlers turn into an error response leaves a log record (gate)."""
         caplog.set_level("WARNING", logger="blueprints.v1.admin")
-        base = f"/api/v1/admin/{seeded['c1']}/reputation"
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation"
         assert (await client.get(f"{base}/config", headers=_h(2))).status_code == 403
         assert (
             await client.put(f"{base}/config", headers=_h(2), json={"softBanEnabled": True})
@@ -306,11 +308,11 @@ class TestCommunityConfig:
             assert "status=403" in hits[0]
 
     async def test_invalid_expires_at_is_400_and_logged(
-        self, client: Any, seeded: dict[str, int], caplog: pytest.LogCaptureFixture
+        self, client: Any, seeded: dict[str, Any], caplog: pytest.LogCaptureFixture
     ) -> None:
         caplog.set_level("WARNING", logger="blueprints.v1.admin")
         r = await client.put(
-            f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans/2",
+            f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans/2",
             headers=_h(1),
             json={"expiresAt": "not-a-date"},
         )
@@ -322,32 +324,34 @@ class TestCommunityConfig:
         assert "not-a-date" not in caplog.text  # user input never reaches the log
 
     async def test_admin_of_another_community_is_403(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.put(
-            f"/api/v1/admin/{seeded['c1']}/reputation/config",
+            f"/api/v1/admin/{seeded['c1_pid']}/reputation/config",
             headers=_h(3),
             json={"softBanEnabled": True},
         )
         assert r.status_code == 403
 
     async def test_other_tenant_community_is_404(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         foreign = _community(rep_db.dal, OTHER_TENANT, "foreign")
-        r = await client.get(f"/api/v1/admin/{foreign}/reputation/config", headers=_h(1))
+        r = await client.get(
+            f"/api/v1/admin/{public_id(rep_db, foreign)}/reputation/config", headers=_h(1)
+        )
         assert r.status_code == 404
 
-    async def test_unauthenticated_is_401(self, client: Any, seeded: dict[str, int]) -> None:
-        r = await client.get(f"/api/v1/admin/{seeded['c1']}/reputation/config")
+    async def test_unauthenticated_is_401(self, client: Any, seeded: dict[str, Any]) -> None:
+        r = await client.get(f"/api/v1/admin/{seeded['c1_pid']}/reputation/config")
         assert r.status_code == 401
 
 
 class TestSoftBans:
     async def test_manual_set_list_clear(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         assert (await client.put(f"{base}/2", headers=_h(1), json={})).status_code == 200
         listed = await (await client.get(base, headers=_h(1))).get_json()
         assert [(b["userId"], b["reason"], b["setByType"]) for b in listed["softBans"]] == [
@@ -366,7 +370,7 @@ class TestSoftBans:
         assert (await (await client.get(base, headers=_h(1))).get_json())["softBans"] == []
 
     async def test_floor_set_soft_ban_is_listed_as_floor_and_admin_can_clear_it(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         dal = rep_db.dal
         dal.bundle_reputation_soft_bans.insert(
@@ -378,16 +382,16 @@ class TestSoftBans:
             set_at=datetime.now(UTC),
         )
         dal.commit()
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         listed = await (await client.get(base, headers=_h(1))).get_json()
         assert listed["softBans"][0]["reason"] == "floor"
         assert listed["softBans"][0]["setByType"] == "system"
         assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 200
 
     async def test_expired_bans_are_not_listed_and_past_expiry_is_400(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         assert (
             await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": past})
@@ -400,14 +404,14 @@ class TestSoftBans:
             await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": "nope"})
         ).status_code == 400
 
-    async def test_unknown_member_is_404(self, client: Any, seeded: dict[str, int]) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
+    async def test_unknown_member_is_404(self, client: Any, seeded: dict[str, Any]) -> None:
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         assert (await client.put(f"{base}/999", headers=_h(1), json={})).status_code == 404
 
     async def test_member_and_foreign_admin_are_403(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         for uid in (2, 3):
             assert (await client.put(f"{base}/2", headers=_h(uid), json={})).status_code == 403
             assert (await client.delete(f"{base}/2", headers=_h(uid))).status_code == 403
@@ -416,13 +420,13 @@ class TestSoftBans:
 
 class TestAtRiskAndHistory:
     async def test_at_risk_lists_members_below_threshold_with_floor_flags(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         dal = rep_db.dal
         _member(dal, seeded["c1"], 10, score=380)  # below hard (400) and soft (550)
         _member(dal, seeded["c1"], 11, score=570)  # below at-risk (600) only
         _member(dal, seeded["c1"], 12, score=700)  # fine
-        r = await client.get(f"/api/v1/admin/{seeded['c1']}/reputation/at-risk", headers=_h(1))
+        r = await client.get(f"/api/v1/admin/{seeded['c1_pid']}/reputation/at-risk", headers=_h(1))
         members = (await r.get_json())["members"]
         assert [
             (m["userId"], m["score"], m["belowSoftBanFloor"], m["belowHardBanFloor"])
@@ -433,7 +437,7 @@ class TestAtRiskAndHistory:
         ]
 
     async def test_history_lists_newest_first_filters_and_hides_internal_actor_ids(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         dal = rep_db.dal
         admin_uuid = _uuid(900)
@@ -454,7 +458,7 @@ class TestAtRiskAndHistory:
                 reason_code_id=100,
             )
         dal.commit()
-        url = f"/api/v1/admin/{seeded['c1']}/reputation/history"
+        url = f"/api/v1/admin/{seeded['c1_pid']}/reputation/history"
         entries = (await (await client.get(url, headers=_h(1))).get_json())["entries"]
         assert [e["delta"] for e in entries] == [-20, 5]
         assert entries[0]["actorType"] == "admin" and admin_uuid not in str(entries)
@@ -490,7 +494,7 @@ class TestTenantConfig:
         return f"/api/v1/tenant/{slug}/reputation/config"
 
     async def test_defaults_off_floor_350_exact_fields(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.get(self._url(), headers=_h(1, scope="tenant:admin"))
         body = await r.get_json()
@@ -499,7 +503,7 @@ class TestTenantConfig:
         assert (body["tenantAutoBanFloor"], body["tenantAtRiskThreshold"]) == (350, 450)
 
     async def test_tenant_admin_sets_and_it_persists(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.put(
             self._url(),
@@ -515,7 +519,7 @@ class TestTenantConfig:
         assert body["tenantAutoBanEnabled"] is True and body["tenantAutoBanFloor"] == 400
 
     async def test_community_admin_cannot_set_the_tenant_floor(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         # user 1 administers community c1 but holds no tenant:admin scope
         r = await client.put(self._url(), headers=_h(1), json={"tenantAutoBanFloor": 320})
@@ -523,7 +527,7 @@ class TestTenantConfig:
         assert (await client.get(self._url(), headers=_h(1))).status_code == 403
 
     async def test_slug_must_match_the_jwt_tenant(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.put(
             self._url(OTHER_TENANT),
@@ -541,7 +545,7 @@ class TestTenantConfig:
         ],
     )
     async def test_out_of_range_is_400(
-        self, client: Any, seeded: dict[str, int], payload: dict[str, int]
+        self, client: Any, seeded: dict[str, Any], payload: dict[str, int]
     ) -> None:
         r = await client.put(self._url(), headers=_h(1, scope="tenant:admin"), json=payload)
         assert r.status_code == 400

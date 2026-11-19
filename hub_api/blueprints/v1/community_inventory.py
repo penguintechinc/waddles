@@ -55,7 +55,7 @@ def _tenant_ok(community_id: int) -> bool:
 # ── Admin routes ──────────────────────────────────────────────────────────
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
 async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
@@ -70,7 +70,7 @@ async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"items": [asdict(i) for i in items]}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items", methods=["POST"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
@@ -85,7 +85,7 @@ async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"item": asdict(dto)}, 201
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>", methods=["PUT"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items/<int:item_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
@@ -99,7 +99,7 @@ async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
     return {"item": asdict(dto)}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>", methods=["DELETE"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items/<int:item_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
@@ -111,7 +111,9 @@ async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
     return {"message": "Item deleted"}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>/stock/add", methods=["POST"])
+@inventory_bp.route(
+    "/<cuuid:community_id>/inventory/items/<int:item_id>/stock/add", methods=["POST"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
@@ -142,7 +144,7 @@ async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, ob
 
 
 @inventory_bp.route(
-    "/<int:community_id>/inventory/items/<int:item_id>/stock/remove", methods=["POST"]
+    "/<cuuid:community_id>/inventory/items/<int:item_id>/stock/remove", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
@@ -173,7 +175,7 @@ async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str,
     return {"item": asdict(dto)}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/checkouts", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/checkouts", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
 async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], int]:
@@ -186,7 +188,7 @@ async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], in
     return {"checkouts": [asdict(c) for c in checkouts]}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/summary", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/summary", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
 async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
@@ -196,7 +198,7 @@ async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"summary": asdict(get_summary(current_app.config["dal"], community_id))}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/log", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
 async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
@@ -220,7 +222,7 @@ async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
 # ── Member routes ─────────────────────────────────────────────────────────
 
 
-@inventory_bp.route("/<int:community_id>/inventory/available", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/available", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:use")  # type: ignore[misc]
 async def available_route(community_id: int) -> tuple[dict[str, object], int]:
@@ -231,7 +233,7 @@ async def available_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"items": [asdict(i) for i in items]}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/checkout", methods=["POST"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/checkout", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:use")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
@@ -268,7 +270,7 @@ async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"checkout": asdict(dto)}, 201
 
 
-@inventory_bp.route("/<int:community_id>/inventory/checkin", methods=["POST"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/checkin", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:use")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
@@ -296,7 +298,7 @@ async def checkin_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"checkout": asdict(dto)}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/my-items", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/my-items", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:use")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]

@@ -22,6 +22,7 @@ from blueprints.v1.superadmin import superadmin_bp
 from services import community_tier_service as svc
 from services.global_identity import SYSTEM_TENANT_SLUG
 from services.schema import bind_community_tier_tables
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG
 from tests.test_v1_superadmin_platform_blueprint import (  # noqa: F401
     _headers,
@@ -59,9 +60,10 @@ def app(admin_db: Any, provisioned: Any) -> Quart:
         dal(dal[name]).count()
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(superadmin_bp)
     quart_app.config["dal"] = dal
     quart_app.config["async_dal"] = admin_db
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(superadmin_bp)
     quart_app.config["envelope_runtime"] = type("R", (), {"service": object()})()
     quart_app.config["install_dal"] = object()
     quart_app.config["POOL_PROVIDER"] = svc.StorePoolProvider(svc.PoolStore(admin_db, dal))
@@ -105,9 +107,13 @@ def _licensed_tenant(admin_db: Any, app: Quart, _system_tenant: None) -> None:
     )
 
 
-async def _put(client: Any, community_id: int, body: dict[str, Any], **hdr: Any) -> tuple[int, Any]:
+async def _put(
+    client: Any, community_id: int | str, body: dict[str, Any], **hdr: Any
+) -> tuple[int, Any]:
     if "licenseTier" in body:  # tier overrides are operator actions: the system tenant by default
         hdr.setdefault("tenant", SYSTEM_TENANT_SLUG)
+    if isinstance(community_id, int):  # numeric seed id -> the community's public UUID
+        community_id = public_id(client.app.config["dal"], community_id)
     response = await client.put(
         f"/api/v1/superadmin/communities/{community_id}", headers=_headers(**hdr), json=body
     )
@@ -355,7 +361,9 @@ class TestLicenseTierOverride:
         assert status == 400
 
     async def test_unknown_community_is_404(self, client: Any) -> None:
-        status, _ = await _put(client, 9999, {"licenseTier": PREMIUM, "reasonCode": REASON})
+        status, _ = await _put(
+            client, UNKNOWN_PUBLIC_ID, {"licenseTier": PREMIUM, "reasonCode": REASON}
+        )
         assert status == 404
 
 

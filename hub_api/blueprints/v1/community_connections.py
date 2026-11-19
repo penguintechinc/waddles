@@ -204,7 +204,7 @@ def _callback_html(*, provider: str, ok: bool, error: str | None = None) -> Resp
 # ===== Admin: list =====
 
 
-@connections_bp.route("/communities/<int:community_id>/connections", methods=["GET"])
+@connections_bp.route("/communities/<cuuid:community_id>/connections", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.connections:read")  # type: ignore[misc]
 async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
@@ -235,7 +235,7 @@ async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
 
 
 @connections_bp.route(
-    "/communities/<int:community_id>/connections/<provider>/authorize", methods=["POST"]
+    "/communities/<cuuid:community_id>/connections/<provider>/authorize", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.connections:write")  # type: ignore[misc]
@@ -376,7 +376,9 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
 # ===== Admin: delete =====
 
 
-@connections_bp.route("/communities/<int:community_id>/connections/<provider>", methods=["DELETE"])
+@connections_bp.route(
+    "/communities/<cuuid:community_id>/connections/<provider>", methods=["DELETE"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.connections:write")  # type: ignore[misc]
 async def delete_connection(community_id: int, provider: str) -> tuple[Any, int]:

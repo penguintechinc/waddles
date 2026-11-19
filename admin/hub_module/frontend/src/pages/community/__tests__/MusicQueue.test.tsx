@@ -10,7 +10,7 @@ import { httpError, mockApiGet, unexpectedUrl } from '../../../test/api';
 import { axeViolations } from '../../../test/axe';
 import { renderWithProviders } from '../../../test/renderWithProviders';
 
-const MUSIC_URL = '/api/v1/communities/5/music';
+const MUSIC_URL = '/api/v1/communities/00000005-0000-4000-8000-000000000000/music';
 
 const track = (title: string, over: Record<string, unknown> = {}) => ({
   title,
@@ -32,7 +32,7 @@ function serve(music: unknown | Error, flagOn = true) {
   });
 }
 
-function renderPage(route = '/community/5/music') {
+function renderPage(route = '/community/00000005-0000-4000-8000-000000000000/music') {
   return renderWithProviders(<MusicQueue />, { route, path: '/community/:communityId/music' });
 }
 

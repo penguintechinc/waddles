@@ -14,7 +14,7 @@ import { RoomDetail } from './RoomDetail';
 import { RoomPresence } from './RoomPresence';
 
 export interface CallRoomViewProps {
-  communityId: number;
+  communityId: string;
   room: Pick<CallRoom, 'roomId' | 'label'>;
   /** Community admins get moderator controls (mute, remove, hands queue); everyone else gets raise/lower hand. */
   moderator: boolean;

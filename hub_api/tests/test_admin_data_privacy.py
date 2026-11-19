@@ -56,6 +56,7 @@ from services import admin_data_privacy_service as svc
 from services import data_privacy_service as privacy
 from services.global_identity import grant_global_admin_sync
 from services.schema import bind_admin_privacy_tables, bind_tenant_tables
+from tests.community_ids import public_id
 from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, create_exclusions_table, make_user_token
 from tests.entitlement_fakes import FakeFlagGate, FakeLicenseGate, install_entitlement_client
 
@@ -599,7 +600,11 @@ class TestSelfServiceStaysUngated:
 
         body = await response.get_json()
         communities = {row["community_id"] for row in body["data"]["message_activity"]}
-        assert communities == {world["acme_community"], world["other_community"]}
+        # the export is a client-facing boundary: public UUIDs, never the numeric ids
+        assert communities == {
+            public_id(db, world["acme_community"]),
+            public_id(db, world["other_community"]),
+        }
 
 
 class TestAuthz:

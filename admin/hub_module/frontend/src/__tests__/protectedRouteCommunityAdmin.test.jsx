@@ -17,7 +17,7 @@ vi.mock('../contexts/AuthContext', async (importOriginal) => {
 
 /** Renders the admin gate for a user holding one community membership with `role`. */
 function renderGate(role) {
-  const user = { id: 1, roles: [], communities: [{ id: 5, role }] };
+  const user = { id: 1, roles: [], communities: [{ id: '00000005-0000-4000-8000-000000000000', role }] };
   useAuth.mockReturnValue({
     user,
     loading: false,
@@ -25,10 +25,10 @@ function renderGate(role) {
     isAnalyticsConsumer: false,
   });
   render(
-    <MemoryRouter initialEntries={['/admin/5']}>
+    <MemoryRouter initialEntries={['/admin/00000005-0000-4000-8000-000000000000']}>
       <Routes>
         <Route
-          path="/admin/5"
+          path="/admin/00000005-0000-4000-8000-000000000000"
           element={
             <ProtectedRoute requireCommunityAdmin>
               <div>admin panel</div>

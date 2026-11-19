@@ -35,6 +35,7 @@ from blueprints.v1.community_interaction import (
 )
 from blueprints.v1.community_loyalty import loyalty_bp
 from blueprints.v1.community_polls import polls_bp
+from tests.community_ids import cpath, install_community_ids
 
 
 class TestChatFeatureGate:
@@ -43,6 +44,7 @@ class TestChatFeatureGate:
         dal, _ = community_db
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, dal)
         quart_app.register_blueprint(chat_bp)
         quart_app.config["dal"] = dal
         return quart_app
@@ -59,10 +61,10 @@ class TestChatFeatureGate:
 
         gate = AsyncMock(return_value=False)
         monkeypatch.setattr(chat_module, "feature_enabled", gate)
-        _, community_id = community_db
+        dal, community_id = community_db
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/chat/history",
+            cpath(dal, "/api/v1/community/{community_id}/chat/history", community_id),
             headers=auth_headers(scope="community.chat:read"),
         )
 
@@ -77,10 +79,10 @@ class TestChatFeatureGate:
         import blueprints.v1.community_chat as chat_module
 
         monkeypatch.setattr(chat_module, "feature_enabled", AsyncMock(return_value=True))
-        _, community_id = community_db
+        dal, community_id = community_db
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/chat/history",
+            cpath(dal, "/api/v1/community/{community_id}/chat/history", community_id),
             headers=auth_headers(scope="community.chat:read"),
         )
 
@@ -93,6 +95,7 @@ class TestPollsFeatureGate:
         dal, _ = community_db
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, dal)
         quart_app.register_blueprint(polls_bp)
         quart_app.config["dal"] = dal
         return quart_app
@@ -108,10 +111,10 @@ class TestPollsFeatureGate:
 
         gate = AsyncMock(return_value=False)
         monkeypatch.setattr(polls_module, "feature_enabled", gate)
-        _, community_id = community_db
+        dal, community_id = community_db
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/polls",
+            cpath(dal, "/api/v1/admin/{community_id}/polls", community_id),
             headers=auth_headers(scope="community.polls:read"),
         )
 
@@ -128,6 +131,7 @@ class TestInteractionsAndForumsGateOnDistinctFlags:
         dal, _ = community_db
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, dal)
         quart_app.register_blueprint(interaction_admin_bp)
         quart_app.register_blueprint(interaction_member_bp)
         quart_app.config["dal"] = dal
@@ -144,10 +148,10 @@ class TestInteractionsAndForumsGateOnDistinctFlags:
 
         gate = AsyncMock(return_value=False)
         monkeypatch.setattr(interaction_module, "feature_enabled", gate)
-        _, community_id = community_db
+        dal, community_id = community_db
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             headers=auth_headers(scope="users:admin", user_id="1"),
         )
 
@@ -161,10 +165,10 @@ class TestInteractionsAndForumsGateOnDistinctFlags:
 
         gate = AsyncMock(return_value=False)
         monkeypatch.setattr(interaction_module, "feature_enabled", gate)
-        _, community_id = community_db
+        dal, community_id = community_db
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/interact/forum/1/posts",
+            cpath(dal, "/api/v1/community/{community_id}/interact/forum/1/posts", community_id),
             headers=auth_headers(scope="community.interaction:read"),
         )
 
@@ -181,10 +185,10 @@ class TestInteractionsAndForumsGateOnDistinctFlags:
             return flag_key != "waddles.community.forums"
 
         monkeypatch.setattr(interaction_module, "feature_enabled", _gate)
-        _, community_id = community_db
+        dal, community_id = community_db
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             headers=auth_headers(scope="users:admin", user_id="1"),
         )
 
@@ -199,6 +203,7 @@ class TestLoyaltyFeatureGateIsProfessionalTier:
         dal, _ = community_db
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
+        install_community_ids(quart_app, dal)
         quart_app.register_blueprint(loyalty_bp)
         quart_app.config["dal"] = dal
         return quart_app
@@ -220,10 +225,10 @@ class TestLoyaltyFeatureGateIsProfessionalTier:
 
         gate = AsyncMock(return_value=False)  # free tier does not entitle community.loyalty
         monkeypatch.setattr(loyalty_module, "feature_enabled", gate)
-        _, community_id = community_db
+        dal, community_id = community_db
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/loyalty/config",
+            cpath(dal, "/api/v1/admin/{community_id}/loyalty/config", community_id),
             headers=auth_headers(scope="community.loyalty:read"),
         )
 

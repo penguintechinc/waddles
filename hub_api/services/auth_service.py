@@ -954,6 +954,13 @@ async def logout_all(
     return outcome
 
 
+def _require_public_id(value: Any) -> str:
+    """`communities.public_id` as text; NOT NULL since alembic 0084, so absent is a bug."""
+    if not value:
+        raise RuntimeError("communities row has no public_id (alembic 0084 not applied?)")
+    return str(value)
+
+
 @dataclass(slots=True, frozen=True)
 class CommunityMembership:
     """Community membership."""
@@ -963,6 +970,8 @@ class CommunityMembership:
     display_name: str
     role: str
     license_tier: int = 1
+    #: `communities.public_id` UUID: the only community id that crosses the API boundary.
+    public_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -1084,6 +1093,7 @@ async def get_current_user(
             & (dal.communities.is_active == True)  # noqa: E712 - pydal Field comparison
         ),
         dal.communities.id,
+        dal.communities.public_id,
         dal.communities.name,
         dal.communities.display_name,
         dal.communities.tenant_id,
@@ -1106,6 +1116,7 @@ async def get_current_user(
             display_name=r.communities.display_name or r.communities.name,
             role=r.community_members.role,
             license_tier=tiers.get(int(r.communities.id), 1),
+            public_id=_require_public_id(r.communities.public_id),
         )
         for r in community_rows
     ]

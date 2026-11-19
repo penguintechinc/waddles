@@ -18,6 +18,7 @@ from flask_core.service_jwt import ServiceJwtIssuer
 
 from services.provider_connections import ProviderConnectionService
 from services.provider_connections.registry import build_default_registry
+from tests.community_ids import public_id
 from tests.provider_connections import test_discord_binding as _discord_tests
 from tests.provider_connections.conftest import BOT, FakeClock, admin_headers
 from tests.provider_connections.fake_twitch import FakeTwitch
@@ -59,7 +60,7 @@ ITEM_FIELDS = {
 
 async def _create_discord(dclient: Any, db: Any) -> int:
     response = await dclient.post(
-        f"/api/v1/communities/{db.seed.community_id}/provider-connections",
+        f"/api/v1/communities/{public_id(db, db.seed.community_id)}/provider-connections",
         headers=admin_headers(db),
         data=_create_body(),
     )

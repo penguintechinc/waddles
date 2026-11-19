@@ -12,7 +12,7 @@ import {
 const fmt = (iso: string | null) => (iso ? new Date(iso).toLocaleString() : 'never');
 
 interface Props {
-  communityId: number;
+  communityId: string;
   appId: string;
   canEdit: boolean;
   onClose: () => void;

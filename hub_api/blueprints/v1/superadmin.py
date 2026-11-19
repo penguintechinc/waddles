@@ -26,6 +26,7 @@ from quart_schema import RequestSchemaValidationError, validate_request, validat
 from services import community_tier_service
 from services import superadmin_service as svc
 from services.audit_http import get_service as get_audit_service
+from services.community_public_id import lookup_public_id, lookup_public_ids
 from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
@@ -89,7 +90,7 @@ class DashboardStatsDTO:
 class RecentCommunityDTO:
     """Recently-created community summary DTO."""
 
-    id: int
+    id: str
     name: str
     displayName: str
     platform: str | None
@@ -119,7 +120,7 @@ class PaginationDTO:
 class CommunityDTO:
     """Community DTO -- list-view shape (no `config`)."""
 
-    id: int
+    id: str
     name: str
     displayName: str
     description: str | None
@@ -152,7 +153,7 @@ class CommunitiesResponse:
 class CommunityDetailDTO:
     """Community DTO -- detail-view shape (includes `config`)."""
 
-    id: int
+    id: str
     name: str
     displayName: str
     description: str | None
@@ -196,7 +197,7 @@ class CreateCommunityRequest:
 class CreatedCommunityDTO:
     """Response DTO for a newly-created community."""
 
-    id: int
+    id: str
     name: str
     displayName: str | None
     platform: str | None
@@ -343,10 +344,11 @@ def _license_tier_code(row: Any) -> int:
     return _TIER_CODE_BY_NAME.get(name, community_tier_service.TIER_CODE_FREE)
 
 
-def _community_dto(row: Any) -> CommunityDTO:
+def _community_dto(row: Any, public_id: str) -> CommunityDTO:
+    """Community DTO; `id` is the community's PUBLIC UUID (never the numeric id)."""
     tier_code = _license_tier_code(row)
     return CommunityDTO(
-        id=row.id,
+        id=public_id,
         name=row.name,
         displayName=row.display_name or row.name,
         description=row.description,
@@ -378,6 +380,7 @@ async def get_dashboard() -> DashboardResponse:
     async_dal, dal = _dal()
     data = await svc.get_dashboard_stats(async_dal, dal)
     stats = data["stats"]
+    recent_public_ids = await lookup_public_ids(int(c["id"]) for c in data["recentCommunities"])
     return DashboardResponse(
         success=True,
         stats=DashboardStatsDTO(
@@ -387,7 +390,10 @@ async def get_dashboard() -> DashboardResponse:
             totalMembers=stats["totalMembers"],
             adminCount=stats["adminCount"],
         ),
-        recentCommunities=[RecentCommunityDTO(**c) for c in data["recentCommunities"]],
+        recentCommunities=[
+            RecentCommunityDTO(**{**c, "id": recent_public_ids[int(c["id"])]})
+            for c in data["recentCommunities"]
+        ],
     )
 
 
@@ -417,16 +423,17 @@ async def list_communities() -> CommunitiesResponse:
         platform=platform,
         is_active=is_active,
     )
+    public_ids = await lookup_public_ids(int(r.id) for r in rows)
     return CommunitiesResponse(
         success=True,
-        communities=[_community_dto(r) for r in rows],
+        communities=[_community_dto(r, public_ids[int(r.id)]) for r in rows],
         pagination=PaginationDTO(
             page=max(1, page), limit=min(100, max(1, limit)), total=total, totalPages=total_pages
         ),
     )
 
 
-@superadmin_bp.route("/communities/<int:community_id>", methods=["GET"])
+@superadmin_bp.route("/communities/<cuuid:community_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(CommunityDetailResponse)
@@ -443,7 +450,7 @@ async def get_community(
     return CommunityDetailResponse(
         success=True,
         community=CommunityDetailDTO(
-            id=row.id,
+            id=await lookup_public_id(int(row.id)),
             name=row.name,
             displayName=row.display_name or row.name,
             description=row.description,
@@ -499,7 +506,7 @@ async def create_community(data: CreateCommunityRequest) -> tuple[Any, int]:
         CreateCommunityResponse(
             success=True,
             community=CreatedCommunityDTO(
-                id=community.id,
+                id=await lookup_public_id(int(community.id)),
                 name=community.name,
                 displayName=community.display_name,
                 platform=community.platform,
@@ -525,7 +532,7 @@ async def _request_validation_error(exc: RequestSchemaValidationError) -> Any:
     return body, status
 
 
-@superadmin_bp.route("/communities/<int:community_id>", methods=["PUT"])
+@superadmin_bp.route("/communities/<cuuid:community_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_request(UpdateCommunityRequest)
@@ -600,7 +607,7 @@ async def update_community(
     return MessageResponse(success=True, message="Community updated")
 
 
-@superadmin_bp.route("/communities/<int:community_id>", methods=["DELETE"])
+@superadmin_bp.route("/communities/<cuuid:community_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -618,7 +625,7 @@ async def delete_community(
     return MessageResponse(success=True, message="Community deleted")
 
 
-@superadmin_bp.route("/communities/<int:community_id>/reassign", methods=["POST"])
+@superadmin_bp.route("/communities/<cuuid:community_id>/reassign", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("communities:admin")  # type: ignore[misc]
 @validate_request(ReassignOwnerRequest)

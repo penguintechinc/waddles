@@ -21,6 +21,7 @@ from services.provider_connections.errors import (
 )
 from services.provider_connections.service import ProviderConnectionService
 from services.provider_connections.vault import PlatformKeyVault
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
 from tests.provider_connections.fake_provider import FAKE_SPEC, FakeChatAdapter
 from tests.provider_connections.support import create_twitch
@@ -269,7 +270,7 @@ class TestBlueprintDefensiveBranches:
 
         monkeypatch.setattr(pc_app.config[bp.SERVICE_CONFIG_KEY], "list", boom)
         response = await client.get(
-            f"/api/v1/communities/{pc_db.seed.community_id}/provider-connections",
+            f"/api/v1/communities/{public_id(pc_db, pc_db.seed.community_id)}/provider-connections",
             headers=admin_headers(pc_db),
         )
         assert response.status_code == status
@@ -286,7 +287,7 @@ class TestBlueprintDefensiveBranches:
 
         monkeypatch.setattr(pc_app.config[bp.SERVICE_CONFIG_KEY], "list", boom)
         response = await client.get(
-            f"/api/v1/communities/{pc_db.seed.community_id}/provider-connections",
+            f"/api/v1/communities/{public_id(pc_db, pc_db.seed.community_id)}/provider-connections",
             headers=admin_headers(pc_db),
         )
         assert response.status_code == 500
@@ -295,7 +296,7 @@ class TestBlueprintDefensiveBranches:
 
     async def test_malformed_json_body_is_a_client_error(self, client: Any, pc_db: Any) -> None:
         response = await client.post(
-            f"/api/v1/communities/{pc_db.seed.community_id}/provider-connections",
+            f"/api/v1/communities/{public_id(pc_db, pc_db.seed.community_id)}/provider-connections",
             headers=admin_headers(pc_db),
             data="{not json",
         )

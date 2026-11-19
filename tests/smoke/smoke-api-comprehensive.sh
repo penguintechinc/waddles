@@ -178,7 +178,22 @@ echo "4. Community Endpoints (community.js)"
 echo "----------------------------------------"
 test_exists "List communities" "GET" "/api/v1/communities"
 test_exists "Create community (no auth)" "POST" "/api/v1/communities" '{"name":"test","display_name":"Test"}'
-test_exists "Community by ID" "GET" "/api/v1/communities/1"
+# Community ids are public UUIDs on the API (never the numeric id): look one up from the list.
+if [ -n "$ALB_HOST" ]; then
+    COMMUNITY_LIST_URL="https://$ALB_HOST/api/v1/communities"
+else
+    COMMUNITY_LIST_URL="${BASE_URL}/api/v1/communities"
+fi
+COMMUNITY_UUID=$(curl $SSL_FLAG -s --connect-timeout "$TIMEOUT" ${ALB_HOST:+-H "Host: $VHOST"} \
+    "$COMMUNITY_LIST_URL" 2>/dev/null \
+    | grep -oE '"id": ?"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"' \
+    | head -1 | grep -oE '[0-9a-fA-F]{8}-[0-9a-fA-F-]{27}' || true)
+if [ -n "$COMMUNITY_UUID" ]; then
+    test_exists "Community by ID" "GET" "/api/v1/communities/${COMMUNITY_UUID}"
+else
+    echo -e "  ${RED}[FAIL]${NC} Community by ID -> no community UUID found in GET /api/v1/communities (0 examined)"
+    ((FAILED++))
+fi
 
 echo ""
 echo "----------------------------------------"

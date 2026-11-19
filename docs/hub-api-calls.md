@@ -55,7 +55,7 @@ grants. svc-streaming still refuses every caller (staff included) on a locked ro
 
 ```json
 {"room_id": "<uuid>", "label": "Town Hall", "locked": false, "participant_count": 3,
- "created": false, "join": {"method": "POST", "path": "/api/v1/community/1/interact/voice/rooms/<uuid>/join"},
+ "created": false, "join": {"method": "POST", "path": "/api/v1/community/<community-uuid>/interact/voice/rooms/<uuid>/join"},
  "success": true}
 ```
 

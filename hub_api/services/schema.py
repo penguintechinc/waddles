@@ -301,9 +301,10 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("license_key", "string", length=255),
         Field("license_expires_at", "datetime"),
         Field("license_tier", "string", length=50),
-        # alembic 0084: external UUID id (UUIDs only cross the API boundary). Read-side mapping
-        # only: no pydal default, so inserts keep using the DB's own gen_random_uuid() default.
-        Field("public_id", "string", length=36),
+        # alembic 0084: external UUID id (UUIDs only cross the API boundary). The pydal-side
+        # default keeps non-Postgres (sqlite) rows addressable; Postgres inserts that bypass pydal
+        # still get the DB's own gen_random_uuid() default.
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         # Columns below added by the M3 Platform-admin group (adminController.js
         # /superadminController.js), the M2 Core Tenancy-Misc group
         # (communityProfileController.js / joinRequestController.js port),

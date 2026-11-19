@@ -23,7 +23,7 @@ afterEach(() => {
 describe('useMusicQueue', () => {
   it('polls every 15s while visible and pauses while hidden', async () => {
     mockApiGet(() => ({ queue: [] }));
-    const { result } = renderHook(() => useMusicQueue(5), { wrapper });
+    const { result } = renderHook(() => useMusicQueue('00000005-0000-4000-8000-000000000000'), { wrapper });
     await waitFor(() => expect(result.current.isSuccess).toBe(true));
     expect(MUSIC_POLL_MS).toBe(15_000);
     const options = result.current;
@@ -31,10 +31,10 @@ describe('useMusicQueue', () => {
 
     // Inspect the interval function through the query cache observer options.
     const client = new QueryClient();
-    const probe = renderHook(() => useMusicQueue(6), {
+    const probe = renderHook(() => useMusicQueue('00000006-0000-4000-8000-000000000000'), {
       wrapper: ({ children }: { children: ReactNode }) => <QueryClientProvider client={client}>{children}</QueryClientProvider>,
     });
-    const observerOptions = client.getQueryCache().find({ queryKey: ['community', 6, 'music'] })?.observers[0]?.options;
+    const observerOptions = client.getQueryCache().find({ queryKey: ['community', '00000006-0000-4000-8000-000000000000', 'music'] })?.observers[0]?.options;
     const interval = observerOptions?.refetchInterval as () => number | false;
     setVisibility('visible');
     expect(interval()).toBe(15_000);

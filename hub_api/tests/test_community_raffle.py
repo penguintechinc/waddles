@@ -13,6 +13,7 @@ from quart_schema import QuartSchema
 from werkzeug.datastructures import FileStorage
 
 from blueprints.v1.community_raffle import raffle_bp
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 
 @pytest.fixture
@@ -20,8 +21,9 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(raffle_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(raffle_bp)
     return quart_app
 
 
@@ -36,6 +38,11 @@ def _feature_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> Any:
     import blueprints.v1.community_raffle as raffle_module
 
     monkeypatch.setattr(raffle_module, "feature_enabled", AsyncMock(return_value=True))
+
+
+def _admin(community_db: Any, community_id: int) -> str:
+    """Admin URL prefix carrying the community's public UUID."""
+    return f"/api/v1/admin/{public_id(community_db[0], community_id)}"
 
 
 async def _put_json(
@@ -54,14 +61,14 @@ class TestScopeAndTenant:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/raffle-customization",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/raffle-customization",
             headers=auth_headers(scope="community.raffle:write"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/raffle-customization",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/raffle-customization",
             headers=auth_headers(scope="community.raffle:read"),
         )
         assert response.status_code == 404
@@ -78,7 +85,7 @@ class TestScopeAndTenant:
         self, client: Any, auth_headers: Any, method: str, path_suffix: str
     ) -> None:
         response = await client.open(
-            f"/api/v1/admin/9999/{path_suffix}",
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/{path_suffix}",
             method=method,
             headers=auth_headers(scope="community.raffle:write"),
         )
@@ -92,7 +99,7 @@ class TestUpsertAndDelete:
         _, community_id = community_db
         response = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/raffle-customization/not_a_real_event",
+            f"{_admin(community_db, community_id)}/raffle-customization/not_a_real_event",
             auth_headers(scope="community.raffle:write"),
             {"message_template": "hi"},
         )
@@ -106,7 +113,7 @@ class TestUpsertAndDelete:
 
         upsert_resp = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/raffle-customization/raffle_winner",
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_winner",
             write_headers,
             {"message_template": "{{winner_name}} won {{prize_name}}!", "is_active": True},
         )
@@ -116,20 +123,20 @@ class TestUpsertAndDelete:
         assert body["customization"]["message_template"] == "{{winner_name}} won {{prize_name}}!"
 
         list_resp = await client.get(
-            f"/api/v1/admin/{community_id}/raffle-customization",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/raffle-customization",
             headers=auth_headers(scope="community.raffle:read"),
         )
         list_body = await list_resp.get_json()
         assert "raffle_winner" in list_body["customizations"]
 
         delete_resp = await client.delete(
-            f"/api/v1/admin/{community_id}/raffle-customization/raffle_winner",
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_winner",
             headers=write_headers,
         )
         assert delete_resp.status_code == 200
 
         list_after = await client.get(
-            f"/api/v1/admin/{community_id}/raffle-customization",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/raffle-customization",
             headers=auth_headers(scope="community.raffle:read"),
         )
         assert "raffle_winner" not in (await list_after.get_json())["customizations"]
@@ -139,7 +146,7 @@ class TestUpsertAndDelete:
     ) -> None:
         _, community_id = community_db
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/raffle-customization/not_a_real_event",
+            f"{_admin(community_db, community_id)}/raffle-customization/not_a_real_event",
             headers=auth_headers(scope="community.raffle:write"),
         )
         assert response.status_code == 400
@@ -151,7 +158,7 @@ class TestUpload:
     ) -> None:
         _, community_id = community_db
         response = await client.post(
-            f"/api/v1/admin/{community_id}/raffle-customization/raffle_start/upload",
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
             headers=auth_headers(scope="community.raffle:write"),
         )
         assert response.status_code == 400
@@ -161,7 +168,7 @@ class TestUpload:
     ) -> None:
         _, community_id = community_db
         response = await client.post(
-            f"/api/v1/admin/{community_id}/raffle-customization/raffle_start/upload",
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
             headers=auth_headers(scope="community.raffle:write"),
             files={"sound": FileStorage(BytesIO(b"not-really-audio"), filename="clip.exe")},
         )
@@ -173,7 +180,7 @@ class TestUpload:
         _, community_id = community_db
         oversized = b"x" * (3 * 1024 * 1024)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/raffle-customization/raffle_start/upload",
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
             headers=auth_headers(scope="community.raffle:write"),
             files={"sound": FileStorage(BytesIO(oversized), filename="clip.mp3")},
         )
@@ -189,7 +196,7 @@ class TestUpload:
         _, community_id = community_db
 
         response = await client.post(
-            f"/api/v1/admin/{community_id}/raffle-customization/raffle_start/upload",
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
             headers=auth_headers(scope="community.raffle:write"),
             files={"sound": FileStorage(BytesIO(b"real-ish-audio-bytes"), filename="clip.mp3")},
         )
@@ -197,3 +204,7 @@ class TestUpload:
         body = await response.get_json()
         assert body["success"] is True
         assert body["customization"]["sound_format"] == "mp3"
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

@@ -14,6 +14,7 @@ from blueprints.v1.bundle_activation import BLUEPRINTS
 from services import bundle_permission_service as perm_svc
 from services.bundle_approval_service import install_version_globally
 from services.tenant_app_availability_service import set_available
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import make_user_token, make_user_token_with_roles
 
 _MANIFEST = {
@@ -130,6 +131,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     quart_app.config["async_dal"] = bundle_install_db
     quart_app.config["dal"] = dal
     quart_app.config["install_dal"] = install_dal
+    install_community_ids(quart_app, dal)
     for bp in BLUEPRINTS:
         quart_app.register_blueprint(bp)
     return quart_app
@@ -147,7 +149,8 @@ def _admin() -> dict[str, str]:
 async def test_preview_requires_community_admin(app: Quart, install_dal: Any) -> None:
     community_id = await _seed_community(install_dal)
     response = await app.test_client().get(
-        f"/api/v1/apps/community/{community_id}/activation/{_APP}/access-grants",
+        f"/api/v1/apps/community/{public_id(app.config['dal'], community_id)}"
+        f"/activation/{_APP}/access-grants",
         headers={"Authorization": f"Bearer {make_user_token(user_id=999, scope='')}"},
     )
     assert response.status_code == 403
@@ -158,7 +161,8 @@ async def test_preview_shows_the_approved_access_for_the_version_to_activate(
 ) -> None:
     community_id = await _seed_community(install_dal)
     response = await app.test_client().get(
-        f"/api/v1/apps/community/{community_id}/activation/{_APP}/access-grants",
+        f"/api/v1/apps/community/{public_id(app.config['dal'], community_id)}"
+        f"/activation/{_APP}/access-grants",
         headers=_admin(),
     )
     assert response.status_code == 200
@@ -172,7 +176,7 @@ async def test_activation_without_ack_is_refused_and_with_ack_succeeds(
 ) -> None:
     community_id = await _seed_community(install_dal)
     client = app.test_client()
-    url = f"/api/v1/apps/community/{community_id}/activation"
+    url = f"/api/v1/apps/community/{public_id(app.config['dal'], community_id)}/activation"
     for ack in ([], [_IDS[0]]):
         refused = await client.post(
             url, headers=_admin(), json={"appId": _APP, "acknowledgedAccessGrants": ack}

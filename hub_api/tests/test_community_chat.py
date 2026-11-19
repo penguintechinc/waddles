@@ -23,6 +23,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.community_chat import chat_bp
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 
 
 @pytest.fixture
@@ -30,8 +31,9 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(chat_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(chat_bp)
     return quart_app
 
 
@@ -58,9 +60,9 @@ class TestScopeEnforcement:
     async def test_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/chat/history",
+            cpath(dal, "/api/v1/community/{community_id}/chat/history", community_id),
             headers=auth_headers(scope="community.chat:write"),
         )
         assert response.status_code == 403
@@ -69,7 +71,7 @@ class TestScopeEnforcement:
 class TestChatHistory:
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/community/9999/chat/history",
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/chat/history",
             headers=auth_headers(scope="community.chat:read"),
         )
         assert response.status_code == 404
@@ -89,7 +91,7 @@ class TestChatHistory:
         dal.commit()
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/chat/history",
+            cpath(dal, "/api/v1/community/{community_id}/chat/history", community_id),
             headers=auth_headers(scope="community.chat:read"),
         )
         assert response.status_code == 200
@@ -102,12 +104,16 @@ class TestChatHistory:
     async def test_channels_always_includes_general(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/chat/channels",
+            cpath(dal, "/api/v1/community/{community_id}/chat/channels", community_id),
             headers=auth_headers(scope="community.chat:read"),
         )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["channels"][0]["name"] == "general"
         assert body["channels"][0]["message_count"] == 0
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

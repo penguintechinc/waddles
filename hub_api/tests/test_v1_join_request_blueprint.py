@@ -32,6 +32,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.join_request import join_request_bp
 from config import HubAPIConfig
 from services import suppression_keys as keys
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -61,9 +62,10 @@ def _test_config() -> HubAPIConfig:
 def app(auth_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(join_request_bp)
     quart_app.config["dal"] = auth_db.dal
     quart_app.config["async_dal"] = auth_db
+    install_community_ids(quart_app, auth_db.dal)
+    quart_app.register_blueprint(join_request_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
 
@@ -146,14 +148,16 @@ def _auth_header(*, user_id: int) -> dict[str, str]:
 class TestSubmitRequest:
     async def test_missing_token_is_401(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
-        response = await client.post(f"/api/v1/{community_id}/join-requests", json={})
+        response = await client.post(
+            f"/api/v1/{public_id(auth_db, community_id)}/join-requests", json={}
+        )
         assert response.status_code == 401
 
     async def test_non_approval_community_is_400(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db, join_mode="open")
         user_id = _seed_user(auth_db, email="joiner@example.com", username="joiner")
         response = await client.post(
-            f"/api/v1/{community_id}/join-requests",
+            f"/api/v1/{public_id(auth_db, community_id)}/join-requests",
             json={"message": "let me in"},
             headers=_auth_header(user_id=user_id),
         )
@@ -168,7 +172,7 @@ class TestSubmitRequest:
         _seed_member(auth_db, community_id=community_id, user_id=user_id, role_id=role_id)
 
         response = await client.post(
-            f"/api/v1/{community_id}/join-requests",
+            f"/api/v1/{public_id(auth_db, community_id)}/join-requests",
             json={},
             headers=_auth_header(user_id=user_id),
         )
@@ -178,7 +182,7 @@ class TestSubmitRequest:
         community_id = _seed_community(auth_db)
         user_id = _seed_user(auth_db, email="newjoiner@example.com", username="newjoiner")
         response = await client.post(
-            f"/api/v1/{community_id}/join-requests",
+            f"/api/v1/{public_id(auth_db, community_id)}/join-requests",
             json={"message": "please let me in"},
             headers=_auth_header(user_id=user_id),
         )
@@ -194,7 +198,8 @@ class TestGetMyRequest:
         community_id = _seed_community(auth_db)
         user_id = _seed_user(auth_db, email="nobody@example.com", username="nobody")
         response = await client.get(
-            f"/api/v1/{community_id}/join-requests/mine", headers=_auth_header(user_id=user_id)
+            f"/api/v1/{public_id(auth_db, community_id)}/join-requests/mine",
+            headers=_auth_header(user_id=user_id),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -213,7 +218,8 @@ class TestGetMyRequest:
         auth_db.dal.commit()
 
         response = await client.get(
-            f"/api/v1/{community_id}/join-requests/mine", headers=_auth_header(user_id=user_id)
+            f"/api/v1/{public_id(auth_db, community_id)}/join-requests/mine",
+            headers=_auth_header(user_id=user_id),
         )
         body = await response.get_json()
         assert body["request"]["status"] == "pending"
@@ -223,7 +229,9 @@ class TestGetMyRequest:
 class TestListRequests:
     async def test_missing_token_is_401(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
-        response = await client.get(f"/api/v1/admin/{community_id}/join-requests")
+        response = await client.get(
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests"
+        )
         assert response.status_code == 401
 
     async def test_by_non_member_of_this_community_is_403(self, client: Any, auth_db: Any) -> None:
@@ -235,7 +243,8 @@ class TestListRequests:
         )
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/join-requests", headers=_auth_header(user_id=outsider_id)
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests",
+            headers=_auth_header(user_id=outsider_id),
         )
         assert response.status_code == 403
 
@@ -253,7 +262,8 @@ class TestListRequests:
         )
         _seed_member(auth_db, community_id=community_id, user_id=mod_id, role_id=role_id)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/join-requests", headers=_auth_header(user_id=mod_id)
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests",
+            headers=_auth_header(user_id=mod_id),
         )
         assert response.status_code == 403
 
@@ -273,7 +283,8 @@ class TestListRequests:
         auth_db.dal.commit()
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/join-requests", headers=_auth_header(user_id=admin_id)
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests",
+            headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -309,7 +320,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
             headers=_auth_header(user_id=outsider_id),
         )
         assert response.status_code == 403
@@ -329,7 +340,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 200
@@ -412,7 +423,7 @@ class TestApproveReject:
         request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
             headers=_auth_header(user_id=admin_id),
         )
 
@@ -447,7 +458,7 @@ class TestApproveReject:
         request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
             headers=_auth_header(user_id=admin_id),
         )
 
@@ -480,7 +491,7 @@ class TestApproveReject:
         request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/{request_id}/approve",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
             headers=_auth_header(user_id=admin_id),
         )
 
@@ -500,7 +511,7 @@ class TestApproveReject:
             auth_db, community_id=community_id, email="approver2@example.com", username="approver2"
         )
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/999999/approve",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/999999/approve",
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 404
@@ -520,7 +531,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/{request_id}/reject",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/reject",
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 200
@@ -545,7 +556,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/join-requests/{request_id}/reject",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/reject",
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 404

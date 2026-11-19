@@ -4,7 +4,7 @@ import { eventSyncApi, type EventSyncState } from '../../services/eventSyncApi';
 import { extractErrorMessage } from '../../services/roleSyncApi';
 
 interface EventDiscordSyncToggleProps {
-  communityId: string | number;
+  communityId: string;
 }
 
 /**

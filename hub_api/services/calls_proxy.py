@@ -70,8 +70,8 @@ SCOPE_CREATE = "streaming.rooms:create"
 SCOPE_WRITE = "streaming.rooms:write"
 SCOPE_MODERATE = "streaming.rooms:moderate"
 
-_ADMIN = "/api/v1/admin/<int:community_id>/calls/rooms"
-_MEMBER = "/api/v1/community/<int:community_id>/interact/voice/rooms"
+_ADMIN = "/api/v1/admin/<cuuid:community_id>/calls/rooms"
+_MEMBER = "/api/v1/community/<cuuid:community_id>/interact/voice/rooms"
 _COMMUNITIES = "/api/v1/communities"
 
 #: (HTTP method, Quart rule) of every `blueprints/v1/calls.py` route -> `RoomsService` RPC.
@@ -101,11 +101,11 @@ ROUTE_RPCS: dict[tuple[str, str], str] = {
     ("POST", f"{_MEMBER}/<room_name>/lower-hand"): "LowerHand",
     (
         "GET",
-        f"{_COMMUNITIES}/<int:community_id>/calls/rooms/<room_id>/participants",
+        f"{_COMMUNITIES}/<cuuid:community_id>/calls/rooms/<room_id>/participants",
     ): "ListParticipants",
-    ("GET", f"{_COMMUNITIES}/<int:community_id>/calls/rooms/<room_id>/hands/mine"): "ListHands",
-    ("GET", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "ListRooms",
-    ("POST", f"{_COMMUNITIES}/<int:community_id>/town-hall"): "CreateRoom",
+    ("GET", f"{_COMMUNITIES}/<cuuid:community_id>/calls/rooms/<room_id>/hands/mine"): "ListHands",
+    ("GET", f"{_COMMUNITIES}/<cuuid:community_id>/town-hall"): "ListRooms",
+    ("POST", f"{_COMMUNITIES}/<cuuid:community_id>/town-hall"): "CreateRoom",
 }
 
 #: Proto RPCs deliberately without a hub-api route, each with the reason. The contract test

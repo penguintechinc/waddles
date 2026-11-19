@@ -271,9 +271,13 @@ class LinkedPlatformDTO:
 
 @dataclass(slots=True, frozen=True)
 class CommunityMembershipDTO:
-    """Community membership DTO."""
+    """Community membership DTO.
 
-    id: int
+    `id` is the community's PUBLIC UUID (`communities.public_id`), the only community
+    identifier that crosses the API boundary; use it verbatim in `/community/<id>/...` URLs.
+    """
+
+    id: str
     name: str
     displayName: str
     role: str
@@ -769,7 +773,7 @@ async def me() -> MeResponse:
             + (["vendor"] if result.is_vendor else []),
             communities=[
                 CommunityMembershipDTO(
-                    id=c.id,
+                    id=c.public_id,
                     name=c.name,
                     displayName=c.display_name,
                     role=c.role,

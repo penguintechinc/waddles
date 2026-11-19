@@ -26,6 +26,7 @@ from services.provider_connections.errors import (
     ProviderUnavailable,
 )
 from services.provider_connections.youtube import GOOGLE_AUTHORIZE_URL, SCOPE_FORCE_SSL
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
 from tests.provider_connections.fake_google import (
     APP_CLIENT_ID,
@@ -55,7 +56,7 @@ def _meta(row: dict[str, Any]) -> dict[str, Any]:
 
 
 def _base(db: Any, community_id: int | None = None) -> str:
-    return f"/api/v1/communities/{community_id or db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, community_id or db.seed.community_id)}/provider-connections"
 
 
 async def _authorize(

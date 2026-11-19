@@ -31,6 +31,7 @@ identically regardless of write history).
 
 from __future__ import annotations
 
+import dataclasses
 import logging
 from dataclasses import dataclass
 from typing import Annotated, Any, cast
@@ -44,6 +45,7 @@ from quart_schema import validate_request
 
 from config import HubAPIConfig
 from services import community_access, overlay_scene_service, overlay_service
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
@@ -131,11 +133,37 @@ class UpdateOverlayRequest:
 
 
 @dataclass(slots=True, frozen=True)
+class OverlayDTO:
+    """Wire shape of an overlay record; `community_id` is the community's PUBLIC UUID."""
+
+    id: int
+    community_id: str
+    overlay_key: str
+    previous_key: str | None
+    is_active: bool
+    theme_config: dict[str, Any]
+    enabled_sources: list[str]
+    last_accessed: str | None
+    access_count: int
+    created_at: str | None
+    updated_at: str | None
+    rotated_at: str | None
+    overlayUrl: str | None
+
+
+async def _overlay_dto(record: OverlayRecord) -> OverlayDTO:
+    """Map the service record to its wire DTO, swapping the numeric community id for the UUID."""
+    values = {f.name: getattr(record, f.name) for f in dataclasses.fields(record)}
+    values["community_id"] = await lookup_public_id(record.community_id)
+    return OverlayDTO(**values)
+
+
+@dataclass(slots=True, frozen=True)
 class OverlayResponse:
     """Response DTO for `getOverlay`/`updateOverlay` -- `{success, overlay}`."""
 
     success: bool
-    overlay: OverlayRecord
+    overlay: OverlayDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -144,7 +172,7 @@ class RotateOverlayResponse:
 
     success: bool
     message: str
-    overlay: OverlayRecord
+    overlay: OverlayDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -192,7 +220,7 @@ async def _handle_api_error(exc: ApiError) -> tuple[dict[str, object], int]:
     return _err(exc)
 
 
-@overlay_bp.route("/<int:community_id>/browser-sources", methods=["GET"])
+@overlay_bp.route("/<cuuid:community_id>/browser-sources", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_browser_sources(community_id: int) -> Any:
@@ -209,7 +237,7 @@ async def get_browser_sources(community_id: int) -> Any:
     return jsonify_dto(BrowserSourcesResponse(success=True, sources=sources))
 
 
-@overlay_bp.route("/<int:community_id>/browser-sources/regenerate", methods=["POST"])
+@overlay_bp.route("/<cuuid:community_id>/browser-sources/regenerate", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(RegenerateBrowserSourcesRequest)
@@ -233,7 +261,7 @@ async def regenerate_browser_sources(
     )
 
 
-@overlay_bp.route("/<int:community_id>/overlay", methods=["GET"])
+@overlay_bp.route("/<cuuid:community_id>/overlay", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_overlay(community_id: int) -> Any:
@@ -250,10 +278,10 @@ async def get_overlay(community_id: int) -> Any:
         )
     except ApiError as exc:
         return _err(exc)
-    return jsonify_dto(OverlayResponse(success=True, overlay=record))
+    return jsonify_dto(OverlayResponse(success=True, overlay=await _overlay_dto(record)))
 
 
-@overlay_bp.route("/<int:community_id>/overlay", methods=["PUT"])
+@overlay_bp.route("/<cuuid:community_id>/overlay", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(UpdateOverlayRequest)
@@ -275,10 +303,10 @@ async def update_overlay(community_id: int, data: UpdateOverlayRequest) -> Any:
         )
     except ApiError as exc:
         return _err(exc)
-    return jsonify_dto(OverlayResponse(success=True, overlay=record))
+    return jsonify_dto(OverlayResponse(success=True, overlay=await _overlay_dto(record)))
 
 
-@overlay_bp.route("/<int:community_id>/overlay/rotate", methods=["POST"])
+@overlay_bp.route("/<cuuid:community_id>/overlay/rotate", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def rotate_overlay_key(community_id: int) -> Any:
@@ -295,12 +323,12 @@ async def rotate_overlay_key(community_id: int) -> Any:
         RotateOverlayResponse(
             success=True,
             message="Overlay key rotated. Previous key valid for 5 more minutes.",
-            overlay=record,
+            overlay=await _overlay_dto(record),
         )
     )
 
 
-@overlay_bp.route("/<int:community_id>/overlay/stats", methods=["GET"])
+@overlay_bp.route("/<cuuid:community_id>/overlay/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @reads_from_replica("overlay.get_overlay_stats")
@@ -414,7 +442,7 @@ async def _require_builder(community_id: int) -> None:
         raise payment_required("The overlay builder is not enabled for this plan")
 
 
-@overlay_bp.route("/<int:community_id>/overlay/widgets", methods=["GET"])
+@overlay_bp.route("/<cuuid:community_id>/overlay/widgets", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_available_widgets(community_id: int) -> Any:
@@ -427,7 +455,7 @@ async def get_available_widgets(community_id: int) -> Any:
     return jsonify_dto(WidgetsResponse(success=True, widgets=widgets))
 
 
-@overlay_bp.route("/<int:community_id>/overlay/layout", methods=["GET"])
+@overlay_bp.route("/<cuuid:community_id>/overlay/layout", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def get_scene_layout(community_id: int) -> Any:
@@ -438,7 +466,7 @@ async def get_scene_layout(community_id: int) -> Any:
     return jsonify_dto(LayoutResponse(success=True, layout=layout))
 
 
-@overlay_bp.route("/<int:community_id>/overlay/layout/components", methods=["POST"])
+@overlay_bp.route("/<cuuid:community_id>/overlay/layout/components", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(AddComponentRequest)
@@ -465,7 +493,7 @@ async def add_scene_component(community_id: int, data: AddComponentRequest) -> A
 
 
 @overlay_bp.route(
-    "/<int:community_id>/overlay/layout/components/<uuid:instance_id>", methods=["PATCH"]
+    "/<cuuid:community_id>/overlay/layout/components/<uuid:instance_id>", methods=["PATCH"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
@@ -495,7 +523,7 @@ async def update_scene_component(
 
 
 @overlay_bp.route(
-    "/<int:community_id>/overlay/layout/components/<uuid:instance_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/overlay/layout/components/<uuid:instance_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
@@ -511,7 +539,7 @@ async def remove_scene_component(community_id: int, instance_id: Any) -> Any:
     return jsonify_dto(RemovedResponse(success=True, removed=True))
 
 
-@overlay_bp.route("/<int:community_id>/overlay/layout", methods=["DELETE"])
+@overlay_bp.route("/<cuuid:community_id>/overlay/layout", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 async def clear_scene_layout(community_id: int) -> Any:
@@ -522,7 +550,7 @@ async def clear_scene_layout(community_id: int) -> Any:
     return jsonify_dto(ClearedResponse(success=True, removed_count=count))
 
 
-@overlay_bp.route("/<int:community_id>/overlay/layout/canvas", methods=["PUT"])
+@overlay_bp.route("/<cuuid:community_id>/overlay/layout/canvas", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_ADMIN)  # type: ignore[misc]
 @validate_request(SetCanvasRequest)

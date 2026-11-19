@@ -4,7 +4,7 @@ import { PanelState } from '../ui';
 import type { LiveStream } from '../../services/communityOverviewApi';
 
 export interface StreamsPanelProps {
-  communityId: number;
+  communityId: string;
   query: Pick<UseQueryResult<LiveStream[]>, 'data' | 'isPending' | 'isError' | 'error' | 'refetch'>;
   /** Offer the connection-settings CTA (only for users allowed to manage connections). */
   canManage: boolean;

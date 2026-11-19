@@ -37,6 +37,7 @@ from services import tenant_discord_install_state as discord_state
 from services import twitch_install_state as twitch_state
 from services.install_state_binding import ERR_BINDING, ERR_STATE
 from services.oauth_providers import ProviderSpec, TokenResponse
+from tests.community_ids import cpath, install_community_ids
 
 CALLBACK_BASE = "http://localhost:19999"
 
@@ -137,9 +138,9 @@ def connections_app(community_db: Any) -> Quart:
     dal, _ = community_db
     app = Quart(__name__)
     QuartSchema(app)
+    install_community_ids(app, dal)
     app.register_blueprint(connections_bp)
     app.config["dal"] = dal
-    app.config["async_dal"] = dal
     app.config["HUB_API_CONFIG"] = _cfg()
     return app
 
@@ -265,7 +266,11 @@ def _connections_flow(
 
     async def start(user_id: int) -> tuple[str, str]:
         resp = await client.post(
-            f"/api/v1/communities/{community_id}/connections/youtube/authorize",
+            cpath(
+                client.app.config["dal"],
+                "/api/v1/communities/{community_id}/connections/youtube/authorize",
+                community_id,
+            ),
             headers=auth(user_id=user_id, scope="community.connections:write"),
         )
         assert resp.status_code == 200
@@ -355,6 +360,10 @@ class TestCrossContext:
         user_auth_headers: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        dal = connections_app.config["dal"]
+        first = dal(dal.communities.id == 1).select().first()
+        dal.communities.insert(id=2, name="second-community", tenant_id=first.tenant_id)
+        dal.commit()
         flow_a = _connections_flow(connections_app, user_auth_headers, monkeypatch, 1)
         state_a, nonce_a = await flow_a.start(1)
         flow_b = _connections_flow(connections_app, user_auth_headers, monkeypatch, 2)

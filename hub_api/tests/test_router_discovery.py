@@ -121,7 +121,7 @@ class TestRealPackageDiscovery:
             for rule in app.url_map.iter_rules()
             for method in rule.methods or ()
         }
-        prefix = "/api/v1/apps/community/<int:community_id>/bundles/<app_id>"
+        prefix = "/api/v1/apps/community/<cuuid:community_id>/bundles/<app_id>"
         for path, method in [
             ("/admin", "GET"),
             ("/config", "GET"),

@@ -50,7 +50,7 @@ chat_bp = Blueprint("v1_community_chat", __name__, url_prefix="/api/v1/community
 FEATURE_COMMUNITY_CHAT = "waddles.community.chat"
 
 
-@chat_bp.route("/<int:community_id>/chat/history", methods=["GET"])
+@chat_bp.route("/<cuuid:community_id>/chat/history", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.chat:read")  # type: ignore[misc]
 @validate_response(ChatHistoryResponse)
@@ -74,7 +74,7 @@ async def chat_history(community_id: int) -> ChatHistoryResponse | tuple[dict[st
     return ChatHistoryResponse(success=True, messages=messages, has_more=has_more)
 
 
-@chat_bp.route("/<int:community_id>/chat/channels", methods=["GET"])
+@chat_bp.route("/<cuuid:community_id>/chat/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.chat:read")  # type: ignore[misc]
 @validate_response(ChatChannelsResponse)

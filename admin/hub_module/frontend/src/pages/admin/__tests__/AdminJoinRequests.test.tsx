@@ -28,7 +28,7 @@ const list = (rows: unknown[]) => ({
   pagination: { total: rows.length, page: 1, limit: 25, totalPages: 1 },
 });
 
-function renderPage(route = '/admin/7/join-requests') {
+function renderPage(route = '/admin/00000007-0000-4000-8000-000000000000/join-requests') {
   return renderWithProviders(<AdminJoinRequests />, { route, path: '/admin/:communityId/join-requests' });
 }
 
@@ -37,12 +37,12 @@ describe('AdminJoinRequests', () => {
   afterEach(() => vi.restoreAllMocks());
 
   it('lists pending requests from the served admin route', async () => {
-    const get = mockApiGet((url) => (url === '/api/v1/admin/7/join-requests' ? list([row(1), row(2, { message: null })]) : unexpectedUrl(url)));
+    const get = mockApiGet((url) => (url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests' ? list([row(1), row(2, { message: null })]) : unexpectedUrl(url)));
     renderPage();
     expect(await screen.findByText('applicant1')).toBeInTheDocument();
     expect(screen.getByText('please 1')).toBeInTheDocument();
     expect(screen.getByText('No message')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/admin/7/join-requests', { params: { status: 'pending', page: 1, limit: 25 } });
+    expect(get).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests', { params: { status: 'pending', page: 1, limit: 25 } });
   });
 
   it('approves with PUT to the served route, then refreshes the queue', async () => {
@@ -55,7 +55,7 @@ describe('AdminJoinRequests', () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Approve applicant1' }));
     await waitFor(() => expect(screen.queryByText('applicant1')).not.toBeInTheDocument());
-    expect(put).toHaveBeenCalledWith('/api/v1/admin/7/join-requests/1/approve');
+    expect(put).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/1/approve');
     expect(screen.getByText('applicant2')).toBeInTheDocument();
   });
 
@@ -64,7 +64,7 @@ describe('AdminJoinRequests', () => {
     const put = vi.spyOn(apiClient, 'put').mockResolvedValue(ok({ success: true }));
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Reject applicant4' }));
-    await waitFor(() => expect(put).toHaveBeenCalledWith('/api/v1/admin/7/join-requests/4/reject'));
+    await waitFor(() => expect(put).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/4/reject'));
   });
 
   it('shows the server reason when a decision fails, and lets the admin dismiss it', async () => {

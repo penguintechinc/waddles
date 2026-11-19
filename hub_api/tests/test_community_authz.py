@@ -65,6 +65,7 @@ from services.community_authz import (
 )
 from services.errors import ApiError
 from services.workflow_service import ProxyResult
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, insert_global_admin
 
 COMMUNITY_ID = 1
@@ -232,11 +233,18 @@ class TestRequireCommunityAdminBypasses:
     """Integration coverage via `workflow.py`'s `list_workflows` -- the thinnest gated route."""
 
     def _app(self, automation_db: Any) -> Quart:
+        dal = automation_db.dal
+        if dal(dal.communities.id == COMMUNITY_ID).count() == 0:
+            # URLs carry the community's public UUID, so the community row must exist to resolve.
+            tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
+            dal.communities.insert(id=COMMUNITY_ID, name="seeded", tenant_id=tenant_row.id)
+            dal.commit()
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
-        quart_app.register_blueprint(workflow_bp)
         quart_app.config["dal"] = automation_db.dal
         quart_app.config["async_dal"] = automation_db
+        install_community_ids(quart_app, automation_db.dal)
+        quart_app.register_blueprint(workflow_bp)
         return quart_app
 
     def _token(self, *, user_id: str, roles: list[str] | None = None, scope: str = "") -> str:
@@ -256,7 +264,7 @@ class TestRequireCommunityAdminBypasses:
         app = self._app(automation_db)
         client = app.test_client()
         response = await client.get(
-            f"/api/v1/admin/{COMMUNITY_ID}/workflows",
+            f"/api/v1/admin/{public_id(automation_db, COMMUNITY_ID)}/workflows",
             headers={"Authorization": f"Bearer {self._token(user_id=str(user_id))}"},
         )
         assert response.status_code == 200
@@ -272,7 +280,7 @@ class TestRequireCommunityAdminBypasses:
         app = self._app(automation_db)
         client = app.test_client()
         response = await client.get(
-            f"/api/v1/admin/{community_id}/workflows",
+            f"/api/v1/admin/{public_id(automation_db, community_id)}/workflows",
             headers={"Authorization": f"Bearer {self._token(user_id=str(user_id))}"},
         )
         assert response.status_code == 200
@@ -306,7 +314,7 @@ class TestRequireCommunityAdminBypasses:
         app = self._app(automation_db)
         client = app.test_client()
         response = await client.get(
-            f"/api/v1/admin/{other_community_id}/workflows",
+            f"/api/v1/admin/{public_id(automation_db, other_community_id)}/workflows",
             headers={"Authorization": f"Bearer {self._token(user_id=str(user_id))}"},
         )
         assert response.status_code == 403
@@ -317,7 +325,7 @@ class TestRequireCommunityAdminBypasses:
         app = self._app(automation_db)
         client = app.test_client()
         response = await client.get(
-            f"/api/v1/admin/{COMMUNITY_ID}/workflows",
+            f"/api/v1/admin/{public_id(automation_db, COMMUNITY_ID)}/workflows",
             headers={"Authorization": f"Bearer {self._token(user_id='999', scope='users:admin')}"},
         )
         assert response.status_code == 200
@@ -339,7 +347,7 @@ class TestRequireCommunityAdminBypasses:
         app = self._app(automation_db)
         client = app.test_client()
         response = await client.get(
-            f"/api/v1/admin/{COMMUNITY_ID}/workflows",
+            f"/api/v1/admin/{public_id(automation_db, COMMUNITY_ID)}/workflows",
             headers={"Authorization": f"Bearer {self._token(user_id=str(user_id))}"},
         )
         assert response.status_code == 403
@@ -355,7 +363,7 @@ class TestRequireCommunityAdminBypasses:
         app = self._app(automation_db)
         client = app.test_client()
         response = await client.get(
-            f"/api/v1/admin/{COMMUNITY_ID}/workflows",
+            f"/api/v1/admin/{public_id(automation_db, COMMUNITY_ID)}/workflows",
             headers={"Authorization": f"Bearer {self._token(user_id=str(user_id))}"},
         )
         assert response.status_code == 403

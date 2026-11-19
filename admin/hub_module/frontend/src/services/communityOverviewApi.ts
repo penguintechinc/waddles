@@ -62,13 +62,13 @@ function parseAnnouncement(raw: unknown): Announcement {
 }
 
 /** `GET /api/v1/communities/:id/streams`. */
-export async function fetchLiveStreams(communityId: number): Promise<LiveStream[]> {
+export async function fetchLiveStreams(communityId: string): Promise<LiveStream[]> {
   const { data } = await apiClient.get<unknown>(`/api/v1/communities/${communityId}/streams`);
   return readArray(expectRecord(data, 'streams'), 'streams', 'streams').map(parseStream);
 }
 
 /** `GET /api/v1/admin/:id/announcements?status=published`; rejected with 403/402 for non-admins. */
-export async function fetchPublishedAnnouncements(communityId: number, limit: number): Promise<Announcement[]> {
+export async function fetchPublishedAnnouncements(communityId: string, limit: number): Promise<Announcement[]> {
   const { data } = await apiClient.get<unknown>(`/api/v1/admin/${communityId}/announcements`, {
     params: { status: 'published', limit },
   });

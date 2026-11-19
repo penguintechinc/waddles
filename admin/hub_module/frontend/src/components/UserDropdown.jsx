@@ -245,7 +245,7 @@ function UserDropdown() {
                   key={c.id}
                   to={`/dashboard/community/${c.id}`}
                   icon={UserGroupIcon}
-                  label={c.name || `Community ${c.id}`}
+                  label={c.name || 'Unnamed community'}
                   onClick={handleNavClick}
                 />
               ))}

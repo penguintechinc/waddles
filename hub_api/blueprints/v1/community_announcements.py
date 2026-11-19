@@ -54,7 +54,7 @@ def _tenant_ok(community_id: int) -> bool:
     return community_in_tenant(current_app.config["dal"], community_id, ctx)
 
 
-@announcements_bp.route("/<int:community_id>/announcements", methods=["GET"])
+@announcements_bp.route("/<cuuid:community_id>/announcements", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
 @validate_response(AnnouncementListResponse)
@@ -79,7 +79,9 @@ async def list_route(community_id: int) -> AnnouncementListResponse | tuple[dict
     )
 
 
-@announcements_bp.route("/<int:community_id>/announcements/<int:announcement_id>", methods=["GET"])
+@announcements_bp.route(
+    "/<cuuid:community_id>/announcements/<int:announcement_id>", methods=["GET"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
@@ -95,7 +97,7 @@ async def get_route(
     return AnnouncementResponse(success=True, data=dto)
 
 
-@announcements_bp.route("/<int:community_id>/announcements", methods=["POST"])
+@announcements_bp.route("/<cuuid:community_id>/announcements", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
@@ -119,7 +121,9 @@ async def create_route(community_id: int) -> tuple[AnnouncementResponse | dict[s
     return AnnouncementResponse(success=True, data=dto), 201
 
 
-@announcements_bp.route("/<int:community_id>/announcements/<int:announcement_id>", methods=["PUT"])
+@announcements_bp.route(
+    "/<cuuid:community_id>/announcements/<int:announcement_id>", methods=["PUT"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
@@ -171,7 +175,7 @@ def _mutate(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/announcements/<int:announcement_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
@@ -185,7 +189,7 @@ async def delete_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/publish", methods=["POST"]
+    "/<cuuid:community_id>/announcements/<int:announcement_id>/publish", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
@@ -199,7 +203,7 @@ async def publish_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/pin", methods=["PUT"]
+    "/<cuuid:community_id>/announcements/<int:announcement_id>/pin", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
@@ -213,7 +217,7 @@ async def pin_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/unpin", methods=["PUT"]
+    "/<cuuid:community_id>/announcements/<int:announcement_id>/unpin", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
@@ -227,7 +231,7 @@ async def unpin_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/archive", methods=["POST"]
+    "/<cuuid:community_id>/announcements/<int:announcement_id>/archive", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
@@ -241,7 +245,7 @@ async def archive_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/broadcast", methods=["POST"]
+    "/<cuuid:community_id>/announcements/<int:announcement_id>/broadcast", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
@@ -282,7 +286,7 @@ async def broadcast_route(community_id: int, announcement_id: int) -> tuple[dict
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/broadcast-status", methods=["GET"]
+    "/<cuuid:community_id>/announcements/<int:announcement_id>/broadcast-status", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]

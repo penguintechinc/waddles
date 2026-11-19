@@ -6,10 +6,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from pydal import Field
 from quart import Quart
 from quart_schema import QuartSchema
+from sqlalchemy import text
 
 from blueprints.v1.workstream_usage import BLUEPRINTS
+from tests.community_ids import install_community_ids
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -36,6 +39,15 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     quart_app.config["async_dal"] = bundle_install_db
     quart_app.config["dal"] = bundle_install_db.dal
     quart_app.config["install_dal"] = install_dal
+    # pydal-side `communities` binding over the shared sqlite file (the `cuuid` resolver reads it)
+    bundle_install_db.dal.define_table(
+        "communities",
+        Field("tenant_id", "integer"),
+        Field("name"),
+        Field("public_id"),
+        migrate=False,
+    )
+    install_community_ids(quart_app, bundle_install_db.dal)
     for bp in BLUEPRINTS:
         quart_app.register_blueprint(bp)
     return quart_app
@@ -158,3 +170,59 @@ async def test_usage_never_returns_another_tenants_rows(app: Quart) -> None:
     )
     body = await response.get_json()
     assert all(r["events"] != 99 for r in body["rows"])
+
+
+def _admin_headers() -> dict[str, str]:
+    token = make_user_token(user_id=1, scope="tenant:admin", tenant=TENANT_SLUG)
+    return {"Authorization": f"Bearer {token}"}
+
+
+async def test_usage_community_filter_takes_the_public_uuid(app: Quart) -> None:
+    """`communityId` is the community UUID: it filters to that community's usage rows."""
+    install_dal = app.config["install_dal"]
+    community_id = int(await install_dal.communities.async_insert(tenant_id=1, name="c1"))
+    public = "5d0f7a52-3c47-4d0e-9a55-0b9d6b2c1e11"
+    async with install_dal.engine.begin() as conn:
+        await conn.execute(
+            text("UPDATE communities SET public_id = :p WHERE id = :i"),
+            {"p": public, "i": community_id},
+        )
+    await install_dal.workstream_usage_hourly.async_insert(
+        tenant_id=1,
+        community_id=community_id,
+        workstream_id="ws-c",
+        stage="ingest",
+        app_id=None,
+        hour=datetime(2026, 9, 14, 11, 0, tzinfo=UTC),
+        events=7,
+        invocations=0,
+        host_calls=0,
+        actions_delivered=0,
+        fuel_ms=0,
+        outbound_bytes=0,
+        media_minutes=None,
+        recorded_at=datetime.now(UTC),
+    )
+    response = await app.test_client().get(
+        f"/api/v1/tenant/{TENANT_SLUG}/usage?communityId={public}", headers=_admin_headers()
+    )
+    assert response.status_code == 200
+    body = await response.get_json()
+    assert [r["workstreamId"] for r in body["rows"]] == ["ws-c"]
+
+
+async def test_usage_community_filter_rejects_a_numeric_id(app: Quart) -> None:
+    response = await app.test_client().get(
+        f"/api/v1/tenant/{TENANT_SLUG}/usage?communityId=1", headers=_admin_headers()
+    )
+    assert response.status_code == 422
+    assert (await response.get_json())["error"]["code"] == "invalid_community_id"
+
+
+async def test_usage_community_filter_unknown_uuid_is_empty(app: Quart) -> None:
+    response = await app.test_client().get(
+        f"/api/v1/tenant/{TENANT_SLUG}/usage?communityId=00000000-0000-4000-8000-00000000dead",
+        headers=_admin_headers(),
+    )
+    assert response.status_code == 200
+    assert (await response.get_json())["rows"] == []

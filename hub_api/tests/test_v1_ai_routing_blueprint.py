@@ -28,6 +28,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.ai_routing import ai_completions_bp, ai_config_bp
 from config import HubAPIConfig
 from services.ai_routing.models import AIResponse
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
@@ -66,10 +67,11 @@ def _test_config(*, ai_enabled: bool = True) -> HubAPIConfig:
 def app(ai_routing_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(ai_config_bp)
-    quart_app.register_blueprint(ai_completions_bp)
     quart_app.config["dal"] = ai_routing_db.dal
     quart_app.config["async_dal"] = ai_routing_db
+    install_community_ids(quart_app, ai_routing_db.dal)
+    quart_app.register_blueprint(ai_config_bp)
+    quart_app.register_blueprint(ai_completions_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
 
@@ -84,10 +86,11 @@ def disabled_app(ai_routing_db: Any) -> Quart:
     """Same wiring as `app`, but `WADDLES_AI_ENABLED=false` -- `HubAPIConfig.ai_enabled=False`."""
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(ai_config_bp)
-    quart_app.register_blueprint(ai_completions_bp)
     quart_app.config["dal"] = ai_routing_db.dal
     quart_app.config["async_dal"] = ai_routing_db
+    install_community_ids(quart_app, ai_routing_db.dal)
+    quart_app.register_blueprint(ai_config_bp)
+    quart_app.register_blueprint(ai_completions_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config(ai_enabled=False)
     return quart_app
 
@@ -139,7 +142,7 @@ class TestAiRoutingDedicatedScope:
         )
         headers = {"Authorization": f"Bearer {make_user_token(user_id=711)}"}
         response = await client.open(
-            f"/api/v1/admin/{community_id}/ai/config",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config",
             method=method,
             headers=headers,
             json={"preferred_tier": "premium", "on_insufficient_balance": "block"},
@@ -154,37 +157,42 @@ class TestAiRoutingDedicatedScope:
             ai_routing_db, community_id=community_id, user_id=712, scopes=["ai.routing:manage"]
         )
         headers = {"Authorization": f"Bearer {make_user_token(user_id=712)}"}
-        response = await client.get(f"/api/v1/admin/{community_id}/ai/config", headers=headers)
+        response = await client.get(
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config", headers=headers
+        )
         assert response.status_code == 200
 
 
 class TestGetConfig:
     async def test_without_token_is_401(self, client: Any) -> None:
-        response = await client.get("/api/v1/admin/1/ai/config")
+        response = await client.get(f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/ai/config")
         assert response.status_code == 401
 
     async def test_non_member_is_403(self, client: Any, ai_routing_db: Any) -> None:
         community_id = seed_community(ai_routing_db)
         token = make_user_token(user_id=999)  # never seeded as a member
         response = await client.get(
-            f"/api/v1/admin/{community_id}/ai/config",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
 
     async def test_admin_gets_default_free_config(self, client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
-        response = await client.get(f"/api/v1/admin/{community_id}/ai/config", headers=headers)
+        response = await client.get(
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config", headers=headers
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["preferred_tier"] == "free"
+        assert body["community_id"] == public_id(ai_routing_db, community_id)  # UUID, not int
 
 
 class TestSetConfig:
     async def test_admin_can_update(self, client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/ai/config",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config",
             headers=headers,
             json={"preferred_tier": "premium", "on_insufficient_balance": "block"},
         )
@@ -197,7 +205,7 @@ class TestSetConfig:
         _, community_id, _ = _admin_headers(ai_routing_db)
         member_headers = _member_headers(ai_routing_db, community_id)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/ai/config",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config",
             headers=member_headers,
             json={"preferred_tier": "premium"},
         )
@@ -211,7 +219,7 @@ class TestByokKeyEndpoints:
         _, community_id, _ = _admin_headers(ai_routing_db)
         member_headers = _member_headers(ai_routing_db, community_id)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/ai/byok-keys",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys",
             headers=member_headers,
             json={"provider": "openai", "api_key": "sk-whatever"},
         )
@@ -231,7 +239,7 @@ class TestByokKeyEndpoints:
 
         headers, community_id, _ = _admin_headers(ai_routing_db)
         set_response = await client.put(
-            f"/api/v1/admin/{community_id}/ai/byok-keys",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys",
             headers=headers,
             json={"provider": "openai", "api_key": "sk-super-secret-do-not-leak"},
         )
@@ -241,7 +249,7 @@ class TestByokKeyEndpoints:
         assert "sk-super-secret-do-not-leak" not in str(set_body)
 
         list_response = await client.get(
-            f"/api/v1/admin/{community_id}/ai/byok-keys", headers=headers
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys", headers=headers
         )
         list_body = await list_response.get_json()
         assert "sk-super-secret-do-not-leak" not in str(list_body)
@@ -261,26 +269,29 @@ class TestByokKeyEndpoints:
 
         headers, community_id, _ = _admin_headers(ai_routing_db)
         await client.put(
-            f"/api/v1/admin/{community_id}/ai/byok-keys",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys",
             headers=headers,
             json={"provider": "anthropic", "api_key": "sk-ant-value"},
         )
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/ai/byok-keys/anthropic", headers=headers
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys/anthropic",
+            headers=headers,
         )
         assert response.status_code == 200
 
 
 class TestCompletions:
     async def test_without_token_is_401(self, client: Any) -> None:
-        response = await client.post("/api/v1/community/1/ai/completions", json={"prompt": "hi"})
+        response = await client.post(
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/ai/completions", json={"prompt": "hi"}
+        )
         assert response.status_code == 401
 
     async def test_non_member_is_403(self, client: Any, ai_routing_db: Any) -> None:
         community_id = seed_community(ai_routing_db)
         token = make_user_token(user_id=888)
         response = await client.post(
-            f"/api/v1/community/{community_id}/ai/completions",
+            f"/api/v1/community/{public_id(ai_routing_db, community_id)}/ai/completions",
             headers={"Authorization": f"Bearer {token}"},
             json={"prompt": "hi"},
         )
@@ -306,7 +317,7 @@ class TestCompletions:
         admin_headers, community_id, _ = _admin_headers(ai_routing_db)
         member_headers = _member_headers(ai_routing_db, community_id, user_id=703)
         response = await client.post(
-            f"/api/v1/community/{community_id}/ai/completions",
+            f"/api/v1/community/{public_id(ai_routing_db, community_id)}/ai/completions",
             headers=member_headers,
             json={"prompt": "hi there"},
         )
@@ -320,7 +331,7 @@ class TestCompletions:
     async def test_invalid_requested_tier_is_400(self, client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await client.post(
-            f"/api/v1/community/{community_id}/ai/completions",
+            f"/api/v1/community/{public_id(ai_routing_db, community_id)}/ai/completions",
             headers=headers,
             json={"prompt": "hi", "requested_tier": "super-deluxe"},
         )
@@ -335,7 +346,7 @@ class TestCompletions:
         # Token minted for TENANT_SLUG, but the community belongs to OTHER_TENANT_SLUG.
         token = make_user_token(user_id=704, tenant=TENANT_SLUG)
         response = await client.post(
-            f"/api/v1/community/{other_community_id}/ai/completions",
+            f"/api/v1/community/{public_id(ai_routing_db, other_community_id)}/ai/completions",
             headers={"Authorization": f"Bearer {token}"},
             json={"prompt": "hi"},
         )
@@ -378,7 +389,7 @@ class TestAiDisabledKillSwitch:
     async def test_get_config_is_503(self, disabled_client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await disabled_client.get(
-            f"/api/v1/admin/{community_id}/ai/config", headers=headers
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config", headers=headers
         )
         assert response.status_code == 503
         body = await response.get_json()
@@ -387,7 +398,7 @@ class TestAiDisabledKillSwitch:
     async def test_set_config_is_503(self, disabled_client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await disabled_client.put(
-            f"/api/v1/admin/{community_id}/ai/config",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config",
             headers=headers,
             json={"preferred_tier": "premium"},
         )
@@ -396,14 +407,14 @@ class TestAiDisabledKillSwitch:
     async def test_list_byok_keys_is_503(self, disabled_client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await disabled_client.get(
-            f"/api/v1/admin/{community_id}/ai/byok-keys", headers=headers
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys", headers=headers
         )
         assert response.status_code == 503
 
     async def test_set_byok_key_is_503(self, disabled_client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await disabled_client.put(
-            f"/api/v1/admin/{community_id}/ai/byok-keys",
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys",
             headers=headers,
             json={"provider": "openai", "api_key": "sk-whatever"},
         )
@@ -412,14 +423,15 @@ class TestAiDisabledKillSwitch:
     async def test_delete_byok_key_is_503(self, disabled_client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await disabled_client.delete(
-            f"/api/v1/admin/{community_id}/ai/byok-keys/openai", headers=headers
+            f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/byok-keys/openai",
+            headers=headers,
         )
         assert response.status_code == 503
 
     async def test_create_completion_is_503(self, disabled_client: Any, ai_routing_db: Any) -> None:
         headers, community_id, _ = _admin_headers(ai_routing_db)
         response = await disabled_client.post(
-            f"/api/v1/community/{community_id}/ai/completions",
+            f"/api/v1/community/{public_id(ai_routing_db, community_id)}/ai/completions",
             headers=headers,
             json={"prompt": "hi"},
         )
@@ -436,5 +448,11 @@ async def test_enabled_app_is_unaffected(client: Any, ai_routing_db: Any) -> Non
     whole point is that `config_service.get_ai_config` DOES get called.
     """
     headers, community_id, _ = _admin_headers(ai_routing_db)
-    response = await client.get(f"/api/v1/admin/{community_id}/ai/config", headers=headers)
+    response = await client.get(
+        f"/api/v1/admin/{public_id(ai_routing_db, community_id)}/ai/config", headers=headers
+    )
     assert response.status_code == 200
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

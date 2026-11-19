@@ -7,6 +7,7 @@ import { avatarInitial, formatEntryValue } from '../../components/leaderboard/le
 import { useLeaderboard } from '../../hooks/useCommunityActivity';
 import { useMyCommunities } from '../../hooks/useMyCommunities';
 import type { LeaderboardEntry, LeaderboardPeriod, LeaderboardType } from '../../services/communityActivityApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 const PAGE_SIZE = 25;
 
@@ -21,7 +22,7 @@ function toType(value: string | null): LeaderboardType {
 }
 
 /** Full leaderboard: tabs, period filter, personal stats and server-side pagination. */
-function LeaderboardView({ communityId }: { communityId: number }) {
+function LeaderboardView({ communityId }: { communityId: string }) {
   const [searchParams, setSearchParams] = useSearchParams();
   const type = toType(searchParams.get('type'));
   const [period, setPeriod] = useState<LeaderboardPeriod>('weekly');
@@ -126,8 +127,8 @@ function LeaderboardView({ communityId }: { communityId: number }) {
 /** Route wrapper: validates `:id` before any query runs. */
 export default function CommunityLeaderboard() {
   const { id } = useParams<{ id: string }>();
-  const communityId = Number(id);
-  if (!Number.isInteger(communityId) || communityId <= 0) {
+  const communityId = parseCommunityId(id);
+  if (communityId === null) {
     return <ErrorState title="Unknown community" message="This leaderboard link is not valid." />;
   }
   return <LeaderboardView communityId={communityId} />;

@@ -89,7 +89,7 @@ export function parseMusicQueue(data: unknown): MusicQueueView {
 }
 
 /** Fetches the community's music queue snapshot. */
-export async function fetchMusicQueue(communityId: number): Promise<MusicQueueView> {
+export async function fetchMusicQueue(communityId: string): Promise<MusicQueueView> {
   const response = await apiClient.get<unknown>(`/api/v1/communities/${communityId}/music`);
   return parseMusicQueue(response.data);
 }

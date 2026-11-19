@@ -26,7 +26,7 @@ forms_bp = Blueprint("v1_community_forms", __name__, url_prefix="/api/v1/admin")
 FEATURE_COMMUNITY_FORMS = "waddles.community.forms"
 
 
-@forms_bp.route("/<int:community_id>/forms", methods=["GET"])
+@forms_bp.route("/<cuuid:community_id>/forms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:read")  # type: ignore[misc]
 async def list_forms(community_id: int) -> tuple[dict[str, object], int]:
@@ -40,7 +40,7 @@ async def list_forms(community_id: int) -> tuple[dict[str, object], int]:
     return await proxy.get_forms(community_id, request.headers.get("Authorization"))
 
 
-@forms_bp.route("/<int:community_id>/forms/<int:form_id>", methods=["GET"])
+@forms_bp.route("/<cuuid:community_id>/forms/<int:form_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:read")  # type: ignore[misc]
 async def get_form(community_id: int, form_id: int) -> tuple[dict[str, object], int]:
@@ -52,7 +52,7 @@ async def get_form(community_id: int, form_id: int) -> tuple[dict[str, object], 
     return await proxy.get_form(community_id, form_id, request.headers.get("Authorization"))
 
 
-@forms_bp.route("/<int:community_id>/forms", methods=["POST"])
+@forms_bp.route("/<cuuid:community_id>/forms", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:write")  # type: ignore[misc]
 async def create_form(community_id: int) -> tuple[dict[str, object], int]:
@@ -65,7 +65,7 @@ async def create_form(community_id: int) -> tuple[dict[str, object], int]:
     return await proxy.create_form(community_id, payload, request.headers.get("Authorization"))
 
 
-@forms_bp.route("/<int:community_id>/forms/<int:form_id>", methods=["DELETE"])
+@forms_bp.route("/<cuuid:community_id>/forms/<int:form_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:write")  # type: ignore[misc]
 async def delete_form(community_id: int, form_id: int) -> tuple[dict[str, object], int]:
@@ -77,7 +77,7 @@ async def delete_form(community_id: int, form_id: int) -> tuple[dict[str, object
     return await proxy.delete_form(community_id, form_id, request.headers.get("Authorization"))
 
 
-@forms_bp.route("/<int:community_id>/forms/<int:form_id>/submissions", methods=["GET"])
+@forms_bp.route("/<cuuid:community_id>/forms/<int:form_id>/submissions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:read")  # type: ignore[misc]
 async def form_submissions(community_id: int, form_id: int) -> tuple[dict[str, object], int]:

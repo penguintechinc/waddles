@@ -178,7 +178,7 @@ class RadioStationResponse:
 # ---------------------------------------------------------------------------
 
 
-@music_bp.route("/<int:community_id>/music/settings", methods=["GET"])
+@music_bp.route("/<cuuid:community_id>/music/settings", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MusicSettingsResponse)
 async def get_music_settings(
@@ -206,7 +206,7 @@ async def get_music_settings(
     return MusicSettingsResponse(success=True, settings=settings)
 
 
-@music_bp.route("/<int:community_id>/music/settings", methods=["PUT"])
+@music_bp.route("/<cuuid:community_id>/music/settings", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(UpdateMusicSettingsRequest)
 # NOT @validate_response -- update_music_settings() calls update_async then
@@ -242,7 +242,7 @@ async def update_music_settings(data: UpdateMusicSettingsRequest, community_id: 
     return jsonify_dto(MusicSettingsResponse(success=True, settings=settings))
 
 
-@music_bp.route("/<int:community_id>/music/providers", methods=["GET"])
+@music_bp.route("/<cuuid:community_id>/music/providers", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MusicProvidersResponse)
 async def get_providers(
@@ -266,7 +266,7 @@ async def get_providers(
     return MusicProvidersResponse(success=True, providers=providers)
 
 
-@music_bp.route("/<int:community_id>/music/providers/<provider>/oauth", methods=["POST"])
+@music_bp.route("/<cuuid:community_id>/music/providers/<provider>/oauth", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(StartOAuthRequest)
 @validate_response(StartOAuthResponse)
@@ -297,7 +297,7 @@ async def start_oauth(
     return StartOAuthResponse(success=True, authUrl=auth_url, stateToken=state_token)
 
 
-@music_bp.route("/<int:community_id>/music/providers/<provider>", methods=["DELETE"])
+@music_bp.route("/<cuuid:community_id>/music/providers/<provider>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def disconnect_provider(
@@ -321,7 +321,7 @@ async def disconnect_provider(
     return MessageResponse(success=True, message=f"{provider} provider disconnected")
 
 
-@music_bp.route("/<int:community_id>/music/radio-stations", methods=["GET"])
+@music_bp.route("/<cuuid:community_id>/music/radio-stations", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(RadioStationsResponse)
 async def get_radio_stations(
@@ -357,7 +357,7 @@ async def get_radio_stations(
     )
 
 
-@music_bp.route("/<int:community_id>/music/radio-stations", methods=["POST"])
+@music_bp.route("/<cuuid:community_id>/music/radio-stations", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(AddRadioStationRequest)
 # NOT @validate_response -- add_radio_station() calls insert_async then
@@ -392,7 +392,7 @@ async def add_radio_station(data: AddRadioStationRequest, community_id: int) -> 
     return jsonify_dto(RadioStationResponse(success=True, station=station), 201)
 
 
-@music_bp.route("/<int:community_id>/music/radio-stations/<int:station_id>", methods=["DELETE"])
+@music_bp.route("/<cuuid:community_id>/music/radio-stations/<int:station_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_radio_station(

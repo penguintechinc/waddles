@@ -18,6 +18,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.community_polls import polls_bp
 from services import community_engagement_proxy as proxy
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 
 
 @pytest.fixture
@@ -25,8 +26,9 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(polls_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(polls_bp)
     return quart_app
 
 
@@ -47,16 +49,17 @@ class TestScopeAndTenant:
     async def test_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/polls",
+            cpath(dal, "/api/v1/admin/{community_id}/polls", community_id),
             headers=auth_headers(scope="community.polls:write"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/polls", headers=auth_headers(scope="community.polls:read")
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/polls",
+            headers=auth_headers(scope="community.polls:read"),
         )
         assert response.status_code == 404
 
@@ -65,7 +68,7 @@ class TestProxyPassthrough:
     async def test_list_polls_forwards_to_engagement_service(
         self, client: Any, auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         captured: dict[str, Any] = {}
 
         async def fake_get_polls(cid: int, authorization: str | None) -> tuple[dict[str, Any], int]:
@@ -76,7 +79,7 @@ class TestProxyPassthrough:
         monkeypatch.setattr(proxy, "get_polls", fake_get_polls)
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/polls",
+            cpath(dal, "/api/v1/admin/{community_id}/polls", community_id),
             headers=auth_headers(scope="community.polls:read"),
         )
         assert response.status_code == 200
@@ -88,7 +91,7 @@ class TestProxyPassthrough:
     async def test_engagement_service_unavailable_returns_502(
         self, client: Any, auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
 
         async def fake_get_polls(cid: int, authorization: str | None) -> tuple[dict[str, Any], int]:
             return {"success": False, "error": "core-engagement unavailable"}, 502
@@ -96,7 +99,7 @@ class TestProxyPassthrough:
         monkeypatch.setattr(proxy, "get_polls", fake_get_polls)
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/polls",
+            cpath(dal, "/api/v1/admin/{community_id}/polls", community_id),
             headers=auth_headers(scope="community.polls:read"),
         )
         assert response.status_code == 502
@@ -104,7 +107,7 @@ class TestProxyPassthrough:
     async def test_get_single_poll_forwards(
         self, client: Any, auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
 
         async def fake_get_poll(
             cid: int, pid: int, authorization: str | None
@@ -113,7 +116,7 @@ class TestProxyPassthrough:
 
         monkeypatch.setattr(proxy, "get_poll", fake_get_poll)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/polls/5",
+            cpath(dal, "/api/v1/admin/{community_id}/polls/5", community_id),
             headers=auth_headers(scope="community.polls:read"),
         )
         assert response.status_code == 200
@@ -124,7 +127,7 @@ class TestProxyPassthrough:
     ) -> None:
         import json as json_module
 
-        _, community_id = community_db
+        dal, community_id = community_db
 
         async def fake_create_poll(
             cid: int, payload: dict[str, Any], authorization: str | None
@@ -133,7 +136,7 @@ class TestProxyPassthrough:
 
         monkeypatch.setattr(proxy, "create_poll", fake_create_poll)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/polls",
+            cpath(dal, "/api/v1/admin/{community_id}/polls", community_id),
             headers={
                 **auth_headers(scope="community.polls:write"),
                 "Content-Type": "application/json",
@@ -146,7 +149,7 @@ class TestProxyPassthrough:
     async def test_delete_poll_forwards(
         self, client: Any, auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
 
         async def fake_delete_poll(
             cid: int, pid: int, authorization: str | None
@@ -155,7 +158,7 @@ class TestProxyPassthrough:
 
         monkeypatch.setattr(proxy, "delete_poll", fake_delete_poll)
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/polls/5",
+            cpath(dal, "/api/v1/admin/{community_id}/polls/5", community_id),
             headers=auth_headers(scope="community.polls:write"),
         )
         assert response.status_code == 200

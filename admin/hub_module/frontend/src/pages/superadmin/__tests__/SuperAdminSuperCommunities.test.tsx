@@ -26,7 +26,7 @@ const api = vi.mocked(platformCommunitiesApi);
 
 const COMMUNITIES: PlatformCommunityDTO[] = [
   {
-    id: 1,
+    id: '00000001-0000-4000-8000-000000000000',
     name: 'penguins',
     displayName: 'Penguin Club',
     description: 'Waddle waddle',
@@ -37,7 +37,7 @@ const COMMUNITIES: PlatformCommunityDTO[] = [
     createdAt: '2026-02-03T12:00:00Z',
   },
   {
-    id: 2,
+    id: '00000002-0000-4000-8000-000000000000',
     name: null,
     displayName: null,
     description: null,
@@ -104,18 +104,18 @@ describe('SuperAdminSuperCommunities listing', () => {
   it('falls back to #id, dashes and Private/Inactive for sparse rows', async () => {
     mount();
     await screen.findByText('Penguin Club');
-    const sparse = rowOf('#2');
+    const sparse = rowOf('#00000002-0000-4000-8000-000000000000');
     expect(sparse.getAllByText('—')).toHaveLength(2);
     expect(sparse.getByText('Private')).toBeInTheDocument();
     expect(sparse.getByText('Inactive')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Edit 2' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Edit 00000002-0000-4000-8000-000000000000' })).toBeInTheDocument();
   });
 
   it('only offers Deactivate for active communities', async () => {
     mount();
     await screen.findByText('Penguin Club');
     expect(screen.getByRole('button', { name: 'Deactivate Penguin Club' })).toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Deactivate 2' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Deactivate 00000002-0000-4000-8000-000000000000' })).not.toBeInTheDocument();
   });
 
   it('shows the empty state', async () => {
@@ -192,7 +192,7 @@ describe('SuperAdminSuperCommunities edit', () => {
   });
 
   it('defaults blank fields for a sparse community', async () => {
-    const dialog = await openEdit('2');
+    const dialog = await openEdit('00000002-0000-4000-8000-000000000000');
     expect(dialog.getByLabelText('Display Name')).toHaveValue('');
     expect(dialog.getByLabelText('Description')).toHaveValue('');
     expect(dialog.getByLabelText('Active')).not.toBeChecked();
@@ -207,7 +207,7 @@ describe('SuperAdminSuperCommunities edit', () => {
     fireEvent.click(dialog.getByRole('button', { name: 'Save Changes' }));
 
     await waitFor(() =>
-      expect(api.update).toHaveBeenCalledWith(1, {
+      expect(api.update).toHaveBeenCalledWith('00000001-0000-4000-8000-000000000000', {
         displayName: 'Emperor Club',
         description: 'Bigger',
         isPublic: false,
@@ -271,7 +271,7 @@ describe('SuperAdminSuperCommunities deactivate', () => {
     fireEvent.change(dialog.getByLabelText('Reason (optional)'), { target: { value: 'abuse' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Deactivate Community' }));
 
-    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith(1, 'abuse'));
+    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith('00000001-0000-4000-8000-000000000000', 'abuse'));
     await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument());
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
@@ -280,7 +280,7 @@ describe('SuperAdminSuperCommunities deactivate', () => {
     const dialog = await openDeactivate();
     fireEvent.change(dialog.getByLabelText('Confirm community name'), { target: { value: 'penguins' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Deactivate Community' }));
-    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith(1, undefined));
+    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith('00000001-0000-4000-8000-000000000000', undefined));
   });
 
   it('shows Deactivating... while pending and stays open on failure', async () => {

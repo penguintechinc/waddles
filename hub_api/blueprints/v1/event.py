@@ -437,7 +437,11 @@ def _register(bp: Blueprint, routes: tuple[ProxyRoute, ...]) -> None:
             # ignore is needed or accepted (`warn_unused_ignores = true`).
             view = require_scope(route.scope)(view)
             view = tenant_middleware(view)
-        bp.route(route.rule, methods=[route.method], endpoint=route.name)(view)
+        # Client-facing community ids are public UUIDs: the app-level hook swaps the `cuuid`
+        # value for the numeric id, so `downstream_template.format(...)` still hands
+        # calendar-interaction the numeric id it expects.
+        rule = route.rule.replace("<community_id>", "<cuuid:community_id>")
+        bp.route(rule, methods=[route.method], endpoint=route.name)(view)
 
 
 _register(event_calendar_bp, _CALENDAR_ROUTES)

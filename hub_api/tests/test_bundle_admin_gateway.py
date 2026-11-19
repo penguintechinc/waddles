@@ -22,13 +22,14 @@ from blueprints.v1.bundle_admin_gateway import BLUEPRINTS
 from services import bundle_tool_transport as tt
 from services.bundle_install_dal import raw_sql_write
 from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v2
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import make_user_token, make_user_token_with_roles
 
 REPO = Path(__file__).resolve().parents[2]
 SVC_APP = "waddles.core.service.reputation"
 APP = "waddles.socials.demo.default"
-BASE = f"/api/v1/apps/community/%d/bundles/{APP}"
-SVC_BASE = f"/api/v1/apps/community/%d/bundles/{SVC_APP}"
+BASE = f"/api/v1/apps/community/%s/bundles/{APP}"
+SVC_BASE = f"/api/v1/apps/community/%s/bundles/{SVC_APP}"
 
 _SCORE = {
     "type": "object",
@@ -246,11 +247,13 @@ async def env(bundle_install_db: Any, install_dal: Any) -> dict[str, Any]:
         bundle_tool_transport=transport,
         rate_limiter=limiter,
     )
+    install_community_ids(quart_app, dal)
     for bp in BLUEPRINTS:
         quart_app.register_blueprint(bp)
     return {
         "app": quart_app,
         "cid": community_id,
+        "pid": public_id(dal, community_id),
         "transport": transport,
         "limiter": limiter,
         "dal": install_dal,
@@ -527,7 +530,7 @@ def test_canonical_args_is_deterministic() -> None:
 
 async def test_descriptor_lists_tools_and_permission(env: dict[str, Any]) -> None:
     c = env["app"].test_client()
-    r = await c.get(BASE % env["cid"] + "/admin", headers=_h(10))
+    r = await c.get(BASE % env["pid"] + "/admin", headers=_h(10))
     assert r.status_code == 200
     body = await r.get_json()
     tools = {t["name"]: t for t in body["tools"]}
@@ -537,14 +540,14 @@ async def test_descriptor_lists_tools_and_permission(env: dict[str, Any]) -> Non
 
 async def test_member_and_stranger_are_denied(env: dict[str, Any]) -> None:
     c = env["app"].test_client()
-    assert (await c.get(BASE % env["cid"] + "/admin", headers=_h(12))).status_code == 403
-    assert (await c.get(BASE % env["cid"] + "/admin", headers=_h(999))).status_code == 403
-    r = await c.get(BASE % env["cid"] + "/config", headers=_h(12))
+    assert (await c.get(BASE % env["pid"] + "/admin", headers=_h(12))).status_code == 403
+    assert (await c.get(BASE % env["pid"] + "/admin", headers=_h(999))).status_code == 403
+    r = await c.get(BASE % env["pid"] + "/config", headers=_h(12))
     assert r.status_code == 403
 
 
 async def test_config_default_save_conflict_history(env: dict[str, Any]) -> None:
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/config"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/config"
     first = await (await c.get(url, headers=_h(10))).get_json()
     assert first["version"] == 0 and first["config"] == {}
     r = await c.put(url, headers=_h(11), json={"config": {"greeting": "hi"}, "expectedVersion": 0})
@@ -570,7 +573,7 @@ async def test_config_default_save_conflict_history(env: dict[str, Any]) -> None
 async def test_config_validation_is_value_free_and_moderator_cannot_write(
     env: dict[str, Any],
 ) -> None:
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/config"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/config"
     r = await c.put(
         url,
         headers=_h(11),
@@ -588,7 +591,7 @@ async def test_config_validation_is_value_free_and_moderator_cannot_write(
 async def test_config_size_cap_and_save_race(
     env: dict[str, Any], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/config"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/config"
     big = await c.put(
         url,
         headers=_h(11),
@@ -617,11 +620,11 @@ async def test_config_size_cap_and_save_race(
 
 async def test_service_bundle_without_config_schema_is_404(env: dict[str, Any]) -> None:
     c = env["app"].test_client()
-    r = await c.get(SVC_BASE % env["cid"] + "/config", headers=_h(10))
+    r = await c.get(SVC_BASE % env["pid"] + "/config", headers=_h(10))
     assert r.status_code == 404
     assert (await r.get_json())["error"]["code"] == "bundle_has_no_config"
     r = await c.put(
-        SVC_BASE % env["cid"] + "/config", headers=_h(11), json={"config": {}, "expectedVersion": 0}
+        SVC_BASE % env["pid"] + "/config", headers=_h(11), json={"config": {}, "expectedVersion": 0}
     )
     assert r.status_code == 404
 
@@ -629,16 +632,16 @@ async def test_service_bundle_without_config_schema_is_404(env: dict[str, Any]) 
 async def test_inactive_bundle_and_bad_ids(env: dict[str, Any]) -> None:
     c = env["app"].test_client()
     r = await c.get(
-        f"/api/v1/apps/community/{env['cid']}/bundles/waddles.no.such.bundle/admin",
+        f"/api/v1/apps/community/{env['pid']}/bundles/waddles.no.such.bundle/admin",
         headers=_h(10),
     )
     assert r.status_code == 404
     assert (await r.get_json())["error"]["code"] == "bundle_not_active"
     assert (
-        await c.get(f"/api/v1/apps/community/{env['cid']}/bundles/Bad_ID/admin", headers=_h(10))
+        await c.get(f"/api/v1/apps/community/{env['pid']}/bundles/Bad_ID/admin", headers=_h(10))
     ).status_code == 400
-    assert (await c.get(BASE % 999_999 + "/admin", headers=_h(10))).status_code == 403
-    assert (await c.get(BASE % env["cid"] + "/admin")).status_code in (401, 403)
+    assert (await c.get(BASE % UNKNOWN_PUBLIC_ID + "/admin", headers=_h(10))).status_code == 403
+    assert (await c.get(BASE % env["pid"] + "/admin")).status_code in (401, 403)
 
 
 # ----------------------------------------------------------------------------- routes: tools
@@ -646,7 +649,7 @@ async def test_inactive_bundle_and_bad_ids(env: dict[str, Any]) -> None:
 
 async def test_admin_action_happy_path_audited_and_scoped(env: dict[str, Any]) -> None:
     env["transport"].reply = {"user": "u", "score": 5}
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/admin-actions/override"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/admin-actions/override"
     r = await c.post(url, headers=_h(11), json={"args": {"user": "u", "absolute_score": 5}})
     assert r.status_code == 200
     assert (await r.get_json())["result"] == {"user": "u", "score": 5}
@@ -667,7 +670,7 @@ async def test_admin_action_happy_path_audited_and_scoped(env: dict[str, Any]) -
 
 
 async def test_admin_action_authz_and_validation(env: dict[str, Any]) -> None:
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/admin-actions/override"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/admin-actions/override"
     good = {"args": {"user": "u", "absolute_score": 5}}
     assert (await c.post(url, headers=_h(10), json=good)).status_code == 403  # moderator < admin
     assert (await c.post(url, headers=_h(12), json=good)).status_code == 403
@@ -676,16 +679,16 @@ async def test_admin_action_authz_and_validation(env: dict[str, Any]) -> None:
     assert bad.status_code == 422
     assert "secretvalue" not in await bad.get_data(as_text=True)
     assert (
-        await c.post(BASE % env["cid"] + "/admin-actions/ghost", headers=_h(11), json={"args": {}})
+        await c.post(BASE % env["pid"] + "/admin-actions/ghost", headers=_h(11), json={"args": {}})
     ).status_code == 404
     # a `read`-kind tool is not invocable as an action, and vice versa
     assert (
-        await c.post(BASE % env["cid"] + "/admin-actions/board", headers=_h(11), json={"args": {}})
+        await c.post(BASE % env["pid"] + "/admin-actions/board", headers=_h(11), json={"args": {}})
     ).status_code == 404
-    assert (await c.get(BASE % env["cid"] + "/data/override", headers=_h(11))).status_code == 404
+    assert (await c.get(BASE % env["pid"] + "/data/override", headers=_h(11))).status_code == 404
     assert (
         await c.post(
-            BASE % env["cid"] + "/admin-actions/Bad-Name", headers=_h(11), json={"args": {}}
+            BASE % env["pid"] + "/admin-actions/Bad-Name", headers=_h(11), json={"args": {}}
         )
     ).status_code == 400
     too_big = await c.post(
@@ -695,7 +698,7 @@ async def test_admin_action_authz_and_validation(env: dict[str, Any]) -> None:
 
 
 async def test_admin_action_failure_mapping_and_bad_output(env: dict[str, Any]) -> None:
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/admin-actions/override"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/admin-actions/override"
     body = {"args": {"user": "u", "absolute_score": 5}}
     env["transport"].exc = tt.ToolTransportError(504, "bundle_tool_timeout", "slow")
     r = await c.post(url, headers=_h(11), json=body)
@@ -712,7 +715,7 @@ async def test_admin_action_failure_mapping_and_bad_output(env: dict[str, Any]) 
 
 async def test_data_view_pagination_pass_through(env: dict[str, Any]) -> None:
     env["transport"].reply = {"entries": [{"user": "u", "score": 1}], "next_cursor": "c2"}
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/data/board"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/data/board"
     r = await c.get(url + "?limit=500&cursor=c1&args=%7B%7D", headers=_h(10))
     assert r.status_code == 200
     body = await r.get_json()
@@ -727,7 +730,7 @@ async def test_data_view_pagination_pass_through(env: dict[str, Any]) -> None:
 async def test_data_view_own_tool_and_undeclared_paging(env: dict[str, Any]) -> None:
     env["transport"].reply = {"anything": 1}
     c = env["app"].test_client()
-    r = await c.get(SVC_BASE % env["cid"] + "/data/flat?limit=5&cursor=x", headers=_h(10))
+    r = await c.get(SVC_BASE % env["pid"] + "/data/flat?limit=5&cursor=x", headers=_h(10))
     assert r.status_code == 200
     body = await r.get_json()
     assert body["limit"] is None and body["nextCursor"] is None
@@ -736,26 +739,26 @@ async def test_data_view_own_tool_and_undeclared_paging(env: dict[str, Any]) -> 
 
 
 async def test_data_view_rejects_bad_query_and_write_tool(env: dict[str, Any]) -> None:
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/data/board"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/data/board"
     assert (await c.get(url + "?args=not-json", headers=_h(10))).status_code == 400
     assert (await c.get(url + "?args=%5B%5D", headers=_h(10))).status_code == 400
     assert (await c.get(url + "?limit=x", headers=_h(10))).status_code == 400
     assert (await c.get(url + "?args=" + "a" * 5000, headers=_h(10))).status_code == 413
-    r = await c.get(SVC_BASE % env["cid"] + "/data/wrongkind", headers=_h(11))
+    r = await c.get(SVC_BASE % env["pid"] + "/data/wrongkind", headers=_h(11))
     assert r.status_code == 502
     assert (await r.get_json())["error"]["code"] == "admin_tool_not_read"
 
 
 async def test_cross_bundle_target_must_be_active(env: dict[str, Any]) -> None:
     await env["dal"](env["dal"].app_active_versions.app_id == SVC_APP).delete()
-    r = await env["app"].test_client().get(BASE % env["cid"] + "/data/board", headers=_h(10))
+    r = await env["app"].test_client().get(BASE % env["pid"] + "/data/board", headers=_h(10))
     assert r.status_code == 404
     assert (await r.get_json())["error"]["code"] == "bundle_not_active"
 
 
 async def test_tenant_wide_activation_is_used(env: dict[str, Any]) -> None:
     await env["dal"](env["dal"].app_active_versions.app_id == APP).update(community_id=0)
-    r = await env["app"].test_client().get(BASE % env["cid"] + "/admin", headers=_h(10))
+    r = await env["app"].test_client().get(BASE % env["pid"] + "/admin", headers=_h(10))
     assert r.status_code == 200
 
 
@@ -766,7 +769,7 @@ async def test_platform_admin_bypass_holds_admin_scope(env: dict[str, Any]) -> N
         await env["app"]
         .test_client()
         .post(
-            BASE % env["cid"] + "/admin-actions/override",
+            BASE % env["pid"] + "/admin-actions/override",
             headers={"Authorization": f"Bearer {token}"},
             json={"args": {"user": "u", "absolute_score": 1}},
         )
@@ -776,7 +779,7 @@ async def test_platform_admin_bypass_holds_admin_scope(env: dict[str, Any]) -> N
 
 
 async def test_rate_limit_and_missing_limiter(env: dict[str, Any]) -> None:
-    c, url = env["app"].test_client(), BASE % env["cid"] + "/data/board"
+    c, url = env["app"].test_client(), BASE % env["pid"] + "/data/board"
     env["limiter"].allow = 1
     assert (await c.get(url, headers=_h(10))).status_code == 200
     r = await c.get(url, headers=_h(10))
@@ -793,7 +796,7 @@ async def test_default_transport_fails_loud_when_unconfigured(
 ) -> None:
     monkeypatch.delenv("BUNDLE_ADMIN_REQUEST_KEYS", raising=False)
     env["app"].config["bundle_tool_transport"] = None
-    r = await env["app"].test_client().get(BASE % env["cid"] + "/data/board", headers=_h(10))
+    r = await env["app"].test_client().get(BASE % env["pid"] + "/data/board", headers=_h(10))
     assert r.status_code == 503
     assert (await r.get_json())["error"]["code"] == "bundle_tool_transport_unconfigured"
 

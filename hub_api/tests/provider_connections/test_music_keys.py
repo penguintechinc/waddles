@@ -18,6 +18,7 @@ from blueprints.v1.provider_connections import SERVICE_CONFIG_KEY
 from services.provider_connections import PlatformKeyVault, ProviderConnectionService
 from services.provider_connections.errors import RefreshNotConfigured
 from services.provider_connections.registry import build_default_registry
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
 from tests.provider_connections.support import open_row, raw_rows
 from tests.provider_connections.test_resolve_v2 import _bound, _url
@@ -39,7 +40,7 @@ def music_service(pc_db: Any, pc_app: Quart, clock: FakeClock) -> ProviderConnec
 
 
 def _base(db: Any) -> str:
-    return f"/api/v1/communities/{db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, db.seed.community_id)}/provider-connections"
 
 
 def _sc(secret: str = SC_SECRET, client_id: str = SC_ID) -> dict[str, Any]:

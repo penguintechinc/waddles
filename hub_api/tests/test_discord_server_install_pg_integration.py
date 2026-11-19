@@ -41,6 +41,7 @@ from services.credential_resolver import (
 )
 from services.errors import ApiError
 from tests import demo_pg_support as pg
+from tests.community_ids import install_community_ids, public_id
 
 pytestmark = pytest.mark.skipif(
     not pg.DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
@@ -216,11 +217,23 @@ def client(adal: AsyncDAL, monkeypatch: pytest.MonkeyPatch, discord_edge: Any) -
     monkeypatch.setattr(pairing_bp_module, "feature_enabled", AsyncMock(return_value=True))
     app = Quart(__name__)
     QuartSchema(app)
-    app.register_blueprint(guild_pairing_bp)
-    app.register_blueprint(tenant_discord_install_bp)
     app.config["dal"] = adal.dal
     app.config["HUB_API_CONFIG"] = _config()
+    install_community_ids(app, adal.dal)
+    app.register_blueprint(guild_pairing_bp)
+    app.register_blueprint(tenant_discord_install_bp)
     return app.test_client()
+
+
+def _pid(client: Any, community_id: int) -> str:
+    """The community's public UUID (client routes take it, never the numeric id)."""
+    return str(
+        pg.scalar(
+            client.app.config["dal"],
+            "SELECT public_id::text FROM communities WHERE id=%s",
+            [community_id],
+        )
+    )
 
 
 async def _authorize(
@@ -228,7 +241,7 @@ async def _authorize(
 ) -> tuple[str, str]:
     """Start the flow; returns `(state, binding nonce)`."""
     response = await client.post(
-        f"/api/v1/communities/{community_id}/discord/server-install/authorize",
+        f"/api/v1/communities/{_pid(client, community_id)}/discord/server-install/authorize",
         headers={**auth_headers(scope=WRITE, user_id="1"), "Content-Type": "application/json"},
         data=json.dumps({"sync_enabled": sync_enabled}),
     )
@@ -291,7 +304,7 @@ class TestServerInstallCallback:
         response = await _callback(client, state, nonce, guild_id=GUILD)
         assert response.status_code == 302
         location = response.headers["Location"]
-        assert location.startswith(f"{FRONTEND}/admin/{community_id}/role-sync?")
+        assert location.startswith(f"{FRONTEND}/admin/{public_id(adal, community_id)}/role-sync?")
         assert "discord_server=paired" in location and f"guild_id={GUILD}" in location
 
         install = pg.q(
@@ -349,7 +362,7 @@ class TestServerInstallCallback:
     ) -> None:
         state, nonce = await _authorize(client, auth_headers, community_id)
         response = await _callback(client, state, nonce, guild_id=OTHER_GUILD)
-        assert f"/admin/{community_id}/role-sync" in response.headers["Location"]
+        assert f"/admin/{public_id(adal, community_id)}/role-sync" in response.headers["Location"]
         assert "reason=install_failed" in response.headers["Location"]
         assert _pairings(adal.dal, community_id) == []
 
@@ -359,7 +372,7 @@ class TestServerInstallCallback:
         state, nonce = await _authorize(client, auth_headers, community_id)
         response = await _callback(client, state, nonce, error="access_denied")
         assert "reason=cancelled" in response.headers["Location"]
-        assert f"/admin/{community_id}/role-sync" in response.headers["Location"]
+        assert f"/admin/{public_id(adal, community_id)}/role-sync" in response.headers["Location"]
         assert _pairings(adal.dal, community_id) == []
 
     async def test_readding_paired_server_is_idempotent(
@@ -375,7 +388,7 @@ class TestServerInstallCallback:
         self, client: Any, auth_headers: Any, community_id: int
     ) -> None:
         response = await client.post(
-            f"/api/v1/communities/{community_id}/discord/server-install/authorize",
+            f"/api/v1/communities/{_pid(client, community_id)}/discord/server-install/authorize",
             headers={**auth_headers(scope="community.guild_pairing:read", user_id="1")},
             data="{}",
         )
@@ -392,7 +405,7 @@ class TestServerInstallCallback:
 
         monkeypatch.setattr(svc, "DefaultCredentialResolver", Broken)
         response = await client.post(
-            f"/api/v1/communities/{community_id}/discord/server-install/authorize",
+            f"/api/v1/communities/{_pid(client, community_id)}/discord/server-install/authorize",
             headers={**auth_headers(scope=WRITE, user_id="1"), "Content-Type": "application/json"},
             data="{}",
         )
@@ -405,7 +418,7 @@ class TestManualPairById:
         self, client: Any, auth_headers: Any, cid: int, guild: str, scope: str = WRITE
     ) -> Any:
         return await client.post(
-            f"/api/v1/communities/{cid}/guild-pairings",
+            f"/api/v1/communities/{_pid(client, cid)}/guild-pairings",
             headers={**auth_headers(scope=scope, user_id="1"), "Content-Type": "application/json"},
             data=json.dumps({"discord_guild_id": guild, "sync_enabled": True}),
         )

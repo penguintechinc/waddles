@@ -49,12 +49,13 @@ ADMIN_TOKEN = {"scope": "community:admin tenant:admin", "user_id": "7"}
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 #: Inline routes that run no `tenant_middleware` in production: the audit hook must still
 #: attribute them to the caller's tenant chain from the verified JWT claim.
-_NO_TENANT_MIDDLEWARE_PREFIX = "/api/v1/admin/<community_id>/calendar/"
+_NO_TENANT_MIDDLEWARE_PREFIX = "/api/v1/admin/<cuuid:community_id>/calendar/"
 _INLINE_PARAMS = sorted(INLINE_AUTHZ_ROUTES.items())
 
 
 def _concrete(rule: str) -> str:
-    """Turn a URL rule into a concrete path (every converter becomes ``1``)."""
+    """Concrete path for a rule: `cuuid` becomes a UUID, every other converter `1`."""
+    rule = rule.replace("<cuuid:community_id>", "00000000-0000-4000-8000-000000000001")
     return re.sub(r"<[^>]+>", "1", rule)
 
 
@@ -120,9 +121,9 @@ class TestInlineAuthzCoverage:
     def test_named_sensitive_routes_are_audited(self) -> None:
         """The finding's examples: BYOK keys, stream keys, PATs, payout profile."""
         for key in (
-            ("PUT", "/api/v1/admin/<int:community_id>/ai/byok-keys"),
-            ("DELETE", "/api/v1/admin/<int:community_id>/ai/byok-keys/<provider>"),
-            ("POST", "/api/v1/admin/<int:community_id>/streams/key/regenerate"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/ai/byok-keys"),
+            ("DELETE", "/api/v1/admin/<cuuid:community_id>/ai/byok-keys/<provider>"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/streams/key/regenerate"),
             ("POST", "/api/v1/user/tokens/pat"),
             ("DELETE", "/api/v1/user/tokens/pat"),
             ("POST", "/api/v1/marketplace/vendor/profile"),
@@ -263,7 +264,7 @@ class TestInlineAuthzRoutesEmitAuditEvents:
     async def test_inline_refusal_is_an_authz_denial_not_a_success(
         self, inline_app: Quart, audit_dal: Any
     ) -> None:
-        method, rule = ("PUT", "/api/v1/admin/<int:community_id>/ai/byok-keys")
+        method, rule = ("PUT", "/api/v1/admin/<cuuid:community_id>/ai/byok-keys")
         headers = {**_auth(**ADMIN_TOKEN), "X-Force-Status": "403"}
         await _call(inline_app, method, rule, headers=headers)
         (event,) = await _events(audit_dal)

@@ -8,6 +8,9 @@ const request = require('supertest');
 const API_BASE_URL = global.TEST_CONFIG.API_BASE_URL;
 const ADMIN_USER = global.TEST_CONFIG.ADMIN_USER;
 
+// Community ids are public UUIDs on the API (never the numeric id).
+const PLACEHOLDER_COMMUNITY_UUID = '00000001-0000-4000-8000-000000000000';
+
 describe('Community API - /api/v1/communities', () => {
   let authToken;
   let testCommunityId;
@@ -41,7 +44,7 @@ describe('Community API - /api/v1/communities', () => {
   describe('GET /api/v1/communities/:id', () => {
     it('should return 404 for non-existent community', async () => {
       const response = await request(API_BASE_URL)
-        .get('/api/v1/communities/99999');
+        .get(`/api/v1/communities/${PLACEHOLDER_COMMUNITY_UUID}`);
 
       expect([404, 400]).toContain(response.status);
     });
@@ -106,7 +109,7 @@ describe('Community API - /api/v1/communities', () => {
   describe('PATCH /api/v1/communities/:id', () => {
     it('should reject update without authentication', async () => {
       const response = await request(API_BASE_URL)
-        .patch('/api/v1/communities/1')
+        .patch(`/api/v1/communities/${PLACEHOLDER_COMMUNITY_UUID}`)
         .send({
           display_name: 'Updated Name'
         });
@@ -131,7 +134,7 @@ describe('Community API - /api/v1/communities', () => {
   describe('GET /api/v1/communities/:id/members', () => {
     it('should return community members', async () => {
       const response = await request(API_BASE_URL)
-        .get('/api/v1/communities/1/members');
+        .get(`/api/v1/communities/${PLACEHOLDER_COMMUNITY_UUID}/members`);
 
       expect([200, 404]).toContain(response.status);
 
@@ -145,7 +148,7 @@ describe('Community API - /api/v1/communities', () => {
   describe('POST /api/v1/communities/:id/join', () => {
     it('should reject join without authentication', async () => {
       const response = await request(API_BASE_URL)
-        .post('/api/v1/communities/1/join');
+        .post(`/api/v1/communities/${PLACEHOLDER_COMMUNITY_UUID}/join`);
 
       expect([401, 403, 404]).toContain(response.status);
     });
@@ -154,7 +157,7 @@ describe('Community API - /api/v1/communities', () => {
   describe('POST /api/v1/communities/:id/leave', () => {
     it('should reject leave without authentication', async () => {
       const response = await request(API_BASE_URL)
-        .post('/api/v1/communities/1/leave');
+        .post(`/api/v1/communities/${PLACEHOLDER_COMMUNITY_UUID}/leave`);
 
       expect([401, 403, 404]).toContain(response.status);
     });

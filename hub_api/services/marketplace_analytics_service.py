@@ -25,6 +25,8 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from services.community_public_id import lookup_public_ids_sync
+
 _PERIOD_DAYS = {"7d": 7, "30d": 30, "90d": 90}
 
 
@@ -278,11 +280,12 @@ def get_community_drilldown(
             dal.marketplace_modules.id, dal.marketplace_modules.name
         )
     }
+    public_ids = lookup_public_ids_sync(dal, (r.community_id for r in page_rows))
     return {
         "rows": [
             {
                 "installationId": r.id,
-                "communityId": r.community_id,
+                "communityId": public_ids[int(r.community_id)],
                 "moduleId": r.module_id,
                 "moduleName": module_names.get(r.module_id),
                 "status": r.status,

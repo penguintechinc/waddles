@@ -406,19 +406,19 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/platform/users/<int:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_PLATFORM_USER_CHANGED
     ),
-    ("POST", "/api/v1/communities/<int:community_id>/join"): RouteAudit(
+    ("POST", "/api/v1/communities/<cuuid:community_id>/join"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<int:community_id>/members/<int:user_id>/role"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
-    ("POST", "/api/v1/admin/<int:community_id>/interaction/roles"): RouteAudit(
+    ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/roles"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<int:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("DELETE", "/api/v1/admin/<int:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
     # --- user administration ---
@@ -476,7 +476,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/tenant/<tenant_slug>/reputation/config"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_POLICY_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<int:community_id>/members/<int:user_id>/reputation"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>/reputation"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_OVERRIDDEN
     ),
 }
@@ -488,11 +488,11 @@ def _ra(category: AuditCategory, action: AuditAction) -> RouteAudit:
 
 
 _P = "/api/v1"
-_ADM = "/api/v1/admin/<int:community_id>"
-_ADMS = "/api/v1/admin/<community_id>"
-_CAL = "/api/v1/admin/<community_id>/calendar/events/<event_id>"
-_WF = "/api/v1/admin/<community_id>/workflows"
-_APPS = "/api/v1/apps/community/<int:community_id>"
+_ADM = "/api/v1/admin/<cuuid:community_id>"
+_ADMS = "/api/v1/admin/<cuuid:community_id>"
+_CAL = "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>"
+_WF = "/api/v1/admin/<cuuid:community_id>/workflows"
+_APPS = "/api/v1/apps/community/<cuuid:community_id>"
 
 #: Routes that authorize *inline* (a ``tenant_middleware`` + in-handler community/role check, or
 #: self-service ownership) instead of ``@require_scope``. ``require_scope`` publishes the
@@ -556,8 +556,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_CONNECTION_CHANGED),
         (
-            ("POST", f"{_P}/<community_id>/github-sync/connections"),
-            ("DELETE", f"{_P}/<community_id>/github-sync/connections/<connection_id>"),
+            ("POST", f"{_P}/<cuuid:community_id>/github-sync/connections"),
+            ("DELETE", f"{_P}/<cuuid:community_id>/github-sync/connections/<connection_id>"),
             ("POST", f"{_ADM}/music/providers/<provider>/oauth"),
             ("DELETE", f"{_ADM}/music/providers/<provider>"),
             ("POST", f"{_ADM}/streams/destinations"),
@@ -616,8 +616,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("POST", f"{_APPS}/activation"),
             ("DELETE", f"{_APPS}/activation/<app_id>"),
-            ("POST", f"{_P}/marketplace/community/<int:community_id>/bundles"),
-            ("DELETE", f"{_P}/marketplace/community/<int:community_id>/bundles/<app_id>"),
+            ("POST", f"{_P}/marketplace/community/<cuuid:community_id>/bundles"),
+            ("DELETE", f"{_P}/marketplace/community/<cuuid:community_id>/bundles/<app_id>"),
         ),
     ),
     (
@@ -635,8 +635,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.LICENSE, AuditAction.LICENSE_TOKEN_BALANCE_CHANGED),
         (
-            ("POST", f"{_P}/marketplace/communities/<int:community_id>/tokens/credit"),
-            ("POST", f"{_P}/marketplace/communities/<int:community_id>/tokens/debit"),
+            ("POST", f"{_P}/marketplace/communities/<cuuid:community_id>/tokens/credit"),
+            ("POST", f"{_P}/marketplace/communities/<cuuid:community_id>/tokens/debit"),
         ),
     ),
     (
@@ -722,18 +722,21 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         # used a JWT `require_scope`, which the generic admin-action rule covered).
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_ACTION),
         (
-            ("PUT", "/api/v1/admin/<int:community_id>/settings"),
-            ("DELETE", "/api/v1/admin/<int:community_id>/members/<int:user_id>"),
-            ("POST", "/api/v1/admin/<int:community_id>/temp-password"),
-            ("PUT", "/api/v1/admin/<int:community_id>/modules/<int:module_id>/config"),
-            ("POST", "/api/v1/admin/<int:community_id>/interaction/channels"),
-            ("PUT", "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>"),
-            ("DELETE", "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>"),
-            ("PUT", "/api/v1/admin/<int:community_id>/interaction/forum/posts/<int:post_id>"),
-            ("DELETE", "/api/v1/admin/<int:community_id>/interaction/forum/replies/<int:reply_id>"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/settings"),
+            ("DELETE", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/temp-password"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/modules/<int:module_id>/config"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/channels"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>"),
+            ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/forum/posts/<int:post_id>"),
+            (
+                "DELETE",
+                "/api/v1/admin/<cuuid:community_id>/interaction/forum/replies/<int:reply_id>",
+            ),
             (
                 "PUT",
-                "/api/v1/admin/<int:community_id>/interaction/channels/<int:channel_id>/permissions",
+                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>/permissions",
             ),
         ),
     ),
@@ -809,8 +812,8 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/github-sync/webhook"): _R_PUBLIC,
     ("POST", "/api/v1/marketplace/public/vendor/submit"): _R_PUBLIC,
     ("POST", "/api/v1/calendar/book/<slug>"): _R_PUBLIC,
-    ("DELETE", "/api/v1/admin/<community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
-    ("POST", "/api/v1/admin/<community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
+    ("DELETE", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
     ("DELETE", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
     ("DELETE", "/api/v1/calendar/booking-pages/<page_id>/members/<user_id>"): _R_SELF,
     ("DELETE", "/api/v1/calendar/bookings/<uuid>"): _R_SELF,
@@ -824,26 +827,26 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("PUT", "/api/v1/calendar/availability/weekly"): _R_SELF,
     ("PUT", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
     ("PUT", "/api/v1/user/profile"): _R_SELF,
-    ("POST", "/api/v1/<int:community_id>/join-requests"): _R_SELF,
-    ("POST", "/api/v1/<community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
-    ("POST", "/api/v1/admin/<community_id>/calendar/events/<event_id>/check-in"): _R_OPS,
+    ("POST", "/api/v1/<cuuid:community_id>/join-requests"): _R_SELF,
+    ("POST", "/api/v1/<cuuid:community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/check-in"): _R_OPS,
     (
         "POST",
-        "/api/v1/admin/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
+        "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
     ): _R_OPS,
     (
         "POST",
-        "/api/v1/admin/<community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel",
+        "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel",
     ): _R_OPS,
-    ("POST", "/api/v1/admin/<community_id>/workflows/<workflow_id>/test"): _R_OPS,
-    ("POST", "/api/v1/admin/<community_id>/workflows/validate"): _R_OPS,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/test"): _R_OPS,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/validate"): _R_OPS,
     ("POST", "/api/v1/admin/calendar/verify-ticket"): _R_OPS,
     (
         "POST",
-        "/api/v1/admin/<int:community_id>/support/my-tickets/<int:ticket_id>/comments",
+        "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments",
     ): _R_USAGE,
-    ("POST", "/api/v1/admin/<int:community_id>/support/submit"): _R_USAGE,
-    ("POST", "/api/v1/community/<int:community_id>/ai/completions"): _R_USAGE,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/support/submit"): _R_USAGE,
+    ("POST", "/api/v1/community/<cuuid:community_id>/ai/completions"): _R_USAGE,
 }
 
 #: Methods that change state; a scope-protected request using one is an auditable admin action.

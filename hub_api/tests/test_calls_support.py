@@ -39,6 +39,7 @@ from blueprints.v1.calls import calls_admin_bp, member_calls_bp, member_voice_bp
 from services.call_participants import identity_uuid
 from services.call_rooms import bind_call_rooms_table
 from services.calls_proxy import RoomsClient
+from tests.community_ids import cpath, install_community_ids
 from tests.conftest import (
     TENANT_SLUG,
     make_user_token,
@@ -487,12 +488,13 @@ def app(overlay_db: Any) -> Quart:
     """A standalone Quart app with both calls blueprints over the `overlay_db` fixture."""
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(calls_admin_bp)
-    quart_app.register_blueprint(member_voice_bp)
-    quart_app.register_blueprint(member_calls_bp)
     quart_app.config["dal"] = overlay_db.dal
     quart_app.config["async_dal"] = overlay_db
     dal = overlay_db.dal
+    install_community_ids(quart_app, dal)  # `cuuid` converter: must precede register_blueprint
+    quart_app.register_blueprint(calls_admin_bp)
+    quart_app.register_blueprint(member_voice_bp)
+    quart_app.register_blueprint(member_calls_bp)
     bind_call_rooms_table(dal, migrate=True)
     dal(dal.call_rooms).count()  # force table creation on this connection (as the other fixtures)
     # the migration's partial unique index: at most one Town Hall per community
@@ -545,7 +547,13 @@ async def join(client: Any, community_id: int, headers: dict[str, str], room: st
     if not dal((table.community_id == community_id) & (table.room_id == room)).count():
         record_room(client.app.config["async_dal"], community_id, room)
     response = await client.post(
-        f"/api/v1/community/{community_id}/interact/voice/rooms/{room}/join", headers=headers
+        cpath(
+            dal,
+            "/api/v1/community/{community_id}/interact/voice/rooms/{room}/join",
+            community_id,
+            room=room,
+        ),
+        headers=headers,
     )
     assert response.status_code == 200, await response.get_json()
     return response

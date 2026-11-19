@@ -43,7 +43,7 @@ components:
           type: string
         communityId:
           title: Communityid
-          type: integer
+          type: string
         config:
           additionalProperties: true
           title: Config
@@ -253,7 +253,7 @@ components:
           title: Archived At
         community_id:
           title: Community Id
-          type: integer
+          type: string
         content:
           title: Content
           type: string
@@ -1116,7 +1116,7 @@ components:
           title: Channel Name
         community_id:
           title: Community Id
-          type: integer
+          type: string
         content:
           title: Content
           type: string
@@ -1299,7 +1299,7 @@ components:
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           title: Isactive
           type: boolean
@@ -1354,7 +1354,7 @@ components:
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           title: Isactive
           type: boolean
@@ -1411,14 +1411,20 @@ components:
       title: CommunityDetailDTO
       type: object
     CommunityMembershipDTO:
-      description: Community membership DTO.
+      description: 'Community membership DTO.
+
+
+        `id` is the community''s PUBLIC UUID (`communities.public_id`), the only community
+
+        identifier that crosses the API boundary; use it verbatim in `/community/<id>/...`
+        URLs.'
       properties:
         displayName:
           title: Displayname
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         licenseTier:
           default: 1
           description: 'The community''s own tier: 1 Free, 2 Premium (no active allocation
@@ -1762,7 +1768,7 @@ components:
           title: Clientsecret
         communityId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Communityid
         configData:
@@ -2030,7 +2036,10 @@ components:
       title: DiscordStatsDTO
       type: object
     DistributionBundleDTO:
-      description: One bundle's `{entrypoint, config, spec}` for the requested stage.
+      description: 'One bundle''s `{entrypoint, config, spec}` for the requested stage.
+
+
+        `communityId` is the numeric internal id (machine endpoint, see module docstring).'
       properties:
         appId:
           title: Appid
@@ -2229,13 +2238,13 @@ components:
       - revokedAt
       title: GlobalInstallDTO
       type: object
-    GuildPairing:
-      description: One `guild_tenant_pairings` row -- the wire-shape DTO for blueprint/API
-        responses.
+    GuildPairingDTO:
+      description: 'Wire shape of one pairing: `community_id` is the community''s
+        PUBLIC UUID.'
       properties:
         community_id:
           title: Community Id
-          type: integer
+          type: string
         created_at:
           anyOf:
           - type: string
@@ -2284,7 +2293,7 @@ components:
       - created_by_user_id
       - created_at
       - updated_at
-      title: GuildPairing
+      title: GuildPairingDTO
       type: object
     HandDTO:
       description: One raised hand with the hub-api-resolved display name (UUIDs elsewhere).
@@ -2742,15 +2751,16 @@ components:
       - score
       title: KnowledgeSearchResultDTO
       type: object
-    KnowledgeSource:
-      description: Response DTO -- one `ai_knowledge_sources` row.
+    KnowledgeSourceDTO:
+      description: 'One knowledge source as exposed over the API: `community_id` is
+        the PUBLIC UUID.'
       properties:
         branch:
           title: Branch
           type: string
         community_id:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Community Id
         created_at:
@@ -2826,7 +2836,7 @@ components:
       - index_errors
       - created_at
       - updated_at
-      title: KnowledgeSource
+      title: KnowledgeSourceDTO
       type: object
     LeaderboardConfig:
       description: Community leaderboard configuration (admin-managed).
@@ -2960,7 +2970,7 @@ components:
           title: Actor
         community_id:
           title: Community Id
-          type: integer
+          type: string
         id:
           title: Id
           type: integer
@@ -3375,7 +3385,7 @@ components:
       properties:
         communityId:
           title: Communityid
-          type: integer
+          type: string
         config:
           additionalProperties: true
           title: Config
@@ -3444,7 +3454,7 @@ components:
           type: array
         communityId:
           title: Communityid
-          type: integer
+          type: string
         createdAt:
           anyOf:
           - type: string
@@ -4039,7 +4049,7 @@ components:
           title: Displayname
         id:
           title: Id
-          type: integer
+          type: string
         logoUrl:
           anyOf:
           - type: string
@@ -4094,7 +4104,7 @@ components:
           title: Displayname
         id:
           title: Id
-          type: integer
+          type: string
         joinMode:
           title: Joinmode
           type: string
@@ -4180,7 +4190,7 @@ components:
       properties:
         communityId:
           title: Communityid
-          type: integer
+          type: string
         createdAt:
           anyOf:
           - type: string
@@ -4244,7 +4254,7 @@ components:
           type: string
         id:
           title: Id
-          type: integer
+          type: string
         name:
           title: Name
           type: string
@@ -4580,13 +4590,13 @@ components:
       - ok
       title: RewrapDTO
       type: object
-    RoleMirrorMapping:
-      description: One `discord_role_mirror_mappings` row -- the wire-shape DTO for
-        API responses.
+    RoleMirrorMappingDTO:
+      description: 'Wire shape of one mirror mapping: `community_id` is the community''s
+        PUBLIC UUID.'
       properties:
         community_id:
           title: Community Id
-          type: integer
+          type: string
         created_at:
           anyOf:
           - type: string
@@ -4639,7 +4649,7 @@ components:
       - last_skipped_not_member
       - last_error
       - created_at
-      title: RoleMirrorMapping
+      title: RoleMirrorMappingDTO
       type: object
     RoleSyncBinding:
       description: One `community_role_sync_bindings` row -- the wire-shape DTO for
@@ -5320,7 +5330,7 @@ components:
           title: Displayname
         id:
           title: Id
-          type: integer
+          type: string
         logoUrl:
           anyOf:
           - type: string
@@ -6209,7 +6219,7 @@ components:
           type: integer
         community_id:
           title: Community Id
-          type: integer
+          type: string
         created_at:
           anyOf:
           - type: string
@@ -6390,7 +6400,7 @@ components:
           title: Appid
         communityId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Communityid
         events:
@@ -6759,7 +6769,8 @@ paths:
               properties:
                 communityId:
                   anyOf:
-                  - type: integer
+                  - format: uuid
+                    type: string
                   - type: 'null'
                   default: null
                   title: Communityid
@@ -6822,7 +6833,7 @@ paths:
                 properties:
                   sources:
                     items:
-                      $ref: '#/components/schemas/KnowledgeSource'
+                      $ref: '#/components/schemas/KnowledgeSourceDTO'
                     title: Sources
                     type: array
                   success:
@@ -6851,7 +6862,8 @@ paths:
                   type: string
                 community_id:
                   anyOf:
-                  - type: integer
+                  - format: uuid
+                    type: string
                   - type: 'null'
                   default: null
                   title: Community Id
@@ -6912,7 +6924,7 @@ paths:
                 description: Response body -- Knowledge Source.
                 properties:
                   source:
-                    $ref: '#/components/schemas/KnowledgeSource'
+                    $ref: '#/components/schemas/KnowledgeSourceDTO'
                   success:
                     title: Success
                     type: boolean
@@ -7022,7 +7034,7 @@ paths:
                 description: Response body -- Knowledge Source.
                 properties:
                   source:
-                    $ref: '#/components/schemas/KnowledgeSource'
+                    $ref: '#/components/schemas/KnowledgeSourceDTO'
                   success:
                     title: Success
                     type: boolean
@@ -7081,7 +7093,8 @@ paths:
               properties:
                 communityId:
                   anyOf:
-                  - type: integer
+                  - format: uuid
+                    type: string
                   - type: 'null'
                   default: null
                   title: Communityid
@@ -7401,7 +7414,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -7429,7 +7443,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -7503,7 +7518,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -7538,7 +7554,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -7610,7 +7627,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: provider
         required: true
@@ -7645,7 +7663,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -7660,7 +7679,7 @@ paths:
                     title: Byok Provider
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   on_insufficient_balance:
                     title: On Insufficient Balance
                     type: string
@@ -7688,7 +7707,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -7726,7 +7746,7 @@ paths:
                     title: Byok Provider
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   on_insufficient_balance:
                     title: On Insufficient Balance
                     type: string
@@ -7755,7 +7775,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -7789,7 +7810,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '201':
           content:
@@ -7818,7 +7840,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -7852,7 +7875,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -7885,7 +7909,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -7919,7 +7944,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -7953,7 +7979,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -7972,7 +7999,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -7991,7 +8019,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -8026,7 +8055,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -8060,7 +8090,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: announcement_id
         required: true
@@ -8094,7 +8125,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -8119,7 +8151,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -8151,7 +8184,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -8165,7 +8199,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -8193,6 +8228,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       responses:
         default:
@@ -8204,6 +8240,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       responses:
         default:
@@ -8216,6 +8253,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8232,6 +8270,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8248,6 +8287,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8265,6 +8305,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8281,6 +8322,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8298,6 +8340,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8319,6 +8362,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8341,6 +8385,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8358,6 +8403,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8375,6 +8421,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8392,6 +8439,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8409,6 +8457,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8426,6 +8475,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8443,6 +8493,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8460,6 +8511,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8477,6 +8529,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8493,6 +8546,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8510,6 +8564,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8527,6 +8582,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8543,6 +8599,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8560,6 +8617,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8581,6 +8639,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8603,6 +8662,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8620,6 +8680,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8637,6 +8698,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8653,6 +8715,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8670,6 +8733,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8692,6 +8756,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8714,6 +8779,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8736,6 +8802,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: event_id
@@ -8759,7 +8826,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -8790,7 +8858,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -8872,7 +8941,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -8906,7 +8976,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -8973,7 +9044,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9021,7 +9093,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9070,7 +9143,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9105,7 +9179,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9160,7 +9235,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9199,7 +9275,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9241,7 +9318,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9282,7 +9360,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9323,7 +9402,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9358,7 +9438,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -9413,7 +9494,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -9443,7 +9525,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -9475,7 +9558,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9488,7 +9572,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9502,7 +9587,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: form_id
         required: true
@@ -9520,7 +9606,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: form_id
         required: true
@@ -9539,7 +9626,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: form_id
         required: true
@@ -9558,7 +9646,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9571,7 +9660,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9585,7 +9675,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: channel_id
         required: true
@@ -9603,7 +9694,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: channel_id
         required: true
@@ -9622,7 +9714,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: channel_id
         required: true
@@ -9640,7 +9733,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: channel_id
         required: true
@@ -9659,7 +9753,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: post_id
         required: true
@@ -9678,7 +9773,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: reply_id
         required: true
@@ -9697,7 +9793,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9710,7 +9807,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9726,7 +9824,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: role_id
         required: true
@@ -9744,7 +9843,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: role_id
         required: true
@@ -9763,7 +9863,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9778,7 +9879,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9792,7 +9894,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9806,7 +9909,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9820,7 +9924,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9834,7 +9939,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9847,7 +9953,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9861,7 +9968,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: item_id
         required: true
@@ -9879,7 +9987,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: item_id
         required: true
@@ -9898,7 +10007,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: item_id
         required: true
@@ -9917,7 +10027,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: item_id
         required: true
@@ -9936,7 +10047,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9950,7 +10062,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9964,7 +10077,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9978,7 +10092,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10013,7 +10128,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: request_id
         required: true
@@ -10044,7 +10160,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: request_id
         required: true
@@ -10075,7 +10192,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10103,7 +10221,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -10117,7 +10236,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10142,7 +10262,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10174,7 +10295,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -10187,7 +10309,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -10202,7 +10325,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -10216,7 +10340,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -10242,7 +10367,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: platform_user_id
         required: true
@@ -10262,7 +10388,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -10277,7 +10404,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10316,7 +10444,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -10386,7 +10515,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: provider
         required: true
@@ -10422,7 +10552,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10457,7 +10588,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: user_id
         required: true
@@ -10506,7 +10638,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: user_id
         required: true
@@ -10551,7 +10684,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: user_id
         required: true
@@ -10599,7 +10733,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10631,7 +10766,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: module_id
         required: true
@@ -10687,7 +10823,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10719,7 +10856,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: provider
         required: true
@@ -10754,7 +10892,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: provider
         required: true
@@ -10806,7 +10945,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10840,7 +10980,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -10889,7 +11030,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: station_id
         required: true
@@ -10924,7 +11066,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -10952,7 +11095,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -11021,7 +11165,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11034,7 +11179,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -11078,7 +11224,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11091,7 +11238,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11105,7 +11253,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -11134,7 +11283,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -11216,7 +11366,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: instance_id
         required: true
@@ -11234,7 +11385,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: instance_id
         required: true
@@ -11314,7 +11466,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11329,7 +11482,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11343,7 +11497,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11358,7 +11513,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11371,7 +11527,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11385,7 +11542,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: poll_id
         required: true
@@ -11403,7 +11561,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: poll_id
         required: true
@@ -11422,7 +11581,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -11487,7 +11647,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -11501,7 +11662,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: event_type
         required: true
@@ -11519,7 +11681,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: event_type
         required: true
@@ -11538,7 +11701,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: event_type
         required: true
@@ -11558,7 +11722,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -11589,7 +11754,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -11609,7 +11775,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -11629,7 +11796,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -11657,7 +11825,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -11687,7 +11856,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -11779,7 +11949,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -11809,7 +11980,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -11920,7 +12092,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -11939,7 +12112,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -11983,7 +12157,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12002,7 +12177,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12035,7 +12211,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12055,7 +12232,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12093,7 +12271,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12133,7 +12312,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12169,7 +12349,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12194,7 +12375,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12214,7 +12396,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: server_id
         required: true
@@ -12248,7 +12431,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12282,7 +12466,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12347,7 +12532,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -12465,7 +12651,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12498,7 +12685,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12530,7 +12718,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: user_id
         required: true
@@ -12564,7 +12753,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: user_id
         required: true
@@ -12614,7 +12804,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12642,7 +12833,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -12717,7 +12909,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12745,7 +12938,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -12823,7 +13017,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12875,7 +13070,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -12906,7 +13102,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: creator_id
         required: true
@@ -12941,7 +13138,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12976,7 +13174,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -13009,7 +13208,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '201':
           content:
@@ -13045,7 +13245,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -13077,7 +13278,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '201':
           content:
@@ -13106,7 +13308,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: destination_id
         required: true
@@ -13141,7 +13344,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: destination_id
         required: true
@@ -13176,7 +13380,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -13211,7 +13416,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -13240,7 +13446,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13254,7 +13461,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13297,7 +13505,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: category_id
         required: true
@@ -13315,7 +13524,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: category_id
         required: true
@@ -13373,7 +13583,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13387,7 +13598,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: ticket_id
         required: true
@@ -13409,7 +13621,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: ticket_id
         required: true
@@ -13453,7 +13666,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13467,7 +13681,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13528,7 +13743,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13542,7 +13758,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: ticket_id
         required: true
@@ -13562,7 +13779,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: ticket_id
         required: true
@@ -13595,7 +13813,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: ticket_id
         required: true
@@ -13633,7 +13852,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: ticket_id
         required: true
@@ -13665,7 +13885,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: ticket_id
         required: true
@@ -13713,7 +13934,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13748,7 +13970,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13761,7 +13984,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13799,7 +14023,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: token_id
         required: true
@@ -13818,7 +14043,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13833,6 +14059,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       responses:
         default:
@@ -13846,6 +14073,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       responses:
         default:
@@ -13860,6 +14088,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       responses:
         default:
@@ -13874,6 +14103,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -13892,6 +14122,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -13910,6 +14141,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -13929,6 +14161,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -13948,6 +14181,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -13967,6 +14201,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -13991,6 +14226,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -14015,6 +14251,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -14034,6 +14271,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -14053,6 +14291,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -14071,6 +14310,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -14090,6 +14330,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: workflow_id
@@ -14142,7 +14383,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: user_id
         required: true
@@ -14161,7 +14403,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: user_id
         required: true
@@ -14312,7 +14555,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -14354,7 +14598,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -14409,7 +14654,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14450,7 +14696,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14535,7 +14782,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14587,7 +14835,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14655,7 +14904,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14712,7 +14962,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14790,7 +15041,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14827,7 +15079,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14883,7 +15136,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -14968,7 +15222,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -15031,7 +15286,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -15071,7 +15327,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -17113,7 +17370,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17124,7 +17382,7 @@ paths:
                 properties:
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   event_sync_enabled:
                     title: Event Sync Enabled
                     type: boolean
@@ -17163,7 +17421,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17174,7 +17433,7 @@ paths:
                 properties:
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   event_sync_enabled:
                     title: Event Sync Enabled
                     type: boolean
@@ -17208,7 +17467,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_id
         required: true
@@ -17276,7 +17536,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_id
         required: true
@@ -17319,7 +17580,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -17333,7 +17595,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: provider
         required: true
@@ -17362,7 +17625,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: provider
         required: true
@@ -17381,7 +17645,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17391,7 +17656,7 @@ paths:
                 properties:
                   mappings:
                     items:
-                      $ref: '#/components/schemas/RoleMirrorMapping'
+                      $ref: '#/components/schemas/RoleMirrorMappingDTO'
                     title: Mappings
                     type: array
                   success:
@@ -17413,7 +17678,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '201':
           content:
@@ -17422,7 +17688,7 @@ paths:
                 description: Single mirror-mapping response envelope.
                 properties:
                   mapping:
-                    $ref: '#/components/schemas/RoleMirrorMapping'
+                    $ref: '#/components/schemas/RoleMirrorMappingDTO'
                   success:
                     title: Success
                     type: boolean
@@ -17443,7 +17709,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: mapping_id
         required: true
@@ -17462,7 +17729,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17502,7 +17770,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17534,7 +17803,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -17603,7 +17873,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: connection_id
         required: true
@@ -17639,7 +17910,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: connection_id
         required: true
@@ -17677,7 +17949,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17687,7 +17960,7 @@ paths:
                 properties:
                   pairings:
                     items:
-                      $ref: '#/components/schemas/GuildPairing'
+                      $ref: '#/components/schemas/GuildPairingDTO'
                     title: Pairings
                     type: array
                   success:
@@ -17708,7 +17981,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '201':
           content:
@@ -17717,7 +17991,7 @@ paths:
                 description: Single-pairing response envelope.
                 properties:
                   pairing:
-                    $ref: '#/components/schemas/GuildPairing'
+                    $ref: '#/components/schemas/GuildPairingDTO'
                   success:
                     title: Success
                     type: boolean
@@ -17737,7 +18011,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: pairing_id
         required: true
@@ -17757,7 +18032,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: pairing_id
         required: true
@@ -17771,7 +18047,7 @@ paths:
                 description: Single-pairing response envelope.
                 properties:
                   pairing:
-                    $ref: '#/components/schemas/GuildPairing'
+                    $ref: '#/components/schemas/GuildPairingDTO'
                   success:
                     title: Success
                     type: boolean
@@ -17791,7 +18067,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: pairing_id
         required: true
@@ -17827,7 +18104,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: pairing_id
         required: true
@@ -17861,7 +18139,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: pairing_id
         required: true
@@ -17885,7 +18164,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -17899,7 +18179,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17957,7 +18238,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -17988,7 +18270,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -18067,7 +18350,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -18131,7 +18415,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: connection_id
         required: true
@@ -18168,7 +18453,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: connection_id
         required: true
@@ -18201,7 +18487,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: connection_id
         required: true
@@ -18280,7 +18567,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: connection_id
         required: true
@@ -18315,7 +18603,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -18347,7 +18636,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -18379,7 +18669,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: entity_id
         required: true
@@ -18413,7 +18704,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -18462,7 +18754,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -18681,7 +18974,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -18710,7 +19004,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -18816,7 +19111,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -18848,7 +19144,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -18883,7 +19180,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -18896,7 +19194,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -18910,7 +19209,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: post_id
         required: true
@@ -18929,7 +19229,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: channel_id
         required: true
@@ -18947,7 +19248,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: channel_id
         required: true
@@ -18966,7 +19268,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: channel_id
         required: true
@@ -18990,7 +19293,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -19021,7 +19325,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -19103,7 +19408,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -19203,7 +19509,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -19238,7 +19545,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -19276,7 +19584,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: room_name
         required: true
@@ -19311,7 +19620,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -19350,7 +19660,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -19389,7 +19700,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -19430,7 +19742,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -19444,7 +19757,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -19459,7 +19773,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -19474,7 +19789,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -19506,7 +19822,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -19538,7 +19855,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: entity_id
         required: true
@@ -21210,7 +21528,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -21223,7 +21542,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -21250,7 +21570,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: subscription_id
         required: true
@@ -21268,7 +21589,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: subscription_id
         required: true
@@ -21287,7 +21609,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -21302,7 +21625,7 @@ paths:
                     type: array
                   community_id:
                     title: Community Id
-                    type: integer
+                    type: string
                   success:
                     title: Success
                     type: boolean
@@ -21324,7 +21647,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -21427,7 +21751,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -21520,7 +21845,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -21565,7 +21891,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -21607,7 +21934,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -21658,7 +21986,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: app_id
         required: true
@@ -21701,7 +22030,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -21790,8 +22120,9 @@ paths:
               description: Request DTO for `POST /cancel`.
               properties:
                 communityId:
+                  format: uuid
                   title: Communityid
-                  type: integer
+                  type: string
                 immediately:
                   default: false
                   title: Immediately
@@ -21855,7 +22186,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -21877,8 +22209,9 @@ paths:
                   title: Cancelurl
                   type: string
                 communityId:
+                  format: uuid
                   title: Communityid
-                  type: integer
+                  type: string
                 provider:
                   default: stripe
                   title: Provider
@@ -22247,8 +22580,9 @@ paths:
                   title: Codeid
                   type: integer
                 communityId:
+                  format: uuid
                   title: Communityid
-                  type: integer
+                  type: string
                 subscriptionId:
                   title: Subscriptionid
                   type: integer
@@ -22652,8 +22986,11 @@ paths:
                 a username.
               properties:
                 communityId:
+                  anyOf:
+                  - format: uuid
+                    type: string
+                  - type: integer
                   title: Communityid
-                  type: integer
                 message:
                   title: Message
                   type: string
@@ -22811,7 +23148,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -22854,7 +23192,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -22867,7 +23206,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -23236,7 +23576,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -23269,7 +23610,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -23284,7 +23626,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -24160,7 +24503,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -24189,7 +24533,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -24223,7 +24568,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -24341,7 +24687,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -28166,6 +28513,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       responses:
         default:
@@ -28179,6 +28527,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       responses:
         default:
@@ -28193,6 +28542,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: connection_id
@@ -28212,6 +28562,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: ticket_id
@@ -28231,6 +28582,7 @@ paths:
         name: community_id
         required: true
         schema:
+          format: uuid
           type: string
       - in: path
         name: ticket_id
@@ -28250,7 +28602,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -28278,7 +28631,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:

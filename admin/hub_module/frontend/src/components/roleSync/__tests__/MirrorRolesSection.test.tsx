@@ -8,7 +8,7 @@ import { roleSyncApi, type GuildPairing, type RoleMirrorMapping } from '../../..
 
 const pairing = (id: number, guild: string): GuildPairing => ({
   id,
-  community_id: 7,
+  community_id: '00000007-0000-4000-8000-000000000000',
   discord_guild_id: guild,
   direction: 'bidirectional',
   sync_enabled: true,
@@ -23,7 +23,7 @@ const PAIRINGS = [pairing(1, '111'), pairing(2, '222')];
 
 const mapping = (over: Partial<RoleMirrorMapping> = {}): RoleMirrorMapping => ({
   id: 5,
-  community_id: 7,
+  community_id: '00000007-0000-4000-8000-000000000000',
   source_guild_id: '111',
   source_role_id: '10',
   target_guild_id: '222',
@@ -41,7 +41,7 @@ function renderSection(canManage = true, pairings = PAIRINGS) {
   const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   return render(
     <QueryClientProvider client={client}>
-      <MirrorRolesSection communityId={7} pairings={pairings} canManage={canManage} />
+      <MirrorRolesSection communityId={'00000007-0000-4000-8000-000000000000'} pairings={pairings} canManage={canManage} />
     </QueryClientProvider>,
   );
 }
@@ -107,7 +107,7 @@ describe('MirrorRolesSection', () => {
     expect((submit as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(submit);
     await waitFor(() =>
-      expect(create).toHaveBeenCalledWith(7, {
+      expect(create).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', {
         source_guild_id: '111',
         source_role_id: '10',
         target_guild_id: '222',
@@ -152,7 +152,7 @@ describe('MirrorRolesSection', () => {
     const del = vi.spyOn(roleSyncApi, 'deleteMirror').mockResolvedValue({} as never);
     renderSection();
     fireEvent.click(await screen.findByRole('button', { name: 'Delete mirror 5' }));
-    await waitFor(() => expect(del).toHaveBeenCalledWith(7, 5));
+    await waitFor(() => expect(del).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 5));
   });
 
   it('hides create form and delete buttons for non-admins', async () => {

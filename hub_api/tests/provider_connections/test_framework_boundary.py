@@ -23,6 +23,7 @@ from services.provider_connections.errors import (
     ResourceUnresolvable,
 )
 from services.provider_connections.twitch import TwitchAdapter
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
 from tests.provider_connections.fake_provider import FakeChatAdapter
 from tests.provider_connections.fake_twitch import FakeTwitch
@@ -181,7 +182,9 @@ class TestSecondProviderThroughHttp:
         assert fake["metadataFields"][0]["name"] == "room" and fake["refreshable"] is False
         assert fake["requiredScopes"] == ["read"] and fake["resourceType"] == "fake_room"
 
-        base = f"/api/v1/communities/{pc_db.seed.community_id}/provider-connections"
+        base = (
+            f"/api/v1/communities/{public_id(pc_db, pc_db.seed.community_id)}/provider-connections"
+        )
         created = await client.post(
             base,
             headers=admin_headers(pc_db),

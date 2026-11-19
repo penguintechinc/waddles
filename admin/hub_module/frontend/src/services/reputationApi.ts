@@ -30,7 +30,7 @@ export function parseReputationLeaderboard(data: unknown): ReputationEntry[] {
 }
 
 /** `GET /api/v1/community/:id/reputation/leaderboard`. */
-export async function fetchReputationLeaderboard(communityId: number, limit: number): Promise<ReputationEntry[]> {
+export async function fetchReputationLeaderboard(communityId: string, limit: number): Promise<ReputationEntry[]> {
   const { data } = await apiClient.get<unknown>(`/api/v1/community/${communityId}/reputation/leaderboard`, {
     params: { limit },
   });

@@ -30,6 +30,7 @@ import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
 from waddles.streaming.internal.v1 import rooms_pb2
 
 from blueprints.v1.calls import SCOPE_ADMIN, SCOPE_READ, SCOPE_WRITE
+from tests.community_ids import UNKNOWN_PUBLIC_ID, public_id
 from tests.conftest import (
     TENANT_SLUG,
     make_super_admin_token,
@@ -63,7 +64,7 @@ def _plain_member(overlay_db: Any, *, scope: str) -> tuple[dict[str, str], int]:
     return user_headers(overlay_db, scope=scope, role="community-member", user_id=702)
 
 
-#: (method, path_fn(cid), json_body) -- every admin route.
+#: (method, path_fn(community_uuid), json_body) -- every admin route.
 _ADMIN_ROUTES: tuple[tuple[str, Any, dict[str, Any] | None], ...] = (
     ("GET", lambda cid: f"/api/v1/admin/{cid}/calls/rooms", None),
     ("POST", lambda cid: f"/api/v1/admin/{cid}/calls/rooms", {"room_name": "room1"}),
@@ -97,7 +98,7 @@ _ADMIN_ROUTES: tuple[tuple[str, Any, dict[str, Any] | None], ...] = (
     ),
 )
 
-#: (method, path_fn(cid), json_body) -- every member-facing route.
+#: (method, path_fn(community_uuid), json_body) -- every member-facing route.
 _MEMBER_ROUTES: tuple[tuple[str, Any, dict[str, Any] | None], ...] = (
     ("GET", lambda cid: f"/api/v1/community/{cid}/interact/voice/rooms", None),
     ("POST", lambda cid: f"/api/v1/community/{cid}/interact/voice/rooms", {"room_name": "room1"}),
@@ -113,7 +114,7 @@ class TestAdminRouteAuth:
     async def test_admin_route_without_token_is_401(
         self, client: Any, method: str, path_fn: Any, body: dict[str, Any] | None
     ) -> None:
-        response = await client.open(path_fn(1), method=method, json=body)
+        response = await client.open(path_fn(UNKNOWN_PUBLIC_ID), method=method, json=body)
         assert response.status_code == 401
 
     @pytest.mark.parametrize("method,path_fn,body", _ADMIN_ROUTES)
@@ -129,7 +130,7 @@ class TestAdminRouteAuth:
         """A real, active membership with role='community-member' is still not an admin."""
         headers, community_id = _plain_member(overlay_db, scope=SCOPE_ADMIN)
         response = await client.open(
-            path_fn(community_id), method=method, headers=headers, json=body
+            path_fn(public_id(overlay_db, community_id)), method=method, headers=headers, json=body
         )
         assert response.status_code == 403
         assert fake.calls == []
@@ -154,7 +155,7 @@ class TestAdminRouteAuth:
         )
         headers = {"Authorization": f"Bearer {make_user_token(user_id=703, scope=SCOPE_ADMIN)}"}
         response = await client.open(
-            path_fn(community_id), method=method, headers=headers, json=body
+            path_fn(public_id(overlay_db, community_id)), method=method, headers=headers, json=body
         )
         assert response.status_code == 403
         assert fake.calls == []
@@ -172,7 +173,7 @@ class TestAdminRouteAuth:
         community_id = seed_community(overlay_db)
         token = make_user_token(user_id=999, scope=SCOPE_ADMIN)
         response = await client.open(
-            path_fn(community_id),
+            path_fn(public_id(overlay_db, community_id)),
             method=method,
             headers={"Authorization": f"Bearer {token}"},
             json=body,
@@ -186,7 +187,9 @@ class TestAdminRoutes:
         self, client: Any, overlay_db: Any, fake: FakeRooms
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
-        response = await client.get(f"/api/v1/admin/{community_id}/calls/rooms", headers=headers)
+        response = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms", headers=headers
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["success"] is True
@@ -202,7 +205,7 @@ class TestAdminRoutes:
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/calls/rooms",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms",
             headers=headers,
             json={"room_name": "room1", "max_participants": 8},
         )
@@ -220,7 +223,7 @@ class TestAdminRoutes:
         fake.fail["CreateRoom"] = (grpc.StatusCode.RESOURCE_EXHAUSTED, "limit reached: 100 rooms")
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/calls/rooms",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms",
             headers=headers,
             json={"room_name": "room1"},
         )
@@ -246,7 +249,8 @@ class TestAdminRoutes:
         fake.fail["GetRoom"] = (code, "x")
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}",
+            headers=headers,
         )
         assert response.status_code == http
 
@@ -256,7 +260,8 @@ class TestAdminRoutes:
         fake.fail["GetRoom"] = (grpc.StatusCode.UNAVAILABLE, "secret internal detail")
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}",
+            headers=headers,
         )
         assert response.status_code == 503
         body = await response.get_json()
@@ -270,17 +275,22 @@ class TestAdminRoutes:
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/calls/rooms/not-a-uuid", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/not-a-uuid",
+            headers=headers,
         )
         assert response.status_code == 400
         assert fake.calls == []
 
     async def test_get_and_delete_room(self, client: Any, overlay_db: Any, fake: FakeRooms) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
-        got = await client.get(f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}", headers=headers)
+        got = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}",
+            headers=headers,
+        )
         assert (await got.get_json())["room_id"] == ROOM
         deleted = await client.delete(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}",
+            headers=headers,
         )
         assert (await deleted.get_json())["message"] == "Room deleted"
         assert [c[0] for c in fake.calls] == ["GetRoom", "DeleteRoom"]
@@ -293,7 +303,8 @@ class TestAdminRoutes:
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}/{action}", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}/{action}",
+            headers=headers,
         )
         assert response.status_code == 200
         name, request, metadata = fake.calls[0]
@@ -308,7 +319,7 @@ class TestAdminRoutes:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         fake.seed_room(community_id)
         fake.seed_participant(community_id, PARTICIPANT)
-        base = f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}"
+        base = f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}"
         parts = await client.get(f"{base}/participants", headers=headers)
         assert (await parts.get_json())["participants"][0]["participant_id"] == PARTICIPANT
         kick = await client.post(f"{base}/kick", headers=headers, json={"identity": PARTICIPANT})
@@ -323,7 +334,7 @@ class TestAdminRoutes:
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}/kick",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}/kick",
             headers=headers,
             json={"identity": "some-username"},
         )
@@ -339,7 +350,7 @@ class TestAdminRoutes:
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}/{action}",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}/{action}",
             headers=headers,
             json={"identity": PARTICIPANT},
         )
@@ -361,7 +372,7 @@ class TestAdminRoutes:
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}/{action}",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}/{action}",
             headers=headers,
             json={"identity": "alice"},
         )
@@ -373,7 +384,8 @@ class TestAdminRoutes:
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}/mute-all", headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms/{ROOM}/mute-all",
+            headers=headers,
         )
         body = await response.get_json()
         assert (body["success"], body["muted"]) == (True, 2)
@@ -397,7 +409,7 @@ class TestFeatureFlag:
         _feature_enabled_default_on.return_value = False
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
         response = await client.open(
-            path_fn(community_id), method=method, headers=headers, json=body
+            path_fn(public_id(overlay_db, community_id)), method=method, headers=headers, json=body
         )
         assert response.status_code == 402
         error = (await response.get_json())["error"]
@@ -418,7 +430,7 @@ class TestFeatureFlag:
         _feature_enabled_default_on.return_value = False
         headers, community_id = _plain_member(overlay_db, scope=f"{SCOPE_READ} {SCOPE_WRITE}")
         response = await client.open(
-            path_fn(community_id), method=method, headers=headers, json=body
+            path_fn(public_id(overlay_db, community_id)), method=method, headers=headers, json=body
         )
         assert response.status_code == 402
         assert (await response.get_json())["error"]["code"] == "FEATURE_NOT_ENABLED"
@@ -432,7 +444,9 @@ class TestFeatureFlag:
         _feature_enabled_default_on: AsyncMock,
     ) -> None:
         headers, community_id = _owner(overlay_db, scope=SCOPE_ADMIN)
-        await client.get(f"/api/v1/admin/{community_id}/calls/rooms", headers=headers)
+        await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms", headers=headers
+        )
         _feature_enabled_default_on.assert_awaited_once()
         assert _feature_enabled_default_on.await_args.args == ("waddles.streaming.rtc",)
         assert _feature_enabled_default_on.await_args.kwargs == {"tenant": TENANT_SLUG}
@@ -448,7 +462,7 @@ class TestFeatureFlag:
         community_id = seed_community(overlay_db)
         token = make_user_token(user_id=999, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/calls/rooms",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -462,7 +476,7 @@ class TestMemberVoiceRoutes:
     async def test_member_route_without_token_is_401(
         self, client: Any, method: str, path_fn: Any, body: dict[str, Any] | None
     ) -> None:
-        response = await client.open(path_fn(1), method=method, json=body)
+        response = await client.open(path_fn(UNKNOWN_PUBLIC_ID), method=method, json=body)
         assert response.status_code == 401
 
     @pytest.mark.parametrize("method,path_fn,body", _MEMBER_ROUTES)
@@ -479,7 +493,7 @@ class TestMemberVoiceRoutes:
         community_id = seed_community(overlay_db)
         token = make_user_token(user_id=888, scope=f"{SCOPE_READ} {SCOPE_WRITE}")
         response = await client.open(
-            path_fn(community_id),
+            path_fn(public_id(overlay_db, community_id)),
             method=method,
             headers={"Authorization": f"Bearer {token}"},
             json=body,
@@ -489,7 +503,7 @@ class TestMemberVoiceRoutes:
 
     async def test_list_and_create(self, client: Any, overlay_db: Any, fake: FakeRooms) -> None:
         headers, community_id = _plain_member(overlay_db, scope=f"{SCOPE_READ} {SCOPE_WRITE}")
-        base = f"/api/v1/community/{community_id}/interact/voice/rooms"
+        base = f"/api/v1/community/{public_id(overlay_db, community_id)}/interact/voice/rooms"
         listed = await client.get(base, headers=headers)
         assert (await listed.get_json())["rooms"][0]["room_id"] == ROOM
         created = await client.post(base, headers=headers, json={"room_name": "chat"})
@@ -506,7 +520,8 @@ class TestMemberVoiceRoutes:
         seed_membership(overlay_db, community_id=community_id, user_id=42, role="community-member")
         token = make_user_token(user_id=42, scope=SCOPE_WRITE)
         response = await client.post(
-            f"/api/v1/community/{community_id}/interact/voice/rooms/{ROOM}/join",
+            f"/api/v1/community/{public_id(overlay_db, community_id)}"
+            f"/interact/voice/rooms/{ROOM}/join",
             headers={"Authorization": f"Bearer {token}"},
             json={"user_id": "9999-attacker-supplied", "participant_id": PARTICIPANT},
         )
@@ -534,7 +549,8 @@ class TestMemberVoiceRoutes:
         for uid in (42, 42, 43):
             token = make_user_token(user_id=uid, scope=SCOPE_WRITE)
             await client.post(
-                f"/api/v1/community/{community_id}/interact/voice/rooms/{ROOM}/join",
+                f"/api/v1/community/{public_id(overlay_db, community_id)}"
+                f"/interact/voice/rooms/{ROOM}/join",
                 headers={"Authorization": f"Bearer {token}"},
             )
             seen.append(fake.calls[-1][1].participant_id)
@@ -547,7 +563,9 @@ class TestMemberVoiceRoutes:
         headers, community_id = _plain_member(overlay_db, scope=SCOPE_WRITE)
         record_room(overlay_db, community_id)
         response = await client.post(
-            f"/api/v1/community/{community_id}/interact/voice/rooms/{ROOM}/join", headers=headers
+            f"/api/v1/community/{public_id(overlay_db, community_id)}"
+            f"/interact/voice/rooms/{ROOM}/join",
+            headers=headers,
         )
         assert response.status_code == 403
         assert (await response.get_json())["error"]["message"] == "forbidden: room is locked"
@@ -557,7 +575,9 @@ class TestMemberVoiceRoutes:
     ) -> None:
         headers, community_id = _plain_member(overlay_db, scope=SCOPE_WRITE)
         response = await client.post(
-            f"/api/v1/community/{community_id}/interact/voice/rooms/{ROOM}/leave", headers=headers
+            f"/api/v1/community/{public_id(overlay_db, community_id)}"
+            f"/interact/voice/rooms/{ROOM}/leave",
+            headers=headers,
         )
         assert response.status_code == 200
         _, request, _ = fake.calls[0]
@@ -573,7 +593,7 @@ class TestSuperAdminBypass:
         seed_super_admin(overlay_db, user_id=1)
         token = make_super_admin_token(user_id=1, scope=SCOPE_ADMIN)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/calls/rooms",
+            f"/api/v1/admin/{public_id(overlay_db, community_id)}/calls/rooms",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 200
@@ -585,7 +605,7 @@ class TestSuperAdminBypass:
         seed_super_admin(overlay_db, user_id=1)
         token = make_super_admin_token(user_id=1, scope=SCOPE_READ)
         response = await client.get(
-            f"/api/v1/community/{community_id}/interact/voice/rooms",
+            f"/api/v1/community/{public_id(overlay_db, community_id)}/interact/voice/rooms",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 200

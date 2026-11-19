@@ -28,6 +28,7 @@ from blueprints.v1.marketplace_billing import (
     subscriptions_bp,
 )
 from config import HubAPIConfig
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import insert_global_admin
 
 
@@ -64,6 +65,7 @@ def app(marketplace_billing_db: Any) -> Quart:
     dal, _tenant_id, _community_id = marketplace_billing_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(premium_bp)
     quart_app.register_blueprint(discount_bp)
     quart_app.register_blueprint(subscriptions_bp)
@@ -90,7 +92,7 @@ class TestPremiumStatusAndCancel:
         admin_id = _admin(dal)
         dal.commit()
         response = await client.get(
-            f"/api/v1/marketplace/premium/status/{community_id}",
+            f"/api/v1/marketplace/premium/status/{public_id(dal, community_id)}",
             headers=user_auth_headers(user_id=admin_id, scope="marketplace.premium:admin"),
         )
         assert response.status_code == 200
@@ -110,7 +112,8 @@ class TestPremiumStatusAndCancel:
                 **user_auth_headers(user_id=admin_id, scope="marketplace.premium:admin"),
                 "Content-Type": "application/json",
             },
-            data=b'{"communityId": %d, "immediately": false}' % community_id,
+            data=b'{"communityId": "%s", "immediately": false}'
+            % public_id(dal, community_id).encode(),
         )
         assert response.status_code == 404
 
@@ -145,7 +148,8 @@ class TestPremiumStatusAndCancel:
                 **user_auth_headers(user_id=admin_id, scope="marketplace.premium:admin"),
                 "Content-Type": "application/json",
             },
-            data=b'{"communityId": %d, "immediately": true}' % community_id,
+            data=b'{"communityId": "%s", "immediately": true}'
+            % public_id(dal, community_id).encode(),
         )
         assert response.status_code == 200
         assert called["sub_id"] == "sub_cancel_me"
@@ -172,8 +176,9 @@ class TestSubscribePremiumWithStripeMocked:
                 "Content-Type": "application/json",
             },
             data=(
-                b'{"communityId": %d, "provider": "stripe", '
-                b'"successUrl": "https://x/ok", "cancelUrl": "https://x/cancel"}' % community_id
+                b'{"communityId": "%s", "provider": "stripe", '
+                b'"successUrl": "https://x/ok", "cancelUrl": "https://x/cancel"}'
+                % public_id(dal, community_id).encode()
             ),
         )
         assert response.status_code == 200
@@ -202,8 +207,9 @@ class TestSubscribePremiumWithStripeMocked:
                 "Content-Type": "application/json",
             },
             data=(
-                b'{"communityId": %d, "provider": "stripe", '
-                b'"successUrl": "https://x/ok", "cancelUrl": "https://x/cancel"}' % community_id
+                b'{"communityId": "%s", "provider": "stripe", '
+                b'"successUrl": "https://x/ok", "cancelUrl": "https://x/cancel"}'
+                % public_id(dal, community_id).encode()
             ),
         )
         assert response.status_code == 502
@@ -382,7 +388,8 @@ class TestDiscountCodeCrudBlueprint:
                 **user_auth_headers(user_id=admin_id, scope="marketplace.discount:admin"),
                 "Content-Type": "application/json",
             },
-            data=b'{"codeId": 999999, "communityId": %d, "subscriptionId": 1}' % community_id,
+            data=b'{"codeId": 999999, "communityId": "%s", "subscriptionId": 1}'
+            % public_id(dal, community_id).encode(),
         )
         assert response.status_code == 409
 
@@ -406,13 +413,14 @@ class TestSubscriptionsBlueprint:
         headers_write = user_auth_headers(user_id=admin_id, scope="marketplace.subscription:write")
 
         empty = await client.get(
-            f"/api/v1/marketplace/communities/{community_id}/subscriptions", headers=headers_read
+            f"/api/v1/marketplace/communities/{public_id(dal, community_id)}/subscriptions",
+            headers=headers_read,
         )
         assert empty.status_code == 200
         assert (await empty.get_json())["total"] == 0
 
         subscribe_resp = await client.post(
-            f"/api/v1/marketplace/communities/{community_id}/subscriptions",
+            f"/api/v1/marketplace/communities/{public_id(dal, community_id)}/subscriptions",
             headers={**headers_write, "Content-Type": "application/json"},
             data=b'{"moduleId": %d}' % module_id,
         )
@@ -420,14 +428,16 @@ class TestSubscriptionsBlueprint:
         subscription_id = (await subscribe_resp.get_json())["subscription"]["id"]
 
         update_resp = await client.put(
-            f"/api/v1/marketplace/communities/{community_id}/subscriptions/{subscription_id}",
+            f"/api/v1/marketplace/communities/{public_id(dal, community_id)}"
+            f"/subscriptions/{subscription_id}",
             headers={**headers_write, "Content-Type": "application/json"},
             data=b'{"isEnabled": false}',
         )
         assert update_resp.status_code == 200
 
         delete_resp = await client.delete(
-            f"/api/v1/marketplace/communities/{community_id}/subscriptions/{subscription_id}",
+            f"/api/v1/marketplace/communities/{public_id(dal, community_id)}"
+            f"/subscriptions/{subscription_id}",
             headers=headers_write,
         )
         assert delete_resp.status_code == 200
@@ -439,7 +449,7 @@ class TestSubscriptionsBlueprint:
         admin_id = _admin(dal)
         dal.commit()
         response = await client.post(
-            f"/api/v1/marketplace/communities/{community_id}/subscriptions",
+            f"/api/v1/marketplace/communities/{public_id(dal, community_id)}/subscriptions",
             headers={
                 **user_auth_headers(user_id=admin_id, scope="marketplace.subscription:write"),
                 "Content-Type": "application/json",
@@ -719,3 +729,54 @@ class TestPaymentsBlueprint:
             data=b'{"provider": "stripe", "paymentId": "cs_owned"}',
         )
         assert response.status_code == 403
+
+
+class TestPremiumRequestCommunityIsPublicUuid:
+    """`communityId` request fields take the community UUID; numeric / unknown are refused."""
+
+    async def test_numeric_community_id_rejected_by_validation(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any
+    ) -> None:
+        dal, _t, community_id = marketplace_billing_db
+        admin_id = _admin(dal)
+        dal.commit()
+        response = await client.post(
+            "/api/v1/marketplace/premium/cancel",
+            headers={
+                **user_auth_headers(user_id=admin_id, scope="marketplace.premium:admin"),
+                "Content-Type": "application/json",
+            },
+            data=b'{"communityId": %d, "immediately": false}' % community_id,
+        )
+        assert response.status_code in (400, 422)
+
+    async def test_unknown_uuid_is_fenced_like_an_unknown_community(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any
+    ) -> None:
+        dal, _t, _c = marketplace_billing_db
+        admin_id = _admin(dal)
+        dal.commit()
+        response = await client.post(
+            "/api/v1/marketplace/premium/cancel",
+            headers={
+                **user_auth_headers(user_id=admin_id, scope="marketplace.premium:admin"),
+                "Content-Type": "application/json",
+            },
+            data=b'{"communityId": "00000000-0000-4000-8000-00000000dead", "immediately": false}',
+        )
+        assert response.status_code in (403, 404)
+
+    async def test_pricing_query_takes_uuid_and_ignores_numeric(
+        self, client: Any, marketplace_billing_db: Any
+    ) -> None:
+        dal, _t, community_id = marketplace_billing_db
+        by_uuid = await client.get(
+            f"/api/v1/marketplace/premium/pricing?communityId={public_id(dal, community_id)}"
+        )
+        assert by_uuid.status_code == 200
+        assert (await by_uuid.get_json())["seatCount"] is not None
+        numeric = await client.get(
+            f"/api/v1/marketplace/premium/pricing?communityId={community_id}"
+        )
+        assert numeric.status_code == 200
+        assert (await numeric.get_json())["seatCount"] is None

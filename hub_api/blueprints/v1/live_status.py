@@ -132,7 +132,7 @@ def _envelope(data: LiveStatusResponseDTO) -> Response:
     return response
 
 
-@live_status_public_bp.route("/communities/<int:community_id>/live", methods=["GET"])
+@live_status_public_bp.route("/communities/<cuuid:community_id>/live", methods=["GET"])
 @reads_from_replica("live_status.get_public_live_status")
 async def get_public_live_status(community_id: int) -> Any:
     """Unauthenticated, rate-limited read of one community's current live status.

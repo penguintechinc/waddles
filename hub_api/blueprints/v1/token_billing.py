@@ -36,6 +36,7 @@ from quart_schema import validate_request, validate_response
 
 from services import token_billing_service as svc
 from services.community_authz import authorize_community
+from services.community_public_id import lookup_public_id
 from services.errors import ApiError, bad_request
 from services.scope_registry import SCOPE_TOKEN_BILLING
 
@@ -106,7 +107,7 @@ class TokenBalancesResponse:
     """Response DTO for a community's token balances."""
 
     success: bool
-    community_id: int
+    community_id: str
     balances: list[TokenBalanceDTO]
 
 
@@ -152,7 +153,7 @@ class TokenTransactionDTO:
     """One ledger row."""
 
     id: int
-    community_id: int
+    community_id: str
     product_id: int
     product_key: str
     delta: int
@@ -257,7 +258,7 @@ async def list_token_products() -> TokenProductsResponse:
 # ---------------------------------------------------------------------------
 
 
-@tokens_bp.route("/<int:community_id>/tokens/balances", methods=["GET"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/balances", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(TokenBalancesResponse)
 async def get_balances(
@@ -272,7 +273,7 @@ async def get_balances(
         return _err(exc)
     return TokenBalancesResponse(
         success=True,
-        community_id=community_id,
+        community_id=await lookup_public_id(community_id),
         balances=[
             TokenBalanceDTO(
                 product_id=b.product_id,
@@ -287,7 +288,7 @@ async def get_balances(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/credit", methods=["POST"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/credit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(CreditTokensRequest)
 @validate_response(TokenLedgerResponse)
@@ -325,7 +326,7 @@ async def credit_tokens(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/debit", methods=["POST"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/debit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(DebitTokensRequest)
 @validate_response(TokenLedgerResponse)
@@ -362,7 +363,7 @@ async def debit_tokens(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/transactions", methods=["GET"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/transactions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(TokenTransactionsResponse)
 async def get_transactions(
@@ -411,12 +412,13 @@ async def get_transactions(
     except ApiError as exc:
         logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc)
         return _err(exc)
+    public_community_id = await lookup_public_id(community_id)
     return TokenTransactionsResponse(
         success=True,
         transactions=[
             TokenTransactionDTO(
                 id=r.id,
-                community_id=r.community_id,
+                community_id=public_community_id,
                 product_id=r.product_id,
                 product_key=r.product_key,
                 delta=r.delta,

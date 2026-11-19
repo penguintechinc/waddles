@@ -14,6 +14,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.community_forms import forms_bp
 from services import community_engagement_proxy as proxy
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 
 @pytest.fixture
@@ -21,6 +22,7 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(forms_bp)
     quart_app.config["dal"] = dal
     return quart_app
@@ -45,14 +47,26 @@ class TestScopeAndTenant:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/forms",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/forms",
             headers=auth_headers(scope="community.forms:write"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/forms", headers=auth_headers(scope="community.forms:read")
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/forms",
+            headers=auth_headers(scope="community.forms:read"),
+        )
+        assert response.status_code == 404
+
+    async def test_numeric_community_id_is_not_routed(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        """Community routes take the public UUID; the numeric id no longer matches `cuuid`."""
+        _, community_id = community_db
+        response = await client.get(
+            f"/api/v1/admin/{community_id}/forms",
+            headers=auth_headers(scope="community.forms:read"),
         )
         assert response.status_code == 404
 
@@ -71,7 +85,7 @@ class TestProxyPassthrough:
         monkeypatch.setattr(proxy, "get_form_submissions", fake_get_submissions)
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/forms/7/submissions",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/forms/7/submissions",
             headers=auth_headers(scope="community.forms:read"),
         )
         assert response.status_code == 200
@@ -88,7 +102,7 @@ class TestProxyPassthrough:
 
         monkeypatch.setattr(proxy, "get_forms", fake_get_forms)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/forms",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/forms",
             headers=auth_headers(scope="community.forms:read"),
         )
         assert response.status_code == 200
@@ -106,7 +120,7 @@ class TestProxyPassthrough:
 
         monkeypatch.setattr(proxy, "get_form", fake_get_form)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/forms/9",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/forms/9",
             headers=auth_headers(scope="community.forms:read"),
         )
         assert response.status_code == 200
@@ -126,7 +140,7 @@ class TestProxyPassthrough:
 
         monkeypatch.setattr(proxy, "create_form", fake_create_form)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/forms",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/forms",
             headers={
                 **auth_headers(scope="community.forms:write"),
                 "Content-Type": "application/json",
@@ -148,7 +162,7 @@ class TestProxyPassthrough:
 
         monkeypatch.setattr(proxy, "delete_form", fake_delete_form)
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/forms/9",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/forms/9",
             headers=auth_headers(scope="community.forms:write"),
         )
         assert response.status_code == 200

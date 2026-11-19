@@ -20,6 +20,10 @@ from quart import Quart
 
 from routers.v1 import register_v1
 from routers.v2 import register_v2
+from services.community_public_id import register_default_converter
+
+# `<cuuid:community_id>` rules must parse for any app that registers a v1 blueprint.
+register_default_converter()
 
 
 def register_blueprints(app: Quart) -> None:

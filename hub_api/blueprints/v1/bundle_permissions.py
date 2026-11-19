@@ -190,7 +190,7 @@ async def get_version_access_grants(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/access-grants", methods=["GET"]
+    "/community/<cuuid:community_id>/<app_id>/access-grants", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(AccessGrantsResponse)
@@ -276,7 +276,7 @@ async def restrict_permissions(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/permissions/grant", methods=["POST"]
+    "/community/<cuuid:community_id>/<app_id>/permissions/grant", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_request(GrantPermissionsRequest)
@@ -325,7 +325,7 @@ async def grant_permissions(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/permissions/<permission_id>", methods=["DELETE"]
+    "/community/<cuuid:community_id>/<app_id>/permissions/<permission_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(GrantVersionResponse)
@@ -372,7 +372,7 @@ async def revoke_permission(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/permissions/granted", methods=["GET"]
+    "/community/<cuuid:community_id>/<app_id>/permissions/granted", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(PermissionListResponse)

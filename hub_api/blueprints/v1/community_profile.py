@@ -32,6 +32,7 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import community_profile_service as svc
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id, get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request
@@ -55,7 +56,7 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 class CommunityProfileDTO:
     """Community profile DTO -- matches Node's `formatCommunity()` shape (camelCase)."""
 
-    id: int
+    id: str
     name: str
     displayName: str | None
     description: str | None
@@ -119,9 +120,10 @@ class SimpleSuccessResponse:
     success: bool
 
 
-def _to_dto(profile: svc.CommunityProfile) -> CommunityProfileDTO:
+async def _to_dto(profile: svc.CommunityProfile) -> CommunityProfileDTO:
+    """Profile DTO; `id` is the community's PUBLIC UUID (never the numeric id)."""
     return CommunityProfileDTO(
-        id=profile.id,
+        id=await lookup_public_id(profile.id),
         name=profile.name,
         displayName=profile.display_name,
         description=profile.description,
@@ -142,7 +144,7 @@ def _to_dto(profile: svc.CommunityProfile) -> CommunityProfileDTO:
     )
 
 
-@community_profile_bp.route("/public/communities/<int:community_id>/profile", methods=["GET"])
+@community_profile_bp.route("/public/communities/<cuuid:community_id>/profile", methods=["GET"])
 # Pre-auth-shaped (matches Node's `optionalAuth` middleware): an absent
 # bearer token is a valid "anonymous viewer" state, not a 401 -- so no
 # `@tenant_middleware` here. `get_optional_current_user_id` still resolves
@@ -155,13 +157,11 @@ async def get_community_profile(community_id: int) -> tuple[Any, int]:
         async_dal, dal, community_id=community_id, viewer_id=viewer_id
     )
     if profile is None:
-        return cast(
-            "tuple[Any, int]", error_response("Community not found", 404, "NOT_FOUND")
-        )
-    return jsonify_dto(CommunityProfileResponse(success=True, community=_to_dto(profile)))
+        return cast("tuple[Any, int]", error_response("Community not found", 404, "NOT_FOUND"))
+    return jsonify_dto(CommunityProfileResponse(success=True, community=await _to_dto(profile)))
 
 
-@community_profile_bp.route("/admin/<int:community_id>/profile", methods=["PUT"])
+@community_profile_bp.route("/admin/<cuuid:community_id>/profile", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(UpdateCommunityProfileRequest)
 # NOT @validate_response -- update_community_profile() awaits update_async()
@@ -191,10 +191,10 @@ async def update_community_profile(
         )
     except ApiError as exc:
         return _err(exc)
-    return jsonify_dto(CommunityProfileResponse(success=True, community=_to_dto(profile)))
+    return jsonify_dto(CommunityProfileResponse(success=True, community=await _to_dto(profile)))
 
 
-@community_profile_bp.route("/admin/<int:community_id>/logo", methods=["POST"])
+@community_profile_bp.route("/admin/<cuuid:community_id>/logo", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(LogoResponse)
 async def upload_community_logo(community_id: int) -> LogoResponse | tuple[dict[str, object], int]:
@@ -222,7 +222,7 @@ async def upload_community_logo(community_id: int) -> LogoResponse | tuple[dict[
     return LogoResponse(success=True, logoUrl=logo_url)
 
 
-@community_profile_bp.route("/admin/<int:community_id>/logo", methods=["DELETE"])
+@community_profile_bp.route("/admin/<cuuid:community_id>/logo", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def delete_community_logo(
@@ -238,7 +238,7 @@ async def delete_community_logo(
     return SimpleSuccessResponse(success=True)
 
 
-@community_profile_bp.route("/admin/<int:community_id>/banner", methods=["POST"])
+@community_profile_bp.route("/admin/<cuuid:community_id>/banner", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(BannerResponse)
 async def upload_community_banner(
@@ -268,7 +268,7 @@ async def upload_community_banner(
     return BannerResponse(success=True, bannerUrl=banner_url)
 
 
-@community_profile_bp.route("/admin/<int:community_id>/banner", methods=["DELETE"])
+@community_profile_bp.route("/admin/<cuuid:community_id>/banner", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def delete_community_banner(

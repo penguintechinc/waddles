@@ -54,7 +54,7 @@ export default function SuperAdminSuperCommunities() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, payload }: { id: number; payload: UpdatePlatformCommunityPayload }) =>
+    mutationFn: ({ id, payload }: { id: string; payload: UpdatePlatformCommunityPayload }) =>
       platformCommunitiesApi.update(id, payload),
     onSuccess: () => {
       console.debug('[SuperCommunities] UpdateCommunity success');
@@ -67,7 +67,7 @@ export default function SuperAdminSuperCommunities() {
   });
 
   const deactivateMutation = useMutation({
-    mutationFn: ({ id, reason }: { id: number; reason: string }) =>
+    mutationFn: ({ id, reason }: { id: string; reason: string }) =>
       platformCommunitiesApi.deactivate(id, reason || undefined),
     onSuccess: () => {
       console.debug('[SuperCommunities] DeactivateCommunity success');

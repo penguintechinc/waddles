@@ -62,6 +62,7 @@ from quart_schema import validate_response
 from services import event_discord_sync_service as sync_svc
 from services import guild_pairing as pairing_svc
 from services.community_common import community_in_tenant, is_valid_service_key
+from services.community_public_id import lookup_public_id
 from services.errors import ApiError, bad_request, not_found, payment_required
 from services.schema import bind_calendar_sync_tables
 
@@ -85,18 +86,19 @@ class EventSyncStateResponse:
     """Community-wide event-sync state: how many paired guilds have it on."""
 
     success: bool
-    community_id: int
+    community_id: str
     event_sync_enabled: bool
     pairings_total: int
     pairings_enabled: int
 
 
-def _sync_state(community_id: int) -> EventSyncStateResponse:
+async def _sync_state(community_id: int) -> EventSyncStateResponse:
+    """Sync-state DTO; `community_id` is the community's PUBLIC UUID."""
     pairings = pairing_svc.list_pairings(_dal(), community_id)
     enabled = sum(1 for p in pairings if p.event_sync_enabled)
     return EventSyncStateResponse(
         success=True,
-        community_id=community_id,
+        community_id=await lookup_public_id(community_id),
         event_sync_enabled=bool(pairings) and enabled == len(pairings),
         pairings_total=len(pairings),
         pairings_enabled=enabled,
@@ -115,7 +117,7 @@ async def _admin_gate(community_id: int) -> tuple[dict[str, object], int] | None
 
 
 @event_discord_sync_admin_bp.route(
-    "/communities/<int:community_id>/calendar/event-sync", methods=["GET"]
+    "/communities/<cuuid:community_id>/calendar/event-sync", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
@@ -127,11 +129,11 @@ async def get_event_sync(
     gate_error = await _admin_gate(community_id)
     if gate_error is not None:
         return gate_error
-    return _sync_state(community_id)
+    return await _sync_state(community_id)
 
 
 @event_discord_sync_admin_bp.route(
-    "/communities/<int:community_id>/calendar/event-sync", methods=["PUT"]
+    "/communities/<cuuid:community_id>/calendar/event-sync", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
@@ -175,7 +177,7 @@ async def put_event_sync(
             exc_info=exc.status_code >= 500,
         )
         return _err(exc)
-    return _sync_state(community_id)
+    return await _sync_state(community_id)
 
 
 #: `action` values this endpoint accepts -- mirrors `event_discord_sync_service.sync_event`'s own.

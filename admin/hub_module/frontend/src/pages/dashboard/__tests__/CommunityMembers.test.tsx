@@ -20,7 +20,7 @@ vi.mock('../../../lib/unservedFeatures', async (importOriginal) => {
   return { ...actual, isFeatureServed: vi.fn(actual.isFeatureServed) };
 });
 
-const me = (role: string, id = 7) => ({
+const me = (role: string, id = '00000007-0000-4000-8000-000000000000') => ({
   success: true,
   user: { id: 1, communities: [{ id, name: 'acme', displayName: 'Acme', role }] },
 });
@@ -43,7 +43,7 @@ const roster = (members: unknown[], pagination: Record<string, unknown> = {}) =>
   pagination: { page: 1, limit: 25, total: members.length, totalPages: 1, ...pagination },
 });
 
-function renderPage(route = '/dashboard/community/7/members') {
+function renderPage(route = '/dashboard/community/00000007-0000-4000-8000-000000000000/members') {
   return renderWithProviders(<CommunityMembers />, { route, path: '/dashboard/community/:id/members' });
 }
 
@@ -57,7 +57,7 @@ describe('CommunityMembers', () => {
   it('lists the roster for an admin from the served admin route, without carrying emails', async () => {
     const get = mockApiGet((url) => {
       if (url === '/api/v1/auth/me') return me('community-admin');
-      if (url === '/api/v1/admin/7/members') return roster([member(1, { role: 'community-owner' }), member(2)]);
+      if (url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/members') return roster([member(1, { role: 'community-owner' }), member(2)]);
       return unexpectedUrl(url);
     });
     const { container } = renderPage();
@@ -67,8 +67,8 @@ describe('CommunityMembers', () => {
     expect(within(rows[0]!).getByText('Owner')).toBeInTheDocument();
     expect(within(rows[0]!).getByText('Joined Jan 5, 2026')).toBeInTheDocument();
     expect(screen.getByText('2 members in this community')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/admin/7/members', { params: { page: 1, limit: 25 } });
-    expect(get.mock.calls.map(([url]) => url)).not.toContain('/api/v1/communities/7/members');
+    expect(get).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/members', { params: { page: 1, limit: 25 } });
+    expect(get.mock.calls.map(([url]) => url)).not.toContain('/api/v1/communities/00000007-0000-4000-8000-000000000000/members');
     expect(container.textContent).not.toContain('@example.test');
     // Member profiles are not served yet, so rows must not be links into a dead page.
     expect(within(rows[0]!).queryByRole('link')).not.toBeInTheDocument();
@@ -93,7 +93,7 @@ describe('CommunityMembers', () => {
 
   it('lets a super admin who is not a member see the roster', async () => {
     auth.isSuperAdmin = true;
-    mockApiGet((url) => (url === '/api/v1/auth/me' ? me('member', 99) : roster([member(1)])));
+    mockApiGet((url) => (url === '/api/v1/auth/me' ? me('member', '00000063-0000-4000-8000-000000000000') : roster([member(1)])));
     renderPage();
     expect(await screen.findByText('member1')).toBeInTheDocument();
   });
@@ -104,13 +104,13 @@ describe('CommunityMembers', () => {
     await screen.findByText('member1');
     fireEvent.click(screen.getByRole('button', { name: 'Moderators' }));
     await waitFor(() =>
-      expect(get).toHaveBeenCalledWith('/api/v1/admin/7/members', { params: { page: 1, limit: 25, role: 'moderator' } }),
+      expect(get).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/members', { params: { page: 1, limit: 25, role: 'moderator' } }),
     );
     expect(screen.getByRole('button', { name: 'Moderators' })).toHaveAttribute('aria-pressed', 'true');
     fireEvent.change(screen.getByRole('searchbox', { name: 'Search by username' }), { target: { value: ' ann ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Search' }));
     await waitFor(() =>
-      expect(get).toHaveBeenCalledWith('/api/v1/admin/7/members', { params: { page: 1, limit: 25, search: 'ann', role: 'moderator' } }),
+      expect(get).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/members', { params: { page: 1, limit: 25, search: 'ann', role: 'moderator' } }),
     );
   });
 
@@ -125,7 +125,7 @@ describe('CommunityMembers', () => {
     expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(await screen.findByText('Page 2 of 2')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/admin/7/members', { params: { page: 2, limit: 25 } });
+    expect(get).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/members', { params: { page: 2, limit: 25 } });
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
   });
 

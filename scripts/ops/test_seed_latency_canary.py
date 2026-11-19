@@ -19,6 +19,8 @@ sys.modules["seed_latency_canary"] = (
 _SPEC.loader.exec_module(mod)
 
 GUILD = "1234567890123456789"
+UUID_11 = "11111111-1111-4111-8111-111111111111"
+UUID_42 = "42424242-4242-4242-8242-424242424242"
 
 
 class FakeHub:
@@ -39,7 +41,7 @@ class FakeHub:
         self.no_schema: set[str] = set()
         self.ignore_put = False
         if community:
-            self.communities.append({"id": 11, "platformServerId": GUILD})
+            self.communities.append({"id": UUID_11, "platformServerId": GUILD})
 
     def __call__(self, method: str, path: str, body):
         self.calls.append((method, path))
@@ -47,8 +49,8 @@ class FakeHub:
             return 200, {"communities": self.communities}
         if path == "/api/v1/superadmin/communities" and method == "POST":
             assert body["platformServerId"] == GUILD and body["isPublic"] is False
-            self.communities.append({"id": 42, "platformServerId": GUILD})
-            return 201, {"community": {"id": 42}}
+            self.communities.append({"id": UUID_42, "platformServerId": GUILD})
+            return 201, {"community": {"id": UUID_42}}
         if "/bundles/" in path and path.endswith("/config"):
             app_id = path.split("/bundles/")[1].rsplit("/", 1)[0]
             if app_id in self.inactive_cfg:
@@ -79,7 +81,7 @@ class FakeHub:
 def test_fresh_seed_creates_activates_ping_and_verifies() -> None:
     hub = FakeHub()
     res = mod.seed(hub, GUILD, dry_run=False)
-    assert (res.community_id, res.created, res.ping_activated) == (42, True, True)
+    assert (res.community_id, res.created, res.ping_activated) == (UUID_42, True, True)
     assert hub.active == [mod.PING_APP_ID]
     assert res.examined == 1
     # Accrual is switched off on all three reputation/economy bundles, verified by read-back.
@@ -101,7 +103,7 @@ def test_rerun_is_idempotent_and_deactivates_denied_bundles() -> None:
         community=True,
     )
     res = mod.seed(hub, GUILD, dry_run=False)
-    assert res.community_id == 11 and not res.created and not res.ping_activated
+    assert res.community_id == UUID_11 and not res.created and not res.ping_activated
     assert set(res.deactivated) == {"waddles.fun.loyalty", "waddles.fun.jackpot"}
     assert sorted(hub.active) == sorted(
         [mod.PING_APP_ID, "waddles.core.service.economy", "waddles.fun.roll"]
@@ -197,7 +199,7 @@ def test_main_requires_confirmation_token_and_snowflake(monkeypatch, capsys) -> 
     )
     out = capsys.readouterr()
     assert (
-        "community_id=42" in out.out and "s3cret-token-value" not in out.out + out.err
+        f"community_id={UUID_42}" in out.out and "s3cret-token-value" not in out.out + out.err
     )
 
 
@@ -264,3 +266,19 @@ def test_dry_run_flags_pending_accrual_change_without_writing() -> None:
     with pytest.raises(RuntimeError, match="would set accrual_enabled=false"):
         mod.seed(hub, GUILD, dry_run=True)
     assert all(m == "GET" for m, _ in hub.calls)
+
+
+def test_numeric_community_id_from_api_is_rejected_not_coerced() -> None:
+    """The API serves UUID ids only; an int id is a contract break and must fail loudly."""
+    hub = FakeHub()
+    hub.communities.append({"id": 11, "platformServerId": GUILD})
+    with pytest.raises(RuntimeError, match="not a UUID"):
+        mod.seed(hub, GUILD, dry_run=False)
+
+
+def test_all_community_paths_use_the_uuid() -> None:
+    """Every activation/config call is built from the UUID, never a numeric id."""
+    hub = FakeHub(community=True)
+    mod.seed(hub, GUILD, dry_run=False)
+    scoped = [p for _, p in hub.calls if "/apps/community/" in p]
+    assert scoped and all(f"/apps/community/{UUID_11}/" in p for p in scoped)

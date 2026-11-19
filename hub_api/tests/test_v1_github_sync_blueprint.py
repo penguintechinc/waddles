@@ -28,6 +28,7 @@ from quart_schema import QuartSchema
 
 import services.github_sync_service as svc
 from blueprints.v1.github_sync import github_sync_admin_bp, github_sync_webhook_bp
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 COMMUNITY_ID = 1
 OTHER_COMMUNITY_ID = 2
@@ -45,16 +46,26 @@ def _encryption_key_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def app(automation_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(github_sync_webhook_bp)
-    quart_app.register_blueprint(github_sync_admin_bp)
     quart_app.config["dal"] = automation_db.dal
     quart_app.config["async_dal"] = automation_db
+    install_community_ids(quart_app, automation_db.dal)
+    quart_app.register_blueprint(github_sync_webhook_bp)
+    quart_app.register_blueprint(github_sync_admin_bp)
     return quart_app
 
 
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
+
+
+def _cid(automation_db: Any, community_id: int = COMMUNITY_ID) -> str:
+    """Public UUID of `community_id`, seeding the bare community row first when absent."""
+    dal = automation_db.dal
+    if not dal(dal.communities.id == community_id).count():
+        dal.communities.insert(id=community_id, name=f"community-{community_id}")
+        dal.commit()
+    return public_id(automation_db, community_id)
 
 
 def _seed_admin(
@@ -88,15 +99,17 @@ def _seed_admin(
 
 class TestAuthBypass:
     async def test_missing_token_is_401(self, client: Any) -> None:
-        response = await client.get(f"/api/v1/{COMMUNITY_ID}/github-sync/connections")
+        response = await client.get(f"/api/v1/{UNKNOWN_PUBLIC_ID}/github-sync/connections")
         assert response.status_code == 401
 
 
 class TestCommunityAdminAuthz:
-    async def test_non_admin_is_403(self, client: Any, user_auth_headers: Any) -> None:
+    async def test_non_admin_is_403(
+        self, client: Any, user_auth_headers: Any, automation_db: Any
+    ) -> None:
         headers = user_auth_headers(user_id=NON_ADMIN_USER_ID)
         response = await client.get(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections", headers=headers
         )
         assert response.status_code == 403
 
@@ -106,7 +119,7 @@ class TestCommunityAdminAuthz:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.get(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections", headers=headers
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -114,10 +127,12 @@ class TestCommunityAdminAuthz:
 
 
 class TestCreateConnection:
-    async def test_non_admin_is_403(self, client: Any, user_auth_headers: Any) -> None:
+    async def test_non_admin_is_403(
+        self, client: Any, user_auth_headers: Any, automation_db: Any
+    ) -> None:
         headers = user_auth_headers(user_id=NON_ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections", headers=headers, json={}
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections", headers=headers, json={}
         )
         assert response.status_code == 403
 
@@ -127,7 +142,7 @@ class TestCreateConnection:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections", headers=headers, json={}
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections", headers=headers, json={}
         )
         assert response.status_code == 400
 
@@ -138,7 +153,7 @@ class TestCreateConnection:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections",
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections",
             headers=headers,
             json={
                 "repo_owner": "not/a/valid/owner",
@@ -156,7 +171,7 @@ class TestCreateConnection:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections",
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections",
             headers=headers,
             json={
                 "repo_owner": "penguintechinc",
@@ -169,7 +184,7 @@ class TestCreateConnection:
         assert response.status_code == 201
         body = await response.get_json()
         conn = body["data"]
-        assert conn["community_id"] == COMMUNITY_ID
+        assert conn["community_id"] == public_id(automation_db, COMMUNITY_ID)
         assert conn["vendor_id"] is None
         assert conn["token_masked"] == "****1234"
         assert "encrypted_token" not in conn
@@ -177,7 +192,7 @@ class TestCreateConnection:
         assert conn["webhook_secret"]
         assert conn["webhook_secret_set"] is True
         listed = await client.get(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections", headers=headers
         )
         assert listed.status_code == 200
         rows = (await listed.get_json())["data"]
@@ -189,10 +204,12 @@ class TestCreateConnection:
 
 
 class TestDeleteConnection:
-    async def test_non_admin_is_403(self, client: Any, user_auth_headers: Any) -> None:
+    async def test_non_admin_is_403(
+        self, client: Any, user_auth_headers: Any, automation_db: Any
+    ) -> None:
         headers = user_auth_headers(user_id=NON_ADMIN_USER_ID)
         response = await client.delete(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections/1", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections/1", headers=headers
         )
         assert response.status_code == 403
 
@@ -202,7 +219,7 @@ class TestDeleteConnection:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.delete(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections/not-a-number", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections/not-a-number", headers=headers
         )
         assert response.status_code == 400
 
@@ -212,7 +229,7 @@ class TestDeleteConnection:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.delete(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections/9999", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections/9999", headers=headers
         )
         assert response.status_code == 404
 
@@ -235,7 +252,7 @@ class TestDeleteConnection:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.delete(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections/{conn_id}", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections/{conn_id}", headers=headers
         )
         assert response.status_code == 403
 
@@ -262,7 +279,7 @@ class TestDeleteConnection:
         )
         dal.commit()
         response = await client.delete(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections/{conn_id}",
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections/{conn_id}",
             headers=user_auth_headers(user_id=ADMIN_USER_ID),
         )
         assert response.status_code == 403
@@ -286,7 +303,7 @@ class TestDeleteConnection:
         dal.commit()
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.delete(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/connections/{conn_id}", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/connections/{conn_id}", headers=headers
         )
         assert response.status_code == 200
         # `update_async()` never calls `.commit()` (hub_api/PORTING.md
@@ -298,10 +315,12 @@ class TestDeleteConnection:
 
 
 class TestSyncStatus:
-    async def test_non_admin_is_403(self, client: Any, user_auth_headers: Any) -> None:
+    async def test_non_admin_is_403(
+        self, client: Any, user_auth_headers: Any, automation_db: Any
+    ) -> None:
         headers = user_auth_headers(user_id=NON_ADMIN_USER_ID)
         response = await client.get(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/1/sync-status", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/1/sync-status", headers=headers
         )
         assert response.status_code == 403
 
@@ -311,7 +330,8 @@ class TestSyncStatus:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.get(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/not-a-number/sync-status", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/not-a-number/sync-status",
+            headers=headers,
         )
         assert response.status_code == 400
 
@@ -338,7 +358,7 @@ class TestSyncStatus:
         dal.commit()
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.get(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/7/sync-status", headers=headers
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/7/sync-status", headers=headers
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -347,10 +367,12 @@ class TestSyncStatus:
 
 
 class TestTriggerSync:
-    async def test_non_admin_is_403(self, client: Any, user_auth_headers: Any) -> None:
+    async def test_non_admin_is_403(
+        self, client: Any, user_auth_headers: Any, automation_db: Any
+    ) -> None:
         headers = user_auth_headers(user_id=NON_ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/1/sync", headers=headers, json={}
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/1/sync", headers=headers, json={}
         )
         assert response.status_code == 403
 
@@ -360,7 +382,7 @@ class TestTriggerSync:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/not-a-number/sync",
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/not-a-number/sync",
             headers=headers,
             json={"repo_connection_id": 1},
         )
@@ -372,7 +394,7 @@ class TestTriggerSync:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/1/sync",
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/1/sync",
             headers=headers,
             json={"repo_connection_id": "not-a-number"},
         )
@@ -384,7 +406,7 @@ class TestTriggerSync:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/1/sync", headers=headers, json={}
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/1/sync", headers=headers, json={}
         )
         assert response.status_code == 400
 
@@ -395,7 +417,7 @@ class TestTriggerSync:
         _seed_admin(automation_db, user_id=ADMIN_USER_ID, community_id=COMMUNITY_ID)
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/9999/sync",
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/9999/sync",
             headers=headers,
             json={"repo_connection_id": 1},
         )
@@ -444,7 +466,7 @@ class TestTriggerSync:
         headers = user_auth_headers(user_id=ADMIN_USER_ID)
         headers["Content-Type"] = "application/json"
         response = await client.post(
-            f"/api/v1/{COMMUNITY_ID}/github-sync/ticket/{ticket_id}/sync",
+            f"/api/v1/{_cid(automation_db)}/github-sync/ticket/{ticket_id}/sync",
             headers=headers,
             data=json.dumps({"repo_connection_id": conn_id}).encode(),
         )

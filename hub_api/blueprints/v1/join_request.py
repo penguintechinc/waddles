@@ -147,7 +147,7 @@ class SimpleSuccessResponse:
     success: bool
 
 
-@join_request_bp.route("/<int:community_id>/join-requests", methods=["POST"])
+@join_request_bp.route("/<cuuid:community_id>/join-requests", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SubmitJoinRequestBody)
 # NOT @validate_response -- submit_request() awaits insert_async()/
@@ -175,7 +175,7 @@ async def submit_request(community_id: int, data: SubmitJoinRequestBody) -> tupl
     )
 
 
-@join_request_bp.route("/<int:community_id>/join-requests/mine", methods=["GET"])
+@join_request_bp.route("/<cuuid:community_id>/join-requests/mine", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MyJoinRequestResponse)
 async def get_my_request(community_id: int) -> MyJoinRequestResponse:
@@ -197,7 +197,7 @@ async def get_my_request(community_id: int) -> MyJoinRequestResponse:
     )
 
 
-@join_request_bp.route("/admin/<int:community_id>/join-requests", methods=["GET"])
+@join_request_bp.route("/admin/<cuuid:community_id>/join-requests", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ListJoinRequestsResponse)
 async def list_requests(
@@ -253,7 +253,7 @@ async def list_requests(
 
 
 @join_request_bp.route(
-    "/admin/<int:community_id>/join-requests/<int:request_id>/approve", methods=["PUT"]
+    "/admin/<cuuid:community_id>/join-requests/<int:request_id>/approve", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
@@ -277,7 +277,7 @@ async def approve_request(
 
 
 @join_request_bp.route(
-    "/admin/<int:community_id>/join-requests/<int:request_id>/reject", methods=["PUT"]
+    "/admin/<cuuid:community_id>/join-requests/<int:request_id>/reject", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)

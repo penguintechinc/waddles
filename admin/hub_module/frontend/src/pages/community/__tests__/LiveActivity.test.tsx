@@ -33,7 +33,7 @@ class FakeEventSource {
 
 const wire = (id: number, over: Record<string, unknown> = {}) => ({
   id,
-  community_id: 5,
+  community_id: '00000005-0000-4000-8000-000000000000',
   platform: 'discord',
   actor: `user${id}`,
   message_in: `hello ${id}`,
@@ -42,7 +42,7 @@ const wire = (id: number, over: Record<string, unknown> = {}) => ({
   ...over,
 });
 
-function renderPage(route = '/admin/5/live-activity') {
+function renderPage(route = '/admin/00000005-0000-4000-8000-000000000000/live-activity') {
   return renderWithProviders(<LiveActivity />, { route, path: '/admin/:communityId/live-activity' });
 }
 
@@ -59,7 +59,7 @@ describe('LiveActivity', () => {
 
   it('renders the served `events` backfill, newest first, with replies', async () => {
     const get = mockApiGet((url) =>
-      url === '/api/v1/community/5/live-activity'
+      url === '/api/v1/community/00000005-0000-4000-8000-000000000000/live-activity'
         ? { success: true, events: [wire(3, { reply_out: 'pong' }), wire(2, { actor: null })] }
         : unexpectedUrl(url),
     );
@@ -70,7 +70,7 @@ describe('LiveActivity', () => {
     expect(within(rows[0]!).getByText('hello 3')).toBeInTheDocument();
     expect(within(rows[0]!).getByText(/Waddles: pong/)).toBeInTheDocument();
     expect(within(rows[1]!).getByText('Unknown user')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/community/5/live-activity', { params: { limit: 50 } });
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000005-0000-4000-8000-000000000000/live-activity', { params: { limit: 50 } });
   });
 
   it('opens the SSE stream for this community with credentials and closes it on unmount', async () => {
@@ -78,7 +78,7 @@ describe('LiveActivity', () => {
     const { unmount } = renderPage();
     await screen.findByText('No Activity Yet');
     const source = FakeEventSource.instances[0]!;
-    expect(source.url).toBe('/api/v1/community/5/live-activity/stream');
+    expect(source.url).toBe('/api/v1/community/00000005-0000-4000-8000-000000000000/live-activity/stream');
     expect(source.init).toEqual({ withCredentials: true });
     unmount();
     expect(source.closed).toBe(true);

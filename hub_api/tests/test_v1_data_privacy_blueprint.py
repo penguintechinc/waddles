@@ -101,6 +101,38 @@ class TestExportUserData:
         body = await response.get_json()
         assert "password_hash" not in body["data"]["account"][0]
 
+    async def test_export_emits_community_public_ids_never_numeric(
+        self, client: Any, privacy_db: Any
+    ) -> None:
+        """Regression: the self-service export must not leak the numeric community PK."""
+        user_id = _seed_user(privacy_db)
+        dal = privacy_db.dal
+        tenant = dal(dal.tenants.slug == TENANT_SLUG).select().first()
+        public_id = "5b0e2f0a-3c1d-4a55-9d0e-0f6a5c3d7e11"
+        community_id = dal.communities.insert(
+            name="c-one", display_name="c-one", tenant_id=tenant.id, public_id=public_id
+        )
+        dal.hub_chat_messages.insert(
+            community_id=community_id,
+            channel_name="general",
+            sender_hub_user_id=user_id,
+            sender_platform="discord",
+            sender_username="alice",
+            message_content="hello",
+            message_type="text",
+            created_at=datetime.now(UTC),
+        )
+        dal.commit()
+
+        response = await client.get("/api/v1/user/me/data", headers=_headers(user_id))
+        assert response.status_code == 200
+        body = await response.get_json()
+
+        keyed = [row for rows in body["data"].values() for row in rows if "community_id" in row]
+        assert keyed, "no community-keyed rows examined: the regression proves nothing"
+        assert all(not isinstance(row["community_id"], int) for row in keyed)
+        assert {row["community_id"] for row in keyed} == {public_id}
+
     async def test_export_sets_content_disposition_header(
         self, client: Any, privacy_db: Any
     ) -> None:

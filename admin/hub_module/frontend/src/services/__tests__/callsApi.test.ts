@@ -55,25 +55,25 @@ afterEach(() => vi.restoreAllMocks());
 describe('error envelope', () => {
   it('maps HTTP 402 FEATURE_NOT_ENABLED to a feature-disabled error that keeps the server message', async () => {
     vi.spyOn(apiClient, 'get').mockRejectedValue(httpError(402, envelope('FEATURE_NOT_ENABLED', 'Calls / RTC is not enabled for this plan')));
-    const err = await fetchRooms('admin', 7).catch((e: unknown) => e);
+    const err = await fetchRooms('admin', '00000007-0000-4000-8000-000000000000').catch((e: unknown) => e);
     expect(err).toBeInstanceOf(CallsApiError);
     expect(err).toMatchObject({ kind: 'feature-disabled', status: 402, code: 'FEATURE_NOT_ENABLED', retryable: false, message: 'Calls / RTC is not enabled for this plan' });
   });
 
   it('marks 503 with details.retryable as retryable and unavailable', async () => {
     vi.spyOn(apiClient, 'get').mockRejectedValue(httpError(503, envelope('STREAMING_UNAVAILABLE', 'Streaming service unavailable', { retryable: true })));
-    await expect(fetchRooms('member', 7)).rejects.toMatchObject({ kind: 'unavailable', retryable: true, message: 'Streaming service unavailable' });
+    await expect(fetchRooms('member', '00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ kind: 'unavailable', retryable: true, message: 'Streaming service unavailable' });
   });
 
   it('treats 504 as retryable even without details', async () => {
     vi.spyOn(apiClient, 'get').mockRejectedValue(httpError(504, envelope('TIMEOUT', 'Timed out')));
-    await expect(fetchRooms('admin', 7)).rejects.toMatchObject({ kind: 'unavailable', retryable: true });
+    await expect(fetchRooms('admin', '00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ kind: 'unavailable', retryable: true });
   });
 
   it('surfaces a 404 as an error, not an empty room list', async () => {
     vi.spyOn(apiClient, 'get').mockRejectedValue(httpError(404, envelope('ROOM_NOT_FOUND', 'Room not found')));
-    await expect(fetchRooms('admin', 7)).rejects.toMatchObject({ kind: 'not-found', status: 404 });
-    await expect(fetchRaisedHands(7, ROOM)).rejects.toMatchObject({ kind: 'not-found' });
+    await expect(fetchRooms('admin', '00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ kind: 'not-found', status: 404 });
+    await expect(fetchRaisedHands('00000007-0000-4000-8000-000000000000', ROOM)).rejects.toMatchObject({ kind: 'not-found' });
   });
 
   it.each([
@@ -83,7 +83,7 @@ describe('error envelope', () => {
     [500, 'unknown'],
   ])('classifies HTTP %i as %s', async (status, kind) => {
     vi.spyOn(apiClient, 'get').mockRejectedValue(httpError(status, envelope('X', 'nope')));
-    await expect(fetchRooms('admin', 7)).rejects.toMatchObject({ kind, status });
+    await expect(fetchRooms('admin', '00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ kind, status });
   });
 
   it('falls back to a generic message and ERROR_<status> code when the body is not the envelope', () => {
@@ -108,27 +108,27 @@ describe('error envelope', () => {
 describe('request guards', () => {
   it('refuses a non-UUID room id before any request (legacy names are not addressable)', async () => {
     const post = vi.spyOn(apiClient, 'post');
-    await expect(joinRoom(7, 'weekly-call')).rejects.toMatchObject({ status: 400, code: 'INVALID_ROOM_ID' });
+    await expect(joinRoom('00000007-0000-4000-8000-000000000000', 'weekly-call')).rejects.toMatchObject({ status: 400, code: 'INVALID_ROOM_ID' });
     expect(post).not.toHaveBeenCalled();
   });
 
   it('refuses a non-UUID participant id', async () => {
-    await expect(acknowledgeHand(7, ROOM, 'alice')).rejects.toMatchObject({ code: 'INVALID_ROOM_ID', message: 'Participant id must be a UUID' });
+    await expect(acknowledgeHand('00000007-0000-4000-8000-000000000000', ROOM, 'alice')).rejects.toMatchObject({ code: 'INVALID_ROOM_ID', message: 'Participant id must be a UUID' });
   });
 
   it('sends room_name (and max_participants only when set)', async () => {
     const post = vi.spyOn(apiClient, 'post').mockResolvedValue(ok(roomWire()));
-    await createRoom('admin', 7, { roomName: 'Town hall' });
-    expect(post).toHaveBeenLastCalledWith('/api/v1/admin/7/calls/rooms', { room_name: 'Town hall' });
-    await createRoom('member', 7, { roomName: 'Hangout', maxParticipants: 12 });
-    expect(post).toHaveBeenLastCalledWith('/api/v1/community/7/interact/voice/rooms', { room_name: 'Hangout', max_participants: 12 });
+    await createRoom('admin', '00000007-0000-4000-8000-000000000000', { roomName: 'Town hall' });
+    expect(post).toHaveBeenLastCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/calls/rooms', { room_name: 'Town hall' });
+    await createRoom('member', '00000007-0000-4000-8000-000000000000', { roomName: 'Hangout', maxParticipants: 12 });
+    expect(post).toHaveBeenLastCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms', { room_name: 'Hangout', max_participants: 12 });
   });
 });
 
 describe('parsing', () => {
   it('parses a room by its label and UUID and tolerates a missing label', async () => {
     vi.spyOn(apiClient, 'get').mockResolvedValue(ok({ success: true, rooms: [roomWire(), roomWire({ label: null, room_id: PERSON })] }));
-    const rooms = await fetchRooms('admin', 7);
+    const rooms = await fetchRooms('admin', '00000007-0000-4000-8000-000000000000');
     expect(rooms.map((r) => r.label)).toEqual(['Town hall', null]);
     expect(roomTitle(rooms[0] ?? { label: null })).toBe('Town hall');
     expect(roomTitle(rooms[1] ?? { label: null })).toBe(UNTITLED_ROOM);
@@ -137,11 +137,11 @@ describe('parsing', () => {
 
   it('fails loudly on a drifted room shape instead of rendering an empty page', async () => {
     vi.spyOn(apiClient, 'get').mockResolvedValue(ok({ rooms: [{ name: 'old', participantCount: 1 }] }));
-    await expect(fetchRooms('admin', 7)).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
+    await expect(fetchRooms('admin', '00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
     vi.spyOn(apiClient, 'get').mockResolvedValue(ok({ success: true }));
-    await expect(fetchRooms('admin', 7)).rejects.toThrow('"rooms" is not a list');
+    await expect(fetchRooms('admin', '00000007-0000-4000-8000-000000000000')).rejects.toThrow('"rooms" is not a list');
     vi.spyOn(apiClient, 'get').mockResolvedValue(ok({ rooms: [roomWire({ publisher_ids: [1] })] }));
-    await expect(fetchRooms('admin', 7)).rejects.toThrow('non-string');
+    await expect(fetchRooms('admin', '00000007-0000-4000-8000-000000000000')).rejects.toThrow('non-string');
   });
 
   it('shows participant display names, with Guest for blanks', async () => {
@@ -155,7 +155,7 @@ describe('parsing', () => {
         ],
       }),
     );
-    const list = await fetchParticipants(7, ROOM);
+    const list = await fetchParticipants('00000007-0000-4000-8000-000000000000', ROOM);
     expect(list.locked).toBe(true);
     expect(list.participants.map((p) => p.displayName)).toEqual(['Ada', GUEST_LABEL]);
     expect(list.participants[1]).toMatchObject({ muted: true, joinedAt: null });
@@ -172,8 +172,8 @@ describe('parsing', () => {
         locked: false,
       }),
     );
-    const list = await fetchMemberParticipants(7, ROOM);
-    expect(get).toHaveBeenCalledWith(`/api/v1/communities/7/calls/rooms/${ROOM}/participants`);
+    const list = await fetchMemberParticipants('00000007-0000-4000-8000-000000000000', ROOM);
+    expect(get).toHaveBeenCalledWith(`/api/v1/communities/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM}/participants`);
     expect(list.locked).toBe(false);
     expect(list.participants.map((p) => p.displayName)).toEqual(['Ada', GUEST_LABEL]);
     expect(list.participants[0]).toMatchObject({ publisher: true, joinedAt: 5 });
@@ -190,7 +190,7 @@ describe('parsing', () => {
         ],
       }),
     );
-    const hands = await fetchRaisedHands(7, ROOM);
+    const hands = await fetchRaisedHands('00000007-0000-4000-8000-000000000000', ROOM);
     expect(hands.map((h) => h.displayName)).toEqual(['Ada', 'guest']);
     expect(hands[1]).toMatchObject({ acknowledgedAt: 25, acknowledgedBy: PERSON });
   });
@@ -199,24 +199,24 @@ describe('parsing', () => {
     const hand = { participant_id: PERSON, display_name: 'Ada', raised_at: 10, acknowledged_at: null, acknowledged_by: null };
     const post = vi.spyOn(apiClient, 'post');
     post.mockResolvedValueOnce(ok({ success: true, hand }));
-    await expect(raiseHand(7, ROOM)).resolves.toMatchObject({ displayName: 'Ada' });
+    await expect(raiseHand('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toMatchObject({ displayName: 'Ada' });
     post.mockResolvedValueOnce(ok({ success: true, lowered: false }));
-    await expect(lowerHand(7, ROOM)).resolves.toBe(false);
+    await expect(lowerHand('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toBe(false);
     post.mockResolvedValueOnce(ok({ success: true, cleared: 3 }));
-    await expect(resetHands(7, ROOM)).resolves.toBe(3);
+    await expect(resetHands('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toBe(3);
     post.mockResolvedValueOnce(ok({ success: true, muted: 2 }));
-    await expect(muteAll(7, ROOM)).resolves.toBe(2);
+    await expect(muteAll('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toBe(2);
     post.mockResolvedValueOnce(ok({ success: true, participant_id: PERSON, muted: true }));
-    await expect(setParticipantMuted(7, ROOM, PERSON, true)).resolves.toBe(true);
+    await expect(setParticipantMuted('00000007-0000-4000-8000-000000000000', ROOM, PERSON, true)).resolves.toBe(true);
     post.mockResolvedValueOnce(ok({ success: true, hand }));
-    await expect(acknowledgeHand(7, ROOM, PERSON)).resolves.toMatchObject({ participantId: PERSON });
+    await expect(acknowledgeHand('00000007-0000-4000-8000-000000000000', ROOM, PERSON)).resolves.toMatchObject({ participantId: PERSON });
   });
 
   it('parses a join response', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValue(
       ok({ success: true, token: 't', url: 'https://media.example/whip', whip_url: 'https://media.example/whip/r', whep_url: 'https://media.example/whep/r', token_id: 'k', participant_id: PERSON, expires_at: 99, publish: true, subscribe: false, ice_servers: [{ urls: ['stun:stun.example:3478'] }] }),
     );
-    await expect(joinRoom(7, ROOM)).resolves.toMatchObject({ participantId: PERSON, expiresAt: 99, whepUrl: 'https://media.example/whep/r', publish: true, subscribe: false, iceServers: [{ urls: ['stun:stun.example:3478'] }] });
+    await expect(joinRoom('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toMatchObject({ participantId: PERSON, expiresAt: 99, whepUrl: 'https://media.example/whep/r', publish: true, subscribe: false, iceServers: [{ urls: ['stun:stun.example:3478'] }] });
   });
 });
 
@@ -225,7 +225,7 @@ describe('join grants and ICE servers', () => {
 
   it('defaults ice_servers to none when absent or null', async () => {
     vi.spyOn(apiClient, 'post').mockResolvedValue(ok(joinWire));
-    await expect(joinRoom(7, ROOM)).resolves.toMatchObject({ iceServers: [] });
+    await expect(joinRoom('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toMatchObject({ iceServers: [] });
     expect(parseIceServers(null)).toEqual([]);
   });
 
@@ -246,45 +246,45 @@ describe('join grants and ICE servers', () => {
   it('requires real boolean publish/subscribe grants (never defaulting to "granted" or "denied")', async () => {
     for (const bad of [{ publish: undefined }, { subscribe: 'yes' }]) {
       vi.spyOn(apiClient, 'post').mockResolvedValueOnce(ok({ ...joinWire, ...bad }));
-      await expect(joinRoom(7, ROOM)).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
+      await expect(joinRoom('00000007-0000-4000-8000-000000000000', ROOM)).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
     }
   });
 });
 
 describe('town hall and own hand', () => {
-  const hall = { success: true, room_id: ROOM, label: 'Town Hall', locked: false, participant_count: 4, created: true, join: { method: 'POST', path: `/api/v1/community/7/interact/voice/rooms/${ROOM}/join` } };
+  const hall = { success: true, room_id: ROOM, label: 'Town Hall', locked: false, participant_count: 4, created: true, join: { method: 'POST', path: `/api/v1/community/00000007-0000-4000-8000-000000000000/interact/voice/rooms/${ROOM}/join` } };
 
   it('GET and POST (ensure) read the same Town Hall shape', async () => {
     const get = vi.spyOn(apiClient, 'get').mockResolvedValue(ok(hall));
     const post = vi.spyOn(apiClient, 'post').mockResolvedValue(ok(hall));
     const expected = { roomId: ROOM, label: 'Town Hall', locked: false, participantCount: 4, created: true };
-    await expect(fetchTownHall(7)).resolves.toEqual(expected);
-    await expect(ensureTownHall(7)).resolves.toEqual(expected);
-    expect(get).toHaveBeenCalledWith('/api/v1/communities/7/town-hall');
-    expect(post).toHaveBeenCalledWith('/api/v1/communities/7/town-hall');
+    await expect(fetchTownHall('00000007-0000-4000-8000-000000000000')).resolves.toEqual(expected);
+    await expect(ensureTownHall('00000007-0000-4000-8000-000000000000')).resolves.toEqual(expected);
+    expect(get).toHaveBeenCalledWith('/api/v1/communities/00000007-0000-4000-8000-000000000000/town-hall');
+    expect(post).toHaveBeenCalledWith('/api/v1/communities/00000007-0000-4000-8000-000000000000/town-hall');
   });
 
   it('a failing or drifted Town Hall is an error: 402 flag off, 503 retryable, wrong shape', async () => {
     vi.spyOn(apiClient, 'get').mockRejectedValueOnce(httpError(402, envelope('FEATURE_NOT_ENABLED', 'off')));
-    await expect(fetchTownHall(7)).rejects.toMatchObject({ kind: 'feature-disabled' });
+    await expect(fetchTownHall('00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ kind: 'feature-disabled' });
     vi.spyOn(apiClient, 'get').mockRejectedValueOnce(httpError(503, envelope('UNAVAILABLE', 'down', { retryable: true })));
-    await expect(fetchTownHall(7)).rejects.toMatchObject({ kind: 'unavailable', retryable: true });
+    await expect(fetchTownHall('00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ kind: 'unavailable', retryable: true });
     vi.spyOn(apiClient, 'get').mockResolvedValueOnce(ok({ room: ROOM }));
-    await expect(fetchTownHall(7)).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
+    await expect(fetchTownHall('00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ code: 'CLIENT_ERROR' });
   });
 
   it('reads the caller\'s own hand: raised, acknowledged and timestamps', async () => {
     const get = vi.spyOn(apiClient, 'get');
     get.mockResolvedValueOnce(ok({ success: true, participant_id: PERSON, raised: true, acknowledged: true, raised_at: 10, acknowledged_at: 12 }));
-    await expect(fetchMyHand(7, ROOM)).resolves.toEqual({ raised: true, acknowledged: true, raisedAt: 10, acknowledgedAt: 12 });
-    expect(get).toHaveBeenLastCalledWith(`/api/v1/communities/7/calls/rooms/${ROOM}/hands/mine`);
+    await expect(fetchMyHand('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toEqual({ raised: true, acknowledged: true, raisedAt: 10, acknowledgedAt: 12 });
+    expect(get).toHaveBeenLastCalledWith(`/api/v1/communities/00000007-0000-4000-8000-000000000000/calls/rooms/${ROOM}/hands/mine`);
     get.mockResolvedValueOnce(ok({ success: true, participant_id: PERSON, raised: false, acknowledged: false, raised_at: null, acknowledged_at: null }));
-    await expect(fetchMyHand(7, ROOM)).resolves.toEqual({ raised: false, acknowledged: false, raisedAt: null, acknowledgedAt: null });
+    await expect(fetchMyHand('00000007-0000-4000-8000-000000000000', ROOM)).resolves.toEqual({ raised: false, acknowledged: false, raisedAt: null, acknowledgedAt: null });
   });
 
   it('refuses a non-UUID room id for the own-hand read before any request', async () => {
     const get = vi.spyOn(apiClient, 'get');
-    await expect(fetchMyHand(7, 'town-hall')).rejects.toMatchObject({ code: 'INVALID_ROOM_ID' });
+    await expect(fetchMyHand('00000007-0000-4000-8000-000000000000', 'town-hall')).rejects.toMatchObject({ code: 'INVALID_ROOM_ID' });
     expect(get).not.toHaveBeenCalled();
   });
 });

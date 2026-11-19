@@ -20,6 +20,7 @@ import grpc_internal  # noqa: F401  (puts the generated pb/ tree on sys.path)
 from waddles.streaming.internal.v1 import rooms_pb2
 
 from blueprints.v1.calls import SCOPE_ADMIN, SCOPE_WRITE
+from tests.community_ids import public_id
 from tests.conftest import make_user_token, seed_membership
 from tests.test_calls_support import (  # noqa: F401  (fixtures are consumed by name)
     ROOM,
@@ -40,10 +41,26 @@ MEMBER_ID = 502
 ADMIN_ID = 501
 
 
+_DB: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _bind_db(overlay_db: Any) -> Any:
+    """Expose the test DB to the URL helpers so numeric seeded ids map to community UUIDs."""
+    _DB[:] = [overlay_db]
+    yield
+    _DB.clear()
+
+
+def cu(community_id: int) -> str:
+    """Public UUID of a seeded community (client-facing routes never take the numeric id)."""
+    return public_id(_DB[0], community_id)
+
+
 def _base(community_id: int) -> tuple[str, str]:
     return (
-        f"/api/v1/community/{community_id}/interact/voice/rooms/{ROOM}",
-        f"/api/v1/admin/{community_id}/calls/rooms/{ROOM}",
+        f"/api/v1/community/{cu(community_id)}/interact/voice/rooms/{ROOM}",
+        f"/api/v1/admin/{cu(community_id)}/calls/rooms/{ROOM}",
     )
 
 
@@ -275,7 +292,7 @@ class TestModeratorHands:
         _, admin, cid = await _room_with_people(client, overlay_db, joined=False)
         fake.seed_room(999)  # ROOM now exists, but only in ANOTHER community
         response = await client.get(
-            f"/api/v1/admin/{cid}/calls/rooms/{ROOM}/raised-hands", headers=admin
+            f"/api/v1/admin/{cu(cid)}/calls/rooms/{ROOM}/raised-hands", headers=admin
         )
         assert response.status_code == 404
 

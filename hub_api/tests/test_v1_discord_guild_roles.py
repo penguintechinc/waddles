@@ -17,6 +17,7 @@ from quart_schema import QuartSchema
 import services.discord_guild_roles as roles_module
 from blueprints.v1.guild_pairing import guild_pairing_bp
 from services.credential_resolver import PlatformCredentials, TransportUnavailable
+from tests.community_ids import cpath, install_community_ids
 
 _REAL_ASYNC_CLIENT = httpx.AsyncClient
 GUILD = "123456789012345678"  # gitleaks:allow - fake snowflake
@@ -39,6 +40,7 @@ class _FakeResolver:
 def app(guild_pairing_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, guild_pairing_db[0])
     quart_app.register_blueprint(guild_pairing_bp)
     quart_app.config["dal"] = guild_pairing_db[0]
     return quart_app
@@ -87,8 +89,8 @@ def _pair(guild_pairing_db: Any, guild: str = GUILD) -> None:
     dal.commit()
 
 
-def _url(community_id: int, qs: str = "") -> str:
-    return f"/api/v1/communities/{community_id}/discord/roles{qs}"
+def _url(dal: Any, community_id: int, qs: str = "") -> str:
+    return cpath(dal, "/api/v1/communities/{community_id}/discord/roles", community_id) + qs
 
 
 ROLES = [
@@ -104,7 +106,8 @@ async def test_happy_path_dto_shape_sorted_everyone_excluded(
     _pair(guild_pairing_db)
     seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=ROLES))
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 200
     body = await resp.get_json()
@@ -171,7 +174,8 @@ async def test_discord_errors_map_to_distinct_codes(
 
     _mock_discord(monkeypatch, handler)
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == http_status
     assert (await resp.get_json())["error"]["code"] == code
@@ -187,7 +191,8 @@ async def test_transport_error_is_502(
 
     _mock_discord(monkeypatch, boom)
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 502
     assert (await resp.get_json())["error"]["code"] == "DISCORD_UNAVAILABLE"
@@ -199,14 +204,16 @@ async def test_malformed_payload_is_502(
     _pair(guild_pairing_db)
     _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=[{"nope": 1}]))
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 502
 
 
 async def test_no_pairing_is_404(client: Any, auth_headers: Any, guild_pairing_db: Any) -> None:
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 404
     assert (await resp.get_json())["error"]["code"] == "DISCORD_PAIRING_NOT_FOUND"
@@ -218,7 +225,7 @@ async def test_unpaired_guild_param_is_404_and_never_calls_discord(
     _pair(guild_pairing_db)
     seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=[]))
     resp = await client.get(
-        _url(guild_pairing_db[1], "?guild_id=999"),
+        _url(guild_pairing_db[0], guild_pairing_db[1], "?guild_id=999"),
         headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 404
@@ -232,8 +239,12 @@ async def test_multiple_guilds_require_guild_id(
     _pair(guild_pairing_db, "555")
     _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=[]))
     headers = auth_headers(scope="community.guild_pairing:read")
-    assert (await client.get(_url(guild_pairing_db[1]), headers=headers)).status_code == 400
-    ok = await client.get(_url(guild_pairing_db[1], "?guild_id=555"), headers=headers)
+    assert (
+        await client.get(_url(guild_pairing_db[0], guild_pairing_db[1]), headers=headers)
+    ).status_code == 400
+    ok = await client.get(
+        _url(guild_pairing_db[0], guild_pairing_db[1], "?guild_id=555"), headers=headers
+    )
     assert ok.status_code == 200
     assert (await ok.get_json()) == {"success": True, "roles": []}
 
@@ -249,7 +260,8 @@ async def test_credentials_missing_is_503(
     _pair(guild_pairing_db)
     monkeypatch.setattr(roles_module, "DefaultCredentialResolver", lambda: _FakeResolver(payload))
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 503
     assert (await resp.get_json())["error"]["code"] == "DISCORD_NOT_CONFIGURED"
@@ -264,7 +276,8 @@ async def test_real_resolver_with_no_tenant_credentials_is_503(
 
     monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=True))
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 503
 
@@ -274,12 +287,14 @@ async def test_wrong_scope_is_403(
     client: Any, auth_headers: Any, guild_pairing_db: Any, scope: str
 ) -> None:
     _pair(guild_pairing_db)
-    resp = await client.get(_url(guild_pairing_db[1]), headers=auth_headers(scope=scope))
+    resp = await client.get(
+        _url(guild_pairing_db[0], guild_pairing_db[1]), headers=auth_headers(scope=scope)
+    )
     assert resp.status_code == 403
 
 
 async def test_no_token_is_rejected(client: Any, guild_pairing_db: Any) -> None:
-    resp = await client.get(_url(guild_pairing_db[1]))
+    resp = await client.get(_url(guild_pairing_db[0], guild_pairing_db[1]))
     assert resp.status_code in (401, 403)
 
 
@@ -299,7 +314,7 @@ async def test_cross_tenant_community_is_404(
     dal.commit()
     seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=ROLES))
     resp = await client.get(
-        _url(other_community), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(dal, other_community), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 404
     assert seen == []
@@ -312,7 +327,8 @@ async def test_feature_flag_off_is_402(
 
     monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=False))
     resp = await client.get(
-        _url(guild_pairing_db[1]), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(guild_pairing_db[0], guild_pairing_db[1]),
+        headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 402
 
@@ -364,7 +380,7 @@ async def test_guild_paired_to_other_community_is_404_and_never_calls_discord(
     _pair(guild_pairing_db)  # caller's own legit pairing exists too
     seen = _mock_discord(monkeypatch, lambda r: httpx.Response(200, json=ROLES))
     resp = await client.get(
-        _url(community_id, f"?guild_id={victim_guild}"),
+        _url(dal, community_id, f"?guild_id={victim_guild}"),
         headers=auth_headers(scope="community.guild_pairing:read"),
     )
     assert resp.status_code == 404

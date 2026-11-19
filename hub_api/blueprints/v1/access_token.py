@@ -245,7 +245,7 @@ async def revoke_pat() -> tuple[dict[str, object], int]:
 # ---------------------------------------------------------------------------
 
 
-@community_tokens_bp.route("/<int:community_id>/tokens/scopes", methods=["GET"])
+@community_tokens_bp.route("/<cuuid:community_id>/tokens/scopes", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
 async def community_list_scopes(community_id: int) -> tuple[dict[str, object], int]:
@@ -257,7 +257,7 @@ async def community_list_scopes(community_id: int) -> tuple[dict[str, object], i
     return {"scopes": [asdict(_scope_dto(s)) for s in scopes]}, 200
 
 
-@community_tokens_bp.route("/<int:community_id>/tokens/cats", methods=["GET"])
+@community_tokens_bp.route("/<cuuid:community_id>/tokens/cats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
 async def list_cats(community_id: int) -> tuple[dict[str, object], int]:
@@ -270,7 +270,7 @@ async def list_cats(community_id: int) -> tuple[dict[str, object], int]:
     return {"tokens": tokens, "quota": quota, "used": len(tokens)}, 200
 
 
-@community_tokens_bp.route("/<int:community_id>/tokens/cats", methods=["POST"])
+@community_tokens_bp.route("/<cuuid:community_id>/tokens/cats", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
 @validate_request(CreateCatRequest)
@@ -297,7 +297,7 @@ async def create_cat(data: CreateCatRequest, community_id: int) -> tuple[dict[st
     }, 201
 
 
-@community_tokens_bp.route("/<int:community_id>/tokens/cats/<int:token_id>", methods=["DELETE"])
+@community_tokens_bp.route("/<cuuid:community_id>/tokens/cats/<int:token_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
 async def revoke_cat(community_id: int, token_id: int) -> tuple[dict[str, object], int]:

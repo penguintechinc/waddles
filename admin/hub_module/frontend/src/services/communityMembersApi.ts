@@ -59,7 +59,7 @@ export function parseMemberPage(data: unknown): MemberPage {
 }
 
 /** `GET /api/v1/admin/:id/members`. */
-export async function fetchCommunityMembers(communityId: number, query: MemberQuery): Promise<MemberPage> {
+export async function fetchCommunityMembers(communityId: string, query: MemberQuery): Promise<MemberPage> {
   const params: Record<string, string | number> = { page: query.page, limit: query.limit };
   if (query.search.trim() !== '') params['search'] = query.search.trim();
   if (query.role !== '') params['role'] = query.role;

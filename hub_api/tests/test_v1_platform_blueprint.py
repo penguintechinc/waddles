@@ -26,6 +26,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.platform import platform_bp
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -33,6 +34,7 @@ from tests.conftest import TENANT_SLUG, make_user_token
 def app(platform_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, platform_db.dal)
     quart_app.register_blueprint(platform_bp)
     quart_app.config["dal"] = platform_db.dal
     quart_app.config["async_dal"] = platform_db
@@ -301,23 +303,26 @@ class TestCommunities:
         assert [c["name"] for c in body["communities"]] == ["findme"]
 
     async def test_get_community_not_found_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/platform/communities/9999", headers=_admin_headers())
+        response = await client.get(
+            f"/api/v1/platform/communities/{UNKNOWN_PUBLIC_ID}", headers=_admin_headers()
+        )
         assert response.status_code == 404
 
     async def test_get_community_found(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         response = await client.get(
-            f"/api/v1/platform/communities/{community_id}", headers=_admin_headers()
+            cpath(platform_db, "/api/v1/platform/communities/{community_id}", community_id),
+            headers=_admin_headers(),
         )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["community"]["id"] == community_id
+        assert body["community"]["id"] == public_id(platform_db, community_id)
         assert body["community"]["owner"] is None
 
     async def test_update_community(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         response = await client.put(
-            f"/api/v1/platform/communities/{community_id}",
+            cpath(platform_db, "/api/v1/platform/communities/{community_id}", community_id),
             headers=_admin_headers(),
             json={
                 "displayName": "New Name",
@@ -339,13 +344,15 @@ class TestCommunities:
     async def test_update_community_no_fields_is_400(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         response = await client.put(
-            f"/api/v1/platform/communities/{community_id}", headers=_admin_headers(), json={}
+            cpath(platform_db, "/api/v1/platform/communities/{community_id}", community_id),
+            headers=_admin_headers(),
+            json={},
         )
         assert response.status_code == 400
 
     async def test_update_community_not_found_is_404(self, client: Any) -> None:
         response = await client.put(
-            "/api/v1/platform/communities/9999",
+            f"/api/v1/platform/communities/{UNKNOWN_PUBLIC_ID}",
             headers=_admin_headers(),
             json={"displayName": "x"},
         )
@@ -353,14 +360,14 @@ class TestCommunities:
 
     async def test_deactivate_community_not_found_is_404(self, client: Any) -> None:
         response = await client.delete(
-            "/api/v1/platform/communities/9999", headers=_admin_headers(), json={}
+            f"/api/v1/platform/communities/{UNKNOWN_PUBLIC_ID}", headers=_admin_headers(), json={}
         )
         assert response.status_code == 404
 
     async def test_deactivate_community(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         response = await client.delete(
-            f"/api/v1/platform/communities/{community_id}",
+            cpath(platform_db, "/api/v1/platform/communities/{community_id}", community_id),
             headers=_admin_headers(),
             json={"reason": "tos violation"},
         )

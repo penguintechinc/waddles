@@ -149,7 +149,7 @@ async def _json_body() -> dict[str, Any]:
     return body
 
 
-@streaming_bp.route("/<int:community_id>/streams", methods=["GET"])
+@streaming_bp.route("/<cuuid:community_id>/streams", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ConfigResponse)
 async def get_stream_config(
@@ -163,7 +163,7 @@ async def get_stream_config(
     return ConfigResponse(success=True, config=config)
 
 
-@streaming_bp.route("/<int:community_id>/streams", methods=["POST"])
+@streaming_bp.route("/<cuuid:community_id>/streams", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(KeyRevealResponse, 201)
 async def create_stream_config(
@@ -182,7 +182,7 @@ async def create_stream_config(
     return KeyRevealResponse(success=True, config=config, streamKey=key), 201, _NO_STORE
 
 
-@streaming_bp.route("/<int:community_id>/streams/key/regenerate", methods=["POST"])
+@streaming_bp.route("/<cuuid:community_id>/streams/key/regenerate", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(KeyRevealResponse)
 async def regenerate_stream_key(
@@ -196,7 +196,7 @@ async def regenerate_stream_key(
     return KeyRevealResponse(success=True, config=config, streamKey=key), 200, _NO_STORE
 
 
-@streaming_bp.route("/<int:community_id>/streams/destinations", methods=["GET"])
+@streaming_bp.route("/<cuuid:community_id>/streams/destinations", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(DestinationsResponse)
 async def get_destinations(
@@ -208,7 +208,7 @@ async def get_destinations(
     return DestinationsResponse(success=True, destinations=destinations)
 
 
-@streaming_bp.route("/<int:community_id>/streams/destinations", methods=["POST"])
+@streaming_bp.route("/<cuuid:community_id>/streams/destinations", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(DestinationResponse, 201)
 async def add_destination(
@@ -223,7 +223,9 @@ async def add_destination(
     return DestinationResponse(success=True, destination=destination), 201
 
 
-@streaming_bp.route("/<int:community_id>/streams/destinations/<destination_id>", methods=["DELETE"])
+@streaming_bp.route(
+    "/<cuuid:community_id>/streams/destinations/<destination_id>", methods=["DELETE"]
+)
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_destination(
@@ -238,7 +240,7 @@ async def remove_destination(
 
 
 @streaming_bp.route(
-    "/<int:community_id>/streams/destinations/<destination_id>/force-cut", methods=["PUT"]
+    "/<cuuid:community_id>/streams/destinations/<destination_id>/force-cut", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(DestinationResponse)
@@ -261,7 +263,7 @@ async def toggle_force_cut(
     return DestinationResponse(success=True, destination=destination)
 
 
-@streaming_bp.route("/<int:community_id>/streams/status", methods=["GET"])
+@streaming_bp.route("/<cuuid:community_id>/streams/status", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(StatusResponse)
 async def get_stream_status(

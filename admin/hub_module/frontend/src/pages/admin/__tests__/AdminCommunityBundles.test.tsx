@@ -34,8 +34,8 @@ const auth = vi.mocked(useAuth);
 const api = vi.mocked(bundleActivationApi);
 
 const ROWS: BundleActivation[] = [
-  { appId: 'waddles.core.ping', communityId: 7, tenantId: 1, versionId: 3, version: '3.0.1', activatedAt: '2026-03-04T10:30:00Z' },
-  { appId: 'waddles.core.pong', communityId: 7, tenantId: 1, versionId: 4, activatedAt: null },
+  { appId: 'waddles.core.ping', communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 3, version: '3.0.1', activatedAt: '2026-03-04T10:30:00Z' },
+  { appId: 'waddles.core.pong', communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 4, activatedAt: null },
 ];
 
 let flags: Record<string, boolean>;
@@ -45,7 +45,7 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={client}>{children}</QueryClientProvider>;
 }
 
-function mount(communityId = '7') {
+function mount(communityId = '00000007-0000-4000-8000-000000000000') {
   return render(
     <MemoryRouter initialEntries={[`/admin/${communityId}/bundles`]}>
       <Routes>
@@ -91,19 +91,19 @@ describe('AdminCommunityBundles gating', () => {
     expect(api.list).not.toHaveBeenCalled();
   });
 
-  it('rejects a non-numeric community id without fetching', () => {
-    mount('not-a-number');
+  it('rejects a non-UUID community id without fetching', () => {
+    mount('7');
     expect(screen.getByRole('alert')).toHaveTextContent('Invalid community.');
     expect(api.list).not.toHaveBeenCalled();
   });
 });
 
 describe('AdminCommunityBundles listing', () => {
-  it('loads activations for the numeric community id', async () => {
+  it('loads activations for the community UUID', async () => {
     mount();
     expect(screen.getByRole('status')).toHaveTextContent('Loading bundles');
     expect(await screen.findByTestId('bundle-row-waddles.core.ping')).toBeInTheDocument();
-    expect(api.list).toHaveBeenCalledWith(7);
+    expect(api.list).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000');
   });
 
   it('renders each activation with its date, or "unknown" when none', async () => {
@@ -157,7 +157,7 @@ describe('AdminCommunityBundles activate', () => {
     fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: '  waddles.core.new  ' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Activate' }));
 
-    await waitFor(() => expect(api.activate).toHaveBeenCalledWith(7, 'waddles.core.new', []));
+    await waitFor(() => expect(api.activate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.new', []));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Activate Bundle' })).not.toBeInTheDocument());
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
@@ -182,7 +182,7 @@ describe('AdminCommunityBundles activate', () => {
     expect(screen.getByRole('dialog', { name: 'Activate Bundle' })).toBeInTheDocument();
     expect(console.error).toHaveBeenCalledWith(
       '[CommunityBundles] ActivateFailed',
-      expect.objectContaining({ communityId: 7, appId: 'waddles.core.new' }),
+      expect.objectContaining({ communityId: '00000007-0000-4000-8000-000000000000', appId: 'waddles.core.new' }),
     );
   });
 
@@ -221,7 +221,7 @@ describe('AdminCommunityBundles activate', () => {
 
     it('shows the bold red warning and does not activate until acknowledged', async () => {
       const grants = within(await startActivation());
-      expect(api.accessGrants).toHaveBeenCalledWith(7, 'waddles.core.rolesync');
+      expect(api.accessGrants).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.rolesync');
       expect(grants.getByTestId('access-grant-warning').className).toContain('border-red-500');
       expect(grants.getByTestId('access-grant-entry')).toHaveTextContent('community_members');
       expect(grants.getByTestId('access-grant-entry')).toHaveTextContent('ops: read, write');
@@ -237,7 +237,7 @@ describe('AdminCommunityBundles activate', () => {
       fireEvent.click(grants.getByTestId('access-grant-ack'));
       fireEvent.click(grants.getByTestId('access-grants-confirm'));
       await waitFor(() =>
-        expect(api.activate).toHaveBeenCalledWith(7, 'waddles.core.rolesync', IDS),
+        expect(api.activate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.rolesync', IDS),
       );
     });
   });
@@ -255,7 +255,7 @@ describe('AdminCommunityBundles deactivate', () => {
     const dialog = within(await askDeactivate());
     fireEvent.click(dialog.getByRole('button', { name: 'Deactivate' }));
 
-    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith(7, 'waddles.core.ping'));
+    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.ping'));
     await waitFor(() =>
       expect(screen.queryByRole('dialog', { name: 'Deactivate waddles.core.ping?' })).not.toBeInTheDocument(),
     );
