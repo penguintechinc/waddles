@@ -95,7 +95,7 @@ async fn empty_room_is_reaped_at_its_timeout_with_hands_locks_and_an_info_log() 
     // which pins the server's idle start to `t0` however slow the machine is (coverage builds).
     let hand_owner = uid();
     let t0 = loop {
-        let before = chrono::Utc::now().timestamp();
+        let before = time::OffsetDateTime::now_utc().unix_timestamp();
         h.client
             .join_room(req(
                 JoinRoomRequest {
@@ -112,7 +112,7 @@ async fn empty_room_is_reaped_at_its_timeout_with_hands_locks_and_an_info_log() 
             ))
             .await
             .unwrap();
-        if chrono::Utc::now().timestamp() == before {
+        if time::OffsetDateTime::now_utc().unix_timestamp() == before {
             break before;
         }
     };

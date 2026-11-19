@@ -29,7 +29,7 @@ fn test_state() -> AppState {
 }
 
 fn signed_token(state: &AppState) -> String {
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let claims = Claims {
         sub: "user-123".into(),
         iss: state.config.cli.jwt_issuer.clone(),

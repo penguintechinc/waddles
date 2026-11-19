@@ -4,6 +4,7 @@
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+use waddles_ops_cli::audit_cli::canonical_timestamp;
 use waddles_ops_cli::db::connect_options_from;
 use waddles_ops_cli::suppression_cli::{py_isoformat, read_platform_user_id};
 
@@ -253,8 +254,43 @@ fn stdin_line_and_isoformat_match_python() {
     );
     assert_eq!(read_platform_user_id("".as_bytes()).unwrap(), "");
     assert_eq!(read_platform_user_id("a b \n".as_bytes()).unwrap(), "a b ");
-    let t = chrono::DateTime::from_timestamp(1_760_000_000, 0).unwrap();
+    let t = time::OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
     assert_eq!(py_isoformat(t), "2025-10-09T08:53:20+00:00");
-    let t = chrono::DateTime::from_timestamp(1_760_000_000, 123_456_000).unwrap();
+    let t = time::OffsetDateTime::from_unix_timestamp_nanos(1_760_000_000_123_456_000).unwrap();
     assert_eq!(py_isoformat(t), "2025-10-09T08:53:20.123456+00:00");
+}
+
+/// Golden strings captured from the previous chrono implementation: the audit
+/// chain hashes `canonical_timestamp`, so any drift breaks chain verification.
+#[test]
+fn canonical_timestamp_goldens_match_legacy_chrono_output() {
+    use time::{Duration, OffsetDateTime, UtcOffset};
+    let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+    assert_eq!(canonical_timestamp(base), "2025-10-09T08:53:20.000000Z");
+    let micros = OffsetDateTime::from_unix_timestamp_nanos(1_760_000_000_123_456_000).unwrap();
+    assert_eq!(canonical_timestamp(micros), "2025-10-09T08:53:20.123456Z");
+    // sub-microsecond digits truncate (chrono `%6f` behaviour), never round
+    let nanos = OffsetDateTime::from_unix_timestamp_nanos(1_760_000_000_123_456_999).unwrap();
+    assert_eq!(canonical_timestamp(nanos), "2025-10-09T08:53:20.123456Z");
+    let tiny = base + Duration::microseconds(7);
+    assert_eq!(canonical_timestamp(tiny), "2025-10-09T08:53:20.000007Z");
+    // a non-UTC offset is normalised to UTC before formatting
+    let est = micros.to_offset(UtcOffset::from_hms(-5, 30, 0).unwrap());
+    assert_eq!(canonical_timestamp(est), "2025-10-09T08:53:20.123456Z");
+    // epoch and pre-epoch boundaries
+    assert_eq!(
+        canonical_timestamp(OffsetDateTime::UNIX_EPOCH),
+        "1970-01-01T00:00:00.000000Z"
+    );
+    let before = OffsetDateTime::from_unix_timestamp(-1).unwrap();
+    assert_eq!(canonical_timestamp(before), "1969-12-31T23:59:59.000000Z");
+}
+
+#[test]
+fn py_isoformat_normalises_offset_and_truncates_nanos() {
+    use time::{OffsetDateTime, UtcOffset};
+    let t = OffsetDateTime::from_unix_timestamp_nanos(1_760_000_000_000_001_999).unwrap();
+    assert_eq!(py_isoformat(t), "2025-10-09T08:53:20.000001+00:00");
+    let est = t.to_offset(UtcOffset::from_hms(9, 0, 0).unwrap());
+    assert_eq!(py_isoformat(est), "2025-10-09T08:53:20.000001+00:00");
 }

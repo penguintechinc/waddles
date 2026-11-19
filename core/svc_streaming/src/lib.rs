@@ -24,6 +24,7 @@ pub mod spec_builder;
 pub mod store;
 pub mod stream_key;
 pub mod telemetry;
+pub mod timestamp;
 pub mod tls;
 
 use std::net::SocketAddr;

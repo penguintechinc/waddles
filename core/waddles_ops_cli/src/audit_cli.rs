@@ -73,8 +73,18 @@ fn py_repr_lossy(s: &str) -> String {
 }
 
 /// Canonical UTC timestamp string that is hashed (microsecond precision, `Z` suffix).
-pub fn canonical_timestamp(t: chrono::DateTime<chrono::Utc>) -> String {
-    t.format("%Y-%m-%dT%H:%M:%S.%6fZ").to_string()
+pub fn canonical_timestamp(t: time::OffsetDateTime) -> String {
+    let t = t.to_offset(time::UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:06}Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.microsecond()
+    )
 }
 
 /// Python truthiness of a JSON value (`details or {}`).
@@ -103,7 +113,7 @@ fn row_to_record(row: &sqlx::postgres::PgRow) -> Result<ChainRecord, DbError> {
             }
         }
     };
-    let occurred: chrono::DateTime<chrono::Utc> = row.try_get("occurred_at")?;
+    let occurred: time::OffsetDateTime = row.try_get("occurred_at")?;
     Ok(ChainRecord {
         chain_id: row.try_get("chain_id")?,
         seq: row.try_get("seq")?,

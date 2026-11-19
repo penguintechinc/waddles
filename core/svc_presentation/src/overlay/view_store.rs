@@ -7,7 +7,6 @@
 use std::future::Future;
 use std::pin::Pin;
 
-use chrono::Utc;
 use overlay_auth::{OverlayAuthError, ViewCredentialRecord, ViewCredentialStore};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
 
@@ -47,7 +46,7 @@ impl ViewCredentialStore for SeaOrmViewCredentialStore {
                 key_hash: model.key_hash,
                 previous_key_hash: model.previous_key_hash,
                 is_active: model.is_active,
-                rotated_at: model.rotated_at.map(|dt| dt.with_timezone(&Utc)),
+                rotated_at: model.rotated_at,
             }))
         })
     }

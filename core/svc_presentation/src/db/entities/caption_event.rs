@@ -29,7 +29,7 @@ pub struct Model {
     pub detected_language: Option<String>,
     pub target_language: Option<String>,
     pub confidence_score: Option<f64>,
-    pub created_at: DateTimeWithTimeZone,
+    pub created_at: TimeDateTimeWithTimeZone,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

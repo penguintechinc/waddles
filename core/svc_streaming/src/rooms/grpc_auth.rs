@@ -85,7 +85,7 @@ pub struct ServiceClaims {
 type Clock = Arc<dyn Fn() -> i64 + Send + Sync>;
 
 fn system_now() -> i64 {
-    chrono::Utc::now().timestamp()
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 /// Verifies hub-api machine JWTs against a static public-key set.

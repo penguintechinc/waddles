@@ -53,8 +53,8 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::time::{Duration, Instant};
 
 use anyhow::Context as _;
-use chrono::{DateTime, Utc};
 use sea_orm::{ColumnTrait, DatabaseConnection, EntityTrait, QueryFilter};
+use time::OffsetDateTime;
 use tokio::io::AsyncReadExt;
 use tokio::sync::mpsc;
 use tracing::Instrument as _;
@@ -99,7 +99,7 @@ const RECORD_PROFILE: &str = "record";
 struct RegistryEntry {
     community_id: String,
     profile: String,
-    started_at: DateTime<Utc>,
+    started_at: OffsetDateTime,
 }
 
 /// In-memory record of which pipelines the orchestrator currently considers
@@ -131,7 +131,7 @@ impl PipelineRegistry {
             RegistryEntry {
                 community_id: community_id.into(),
                 profile: profile.into(),
-                started_at: Utc::now(),
+                started_at: OffsetDateTime::now_utc(),
             },
         );
     }

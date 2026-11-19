@@ -385,10 +385,13 @@ impl FlagSource for Arc<penguin_licensing::LicenseClient> {
         Box::pin(async move {
             let value = self.flag_enabled(key).await;
             let snap = self.snapshot()?;
-            let age = chrono::Utc::now().signed_duration_since(snap.fetched_at);
-            let fresh = age
-                .to_std()
-                .map(|a| a < self.config().cache_ttl)
+            // `fetched_at` is penguin-licensing's (chrono) timestamp; read it through its
+            // inherent epoch accessors so this crate never names a chrono type.
+            let fetched_nanos = i128::from(snap.fetched_at.timestamp()) * 1_000_000_000
+                + i128::from(snap.fetched_at.timestamp_subsec_nanos());
+            let age_nanos = time::OffsetDateTime::now_utc().unix_timestamp_nanos() - fetched_nanos;
+            let fresh = u64::try_from(age_nanos)
+                .map(|n| std::time::Duration::from_nanos(n) < self.config().cache_ttl)
                 .unwrap_or(false);
             Some((value, fresh))
         })

@@ -185,7 +185,7 @@ pub fn maybe_build_enforcement_envelope(
             payload.insert((*key).to_string(), value.clone());
         }
     }
-    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now = crate::timefmt::now_rfc3339_millis();
     Some(StageEnvelope {
         // Verbatim from `source` (see the MAC note above): the binding covers
         // the numeric scope on a v3 envelope, so it must be carried across.

@@ -59,10 +59,10 @@ use axum::http::{header, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Extension, Json, Router};
-use chrono::{DateTime, SecondsFormat, Utc};
 use overlay_auth::{validate_view_token, OverlayAuthError, PushCredential};
 use overlay_schema::{OverlayPush, Surface};
 use serde::{Deserialize, Serialize};
+use time::{OffsetDateTime, UtcOffset};
 
 use crate::error::ApiError;
 use crate::http::overlay::HEARTBEAT_INTERVAL;
@@ -302,9 +302,26 @@ pub struct CaptionWsFrame {
     pub timestamp: String,
 }
 
+/// RFC 3339 UTC with millisecond precision and a `Z` suffix
+/// (`2026-10-09T12:00:00.000Z`) -- the exact wire shape the overlay JS
+/// parses; sub-millisecond digits truncate, never round.
+pub fn rfc3339_millis(t: OffsetDateTime) -> String {
+    let t = t.to_offset(UtcOffset::UTC);
+    format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}.{:03}Z",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second(),
+        t.millisecond()
+    )
+}
+
 impl CaptionWsFrame {
     /// A frame for a freshly-pushed, already-validated caption.
-    pub fn live(content: &CaptionContent, now: DateTime<Utc>) -> Self {
+    pub fn live(content: &CaptionContent, now: OffsetDateTime) -> Self {
         Self {
             kind: "caption",
             display_name: Some(content.display_name.clone()),
@@ -313,7 +330,7 @@ impl CaptionWsFrame {
             detected_lang: content.detected_lang.clone(),
             target_lang: content.target_lang.clone(),
             confidence: content.confidence,
-            timestamp: now.to_rfc3339_opts(SecondsFormat::Millis, true),
+            timestamp: rfc3339_millis(now),
         }
     }
 
@@ -328,9 +345,7 @@ impl CaptionWsFrame {
             detected_lang: stored.detected_lang.clone(),
             target_lang: stored.target_lang.clone(),
             confidence: stored.confidence,
-            timestamp: stored
-                .created_at
-                .to_rfc3339_opts(SecondsFormat::Millis, true),
+            timestamp: rfc3339_millis(stored.created_at),
         }
     }
 }
@@ -384,7 +399,8 @@ pub async fn run_caption_ws(
     metrics: CaptionMetrics,
     heartbeat_interval: Duration,
 ) {
-    let since = Utc::now() - chrono::Duration::seconds(HISTORY_WINDOW.as_secs() as i64);
+    let since =
+        OffsetDateTime::now_utc() - time::Duration::seconds(HISTORY_WINDOW.as_secs() as i64);
     match store.recent(community_id, since, HISTORY_LIMIT).await {
         Ok(history) => {
             metrics.history_replayed.observe(history.len() as f64);
@@ -419,7 +435,7 @@ pub async fn run_caption_ws(
             outcome = subscription.recv() => match outcome {
                 Some(RecvOutcome::Push(push)) => match render_caption(&push) {
                     Ok(content) => {
-                        if !send_frame(&mut socket, &CaptionWsFrame::live(&content, Utc::now())).await {
+                        if !send_frame(&mut socket, &CaptionWsFrame::live(&content, OffsetDateTime::now_utc())).await {
                             break;
                         }
                     }
@@ -567,7 +583,15 @@ pub async fn push_caption(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+
+    /// Test helper: a UTC timestamp from calendar fields.
+    fn utc(y: i32, mo: u8, d: u8, h: u8, mi: u8, s: u8) -> OffsetDateTime {
+        time::Date::from_calendar_date(y, time::Month::try_from(mo).unwrap(), d)
+            .unwrap()
+            .with_hms(h, mi, s)
+            .unwrap()
+            .assume_utc()
+    }
     use uuid::Uuid;
 
     fn content() -> CaptionContent {
@@ -592,13 +616,33 @@ mod tests {
             detected_lang: Some("es".to_string()),
             target_lang: Some("en".to_string()),
             confidence,
-            created_at: Utc.with_ymd_and_hms(2026, 10, 9, 12, 30, 0).unwrap(),
+            created_at: utc(2026, 10, 9, 12, 30, 0),
         }
+    }
+
+    /// Goldens captured from the previous chrono `to_rfc3339_opts(Millis, true)`
+    /// output: the overlay JS parses this exact wire shape.
+    #[test]
+    fn rfc3339_millis_goldens_match_legacy_chrono_output() {
+        let base = OffsetDateTime::from_unix_timestamp(1_760_000_000).unwrap();
+        assert_eq!(rfc3339_millis(base), "2025-10-09T08:53:20.000Z");
+        let ms = OffsetDateTime::from_unix_timestamp_nanos(1_760_000_000_123_456_789).unwrap();
+        // sub-millisecond digits truncate, never round
+        assert_eq!(rfc3339_millis(ms), "2025-10-09T08:53:20.123Z");
+        let edge = OffsetDateTime::from_unix_timestamp_nanos(1_760_000_000_999_999_999).unwrap();
+        assert_eq!(rfc3339_millis(edge), "2025-10-09T08:53:20.999Z");
+        // non-UTC offsets are normalised to UTC with a `Z` suffix
+        let shifted = ms.to_offset(UtcOffset::from_hms(-5, 30, 0).unwrap());
+        assert_eq!(rfc3339_millis(shifted), "2025-10-09T08:53:20.123Z");
+        assert_eq!(
+            rfc3339_millis(OffsetDateTime::UNIX_EPOCH),
+            "1970-01-01T00:00:00.000Z"
+        );
     }
 
     #[test]
     fn live_frame_carries_the_display_name_and_a_utc_timestamp() {
-        let now = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
+        let now = utc(2026, 10, 9, 12, 0, 0);
         let frame = CaptionWsFrame::live(&content(), now);
         assert_eq!(frame.kind, "caption");
         assert_eq!(frame.display_name.as_deref(), Some("Display Name"));
@@ -607,7 +651,9 @@ mod tests {
 
     #[test]
     fn frames_never_expose_the_user_uuid_platform_or_a_username() {
-        let live = serde_json::to_value(CaptionWsFrame::live(&content(), Utc::now())).unwrap();
+        let live =
+            serde_json::to_value(CaptionWsFrame::live(&content(), OffsetDateTime::now_utc()))
+                .unwrap();
         let replayed = serde_json::to_value(CaptionWsFrame::replayed(&stored(None))).unwrap();
         for value in [live, replayed] {
             for forbidden in ["user", "user_ref", "username", "platform"] {

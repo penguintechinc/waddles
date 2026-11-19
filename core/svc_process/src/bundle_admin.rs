@@ -669,7 +669,7 @@ pub async fn run_consumer<B, E>(
                         Arc::clone(&executor),
                     );
                     tokio::spawn(async move {
-                        let now = chrono::Utc::now().timestamp_millis();
+                        let now = crate::timefmt::now_unix_millis();
                         handle_one(&raw, &ring, &*backend, &*executor, now).await;
                         drop(permit);
                     });

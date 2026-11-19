@@ -52,7 +52,7 @@ impl<T: Serialize> IntoResponse for ApiSuccess<T> {
             data: self.data,
             meta: Meta {
                 version: 1,
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                timestamp: crate::timestamp::to_rfc3339_offset(time::OffsetDateTime::now_utc()),
             },
         };
         (self.status_code, Json(body)).into_response()
