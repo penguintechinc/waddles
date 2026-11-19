@@ -26,10 +26,13 @@ on:
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Ref to test (empty = default branch; e.g. release/v3.0.X)'
+        description: 'Branch to test'
         required: false
-        default: ''
-        type: string
+        default: 'main'
+        type: choice
+        options:
+          - main
+          - release/v3.0.X
 
 permissions:
   contents: read
@@ -50,10 +53,18 @@ jobs:
     outputs:
       match: ${{ steps.paths.outputs.match }}
     steps:
+      - name: Validate ref input (main or release/* only)
+        env:
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          if [ -n "$REF_INPUT" ] && ! printf '%s' "$REF_INPUT" | grep -Eq '^(main|release/[A-Za-z0-9._-]+)$'; then
+            echo "::error::ref must be main or release/<name>; got a disallowed value"; exit 1
+          fi
+
       - name: Checkout (change classifier only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ inputs.ref || '' }}
+          ref: ${{ inputs.ref }}
           persist-credentials: false
           fetch-depth: 2
           sparse-checkout: |
@@ -82,7 +93,7 @@ jobs:
     name: fmt + clippy + deny + coverage
     uses: ./.github/workflows/rust-crate-ci.yml
     with:
-      ref: ${{ inputs.ref || '' }}
+      ref: ${{ inputs.ref }}
       crate_name: svc-ingest
       working_directory: core/svc_ingest
       # The lease + real-socket + live-hub tests fail loudly without a real Valkey.
@@ -104,10 +115,18 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 45
     steps:
+      - name: Validate ref input (main or release/* only)
+        env:
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          if [ -n "$REF_INPUT" ] && ! printf '%s' "$REF_INPUT" | grep -Eq '^(main|release/[A-Za-z0-9._-]+)$'; then
+            echo "::error::ref must be main or release/<name>; got a disallowed value"; exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ inputs.ref || '' }}
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Set up Python
