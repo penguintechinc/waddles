@@ -58,6 +58,7 @@ external_groups:
   - svc_process
   - svc_action
   - svc_streaming
+  - analytics_writer
   - mod_core_reputation
   - mod_router
   - mod_trigger_discord
@@ -245,6 +246,11 @@ roles:
       tenants: [SELECT]
       communities: [SELECT]
       community_servers: [SELECT]
+
+  waddles_svc_analytics:
+    description: svc-analytics stream consumer (analytics_fp DML + data_use_exclusions SELECT via analytics_writer)
+    workloads: [svc-analytics]
+    member_of: [analytics_writer]
 
   waddles_reputation:
     description: reputation service (community_members score columns, reputation ledgers)

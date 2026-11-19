@@ -3843,9 +3843,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                     .unwrap_or(0);
                 Ok(serde_json::json!(millis))
             }
-            "now-rfc3339" => Ok(serde_json::json!(
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
-            )),
+            "now-rfc3339" => Ok(serde_json::json!(crate::timefmt::now_rfc3339_millis())),
             "monotonic-nanos" => {
                 // No process-wide monotonic epoch exists to subtract
                 // against; a bundle only ever diffs two calls of its own,

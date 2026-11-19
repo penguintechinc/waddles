@@ -113,7 +113,7 @@ impl AuditSink for DbAuditSink {
         community_id: Option<i32>,
         app_id: &'a str,
         record: &'a DispatchRecord,
-        envelope_ts: Option<chrono::DateTime<chrono::FixedOffset>>,
+        envelope_ts: Option<time::OffsetDateTime>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             if let Err(err) = crate::db::entities::action_dispatch_log::insert(
@@ -237,7 +237,7 @@ mod tests {
                 http_status: None,
                 detail: "ok".to_string(),
                 envelope_ts: None,
-                dispatched_at: chrono::Utc::now().into(),
+                dispatched_at: time::OffsetDateTime::now_utc(),
             }]])
             .into_connection();
         let sink = DbAuditSink::new(db);

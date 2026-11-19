@@ -43,7 +43,7 @@ pub struct Model {
     pub entity: String,
     pub entity_id: String,
     pub op: String,
-    pub changed_at: DateTimeUtc,
+    pub changed_at: TimeDateTimeWithTimeZone,
     pub writer_xid: Option<i64>,
 }
 

@@ -181,7 +181,7 @@ async fn verify_with_metrics(
 
 /// Seconds since the Unix epoch (UTC), the reference for every time claim.
 fn now_unix() -> i64 {
-    chrono::Utc::now().timestamp()
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 /// Every check, in order, raising the first [`Failure`]. Kept free of
@@ -458,7 +458,7 @@ mod tests {
     }
 
     fn valid_claims(config: &Config) -> Claims {
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         Claims {
             sub: "user-123".into(),
             iss: config.cli.jwt_issuer.clone(),
@@ -1031,7 +1031,7 @@ mod tests {
     #[tokio::test]
     async fn exp_is_strict_and_the_skew_only_applies_to_iat_and_nbf() {
         let config = test_config(true);
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         // Expired 5 s ago: inside the 30 s library leeway, still refused.
         let claims = with(good_claims(&config), "exp", json!(now - 5));
         assert_refused(
@@ -1061,7 +1061,7 @@ mod tests {
     #[tokio::test]
     async fn iat_and_nbf_in_the_future_are_bounded_by_the_skew() {
         let config = test_config(true);
-        let now = chrono::Utc::now().timestamp();
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let claims = with(
             good_claims(&config),
             "iat",

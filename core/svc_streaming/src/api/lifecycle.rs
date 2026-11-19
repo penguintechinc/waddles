@@ -15,8 +15,8 @@ use axum::extract::{Path, State};
 use axum::http::header::AUTHORIZATION;
 use axum::http::HeaderMap;
 use axum::Extension;
-use chrono::Utc;
 use sea_orm::DatabaseConnection;
+use time::OffsetDateTime;
 
 use crate::billing::token_ledger::TokenLedgerClient;
 use crate::db::entities::streaming_config;
@@ -186,7 +186,11 @@ async fn resolve_transcode_admission(
         return false;
     };
 
-    let reference = format!("stream:{}:{}", config.id, Utc::now().to_rfc3339());
+    let reference = format!(
+        "stream:{}:{}",
+        config.id,
+        crate::timestamp::to_rfc3339_offset(OffsetDateTime::now_utc())
+    );
     let result = token_ledger
         .debit_transcoding_tokens(
             hub_api_url,

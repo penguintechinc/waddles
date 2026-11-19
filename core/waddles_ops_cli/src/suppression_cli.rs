@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Row};
+use time::OffsetDateTime;
 
 use crate::db::DbError;
 use crate::suppression::{
@@ -53,7 +53,7 @@ impl CmdError {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Match {
     pub reason: &'static str,
-    pub expires_at: Option<DateTime<Utc>>,
+    pub expires_at: Option<OffsetDateTime>,
 }
 
 /// BAN outranks AUTO_BAN.
@@ -66,7 +66,7 @@ fn stronger(a: &'static str, b: &'static str) -> &'static str {
 }
 
 /// The later of two expiries; NULL (until lifted) outranks every date.
-fn later(a: Option<DateTime<Utc>>, b: Option<DateTime<Utc>>) -> Option<DateTime<Utc>> {
+fn later(a: Option<OffsetDateTime>, b: Option<OffsetDateTime>) -> Option<OffsetDateTime> {
     match (a, b) {
         (Some(x), Some(y)) => Some(x.max(y)),
         _ => None,
@@ -82,9 +82,18 @@ fn reason_of(raw: &str) -> Result<&'static str, DbError> {
 }
 
 /// Python `datetime.isoformat()` of an aware UTC value (`+00:00`, micros only when non-zero).
-pub fn py_isoformat(t: DateTime<Utc>) -> String {
-    let base = t.format("%Y-%m-%dT%H:%M:%S").to_string();
-    let micros = t.timestamp_subsec_micros();
+pub fn py_isoformat(t: OffsetDateTime) -> String {
+    let t = t.to_offset(time::UtcOffset::UTC);
+    let base = format!(
+        "{:04}-{:02}-{:02}T{:02}:{:02}:{:02}",
+        t.year(),
+        u8::from(t.month()),
+        t.day(),
+        t.hour(),
+        t.minute(),
+        t.second()
+    );
+    let micros = t.microsecond();
     if micros == 0 {
         format!("{base}+00:00")
     } else {
@@ -182,7 +191,7 @@ pub async fn find(
             continue;
         }
         let reason = reason_of(&r.try_get::<String, _>("reason_enum")?)?;
-        let expires: Option<DateTime<Utc>> = r.try_get("expires_at")?;
+        let expires: Option<OffsetDateTime> = r.try_get("expires_at")?;
         acc = Some(match acc {
             None => Match {
                 reason,
@@ -215,10 +224,10 @@ pub async fn stats(pool: &PgPool) -> Result<Vec<String>, CmdError> {
     )
     .fetch_all(pool)
     .await?;
-    let now = Utc::now();
+    let now = OffsetDateTime::now_utc();
     let mut buckets: BTreeMap<(i64, String, String, &'static str), u64> = BTreeMap::new();
     for r in &rows {
-        let expires: Option<DateTime<Utc>> = r.try_get("expires_at")?;
+        let expires: Option<OffsetDateTime> = r.try_get("expires_at")?;
         let state = if expires.is_some_and(|e| e <= now) {
             "expired"
         } else {

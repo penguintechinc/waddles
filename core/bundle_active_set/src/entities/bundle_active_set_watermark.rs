@@ -42,7 +42,7 @@ pub struct Model {
     pub id: i16,
     pub safe_seq: i64,
     pub min_retained_seq: i64,
-    pub computed_at: DateTimeUtc,
+    pub computed_at: TimeDateTimeWithTimeZone,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

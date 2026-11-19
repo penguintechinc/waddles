@@ -314,8 +314,8 @@ impl ChangeLogTracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
     use sea_orm::{DatabaseBackend, MockDatabase};
+    use time::OffsetDateTime;
 
     fn watermark_row(safe_seq: i64) -> bundle_active_set_watermark::Model {
         watermark_row_with_retention(safe_seq, 0)
@@ -329,7 +329,7 @@ mod tests {
             id: WATERMARK_ROW_ID,
             safe_seq,
             min_retained_seq,
-            computed_at: Utc::now(),
+            computed_at: OffsetDateTime::now_utc(),
         }
     }
 
@@ -352,7 +352,7 @@ mod tests {
             entity: "app_active_versions".to_string(),
             entity_id: "waddles.a".to_string(),
             op: "upsert".to_string(),
-            changed_at: Utc::now(),
+            changed_at: OffsetDateTime::now_utc(),
             writer_xid: Some(42),
         }
     }

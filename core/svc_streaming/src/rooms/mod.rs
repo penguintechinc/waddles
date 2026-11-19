@@ -663,7 +663,7 @@ pub struct RoomService {
 }
 
 fn now() -> i64 {
-    chrono::Utc::now().timestamp()
+    time::OffsetDateTime::now_utc().unix_timestamp()
 }
 
 /// The community id as a span attribute: the digits when it is a plain numeric id, else `-`,

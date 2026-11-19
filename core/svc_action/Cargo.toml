@@ -57,7 +57,8 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["std
 # than a JSON array of byte values or lossy UTF-8. Pinned to the version
 # already resolved transitively (Cargo.lock).
 base64 = "=0.22.1"
-chrono = { version = "=0.4.45", features = ["serde"] }
+# Envelope `ts` parsing (`crate::dispatch`) + sea-orm `with-time` column types; replaces chrono.
+time = { version = "=0.3.55", features = ["parsing"] }
 # This service owns `action_dispatch_log` (config/postgres/migrations/074) --
 # see `rules/backend-database.md` Per-Service Database Accounts. No other
 # tables are queried by this crate.
@@ -66,7 +67,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
     "sqlx-sqlite",
     "runtime-tokio-rustls",
     "macros",
-    "with-chrono",
+    "with-time",
 ] }
 # `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
 # (spec SS4.9) -- see `src/telemetry.rs`. Pinned to the HEAD of

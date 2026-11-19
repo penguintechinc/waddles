@@ -23,8 +23,8 @@ use std::sync::Arc;
 use axum::extract::{Path, Query, Request, State};
 use axum::middleware::Next;
 use axum::response::Response;
-use chrono::{DateTime, Duration, Utc};
 use serde::Deserialize;
+use time::{Duration, OffsetDateTime};
 
 use crate::error::OverlayAuthError;
 
@@ -43,7 +43,7 @@ pub struct ViewCredentialRecord {
     pub key_hash: String,
     pub previous_key_hash: Option<String>,
     pub is_active: bool,
-    pub rotated_at: Option<DateTime<Utc>>,
+    pub rotated_at: Option<OffsetDateTime>,
 }
 
 /// The successfully-validated credential, inserted as a request extension
@@ -157,7 +157,9 @@ pub async fn validate_view_token(
     if let (Some(previous_hash), Some(rotated_at)) =
         (record.previous_key_hash.as_deref(), record.rotated_at)
     {
-        if presented_hash == previous_hash && Utc::now() <= rotated_at + ROTATION_GRACE_PERIOD {
+        if presented_hash == previous_hash
+            && OffsetDateTime::now_utc() <= rotated_at + ROTATION_GRACE_PERIOD
+        {
             store.record_access(community_id).await.ok();
             return Ok(ViewCredential {
                 community_id,
@@ -339,7 +341,7 @@ mod tests {
         let new_token = generate_view_token();
         let mut record = active_record(42, &new_token);
         record.previous_key_hash = Some(hash_token(&old_token));
-        record.rotated_at = Some(Utc::now() - Duration::minutes(2));
+        record.rotated_at = Some(OffsetDateTime::now_utc() - Duration::minutes(2));
         let store = FakeStore::new(vec![record]);
         let result = validate_view_token(&store, 42, &old_token).await.unwrap();
         assert!(!result.is_current);
@@ -351,7 +353,7 @@ mod tests {
         let new_token = generate_view_token();
         let mut record = active_record(42, &new_token);
         record.previous_key_hash = Some(hash_token(&old_token));
-        record.rotated_at = Some(Utc::now() - Duration::minutes(10));
+        record.rotated_at = Some(OffsetDateTime::now_utc() - Duration::minutes(10));
         let store = FakeStore::new(vec![record]);
         let err = validate_view_token(&store, 42, &old_token)
             .await

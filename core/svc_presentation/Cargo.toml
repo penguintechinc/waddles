@@ -45,7 +45,7 @@ tracing-opentelemetry = "=0.33.0"
 prometheus = "=0.14.0"
 utoipa = { version = "=5.5.0", features = ["axum_extras", "uuid"] }
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
-chrono = { version = "=0.4.45", features = ["serde"] }
+time = { version = "=0.3.55", default-features = false, features = ["std"] }
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
@@ -60,7 +60,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
     "runtime-tokio-rustls",
     "macros",
     "with-json",
-    "with-chrono",
+    "with-time",
     # `overlay_images.asset_id` (migration 101) is a `UUID` column --
     # `with-uuid` is what makes `sea_orm::entity::prelude::Uuid` resolve to
     # the `uuid` crate's type in a `DeriveEntityModel`, same convention

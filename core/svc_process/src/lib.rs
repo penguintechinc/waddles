@@ -64,6 +64,7 @@ pub mod spine;
 pub mod stage_metrics;
 pub mod surface;
 pub mod telemetry;
+pub mod timefmt;
 pub mod tokenize_memo;
 
 use std::net::SocketAddr;
