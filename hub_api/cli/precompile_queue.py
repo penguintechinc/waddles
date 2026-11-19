@@ -62,9 +62,15 @@ def database_url_from_env(env: Mapping[str, str] | None = None) -> str:
     return url
 
 
-async def _export(install_dal: Any, out: Path, *, limit: int) -> int:
+async def _export(
+    install_dal: Any,
+    out: Path,
+    *,
+    limit: int,
+    max_stale_reclaims: int = svc.DEFAULT_MAX_STALE_RECLAIMS,
+) -> int:
     """Lease up to `limit` queue rows and write them as the precompile manifest."""
-    items = await svc.claim_pending(install_dal, limit=limit)
+    items = await svc.claim_pending(install_dal, limit=limit, max_stale_reclaims=max_stale_reclaims)
     payload = json.dumps([i.as_json() for i in items])
     await asyncio.to_thread(out.write_text, payload)
     logger.info("precompile-queue: exported", extra={"items": len(items)})
@@ -148,6 +154,12 @@ def _parser() -> argparse.ArgumentParser:
     exp = sub.add_parser("export")
     exp.add_argument("--out", type=Path, required=True)
     exp.add_argument("--limit", type=int, default=50)
+    exp.add_argument(
+        "--max-stale-reclaims",
+        type=int,
+        default=svc.DEFAULT_MAX_STALE_RECLAIMS,
+        help="expired-lease reclaims tolerated per row before it is dead-lettered",
+    )
     ack = sub.add_parser("ack")
     ack.add_argument("--report", type=Path, required=True)
     ack.add_argument("--manifest", type=Path, default=None)
@@ -171,7 +183,12 @@ async def _run(args: argparse.Namespace) -> int:
     install_dal = await build_install_dal(database_url_from_env(), pool_size=2)
     try:
         if args.command == "export":
-            return await _export(install_dal, args.out, limit=args.limit)
+            return await _export(
+                install_dal,
+                args.out,
+                limit=args.limit,
+                max_stale_reclaims=args.max_stale_reclaims,
+            )
         if args.command == "enqueue-all-active":
             return await _enqueue_all_active(
                 install_dal, revive_dead_letters=args.revive_dead_letters

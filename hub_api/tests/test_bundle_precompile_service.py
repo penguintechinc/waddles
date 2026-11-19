@@ -51,8 +51,33 @@ class FakeQueue:
                 "last_error": None,
                 "attempts": 0,
                 "claimed_at": None,
+                "stale_reclaims": 0,
             }
             return _Rows([_Row(id=len(self.pending))])
+        if "SET attempts = GREATEST" in sql:
+            hits = []
+            for p in self.pending.values():
+                if (
+                    p["attempts"] < params["max_attempts"]
+                    and p["claimed_at"] is not None
+                    and p.get("lease_expired")
+                    and p["stale_reclaims"] + 1 > params["max_stale_reclaims"]
+                ):
+                    p["attempts"] = max(p["attempts"], params["max_attempts"])
+                    p["stale_reclaims"] += 1
+                    p["last_error"] = (
+                        f"lease expired {p['stale_reclaims']} times without ack "
+                        "(runner crash/timeout)"
+                    )
+                    hits.append(
+                        _Row(
+                            app_id=p["app_id"],
+                            version=p["version"],
+                            attempts=p["attempts"],
+                            stale_reclaims=p["stale_reclaims"],
+                        )
+                    )
+            return _Rows(hits)
         if "UPDATE bundle_precompile_requests r" in sql:
             picked = [
                 p
@@ -70,6 +95,8 @@ class FakeQueue:
                         prev_claimed_at=p["claimed_at"],
                     )
                 )
+                if p["claimed_at"] is not None:
+                    p["stale_reclaims"] += 1
                 p["claimed_at"] = "now"
                 p["lease_expired"] = False
             return _Rows(rows)
@@ -80,17 +107,19 @@ class FakeQueue:
             p = self.pending[params["digest"]]
             p["last_error"] = params["error"]
             p["attempts"] += 1
+            p["stale_reclaims"] = 0
             return _Rows([_Row(app_id=p["app_id"], version=p["version"], attempts=p["attempts"])])
         if "WHERE artifact_digest = :digest AND attempts >= :max_attempts" in sql:
-            p = self.pending.get(params["digest"])
-            if p is None or p["attempts"] < params["max_attempts"]:
+            hit = self.pending.get(params["digest"])
+            if hit is None or hit["attempts"] < params["max_attempts"]:
                 return _Rows()
-            p.update(attempts=0, claimed_at=None, last_error=None)
+            p = hit
+            p.update(attempts=0, stale_reclaims=0, claimed_at=None, last_error=None)
             return _Rows([_Row(id=p["id"])])
         if "WHERE id = :id AND attempts >= :max_attempts" in sql:
             for p in self.pending.values():
                 if p["id"] == params["id"] and p["attempts"] >= params["max_attempts"]:
-                    p.update(attempts=0, claimed_at=None, last_error=None)
+                    p.update(attempts=0, stale_reclaims=0, claimed_at=None, last_error=None)
                     return _Rows([_Row(id=p["id"])])
             return _Rows()
         raise AssertionError(f"unexpected SQL {sql}")
@@ -253,7 +282,7 @@ def test_cli_enqueue_all_active_command_runs_with_minimal_config(
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://r:p@h:5432/d")
     monkeypatch.setattr(precompile_queue, "build_install_dal", _build)
-    monkeypatch.setattr(precompile_queue.svc, "enqueue_all_active", _enqueue)
+    monkeypatch.setattr(svc, "enqueue_all_active", _enqueue)
     rc = asyncio.run(
         precompile_queue._run(precompile_queue._parser().parse_args(["enqueue-all-active"]))
     )
@@ -320,13 +349,13 @@ def test_cli_run_uses_minimal_config_not_hub_api_config(
         seen.append(url)
         return _Dal()
 
-    async def _claim(_dal: Any, limit: int) -> list[Any]:
+    async def _claim(_dal: Any, limit: int, **_kw: Any) -> list[Any]:
         return []
 
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://r:p@h:5432/d")
     monkeypatch.setattr(precompile_queue, "build_install_dal", _build)
-    monkeypatch.setattr(precompile_queue.svc, "claim_pending", _claim)
+    monkeypatch.setattr(svc, "claim_pending", _claim)
     out = tmp_path / "m.json"
     rc = asyncio.run(
         precompile_queue._run(precompile_queue._parser().parse_args(["export", "--out", str(out)]))

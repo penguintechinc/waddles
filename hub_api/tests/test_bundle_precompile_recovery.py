@@ -23,7 +23,14 @@ from tests.test_bundle_precompile_service import (  # noqa: F401  # queue is a f
 )
 
 
-def _dead(q: FakeQueue, digest: str, app_id: str, error: str | None, attempts: int = 5) -> None:
+def _dead(
+    q: FakeQueue,
+    digest: str,
+    app_id: str,
+    error: str | None,
+    attempts: int = 5,
+    stale_reclaims: int = 0,
+) -> None:
     """Seed a dead-lettered row directly (attempts at the cap)."""
     q.pending[digest] = {
         "digest": digest,
@@ -32,20 +39,85 @@ def _dead(q: FakeQueue, digest: str, app_id: str, error: str | None, attempts: i
         "id": len(q.pending) + 1,
         "last_error": error,
         "attempts": attempts,
+        "stale_reclaims": stale_reclaims,
         "claimed_at": "old",
     }
 
 
-async def test_stale_lease_reclaim_does_not_burn_attempts(queue: FakeQueue) -> None:
-    """A claim whose lease expires without an ack is re-offered and never nears the dead letter."""
+async def test_stale_reclaim_under_cap_is_reoffered_without_burning_attempts(
+    queue: FakeQueue,
+) -> None:
+    """Up to MAX_STALE_RECLAIMS expired leases are re-offered; attempts never moves."""
     await svc.enqueue_precompile(None, app_id="a", version="1.0.0", digest=DIGEST)
     _signed(queue, app_id="a")
-    for _ in range(12):  # far more than max attempts
+    assert [i.digest for i in await svc.claim_pending(None, limit=10)] == [DIGEST]  # first claim
+    for expected in range(1, svc.DEFAULT_MAX_STALE_RECLAIMS + 1):
+        queue.pending[DIGEST]["lease_expired"] = True  # runner died, no ack
         items = await svc.claim_pending(None, limit=10)
         assert [i.digest for i in items] == [DIGEST]
-        queue.pending[DIGEST]["lease_expired"] = True  # runner died, no ack
+        assert queue.pending[DIGEST]["stale_reclaims"] == expected
     assert queue.pending[DIGEST]["attempts"] == 0
     assert await svc.record_dead_letters(None) == 0
+
+
+async def test_stale_reclaim_over_cap_dead_letters_with_error_and_warning(
+    queue: FakeQueue, caplog: pytest.LogCaptureFixture
+) -> None:
+    """The reclaim past the cap dead-letters (poison pill): not offered, error set, WARN logged."""
+    await svc.enqueue_precompile(None, app_id="app.x", version="1.0.0", digest=DIGEST)
+    _signed(queue, app_id="app.x")
+    await svc.claim_pending(None, limit=10)
+    for _ in range(svc.DEFAULT_MAX_STALE_RECLAIMS):
+        queue.pending[DIGEST]["lease_expired"] = True
+        await svc.claim_pending(None, limit=10)
+    queue.pending[DIGEST]["lease_expired"] = True
+    with caplog.at_level("WARNING"):
+        items = await svc.claim_pending(None, limit=10)
+    assert items == []
+    n = svc.DEFAULT_MAX_STALE_RECLAIMS + 1
+    row = queue.pending[DIGEST]
+    assert row["last_error"] == f"lease expired {n} times without ack (runner crash/timeout)"
+    assert row["attempts"] >= svc.DEFAULT_MAX_ATTEMPTS
+    assert svc._DEAD_LETTERS_SEEN == 1  # the gauge counts it
+    warn = [r for r in caplog.records if "lease expired too many times" in r.getMessage()]
+    assert len(warn) == 1
+    extra = warn[0].__dict__
+    assert (extra.get("app_id"), extra.get("version"), extra.get("stale_reclaims")) == (
+        "app.x",
+        "1.0.0",
+        n,
+    )
+    queue.pending[DIGEST]["lease_expired"] = True
+    assert await svc.claim_pending(None, limit=10) == []  # stays dead
+
+
+async def test_poison_item_does_not_starve_other_items(queue: FakeQueue) -> None:
+    """After a poison row dead-letters, the rest of the queue is still claimed."""
+    other = "cd" * 32
+    await svc.enqueue_precompile(None, app_id="a", version="1.0.0", digest=DIGEST)
+    await svc.enqueue_precompile(None, app_id="b", version="1.0.0", digest=other)
+    _signed(queue, app_id="a")
+    queue.signed[("b", "1.0.0", other)] = queue.signed[("a", "1.0.0", DIGEST)].__class__(
+        app_id="b",
+        version="1.0.0",
+        artifact_digest=other,
+        component_key="c",
+        sidecar_key="s",
+    )
+    queue.pending[DIGEST].update(
+        claimed_at="old", lease_expired=True, stale_reclaims=svc.DEFAULT_MAX_STALE_RECLAIMS
+    )
+    items = await svc.claim_pending(None, limit=10)
+    assert [i.digest for i in items] == [other]
+    assert queue.pending[DIGEST]["attempts"] >= svc.DEFAULT_MAX_ATTEMPTS
+
+
+async def test_failed_ack_resets_stale_reclaims(queue: FakeQueue) -> None:
+    """A genuine failed ack proves the runner finished the item, so the stale counter restarts."""
+    await svc.enqueue_precompile(None, app_id="a", version="1.0.0", digest=DIGEST)
+    queue.pending[DIGEST]["stale_reclaims"] = 2
+    await svc.ack_report(None, {"results": [{"digest": DIGEST, "status": "failed", "error": "e"}]})
+    assert queue.pending[DIGEST]["stale_reclaims"] == 0
 
 
 async def test_claim_counts_stale_reclaims(
@@ -58,7 +130,9 @@ async def test_claim_counts_stale_reclaims(
         await svc.claim_pending(None, limit=10)
         queue.pending[DIGEST]["lease_expired"] = True
         await svc.claim_pending(None, limit=10)
-    stale = [r.stale_reclaims for r in caplog.records if hasattr(r, "stale_reclaims")]
+    stale = [
+        getattr(r, "stale_reclaims", None) for r in caplog.records if "stale_reclaims" in r.__dict__
+    ]
     assert stale == [0, 1]
 
 
@@ -74,7 +148,11 @@ async def test_failed_ack_consumes_attempts_and_dead_letters_with_warning(
     assert queue.pending[DIGEST]["attempts"] == svc.DEFAULT_MAX_ATTEMPTS
     dead = [r for r in caplog.records if "dead letter)" in r.getMessage()]
     assert len(dead) == 1
-    assert (dead[0].app_id, dead[0].version, dead[0].attempts) == (
+    assert (
+        getattr(dead[0], "app_id", None),
+        getattr(dead[0], "version", None),
+        getattr(dead[0], "attempts", None),
+    ) == (
         "app.x",
         "1.0.0",
         svc.DEFAULT_MAX_ATTEMPTS,
@@ -112,7 +190,7 @@ async def test_reconcile_revives_dead_letters_for_active_versions_only(queue: Fa
     """enqueue_all_active(revive_dead_letters=True) resets capped active rows, clears last_error."""
     _signed(queue)
     other = "cd" * 32
-    _dead(queue, DIGEST, "waddles.test", "S3 PUT 403")
+    _dead(queue, DIGEST, "waddles.test", "S3 PUT 403", stale_reclaims=4)
     _dead(queue, other, "waddles.inactive", "boom")  # not active: must stay dead
     off = await svc.enqueue_all_active(None)  # default: insert-only, no revive
     assert (off.queued, off.revived, off.already_pending) == (0, 0, 1)
@@ -120,6 +198,7 @@ async def test_reconcile_revives_dead_letters_for_active_versions_only(queue: Fa
     on = await svc.enqueue_all_active(None, revive_dead_letters=True)
     assert (on.examined, on.queued, on.revived, on.already_pending) == (1, 0, 1, 0)
     assert queue.pending[DIGEST]["attempts"] == 0
+    assert queue.pending[DIGEST]["stale_reclaims"] == 0
     assert queue.pending[DIGEST]["last_error"] is None
     assert queue.pending[DIGEST]["claimed_at"] is None
     assert queue.pending[other]["attempts"] == 5
@@ -148,7 +227,7 @@ async def test_requeue_failed_dry_run_counts_and_writes_nothing(queue: FakeQueue
 async def test_requeue_failed_filters_and_resets(queue: FakeQueue) -> None:
     """app_id and error_like narrow the set; requeue clears attempts, lease and last_error."""
     d2, d3 = "cd" * 32, "ef" * 32
-    _dead(queue, DIGEST, "app.a", "S3 PUT returned 403 Forbidden")
+    _dead(queue, DIGEST, "app.a", "S3 PUT returned 403 Forbidden", stale_reclaims=4)
     _dead(queue, d2, "app.b", "S3 PUT returned 403 Forbidden")
     _dead(queue, d3, "app.a", "wasm trap")
     assert (await svc.requeue_failed(None, app_id="app.a")).matched == 2
@@ -156,6 +235,7 @@ async def test_requeue_failed_filters_and_resets(queue: FakeQueue) -> None:
     both = await svc.requeue_failed(None, app_id="app.a", error_like="403", dry_run=False)
     assert (both.matched, both.requeued, both.dry_run) == (1, 1, False)
     assert queue.pending[DIGEST]["attempts"] == 0
+    assert queue.pending[DIGEST]["stale_reclaims"] == 0
     assert queue.pending[DIGEST]["last_error"] is None
     assert queue.pending[DIGEST]["claimed_at"] is None
     assert queue.pending[d2]["attempts"] == 5 and queue.pending[d3]["attempts"] == 5

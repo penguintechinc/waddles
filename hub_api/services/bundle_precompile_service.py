@@ -23,10 +23,15 @@ Attempt accounting (incident 2026-11-16..19, alpha): `attempts` counts only GENU
 i.e. a `failed` result acked by the precompiler. Claiming a row never increments it. Previously
 every claim incremented `attempts`, so a precompile Job that died before acking (OOM, eviction,
 node drain) burned an attempt per 1800s lease re-offer until the row dead-lettered with an empty
-`last_error` (50 such rows on alpha). A lease that expires with no ack is now simply re-offered
-(counted and logged as a `stale_reclaim`); it never moves a row toward the dead letter.
+`last_error` (50 such rows on alpha). A lease that expires with no ack is re-offered
+(counted and logged as a `stale_reclaim`) and increments the SEPARATE `stale_reclaims` column, never
+`attempts`. Poison-pill guard: a row whose lease expires more than `MAX_STALE_RECLAIMS` times (a
+runner that deterministically crashes, is OOM-killed or hangs) is dead-lettered by `claim_pending()`
+(`attempts` set to the cap, `last_error` = "lease expired N times without ack (runner
+crash/timeout)") so it cannot be re-offered forever. A genuine failed ack resets `stale_reclaims`.
 `last_error` is only ever written by a genuine failure and is cleared whenever a row is revived
-(`requeue_failed`, or the reconcile Job's `revive_dead_letters`); a successful ack deletes the row.
+(`requeue_failed`, or the reconcile Job's `revive_dead_letters`), which also reset `stale_reclaims`;
+a successful ack deletes the row.
 
 Per-engine-fingerprint idempotency lives in object storage (`precompiled/<engine_fp>/...`), which
 the precompiler checks before compiling -- this table only says "this digest needs a look".
@@ -48,6 +53,8 @@ logger = logging.getLogger("waddles.hub_api.bundle_precompile")
 DEFAULT_LEASE_SECONDS = 1800
 #: Genuine-failure attempts after which a row is left for operators (dead letter, error kept).
 DEFAULT_MAX_ATTEMPTS = 5
+#: Expired-lease reclaims (no ack) tolerated per row; the next one dead-letters it (poison pill).
+DEFAULT_MAX_STALE_RECLAIMS = 3
 #: Default `requeue_failed` safety cap: more matches than this aborts instead of requeueing.
 DEFAULT_REQUEUE_CAP = 500
 _LAST_ERROR_MAX = 500
@@ -58,6 +65,23 @@ _ENQUEUE_SQL = """
     VALUES (:digest, :app_id, :version)
     ON CONFLICT (artifact_digest) DO NOTHING
     RETURNING id
+"""
+
+_STALE_DEAD_LETTER_SQL = """
+    UPDATE bundle_precompile_requests
+    SET attempts = GREATEST(attempts, :max_attempts),
+        stale_reclaims = stale_reclaims + 1,
+        last_error = 'lease expired ' || (stale_reclaims + 1)
+                     || ' times without ack (runner crash/timeout)'
+    WHERE id IN (
+        SELECT id FROM bundle_precompile_requests
+        WHERE attempts < :max_attempts
+          AND claimed_at IS NOT NULL
+          AND claimed_at < NOW() - make_interval(secs => :lease)
+          AND stale_reclaims + 1 > :max_stale_reclaims
+        FOR UPDATE SKIP LOCKED
+    )
+    RETURNING app_id, version, attempts, stale_reclaims
 """
 
 _CLAIM_SQL = """
@@ -71,7 +95,8 @@ _CLAIM_SQL = """
         FOR UPDATE SKIP LOCKED
     )
     UPDATE bundle_precompile_requests r
-    SET claimed_at = NOW()
+    SET claimed_at = NOW(),
+        stale_reclaims = r.stale_reclaims + CASE WHEN r.claimed_at IS NULL THEN 0 ELSE 1 END
     FROM picked
     WHERE r.id = picked.id
     RETURNING r.artifact_digest, r.app_id, r.version, picked.prev_claimed_at
@@ -98,14 +123,14 @@ _ALL_ACTIVE_SQL = """
 _DELETE_SQL = "DELETE FROM bundle_precompile_requests WHERE artifact_digest = :digest"
 _FAIL_SQL = """
     UPDATE bundle_precompile_requests
-    SET last_error = :error, attempts = attempts + 1
+    SET last_error = :error, attempts = attempts + 1, stale_reclaims = 0
     WHERE artifact_digest = :digest
     RETURNING app_id, version, attempts
 """
 
 _REVIVE_SQL = """
     UPDATE bundle_precompile_requests
-    SET attempts = 0, claimed_at = NULL, last_error = NULL
+    SET attempts = 0, stale_reclaims = 0, claimed_at = NULL, last_error = NULL
     WHERE artifact_digest = :digest AND attempts >= :max_attempts
     RETURNING id
 """
@@ -127,7 +152,7 @@ _DEAD_MATCH_SQL = """
 
 _REQUEUE_SQL = """
     UPDATE bundle_precompile_requests
-    SET attempts = 0, claimed_at = NULL, last_error = NULL
+    SET attempts = 0, stale_reclaims = 0, claimed_at = NULL, last_error = NULL
     WHERE id = :id AND attempts >= :max_attempts
     RETURNING id
 """
@@ -255,16 +280,42 @@ async def claim_pending(
     limit: int,
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
     max_attempts: int = DEFAULT_MAX_ATTEMPTS,
+    max_stale_reclaims: int = DEFAULT_MAX_STALE_RECLAIMS,
 ) -> list[PrecompileItem]:
     """Lease up to `limit` pending rows and resolve their bucket keys.
 
     A claim does not consume an attempt; rows whose previous lease expired without an ack are
-    re-offered and counted as `stale_reclaim`. A claimed row whose `app_versions` row is not
-    (yet) signed is still leased -- its sidecar may not be uploaded yet -- and is retried after
-    the lease; it is logged at WARNING.
+    re-offered, counted as `stale_reclaim` and tracked in `stale_reclaims`. A row whose lease has
+    expired more than `max_stale_reclaims` times is dead-lettered first (poison pill: it
+    crashes/hangs its runner every time) instead of being offered again. A claimed row whose
+    `app_versions` row is not (yet) signed is still leased -- its sidecar may not be uploaded
+    yet -- and is retried after the lease; it is logged at WARNING.
     """
-    if limit < 1 or lease_seconds < 1 or max_attempts < 1:
-        raise ValueError("limit, lease_seconds and max_attempts must be >= 1")
+    if limit < 1 or lease_seconds < 1 or max_attempts < 1 or max_stale_reclaims < 0:
+        raise ValueError(
+            "limit, lease_seconds and max_attempts must be >= 1; max_stale_reclaims >= 0"
+        )
+    poisoned = await raw_sql_write(
+        install_dal,
+        _STALE_DEAD_LETTER_SQL,
+        {
+            "lease": lease_seconds,
+            "max_attempts": max_attempts,
+            "max_stale_reclaims": max_stale_reclaims,
+        },
+    )
+    for dead in poisoned:
+        _counter().add(1, {"op": "claim", "outcome": "stale_dead_lettered"})
+        logger.warning(
+            "bundle precompile: lease expired too many times (dead letter)",
+            extra={
+                "app_id": str(dead.app_id),
+                "version": str(dead.version),
+                "attempts": int(dead.attempts),
+                "stale_reclaims": int(dead.stale_reclaims),
+                "max_stale_reclaims": max_stale_reclaims,
+            },
+        )
     claimed = await raw_sql_write(
         install_dal,
         _CLAIM_SQL,
