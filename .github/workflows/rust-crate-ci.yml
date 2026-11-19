@@ -9,6 +9,11 @@ name: Rust Crate CI (Reusable)
 on:
   workflow_call:
     inputs:
+      ref:
+        required: false
+        type: string
+        default: ''
+        description: 'Ref to check out (empty = the triggering ref)'
       crate_name:
         required: true
         type: string
@@ -83,6 +88,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Setup build deps (${{ inputs.extra_apt_reason }})
