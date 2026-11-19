@@ -98,7 +98,7 @@ Needs the Gateway API `BackendTLSPolicy` CRD (`gateway.networking.k8s.io/v1`); o
 `httproute.backendTls.apiVersion` if the cluster serves another version.
 
 ## 5. Waddles (helm 3.17.x -- NOT v4, helm#31361 fresh-install bug)
-Prereq secrets in ns waddlebot: `ghcr-pull`, `waddlebot-platform-credentials`.
+Prereq secrets in ns waddlebot: `waddlebot-platform-credentials` (alpha images are public; no ghcr-pull needed).
 ```bash
 kubectl --context dal2alpha create ns waddlebot --dry-run=client -o yaml | kubectl --context dal2alpha apply -f -
 # REQUIRED: without this label the shared Gateway rejects the waddlebot HTTPRoute

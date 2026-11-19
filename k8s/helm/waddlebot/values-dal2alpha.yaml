@@ -3,7 +3,7 @@
 # is a REAL 2-node amd64 cluster (Cilium CNI, k8s v1.35): ghcr.io images, ClusterIP + Ingress/TLS only (no
 # NodePort), and the full security baseline (default-deny CNP, PSA restricted, Tetragon) is ON.
 # Usage: helm upgrade --install waddlebot . -n waddlebot -f values-dal2alpha.yaml (NO other -f needed).
-# Prereqs (operator-provisioned, never in git): Secret ghcr-pull + waddlebot-platform-credentials in ns waddlebot.
+# Prereqs (operator-provisioned, never in git): Secret waddlebot-platform-credentials in ns waddlebot.
 hubApi:
   trustForwardedHost: true
   trustedProxyCidrs: ["10.244.0.0/16"]
@@ -32,8 +32,8 @@ global:
   # here, this chart pulls from here.
   imageRegistry: "ghcr.io/penguintechinc/waddles"
   imageTag: "demo-881ac8dd"
-  imagePullSecrets:
-    - name: ghcr-pull
+  # No imagePullSecrets: alpha images in ghcr.io/penguintechinc/waddles are public (verified 2026-11-19),
+  # so no pull secret is needed; values.yaml default [] applies.
   # IfNotPresent: every alpha deploy gets a unique per-deploy global.imageTag (SHA8), and kind e2e /
   # alpha local builds load images onto the node -- Always would force a registry pull that fails
   # and hang the pod. (Never would make containerd skip localhost:32000 -> ErrImageNeverPull.)
