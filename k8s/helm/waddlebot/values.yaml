@@ -2653,6 +2653,8 @@ latencyCanary:
   intervalSeconds: 60  # 30..600; jittered +-10%, doubles on consecutive failures
 
 config:
+  # FLAG_* ENV baselines for data-plane FEATURE flags (key must start with FLAG_; never licensed flags).
+  dataPlaneFlagBaselines: {}
   # ENV baseline for flag waddles.analytics-stream -> FLAG_WADDLES_ANALYTICS_STREAM (analytics
   # stream producer + svc-analytics writer; default OFF, PostHog overrides when connected).
   analyticsStreamEnabled: false

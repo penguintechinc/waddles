@@ -29,6 +29,7 @@ use std::time::Duration;
 use egress_detokenizer::{DetokenizedText, DisplayNameResolver, Sink};
 
 use crate::display_names::PgDisplayNameResolver;
+use crate::license::PosthogFlag;
 
 use crate::config::CliConfig;
 use crate::outbound_ops::OutboundAction;
@@ -72,8 +73,7 @@ pub fn outcome_count(outcome: &str) -> u64 {
 pub enum KillSwitch {
     /// A fixed answer: `true` = detokenization enabled (env override, tests).
     Fixed(bool),
-    /// The PostHog-backed license client: bypass domain => enabled, otherwise
-    /// enabled unless [`DISABLE_PII_DETOKENIZATION_FLAG`] is ON.
+    /// The PostHog-backed license client: enabled unless [`DISABLE_PII_DETOKENIZATION_FLAG`] is ON.
     License(Arc<penguin_licensing::LicenseClient>),
 }
 
@@ -81,12 +81,7 @@ impl KillSwitch {
     async fn detokenization_enabled(&self) -> bool {
         match self {
             Self::Fixed(enabled) => *enabled,
-            Self::License(client) => {
-                if client.bypass_active() {
-                    return true;
-                }
-                !client.flag_enabled(DISABLE_PII_DETOKENIZATION_FLAG).await
-            }
+            Self::License(client) => !client.flag_on(DISABLE_PII_DETOKENIZATION_FLAG).await,
         }
     }
 }

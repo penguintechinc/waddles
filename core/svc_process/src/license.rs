@@ -26,6 +26,31 @@ use std::sync::{Arc, OnceLock};
 
 use penguin_licensing::{LicenseClient, LicenseConfig, LicenseError};
 
+/// Feature-flag evaluation over a license client: PostHog snapshot, then the
+/// `FLAG_*` ENV baseline, then OFF. The license-bypass domain answers
+/// LICENSE/entitlement checks only (`tier`/`check_feature`) and never forces a
+/// feature flag or kill-switch -- the library's own `flag_enabled` returns
+/// `true` for every key under bypass, so it is deliberately not used for
+/// the value (user decision 2026-11-12).
+pub trait PosthogFlag {
+    /// Resolves `key`: PostHog snapshot, else ENV baseline, else `false`.
+    fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+}
+
+impl PosthogFlag for Arc<LicenseClient> {
+    fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            // Side effect only: `validate` schedules a background refresh when the snapshot is
+            // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
+            let _ = self.validate().await;
+            self.snapshot()
+                .and_then(|snap| snap.flags.get(key).copied())
+                .or_else(|| env_flag_value(key))
+                .unwrap_or(false)
+        })
+    }
+}
+
 /// The flag key gating the process-stage drain loop (spec §13.5). Flag-key
 /// convention: `{product}.{feature-name}` (`rules/critical-rules.md`
 /// Feature Flags & License Tiers) -- product is `waddles`.
@@ -56,7 +81,7 @@ impl BundleEgressFlag {
 
 impl bundle_host_http::egress::FeatureFlag for BundleEgressFlag {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(BUNDLE_EGRESS_FLAG).await })
+        Box::pin(async move { self.0.flag_on(BUNDLE_EGRESS_FLAG).await })
     }
 }
 
@@ -79,7 +104,7 @@ impl LicenseFeatureGate {
 
 impl FeatureGate for LicenseFeatureGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(RUST_DATA_PLANE_FLAG).await })
+        Box::pin(async move { self.0.flag_on(RUST_DATA_PLANE_FLAG).await })
     }
 }
 
@@ -124,19 +149,9 @@ pub const DISABLE_DB_BUNDLE_CONFIG_FLAG: &str = "waddles.core.disable-db-bundle-
 /// same fakes serve both gates) -- constructing those directly with the
 /// *already-inverted* boolean they want [`enabled`] to report.
 ///
-/// **Bypass-awareness fix:** [`build_license_client`] always registers
-/// this service's own [`DEPLOYMENT_DOMAIN`] against [`BYPASS_DOMAIN`], so
-/// `LicenseClient::bypass_active()` is `true` for every deployment of this
-/// service (`build_license_client_hardcoded_domain_bypasses_flag_checks`'s
-/// own proof) -- and a bypassed client's `flag_enabled` reads `true` for
-/// *any* key, `RUST_DATA_PLANE_FLAG` included, since bypass means "this
-/// PenguinTech-owned deployment gets every feature unlocked". Naively
-/// negating that raw `true` for this OPT-OUT kill-switch would read as
-/// "bypass -> kill-switch raw-ON -> DB path permanently DISABLED" -- the
-/// exact opposite of what bypass is supposed to mean. [`enabled`] checks
-/// [`LicenseClient::bypass_active`] first and short-circuits to `true`
-/// (DB path enabled, the correct "unlocked" outcome) before ever reading
-/// the raw flag.
+/// **Bypass domains are license-only (2026-11-12):** a bypassed client is
+/// evaluated like any other -- an unseen kill-switch is OFF (DB path
+/// enabled) and PostHog can still flip it on a bypass domain.
 pub struct DbBundleConfigGate(Arc<LicenseClient>);
 
 impl DbBundleConfigGate {
@@ -147,12 +162,7 @@ impl DbBundleConfigGate {
 
 impl FeatureGate for DbBundleConfigGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            if self.0.bypass_active() {
-                return true;
-            }
-            !self.0.flag_enabled(DISABLE_DB_BUNDLE_CONFIG_FLAG).await
-        })
+        Box::pin(async move { !self.0.flag_on(DISABLE_DB_BUNDLE_CONFIG_FLAG).await })
     }
 }
 
@@ -177,12 +187,7 @@ impl ExecutorShardingGate {
 
 impl FeatureGate for ExecutorShardingGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            if self.0.bypass_active() {
-                return true;
-            }
-            !self.0.flag_enabled(DISABLE_EXECUTOR_SHARDING_FLAG).await
-        })
+        Box::pin(async move { !self.0.flag_on(DISABLE_EXECUTOR_SHARDING_FLAG).await })
     }
 }
 
@@ -222,15 +227,7 @@ impl MultiTenantWatermarkGate {
 
 impl FeatureGate for MultiTenantWatermarkGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            if self.0.bypass_active() {
-                return true;
-            }
-            !self
-                .0
-                .flag_enabled(DISABLE_MULTI_TENANT_WATERMARK_FLAG)
-                .await
-        })
+        Box::pin(async move { !self.0.flag_on(DISABLE_MULTI_TENANT_WATERMARK_FLAG).await })
     }
 }
 
@@ -317,7 +314,7 @@ impl BundleDbCapabilityGate {
 
 impl FeatureGate for BundleDbCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(BUNDLE_DB_CAPABILITY_FLAG).await })
+        Box::pin(async move { self.0.flag_on(BUNDLE_DB_CAPABILITY_FLAG).await })
     }
 }
 
@@ -339,7 +336,7 @@ impl BundleReputationCapabilityGate {
 
 impl FeatureGate for BundleReputationCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(BUNDLE_REPUTATION_CAPABILITY_FLAG).await })
+        Box::pin(async move { self.0.flag_on(BUNDLE_REPUTATION_CAPABILITY_FLAG).await })
     }
 }
 
@@ -360,7 +357,7 @@ impl ReputationAutoBanGate {
 
 impl FeatureGate for ReputationAutoBanGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(REPUTATION_AUTO_BAN_FLAG).await })
+        Box::pin(async move { self.0.flag_on(REPUTATION_AUTO_BAN_FLAG).await })
     }
 }
 
@@ -383,7 +380,7 @@ impl BundleEconomyCapabilityGate {
 
 impl FeatureGate for BundleEconomyCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(BUNDLE_ECONOMY_CAPABILITY_FLAG).await })
+        Box::pin(async move { self.0.flag_on(BUNDLE_ECONOMY_CAPABILITY_FLAG).await })
     }
 }
 
@@ -404,11 +401,7 @@ impl BundlePlatformTableCapabilityGate {
 
 impl FeatureGate for BundlePlatformTableCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.0
-                .flag_enabled(BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG)
-                .await
-        })
+        Box::pin(async move { self.0.flag_on(BUNDLE_PLATFORM_TABLE_CAPABILITY_FLAG).await })
     }
 }
 
@@ -427,7 +420,7 @@ impl FeatureGate for BundleGameServerNetCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             self.0
-                .flag_enabled(crate::capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG)
+                .flag_on(crate::capabilities::BUNDLE_GAMESERVER_NET_CAPABILITY_FLAG)
                 .await
         })
     }
@@ -450,11 +443,7 @@ impl BundleObjectStorageCapabilityGate {
 
 impl FeatureGate for BundleObjectStorageCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            self.0
-                .flag_enabled(BUNDLE_OBJECT_STORAGE_CAPABILITY_FLAG)
-                .await
-        })
+        Box::pin(async move { self.0.flag_on(BUNDLE_OBJECT_STORAGE_CAPABILITY_FLAG).await })
     }
 }
 
@@ -476,7 +465,7 @@ impl BundleIdentityCapabilityGate {
 
 impl FeatureGate for BundleIdentityCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(BUNDLE_IDENTITY_CAPABILITY_FLAG).await })
+        Box::pin(async move { self.0.flag_on(BUNDLE_IDENTITY_CAPABILITY_FLAG).await })
     }
 }
 
@@ -505,7 +494,7 @@ impl BundleAiCapabilityGate {
 
 impl FeatureGate for BundleAiCapabilityGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(BUNDLE_AI_CAPABILITY_FLAG).await })
+        Box::pin(async move { self.0.flag_on(BUNDLE_AI_CAPABILITY_FLAG).await })
     }
 }
 
@@ -526,7 +515,7 @@ impl HarnessMediaGenerationGate {
 
 impl FeatureGate for HarnessMediaGenerationGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(HARNESS_MEDIA_GENERATION_FLAG).await })
+        Box::pin(async move { self.0.flag_on(HARNESS_MEDIA_GENERATION_FLAG).await })
     }
 }
 
@@ -546,7 +535,7 @@ impl OverlaySurfacesGate {
 
 impl FeatureGate for OverlaySurfacesGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move { self.0.flag_enabled(OVERLAY_SURFACES_FLAG).await })
+        Box::pin(async move { self.0.flag_on(OVERLAY_SURFACES_FLAG).await })
     }
 }
 
@@ -592,30 +581,21 @@ impl PiiTokenizationGate {
 
 impl FeatureGate for PiiTokenizationGate {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            if self.0.bypass_active() {
-                return true;
-            }
-            !self.0.flag_enabled(DISABLE_PII_TOKENIZATION_FLAG).await
-        })
+        Box::pin(async move { !self.0.flag_on(DISABLE_PII_TOKENIZATION_FLAG).await })
     }
 }
 
 /// Adapts the license/flag client to the hub_client cache's kill switch
 /// (`waddles.disable-bundle-community-config`): ON = live community config disabled, unseen/OFF/
-/// license-server-unreachable = enabled. Bypass-aware like [`PiiTokenizationGate`]: a bypassed
-/// client reads `true` for every key, which must NOT read as "kill switch ON".
+/// license-server-unreachable = enabled. Bypass domains never force it (license-only).
 pub struct LiveBundleConfigGate(pub Option<Arc<LicenseClient>>);
 
 impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
     fn live_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             match &self.0 {
-                Some(c) if !c.bypass_active() => {
-                    !c.flag_enabled(hub_client::bundle_config::DISABLE_FLAG)
-                        .await
-                }
-                _ => true,
+                Some(c) => !c.flag_on(hub_client::bundle_config::DISABLE_FLAG).await,
+                None => true,
             }
         })
     }
@@ -624,19 +604,15 @@ impl hub_client::bundle_config::LiveConfigGate for LiveBundleConfigGate {
 /// Adapts the license/flag client to the bundle-config read-path kill switch
 /// (`waddles.disable-db-bundle-config-reads`, issue #1306): ON = serve per-community config via
 /// the legacy hub-api gRPC path, unseen/OFF/license-server-unreachable = the direct read-only
-/// database path. Bypass-aware like [`LiveBundleConfigGate`]: a bypassed client reads `true` for
-/// every key, which must NOT read as "kill switch ON".
+/// database path. Bypass domains never force it (license-only).
 pub struct DbConfigReadsGate(pub Option<Arc<LicenseClient>>);
 
 impl hub_client::bundle_config::ReadPathGate for DbConfigReadsGate {
     fn db_reads_enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
         Box::pin(async move {
             match &self.0 {
-                Some(c) if !c.bypass_active() => {
-                    !c.flag_enabled(bundle_config_db::DISABLE_DB_READS_FLAG)
-                        .await
-                }
-                _ => true,
+                Some(c) => !c.flag_on(bundle_config_db::DISABLE_DB_READS_FLAG).await,
+                None => true,
             }
         })
     }
@@ -736,10 +712,6 @@ fn apply_deployment_domain(cfg: LicenseConfig, raw: Option<&str>) -> LicenseConf
 pub type FlagValueFuture<'a> = Pin<Box<dyn Future<Output = Option<(bool, bool)>> + Send + 'a>>;
 
 pub trait FlagSource: Send + Sync {
-    /// Whether this deployment bypasses all license/flag gating
-    /// (mirrors [`LicenseClient::bypass_active`]).
-    fn bypass_active(&self) -> bool;
-
     /// Resolves `key`'s raw value plus whether it came from a *fresh*
     /// (within `cache_ttl`) snapshot. `None` means no snapshot has ever
     /// been fetched for this process (never-seen, or the flag server has
@@ -749,10 +721,6 @@ pub trait FlagSource: Send + Sync {
 }
 
 impl FlagSource for Arc<LicenseClient> {
-    fn bypass_active(&self) -> bool {
-        LicenseClient::bypass_active(self)
-    }
-
     fn flag_value<'a>(&'a self, key: &'a str) -> FlagValueFuture<'a> {
         Box::pin(async move {
             // `flag_enabled` already does the "refresh when the cached
@@ -761,8 +729,11 @@ impl FlagSource for Arc<LicenseClient> {
             // `snapshot()` again afterward tells us whether *any*
             // snapshot now exists (never-seen vs. seen-at-least-once) and
             // how fresh it is, without duplicating that logic here.
-            let value = self.flag_enabled(key).await;
+            // Refresh side effect only (`validate` schedules it even under bypass); the value
+            // comes from the snapshot -- bypass never forces it.
+            let _ = self.validate().await;
             let snap = self.snapshot()?;
+            let value = snap.flags.get(key).copied().unwrap_or(false);
             // `fetched_at` is penguin-licensing's (chrono) timestamp; read it through its
             // inherent epoch accessors so this crate never names a chrono type.
             let fetched_nanos = i128::from(snap.fetched_at.timestamp()) * 1_000_000_000
@@ -916,16 +887,6 @@ pub async fn resolve_flag_with<F: FlagSource>(
         record_flag_eval("default");
         return default_value;
     };
-    if source.bypass_active() {
-        tracing::debug!(
-            key,
-            value = true,
-            source = "bypass",
-            "flags.enabled: license bypass active"
-        );
-        record_flag_eval("bypass");
-        return true;
-    }
     match source.flag_value(key).await {
         None => {
             if let Some(value) = env_flag_value(key) {
@@ -989,15 +950,12 @@ fn shared_flags_license_client() -> Option<Arc<LicenseClient>> {
 
 /// The command-latency kill-switch resolver (`waddles.disable-command-latency-telemetry`): `true`
 /// means telemetry is DISABLED. Opt-out convention: an unseen flag leaves the mechanism ON. Under the
-/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would
-/// switch the mechanism off, so the bypass answer is the ENV baseline only.
+/// license bypass domain the PostHog snapshot is still evaluated normally (bypass is license-only).
 pub async fn command_latency_kill_switch_wanted() -> bool {
     let env = command_latency::switch::env_baseline_disabled();
     match shared_flags_license_client() {
-        Some(c) if !c.bypass_active() => {
-            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
-        }
-        _ => env,
+        Some(c) => env || c.flag_on(command_latency::switch::FLAG_KEY).await,
+        None => env,
     }
 }
 
@@ -1143,7 +1101,6 @@ mod flags_capability_tests {
         let key = "waddles.test-posthog-live-beats-env";
         let var = env_flag_var_name(key);
         let source = FakeFlagSource {
-            bypass: false,
             value: Some((false, true)), // PostHog: live, flag OFF
         };
         let result = await_with_env_var(
@@ -1167,7 +1124,6 @@ mod flags_capability_tests {
         let key = "waddles.test-posthog-cached-beats-env";
         let var = env_flag_var_name(key);
         let source = FakeFlagSource {
-            bypass: false,
             value: Some((true, false)), // PostHog: stale cache, flag ON
         };
         let result = await_with_env_var(
@@ -1247,10 +1203,7 @@ mod flags_capability_tests {
         let _guard = ENV_LOCK.lock().await;
         let key = "waddles.test-env-baseline-never-seen";
         let var = env_flag_var_name(key);
-        let source = FakeFlagSource {
-            bypass: false,
-            value: None,
-        };
+        let source = FakeFlagSource { value: None };
         let result = await_with_env_var(
             &var,
             "true",
@@ -1263,27 +1216,26 @@ mod flags_capability_tests {
         );
     }
 
-    /// License-entitlement immunity: setting this flag's would-be ENV
-    /// baseline variable must have ZERO effect on
-    /// [`LicenseFeatureGate`] (or any other [`FeatureGate`] impl) -- those
-    /// call `LicenseClient::flag_enabled` directly and never pass through
-    /// [`resolve_flag_with`]/[`env_flag_value`] at all. A cold
-    /// (never-fetched) client's `RUST_DATA_PLANE_FLAG` must still fail
-    /// closed to `false` even with `FLAG_WADDLES_CORE_RUST_DATA_PLANE=true`
-    /// set in the environment.
+    /// License-entitlement immunity: an ENV baseline variable must have ZERO effect on the
+    /// LICENSE/entitlement answers (`check_feature`/`tier`) -- only plain feature flags read it.
+    // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
-    async fn license_feature_gate_is_not_overridable_by_its_env_flag_baseline() {
+    async fn license_entitlement_is_not_overridable_by_a_flag_env_baseline() {
         let _guard = ENV_LOCK.lock().await;
-        let var = env_flag_var_name(RUST_DATA_PLANE_FLAG);
-        assert_eq!(var, "FLAG_WADDLES_CORE_RUST_DATA_PLANE");
+        let var = env_flag_var_name("waddles.some-licensed-feature");
         let cfg = LicenseConfig::new("waddles-test-license-env-immunity").expect("valid defaults");
         let client = LicenseClient::new(cfg).expect("client construction");
-        let gate = LicenseFeatureGate::new(client);
-        let result = await_with_env_var(&var, "true", gate.enabled()).await;
+        let entitled = await_with_env_var(
+            &var,
+            "true",
+            client.check_feature("waddles.some-licensed-feature"),
+        )
+        .await;
         assert!(
-            !result,
-            "LICENSE-entitlement gating must never be overridable by a FLAG_* env var"
+            !entitled,
+            "a cold, non-bypassed client has no entitlement; ENV cannot grant it"
         );
+        assert!(!client.check_tier(penguin_licensing::Tier::Enterprise).await);
     }
 
     /// Test double for [`FlagSource`] -- `value` mirrors the trait's own
@@ -1292,15 +1244,10 @@ mod flags_capability_tests {
     /// [`resolve_flag_with`] is provable without a live PostHog/license
     /// server.
     struct FakeFlagSource {
-        bypass: bool,
         value: Option<(bool, bool)>,
     }
 
     impl FlagSource for FakeFlagSource {
-        fn bypass_active(&self) -> bool {
-            self.bypass
-        }
-
         fn flag_value<'a>(&'a self, _key: &'a str) -> FlagValueFuture<'a> {
             let value = self.value;
             Box::pin(async move { value })
@@ -1310,7 +1257,6 @@ mod flags_capability_tests {
     #[tokio::test]
     async fn live_enabled_flag_resolves_true() {
         let source = FakeFlagSource {
-            bypass: false,
             value: Some((true, true)),
         };
         assert!(resolve_flag_with(Some(&source), true, "waddles.command-8ball", false).await);
@@ -1319,7 +1265,6 @@ mod flags_capability_tests {
     #[tokio::test]
     async fn live_disabled_flag_resolves_false_even_with_a_true_default() {
         let source = FakeFlagSource {
-            bypass: false,
             value: Some((false, true)),
         };
         assert!(!resolve_flag_with(Some(&source), true, "waddles.command-8ball", true).await);
@@ -1331,7 +1276,6 @@ mod flags_capability_tests {
         // false`) but a prior fetch is still cached -- must serve that
         // cached value, never silently fall back to `default_value`.
         let source = FakeFlagSource {
-            bypass: false,
             value: Some((true, false)),
         };
         assert!(resolve_flag_with(Some(&source), true, "waddles.command-roll", false).await);
@@ -1339,10 +1283,7 @@ mod flags_capability_tests {
 
     #[tokio::test]
     async fn never_seen_snapshot_falls_back_to_caller_default() {
-        let source = FakeFlagSource {
-            bypass: false,
-            value: None,
-        };
+        let source = FakeFlagSource { value: None };
         assert!(!resolve_flag_with(Some(&source), true, "waddles.command-lurk", false).await);
         assert!(resolve_flag_with(Some(&source), true, "waddles.command-lurk", true).await);
     }
@@ -1352,7 +1293,6 @@ mod flags_capability_tests {
         // Even a source that would otherwise say "live, true" must never
         // be consulted once the capability is toggled off.
         let source = FakeFlagSource {
-            bypass: false,
             value: Some((true, true)),
         };
         assert!(!resolve_flag_with(Some(&source), false, "waddles.command-count", false).await);
@@ -1368,13 +1308,29 @@ mod flags_capability_tests {
         );
     }
 
+    // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
-    async fn bypass_active_resolves_true_regardless_of_default() {
-        let source = FakeFlagSource {
-            bypass: true,
-            value: Some((false, true)),
-        };
-        assert!(resolve_flag_with(Some(&source), true, "waddles.command-8ball", false).await);
+    async fn bypass_domain_unset_flag_is_off_explicit_off_stays_off_license_passes() {
+        let _guard = ENV_LOCK.lock().await;
+        let cfg = LicenseConfig::new("waddles-test-flags-bypass")
+            .expect("valid defaults")
+            .with_bypass_domain("waddles.app")
+            .with_deployment_domain("svc.waddles.app");
+        let client = LicenseClient::new(cfg).expect("client builds");
+        assert!(client.bypass_active(), "precondition: bypassed client");
+        let key = "waddles.regression-bypass-license-only";
+        assert!(!client.flag_on(key).await, "unset flag is OFF on bypass");
+        assert!(!resolve_flag_with(Some(&client), true, key, false).await);
+        let var = env_flag_var_name(key);
+        let off = await_with_env_var(
+            &var,
+            "false",
+            resolve_flag_with(Some(&client), true, key, true),
+        )
+        .await;
+        assert!(!off, "explicitly-off baseline stays off on a bypass domain");
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
     }
 
     /// Proves [`FlagSource`]'s blanket `Arc<LicenseClient>` impl reaches a
@@ -1800,20 +1756,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_license_client_hardcoded_domain_bypasses_flag_checks() {
-        // Proves the net effect the hardcoded DEPLOYMENT_DOMAIN bypass is
-        // meant to have: `build_license_client`'s own output resolves
-        // every flag ON, with zero network access and zero env/config
-        // spoofability (`rules/critical-rules.md` Feature Flags & License
-        // Tiers: bypass is domain-based ONLY -- satisfied entirely in
-        // source here).
+    async fn build_license_client_hardcoded_domain_bypasses_license_checks_only() {
+        // The hardcoded DEPLOYMENT_DOMAIN answers LICENSE checks (tier/feature) with zero network
+        // access, but never forces a feature flag (2026-11-12 decision).
+        // regression: bypass domains are license-only (2026-11-12 decision)
         let client = {
             let _guard = ENV_LOCK.lock().await;
             build_license_client("waddles-test-hardcoded-domain").expect("valid defaults")
         };
         assert!(client.bypass_active());
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
         let gate = LicenseFeatureGate::new(client);
-        assert!(gate.enabled().await);
+        assert!(
+            !gate.enabled().await,
+            "feature flag is not forced ON by bypass"
+        );
     }
 
     #[test]

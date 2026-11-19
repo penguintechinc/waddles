@@ -2153,17 +2153,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_license_client_hardcoded_domain_bypasses_flag_checks() {
-        // Proves the net effect the hardcoded DEPLOYMENT_DOMAIN bypass is
-        // meant to have: `build_license_client`'s own output resolves
-        // every flag ON, with zero network access and zero env/config
-        // spoofability (`rules/critical-rules.md` Feature Flags & License
-        // Tiers: bypass is domain-based ONLY -- satisfied entirely in
-        // source here).
+    async fn build_license_client_hardcoded_domain_bypasses_license_checks_only() {
+        // The hardcoded DEPLOYMENT_DOMAIN answers LICENSE checks (tier/feature) with zero network
+        // access, but never forces a feature flag (2026-11-12 decision).
+        // regression: bypass domains are license-only (2026-11-12 decision)
         let client = build_license_client().expect("valid defaults");
         assert!(client.bypass_active());
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
         let flag = flag_or_closed(&Some(Arc::clone(&client)), flags::RUST_DATA_PLANE_FLAG);
-        assert!(flag.enabled().await);
+        assert!(
+            !flag.enabled().await,
+            "feature flag is not forced ON by bypass"
+        );
     }
 
     #[test]

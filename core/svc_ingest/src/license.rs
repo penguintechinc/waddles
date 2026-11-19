@@ -27,6 +27,68 @@
 
 use std::sync::Arc;
 
+use std::future::Future;
+use std::pin::Pin;
+
+/// Derives a flag key's Docker ENV baseline variable: `FLAG_` + key uppercased, `.`/`-` -> `_`
+/// (e.g. `FLAG_WADDLES_CORE_RUST_DATA_PLANE`).
+pub fn env_flag_var_name(key: &str) -> String {
+    let mut name = String::with_capacity(5 + key.len());
+    name.push_str("FLAG_");
+    for ch in key.chars() {
+        match ch {
+            '.' | '-' => name.push('_'),
+            c => name.extend(c.to_uppercase()),
+        }
+    }
+    name
+}
+
+/// Parses `key`'s `FLAG_*` env baseline; `None` when unset or unrecognized.
+pub fn env_flag_value(key: &str) -> Option<bool> {
+    let raw = std::env::var(env_flag_var_name(key)).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => Some(true),
+        "false" | "0" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Feature-flag evaluation over a license client: PostHog snapshot, then the `FLAG_*` ENV
+/// baseline, then OFF. The license-bypass domain answers LICENSE/entitlement checks only
+/// (`tier`/`check_feature`) and never forces a feature flag or kill-switch -- the library's own
+/// `flag_enabled` returns `true` for every key under bypass, so it is deliberately not used for
+/// the value (user decision 2026-11-12).
+pub trait PosthogFlag {
+    /// Resolves `key`: PostHog snapshot, else ENV baseline, else `false`.
+    fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+}
+
+impl PosthogFlag for Arc<penguin_licensing::LicenseClient> {
+    fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            // Side effect only: `validate` schedules a background refresh when the snapshot is
+            // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
+            let _ = self.validate().await;
+            self.snapshot()
+                .and_then(|snap| snap.flags.get(key).copied())
+                .or_else(|| env_flag_value(key))
+                .unwrap_or(false)
+        })
+    }
+}
+
+/// Resolves a flag with an optional client: no client => ENV baseline, else OFF.
+pub async fn flag_on_opt(
+    client: Option<&Arc<penguin_licensing::LicenseClient>>,
+    key: &str,
+) -> bool {
+    match client {
+        Some(c) => c.flag_on(key).await,
+        None => env_flag_value(key).unwrap_or(false),
+    }
+}
+
 /// The flag key gating every fixed-platform receiver plus the outbound
 /// relay drain (spec S13.5's convention: `{product}.{feature-name}`).
 pub const RUST_DATA_PLANE_FLAG: &str = "waddles.core.rust-data-plane";
@@ -125,20 +187,18 @@ pub fn shared_license_client() -> Option<Arc<penguin_licensing::LicenseClient>> 
     SHARED_CLIENT.get().cloned().flatten()
 }
 
-/// Checks the `waddles.core.rust-data-plane` flag. Non-blocking (the
-/// crate's own `flag_enabled` never performs inline network I/O) and
-/// fail-closed: no client (see [`build_license_client`]) or a never-seen/
-/// unreachable flag both evaluate to `false`.
+/// Checks the `waddles.core.rust-data-plane` flag (PostHog -> ENV -> OFF). Non-blocking and
+/// fail-closed: a never-seen/unreachable flag evaluates to `false`; bypass domains never force it.
 pub async fn rust_data_plane_enabled(
     client: Option<&Arc<penguin_licensing::LicenseClient>>,
 ) -> bool {
-    match client {
-        Some(client) => client.flag_enabled(RUST_DATA_PLANE_FLAG).await,
-        None => false,
-    }
+    flag_on_opt(client, RUST_DATA_PLANE_FLAG).await
 }
 
 #[cfg(test)]
+// Env-mutating tests hold the std `ENV_LOCK` across awaits on purpose: each `#[tokio::test]` is
+// single-threaded and the lock only serializes process-global env access between tests.
+#[allow(clippy::await_holding_lock)]
 mod tests {
     use super::*;
     use std::sync::Mutex;
@@ -183,19 +243,31 @@ mod tests {
         assert!(!rust_data_plane_enabled(Some(&client)).await);
     }
 
+    // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
-    async fn rust_data_plane_enabled_true_under_domain_bypass() {
+    async fn rust_data_plane_flag_stays_off_under_domain_bypass() {
         crate::crypto::ensure_installed();
-        // Domain bypass (security.md / critical-rules.md: PenguinTech-
-        // internal domains) makes every flag/feature evaluate enabled --
-        // even with zero network access, proving the gate isn't
-        // accidentally hard-wired to "always false in tests".
+        let _guard = ENV_LOCK.lock().unwrap();
+        // SAFETY: serialized by ENV_LOCK.
+        unsafe { std::env::remove_var(env_flag_var_name(RUST_DATA_PLANE_FLAG)) };
+        // Bypass is LICENSE-only: tier/entitlement are granted, a feature flag is not forced.
         let cfg = penguin_licensing::LicenseConfig::new("test-product")
             .expect("default config is always valid")
             .with_deployment_domain("svc-ingest.penguintech.cloud");
         let client = penguin_licensing::LicenseClient::new(cfg).expect("client construction");
         assert!(client.bypass_active());
+        assert!(
+            !rust_data_plane_enabled(Some(&client)).await,
+            "unset flag is OFF on bypass"
+        );
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
+        // Explicitly-off baseline stays off; explicit-on baseline is honored (not forced).
+        unsafe { std::env::set_var(env_flag_var_name(RUST_DATA_PLANE_FLAG), "false") };
+        assert!(!rust_data_plane_enabled(Some(&client)).await);
+        unsafe { std::env::set_var(env_flag_var_name(RUST_DATA_PLANE_FLAG), "true") };
         assert!(rust_data_plane_enabled(Some(&client)).await);
+        unsafe { std::env::remove_var(env_flag_var_name(RUST_DATA_PLANE_FLAG)) };
     }
 
     #[tokio::test]
@@ -213,23 +285,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_license_client_hardcoded_domain_bypasses_flag_checks() {
-        // Proves the net effect the hardcoded DEPLOYMENT_DOMAIN bypass is
-        // meant to have: `build_license_client`'s own output resolves
-        // every flag ON, with zero network access and zero env/config
-        // spoofability (`rules/critical-rules.md` Feature Flags & License
-        // Tiers: bypass is domain-based ONLY -- satisfied entirely in
-        // source here).
+    async fn build_license_client_hardcoded_domain_bypasses_license_checks_only() {
+        // regression: bypass domains are license-only (2026-11-12 decision)
         crate::crypto::ensure_installed();
         let client = {
             let _guard = ENV_LOCK.lock().unwrap();
             clear_license_env();
+            // SAFETY: serialized by ENV_LOCK.
+            unsafe { std::env::remove_var(env_flag_var_name(RUST_DATA_PLANE_FLAG)) };
             let client = build_license_client().expect("valid defaults");
             clear_license_env();
             client
         };
         assert!(client.bypass_active());
-        assert!(rust_data_plane_enabled(Some(&client)).await);
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(!rust_data_plane_enabled(Some(&client)).await);
     }
 
     #[test]

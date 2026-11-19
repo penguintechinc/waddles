@@ -29,6 +29,53 @@ pub trait FeatureFlag: Send + Sync {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
 }
 
+/// Derives a flag key's Docker ENV baseline variable: `FLAG_` + key uppercased, `.`/`-` -> `_`.
+fn env_flag_var_name(key: &str) -> String {
+    let mut name = String::with_capacity(5 + key.len());
+    name.push_str("FLAG_");
+    for ch in key.chars() {
+        match ch {
+            '.' | '-' => name.push('_'),
+            c => name.extend(c.to_uppercase()),
+        }
+    }
+    name
+}
+
+/// Parses `key`'s `FLAG_*` env baseline; `None` when unset or unrecognized.
+fn env_flag_value(key: &str) -> Option<bool> {
+    let raw = std::env::var(env_flag_var_name(key)).ok()?;
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "on" | "yes" => Some(true),
+        "false" | "0" | "off" | "no" => Some(false),
+        _ => None,
+    }
+}
+
+/// Feature-flag evaluation over a license client: PostHog snapshot, then the `FLAG_*` ENV
+/// baseline, then OFF. The license-bypass domain answers LICENSE/entitlement checks only
+/// (`tier`/`check_feature`) and never forces a feature flag -- the library's own `flag_enabled`
+/// returns `true` for every key under bypass, so it is deliberately not used for the value
+/// (user decision 2026-11-12).
+pub trait PosthogFlag {
+    /// Resolves `key`: PostHog snapshot, else ENV baseline, else `false`.
+    fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>>;
+}
+
+impl PosthogFlag for Arc<penguin_licensing::LicenseClient> {
+    fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
+        Box::pin(async move {
+            // Side effect only: `validate` schedules a background refresh when the snapshot is
+            // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
+            let _ = self.validate().await;
+            self.snapshot()
+                .and_then(|snap| snap.flags.get(key).copied())
+                .or_else(|| env_flag_value(key))
+                .unwrap_or(false)
+        })
+    }
+}
+
 /// The real [`FeatureFlag`]: `key` resolved via a live
 /// `penguin_licensing::LicenseClient` (cheap `Arc` clone).
 pub struct LicenseFlag {
@@ -44,7 +91,7 @@ impl LicenseFlag {
 
 impl FeatureFlag for LicenseFlag {
     fn enabled<'a>(&'a self) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(self.client.flag_enabled(self.key))
+        Box::pin(self.client.flag_on(self.key))
     }
 }
 
@@ -179,29 +226,20 @@ mod tests {
         assert!(!flag.enabled().await);
     }
 
-    /// `build_license_client()` always registers this service's own
-    /// `DEPLOYMENT_DOMAIN`/`BYPASS_DOMAIN` -- so a client built through it
-    /// is always bypass-active, and [`image_upload_flag`] (a *plain*
-    /// opt-in [`LicenseFlag`], not one of the bypass-aware kill-switch
-    /// wrappers `core/svc_action::flags` needs for its *inverted* flags)
-    /// correctly resolves `true` regardless of whether the flag has ever
-    /// been seen in PostHog -- "every PenguinTech-owned deployment gets
-    /// every feature unlocked" is the documented bypass semantic
-    /// (`rules/penguintech.md` License Bypass Domains), not a bug. The
-    /// genuine fail-closed-to-OFF proof (a client with NO bypass
-    /// registered) is [`license_flag_reaches_a_real_cold_client_and_fails_closed_to_off`]
-    /// below.
+    // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
-    async fn image_upload_flag_wraps_a_real_client_and_resolves_bypass_true() {
+    async fn image_upload_flag_on_a_bypassed_client_stays_off_and_license_passes() {
         let client = build_license_client().expect("defaults always build a client");
         assert!(
             client.bypass_active(),
             "sanity check: build_license_client's own hardcoded domain must bypass"
         );
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
         let flag = image_upload_flag(&Some(client));
         assert!(
-            flag.enabled().await,
-            "a bypassed client must resolve true even for a never-seen flag"
+            !flag.enabled().await,
+            "a bypassed client must NOT force a never-seen feature flag ON"
         );
     }
 
@@ -231,11 +269,12 @@ mod tests {
         assert!(!flag.enabled().await);
     }
 
+    // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
-    async fn captions_flag_wraps_a_real_client_and_resolves_bypass_true() {
+    async fn captions_flag_on_a_bypassed_client_stays_off_until_baseline_set() {
         let client = build_license_client().expect("defaults always build a client");
         let flag = captions_flag(&Some(client));
-        assert!(flag.enabled().await);
+        assert!(!flag.enabled().await);
     }
 
     #[tokio::test]

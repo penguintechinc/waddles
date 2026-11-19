@@ -92,7 +92,8 @@ def test_disabled_by_default_renders_no_credential_anywhere(
 ) -> None:
     docs = _render()
     text = yaml.safe_dump_all(docs)
-    assert "PLATFORM_TABLE" not in text and _KEY not in text
+    # FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY (alpha flag baseline) is not a credential.
+    assert "DB_PLATFORM_TABLE" not in text and _KEY not in text
     assert "DB_PLATFORM_TABLE_PASSWORD" not in _secret(docs, "-db-migrate-secret")
     assert not [k for k in _process_env(docs) if k.startswith("BUNDLE_PLATFORM_TABLE")]
 

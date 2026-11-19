@@ -36,6 +36,7 @@ use sha2::{Digest, Sha256};
 use tokio::sync::{mpsc, Semaphore};
 
 use crate::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
+use crate::license::PosthogFlag;
 
 const ENV_TOKEN_TIMEOUT_MS: &str = "ANALYTICS_TOKENIZE_TIMEOUT_MS";
 const ENV_TOKEN_CONCURRENCY: &str = "ANALYTICS_TOKENIZE_CONCURRENCY";
@@ -910,8 +911,8 @@ pub async fn flag_wanted(
         return true;
     }
     match client {
-        Some(c) if !c.bypass_active() => c.flag_enabled(FLAG_KEY).await,
-        _ => false,
+        Some(c) => c.flag_on(FLAG_KEY).await,
+        None => false,
     }
 }
 

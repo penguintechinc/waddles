@@ -447,11 +447,12 @@ async fn ingest_scopes_persistence_to_the_credential_community_only() {
 async fn app_state_defaults_to_a_sea_orm_backed_store_and_a_real_flag() {
     // `AppState::new` wires production defaults: the store is exercised via
     // the mock DB (an INSERT that the mock has no result for errors), and the
-    // flag resolves through the real licensing client (PenguinTech-owned
-    // deployment domain => bypass => on).
+    // flag resolves through the real licensing client. The bypass domain is
+    // license-only, so a never-seen feature flag stays OFF.
+    // regression: bypass domains are license-only (2026-11-12 decision)
     let db = sea_orm::MockDatabase::new(sea_orm::DatabaseBackend::Postgres).into_connection();
     let state = AppState::new(config_with(&[]), prometheus::Registry::new(), db);
-    assert!(state.captions_flag.enabled().await);
+    assert!(!state.captions_flag.enabled().await);
     let result = state
         .caption_store
         .insert(svc_presentation::overlay::caption_store::NewCaptionEvent {

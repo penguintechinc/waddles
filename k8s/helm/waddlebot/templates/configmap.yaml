@@ -111,6 +111,15 @@ data:
   # Gates the per-community Discord/Twitch connect authorize route (hub-api); also tier-gated
   # (Professional) -- tier is bypassed only on *.penguintech.cloud hosts.
   FLAG_WADDLES_COMMUNITY_CONNECTIONS: {{ .Values.config.communityConnectionsEnabled | default false | quote }}
+  # Data-plane FEATURE-flag ENV baselines (svc-action/process/ingest/presentation via envFrom).
+  # The license-bypass domain no longer forces flags ON (2026-11-12, docs/licensing/
+  # feature-flags-and-domain-bypass.md); PostHog -> these -> OFF. Never for licensed flags.
+  {{- range $key, $value := .Values.config.dataPlaneFlagBaselines }}
+  {{- if not (hasPrefix "FLAG_" $key) }}
+  {{- fail (printf "config.dataPlaneFlagBaselines key %q must start with FLAG_" $key) }}
+  {{- end }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
   # Command-latency canary (alpha only; docs/observability/command-latency.md "Synthetic canary").
   # Rendered ONLY when latencyCanary.enabled, and then fail-loud (missing ids / non-alpha fail the
   # render). Read by svc-ingest (driver) and svc-action (confirm point) via envFrom. No secrets.

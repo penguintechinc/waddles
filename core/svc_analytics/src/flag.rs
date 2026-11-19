@@ -78,10 +78,14 @@ impl FlagGate {
                     return true;
                 }
                 match client {
-                    // A bypass-active deployment (PenguinTech-owned domain) makes every LICENSE
-                    // entitlement evaluate enabled; that must never switch data collection on.
-                    Some(c) if !c.bypass_active() => c.flag_enabled(FLAG_KEY).await,
-                    _ => false,
+                    // Bypass domains are license-only (2026-11-12): the library's `flag_enabled`
+                    // reads `true` for every key under bypass, so read the PostHog snapshot
+                    // directly (refreshed by `spawn_refresh`); unseen = OFF.
+                    Some(c) => c
+                        .snapshot()
+                        .and_then(|snap| snap.flags.get(FLAG_KEY).copied())
+                        .unwrap_or(false),
+                    None => false,
                 }
             }
             Self::Fixed(v) => v.load(Ordering::Relaxed),
@@ -149,6 +153,7 @@ mod tests {
 
     #[tokio::test]
     async fn domain_bypass_never_turns_collection_on() {
+        // regression: bypass domains are license-only (2026-11-12 decision)
         let c = client(true);
         assert!(
             c.bypass_active(),

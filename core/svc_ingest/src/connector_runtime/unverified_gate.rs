@@ -36,23 +36,21 @@ pub trait UnverifiedRoutingGate: Send + Sync {
 
 /// Narrow view of the PostHog/license client used by [`resolve`].
 pub trait FlagLookup: Send + Sync {
-    /// Whether the deployment-domain license bypass is active.
-    fn bypass_active(&self) -> bool;
     /// The flag's PostHog value, or `None` when no snapshot was ever fetched.
     fn posthog_value(&self) -> Pin<Box<dyn Future<Output = Option<bool>> + Send + '_>>;
 }
 
 impl FlagLookup for Arc<penguin_licensing::LicenseClient> {
-    fn bypass_active(&self) -> bool {
-        penguin_licensing::LicenseClient::bypass_active(self)
-    }
-
     fn posthog_value(&self) -> Pin<Box<dyn Future<Output = Option<bool>> + Send + '_>> {
         Box::pin(async move {
-            self.snapshot()?;
+            // Refresh side effect only (`validate` schedules it even under bypass).
+            let _ = self.validate().await;
+            let snap = self.snapshot()?;
             Some(
-                self.flag_enabled(DISABLE_UNVERIFIED_BINDING_ROUTING_FLAG)
-                    .await,
+                snap.flags
+                    .get(DISABLE_UNVERIFIED_BINDING_ROUTING_FLAG)
+                    .copied()
+                    .unwrap_or(false),
             )
         })
     }
@@ -67,10 +65,10 @@ fn parse_env(raw: Option<&str>) -> Option<bool> {
     }
 }
 
-/// Resolves the kill-switch: PostHog (non-bypass, snapshot present) -> env -> OFF.
+/// Resolves the kill-switch: PostHog (snapshot present; bypass domains are license-only) -> env -> OFF.
 /// Returns the value and its source label (`posthog`/`env`/`default`).
 pub async fn resolve(source: Option<&dyn FlagLookup>, env: Option<&str>) -> (bool, &'static str) {
-    if let Some(s) = source.filter(|s| !s.bypass_active()) {
+    if let Some(s) = source {
         if let Some(v) = s.posthog_value().await {
             return (v, "posthog");
         }
@@ -122,14 +120,10 @@ mod tests {
     use super::*;
 
     struct Fake {
-        bypass: bool,
         value: Option<bool>,
     }
 
     impl FlagLookup for Fake {
-        fn bypass_active(&self) -> bool {
-            self.bypass
-        }
         fn posthog_value(&self) -> Pin<Box<dyn Future<Output = Option<bool>> + Send + '_>> {
             let v = self.value;
             Box::pin(async move { v })
@@ -157,10 +151,7 @@ mod tests {
     #[tokio::test]
     async fn unseen_everywhere_is_off() {
         assert_eq!(resolve(None, None).await, (false, "default"));
-        let never = Fake {
-            bypass: false,
-            value: None,
-        };
+        let never = Fake { value: None };
         assert_eq!(resolve(Some(&never), None).await, (false, "default"));
         assert_eq!(resolve(None, Some("garbage")).await, (false, "default"));
     }
@@ -174,27 +165,24 @@ mod tests {
 
     #[tokio::test]
     async fn posthog_wins_over_env() {
-        let on = Fake {
-            bypass: false,
-            value: Some(true),
-        };
+        let on = Fake { value: Some(true) };
         assert_eq!(resolve(Some(&on), Some("false")).await, (true, "posthog"));
-        let off = Fake {
-            bypass: false,
-            value: Some(false),
-        };
+        let off = Fake { value: Some(false) };
         assert_eq!(resolve(Some(&off), Some("true")).await, (false, "posthog"));
     }
 
+    // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
     async fn license_bypass_never_flips_the_kill_switch() {
-        // regression: the *.waddles.app bypass reads every PostHog flag ON.
-        let bypass = Fake {
-            bypass: true,
-            value: Some(true),
-        };
-        assert_eq!(resolve(Some(&bypass), None).await, (false, "default"));
-        assert_eq!(resolve(Some(&bypass), Some("on")).await, (true, "env"));
+        // A bypass-domain client with no snapshot: unseen = OFF, env baseline still honored.
+        let cfg = penguin_licensing::LicenseConfig::new("test-product")
+            .expect("default config is always valid")
+            .with_deployment_domain("svc-ingest.penguintech.cloud");
+        let client = penguin_licensing::LicenseClient::new(cfg).expect("client construction");
+        assert!(client.bypass_active());
+        assert_eq!(resolve(Some(&client), None).await, (false, "default"));
+        assert_eq!(resolve(Some(&client), Some("on")).await, (true, "env"));
+        assert_eq!(resolve(Some(&client), Some("false")).await, (false, "env"));
     }
 
     #[tokio::test]

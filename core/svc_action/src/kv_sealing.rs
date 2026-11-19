@@ -10,6 +10,8 @@ use bundle_host_kv::grpc_wiring::{build_grpc_sealing, GrpcDekProvider, HubKeyEnd
 use bundle_host_kv::{BoxFuture, Sealing, SealingGate};
 use penguin_licensing::LicenseClient;
 
+use crate::flags::PosthogFlag;
+
 use crate::config::CliConfig;
 
 /// Opt-out kill-switch (core-mechanism convention): unseen / OFF / license
@@ -18,9 +20,8 @@ use crate::config::CliConfig;
 pub const DISABLE_TENANT_AT_REST_ENCRYPTION_FLAG: &str =
     "waddles.disable-tenant-at-rest-encryption";
 
-/// [`SealingGate`] over the license client's flag. Bypass-aware: a bypassed
-/// client reads every flag `true`, which for an opt-OUT flag must not mean
-/// "encryption disabled", so bypass short-circuits to "seal".
+/// [`SealingGate`] over the license client's flag (PostHog -> ENV -> OFF). Bypass domains are
+/// license-only and never force the opt-OUT flag.
 pub struct TenantAtRestEncryptionGate(Option<Arc<LicenseClient>>);
 
 impl TenantAtRestEncryptionGate {
@@ -35,12 +36,7 @@ impl SealingGate for TenantAtRestEncryptionGate {
         Box::pin(async move {
             match &self.0 {
                 None => true,
-                Some(client) if client.bypass_active() => true,
-                Some(client) => {
-                    !client
-                        .flag_enabled(DISABLE_TENANT_AT_REST_ENCRYPTION_FLAG)
-                        .await
-                }
+                Some(client) => !client.flag_on(DISABLE_TENANT_AT_REST_ENCRYPTION_FLAG).await,
             }
         })
     }

@@ -65,14 +65,22 @@ fn state_with_view_credential(community_id: i64, token: &str) -> AppState {
             rotated_at: None,
         }]])
         .into_connection();
-    AppState::new(config(), prometheus::Registry::new(), db)
+    with_captions_on(AppState::new(config(), prometheus::Registry::new(), db))
         .with_overlay_codes(test_overlay_codes())
 }
 
 fn state_with_no_queries_expected() -> AppState {
     let db = MockDatabase::new(DatabaseBackend::Postgres).into_connection();
-    AppState::new(config(), prometheus::Registry::new(), db)
+    with_captions_on(AppState::new(config(), prometheus::Registry::new(), db))
         .with_overlay_codes(test_overlay_codes())
+}
+
+/// Routing tests exercise route wiring, not flag resolution: hold the
+/// captions flag ON explicitly (the bypass domain no longer flips feature
+/// flags -- it is license-only since 2026-11-12).
+fn with_captions_on(mut state: AppState) -> AppState {
+    state.captions_flag = svc_presentation::flags::boxed(svc_presentation::flags::StaticFlag(true));
+    state
 }
 
 /// regression: p696-route-shadow -- the literal `image` segment of

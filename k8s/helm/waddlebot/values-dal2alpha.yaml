@@ -761,6 +761,26 @@ config:
   # Cross-guild Discord role mirror demo: guild-pairing routes + the role-sync admin page.
   guildPairingEnabled: true
   webuiRoleSyncMappingEnabled: true
+  # Data-plane feature-flag ENV baselines: these were forced ON by the license-bypass
+  # domain until 2026-11-12; kept ON here so alpha behaviour is unchanged. PostHog overrides.
+  # Kill switches (waddles.*.disable-*) are deliberately absent: unset = mechanism ON.
+  dataPlaneFlagBaselines:
+    FLAG_WADDLES_CORE_RUST_DATA_PLANE: "true"
+    FLAG_WADDLES_CORE_BUNDLE_EGRESS: "true"
+    FLAG_WADDLES_BUNDLE_DB_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_REPUTATION_CAPABILITY: "true"
+    FLAG_WADDLES_REPUTATION_AUTO_BAN: "true"
+    FLAG_WADDLES_BUNDLE_ECONOMY_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_GAMESERVER_NET: "true"
+    FLAG_WADDLES_BUNDLE_OBJECT_STORAGE: "true"
+    FLAG_WADDLES_BUNDLE_IDENTITY_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_AI_CAPABILITY: "true"
+    FLAG_WADDLES_HARNESS_MEDIA_GENERATION: "true"
+    FLAG_WADDLES_OVERLAY_SURFACES: "true"
+    FLAG_WADDLES_CONNECTOR_TOOLS: "true"
+    FLAG_WADDLES_CORE_OVERLAY_IMAGE_UPLOAD: "true"
+    FLAG_WADDLES_CORE_OVERLAY_CAPTIONS: "true"
 
 # Command-latency canary against the DEDICATED TESTING DISCORD GUILD (owner decision 2026-11-15).
 # OWNER: fill the three placeholders below, then flip `enabled: true`. Runbook:
