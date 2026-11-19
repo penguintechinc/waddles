@@ -68,9 +68,11 @@ def cur() -> Iterator[psycopg2.extensions.cursor]:
         pytest.skip("docker CLI not available in this environment")
     with migrated_postgres("0130-excl-grant") as db:
         conn = psycopg2.connect(db.dsn)
-        conn.autocommit = True
-        yield conn.cursor()
-        conn.close()
+        try:
+            conn.autocommit = True
+            yield conn.cursor()
+        finally:
+            conn.close()
 
 
 def _can(cur: psycopg2.extensions.cursor, sql: str) -> bool:

@@ -61,25 +61,44 @@ CREATE TABLE IF NOT EXISTS data_deletion_requests (
 def pg() -> Iterator[PgTestDatabase]:
     with migrated_postgres(f"analytics-excl-{os.getpid()}") as db:
         conn = psycopg2.connect(db.dsn)
-        conn.autocommit = True
-        conn.cursor().execute(_DDL)
-        conn.close()
+        try:
+            conn.autocommit = True
+            with conn.cursor() as cur:
+                cur.execute(_DDL)
+        finally:
+            conn.close()
         yield db
 
 
-@pytest.fixture
-def adal(pg: PgTestDatabase) -> Iterator[AsyncDAL]:
-    conn = psycopg2.connect(pg.dsn)
-    conn.autocommit = True
-    conn.cursor().execute(
-        "TRUNCATE data_use_exclusions, cookie_consent, cookie_audit_log, data_deletion_requests"
-    )
-    conn.close()
+@pytest.fixture(scope="module")
+def _shared_adal(pg: PgTestDatabase) -> Iterator[AsyncDAL]:
+    """One pooled `AsyncDAL` for the module, fully released at teardown (no fd/thread leak)."""
     async_dal = AsyncDAL(pg.dsn.replace("postgresql://", "postgres://", 1), pool_size=2)
     bind_auth_tables(async_dal.dal, migrate=False)
     bind_privacy_tables(async_dal.dal)
-    yield async_dal
-    async_dal.dal.close()
+    try:
+        yield async_dal
+    finally:
+        try:
+            async_dal.dal.close()
+        finally:
+            async_dal.executor.shutdown(wait=True)
+
+
+@pytest.fixture
+def adal(pg: PgTestDatabase, _shared_adal: AsyncDAL) -> AsyncDAL:
+    """The shared DAL with the tables emptied (the admin connection is always closed)."""
+    conn = psycopg2.connect(pg.dsn)
+    try:
+        conn.autocommit = True
+        with conn.cursor() as cur:
+            cur.execute(
+                "TRUNCATE data_use_exclusions, cookie_consent, cookie_audit_log, "
+                "data_deletion_requests"
+            )
+    finally:
+        conn.close()
+    return _shared_adal
 
 
 @pytest.fixture(autouse=True)
