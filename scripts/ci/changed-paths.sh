@@ -207,7 +207,8 @@ while IFS= read -r -d '' f; do
   case "${f}" in
     *.py|*.pyi|*requirements*.txt|*requirements*.in|*constraints*.txt|*pyproject.toml|*setup.cfg|\
     *Pipfile|*Pipfile.lock|*poetry.lock|*uv.lock|alembic/*|alembic.ini|bundles/python/*|hub_api/*|libs/*|openapi/*|\
-    .flake8|.coveragerc|.bandit|.bandit.yaml)
+    .flake8|.coveragerc|.bandit|.bandit.yaml|\
+    scripts/tests/*|scripts/ops/*|scripts/*release*|Makefile)
       HIT[python]=true ;;
   esac
 
