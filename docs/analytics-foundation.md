@@ -143,6 +143,44 @@ Purge by `retention_days`: delete rows where the row's time column + `retention_
 - Do-not-sell is a global per-user preference (cookie_consent); GDPR objection/erasure must
   propagate into `data_use_exclusions`.
 
+## Keeping `data_use_exclusions` current (W5)
+
+hub-api is the ONLY writer (`hub_api/services/analytics_exclusions_service.py`); `svc_analytics`
+and the layer B builder only read. Rows are `(user_uuid token, reason_code, since)` -- no PII.
+
+| Trigger | Exclusion written / cleared | Where |
+|---|---|---|
+| Do-not-sell set (cookie save/update, GPC, admin DSAR do-not-sell) | add `1 do_not_sell` | `cookie_consent_service`, `admin_data_privacy_service.apply_do_not_sell` |
+| `Sec-GPC: 1` applied on a write | add `2 gpc` (and `1`, GPC forces do-not-sell) | same |
+| Marketing consent withdrawn (true -> false, or cookie revoke) | add `1 do_not_sell` (no separate documented code) | same |
+| Explicit opt-back-in (`doNotSell` true -> false, no GPC) | remove `1` and `2` only | same |
+| Marketing re-granted (false -> true) while `doNotSell` is not true | remove `1` only | same |
+| Erasure | add `4 erased` (never removed) | `erasure_executor.record_erasure_exclusions` |
+| Objection (`3`) | `add_exclusion(..., OBJECTION)` is available and `3` is removable, but **no objection/restriction request type exists yet** (`dsar_service.RequestType` has none), so nothing writes it | gap |
+| Not an adult / age unknown (`5`) | **no age signal source exists**; nothing writes it; never removable by a consent change | gap |
+
+* **Same transaction, no window.** The consent write and its exclusion change run as one
+  synchronous executor job and commit once (`apply_consent_change`); a failure in either rolls
+  back both. Audit (`privacy.exclusion_added` / `privacy.exclusion_removed`, uuid token +
+  `reason_code` only) and the metrics (`hub_api.analytics_exclusions.added|removed`) follow the
+  commit; an audit failure is raised loudly, never swallowed.
+* **Consent stays a global per-user preference.** Anonymous visitors (no `user_id`) have no subject
+  token, so no exclusion is written until the consent row is tied to a user.
+* **EU-tenant exclusion for layer B** is a separate gate in the policy crate and is not duplicated.
+* **Reconciler.** `reconcile_exclusions()` rebuilds MISSING rows from `cookie_consent`
+  (`doNotSell` true -> 1) and the erasure ledger (`data_deletion_requests.status='completed'` -> 4
+  for the retained `hub_users.uuid`). Add-only (so it can never undo a re-grant), idempotent,
+  bounded batches (default 500), one transaction + `pg_try_advisory_xact_lock` per batch so a single
+  replica works at a time (a lost lock ends the pass: `skipped_locked`). Runs from the hub-api
+  startup loop every hour, gated by flag **`waddles.analytics-exclusions-reconcile`** (default
+  OFF). GPC (2) and marketing-withdrawal rows are act-time only and not reconstructable; a GPC
+  subject stays covered by `1`. Erasure tokens other than `hub_users.uuid` are not recoverable from
+  the ledger (erasure already writes every token at act time). Metrics:
+  `reconciled`, `reconcile_examined` (denominator), `reconcile_passes`.
+* **Grant.** hub-api must hold `SELECT, INSERT, DELETE` on `public.data_use_exclusions`
+  (migration 0129 grants it nothing there -- PUBLIC is revoked -- so unless the hub-api role owns
+  the table the grant is required); do not widen any other role.
+
 ## Layer B inclusion rules (enforced by the later builder)
 
 `k >= 50` contributors per cell; one-way job from consent-filtered input only; exclude users

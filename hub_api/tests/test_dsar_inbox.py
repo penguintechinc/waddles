@@ -35,7 +35,7 @@ from services import dsar_crypto as crypto
 from services import dsar_notifier, dsar_outbox, dsar_rate_limit
 from services import dsar_service as svc
 from services.schema import bind_dsar_tables
-from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token
+from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, create_exclusions_table, make_user_token
 from tests.entitlement_fakes import FakeFlagGate, FakeLicenseGate, install_entitlement_client
 from tests.test_admin_data_privacy import _community, _member, _tenant_admin, _user
 
@@ -84,6 +84,7 @@ def module_db(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Any]:
     dal = async_dal.dal
     _define_tenants(dal, migrate=True)
     bind_dsar_tables(dal, migrate=True)
+    create_exclusions_table(dal)
     assert dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme", is_active=True) == ACME_ID
     assert (
         dal.tenants.insert(slug=OTHER_TENANT_SLUG, display_name="Other", is_active=True) == OTHER_ID
@@ -102,6 +103,7 @@ def db(module_db: Any) -> Any:
     for name in dal.tables:
         if name != "tenants":
             dal(dal[name]).delete()
+    dal.executesql("DELETE FROM data_use_exclusions")
     dal.commit()
     return module_db
 

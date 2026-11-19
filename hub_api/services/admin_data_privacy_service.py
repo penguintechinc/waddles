@@ -67,6 +67,7 @@ from enum import StrEnum
 from typing import Any
 from uuid import uuid4
 
+from services import analytics_exclusions_service as exclusions
 from services import data_privacy_service as privacy
 from services.cookie_consent_service import (
     default_preferences,
@@ -422,14 +423,30 @@ async def apply_do_not_sell(async_dal: Any, dal: Any, *, user_id: int) -> bool:
     for row in rows:
         preferences = dict(row.preferences or {})
         if preferences.get("doNotSell") is True and preferences.get("marketing") is False:
+            # Already opted out: re-assert the exclusion (idempotent self-heal), no consent write.
+            await exclusions.apply_consent_change(
+                async_dal,
+                dal,
+                user_id=user_id,
+                write=lambda _d: None,
+                previous=preferences,
+                merged=preferences,
+            )
             continue
         previous_marketing = preferences.get("marketing")
+        before = dict(row.preferences or {})
         preferences["doNotSell"] = True
         preferences["marketing"] = False
-        await async_dal.update_async(
-            dal.cookie_consent.consent_id == row.consent_id,
-            preferences=preferences,
-            updated_at=now,
+        consent_id_value = row.consent_id
+
+        def _write(
+            d: Any, _id: str = consent_id_value, _prefs: dict[str, Any] = preferences
+        ) -> None:
+            d(d.cookie_consent.consent_id == _id).update(preferences=_prefs, updated_at=now)
+
+        # Opt-out + analytics exclusion in ONE transaction.
+        await exclusions.apply_consent_change(
+            async_dal, dal, user_id=user_id, write=_write, previous=before, merged=preferences
         )
         await log_audit_event(
             async_dal,
@@ -448,16 +465,22 @@ async def apply_do_not_sell(async_dal: Any, dal: Any, *, user_id: int) -> bool:
         policy = await get_current_policy(async_dal, dal)
         version = policy.version if policy else "admin-dsar"
         consent_id = str(uuid4())
-        await async_dal.insert_async(
-            dal.cookie_consent,
-            user_id=user_id,
-            consent_id=consent_id,
-            preferences={**default_preferences(), "doNotSell": True},
-            consent_version=version,
-            consent_method="admin_dsar",
-            consented_at=now,
-            updated_at=now,
-            expires_at=None,
+        new_prefs = {**default_preferences(), "doNotSell": True}
+
+        def _insert(d: Any) -> None:
+            d.cookie_consent.insert(
+                user_id=user_id,
+                consent_id=consent_id,
+                preferences=new_prefs,
+                consent_version=version,
+                consent_method="admin_dsar",
+                consented_at=now,
+                updated_at=now,
+                expires_at=None,
+            )
+
+        await exclusions.apply_consent_change(
+            async_dal, dal, user_id=user_id, write=_insert, previous=None, merged=new_prefs
         )
         await log_audit_event(
             async_dal,
