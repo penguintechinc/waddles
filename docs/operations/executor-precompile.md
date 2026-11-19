@@ -53,7 +53,7 @@ separator (`waddles-cwasm-sig-v1`) differs from the bundle-approval one.
 ## Operations
 
 - Print a binary's fingerprint: `bundle-executor --precompile --print-engine-fingerprint`
-- Dead letters: `SELECT app_id, version, attempts, last_error FROM bundle_precompile_requests WHERE attempts >= 5`
+- Dead letters and recovery: see "Dead letters: seeing and requeueing them" below
 - Metrics: `executor_precompile_items_total{status}`, `executor_precompile_duration_seconds`,
   `waddles_hub_bundle_precompile_requests_total{op,outcome}`
 - Metrics (compile stage): `executor_precompile_compile_items_total{status}`,
@@ -70,6 +70,59 @@ separator (`waddles-cwasm-sig-v1`) differs from the bundle-approval one.
   since the release may be Failed. Counts are printed.
 - Re-queue: any `helm upgrade` creates a new
   `executor-precompile-enqueue-r<rev>` Job.
+
+## Dead letters: seeing and requeueing them
+
+A queue row is a *dead letter* when `attempts >= 5` (max attempts). Two things get it there:
+
+- **Genuine failures.** `attempts` counts only `failed` acks from the precompiler.
+- **Poison pill (stale-lease cap).** A Job that dies before acking (OOM, eviction, hang past the
+  lease) does **not** consume an attempt: its lease expires after 1800 s and the row is re-offered,
+  counted in the separate `stale_reclaims` column. After `MAX_STALE_RECLAIMS` (default 3; the
+  `export --max-stale-reclaims N` flag / `max_stale_reclaims` kwarg) re-offers, the next expired
+  lease dead-letters the row (`attempts` set to the cap) with
+  `last_error = 'lease expired N times without ack (runner crash/timeout)'`, so an item that
+  deterministically kills its runner cannot be re-offered forever. A genuine `failed` ack resets
+  `stale_reclaims` to 0. `requeue-failed` and `--revive-dead-letters` reset both counters.
+
+(Regression, alpha 2026-11-16..19: every claim used to burn an attempt, so 50 rows dead-lettered
+with an empty `last_error` after OOM-killed runs, and 130 more exhausted retries on a deterministic
+S3 403 -- both were revived with hand-written SQL.)
+
+**Known limitation.** `bundle-executor --precompile` writes its report once per batch, so a crash,
+OOM-kill or timeout of one item loses the acks for the whole batch; every row in that batch has its
+lease expire and counts one stale reclaim. The cap bounds the damage (a poison item is gone after
+at most 4 batches) but healthy rows sharing its batch can accrue reclaims too. Per-item
+isolation in the executor is out of scope here.
+
+**See them**
+
+- Metric `waddles_hub_bundle_precompile_dead_letters` (gauge, refreshed on every export/ack cycle);
+  `waddles_hub_bundle_precompile_requests_total{op,outcome}` also has `outcome=dead_lettered`,
+  `revived`, `stale_reclaim`, `stale_dead_lettered` and `op=requeue`. Alert on the gauge being > 0 for longer than a
+  few cron cycles.
+- Logs: WARNING `bundle precompile: row reached max attempts (dead letter)` and WARNING
+  `bundle precompile: lease expired too many times (dead letter)` (app_id, version, counters only) and WARNING `bundle precompile: dead letters` (count) from the export/ack steps.
+- SQL: `SELECT app_id, version, attempts, claimed_at, last_error FROM bundle_precompile_requests WHERE attempts >= 5`  -- add stale_reclaims to the SELECT to spot poison pills
+
+**Requeue them** (run from a hub-api pod, `/app`, with `DATABASE_URL` set)
+
+```bash
+# default is a dry run: prints the match count, changes nothing
+python3 -m cli.precompile_queue requeue-failed --error-like "403" --app-id waddles.some-bundle
+# apply (resets attempts, stale_reclaims, claimed_at, last_error)
+python3 -m cli.precompile_queue requeue-failed --error-like "403" --yes
+```
+
+Filters: `--app-id` (exact), `--error-like` (case-insensitive substring of `last_error`),
+`--max N` (safety cap, default 500: more matches exits 2 and writes nothing), `--dry-run`
+(explicitly never writes, even with `--yes`). Only fix the root cause first -- requeueing a
+deterministic failure just burns five more attempts.
+
+**Self-healing on deploy.** The per-release `executor-precompile-enqueue-r<rev>` Job runs
+`enqueue-all-active --revive-dead-letters`: dead-lettered rows of *active* versions are reset
+once per release, so a deploy that fixes the cause recovers without operator action. Inactive
+versions are left alone.
 
 ## Existing bundles: backfill, storage, and what a miss does
 

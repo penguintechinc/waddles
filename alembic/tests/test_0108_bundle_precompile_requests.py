@@ -78,32 +78,45 @@ def test_enqueue_is_idempotent_and_lease_claims_once(db: PgTestDatabase) -> None
     assert [r.artifact_digest for r in got] == [DIGEST]
     assert again == []  # leased
 
-    # Expire the lease: claimable again; then the attempt cap (2) stops it.
+    # Expire the lease: claimable again, and a stale reclaim NEVER burns an attempt
+    # (regression: alpha 2026-11-16..19, killed runs dead-lettered rows with empty last_error).
+    expire = sqlalchemy.text(
+        "UPDATE bundle_precompile_requests SET claimed_at = NOW() - INTERVAL '1 hour'"
+    )
+    attempts_q = sqlalchemy.text("SELECT attempts FROM bundle_precompile_requests")
     with engine.begin() as conn:
-        conn.execute(
-            sqlalchemy.text(
-                "UPDATE bundle_precompile_requests SET claimed_at = NOW() - INTERVAL '1 hour'"
-            )
-        )
+        for _ in range(4):  # more reclaims than max_attempts (2)
+            conn.execute(expire)
+            stale = conn.execute(sqlalchemy.text(sql["_CLAIM_SQL"]), {**claim, "lease": 60})
+            (row,) = stale.fetchall()
+            assert row.prev_claimed_at is not None
+        assert conn.execute(attempts_q).scalar() == 0
+
+        # Genuine failures consume attempts; at the cap the row is no longer claimable.
+        fail = {"digest": DIGEST, "error": "S3 PUT 403"}
+        for expected in (1, 2):
+            (hit,) = conn.execute(sqlalchemy.text(sql["_FAIL_SQL"]), fail).fetchall()
+            assert (hit.app_id, hit.attempts) == ("waddles.test", expected)
+        conn.execute(expire)
         assert (
-            len(
-                conn.execute(
-                    sqlalchemy.text(sql["_CLAIM_SQL"]), {**claim, "lease": 60}
-                ).fetchall()
-            )
-            == 1
-        )
-        conn.execute(
-            sqlalchemy.text(
-                "UPDATE bundle_precompile_requests SET claimed_at = NOW() - INTERVAL '1 hour'"
-            )
-        )
-        assert (
-            conn.execute(
-                sqlalchemy.text(sql["_CLAIM_SQL"]), {**claim, "lease": 60}
-            ).fetchall()
+            conn.execute(sqlalchemy.text(sql["_CLAIM_SQL"]), {**claim, "lease": 60}).fetchall()
             == []
         )
+        assert conn.execute(
+            sqlalchemy.text(sql["_DEAD_COUNT_SQL"]), {"max_attempts": 2}
+        ).scalar() == 1
+
+        # Requeue match (ILIKE ... ESCAPE) honours the filters; revive resets the row.
+        match = {"max_attempts": 2, "app_id": None, "error_like": "%s3 put%", "fetch_limit": 6}
+        assert len(conn.execute(sqlalchemy.text(sql["_DEAD_MATCH_SQL"]), match).fetchall()) == 1
+        miss = {**match, "app_id": "other.app"}
+        assert conn.execute(sqlalchemy.text(sql["_DEAD_MATCH_SQL"]), miss).fetchall() == []
+        revive = {"digest": DIGEST, "max_attempts": 2}
+        assert len(conn.execute(sqlalchemy.text(sql["_REVIVE_SQL"]), revive).fetchall()) == 1
+        reset = conn.execute(
+            sqlalchemy.text("SELECT attempts, claimed_at, last_error FROM bundle_precompile_requests")
+        ).one()
+        assert tuple(reset) == (0, None, None)
         conn.execute(sqlalchemy.text(sql["_DELETE_SQL"]), {"digest": DIGEST})
         left = conn.execute(
             sqlalchemy.text("SELECT count(*) FROM bundle_precompile_requests")

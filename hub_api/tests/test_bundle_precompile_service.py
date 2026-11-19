@@ -45,27 +45,110 @@ class FakeQueue:
         if "INSERT INTO bundle_precompile_requests" in sql:
             if params["digest"] in self.pending:
                 return _Rows()
-            self.pending[params["digest"]] = {**params, "last_error": None}
+            self.pending[params["digest"]] = {
+                **params,
+                "id": len(self.pending) + 1,
+                "last_error": None,
+                "attempts": 0,
+                "claimed_at": None,
+                "stale_reclaims": 0,
+            }
             return _Rows([_Row(id=len(self.pending))])
+        if "SET attempts = GREATEST" in sql:
+            hits = []
+            for p in self.pending.values():
+                if (
+                    p["attempts"] < params["max_attempts"]
+                    and p["claimed_at"] is not None
+                    and p.get("lease_expired")
+                    and p["stale_reclaims"] + 1 > params["max_stale_reclaims"]
+                ):
+                    p["attempts"] = max(p["attempts"], params["max_attempts"])
+                    p["stale_reclaims"] += 1
+                    p["last_error"] = (
+                        f"lease expired {p['stale_reclaims']} times without ack "
+                        "(runner crash/timeout)"
+                    )
+                    hits.append(
+                        _Row(
+                            app_id=p["app_id"],
+                            version=p["version"],
+                            attempts=p["attempts"],
+                            stale_reclaims=p["stale_reclaims"],
+                        )
+                    )
+            return _Rows(hits)
         if "UPDATE bundle_precompile_requests r" in sql:
-            picked = list(self.pending.values())[: params["limit"]]
-            return _Rows(
-                [
-                    _Row(artifact_digest=p["digest"], app_id=p["app_id"], version=p["version"])
-                    for p in picked
-                ]
-            )
+            picked = [
+                p
+                for p in self.pending.values()
+                if p["attempts"] < params["max_attempts"]
+                and (p["claimed_at"] is None or p.get("lease_expired"))
+            ][: params["limit"]]
+            rows = []
+            for p in picked:
+                rows.append(
+                    _Row(
+                        artifact_digest=p["digest"],
+                        app_id=p["app_id"],
+                        version=p["version"],
+                        prev_claimed_at=p["claimed_at"],
+                    )
+                )
+                if p["claimed_at"] is not None:
+                    p["stale_reclaims"] += 1
+                p["claimed_at"] = "now"
+                p["lease_expired"] = False
+            return _Rows(rows)
         if sql.strip().startswith("DELETE"):
             self.pending.pop(params["digest"], None)
             return _Rows()
-        if "SET last_error" in sql:
-            self.pending[params["digest"]]["last_error"] = params["error"]
+        if "SET last_error = :error" in sql:
+            p = self.pending[params["digest"]]
+            p["last_error"] = params["error"]
+            p["attempts"] += 1
+            p["stale_reclaims"] = 0
+            return _Rows([_Row(app_id=p["app_id"], version=p["version"], attempts=p["attempts"])])
+        if "WHERE artifact_digest = :digest AND attempts >= :max_attempts" in sql:
+            hit = self.pending.get(params["digest"])
+            if hit is None or hit["attempts"] < params["max_attempts"]:
+                return _Rows()
+            p = hit
+            p.update(attempts=0, stale_reclaims=0, claimed_at=None, last_error=None)
+            return _Rows([_Row(id=p["id"])])
+        if "WHERE id = :id AND attempts >= :max_attempts" in sql:
+            for p in self.pending.values():
+                if p["id"] == params["id"] and p["attempts"] >= params["max_attempts"]:
+                    p.update(attempts=0, stale_reclaims=0, claimed_at=None, last_error=None)
+                    return _Rows([_Row(id=p["id"])])
             return _Rows()
         raise AssertionError(f"unexpected SQL {sql}")
 
     async def read(self, _dal: Any, sql: str, params: dict[str, Any] | None = None) -> _Rows:
         if "FROM app_active_versions" in sql:
             return _Rows(list(self.signed.values()))
+        if "COUNT(*) AS n" in sql:
+            assert params is not None
+            n = sum(1 for p in self.pending.values() if p["attempts"] >= params["max_attempts"])
+            return _Rows([_Row(n=n)])
+        if "ILIKE" in sql:
+            assert params is not None
+            frag = params["error_like"]
+            out = []
+            for p in self.pending.values():
+                if p["attempts"] < params["max_attempts"]:
+                    continue
+                if params["app_id"] is not None and p["app_id"] != params["app_id"]:
+                    continue
+                needle = (frag or "").strip("%").lower()
+                if frag is not None and needle not in (p["last_error"] or "").lower():
+                    continue
+                out.append(
+                    _Row(
+                        id=p["id"], app_id=p["app_id"], version=p["version"], attempts=p["attempts"]
+                    )
+                )
+            return _Rows(out[: params["fetch_limit"]])
         assert params is not None
         row = self.signed.get((params["app_id"], params["version"], params["digest"]))
         return _Rows([row] if row else [])
@@ -111,6 +194,7 @@ async def test_claim_resolves_keys_and_skips_unsigned(queue: FakeQueue) -> None:
     await svc.enqueue_precompile(None, app_id="waddles.test", version="1.0.0", digest=DIGEST)
     assert await svc.claim_pending(None, limit=10) == []  # not signed yet -> retried later
     _signed(queue)
+    queue.pending[DIGEST]["lease_expired"] = True  # the first lease ran out
     items = await svc.claim_pending(None, limit=10)
     assert [i.as_json()["digest"] for i in items] == [DIGEST]
     assert items[0].component_key.endswith(".wasm")
@@ -191,19 +275,19 @@ def test_cli_enqueue_all_active_command_runs_with_minimal_config(
         seen.append(url)
         return _Dal()
 
-    async def _enqueue(_dal: Any) -> svc.EnqueueSummary:
-        seen.append("enqueued")
+    async def _enqueue(_dal: Any, revive_dead_letters: bool = False) -> svc.EnqueueSummary:
+        seen.append(f"enqueued revive={revive_dead_letters}")
         return svc.EnqueueSummary(examined=3, queued=1, already_pending=2)
 
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://r:p@h:5432/d")
     monkeypatch.setattr(precompile_queue, "build_install_dal", _build)
-    monkeypatch.setattr(precompile_queue.svc, "enqueue_all_active", _enqueue)
+    monkeypatch.setattr(svc, "enqueue_all_active", _enqueue)
     rc = asyncio.run(
         precompile_queue._run(precompile_queue._parser().parse_args(["enqueue-all-active"]))
     )
     assert rc == 0
-    assert seen == ["postgresql://r:p@h:5432/d", "enqueued", "closed"]
+    assert seen == ["postgresql://r:p@h:5432/d", "enqueued revive=False", "closed"]
 
 
 @pytest.mark.parametrize(
@@ -265,13 +349,13 @@ def test_cli_run_uses_minimal_config_not_hub_api_config(
         seen.append(url)
         return _Dal()
 
-    async def _claim(_dal: Any, limit: int) -> list[Any]:
+    async def _claim(_dal: Any, limit: int, **_kw: Any) -> list[Any]:
         return []
 
     monkeypatch.delenv("SECRET_KEY", raising=False)
     monkeypatch.setenv("DATABASE_URL", "postgresql://r:p@h:5432/d")
     monkeypatch.setattr(precompile_queue, "build_install_dal", _build)
-    monkeypatch.setattr(precompile_queue.svc, "claim_pending", _claim)
+    monkeypatch.setattr(svc, "claim_pending", _claim)
     out = tmp_path / "m.json"
     rc = asyncio.run(
         precompile_queue._run(precompile_queue._parser().parse_args(["export", "--out", str(out)]))
