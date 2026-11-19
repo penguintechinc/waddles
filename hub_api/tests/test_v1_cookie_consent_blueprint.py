@@ -40,6 +40,17 @@ def app(privacy_db: Any) -> Quart:
     return quart_app
 
 
+@pytest.fixture(autouse=True)
+def _hub_users(privacy_db: Any) -> None:
+    """Real `hub_users` rows for every JWT subject (exclusions resolve `hub_users.uuid`)."""
+    dal = privacy_db.dal
+    for user_id in range(1, 61):
+        dal.hub_users.insert(
+            id=user_id, email=f"u{user_id}@example.com", username=f"u{user_id}", is_active=True
+        )
+    dal.commit()
+
+
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()

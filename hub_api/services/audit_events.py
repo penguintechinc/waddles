@@ -195,6 +195,9 @@ class AuditAction(StrEnum):
     ADMIN_CALENDAR_EVENT_CHANGED = "admin.calendar_event_changed"
     ADMIN_TICKETING_CHANGED = "admin.ticketing_changed"
     PRIVACY_CONSENT_CHANGED = "privacy.consent_changed"
+    PRIVACY_EXCLUSION_ADDED = "privacy.exclusion_added"
+    PRIVACY_EXCLUSION_REMOVED = "privacy.exclusion_removed"
+    PRIVACY_EXCLUSIONS_RECONCILED = "privacy.exclusions_reconciled"
 
 
 class AuditValidationError(ValueError):

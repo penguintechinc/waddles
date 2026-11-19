@@ -56,7 +56,7 @@ from services import admin_data_privacy_service as svc
 from services import data_privacy_service as privacy
 from services.global_identity import grant_global_admin_sync
 from services.schema import bind_admin_privacy_tables, bind_tenant_tables
-from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token
+from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, create_exclusions_table, make_user_token
 from tests.entitlement_fakes import FakeFlagGate, FakeLicenseGate, install_entitlement_client
 
 ACME_ID = 1
@@ -87,6 +87,7 @@ def module_db(tmp_path_factory: pytest.TempPathFactory) -> Any:
     _define_tenants(dal, migrate=True)
     bind_admin_privacy_tables(dal, migrate=True)
     bind_tenant_tables(dal, migrate=True)  # extends `communities` with `public_id`
+    create_exclusions_table(dal)
     assert dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme", is_active=True) == ACME_ID
     assert dal.tenants.insert(slug=OTHER_TENANT_SLUG, display_name="Other", is_active=True) == (
         OTHER_ID
@@ -122,6 +123,7 @@ def db(module_db: Any) -> Any:
     for table_name in dal.tables:
         if table_name != "tenants":
             dal(dal[table_name]).delete()
+    dal.executesql("DELETE FROM data_use_exclusions")
     dal.commit()
     return module_db
 
