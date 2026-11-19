@@ -60,10 +60,12 @@ metadata:
 spec:
   backoffLimit: 3
   # Bounded so this post-install/post-upgrade HOOK can never hang `helm --wait`
-  # past the deploy timeout (#1391 class): bucket creation is fast, 5m is ample
-  # and well under every env's helm --timeout (beta 10m, alpha/dal2alpha 60m).
-  # scripts/ci/check-helm-hook-job-timeouts.py enforces this statically.
-  activeDeadlineSeconds: 300
+  # past the deploy timeout (#1391 class). activeDeadlineSeconds spans the WHOLE Job (pod
+  # scheduling, image pull, termination), and 300s was hit on dal2alpha (DeadlineExceeded, no
+  # script log), so it is 600s. The script's own TOTAL_BUDGET (480s) is strictly below this with
+  # a 120s margin, so the script always exits itself first with an `elapsed/budget` log line.
+  # scripts/ci/check-helm-hook-job-timeouts.py enforces the deadline < deploy timeout statically.
+  activeDeadlineSeconds: 600
   # FAILED Jobs (and their pods/logs) stay inspectable for 24h; hook-succeeded above only
   # deletes on success. NOTE: on DeadlineExceeded the Job controller itself reaps running pods,
   # so diagnosability comes from the script's own per-call timeouts (it fails first, with logs).
@@ -101,27 +103,50 @@ spec:
           export AWS_CA_BUNDLE="{{ include "waddlebot.transitTls.caPath" . }}"
           ENDPOINT="{{ include "waddlebot.transitTls.s3Endpoint" . }}"
           # Fail FAST and DIAGNOSABLY: the Job controller reaps the pod on
-          # activeDeadlineSeconds (no logs survive), so every call is bounded well inside the
-          # deadline -- a stall makes THIS script exit non-zero with a log line, leaving a Failed
-          # pod whose logs `kubectl logs` can still read. Worst case before first failure:
-          # WAIT_MAX + CALL_TIMEOUT.
+          # activeDeadlineSeconds (no logs survive), so the script enforces ONE total budget
+          # (TOTAL_BUDGET) strictly below that deadline minus a margin for scheduling/image pull/
+          # termination (activeDeadlineSeconds 600 - 120 = 480). The budget is checked before every
+          # call and caps each call's timeout to the remaining time, so a stall makes THIS script
+          # exit non-zero with an `elapsed/budget` log line, leaving a Failed pod whose logs
+          # `kubectl logs` can still read.
+          TOTAL_BUDGET=480
           CALL_TIMEOUT=30
           WAIT_MAX=90
+          START_TS=$(date +%s)
           log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) bucket-init: $*"; }
+          elapsed() { echo $(( $(date +%s) - START_TS )); }
+          remaining() { echo $(( TOTAL_BUDGET - $(elapsed) )); }
+          trap 'rc=$?; if [ "${rc}" -ne 0 ]; then log "ERROR: exiting rc=${rc} elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s"; fi' EXIT
+          # budget_check: abort the whole script (main shell only) once the total budget is spent.
+          budget_check() {
+            if [ "$(remaining)" -le 0 ]; then
+              log "ERROR: total budget exhausted elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s while: $*"
+              exit 1
+            fi
+          }
           command -v timeout >/dev/null 2>&1 || { log "ERROR: 'timeout' not found in image; cannot bound aws calls"; exit 1; }
-          awsx() { timeout "${CALL_TIMEOUT}" aws --endpoint-url "$ENDPOINT" "$@"; }
+          # capped_timeout <max>: min(max, remaining budget), never below 1s.
+          capped_timeout() {
+            r=$(remaining)
+            if [ "${r}" -lt 1 ]; then echo 1; elif [ "${r}" -lt "$1" ]; then echo "${r}"; else echo "$1"; fi
+          }
+          awsx() {
+            budget_check "aws $*"
+            timeout "$(capped_timeout "${CALL_TIMEOUT}")" aws --endpoint-url "$ENDPOINT" "$@"
+          }
           # Bounded wait for the S3 gateway (post-hook can fire before SeaweedFS is Ready).
-          log "waiting for S3 endpoint ${ENDPOINT} (max ${WAIT_MAX}s)"
+          log "waiting for S3 endpoint ${ENDPOINT} (max ${WAIT_MAX}s, total budget ${TOTAL_BUDGET}s)"
           waited=0
-          until err=$(timeout 10 aws --endpoint-url "$ENDPOINT" s3api list-buckets 2>&1 >/dev/null); do
+          until err=$(timeout "$(capped_timeout 10)" aws --endpoint-url "$ENDPOINT" s3api list-buckets 2>&1 >/dev/null); do
+            budget_check "waiting for S3 endpoint ${ENDPOINT}"
             if [ "${waited}" -ge "${WAIT_MAX}" ]; then
-              log "ERROR: S3 endpoint ${ENDPOINT} not ready after ${WAIT_MAX}s; last error: $(echo "${err}" | tail -n 3)"
+              log "ERROR: S3 endpoint ${ENDPOINT} not ready after ${WAIT_MAX}s elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s; last error: $(echo "${err}" | tail -n 3)"
               exit 1
             fi
             sleep 3
             waited=$((waited + 3))
           done
-          log "S3 endpoint ready after ${waited}s"
+          log "S3 endpoint ready after ${waited}s (elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s)"
           # "recordings" (svc-streaming egress) and bundleExecutor.bucketName
           # ("waddles-bundles", core/bundle_executor's BUNDLE_BUCKET_NAME) --
           # both consumers expect their bucket to already exist; previously
@@ -130,7 +155,8 @@ spec:
           EXPECTED={{ if eq .Values.bundleStorage.mode "bundled" }}5{{ else }}4{{ end }}
           VERIFIED=0
           for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}" "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}"{{ if eq .Values.bundleStorage.mode "bundled" }} "{{ .Values.bundleStorage.bucketName }}"{{ end }}; do
-            log "bucket ${bucket}: ensure exists"
+            budget_check "bucket ${bucket}"
+            log "bucket ${bucket}: ensure exists (elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s)"
             # Best-effort mb (masked on purpose): the head-bucket || create-bucket gate below is the real check.
             { awsx s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already"; } || true
             awsx s3api head-bucket --bucket "${bucket}" 2>/dev/null \
@@ -162,7 +188,7 @@ spec:
             log "ERROR: ${VERIFIED}/${EXPECTED} buckets verified"
             exit 1
           fi
-          log "${VERIFIED}/${EXPECTED} buckets verified"
+          log "${VERIFIED}/${EXPECTED} buckets verified (elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s)"
         env:
         # Dedicated hook-scoped "bucket-init" identity (Admin) -- never the
         # shared rootUser/rootPassword admin credential, and never mounted by
