@@ -690,7 +690,7 @@ describe('Interaction API', () => {
             expect(Array.isArray(response.body.rooms)).toBe(true);
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });
@@ -721,7 +721,7 @@ describe('Interaction API', () => {
             createdVoiceRoomName = roomName;
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });
@@ -750,7 +750,7 @@ describe('Interaction API', () => {
             expect(response.body).toHaveProperty('url');
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });
@@ -777,7 +777,7 @@ describe('Interaction API', () => {
             expect(response.body).toHaveProperty('success', true);
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });

@@ -240,18 +240,16 @@ jobs:
           bandit -r . -lll -iii \
             --exclude ./node_modules,./.worktrees,./tests,./.venv
 
-  # Slow static analysis (~17-21 min): CodeQL on go/javascript/python.
+  # Slow static analysis (~17-21 min): CodeQL on javascript/python.
   # Runs in parallel with builds -- does NOT gate container builds or any other jobs.
   # Pre-existing OS-level CVEs in bookworm base images cause false positives;
   # continue-on-error prevents them from blocking the pipeline.
   codeql:
     name: CodeQL Analysis
     needs: changes
-    # CodeQL here analyzes go, javascript and python only.
+    # CodeQL here analyzes javascript and python only.
     # Main-only tier: skipped on PRs into release/** (see scripts/ci/ci-gate-tier.py)
     if: (github.event_name != 'pull_request' || github.base_ref == 'main') && (needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || needs.changes.outputs.go == 'true')
-    # dal2-alpha-ci egress cannot resolve proxy.golang.org, so CodeQL's Go autobuild cannot fetch
-    # core/module_rtc's pinned (go.sum-verified) livekit modules and fails extraction.
     # egress allowlist pending admin CNP update
     runs-on: ubuntu-latest
     continue-on-error: true
@@ -261,16 +259,7 @@ jobs:
         with:
           fetch-depth: 0
 
-      # The dal2-alpha-ci runners ship no Go toolchain, so CodeQL's Go autobuild failed with
-      # "Unable to locate executable file: go". core/module_rtc is still Go on release/v3.0.X;
-      # same pinned SHA + version as go-gates.yml. Drop this step and `go` below when it is deleted.
-      - name: Set up Go (CodeQL Go extraction)
-        uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e  # v7.0.0
-        with:
-          go-version: '1.26.11'
-          cache: false
-
-      # Same runners ship no Node.js either; CodeQL's JavaScript/TypeScript extractor needs
+      # The dal2-alpha-ci runners ship no Node.js; CodeQL's JavaScript/TypeScript extractor needs
       # `node` on PATH ("Could not start Node.js. It is required for TypeScript extraction").
       - name: Set up Node.js (CodeQL TypeScript extraction)
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
@@ -281,7 +270,7 @@ jobs:
       - name: Initialize CodeQL
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4
         with:
-          languages: go, javascript, python
+          languages: javascript, python
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4

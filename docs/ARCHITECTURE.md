@@ -38,9 +38,8 @@ hub-api**, not its own container.
 auth/entitlement checks rather than going through a Valkey queue, since those calls block the
 caller and can't tolerate queue latency.
 
-A ninth container, **`svc-rtc`** (Go, WebRTC/SFU via LiveKit, port 8206), still runs standalone.
-It is the design's absorption target into `svc-streaming` (RTC capability) but that merge has not
-happened — `svc-rtc` and `svc-streaming` are two containers today, gated independently in Helm.
+The former standalone Go `svc-rtc` container (WebRTC/SFU via LiveKit) is retired: its room, join,
+moderation and raised-hand surface now lives in `svc-streaming` (Rust, native WHIP/WHEP SFU).
 
 ## Pipeline flow
 

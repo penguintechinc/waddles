@@ -29,6 +29,7 @@ use std::time::Duration;
 use egress_detokenizer::{DetokenizedText, DisplayNameResolver, Sink};
 
 use crate::display_names::PgDisplayNameResolver;
+use crate::license::PosthogFlag;
 
 use crate::config::CliConfig;
 use crate::outbound_ops::OutboundAction;
@@ -72,8 +73,7 @@ pub fn outcome_count(outcome: &str) -> u64 {
 pub enum KillSwitch {
     /// A fixed answer: `true` = detokenization enabled (env override, tests).
     Fixed(bool),
-    /// The PostHog-backed license client: bypass domain => enabled, otherwise
-    /// enabled unless [`DISABLE_PII_DETOKENIZATION_FLAG`] is ON.
+    /// The PostHog-backed license client: enabled unless [`DISABLE_PII_DETOKENIZATION_FLAG`] is ON.
     License(Arc<penguin_licensing::LicenseClient>),
 }
 
@@ -81,12 +81,7 @@ impl KillSwitch {
     async fn detokenization_enabled(&self) -> bool {
         match self {
             Self::Fixed(enabled) => *enabled,
-            Self::License(client) => {
-                if client.bypass_active() {
-                    return true;
-                }
-                !client.flag_enabled(DISABLE_PII_DETOKENIZATION_FLAG).await
-            }
+            Self::License(client) => !client.flag_on(DISABLE_PII_DETOKENIZATION_FLAG).await,
         }
     }
 }
@@ -308,6 +303,25 @@ mod tests {
     use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Mutex;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/licensing_mock.rs"
+    ));
+
+    // regression: bypass domains are license-only; the PII-detokenization kill switch is
+    // ON-by-absence (mechanism enabled) and only an explicit PostHog ON opts out, bypass or not.
+    #[tokio::test]
+    async fn bypass_client_detokenization_kill_switch_follows_posthog_not_bypass() {
+        crate::crypto::ensure_installed();
+        let unset = seeded_client("{}", true).await;
+        assert!(unset.bypass_active());
+        assert!(KillSwitch::License(unset).detokenization_enabled().await);
+        let off = seeded_client(r#"{"waddles.core.disable-pii-detokenization":false}"#, true).await;
+        assert!(KillSwitch::License(off).detokenization_enabled().await);
+        let on = seeded_client(r#"{"waddles.core.disable-pii-detokenization":true}"#, true).await;
+        assert!(!KillSwitch::License(on).detokenization_enabled().await);
+    }
 
     /// Counts calls and records the tenant each one named; resolves from `names`, or fails.
     struct CountingResolver {

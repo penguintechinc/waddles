@@ -137,10 +137,9 @@ infrastructure:
 # svcStreaming are re-enabled here, superseding the earlier T10 (v3 demo)
 # "minimal 5-of-8" scoping that left them off. All three already had their
 # resources/replicas min-spec'd below for exactly this re-enable (see the old
-# comment this replaces), so no re-sizing was needed. svcCore/svcRtc stay
-# disabled -- svcCore has no Dockerfile yet (still the shared base-image
-# skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
-# is part of this fix's scope.
+# comment this replaces), so no re-sizing was needed. svcCore stays
+# disabled -- it has no Dockerfile yet (still the shared base-image skeleton) and
+# is not part of this fix's scope.
 pipeline:
   # Default tenant id (slug `default`, is_global) -- see values.yaml pipeline.defaultTenantId.
   defaultTenantId: 1
@@ -228,12 +227,6 @@ pipeline:
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
       limits: { cpu: "200m", memory: "256Mi" }
-  svcRtc:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "100m", memory: "128Mi" }
-      limits: { cpu: "500m", memory: "512Mi" }
   svcPresentation:
     enabled: true
     # Pinned to 1: overlay fan-out is in-process, >1 replica splits frames across pods (the chart
@@ -627,3 +620,26 @@ networkPolicy:
   enabled: false
 tetragon:
   enabled: false
+
+# License-bypass scope fix (2026-11-12): see values-dal2alpha.yaml config.dataPlaneFlagBaselines.
+config:
+  # Data-plane feature-flag ENV baselines: these were forced ON by the license-bypass
+  # domain until 2026-11-12; kept ON here so alpha behaviour is unchanged. PostHog overrides.
+  # Kill switches (waddles.*.disable-*) are deliberately absent: unset = mechanism ON.
+  dataPlaneFlagBaselines:
+    FLAG_WADDLES_CORE_RUST_DATA_PLANE: "true"
+    FLAG_WADDLES_CORE_BUNDLE_EGRESS: "true"
+    FLAG_WADDLES_BUNDLE_DB_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_REPUTATION_CAPABILITY: "true"
+    FLAG_WADDLES_REPUTATION_AUTO_BAN: "true"
+    FLAG_WADDLES_BUNDLE_ECONOMY_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_GAMESERVER_NET: "true"
+    FLAG_WADDLES_BUNDLE_OBJECT_STORAGE: "true"
+    FLAG_WADDLES_BUNDLE_IDENTITY_CAPABILITY: "true"
+    FLAG_WADDLES_BUNDLE_AI_CAPABILITY: "true"
+    FLAG_WADDLES_HARNESS_MEDIA_GENERATION: "true"
+    FLAG_WADDLES_OVERLAY_SURFACES: "true"
+    FLAG_WADDLES_CONNECTOR_TOOLS: "true"
+    FLAG_WADDLES_CORE_OVERLAY_IMAGE_UPLOAD: "true"
+    FLAG_WADDLES_CORE_OVERLAY_CAPTIONS: "true"

@@ -33,7 +33,7 @@ bandit=0
 pip-audit=0
 npm-audit=0
 gosec=0
-# core/module_rtc only; disappears with the Rust rewrite at P3.
+# no Go modules remain; the check skips itself.
 govulncheck=0
 # gitleaks scans git HISTORY, so this count cannot fall without rewriting it —
 # the RATCHET line will never fire for this check. Baselined so a NEW committed

@@ -1440,10 +1440,10 @@ fn try_start_changelog_consumer(
     // `flags::db_bundle_config_flag`/`multi_tenant_watermark_flag` (not the
     // generic `flag_or_closed` + `NegatedFlag` composition) -- this crate's
     // own hardcoded license-bypass domain (`build_license_client` above)
-    // makes `flag_enabled` read `true` for ANY key, so a bare negation
-    // would report the multi-tenant path permanently DISABLED for every
-    // deployment of this service; see `flags::DisableDbBundleConfigFlag`'s
-    // doc.
+    // satisfies license/tier checks only and never forces a flag; these
+    // wrappers resolve PostHog, then ENV, then OFF (the ENV baseline is ours,
+    // not the library's) and apply the opt-out inversion; see
+    // `flags::DisableDbBundleConfigFlag`'s doc.
     let flag: Arc<dyn flags::FeatureFlag> = Arc::new(flags::AllFlags(vec![
         flags::db_bundle_config_flag(&license),
         flags::multi_tenant_watermark_flag(&license),
@@ -2153,17 +2153,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn build_license_client_hardcoded_domain_bypasses_flag_checks() {
-        // Proves the net effect the hardcoded DEPLOYMENT_DOMAIN bypass is
-        // meant to have: `build_license_client`'s own output resolves
-        // every flag ON, with zero network access and zero env/config
-        // spoofability (`rules/critical-rules.md` Feature Flags & License
-        // Tiers: bypass is domain-based ONLY -- satisfied entirely in
-        // source here).
+    async fn build_license_client_hardcoded_domain_bypasses_license_checks_only() {
+        // The hardcoded DEPLOYMENT_DOMAIN answers LICENSE checks (tier/feature) with zero network
+        // access, but never forces a feature flag (2026-11-12 decision).
+        // regression: bypass domains are license-only (2026-11-12 decision)
         let client = build_license_client().expect("valid defaults");
         assert!(client.bypass_active());
+        assert!(client.check_feature("any-licensed-feature").await);
+        assert!(client.check_tier(penguin_licensing::Tier::Enterprise).await);
         let flag = flag_or_closed(&Some(Arc::clone(&client)), flags::RUST_DATA_PLANE_FLAG);
-        assert!(flag.enabled().await);
+        assert!(
+            !flag.enabled().await,
+            "feature flag is not forced ON by bypass"
+        );
     }
 
     #[test]

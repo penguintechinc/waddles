@@ -80,7 +80,6 @@ updates:
   - /core/bundle_compiler/assets/csharp
   - /core/bundle_executor
   - /core/egress_proxy
-  - /core/module_rtc
   - /hub_api
   - /migrations
   schedule:
@@ -97,20 +96,6 @@ updates:
 - package-ecosystem: github-actions
   directories:
   - /
-  schedule:
-    interval: weekly
-  groups:
-    all-dependencies:
-      applies-to: version-updates
-      patterns:
-      - '*'
-    security:
-      applies-to: security-updates
-      patterns:
-      - '*'
-- package-ecosystem: gomod
-  directories:
-  - /core/module_rtc
   schedule:
     interval: weekly
   groups:

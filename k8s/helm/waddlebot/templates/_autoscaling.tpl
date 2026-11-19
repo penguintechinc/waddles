@@ -6,7 +6,7 @@ a PodDisruptionBudget. Singletons are deliberately absent and must stay absent:
   - svc-streaming    -- stateful RTMP/SRT ingest + local stream dir, Recreate singleton
   - svc-presentation -- overlay fan-out is in-process; >1 replica splits frames
   - postgres/redis/qdrant/ollama/seaweedfs -- single-writer stateful stores
-  - collectors/svc-rtc -- per-platform connection owners
+  - collectors -- per-platform connection owners
 `hpa: false` entries get a PDB when multi-replica but never an HPA: svc-ingest-rust holds
 single-connection leases (Discord gateway / Twitch IRC) so extra replicas add nothing;
 egress-proxy is fixed-size by design (sized for the egress allowlist, not load).

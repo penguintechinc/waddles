@@ -152,10 +152,8 @@ impl LicenseFlagGate {
 
 impl FlagGate for LicenseFlagGate {
     async fn enabled(&self, flag: &str) -> bool {
-        match &self.client {
-            Some(c) => c.flag_enabled(flag).await,
-            None => false,
-        }
+        // Feature flag, not entitlement: bypass domains never flip it (PostHog -> ENV -> OFF).
+        crate::license::flag_on_opt(self.client.as_ref(), flag).await
     }
 }
 

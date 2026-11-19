@@ -900,18 +900,18 @@ fn env_baseline_on() -> bool {
     )
 }
 
-/// ENV baseline or the PostHog flag -- never the license bypass domain (a data-collecting
+/// PostHog value if seen, else the ENV baseline -- never the license bypass domain (a data-collecting
 /// producer must be switched on deliberately, default OFF), same rule as the canary.
 pub async fn flag_wanted(
     client: Option<&Arc<penguin_licensing::LicenseClient>>,
     env_on: bool,
 ) -> bool {
-    if env_on {
-        return true;
-    }
     match client {
-        Some(c) if !c.bypass_active() => c.flag_enabled(FLAG_KEY).await,
-        _ => false,
+        Some(c) => crate::license::posthog_then_env(
+            crate::license::posthog_flag_value(c, FLAG_KEY).await,
+            env_on,
+        ),
+        None => env_on,
     }
 }
 

@@ -691,7 +691,6 @@ class TestPortScopedIngress:
             "trigger-webhooks",
             "svc-presentation",
             "svc-streaming",
-            "svc-rtc",
         }
 
     def test_httproute_adds_gateway_sources(self) -> None:

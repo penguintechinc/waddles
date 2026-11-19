@@ -204,6 +204,57 @@ async def test_bypass_domain_still_respects_flag_off() -> None:
     assert license_gate.calls == 0
 
 
+KILL_SWITCH = "waddles.core.disable-test-mechanism"
+
+
+@pytest.mark.asyncio
+async def test_bypass_domain_never_turns_on_unseen_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User decision 2026-11-12: bypass domains never flip a kill switch ON; unseen = OFF."""
+    # regression: bypass domains are license-only (2026-11-12 decision)
+    monkeypatch.delenv("FLAG_WADDLES_CORE_DISABLE_TEST_MECHANISM", raising=False)
+    client, _, _ = make_client(flag_result=None, tier=None)
+    for host in ("svc.waddles.app", "x.penguincloud.io", "x.penguintech.cloud"):
+        assert (
+            await client.evaluate(KILL_SWITCH, tenant=TENANT, request_host=host)
+            is False
+        )
+
+
+@pytest.mark.asyncio
+async def test_bypass_domain_kill_switch_follows_env_then_posthog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a bypass host a kill switch resolves PostHog -> FLAG_ env -> default."""
+    # regression: bypass domains are license-only (2026-11-12 decision)
+    monkeypatch.setenv("FLAG_WADDLES_CORE_DISABLE_TEST_MECHANISM", "true")
+    client, _, _ = make_client(flag_result=None, tier=None)
+    assert (
+        await client.evaluate(KILL_SWITCH, tenant=TENANT, request_host="a.waddles.app")
+        is True
+    )
+    client, _, _ = make_client(flag_result=False, tier=None)
+    assert (
+        await client.evaluate(KILL_SWITCH, tenant=TENANT, request_host="a.waddles.app")
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_bypass_domain_still_grants_license_feature() -> None:
+    """The bypass still answers the licence/entitlement check for licensed flags."""
+    # regression: bypass domains are license-only (2026-11-12 decision)
+    client, _, license_gate = make_client(
+        flag_result=True, tier=None, tier_requirements={FLAG_KEY: "enterprise"}
+    )
+    assert (
+        await client.evaluate(FLAG_KEY, tenant=TENANT, request_host="a.waddles.app")
+        is True
+    )
+    assert license_gate.calls == 0
+
+
 @pytest.mark.asyncio
 async def test_non_bypass_domain_still_checks_license() -> None:
     client, _, license_gate = make_client(

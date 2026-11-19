@@ -68,8 +68,8 @@ readonly REGISTRY="localhost:32000/waddlebot"
 # convention values-alpha.yaml and templates/_helpers.tpl's
 # waddlebot.legacyModuleImage/waddlebot.dbMigrateInitContainer render. Only
 # services actually enabled in values-alpha.yaml are listed here; svc-core
-# and svc-rtc have no Dockerfile yet and are left on the chart's shared
-# base-image skeleton (disabled in alpha).
+# has no Dockerfile yet and is left on the chart's shared base-image
+# skeleton (disabled in alpha).
 readonly SERVICE_ORDER=(
     "hub-api"
     "hub-webui"
