@@ -68,6 +68,66 @@ def _identities(docs: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return identities
 
 
+_BARE_VERBS = frozenset({"Admin", "Read", "Write", "List", "Tagging"})
+# SeaweedFS 4.48 Identity.CanDo matches a wildcard action against "Action:bucket/objectKey", so a
+# "Verb:<bucket>/<prefix>/*" grant only reaches keys under that concrete bucket + prefix.
+_ANCHORED_PREFIX_GLOB = re.compile(
+    r"^(?:Read|Write|List|Tagging):(?P<bucket>[^/*?:]+)/[^/*?][^*?]*/\*$"
+)
+
+
+def _action_cannot_reach_escrow(action: str) -> bool:
+    """True when a non-escrow identity's S3 action provably cannot reach the escrow bucket.
+
+    Rejects bare verbs, Admin, any wildcard not anchored to a concrete non-escrow bucket plus a
+    non-empty prefix (``Verb:*``, ``Verb:<bucket>*``, bucket-segment globs, ``?``, mid-string ``*``).
+    """
+    if action in _BARE_VERBS or action.startswith("Admin"):
+        return False
+    if "*" not in action and "?" not in action:
+        return _BUCKET not in action
+    match = _ANCHORED_PREFIX_GLOB.fullmatch(action)
+    if match is None:
+        return False
+    return not match.group("bucket").startswith(_BUCKET)
+
+
+@pytest.mark.parametrize(
+    ("action", "allowed"),
+    [
+        ("Write:waddles-bundles/precompiled/*", True),
+        ("Read:waddles-bundles/a/b/*", True),
+        ("List:waddles-bundles", True),
+        ("Read:waddles-bundles", True),
+        ("Read", False),
+        ("Write", False),
+        ("List", False),
+        ("Tagging", False),
+        ("Admin", False),
+        ("Admin:waddles-bundles", False),
+        ("Admin:waddles-bundles/precompiled/*", False),
+        ("Write:*", False),
+        ("Read:waddles-bundles*", False),
+        ("Read:waddles-*/precompiled/*", False),
+        ("Read:*/precompiled/*", False),
+        ("Read:waddles-bundles/*", False),
+        ("Read:waddles-bundles//*", False),
+        ("Read:waddles-bundles///*", False),
+        ("Read:waddles-bundles/pre?ompiled/*", False),
+        ("Read:waddles-bundles/pre*/x/*", False),
+        ("Read:waddles-bundles/precompiled/*x", False),
+        ("Read:waddles-bundles/precompiled*", False),
+        ("Delete:waddles-bundles/precompiled/*", False),
+        (f"Read:{_BUCKET}", False),
+        (f"Read:{_BUCKET}/x/*", False),
+        (f"Read:{_BUCKET}-2/x/*", False),
+    ],
+)
+def test_escrow_reachability_predicate(action: str, allowed: bool) -> None:
+    """Pure check of the predicate: only bucket-anchored, non-escrow prefix globs pass."""
+    assert _action_cannot_reach_escrow(action) is allowed, action
+
+
 def test_only_the_escrow_identity_names_the_escrow_bucket(helm_available: None) -> None:
     identities = _identities(_render())
     named = {
@@ -79,15 +139,15 @@ def test_only_the_escrow_identity_names_the_escrow_bucket(helm_available: None) 
     assert sorted(named["hub-api-escrow"]) == sorted(
         f"{verb}:{_BUCKET}" for verb in ("Read", "Write", "List")
     )
-    # no wildcard / admin / prefix-less grant on any other identity could reach it either
+    # no bare / admin / unanchored-wildcard grant on any other identity could reach it either
+    examined = 0
     for ident in identities:
         if ident["name"] in {"hub-api-escrow", "bucket-init"}:
             continue
         for action in ident["actions"]:
-            assert action not in {"Admin", "Read", "Write", "List", "Tagging"}, ident[
-                "name"
-            ]
-            assert "*" not in action, ident["name"]
+            examined += 1
+            assert _action_cannot_reach_escrow(action), (ident["name"], action)
+    assert examined >= 1, "zero non-escrow actions examined"
 
 
 def test_escrow_identity_is_in_no_bundle_or_general_hub_api_grant(

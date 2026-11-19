@@ -113,6 +113,8 @@ Bucket-scoped actions (`Read:<bucket>`) limit an identity to that bucket. Prefix
 | `svc-streaming` | svc-streaming (recordings) | `Read, Write` on the literal bucket `recordings` | Always |
 | `bundle-storage` | Host-mediated bundle storage (never given to a bundle) | `Read, Write, List, Tagging` on `bundleStorage.bucketName` | Only when `bundleStorage.mode` is `bundled` |
 
+**Prefix-scoped grants need a trailing `*`:** SeaweedFS (`weed/s3api/auth_credentials.go` `Identity.CanDo`) matches a wildcard-free action only against `Action:bucket` exactly, so `Write:bucket/prefix` never matches an object write — use `Write:bucket/prefix/*` (wildcard-matched against `Action:bucket/objectKey`).
+
 ## Bucket Init Hook
 
 `seaweedfs-bucket-init` (`k8s/helm/waddlebot/templates/infrastructure/seaweedfs.yaml`) is a Helm `post-install,post-upgrade` hook Job, `before-hook-creation,hook-succeeded` delete policy (Job specs are immutable in-place, so a plain Job breaks every `helm upgrade` once it exists). It waits for the SeaweedFS Deployment/Service/PVC to exist, then idempotently creates `waddlebot-assets` and `recordings`, and applies default SSE-S3 encryption when `encryption.autoEncryptBucket` is set. Uses the stock `amazon/aws-cli` image against the S3 gateway endpoint — no SeaweedFS-specific client.

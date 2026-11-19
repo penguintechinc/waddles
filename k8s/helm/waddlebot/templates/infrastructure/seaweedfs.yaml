@@ -334,7 +334,10 @@ spec:
                 "actions": [
                   "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
                   "List:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
-                  "Write:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}/precompiled"
+                  {{/* regression: precompiler sign PUTs 403'd -- SeaweedFS Identity.CanDo matches a
+                  non-wildcard action only against "Action:bucket" exactly; a prefix grant needs a
+                  trailing "*" (wildcard-matched against "Action:bucket/objectKey"). */}}
+                  "Write:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}/precompiled/*"
                 ]
               },
               {
