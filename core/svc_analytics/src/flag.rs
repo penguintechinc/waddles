@@ -231,8 +231,8 @@ mod tests {
             "precondition: bypass is active on this client"
         );
         assert!(
-            c.flag_enabled(FLAG_KEY).await,
-            "license bypass enables every license feature"
+            !c.flag_enabled(FLAG_KEY).await,
+            "bypass no longer forces feature flags (penguin-licensing ad096f5d)"
         );
         let g = FlagGate::Licensed {
             client: Some(c),

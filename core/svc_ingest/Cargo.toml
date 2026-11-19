@@ -126,7 +126,7 @@ base64 = "=0.22.1"
 # `penguin-licensing`: the `waddles.core.rust-data-plane` feature-flag gate
 # on the receive/produce/outbound-drain loops (spec S13.5) -- see
 # `try_start_license_client`/`rust_data_plane_enabled` in `src/lib.rs`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ad096f5d867629f4b62347c94db812d33b720f6e", package = "penguin-licensing", version = "=0.1.0" }
 # `penguin-connector-twitch`: IRC chat receive (`src/ingest/twitch.rs`) and
 # the outbound relay sender (`src/outbound.rs`, `TwitchIrcSender`) -- rev
 # fast-forwarded to penguin-libs PR #129 (real Discord `OP_RESUME`, see the
