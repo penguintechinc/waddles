@@ -267,10 +267,11 @@ seed-latency-canary:
 	@test -n "$(HUB_API_URL)" -a -n "$(CANARY_GUILD_ID)" || { echo 'usage: make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]' >&2; exit 2; }
 	@python3 -I scripts/ops/seed_latency_canary.py --hub-api-url "$(HUB_API_URL)" --guild-id "$(CANARY_GUILD_ID)" --confirm-alpha $(if $(DRY),--dry-run,)
 
-# Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
+# Wait for all checks, then merge a PR into release/* (non-admin, head-pinned):
+#   make release-merge PR=<n> SHA=<full-40-hex-head> [MAX=<minutes>] [DRY=1]
 release-merge:
-	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]" >&2; exit 2; }
-	@bash scripts/release-merge.sh "$(PR)" $(if $(HEAD),--expect-head "$(HEAD)") $(if $(DRY),--dry-run)
+	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> SHA=<full-head-sha> [MAX=<minutes>] [DRY=1]" >&2; exit 2; }
+	@bash scripts/release-merge.sh "$(PR)" $(SHA) $(MAX) $(if $(DRY),--dry-run)
 
 # Watch ordered PRs and merge each when green: make release-auto-merge PRS="1038 1037" [DRY=1]
 release-auto-merge:

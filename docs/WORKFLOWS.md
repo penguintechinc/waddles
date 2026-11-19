@@ -564,17 +564,17 @@ The main tier is unchanged: every check is examined. Self-tests: `scripts/ci/tes
 
 ## Merging a PR into a Release Branch
 
-`make release-merge PR=<n> [HEAD=<sha-prefix>] [DRY=1]` (wraps `scripts/release-merge.sh`) is the
-verify-then-merge procedure for feature/fix/chore PRs into `release/v*.X`.
+`make release-merge PR=<n> SHA=<full-head-sha> [MAX=<minutes>] [DRY=1]` (wraps `scripts/release-merge.sh <pr> <full-head-sha> [max_minutes] [--dry-run]`)
+waits for the PR's whole check set, then merges feature/fix/chore PRs into `release/v*.X`. No admin, no `--auto`.
 
-- Refuses unless base is `release/*` (never `main`) and the PR is OPEN; `HEAD=` pins the reviewed head (refuses on drift)
-- Requires every non-skipped check on the current head to be SUCCESS/NEUTRAL; the advisory `submit-queue` status is printed but ignored (as in `ci-gate.yml`)
-- `ci-gate` (override: `RELEASE_MERGE_REQUIRED`) must be present and SUCCESS on the head; SKIPPED checks never count, all-skipped = refuse
-- Two check snapshots a few seconds apart must be identical before merging; merge uses `--match-head-commit` so GitHub refuses if the head moved
-- Zero checks examined = refuse; CONFLICTING = refuse (never auto-resolved)
-- Then `gh pr merge --admin --merge` (release branches only), polls to MERGED, confirms the merge commit is in `origin/<base>`, and lists the latest runs on the base
-- `DRY=1` runs all checks without merging; release -> `main` is never done with this tool
-- Self-test: `make test-scripts` (also part of `make test`)
+- Refuses (exit 4) unless the PR base is `release/*` (never `main`); refuses a non-OPEN PR
+- The release ruleset has no required status checks, so `gh pr merge --auto` would merge at once; the script itself polls (default 90 polls, `POLL_SECONDS`=60) until `ci-gate` passes with zero pending and zero failed checks
+- The merge is `gh pr merge --merge --match-head-commit <sha>`; if the PR head moves from the pinned sha it aborts (exit 2). Sha omitted: the head is read once at start and pinned
+- The external `submit-queue` status is ignored (as `ci-gate.yml` does); override with `IGNORE_CHECKS`, required check with `REQUIRED_CHECK`, repo with `REPO` (default `gh repo view`)
+- Check buckets come from `gh pr view --json statusCheckRollup`; gh calls are retried (`GH_RETRIES`, `GH_RETRY_SLEEP`) for api.github.com timeouts
+- Exit codes: 0 merged, 1 a check failed, 2 head moved, 3 timeout, 4 bad usage / non-release base
+- `DRY=1` / `--dry-run` does one poll, prints pass/pending/fail counts and what it would do, never merges; release -> `main` is never done with this tool
+- Self-test: `make test-scripts` (also part of `make test`; fake `gh` on PATH)
 
 ### Auto-merge watcher
 
