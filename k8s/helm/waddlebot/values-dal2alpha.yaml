@@ -182,10 +182,9 @@ infrastructure:
 # svcStreaming are re-enabled here, superseding the earlier T10 (v3 demo)
 # "minimal 5-of-8" scoping that left them off. All three already had their
 # resources/replicas min-spec'd below for exactly this re-enable (see the old
-# comment this replaces), so no re-sizing was needed. svcCore/svcRtc stay
-# disabled -- svcCore has no Dockerfile yet (still the shared base-image
-# skeleton) and svcRtc is additionally gated on modules.social.enabled; neither
-# is part of this fix's scope.
+# comment this replaces), so no re-sizing was needed. svcCore stays
+# disabled -- it has no Dockerfile yet (still the shared base-image skeleton) and
+# is not part of this fix's scope.
 pipeline:
   # Default tenant id (slug `default`, is_global) -- see values.yaml pipeline.defaultTenantId.
   defaultTenantId: 1
@@ -291,12 +290,6 @@ pipeline:
     resources:
       requests: { cpu: "50m", memory: "64Mi" }
       limits: { cpu: "200m", memory: "256Mi" }
-  svcRtc:
-    enabled: false
-    replicas: 1
-    resources:
-      requests: { cpu: "100m", memory: "128Mi" }
-      limits: { cpu: "500m", memory: "512Mi" }
   svcPresentation:
     enabled: true
     # Pinned to 1: overlay fan-out is in-process, >1 replica splits frames across pods (the chart

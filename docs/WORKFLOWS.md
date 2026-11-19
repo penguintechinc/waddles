@@ -551,7 +551,7 @@ path-dependency crates, e.g. `core/hub_client/**`, `proto/**`). Add a path depen
 
 | Workflow | Gate |
 |---|---|
-| `rust-*.yml` per crate, `core-bundles-reproducible`, `data-plane-parity`, `python-waddle-sdk`, `node-waddle-sdk-js`, `go-gates`, `helm-chart-e2e`, `builtin-handler-inventory`, `bundle-hygiene` | own `changes` job + `globs` |
+| `rust-*.yml` per crate, `core-bundles-reproducible`, `data-plane-parity`, `python-waddle-sdk`, `node-waddle-sdk-js`, `helm-chart-e2e`, `builtin-handler-inventory`, `bundle-hygiene` | own `changes` job + `globs` |
 | `rust-build-all`, `security`, `pr-validation` | shared area outputs (`rust/python/node/go/helm/docker/any_code`) |
 | `gate-integrity`, `ci-gate` | always run (gate self-tests / the gate) |
 | `build-*.yml`, `containers.yml` image builds | NOT changed here: main-tier only (not examined on release PRs) and already path-filtered by their own `detect-changes` |

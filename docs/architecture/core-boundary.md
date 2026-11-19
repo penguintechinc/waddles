@@ -41,7 +41,7 @@ All platform plumbing — receivers, actions, interaction commands, and the rout
 
 Community-facing social features, chat, presence, conferencing, and stream surfaces.
 
-- **From `core/`**: `browser_source_core_module` (OBS overlay surface), `module_rtc` (Go WebRTC/SFU conferencing — the Rust-rewrite target), `video_proxy_module` (RTMP simulcast)
+- **From `core/`**: `browser_source_core_module` (OBS overlay surface), WebRTC/SFU conferencing (the retired Go RTC module, now `svc-streaming` rooms), `video_proxy_module` (RTMP simulcast)
 - **Interactions** `action/interactive/*` (Social subset): presence, shoutout, alias, quote, loyalty, inventory, calendar, lfg, memories, spotify, youtube_music, translate
 
 ### Marketing

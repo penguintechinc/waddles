@@ -50,7 +50,7 @@ containers" the design doc collapses, and Task 0.5 does not touch them.
 
 `26 + 5 = 31` — full denominator accounted for.
 
-## `svc-rtc` — the 7th container has no Helm predecessor
+## `svc-rtc` — the 7th container has no Helm predecessor (RETIRED: absorbed by `svc-streaming`, see CHANGELOG)
 
 `core/module_rtc` (Go WebRTC/SFU, Social-owned per `core-boundary.md`) has **no existing
 Helm Deployment template** among the 31 — it exists only in the deprecated Kustomize tree
@@ -76,7 +76,7 @@ collided — only the object names did. Confirmed no duplicate `metadata.name` r
 
 - **Per-module App-bundle wiring inside each container.** The skeleton's `MODULE_LOAD_*`
   env passthrough (`modules.{bot,customer,marketing}.enabled`) was removed: nothing read it.
-  Features ship as app bundles instead; `modules.social.enabled` still gates svc-rtc.
+  Features ship as app bundles instead; `modules.social` was removed with the retired svc-rtc.
 - **No Dockerfiles/CI images exist yet** for `svc-ingest`/`svc-process`/`svc-action`/
   `svc-core`/`hub-api`/`hub-webui`/`svc-rtc`. The skeleton pins each container's `image:` to
   the repo's existing base-image digest (`python:3.13-slim-bookworm@sha256:...` for the
