@@ -109,11 +109,11 @@ fn ws_metric(state: &AppState, outcome: &str) -> u64 {
 
 #[tokio::test]
 async fn replays_history_oldest_first_then_streams_live_captions() {
-    let now = chrono::Utc::now();
+    let now = time::OffsetDateTime::now_utc();
     let h = harness_with(FakeCaptionStore {
         history: std::sync::Mutex::new(vec![
-            stored_caption("first", now - chrono::Duration::seconds(30)),
-            stored_caption("second", now - chrono::Duration::seconds(10)),
+            stored_caption("first", now - time::Duration::seconds(30)),
+            stored_caption("second", now - time::Duration::seconds(10)),
         ]),
         ..Default::default()
     })
@@ -151,8 +151,8 @@ async fn replays_history_oldest_first_then_streams_live_captions() {
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].0, 42);
     assert_eq!(calls[0].2, 10);
-    let window = chrono::Utc::now() - calls[0].1;
-    assert!((window.num_seconds() - 300).abs() < 10, "{window}");
+    let window = time::OffsetDateTime::now_utc() - calls[0].1;
+    assert!((window.whole_seconds() - 300).abs() < 10, "{window}");
     assert_eq!(ws_metric(&h.state, "accepted"), 1);
 }
 

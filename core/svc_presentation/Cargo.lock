@@ -3555,10 +3555,10 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "546040c653a705e60ec65ecd3191a809603734bebbc225775916dea9ae409b31"
 dependencies = [
- "chrono",
  "ordered-float",
  "sea-query-derive",
  "serde_json",
+ "time",
  "uuid",
 ]
 
@@ -3893,7 +3893,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cfg-if",
- "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -3914,6 +3913,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -3969,7 +3969,6 @@ dependencies = [
  "bitflags",
  "byteorder",
  "bytes",
- "chrono",
  "crc",
  "digest 0.11.3",
  "dotenvy",
@@ -3984,6 +3983,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
 ]
@@ -3998,7 +3998,6 @@ dependencies = [
  "base64 0.22.1",
  "bitflags",
  "byteorder",
- "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -4020,6 +4019,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -4032,7 +4032,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi 2.0.0",
- "chrono",
  "flume",
  "form_urlencoded",
  "futures-channel",
@@ -4046,6 +4045,7 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "url",
  "uuid",
@@ -4136,7 +4136,6 @@ dependencies = [
  "base64 0.22.1",
  "bundle-host-surface",
  "bytes",
- "chrono",
  "clap",
  "egress_detokenizer",
  "futures",
