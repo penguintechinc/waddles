@@ -13,6 +13,8 @@ on:
       - '.github/workflows/rust-svc-ingest.yml'
       - '.github/workflows/rust-crate-ci.yml'
       - 'hub_api/tests/live/**'
+      - 'hub_api/blueprints/**'
+      - 'hub_api/services/community_public_id.py'
       - 'scripts/ci/twitch-sessions-live.sh'
   pull_request:
     branches: [main, 'release/**']
@@ -57,6 +59,10 @@ jobs:
             core/command_latency/**
             core/egress_detokenizer/**
             proto/**
+            hub_api/tests/live/**
+            hub_api/blueprints/**
+            hub_api/services/community_public_id.py
+            scripts/ci/twitch-sessions-live.sh
 
   lint-test:
     needs: changes

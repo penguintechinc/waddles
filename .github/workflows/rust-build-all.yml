@@ -129,6 +129,7 @@ jobs:
           - overlay_schema
           - service_auth
           - svc_action
+          - svc_analytics
           - svc_ingest
           - svc_presentation
           - svc_process

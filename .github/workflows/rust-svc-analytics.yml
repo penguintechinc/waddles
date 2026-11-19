@@ -1,0 +1,69 @@
+name: Rust svc-analytics (lint + test)
+
+on:
+  push:
+    branches: [main, 'release/**']
+    paths:
+      - 'core/svc_analytics/**'
+      - 'alembic/versions/0130_analytics_exclusions_grant.py'
+      - 'alembic/versions/0131_analytics_applied_entries.py'
+      - '.github/workflows/rust-svc-analytics.yml'
+      - '.github/workflows/rust-crate-ci.yml'
+  pull_request:
+    branches: [main, 'release/**']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  # Path gate (release PRs only): shared detector, fails closed. A job skipped
+  # here means "not affected"; main PRs / pushes / dispatch run everything.
+  changes:
+    name: Detect changed areas
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: rust
+          globs: |
+            core/svc_analytics/**
+            alembic/versions/0130_analytics_exclusions_grant.py
+            alembic/versions/0131_analytics_applied_entries.py
+
+  lint-test:
+    needs: changes
+    if: ${{ !cancelled() && (needs.changes.result != 'success' || needs.changes.outputs.match == 'true') }}
+    name: fmt + clippy + deny + coverage
+    uses: ./.github/workflows/rust-crate-ci.yml
+    with:
+      crate_name: svc-analytics
+      working_directory: core/svc_analytics
+      # The consumer/e2e tests fail loudly without a real Valkey and a real Postgres.
+      valkey: true
+      postgres: true
+      # aws-lc-sys (via the license client's reqwest) needs cmake + a C/C++ toolchain.
+      extra_apt_packages: 'cmake build-essential'
+      extra_apt_reason: 'for aws-lc-sys (cmake, C/C++ toolchain)'
+      # Thin binary entrypoint (`main.rs`): exercised by tests/health_and_binary.rs as a
+      # subprocess, which llvm-cov does not attribute to this file reliably.
+      coverage_ignore_regex: 'src/main\.rs'

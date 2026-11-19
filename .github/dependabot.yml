@@ -31,6 +31,7 @@ updates:
   - /core/overlay_schema
   - /core/service_auth
   - /core/svc_action
+  - /core/svc_analytics
   - /core/svc_ingest
   - /core/svc_presentation
   - /core/svc_process

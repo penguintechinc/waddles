@@ -1,0 +1,53 @@
+[package]
+name = "svc-analytics"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Waddles analytics layer-A writer: consumes the `waddles:analytics` Valkey stream (consumer group), validates every entry against the wire contract, drops excluded subjects, and upserts first-party per-community aggregates into analytics_fp. gRPC health only; telemetry via OTLP."
+
+[lib]
+name = "svc_analytics"
+path = "src/lib.rs"
+
+[[bin]]
+name = "svc-analytics"
+path = "src/main.rs"
+
+# Exact-version pins only (no ^ / * ranges) -- rules/critical-rules.md Dependency Pinning.
+# Cargo.lock is committed alongside this file; versions mirror core/svc_ingest (same
+# crates, same pins) so the repo carries one resolved version of each dependency.
+# No chrono (new code uses plain epoch arithmetic; the DB does calendar math), no
+# axum/REST (in-cluster Rust services are gRPC only), no PRC-origin crates.
+[dependencies]
+tokio = { version = "=1.53.3", features = ["rt-multi-thread", "macros", "time", "sync", "signal", "net"] }
+tonic = { version = "=0.14.6", default-features = false, features = ["transport", "codegen", "router"] }
+# `grpc.health.v1` -- the ONLY gRPC surface (native kubelet gRPC probes).
+tonic-health = "=0.14.6"
+redis = { version = "=1.7.0", default-features = false, features = [
+    "connection-manager",
+    "tokio-comp",
+    "tls-rustls",
+    "tokio-rustls-comp",
+    "streams",
+] }
+sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-postgres", "runtime-tokio-rustls", "postgres-array"] }
+rustls = { version = "=0.23.46", default-features = false, features = ["std", "ring"] }
+uuid = "=1.26.1"
+thiserror = "=2.0.20"
+anyhow = "=1.0.104"
+tracing = "=0.1.44"
+opentelemetry = "=0.32.0"
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
+
+[dev-dependencies]
+tokio = { version = "=1.53.3", features = ["test-util"] }
+penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0", features = ["testing"] }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
