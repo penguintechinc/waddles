@@ -335,7 +335,6 @@ ignore:
   - core/svc_analytics/**
   - core/bundle_compiler/**
   - core/connector_e2e/**
-  - core/module_rtc/**
   - core/test_support/**
   - core/tool_invoke_e2e/**
   - core/twitch_helix/**

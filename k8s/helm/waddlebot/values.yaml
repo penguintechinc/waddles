@@ -1460,7 +1460,6 @@ pipeline:
       limits:
         cpu: "500m"
         memory: "512Mi"
-  goRuntimeImage: "debian:bookworm-slim@sha256:7c7b2c966bc9ee8cedfeef67e0e279108992c77681fa595db4a9d65c06ccc587"
 
   svcCore:
     enabled: true
@@ -1694,22 +1693,11 @@ pipeline:
         cpu: "500m"
         memory: "256Mi"
 
-  svcRtc:
-    enabled: true
-    port: 8206
-    replicas: 1
-    resources:
-      requests:
-        cpu: "250m"
-        memory: "256Mi"
-      limits:
-        cpu: "1000m"
-        memory: "1Gi"
 
   # v3.0.x — 8th container / 4th stage-runner. `presentation.enabled` toggle: renders core
   # overlays + Music Station + activated bundles' presentation components. See
   # templates/svc-presentation-rust.yaml header for the design trail and why this is
-  # NOT gated on any modules.<name>.enabled (generic across all Modules, unlike svc-rtc).
+  # NOT gated on any modules.<name>.enabled (generic across all Modules).
   svcPresentation:
     enabled: true
     port: 8207
@@ -1766,8 +1754,8 @@ pipeline:
   # media-plane ports (rtmp/srt/webrtc range) and MinIO/S3 recording env alongside the
   # existing control ports -- see templates/svc-streaming.yaml header for the full
   # rationale. Gated only on `enabled` here (same pattern as svcPresentation), NOT on
-  # modules.streaming.enabled -- that module doesn't exist in modules.* yet. svc-rtc /
-  # video_proxy_module are untouched (separate, existing containers).
+  # modules.streaming.enabled -- that module doesn't exist in modules.* yet.
+  # svc-streaming absorbed the retired Go svc-rtc (WHIP/WHEP/rooms) and video_proxy.
   # NOTE: this key MUST stay nested directly under `pipeline:` (2-space indent, sibling of
   # svcPresentation above) -- a prior edit accidentally nested it under the top-level
   # `presentation:` block instead, which silently made every
@@ -2555,9 +2543,6 @@ bundleExecutor:
 
 # Module verticals + migrations image
 modules:
-  # Social module: gates svc-rtc (templates/svc-rtc.yaml, with pipeline.svcRtc.enabled).
-  social:
-    enabled: true
 
   migrations:
     image: migrations
@@ -2919,7 +2904,6 @@ networkPolicy:
     - hub-webui-v3
     - svc-presentation
     - svc-streaming
-    - svc-rtc
   # Per-component egress profile override, e.g. { seaweedfs: https } when an external KMS is in
   # use. Profiles: internal (DNS + same namespace) | https (+ world TCP/443) | world (+ any
   # world port) | managed (egress governed by another CNP — set automatically for
@@ -3056,7 +3040,7 @@ egressPolicy:
 # Cilium egress-gateway/FQDN policy can't express per-tenant/app identity
 # either (see templates/network-policies-egress.yaml header for the full
 # design write-up). SKELETON: no Dockerfile/CI image yet, pinned to the
-# same debian:bookworm-slim digest already used as pipeline.goRuntimeImage
+# same debian:bookworm-slim digest used by the other skeleton images
 # as a placeholder — replace once the crate has its own CI-built image.
 egressProxy:
   enabled: true

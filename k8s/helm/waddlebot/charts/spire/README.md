@@ -73,7 +73,6 @@ waddlebot v3 services, each as `spiffe://penguintech.io/{environment}/{name}`:
 | svc-process | waddlebot | svc-process |
 | svc-action | waddlebot | svc-action |
 | svc-core | waddlebot | svc-core |
-| svc-rtc | waddlebot | svc-rtc |
 | hub-api | waddlebot | hub-api |
 | hub-webui | waddlebot | hub-webui |
 
