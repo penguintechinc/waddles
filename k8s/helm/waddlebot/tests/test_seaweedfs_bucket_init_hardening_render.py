@@ -52,7 +52,7 @@ def test_script_is_bounded_and_counts_buckets(values: str | None) -> None:
     extra = () if values else ("infrastructure.seaweedfs.encryption.secretName=seaweedfs-sse-kek",)
     script = _script(_job(values, *extra))
     assert "set -eu" in script and "pipefail" in script
-    assert 'timeout "${CALL_TIMEOUT}" aws' in script
+    assert 'timeout "$(capped_timeout "${CALL_TIMEOUT}")" aws' in script
     # No bare aws invocation outside the timeout wrapper / bounded wait loop.
     bare = [
         ln.strip()
@@ -60,7 +60,7 @@ def test_script_is_bounded_and_counts_buckets(values: str | None) -> None:
         if re.match(r"\s*aws\s", ln) or re.search(r"\|\|\s*aws\s", ln)
     ]
     assert not bare, f"unwrapped aws calls: {bare}"
-    assert "timeout 10 aws" in script and "WAIT_MAX" in script
+    assert 'timeout "$(capped_timeout 10)" aws' in script and "WAIT_MAX" in script
     assert "not ready after" in script and "${ENDPOINT}" in script
     assert "buckets verified" in script and "${VERIFIED}" in script
     # Configured bucket count must equal the number of names in the for-loop.
@@ -76,8 +76,28 @@ def test_failed_pods_are_kept_for_inspection() -> None:
     assert "before-hook-creation" in policy and "hook-succeeded" in policy
     assert "hook-failed" not in policy
     assert job["spec"]["ttlSecondsAfterFinished"] >= 3600
-    assert job["spec"]["activeDeadlineSeconds"] == 300
+    assert job["spec"]["activeDeadlineSeconds"] == 600
     assert job["spec"]["backoffLimit"] == 3
+
+
+@pytest.mark.parametrize("values", [None, "values-alpha.yaml"])
+def test_total_budget_is_strictly_below_job_deadline(values: str | None) -> None:
+    """The script must self-terminate (with a log line) before the Job controller kills it."""
+    extra = () if values else ("infrastructure.seaweedfs.encryption.secretName=seaweedfs-sse-kek",)
+    job = _job(values, *extra)
+    script = _script(job)
+    deadline = job["spec"]["activeDeadlineSeconds"]
+    m = re.search(r"^\s*TOTAL_BUDGET=(\d+)", script, re.M)
+    assert m, "TOTAL_BUDGET not rendered"
+    budget = int(m.group(1))
+    assert 0 < budget <= deadline - 60, (budget, deadline)
+    call_timeout = int(re.search(r"^\s*CALL_TIMEOUT=(\d+)", script, re.M).group(1))  # type: ignore[union-attr]
+    wait_max = int(re.search(r"^\s*WAIT_MAX=(\d+)", script, re.M).group(1))  # type: ignore[union-attr]
+    assert call_timeout < budget and wait_max < budget
+    assert "budget_check()" in script and "capped_timeout()" in script
+    assert 'budget_check "bucket ${bucket}"' in script
+    assert "total budget exhausted elapsed=" in script and "/budget=${TOTAL_BUDGET}s" in script
+    assert "trap " in script and " EXIT" in script
 
 
 def test_image_pull_secrets_omitted_when_empty() -> None:

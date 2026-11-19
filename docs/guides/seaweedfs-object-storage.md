@@ -360,7 +360,7 @@ docker-compose ps
 
 - Every aws call in the Job is bounded (`timeout` 30s each; S3 readiness wait max 90s) so a stall makes the
   script itself fail with timestamped logs. The Job controller reaps running pods on
-  `activeDeadlineSeconds` (300), so the script's own bounds are what keep logs available.
+  `activeDeadlineSeconds` (600; the script self-terminates at `TOTAL_BUDGET`=480s with an `elapsed/budget` log line), so the script's own bounds are what keep logs available.
 - Failed Jobs/pods are kept (hook-delete-policy `before-hook-creation,hook-succeeded` + `ttlSecondsAfterFinished: 86400`):
   `kubectl -n <ns> logs job/seaweedfs-bucket-init` and `kubectl -n <ns> describe pod -l job-name=seaweedfs-bucket-init`
   (a rate-limited Docker Hub pull of the aws-cli image shows as ImagePullBackOff/ErrImagePull in events, not logs; set `global.imagePullSecrets` to a pre-created pull Secret name, which this Job honours).
