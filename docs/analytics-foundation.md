@@ -193,3 +193,39 @@ counsel approves a transfer mechanism); tenant must have an `in` row in
 The approved design defines 13 compliance gates that every export decision must pass (the gate list is owned by the compliance review; this document does not restate it).
 In v3.0 the evaluator is not
 built: the only outcome is `DENY` with `EXPORT_NOT_IMPLEMENTED`, logged to `export_runs`.
+
+## As built: `svc_analytics` (W4a, layer A writer)
+
+Crate `core/svc_analytics` (README there has the full detail). Behaviour that refines the
+contract above:
+
+- **Consumer**: group `svc_analytics` on `waddles:analytics`, XREADGROUP in bounded batches (own
+  pending list, then idle claims from dead consumers, then new entries); XACK only after the DB
+  commit. Dead-letter stream `waddles:analytics:dlq` holds `orig_id`, `reason`, `at_ms`,
+  `consumer` only (no payload fields).
+- **Validation**: strict (unknown `v`, missing/duplicate/extra fields, non-canonical numbers,
+  `community_id >= 1`, canonical non-nil `user_uuid`, code ranges, `ts_ms` within now+5 min ..
+  now-400 d); rejects go to the DLQ with a fixed reason code.
+- **Idempotency ledger** (alembic `0131_analytics_applied_entries`): `analytics_ops.applied_entries
+  (entry_ms, entry_seq, applied_at)`, written in the same transaction as the upserts; `analytics_writer`
+  gets SELECT/INSERT/DELETE on it. Entry ids only, no user data. Purged after 7 days. It lives in its own
+  schema so `analytics_fp` stays exactly the 0129 data model.
+- **Exclusions**: checked before every write (seeded + lazy-loaded TTL cache, default 5 s), fail
+  closed when unavailable, and re-checked inside the write transaction. No community-level
+  exclusion table exists, so none is checked.
+- **Tier source**: Premium = active `community_tier_allocations` row (`tier_code = 2`,
+  `released_at IS NULL`). Alembic 0131 grants `analytics_writer` (role-guarded) exactly
+  `SELECT (community_id, tier_code, released_at) ON public.community_tier_allocations` -- no other
+  column or table; the LOGIN role `waddles_svc_analytics` inherits it. If the grant is missing,
+  every community is treated as Free (never Premium).
+- **Writes**: `community_hourly` metrics 1 messages, 2 commands, 3 joins, 4 leaves (Free);
+  5 sessions_started (Premium). `member_daily`: msgs/cmds/first_ts/last_ts for message, command and
+  presence_start events (Free); `presence_s` Premium. `member_sessions` + `cohort_weekly` Premium only.
+  `retention_days` stamped 90 (Free) / 400 (Premium); a row keeps the greater value on update.
+- **Sessionization**: duplicate starts and orphan ends are counted, not written; sessions are closed
+  by `presence_end`, or by the sweeper after `ANALYTICS_SESSION_MAX_SECS` (12 h) at `start + bound`;
+  presence seconds are split across UTC days into `member_daily.presence_s`.
+- **Purge**: honours each row's own `retention_days`, bounded batches, off-peak UTC window, once per day.
+- **Flag**: `waddles.analytics-stream` gates the consumer and is OFF everywhere by default,
+  including license-bypass domains (ENV baseline `FLAG_WADDLES_ANALYTICS_STREAM` or PostHog only,
+  same rule as the producer). OFF = idle but healthy; maintenance and purge run regardless.

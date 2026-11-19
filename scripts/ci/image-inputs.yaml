@@ -331,6 +331,8 @@ ignore:
   - core/*/*.sh
   - core/*/*.json
   - core/analytics_policy/**
+  # svc_analytics has no image/chart yet (deploy work item); promote to `images:` when it does.
+  - core/svc_analytics/**
   - core/bundle_compiler/**
   - core/connector_e2e/**
   - core/module_rtc/**
