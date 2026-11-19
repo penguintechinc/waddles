@@ -97,6 +97,8 @@ async fn wait_for_signal() {
 /// # Errors
 /// Not serving, or the listener is unreachable.
 pub async fn run_healthcheck() -> anyhow::Result<()> {
-    let port = std::env::var("GRPC_HEALTH_PORT").unwrap_or_else(|_| "50209".into());
+    let port =
+        config::health_port(|k| std::env::var_os(k).map(|v| v.to_string_lossy().into_owned()))
+            .map_err(anyhow::Error::msg)?;
     health::check(&format!("127.0.0.1:{port}")).await
 }

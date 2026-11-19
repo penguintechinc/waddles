@@ -48,13 +48,37 @@ impl Raw {
                     redis::Value::BulkString(b) => b,
                     redis::Value::SimpleString(t) => t.into_bytes(),
                     redis::Value::Int(i) => i.to_string().into_bytes(),
-                    _ => Vec::new(),
+                    other => {
+                        // Not a scalar the contract allows: keep the field empty so
+                        // validation rejects the entry (dead-letter), and say why.
+                        tracing::warn!(
+                            field = %k,
+                            "stream entry field has an unsupported value type"
+                        );
+                        let _ = other;
+                        Vec::new()
+                    }
                 };
                 (k, bytes)
             })
             .collect();
         fields.sort();
         Self { id: s.id, fields }
+    }
+}
+
+/// Flattens an XREADGROUP reply into raw entries. A nil reply is the documented result of a
+/// BLOCK timeout (or an empty history read) and means "no entries"; a malformed reply never
+/// reaches here because the client surfaces it as an error.
+fn entries_from_reply(reply: Option<redis::streams::StreamReadReply>) -> Vec<Raw> {
+    match reply {
+        Some(r) => r
+            .keys
+            .into_iter()
+            .flat_map(|k| k.ids)
+            .map(Raw::from_stream_id)
+            .collect(),
+        None => Vec::new(),
     }
 }
 
@@ -176,16 +200,22 @@ impl<D: AnalyticsDb> Consumer<D> {
         }
         let mut c = self.redis.clone();
         let reply: Option<redis::streams::StreamReadReply> =
-            c.xread_options(&[&self.cfg.stream], &[id], &opts).await?;
-        Ok(reply
-            .map(|r| {
-                r.keys
-                    .into_iter()
-                    .flat_map(|k| k.ids)
-                    .map(Raw::from_stream_id)
-                    .collect()
-            })
-            .unwrap_or_default())
+            match c.xread_options(&[&self.cfg.stream], &[id], &opts).await {
+                Ok(r) => r,
+                Err(e) => {
+                    // Fail closed: nothing was read, so nothing is acked; the cycle fails and
+                    // the loop backs off and retries (readiness drops after repeated failures).
+                    Metrics::inc(&self.metrics.read_failures, 1, "kind", "xreadgroup");
+                    tracing::error!(
+                        kind = ?e.kind(),
+                        stream = %self.cfg.stream,
+                        group = %self.cfg.group,
+                        "XREADGROUP failed or returned a malformed reply; cycle aborted"
+                    );
+                    return Err(e.into());
+                }
+            };
+        Ok(entries_from_reply(reply))
     }
 
     async fn claim_idle(&self) -> Result<Vec<Raw>, CycleError> {
@@ -539,5 +569,39 @@ impl<D: AnalyticsDb> Consumer<D> {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use redis::streams::{StreamId, StreamKey, StreamReadReply};
+
+    #[test]
+    fn nil_reply_is_explicitly_no_entries() {
+        assert!(entries_from_reply(None).is_empty());
+    }
+
+    #[test]
+    fn reply_entries_are_flattened_and_odd_field_types_become_empty() {
+        let mut map = HashMap::new();
+        map.insert("a".to_string(), redis::Value::BulkString(b"x".to_vec()));
+        map.insert("n".to_string(), redis::Value::Int(7));
+        map.insert("bad".to_string(), redis::Value::Nil);
+        let reply = StreamReadReply {
+            keys: vec![StreamKey {
+                key: "s".into(),
+                ids: vec![StreamId {
+                    id: "1-0".into(),
+                    map,
+                    ..Default::default()
+                }],
+            }],
+        };
+        let raws = entries_from_reply(Some(reply));
+        assert_eq!(raws.len(), 1);
+        assert_eq!(raws[0].id, "1-0");
+        assert!(raws[0].fields.contains(&("n".into(), b"7".to_vec())));
+        assert!(raws[0].fields.contains(&("bad".into(), Vec::new())));
     }
 }

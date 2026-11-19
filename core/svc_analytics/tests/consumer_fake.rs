@@ -346,6 +346,22 @@ async fn entries_stuck_on_a_dead_consumer_are_claimed() {
     assert_eq!(pending(&mut r, &stream).await, 0);
 }
 
+/// A read-stage Valkey error (stream key replaced by a non-stream type after the group was
+/// created) must fail the cycle closed: error returned, nothing acked, never treated as empty.
+#[tokio::test]
+async fn read_stage_failure_fails_closed_not_empty() {
+    let stream = unique_stream();
+    let (c, db, _) = mk(&stream, Arc::new(FakeDb::default()), FlagGate::fixed(true)).await;
+    let mut r = conn().await;
+    assert_eq!(c.cycle().await.unwrap(), 0); // creates group, seeds, empty read
+    let _: () = r.del(&stream).await.unwrap();
+    let _: () = r.set(&stream, "wrong type").await.unwrap();
+    let e = c.cycle().await.unwrap_err();
+    assert!(matches!(e, CycleError::Valkey(_)), "{e}");
+    assert!(db.applied.lock().unwrap().is_empty());
+    let _: () = r.del(&stream).await.unwrap();
+}
+
 #[tokio::test]
 async fn valkey_failure_surfaces_as_a_cycle_error() {
     let stream = unique_stream();

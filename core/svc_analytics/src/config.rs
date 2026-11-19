@@ -8,6 +8,28 @@ pub const FREE_RETENTION_DAYS: i32 = 90;
 /// Premium-tier retention for layer-A rows (days).
 pub const PREMIUM_RETENTION_DAYS: i32 = 400;
 
+/// Default gRPC health listener port when `GRPC_HEALTH_PORT` is unset.
+pub const DEFAULT_GRPC_HEALTH_PORT: i64 = 50209;
+
+/// Resolves `GRPC_HEALTH_PORT` from `get`: unset or empty yields [`DEFAULT_GRPC_HEALTH_PORT`];
+/// a set value that is not an integer within 1..=65535 is an error (never silently replaced).
+///
+/// # Errors
+/// A message naming `GRPC_HEALTH_PORT` when the value fails to parse or is out of range.
+pub fn health_port<F>(get: F) -> Result<u16, String>
+where
+    F: Fn(&str) -> Option<String>,
+{
+    match get("GRPC_HEALTH_PORT").filter(|v| !v.is_empty()) {
+        None => Ok(DEFAULT_GRPC_HEALTH_PORT as u16),
+        Some(v) => v
+            .parse::<u16>()
+            .ok()
+            .filter(|p| *p >= 1)
+            .ok_or_else(|| "GRPC_HEALTH_PORT must be within 1..=65535".to_string()),
+    }
+}
+
 /// A secret string whose `Debug` never prints the value.
 #[derive(Clone)]
 pub struct Secret(String);
@@ -163,7 +185,7 @@ impl Config {
             purge_batch: num("ANALYTICS_PURGE_BATCH", 5000, 1, 100_000)?,
             purge_max_batches: num("ANALYTICS_PURGE_MAX_BATCHES", 20, 1, 10_000)? as u32,
             maintenance_interval: secs("ANALYTICS_MAINTENANCE_SECS", 3600, 1, 86_400)?,
-            grpc_addr: format!("0.0.0.0:{}", num("GRPC_HEALTH_PORT", 50209, 1, 65535)?),
+            grpc_addr: format!("0.0.0.0:{}", health_port(&get)?),
             idle_poll: secs("ANALYTICS_IDLE_POLL_SECS", 5, 1, 300)?,
         })
     }
@@ -252,6 +274,23 @@ mod tests {
         let c = Config::from_lookup(lookup(&[("VALKEY_PASSWORD", "")])).unwrap();
         assert_eq!(c.valkey_url.expose(), "redis://x");
         assert!(Config::from_lookup(lookup(&[("GRPC_HEALTH_PORT", "70000")])).is_err());
+    }
+
+    #[test]
+    fn health_port_default_and_errors() {
+        assert_eq!(health_port(lookup(&[])).unwrap(), 50209);
+        assert_eq!(
+            health_port(lookup(&[("GRPC_HEALTH_PORT", "")])).unwrap(),
+            50209
+        );
+        assert_eq!(
+            health_port(lookup(&[("GRPC_HEALTH_PORT", "50300")])).unwrap(),
+            50300
+        );
+        for bad in ["0", "70000", "abc", "-1"] {
+            let e = health_port(lookup(&[("GRPC_HEALTH_PORT", bad)])).unwrap_err();
+            assert!(e.contains("GRPC_HEALTH_PORT"), "{bad}");
+        }
     }
 
     #[test]

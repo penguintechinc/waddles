@@ -32,6 +32,8 @@ pub struct Metrics {
     pub jobs: Counter<u64>,
     /// XACK failures.
     pub ack_failures: Counter<u64>,
+    /// XREADGROUP failures or malformed replies.
+    pub read_failures: Counter<u64>,
     /// Batch processing latency (seconds).
     pub batch_seconds: Histogram<f64>,
     /// Batch size (entries).
@@ -96,6 +98,10 @@ impl Metrics {
             ack_failures: m
                 .u64_counter("svc_analytics_ack_failures_total")
                 .with_description("XACK failures")
+                .build(),
+            read_failures: m
+                .u64_counter("svc_analytics_stream_read_failures_total")
+                .with_description("XREADGROUP failures or malformed replies")
                 .build(),
             batch_seconds: m
                 .f64_histogram("svc_analytics_batch_duration_seconds")
