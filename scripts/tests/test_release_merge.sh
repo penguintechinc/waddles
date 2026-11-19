@@ -20,6 +20,7 @@ if [ -f "$D/fails_left" ] && [ "$(cat "$D/fails_left")" -gt 0 ]; then
   echo "dial tcp: i/o timeout" >&2; exit 1
 fi
 if [ "$1" = "repo" ] && [ "$2" = "view" ]; then echo "acme/widgets"; exit 0; fi
+if [ "$1" = "api" ]; then cat "$D/compare_status" 2>/dev/null || echo identical; exit 0; fi
 if [ "$1" = "pr" ] && [ "$2" = "merge" ]; then
   echo "$*" > "$D/merge.log"; exit "${MERGE_RC:-0}"
 fi
@@ -127,7 +128,7 @@ no_call "mid-wait move never merges" "pr merge"
 # exit 2: merge refused by GitHub because the head moved
 mk release/v3.0.X "$H" "[$OK_GATE,$OK_BUILD]"
 printf '{"baseRefName":"release/v3.0.X","state":"OPEN","headRefOid":"%s","statusCheckRollup":[]}\n' "$H2" > "$D/pr2.json"
-ENVX="MERGE_RC=1 SWITCH_AFTER=1"
+ENVX="MERGE_RC=1 SWITCH_AFTER=3"
 expect "merge refused, head moved (exit 2)" 2 "ABORT: head moved" 7 "$H" 5
 
 # merge fails for another reason -> exit 1
@@ -185,6 +186,30 @@ printf '99' > "$D/fails_left"
 ENVX="GH_RETRIES=3"
 expect "gh failing forever is loud (nonzero)" 1 "gh failed 3x" 7 "$H" 1
 no_call "retry exhaustion never merges" "pr merge"
+
+# TOCTOU: base/state re-checked on every poll and right before the merge
+# p2 <base> <state>: write pr2.json (served after SWITCH_AFTER snapshots) keeping the pinned head.
+p2() { printf '{"baseRefName":"%s","state":"%s","headRefOid":"%s","statusCheckRollup":[%s,%s]}\n' "$1" "$2" "$H" "$OK_GATE" "$(ck slow IN_PROGRESS null)" > "$D/pr2.json"; }
+mk release/v3.0.X "$H" "[$OK_GATE,$(ck slow IN_PROGRESS null)]"; p2 main OPEN
+ENVX="SWITCH_AFTER=2"
+expect "base retargeted to main mid-poll (exit 4)" 4 "REFUSE: base 'main' is not release/" 7 "$H" 5
+no_call "retarget to main never merges" "pr merge"
+mk release/v3.0.X "$H" "[$OK_GATE,$(ck slow IN_PROGRESS null)]"; p2 release/v3.1.X OPEN
+ENVX="SWITCH_AFTER=2"
+expect "base changed to other release/* (exit 4)" 4 "ABORT: base changed from 'release/v3.0.X' to 'release/v3.1.X'" 7 "$H" 5
+no_call "base change never merges" "pr merge"
+mk release/v3.0.X "$H" "[$OK_GATE,$(ck slow IN_PROGRESS null)]"; p2 release/v3.0.X CLOSED
+ENVX="SWITCH_AFTER=2"
+expect "PR closed mid-poll (exit 4)" 4 "ABORT: PR #7 is CLOSED" 7 "$H" 5
+no_call "closed PR never merges" "pr merge"
+# green at the last poll (snapshot 2), base changed at the pre-merge re-check (snapshot 3)
+mk release/v3.0.X "$H" "[$OK_GATE,$OK_BUILD]"; p2 main OPEN
+ENVX="SWITCH_AFTER=2"
+expect "base changes before pre-merge re-check refused (exit 4)" 4 "not release/" 7 "$H" 5
+no_call "pre-merge retarget never merges" "pr merge"
+# post-merge verification fails: merge commit not on the base
+mk release/v3.0.X "$H" "[$OK_GATE,$OK_BUILD]"; echo diverged > "$D/compare_status"
+expect "post-merge check failure (exit 5)" 5 "POST-MERGE CHECK FAILED" 7 "$H" 1
 
 # repo derived from `gh repo view` when REPO is unset
 mk release/v3.0.X "$H" "[$OK_GATE,$OK_BUILD]"

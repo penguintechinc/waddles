@@ -567,12 +567,14 @@ The main tier is unchanged: every check is examined. Self-tests: `scripts/ci/tes
 `make release-merge PR=<n> SHA=<full-head-sha> [MAX=<minutes>] [DRY=1]` (wraps `scripts/release-merge.sh <pr> <full-head-sha> [max_minutes] [--dry-run]`)
 waits for the PR's whole check set, then merges feature/fix/chore PRs into `release/v*.X`. No admin, no `--auto`.
 
-- Refuses (exit 4) unless the PR base is `release/*` (never `main`); refuses a non-OPEN PR
+- Refuses (exit 4) unless the PR base is `release/*` (never `main`); aborts (exit 4) if the PR is no longer OPEN
+- TOCTOU-safe: every poll takes ONE `gh pr view --json baseRefName,headRefOid,state,statusCheckRollup` snapshot and re-checks base (`release/*` and unchanged since start; a retarget even to another `release/*` aborts, exit 4), state OPEN and head; a fresh snapshot is re-verified immediately before `gh pr merge`
+- After merging it confirms via the GitHub API (`compare <base>...<mergeCommit>`) that the merge commit is on the expected base; otherwise prints `POST-MERGE CHECK FAILED` (exit 5)
 - The release ruleset has no required status checks, so `gh pr merge --auto` would merge at once; the script itself polls (default 90 polls, `POLL_SECONDS`=60) until `ci-gate` passes with zero pending and zero failed checks
 - The merge is `gh pr merge --merge --match-head-commit <sha>`; if the PR head moves from the pinned sha it aborts (exit 2). Sha omitted: the head is read once at start and pinned
 - The external `submit-queue` status is ignored (as `ci-gate.yml` does); override with `IGNORE_CHECKS`, required check with `REQUIRED_CHECK`, repo with `REPO` (default `gh repo view`)
 - Check buckets come from `gh pr view --json statusCheckRollup`; gh calls are retried (`GH_RETRIES`, `GH_RETRY_SLEEP`) for api.github.com timeouts
-- Exit codes: 0 merged, 1 a check failed, 2 head moved, 3 timeout, 4 bad usage / non-release base
+- Exit codes: 0 merged, 1 a check failed, 2 head moved, 3 timeout, 4 bad usage / non-release base / base retargeted / PR not OPEN, 5 post-merge check failed
 - `DRY=1` / `--dry-run` does one poll, prints pass/pending/fail counts and what it would do, never merges; release -> `main` is never done with this tool
 - Self-test: `make test-scripts` (also part of `make test`; fake `gh` on PATH)
 

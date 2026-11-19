@@ -18,7 +18,11 @@
 # (base must match release/*). Check buckets come from `gh pr view --json statusCheckRollup`
 # (this gh has no `gh pr checks --json`; masking that with `|| true` once looped silently to timeout).
 # Exit: 0 merged (or dry-run ok), 1 a check failed / refused, 2 head moved, 3 timeout,
-#       4 bad usage / non-release base.
+#       4 bad usage / non-release base / base retargeted mid-wait / PR no longer OPEN,
+#       5 merged but the post-merge check (merge commit on the expected base) failed.
+# TOCTOU: every poll takes ONE `gh pr view --json baseRefName,headRefOid,state,statusCheckRollup`
+# snapshot and re-verifies base (release/*, unchanged since start), state OPEN and head; a fresh
+# snapshot is re-verified right before `gh pr merge`, which is head-pinned (--match-head-commit).
 set -euo pipefail
 
 IGNORE_CHECKS="${IGNORE_CHECKS:-submit-queue}"
@@ -67,17 +71,28 @@ ghr() {
 repo="${REPO:-$(ghr repo view --json nameWithOwner --jq .nameWithOwner)}"
 [ -n "$repo" ] || { echo "cannot determine repo (set REPO)" >&2; exit 4; }
 
-# view <json-field> <jq-expr>: one field of the PR via the retry wrapper.
-view() { ghr pr view "$pr" -R "$repo" --json "$1" --jq "$2"; }
+# snap: ONE gh call returning base, head, state and checks together; every decision in an iteration
+# is made from that single snapshot (no separate reads that could disagree).
+snap() { ghr pr view "$pr" -R "$repo" --json baseRefName,headRefOid,state,statusCheckRollup; }
 
-# Base guard: never merge anything but release/* (never main); PR must be OPEN.
-base="$(view baseRefName .baseRefName)"
-state="$(view state .state)"
-case "$base" in release/*) ;; *) echo "REFUSE: base '$base' is not release/* (never merge into main)"; exit 4 ;; esac
-[ "$state" = "OPEN" ] || { echo "REFUSE: PR #$pr is $state, not OPEN"; exit 1; }
+base0=""
+# verify <snapshot-json>: re-checked on EVERY poll and right before the merge. Never merge anything but
+# release/* (never main); PR must be OPEN; the base must be the one seen at start (even another
+# release/* is an abort); the head must still be the pinned one. Sets $head.
+verify() {
+  local b st
+  b="$(jq -r .baseRefName <<<"$1")"; st="$(jq -r .state <<<"$1")"; head="$(jq -r .headRefOid <<<"$1")"
+  case "$b" in release/*) ;; *) echo "REFUSE: base '$b' is not release/* (never merge into main)"; exit 4 ;; esac
+  [ "$st" = "OPEN" ] || { echo "ABORT: PR #$pr is $st, not OPEN"; exit 4; }
+  if [ -z "$base0" ]; then base0="$b"; fi
+  if [ "$b" != "$base0" ]; then echo "ABORT: base changed from '$base0' to '$b' (retargeted mid-wait)"; exit 4; fi
+  if [ -n "$sha" ] && [ "$head" != "$sha" ]; then echo "ABORT: head moved to $head (pinned $sha)"; exit 2; fi
+}
 
+s0="$(snap)"
+verify "$s0"
 if [ -z "$sha" ]; then
-  sha="$(view headRefOid .headRefOid)"
+  sha="$head"
   echo "no sha given: pinning to current head $sha"
 fi
 
@@ -90,10 +105,27 @@ BUCKETS='[.statusCheckRollup[]?
                elif .s=="cancelled" then "cancel"
                else "pending" end)]'
 
+# post_merge: confirm the merge commit really landed on the expected base via the GitHub API (no local
+# repo needed): compare <base>...<mergeCommit> must be identical/behind (commit already in base).
+post_merge() {
+  local info mc mb cmp i
+  for ((i = 1; i <= GH_RETRIES; i++)); do
+    info="$(ghr pr view "$pr" -R "$repo" --json state,mergeCommit,baseRefName)"
+    mc="$(jq -r '.mergeCommit.oid // ""' <<<"$info")"; mb="$(jq -r .baseRefName <<<"$info")"
+    [ -n "$mc" ] && break
+    sleep "${GH_RETRY_SLEEP:-$((i * 2))}"
+  done
+  cmp="$(ghr api "repos/$repo/compare/$base0...$mc" --jq .status 2>/dev/null || echo unknown)"
+  if [ -z "$mc" ] || [ "$mb" != "$base0" ] || { [ "$cmp" != "identical" ] && [ "$cmp" != "behind" ]; }; then
+    echo "POST-MERGE CHECK FAILED: merge commit '${mc:-none}' base '$mb' compare '$cmp' (expected on $base0)"; exit 5
+  fi
+  echo "MERGED: $mc (verified on $base0)"
+  exit 0
+}
+
 for ((i = 0; i < max; i++)); do
-  head="$(view headRefOid .headRefOid)"
-  if [ "$head" != "$sha" ]; then echo "ABORT: head moved to $head (pinned $sha)"; exit 2; fi
-  raw="$(ghr pr view "$pr" -R "$repo" --json statusCheckRollup)"
+  raw="$(snap)"
+  verify "$raw"
   checks="$(jq --arg ign "$IGNORE_CHECKS" "$BUCKETS" <<<"$raw")"
   total="$(jq length <<<"$checks")"
   if [ "$total" -gt 0 ]; then
@@ -108,16 +140,19 @@ for ((i = 0; i < max; i++)); do
       if [ "$DRY" -eq 1 ]; then
         echo "DRY-RUN: green; would run: gh pr merge $pr -R $repo --merge --match-head-commit $sha"; exit 0
       fi
-      if ! merr="$(gh pr merge "$pr" -R "$repo" --merge --match-head-commit "$sha" 2>&1)"; then
-        now="$(view state .state)"
-        if [ "$now" != "MERGED" ]; then
-          head2="$(view headRefOid .headRefOid)"
+      # Fresh snapshot immediately before merging: base/state/head must still match.
+      verify "$(snap)"
+      merged=0
+      if merr="$(gh pr merge "$pr" -R "$repo" --merge --match-head-commit "$sha" 2>&1)"; then merged=1; else
+        s2="$(snap)"
+        if [ "$(jq -r .state <<<"$s2")" = "MERGED" ]; then merged=1; else
+          head2="$(jq -r .headRefOid <<<"$s2")"
           if [ "$head2" != "$sha" ]; then echo "ABORT: head moved to $head2 (pinned $sha)"; exit 2; fi
           echo "merge failed: $merr" >&2; exit 1
         fi
       fi
-      echo "MERGED: $(view mergeCommit .mergeCommit.oid)"
-      exit 0
+      [ "$merged" -eq 1 ] || exit 1
+      post_merge
     fi
     if [ "$DRY" -eq 1 ]; then echo "DRY-RUN: not green yet; would keep waiting (up to $max polls)"; exit 0; fi
   else
