@@ -74,15 +74,15 @@ impl FlagGate {
     pub async fn enabled(&self) -> bool {
         match self {
             Self::Licensed { client, env_on } => {
-                if *env_on {
-                    return true;
-                }
-                match client {
-                    // A bypass-active deployment (PenguinTech-owned domain) makes every LICENSE
-                    // entitlement evaluate enabled; that must never switch data collection on.
-                    Some(c) if !c.bypass_active() => c.flag_enabled(FLAG_KEY).await,
-                    _ => false,
-                }
+                // Precedence: PostHog value if seen (an explicit OFF beats the ENV baseline),
+                // else the ENV baseline, else OFF. Bypass domains are license-only (2026-11-12):
+                // the library's `flag_enabled` reads `true` for every key under bypass, so read
+                // the PostHog snapshot directly (refreshed by `spawn_refresh`).
+                client
+                    .as_ref()
+                    .and_then(|c| c.snapshot())
+                    .and_then(|snap| snap.flags.get(FLAG_KEY).copied())
+                    .unwrap_or(*env_on)
             }
             Self::Fixed(v) => v.load(Ordering::Relaxed),
         }
@@ -99,6 +99,81 @@ impl FlagGate {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    include!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../test_support/licensing_mock.rs"
+    ));
+
+    // regression: env must not beat an explicit PostHog OFF (3b)
+    #[tokio::test]
+    async fn explicit_posthog_off_beats_env_baseline_true() {
+        crate::crypto::ensure_installed();
+        let c = seeded_client(r#"{"waddles.analytics-stream":false}"#, false).await;
+        let g = FlagGate::Licensed {
+            client: Some(c),
+            env_on: true,
+        };
+        assert!(!g.enabled().await, "explicit PostHog OFF beats FLAG_*=true");
+    }
+
+    #[tokio::test]
+    async fn explicit_posthog_on_and_unseen_key_follow_posthog_then_env() {
+        crate::crypto::ensure_installed();
+        let on = seeded_client(r#"{"waddles.analytics-stream":true}"#, false).await;
+        let g = FlagGate::Licensed {
+            client: Some(on),
+            env_on: false,
+        };
+        assert!(g.enabled().await, "an explicit PostHog ON enables it");
+        let unseen = seeded_client(r#"{"waddles.other":true}"#, false).await;
+        let g = FlagGate::Licensed {
+            client: Some(unseen.clone()),
+            env_on: true,
+        };
+        assert!(g.enabled().await, "unseen key falls to the ENV baseline");
+        let g = FlagGate::Licensed {
+            client: Some(unseen),
+            env_on: false,
+        };
+        assert!(!g.enabled().await, "unseen, no baseline -> OFF");
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_unset_flag_is_off() {
+        crate::crypto::ensure_installed();
+        let c = seeded_client(r#"{"waddles.other":true}"#, true).await;
+        assert!(c.bypass_active());
+        let g = FlagGate::Licensed {
+            client: Some(c),
+            env_on: false,
+        };
+        assert!(!g.enabled().await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_explicitly_off_flag_stays_off() {
+        crate::crypto::ensure_installed();
+        let c = seeded_client(r#"{"waddles.analytics-stream":false}"#, true).await;
+        assert!(c.bypass_active());
+        let g = FlagGate::Licensed {
+            client: Some(c),
+            env_on: false,
+        };
+        assert!(!g.enabled().await);
+    }
+
+    // regression: bypass domains are license-only (2026-11-12 decision)
+    #[tokio::test]
+    async fn bypass_client_license_check_passes() {
+        crate::crypto::ensure_installed();
+        let c = seeded_client("{}", true).await;
+        assert!(c.bypass_active());
+        assert!(c.check_feature("any-licensed-feature").await);
+        assert!(c.check_tier(penguin_licensing::Tier::Enterprise).await);
+    }
 
     fn client(bypass: bool) -> Arc<penguin_licensing::LicenseClient> {
         crate::crypto::ensure_installed();
@@ -149,6 +224,7 @@ mod tests {
 
     #[tokio::test]
     async fn domain_bypass_never_turns_collection_on() {
+        // regression: bypass domains are license-only (2026-11-12 decision)
         let c = client(true);
         assert!(
             c.bypass_active(),

@@ -269,32 +269,32 @@ impl<S: CanaryStore, P: CanaryPublisher> CanaryRunner<S, P> {
 }
 
 /// The kill-switch flag resolver for the shared switch: `true` = telemetry DISABLED. Under the
-/// license bypass domain `flag_enabled` reads ON for every flag, which for an opt-OUT flag would turn
-/// the mechanism off -- so the bypass answer is the ENV baseline only (same inversion the other
-/// kill switches use).
+/// license bypass domain the PostHog snapshot is still evaluated normally (bypass is license-only).
 pub async fn kill_switch_wanted(
     client: Option<&std::sync::Arc<penguin_licensing::LicenseClient>>,
 ) -> bool {
     let env = command_latency::switch::env_baseline_disabled();
     match client {
-        Some(c) if !c.bypass_active() => {
-            env || c.flag_enabled(command_latency::switch::FLAG_KEY).await
-        }
-        _ => env,
+        Some(c) => crate::license::posthog_then_env(
+            crate::license::posthog_flag_value(c, command_latency::switch::FLAG_KEY).await,
+            env,
+        ),
+        None => env,
     }
 }
 
-/// Whether the canary flag is ON: the ENV baseline, or the PostHog flag -- never the bypass domain
+/// Whether the canary flag is ON: the PostHog value if seen, else the ENV baseline -- never forced by the bypass domain
 /// (a canary that drives the real pipeline must be switched on deliberately, default OFF).
 pub async fn canary_enabled(
     client: Option<&std::sync::Arc<penguin_licensing::LicenseClient>>,
 ) -> bool {
-    if canary::env_baseline_enabled() {
-        return true;
-    }
+    let env = canary::env_baseline_enabled();
     match client {
-        Some(c) if !c.bypass_active() => c.flag_enabled(canary::FLAG_KEY).await,
-        _ => false,
+        Some(c) => crate::license::posthog_then_env(
+            crate::license::posthog_flag_value(c, canary::FLAG_KEY).await,
+            env,
+        ),
+        None => env,
     }
 }
 

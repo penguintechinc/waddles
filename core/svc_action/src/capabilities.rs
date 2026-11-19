@@ -7438,13 +7438,9 @@ mod tests {
     /// `permissive_gate()` grants `flags.read` to this scope's app id --
     /// the gate's allow branch must fall through to the real
     /// `crate::flags::resolve_flag` resolution, not short-circuit deny.
-    /// Asserts `true` regardless of `default_value` (rather than asserting
-    /// a specific value derived from it) because this test process has no
-    /// license env vars configured, so `resolve_flag`'s hardcoded-domain
-    /// bypass (`crate::flags`'s own `bypass_active_resolves_true_
-    /// regardless_of_default` test) is what actually answers the call --
-    /// the point here is that `handle_flags` reached that resolution at
-    /// all, not which fallback tier inside it fired.
+    /// Asserts the caller's `default_value` (false) comes back: this test process has no
+    /// license env vars or snapshot, and the bypass domain never forces a feature flag.
+    // regression: bypass domains are license-only (2026-11-12 decision)
     #[tokio::test]
     async fn flags_enabled_resolves_through_the_gate_when_granted() {
         let caps = caps(FakeRelayQueue::default());
@@ -7459,7 +7455,7 @@ mod tests {
             )
             .await
             .expect("flags.read is granted by permissive_gate()");
-        assert_eq!(result["enabled"], serde_json::json!(true));
+        assert_eq!(result["enabled"], serde_json::json!(false));
     }
 
     #[tokio::test]

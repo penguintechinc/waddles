@@ -837,3 +837,43 @@ async fn ai_tier_gate_free_refused_pro_and_enterprise_allowed_unknown_fails_clos
     }
     assert_eq!(backend.calls(), 2);
 }
+
+/// PINNING TEST (licensed-capability gate): a `FLAG_WADDLES_BUNDLE_AI_CAPABILITY=true` ENV
+/// baseline turns the plain feature FLAG on, but must NEVER grant the `ai` capability while the
+/// deployment tier is below Professional. Real gate + real `LicenseTierSource` over a cold
+/// (Free) client; the model must never be reached. The tier is entitlement, not env-overridable.
+#[tokio::test]
+async fn env_flag_baseline_true_does_not_grant_ai_capability_below_professional_tier() {
+    use crate::license::test_support::ENV_LOCK;
+    use crate::license::{BundleAiCapabilityGate, LicenseTierSource};
+    let _guard = ENV_LOCK.lock().await;
+    let var = "FLAG_WADDLES_BUNDLE_AI_CAPABILITY";
+    let cfg = penguin_licensing::LicenseConfig::new("waddles-test-ai-pin").expect("config");
+    let client = penguin_licensing::LicenseClient::new(cfg).expect("client");
+    assert!(!client.bypass_active(), "precondition: not a bypass domain");
+    // SAFETY: ENV_LOCK serializes every env-mutating test in this crate.
+    unsafe { std::env::set_var(var, "true") };
+    let backend = ScriptedBackend::replying("must never be produced");
+    let w = AiWiring::new(
+        Arc::clone(&backend) as Arc<dyn AiBackend>,
+        Arc::new(BundleAiCapabilityGate::new(Arc::clone(&client))),
+        Arc::new(LicenseTierSource::new(Arc::clone(&client))),
+        Duration::from_secs(5),
+        4,
+    );
+    let caps = caps_with(&["ai.generate"], Some(w), Duration::from_secs(30));
+    let result = caps.handle(generate("hi")).await;
+    unsafe { std::env::remove_var(var) };
+    let err = result.expect_err("env baseline must not grant a licensed capability");
+    assert_eq!(err.code, "tier_required", "{}", err.message);
+    assert_eq!(
+        backend.calls(),
+        0,
+        "a refused call must never reach the model"
+    );
+    assert!(
+        !client
+            .check_tier(penguin_licensing::Tier::Professional)
+            .await
+    );
+}
