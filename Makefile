@@ -654,3 +654,9 @@ test-superpenguin-wave4-contracts:
 	python3 -m pytest scripts/ci/tests/test_superpenguin_wave4_contracts.py -q
 scaffold-superpenguin-bundle:
 	bash scripts/scaffold-superpenguin-bundle.sh $(NAME)
+
+# Stale agent worktree pruning. DRY RUN unless ARGS=--apply.
+# Usage: make prune-worktrees [ARGS=--apply]
+.PHONY: prune-worktrees
+prune-worktrees:
+	@bash scripts/ops/prune-agent-worktrees.sh $(ARGS)
