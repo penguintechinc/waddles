@@ -302,7 +302,7 @@ def test_loader_reopens_everything_and_a_cache_refresh_works(hub) -> None:
 
 
 def test_notify_fires_on_generation(hub, pg_db) -> None:
-    import select
+    import selectors
 
     import psycopg2
 
@@ -311,7 +311,11 @@ def test_notify_fires_on_generation(hub, pg_db) -> None:
     with listener.cursor() as cur:
         cur.execute("LISTEN platform_secrets_changed")
     _boot(hub)
-    ready, _, _ = select.select([listener], [], [], 10)
+    # selectors (epoll) instead of select.select(): select() raises ValueError for fds >=
+    # FD_SETSIZE (1024), which the single-process unit run exceeds.
+    with selectors.DefaultSelector() as sel:
+        sel.register(listener, selectors.EVENT_READ)
+        ready = sel.select(10)
     listener.poll()
     assert ready and listener.notifies and listener.notifies[0].payload == ""
     listener.close()
@@ -363,3 +367,24 @@ def test_escrow_roundtrip_on_real_postgres_restores_same_keys_after_a_wipe(hub, 
     assert after == before  # same keys, same states
     with hub.connect() as conn:
         assert verify_chain(SqlRepository(conn), KEK_A).intact
+
+
+def test_select_independent_of_fd_numbers() -> None:
+    """Regression: selectors-based waiting works when fd numbers exceed FD_SETSIZE (1024)."""
+    import os
+    import selectors
+    import socket
+
+    opened = [os.open(os.devnull, os.O_RDONLY) for _ in range(1100)]
+    a, b = socket.socketpair()
+    try:
+        assert a.fileno() > 1024
+        with selectors.DefaultSelector() as sel:
+            sel.register(a, selectors.EVENT_READ)
+            b.send(b"x")
+            assert sel.select(2)
+    finally:
+        a.close()
+        b.close()
+        for fd in opened:
+            os.close(fd)

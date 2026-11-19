@@ -10,7 +10,7 @@ a fake. A failed refresh is counted and logged by exception class only, never fa
 from __future__ import annotations
 
 import logging
-import select
+import selectors
 import threading
 import time
 from collections.abc import Callable
@@ -112,7 +112,10 @@ class PgNotifyWaiter:
         try:
             if self._conn is None:
                 self._conn = self._connect()
-            ready, _, _ = select.select([self._conn], [], [], timeout)
+            # selectors (epoll), not select.select(): select() fails for fds >= 1024.
+            with selectors.DefaultSelector() as sel:
+                sel.register(self._conn, selectors.EVENT_READ)
+                ready = sel.select(timeout)
             if not ready:
                 return False
             self._conn.poll()
