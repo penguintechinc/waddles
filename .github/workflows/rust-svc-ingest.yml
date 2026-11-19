@@ -18,17 +18,17 @@ on:
       - 'scripts/ci/twitch-sessions-live.sh'
   pull_request:
     branches: [main, 'release/**']
-  # Scheduled (every 4h): path filters never fire without a PR, so regressions/flakes in ingest
-  # went unnoticed. NOTE: schedule only runs from the default branch (main) copy of
-  # this file; the checkouts below pin release/v3.0.X so it tests that branch.
+  # Nightly: path filters never fire without a PR, so regressions/flakes in ingest
+  # went unnoticed. Schedule runs main's copy of this file against main's code;
+  # run manually against release with workflow_dispatch ref=release/v3.0.X.
   schedule:
-    - cron: '17 */4 * * *'
+    - cron: '17 7 * * *'
   workflow_dispatch:
     inputs:
       ref:
-        description: 'Ref to test (default release/v3.0.X)'
+        description: 'Ref to test (empty = default branch; e.g. release/v3.0.X)'
         required: false
-        default: 'release/v3.0.X'
+        default: ''
         type: string
 
 permissions:
@@ -53,7 +53,7 @@ jobs:
       - name: Checkout (change classifier only)
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
         with:
-          ref: ${{ github.event_name == 'schedule' && 'release/v3.0.X' || inputs.ref || '' }}
+          ref: ${{ inputs.ref || '' }}
           persist-credentials: false
           fetch-depth: 2
           sparse-checkout: |
@@ -82,7 +82,7 @@ jobs:
     name: fmt + clippy + deny + coverage
     uses: ./.github/workflows/rust-crate-ci.yml
     with:
-      ref: ${{ github.event_name == 'schedule' && 'release/v3.0.X' || inputs.ref || '' }}
+      ref: ${{ inputs.ref || '' }}
       crate_name: svc-ingest
       working_directory: core/svc_ingest
       # The lease + real-socket + live-hub tests fail loudly without a real Valkey.
@@ -107,7 +107,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
-          ref: ${{ github.event_name == 'schedule' && 'release/v3.0.X' || inputs.ref || '' }}
+          ref: ${{ inputs.ref || '' }}
           persist-credentials: false
 
       - name: Set up Python
