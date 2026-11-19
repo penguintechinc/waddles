@@ -46,15 +46,7 @@ impl ViewCredentialStore for SeaOrmViewCredentialStore {
                 key_hash: model.key_hash,
                 previous_key_hash: model.previous_key_hash,
                 is_active: model.is_active,
-                rotated_at: model.rotated_at.and_then(|dt| {
-                    // sea-orm still yields chrono here; bridge to overlay_auth's `time` type via the
-                    // epoch instant (identical instant, UTC).
-                    time::OffsetDateTime::from_unix_timestamp_nanos(
-                        i128::from(dt.timestamp()) * 1_000_000_000
-                            + i128::from(dt.timestamp_subsec_nanos()),
-                    )
-                    .ok()
-                }),
+                rotated_at: model.rotated_at,
             }))
         })
     }

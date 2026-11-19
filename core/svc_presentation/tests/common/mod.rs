@@ -8,11 +8,11 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use axum::Router;
-use chrono::{DateTime, Utc};
 use clap::Parser;
 use overlay_auth::{hash_token, push_scope, PushCredential};
 use overlay_schema::{CaptionPayload, OverlayPush};
 use sea_orm::{DatabaseBackend, MockDatabase};
+use time::OffsetDateTime;
 use uuid::Uuid;
 
 use svc_presentation::config::{CliConfig, Config, Secret};
@@ -91,7 +91,7 @@ pub struct FakeCaptionStore {
     pub inserted: Mutex<Vec<NewCaptionEvent>>,
     pub fail_insert: bool,
     pub fail_recent: bool,
-    pub recent_calls: Mutex<Vec<(i64, DateTime<Utc>, u64)>>,
+    pub recent_calls: Mutex<Vec<(i64, OffsetDateTime, u64)>>,
 }
 
 #[async_trait]
@@ -109,7 +109,7 @@ impl CaptionStore for FakeCaptionStore {
     async fn recent(
         &self,
         community_id: i64,
-        since: DateTime<Utc>,
+        since: OffsetDateTime,
         limit: u64,
     ) -> Result<Vec<StoredCaption>, CaptionStoreError> {
         self.recent_calls
@@ -124,12 +124,12 @@ impl CaptionStore for FakeCaptionStore {
         Ok(self.history.lock().unwrap().clone())
     }
 
-    async fn purge_older_than(&self, _cutoff: DateTime<Utc>) -> Result<u64, CaptionStoreError> {
+    async fn purge_older_than(&self, _cutoff: OffsetDateTime) -> Result<u64, CaptionStoreError> {
         Ok(0)
     }
 }
 
-pub fn stored_caption(original: &str, created_at: DateTime<Utc>) -> StoredCaption {
+pub fn stored_caption(original: &str, created_at: OffsetDateTime) -> StoredCaption {
     StoredCaption {
         user_ref: Some(Uuid::parse_str(AUTHOR).unwrap()),
         platform: "twitch".to_string(),

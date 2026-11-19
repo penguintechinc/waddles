@@ -22,12 +22,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use sea_orm::{
     ActiveValue::{NotSet, Set},
     ColumnTrait, DatabaseConnection, DbErr, EntityTrait, QueryFilter, QueryOrder, QuerySelect,
 };
 use thiserror::Error;
+use time::{Duration as TimeDuration, OffsetDateTime, UtcOffset};
 use uuid::Uuid;
 
 use crate::db::entities::caption_event::{
@@ -78,7 +78,7 @@ pub struct StoredCaption {
     pub detected_lang: Option<String>,
     pub target_lang: Option<String>,
     pub confidence: Option<f64>,
-    pub created_at: DateTime<Utc>,
+    pub created_at: OffsetDateTime,
 }
 
 impl From<CaptionEventModel> for StoredCaption {
@@ -91,7 +91,7 @@ impl From<CaptionEventModel> for StoredCaption {
             detected_lang: model.detected_language,
             target_lang: model.target_language,
             confidence: model.confidence_score,
-            created_at: model.created_at.with_timezone(&Utc),
+            created_at: model.created_at.to_offset(UtcOffset::UTC),
         }
     }
 }
@@ -107,13 +107,13 @@ pub trait CaptionStore: Send + Sync {
     async fn recent(
         &self,
         community_id: i64,
-        since: DateTime<Utc>,
+        since: OffsetDateTime,
         limit: u64,
     ) -> Result<Vec<StoredCaption>, CaptionStoreError>;
 
     /// Deletes every caption (all communities) created before `cutoff`;
     /// returns how many rows were removed.
-    async fn purge_older_than(&self, cutoff: DateTime<Utc>) -> Result<u64, CaptionStoreError>;
+    async fn purge_older_than(&self, cutoff: OffsetDateTime) -> Result<u64, CaptionStoreError>;
 }
 
 /// SeaORM-backed [`CaptionStore`] over `caption_events`.
@@ -155,7 +155,7 @@ impl CaptionStore for SeaOrmCaptionStore {
     async fn recent(
         &self,
         community_id: i64,
-        since: DateTime<Utc>,
+        since: OffsetDateTime,
         limit: u64,
     ) -> Result<Vec<StoredCaption>, CaptionStoreError> {
         let mut rows = CaptionEvent::find()
@@ -171,7 +171,7 @@ impl CaptionStore for SeaOrmCaptionStore {
         Ok(rows.into_iter().map(StoredCaption::from).collect())
     }
 
-    async fn purge_older_than(&self, cutoff: DateTime<Utc>) -> Result<u64, CaptionStoreError> {
+    async fn purge_older_than(&self, cutoff: OffsetDateTime) -> Result<u64, CaptionStoreError> {
         let result = CaptionEvent::delete_many()
             .filter(Column::CreatedAt.lt(cutoff))
             .exec(&self.db)
@@ -191,9 +191,9 @@ pub async fn run_retention_once(
 ) -> Result<u64, CaptionStoreError> {
     // A retention too large to represent as a timestamp offset means
     // "keep everything" -- nothing is old enough to purge.
-    let Some(cutoff) = chrono::Duration::from_std(retention)
+    let Some(cutoff) = TimeDuration::try_from(retention)
         .ok()
-        .and_then(|window| Utc::now().checked_sub_signed(window))
+        .and_then(|window| OffsetDateTime::now_utc().checked_sub(window))
     else {
         tracing::warn!("caption retention window exceeds the representable range; skipping purge");
         return Ok(0);
@@ -247,11 +247,19 @@ pub fn spawn_retention_task(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use sea_orm::{DatabaseBackend, MockDatabase, MockExecResult};
     use std::sync::Mutex;
 
-    fn model(id: i64, original: &str, created_at: DateTime<Utc>) -> CaptionEventModel {
+    /// Test helper: a UTC timestamp from calendar fields.
+    fn utc(y: i32, mo: u8, d: u8, h: u8, mi: u8, s: u8) -> OffsetDateTime {
+        time::Date::from_calendar_date(y, time::Month::try_from(mo).unwrap(), d)
+            .unwrap()
+            .with_hms(h, mi, s)
+            .unwrap()
+            .assume_utc()
+    }
+
+    fn model(id: i64, original: &str, created_at: OffsetDateTime) -> CaptionEventModel {
         CaptionEventModel {
             id,
             community_id: 42,
@@ -262,7 +270,7 @@ mod tests {
             detected_language: Some("es".to_string()),
             target_language: Some("en".to_string()),
             confidence_score: Some(0.9),
-            created_at: created_at.fixed_offset(),
+            created_at,
         }
     }
 
@@ -321,18 +329,18 @@ mod tests {
 
     #[tokio::test]
     async fn recent_returns_rows_oldest_first_and_is_community_scoped() {
-        let t0 = Utc.with_ymd_and_hms(2026, 10, 9, 12, 0, 0).unwrap();
+        let t0 = utc(2026, 10, 9, 12, 0, 0);
         // The query is `ORDER BY created_at DESC` (newest first).
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![
-                model(3, "third", t0 + chrono::Duration::seconds(2)),
-                model(2, "second", t0 + chrono::Duration::seconds(1)),
+                model(3, "third", t0 + TimeDuration::seconds(2)),
+                model(2, "second", t0 + TimeDuration::seconds(1)),
                 model(1, "first", t0),
             ]])
             .into_connection();
         let store = SeaOrmCaptionStore::new(db);
         let got = store
-            .recent(42, t0 - chrono::Duration::minutes(5), HISTORY_LIMIT)
+            .recent(42, t0 - TimeDuration::minutes(5), HISTORY_LIMIT)
             .await
             .unwrap();
         let originals: Vec<_> = got.iter().map(|c| c.original.as_str()).collect();
@@ -358,7 +366,7 @@ mod tests {
             .into_connection();
         let store = SeaOrmCaptionStore::new(db);
         assert!(store
-            .recent(42, Utc::now(), HISTORY_LIMIT)
+            .recent(42, OffsetDateTime::now_utc(), HISTORY_LIMIT)
             .await
             .unwrap()
             .is_empty());
@@ -370,7 +378,10 @@ mod tests {
             .append_query_errors([DbErr::Custom("down".to_string())])
             .into_connection();
         let store = SeaOrmCaptionStore::new(db);
-        assert!(store.recent(42, Utc::now(), 10).await.is_err());
+        assert!(store
+            .recent(42, OffsetDateTime::now_utc(), 10)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -382,7 +393,10 @@ mod tests {
             }])
             .into_connection();
         let store = SeaOrmCaptionStore::new(db);
-        let removed = store.purge_older_than(Utc::now()).await.unwrap();
+        let removed = store
+            .purge_older_than(OffsetDateTime::now_utc())
+            .await
+            .unwrap();
         assert_eq!(removed, 7);
         let sql = only_sql(&store);
         assert!(sql.contains("DELETE FROM \"caption_events\""), "{sql}");
@@ -395,13 +409,16 @@ mod tests {
             .append_exec_errors([DbErr::Custom("locked".to_string())])
             .into_connection();
         let store = SeaOrmCaptionStore::new(db);
-        assert!(store.purge_older_than(Utc::now()).await.is_err());
+        assert!(store
+            .purge_older_than(OffsetDateTime::now_utc())
+            .await
+            .is_err());
     }
 
     /// Records purge cutoffs and answers with a canned result.
     #[derive(Default)]
     struct RecordingStore {
-        cutoffs: Mutex<Vec<DateTime<Utc>>>,
+        cutoffs: Mutex<Vec<OffsetDateTime>>,
         fail: bool,
     }
 
@@ -413,12 +430,12 @@ mod tests {
         async fn recent(
             &self,
             _community_id: i64,
-            _since: DateTime<Utc>,
+            _since: OffsetDateTime,
             _limit: u64,
         ) -> Result<Vec<StoredCaption>, CaptionStoreError> {
             unimplemented!("not used by retention tests")
         }
-        async fn purge_older_than(&self, cutoff: DateTime<Utc>) -> Result<u64, CaptionStoreError> {
+        async fn purge_older_than(&self, cutoff: OffsetDateTime) -> Result<u64, CaptionStoreError> {
             self.cutoffs.lock().unwrap().push(cutoff);
             if self.fail {
                 Err(CaptionStoreError::Db(DbErr::Custom("purge failed".into())))
@@ -431,12 +448,12 @@ mod tests {
     #[tokio::test]
     async fn run_retention_once_purges_everything_older_than_the_retention_window() {
         let store = RecordingStore::default();
-        let before = Utc::now();
+        let before = OffsetDateTime::now_utc();
         let removed = run_retention_once(&store, RETENTION).await.unwrap();
         assert_eq!(removed, 3);
         let cutoff = store.cutoffs.lock().unwrap()[0];
-        let expected = before - chrono::Duration::days(7);
-        assert!((cutoff - expected).num_seconds().abs() < 5, "{cutoff}");
+        let expected = before - TimeDuration::days(7);
+        assert!((cutoff - expected).whole_seconds().abs() < 5, "{cutoff}");
     }
 
     #[tokio::test]

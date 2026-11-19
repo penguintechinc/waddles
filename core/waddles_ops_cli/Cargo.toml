@@ -30,12 +30,13 @@ clap = { version = "=4.6.6", features = ["derive", "env"] }
 sha2 = "=0.10.9"
 hmac = "=0.12.1"
 hkdf = "=0.12.4"
-chrono = { version = "=0.4.45", default-features = false, features = ["std", "clock"] }
+# Replaces chrono (RUSTSEC-2026-0543, unmaintained). Only `std` (now_utc) is needed: timestamps are formatted by hand, byte-compatible with the old chrono output.
+time = { version = "=0.3.55", default-features = false, features = ["std"] }
 tokio = { version = "=1.53.3", features = ["rt", "macros"] }
 tracing = "=0.1.44"
 tracing-subscriber = { version = "=0.3.23", default-features = false, features = ["fmt", "std", "env-filter"] }
 # Postgres (same sqlx line the other core/ crates resolve via sea-orm), rustls TLS, no native TLS.
-sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "chrono", "json"] }
+sqlx = { version = "=0.9.0", default-features = false, features = ["runtime-tokio", "tls-rustls", "postgres", "time", "json"] }
 # S3 with SigV4 signing -- the client core/svc_streaming and core/svc_presentation already use.
 object_store = { version = "=0.14.1", default-features = false, features = ["aws"] }
 

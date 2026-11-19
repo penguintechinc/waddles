@@ -18,11 +18,11 @@
 //! It deletes expired rows (`purge_older_than`) -- never point it at data
 //! you care about.
 
-use chrono::{Duration, Utc};
 use sea_orm::Database;
 use svc_presentation::overlay::caption_store::{
     CaptionStore, NewCaptionEvent, SeaOrmCaptionStore, HISTORY_LIMIT,
 };
+use time::{Duration, OffsetDateTime};
 use uuid::Uuid;
 
 fn env(name: &str) -> String {
@@ -74,7 +74,7 @@ async fn store_round_trips_against_the_real_schema() {
     let recent = store
         .recent(
             community_id,
-            Utc::now() - Duration::minutes(5),
+            OffsetDateTime::now_utc() - Duration::minutes(5),
             HISTORY_LIMIT,
         )
         .await
@@ -90,7 +90,7 @@ async fn store_round_trips_against_the_real_schema() {
     assert_eq!(full.detected_lang.as_deref(), Some("es"));
     assert_eq!(full.target_lang.as_deref(), Some("en"));
     assert_eq!(full.confidence, Some(0.93));
-    assert!(Utc::now() - full.created_at < Duration::minutes(1));
+    assert!(OffsetDateTime::now_utc() - full.created_at < Duration::minutes(1));
 
     let bare = recent
         .iter()
@@ -110,7 +110,7 @@ async fn store_round_trips_against_the_real_schema() {
     let other = store
         .recent(
             community_id + 1_000_000,
-            Utc::now() - Duration::minutes(5),
+            OffsetDateTime::now_utc() - Duration::minutes(5),
             HISTORY_LIMIT,
         )
         .await
@@ -120,14 +120,14 @@ async fn store_round_trips_against_the_real_schema() {
     // Retention: nothing is older than a week, so a 7-day purge leaves them;
     // a purge with a cutoff in the future removes them.
     store
-        .purge_older_than(Utc::now() - Duration::days(7))
+        .purge_older_than(OffsetDateTime::now_utc() - Duration::days(7))
         .await
         .expect("purge with a past cutoff");
     assert!(
         store
             .recent(
                 community_id,
-                Utc::now() - Duration::minutes(5),
+                OffsetDateTime::now_utc() - Duration::minutes(5),
                 HISTORY_LIMIT
             )
             .await
@@ -137,7 +137,7 @@ async fn store_round_trips_against_the_real_schema() {
         "a fresh caption survives the 7-day purge"
     );
     let removed = store
-        .purge_older_than(Utc::now() + Duration::hours(1))
+        .purge_older_than(OffsetDateTime::now_utc() + Duration::hours(1))
         .await
         .expect("purge with a future cutoff");
     assert!(removed >= 2, "removed {removed}");

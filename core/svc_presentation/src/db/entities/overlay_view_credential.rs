@@ -17,7 +17,7 @@ pub struct Model {
     pub key_hash: String,
     pub previous_key_hash: Option<String>,
     pub is_active: bool,
-    pub rotated_at: Option<DateTimeWithTimeZone>,
+    pub rotated_at: Option<TimeDateTimeWithTimeZone>,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
