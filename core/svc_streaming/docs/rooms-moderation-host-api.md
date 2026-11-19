@@ -62,7 +62,7 @@ Req `{"community_id","room_id","actor_id","actor_role"}` -> `{"room_id","locked"
 
 ### Changed existing behavior
 `token.revoke` now also closes the live WHIP/WHEP sessions opened with that token id.
-Raise-hand (Go `RaiseHand/LowerHand/...`) is out of scope for svc_streaming (app-state, rooms bundle kv).
+Raise-hand is implemented in svc_streaming (`room.hand.*`, `src/rooms/host_api.rs:588-626`); see "Rooms (replaces module_rtc)" below.
 
 ## gRPC control plane (hub-api -> svc-streaming)
 
@@ -80,4 +80,23 @@ hub-api's `/api/v1/admin/<c>/calls/rooms*` and `/api/v1/community/<c>/interact/v
   plus `rooms_grpc_requests_total{rpc,code}` and `rooms_grpc_request_seconds{rpc}`.
 - Errors: NotFound->`NOT_FOUND`, Invalid->`INVALID_ARGUMENT`, LimitReached->`RESOURCE_EXHAUSTED`, Forbidden->`PERMISSION_DENIED`,
   Unsupported/flag off->`UNIMPLEMENTED`, Unconfigured->`UNAVAILABLE`.
-- No gRPC equivalent (hub-api answers 501): raised-hand queue and acknowledge (rooms bundle kv state).
+- Raised hands have gRPC equivalents (`ListHands`, `RaiseHand`, `LowerHand`, `AcknowledgeHand`, `ResetHands`); see the table below.
+
+## Rooms (replaces module_rtc)
+
+svc_streaming is the sole rooms/RTC backend; the Go `module_rtc` is retired. Operation map
+(host-API op in `src/rooms/host_api.rs`; gRPC RPC in `proto/waddles/streaming/internal/v1/rooms.proto`):
+
+| Operation | Host-API op | gRPC RPC |
+|---|---|---|
+| Create room | `room.create` | `CreateRoom` |
+| Get room | `room.get` | `GetRoom` |
+| Close room | `room.close` | `DeleteRoom` |
+| Participants | `room.participants` | `ListParticipants` |
+| Leave | `room.leave` | `LeaveRoom` |
+| Kick | `room.kick` | `KickParticipant` |
+| Mute / unmute | `room.mute` / `room.unmute` | `MuteParticipant` / `UnmuteParticipant` |
+| Mute all | `room.mute_all` | `MuteAll` |
+| Lock / unlock | `room.lock` / `room.unlock` | `LockRoom` / `UnlockRoom` |
+| Raise / lower hand | `room.hand.raise` / `room.hand.lower` | `RaiseHand` / `LowerHand` |
+| List / acknowledge / reset hands | `room.hand.list` / `room.hand.ack` / `room.hand.reset` | `ListHands` / `AcknowledgeHand` / `ResetHands` |
