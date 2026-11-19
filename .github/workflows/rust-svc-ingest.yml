@@ -18,11 +18,11 @@ on:
       - 'scripts/ci/twitch-sessions-live.sh'
   pull_request:
     branches: [main, 'release/**']
-  # Nightly: path filters never fire without a PR, so regressions/flakes in ingest
+  # Scheduled (every 4h): path filters never fire without a PR, so regressions/flakes in ingest
   # went unnoticed. NOTE: schedule only runs from the default branch (main) copy of
   # this file; the checkouts below pin release/v3.0.X so it tests that branch.
   schedule:
-    - cron: '17 7 * * *'
+    - cron: '17 */4 * * *'
   workflow_dispatch:
     inputs:
       ref:
