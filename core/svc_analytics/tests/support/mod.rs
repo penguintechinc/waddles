@@ -270,33 +270,57 @@ impl Fixture {
 }
 
 impl Drop for Fixture {
+    /// Drops the throwaway database and roles over a FRESH connection on a side thread.
+    ///
+    /// The cleanup must not reuse `admin_root`: its pool's sockets are registered with the test
+    /// runtime's reactor, and this thread blocks that (current-thread) runtime in `join`, so any
+    /// query on a pooled connection can never be woken and waits out sqlx's 30 s acquire timeout
+    /// per statement (the cleanup then silently fails and leaks the database). A fresh,
+    /// side-runtime connection with short timeouts is bounded and actually cleans up.
     fn drop(&mut self) {
-        // Best-effort cleanup of the throwaway database and roles (runs on a side thread so it
-        // works from inside a tokio test).
-        let root = self.admin_root.clone();
         let db = self.db_name.clone();
         let tag = db.trim_start_matches("an_").to_string();
         let _ = std::thread::spawn(move || {
-            if let Ok(rt) = tokio::runtime::Builder::new_current_thread()
+            let Ok(rt) = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build()
-            {
-                rt.block_on(async {
-                    let _ = root
-                        .execute_unprepared(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
-                        .await;
-                    let _ = root
-                        .execute_unprepared(&format!("DROP ROLE IF EXISTS an_writer_{tag}"))
-                        .await;
-                    let _ = root
-                        .execute_unprepared(&format!(
-                            "DROP ROLE IF EXISTS an_ungranted_{tag}; DROP ROLE IF EXISTS an_wgrp_{tag}; DROP ROLE IF EXISTS an_ugrp_{tag}"
-                        ))
-                        .await;
-                });
-            }
+            else {
+                return;
+            };
+            rt.block_on(async {
+                use sea_orm::ConnectOptions;
+                let mut o = ConnectOptions::new(admin_url());
+                o.max_connections(1)
+                    .min_connections(1)
+                    .connect_timeout(std::time::Duration::from_secs(10))
+                    .acquire_timeout(std::time::Duration::from_secs(10))
+                    .sqlx_logging(false);
+                let Ok(root) = Database::connect(o).await else {
+                    return;
+                };
+                let _ = root
+                    .execute_unprepared(&format!("DROP DATABASE IF EXISTS {db} WITH (FORCE)"))
+                    .await;
+                let _ = root
+                    .execute_unprepared(&format!(
+                        "DROP ROLE IF EXISTS an_writer_{tag}; DROP ROLE IF EXISTS an_ungranted_{tag};                          DROP ROLE IF EXISTS an_wgrp_{tag}; DROP ROLE IF EXISTS an_ugrp_{tag}"
+                    ))
+                    .await;
+                let _ = root.close().await;
+            });
         })
         .join();
+    }
+}
+
+/// Hard per-test deadline: a wait that never completes (a stuck lock, an unbounded read) fails
+/// fast with a clear message instead of consuming the CI job's whole timeout.
+pub const TEST_DEADLINE: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Runs a test body under [`TEST_DEADLINE`], panicking with the test name on expiry.
+pub async fn guarded<F: std::future::Future<Output = ()>>(name: &str, body: F) {
+    if tokio::time::timeout(TEST_DEADLINE, body).await.is_err() {
+        panic!("test `{name}` exceeded {TEST_DEADLINE:?}: a DB/Valkey wait hung (see support::guarded)");
     }
 }
 
