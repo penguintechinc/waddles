@@ -107,7 +107,7 @@ Bucket-scoped actions (`Read:<bucket>`) limit an identity to that bucket. Prefix
 |---|---|---|---|
 | `hub-api` | hub-api (incl. bundle publish and core-bundle-seeder) | `Read, Write, List, Tagging` on `infrastructure.seaweedfs.bucketName`; `Read, Write, List` on `pipeline.rustDataPlane.bundleExecutor.bucketName` | Always |
 | `svc-bundles-executor` | svc-bundles-executor (bundle poller) | `Read, List` on `pipeline.rustDataPlane.bundleExecutor.bucketName` | Always |
-| `svc-bundles-precompiler` | svc-bundles-precompiler | `Read, List` on `pipeline.rustDataPlane.bundleExecutor.bucketName`; `Write` on `<bundleExecutor bucket>/precompiled/*` | Always. Intended write grant; the template currently lacks the trailing `*`, fix in flight |
+| `svc-bundles-precompiler` | svc-bundles-precompiler | `Read, List` on `pipeline.rustDataPlane.bundleExecutor.bucketName`; `Write` on `<bundleExecutor bucket>/precompiled/*` | Always |
 | `hub-api-escrow` | hub-api platform-key escrow (DR copy) | `Read, Write, List` on `infrastructure.seaweedfs.escrow.bucketName` | Always |
 | `bucket-init` | `seaweedfs-bucket-init` hook Job only | `Admin` (all buckets) | Hook only; `BUCKET_INIT_S3_*` env vars |
 | `svc-streaming` | svc-streaming (recordings) | `Read, Write` on the literal bucket `recordings` | Always |
