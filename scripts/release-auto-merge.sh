@@ -2,7 +2,7 @@
 # release-auto-merge.sh - watch an ORDERED list of PRs and merge each into release/* once green.
 # Usage: scripts/release-auto-merge.sh [--dry-run] [--interval S] [--max-hours H] <pr|pr@fullsha> ...
 # PR@SHA pins the reviewed head: if the PR head differs it is skipped (needs human), never merged.
-# Merges via scripts/release-merge.sh (all its guards apply). Reruns apt-mirror flakes
+# Merges via scripts/release-merge.sh <pr> <full-sha> 1 (head-pinned, non-admin; all its guards apply). Reruns apt-mirror flakes
 # ("timed out after 10 minutes") and a ci-gate that ran before reruns finished. Never resolves
 # conflicts, never forces, never touches non-release bases.
 set -euo pipefail
@@ -148,9 +148,9 @@ eval_pr() {
   log "pr=$pr head=${head:0:12} mstate=$mstate gate=${gate:-none} checks=$n_exam ok=$n_other_ok pending=$n_pending failed=$n_bad"
 
   if [ "$gate" = "SUCCESS" ]; then
-    if [ "$DRY" = 1 ]; then log "pr=$pr head=${head:0:12} DRY-RUN would merge via release-merge.sh --expect-head $head"; return 0; fi
+    if [ "$DRY" = 1 ]; then log "pr=$pr head=${head:0:12} DRY-RUN would merge via release-merge.sh pinned to $head"; return 0; fi
     log "pr=$pr head=${head:0:12} MERGE via release-merge.sh"
-    if "$HERE/release-merge.sh" "$pr" --expect-head "$head"; then RESULT=merged; log "pr=$pr head=${head:0:12} MERGED"
+    if "$HERE/release-merge.sh" "$pr" "$head" 1; then RESULT=merged; log "pr=$pr head=${head:0:12} MERGED"
     else log "pr=$pr head=${head:0:12} release-merge refused (see above); will retry next tick"; fi
     return 0
   fi
