@@ -196,12 +196,25 @@ impl CommunityPublicIds {
                 return stale;
             }
         }
-        let fetched = tokio::time::timeout(
+        let fetched = match tokio::time::timeout(
             self.cfg.lookup_timeout,
             self.source.fetch(tenant_id, community_id),
         )
         .await
-        .unwrap_or_else(|_| Err("timeout".to_string()));
+        {
+            Ok(result) => result,
+            Err(_elapsed) => {
+                // Fail closed: a timed-out lookup is an error outcome (counted, logged with the
+                // numeric ids only), answered from a stale UUID if cached, else absent.
+                tracing::error!(
+                    tenant_id,
+                    community_id,
+                    timeout_ms = self.cfg.lookup_timeout.as_millis(),
+                    "community public_id lookup timed out"
+                );
+                Err("timeout".to_string())
+            }
+        };
         match fetched {
             Ok(raw) => {
                 let value = match raw {
@@ -525,10 +538,16 @@ mod tests {
             fail: Mutex::new(false),
             delay: Duration::from_millis(400),
         });
-        let c = CommunityPublicIds::new(f, cfg());
+        let c = CommunityPublicIds::new(f.clone(), cfg());
         let started = Instant::now();
         assert_eq!(c.lookup(1, 7).await, None);
         assert!(started.elapsed() < Duration::from_millis(350));
+        // Fail closed: nothing cached, and the timeout armed the failure backoff so the next
+        // lookup fails fast without another source call.
+        assert!(c.is_empty());
+        let n = f.calls();
+        assert_eq!(c.lookup(1, 7).await, None);
+        assert_eq!(f.calls(), n);
     }
 
     #[tokio::test]
