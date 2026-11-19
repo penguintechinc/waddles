@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: waddles.core.example.ai-teammates
 name: AI Teammates (Researcher, Receptionist, Producer)
-version: 1.0.2
+version: 1.0.3
 feature: waddles.core.example
 module: core
 provider: builtin

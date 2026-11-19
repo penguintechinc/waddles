@@ -61,6 +61,7 @@ use sea_orm::{
 };
 use tracing::Instrument;
 
+pub mod community_public_id;
 pub mod labels;
 
 use hub_client::bundle_config::{

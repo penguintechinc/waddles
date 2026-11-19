@@ -2447,6 +2447,9 @@ fn try_start_changelog_consumer(
                             commands: true,
                             bundles: false,
                         });
+                    // Community PUBLIC UUID for the bundle context (user-facing links): replica
+                    // only, bounded LRU + TTL cache; absent on any miss/failure.
+                    let _ = bundle_config_db::community_public_id::install_global_from_env();
                     let deps = Arc::new(deps);
                     start_bundle_admin_consumer(&deps).await;
                     Some(

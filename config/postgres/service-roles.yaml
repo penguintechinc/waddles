@@ -189,6 +189,12 @@ roles:
       # no tenant/community/app column.
       app_commands:
         SELECT: [command]
+      # Community PUBLIC UUID for the bundle context (alembic 0132,
+      # core/bundle_config_db/src/community_public_id.rs): the host passes bundles the public id
+      # so user-facing links never carry the numeric id. Filtered by BOTH tenant_id and id; no
+      # name/owner/other column (test_0055 least-privilege otherwise intact).
+      communities:
+        SELECT: [id, tenant_id, public_id]
 
   waddles_svc_core:
     description: svc-core placeholder stage (no table access)

@@ -433,6 +433,7 @@ impl<K: KvBackend + 'static> StageCapabilities<K> {
             media: self.media.clone(),
             media_deadline: self.media_deadline,
             bundle_config: self.bundle_config.clone(),
+            community_public_ids: self.community_public_ids.clone(),
             surface: self.surface.clone(),
             invocation_identity: self.invocation_identity.clone(),
             verified_scope: Some((self.tenant_id, community_id)),
