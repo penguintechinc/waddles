@@ -54,6 +54,7 @@ jobs:
       match: ${{ steps.paths.outputs.match }}
     steps:
       - name: Validate ref input (main or release/* only)
+        working-directory: ${{ runner.temp }}
         env:
           REF_INPUT: ${{ inputs.ref }}
         run: |
@@ -116,6 +117,7 @@ jobs:
     timeout-minutes: 45
     steps:
       - name: Validate ref input (main or release/* only)
+        working-directory: ${{ runner.temp }}
         env:
           REF_INPUT: ${{ inputs.ref }}
         run: |

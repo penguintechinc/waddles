@@ -88,6 +88,7 @@ jobs:
         working-directory: ${{ inputs.working_directory }}
     steps:
       - name: Validate ref input (main or release/* only)
+        working-directory: ${{ runner.temp }}
         env:
           REF_INPUT: ${{ inputs.ref }}
         run: |
