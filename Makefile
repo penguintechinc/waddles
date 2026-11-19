@@ -246,6 +246,7 @@ test:
 test-scripts:
 	@bash scripts/tests/test_release_merge.sh
 	@bash scripts/tests/test_release_auto_merge.sh
+	@bash scripts/tests/test_prune_agent_worktrees.sh
 	@python3 -m pytest -q -p no:cacheprovider scripts/ops
 
 # Read-only command-latency SLA report (p99 < 1 s, first door -> outbound confirmed): p50/p95/p99
@@ -657,7 +658,9 @@ scaffold-superpenguin-bundle:
 	bash scripts/scaffold-superpenguin-bundle.sh $(NAME)
 
 # Stale agent worktree pruning. DRY RUN unless ARGS=--apply.
-# Usage: make prune-worktrees [ARGS=--apply]
+# Usage: make prune-worktrees [ARGS="--apply --skip-branch X --skip-path GLOB --no-pr-check"]
+# Env PRUNE_SKIP_BRANCHES / PRUNE_SKIP_PATHS (space-separated) also honored. Branches with an
+# OPEN PR are skipped automatically (needs gh; --no-pr-check to bypass).
 .PHONY: prune-worktrees
 prune-worktrees:
 	@bash scripts/ops/prune-agent-worktrees.sh $(ARGS)

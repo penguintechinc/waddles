@@ -1,20 +1,66 @@
 #!/usr/bin/env bash
 # Prune stale agent worktrees under .claude/worktrees/ and .worktrees/.
 # Default is --dry-run; pass --apply to remove. A worktree is removed only when
-# not live-locked, clean (or stale-index-only), and fully contained on origin.
+# not skipped, not live-locked, clean (or stale-index-only), and fully contained on origin.
+#
+# Usage: prune-agent-worktrees.sh [--dry-run|--apply] [--skip-branch NAME]...
+#                                 [--skip-path GLOB]... [--no-pr-check]
+#   --dry-run          report only (default)
+#   --apply            remove eligible worktrees
+#   --skip-branch NAME never touch the worktree on branch NAME (repeatable)
+#   --skip-path GLOB   never touch worktrees whose path matches GLOB (repeatable)
+#   --no-pr-check      do not query open PRs (otherwise a gh failure aborts)
+# Env: PRUNE_SKIP_BRANCHES / PRUNE_SKIP_PATHS (space-separated) add to the flags.
+#      BASE_REF overrides the base ref (default origin/release/v3.0.X).
+# Skip reasons: protected-branch, user-skip, open-pr (branch has an OPEN PR,
+# fetched once via `gh pr list`), locked-*, dirty, unpushed-or-unmerged.
 set -euo pipefail
 
 BASE="${BASE_REF:-origin/release/v3.0.X}"
 MODE=dry
-case "${1:-}" in
-  ""|--dry-run) MODE=dry ;;
-  --apply) MODE=apply ;;
-  *) echo "usage: $0 [--dry-run|--apply]" >&2; exit 2 ;;
-esac
+PR_CHECK=1
+# Newline-delimited lists (bash 3.2-safe; empty arrays trip `set -u` there).
+SKIP_BRANCHES="$(printf '%s\n' ${PRUNE_SKIP_BRANCHES:-})"
+SKIP_PATHS="$(printf '%s\n' ${PRUNE_SKIP_PATHS:-})"
+usage() { echo "usage: $0 [--dry-run|--apply] [--skip-branch NAME]... [--skip-path GLOB]... [--no-pr-check]" >&2; exit 2; }
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --dry-run) MODE=dry ;;
+    --apply) MODE=apply ;;
+    --no-pr-check) PR_CHECK=0 ;;
+    --skip-branch) [ $# -ge 2 ] || usage; SKIP_BRANCHES="$SKIP_BRANCHES"$'\n'"$2"; shift ;;
+    --skip-path) [ $# -ge 2 ] || usage; SKIP_PATHS="$SKIP_PATHS"$'\n'"$2"; shift ;;
+    *) usage ;;
+  esac
+  shift
+done
 
 ROOT="$(git rev-parse --show-toplevel)"
 cd "$ROOT"
 git rev-parse --verify -q "$BASE" >/dev/null || { echo "missing $BASE" >&2; exit 1; }
+
+OPEN_PR_BRANCHES=""
+if [ "$PR_CHECK" -eq 1 ]; then
+  command -v gh >/dev/null 2>&1 || { echo "FAIL: gh not found; install it or pass --no-pr-check" >&2; exit 1; }
+  OPEN_PR_BRANCHES="$(gh pr list --state open --limit 1000 --json headRefName -q '.[].headRefName')" \
+    || { echo "FAIL: gh pr list failed; fix gh or pass --no-pr-check" >&2; exit 1; }
+fi
+
+in_list() { # needle newline-list -> 0 if exact line match
+  printf '%s\n' "$2" | grep -Fxq -- "$1"
+}
+
+path_skipped() { # wt -> 0 if it matches any --skip-path glob
+  local pat
+  while IFS= read -r pat; do
+    [ -n "$pat" ] || continue
+    # shellcheck disable=SC2254
+    case "$1" in $pat) return 0 ;; esac
+  done <<EOL
+$SKIP_PATHS
+EOL
+  return 1
+}
 
 examined=0; removed=0; skipped=0
 declare -a SKIP_LINES=()
@@ -66,9 +112,13 @@ while IFS= read -r wt; do
     release/*|main|integration/*) skip "$wt" "$label" "protected-branch"; continue ;;
   esac
 
-  # Live PR work — never touch.
-  case "$wt" in */agent-ab086688067da2db0) skip "$wt" "$label" "live-pr-work"; continue ;; esac
-  [ "$branch" = "fix/precompile-queue-recovery" ] && { skip "$wt" "$label" "live-pr-work"; continue; }
+  # Explicit skips, then branches with an OPEN PR — never touch.
+  if path_skipped "$wt" || { [ -n "$branch" ] && in_list "$branch" "$SKIP_BRANCHES"; }; then
+    skip "$wt" "$label" "user-skip"; continue
+  fi
+  if [ -n "$branch" ] && in_list "$branch" "$OPEN_PR_BRANCHES"; then
+    skip "$wt" "$label" "open-pr"; continue
+  fi
 
   # 1. lock check
   gd="$(git -C "$wt" rev-parse --absolute-git-dir 2>/dev/null || true)"
