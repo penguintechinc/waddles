@@ -50,6 +50,12 @@ pub enum FullSyncReason {
     /// state out of sync even though the change-log watermark has not
     /// advanced -- the exact condition this regression's fix closes.
     Diverged,
+    /// A live executor session disappeared while placement is sharded: its
+    /// slots now have a new owner set, so surviving owners must pick up the
+    /// loads that restore the replica count -- without waiting for the next
+    /// change-log advance or full reconcile (new executors already force
+    /// [`FullSyncReason::Reconnect`]).
+    Rebalance,
 }
 
 impl FullSyncReason {
@@ -60,6 +66,7 @@ impl FullSyncReason {
             FullSyncReason::Reconnect => "reconnect",
             FullSyncReason::Reconcile => "reconcile",
             FullSyncReason::Diverged => "diverged",
+            FullSyncReason::Rebalance => "rebalance",
         }
     }
 }
@@ -133,6 +140,43 @@ pub fn any_session_diverged(
         .any(|&session| session_loaded_state_diverged(by_scope, loaded, session))
 }
 
+/// Routing-aware [`any_session_diverged`]: true when the placement planner
+/// still has work for any live session -- a TARGET session missing (or at the
+/// wrong digest for) an active bundle, or a NON-target session holding a
+/// bundle whose targets are all ready (make-before-break unload due).
+///
+/// Under executor sharding the plain per-session check is wrong: a session
+/// that is not an owner of an app legitimately never holds it, so it would
+/// read as "diverged" on every poll tick forever and force a spurious
+/// full-sync pass (INFO line + `bundle_full_sync_total{reason="diverged"}`)
+/// each time. `targets_of(scope, row)` is the router's target sessions for the
+/// scope's app. `live_sessions` empty is never diverged.
+pub fn any_session_diverged_routed(
+    by_scope: &HashMap<ScopeKey, ActiveSetRead>,
+    loaded: &SessionLoaded<AppScope>,
+    live_sessions: &[SessionId],
+    targets_of: impl Fn(&AppScope, &crate::query::ActiveBundleRow) -> Vec<SessionId>,
+) -> bool {
+    if live_sessions.is_empty() {
+        return false;
+    }
+    let active = scoped_active_rows(by_scope);
+    let plan = crate::session_sync::plan_sessions_routed(
+        loaded,
+        &active,
+        live_sessions,
+        targets_of,
+        |row| row.digest.as_str(),
+    );
+    // Stale (no-longer-active) keys are the diff path's business, exactly as
+    // with `any_session_diverged`; only ACTIVE keys count here.
+    !plan.to_load.is_empty()
+        || plan
+            .to_unload
+            .iter()
+            .any(|(_, scope, _)| active.contains_key(scope))
+}
+
 /// A short, stable-length prefix of a bundle digest for log lines -- never
 /// the full digest (noisy, and the full value is already available via
 /// `grep` against the per-bundle structured field when needed). Safe on any
@@ -182,6 +226,7 @@ mod tests {
         assert_eq!(FullSyncReason::Reconnect.as_str(), "reconnect");
         assert_eq!(FullSyncReason::Reconcile.as_str(), "reconcile");
         assert_eq!(FullSyncReason::Diverged.as_str(), "diverged");
+        assert_eq!(FullSyncReason::Rebalance.as_str(), "rebalance");
     }
 
     #[test]
@@ -297,5 +342,106 @@ mod tests {
     #[test]
     fn digest_prefix_returns_the_whole_string_when_shorter_than_the_prefix() {
         assert_eq!(digest_prefix("short"), "short");
+    }
+
+    fn one_scope(app: &str, digest: &str) -> HashMap<ScopeKey, ActiveSetRead> {
+        let mut m = HashMap::new();
+        m.insert((1, 0), active_set(vec![row(app, digest)]));
+        m
+    }
+
+    /// Regression (sharding): a NON-owner session never holds the app, which
+    /// the plain check reads as diverged forever (a forced full-sync pass on
+    /// every poll tick); the routed check does not.
+    #[test]
+    fn routed_divergence_ignores_a_session_that_is_not_a_target() {
+        let by_scope = one_scope("waddles.a", "sha256:a");
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:a".into());
+        assert!(
+            any_session_diverged(&by_scope, &loaded, &[1, 2]),
+            "the unrouted check wrongly flags the non-owner"
+        );
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &[1, 2],
+            |_, _| vec![1]
+        ));
+    }
+
+    /// A TARGET session that lacks the digest (or has a stale one) IS diverged.
+    #[test]
+    fn routed_divergence_flags_a_target_missing_the_digest() {
+        let by_scope = one_scope("waddles.a", "sha256:new");
+        let mut loaded = SessionLoaded::new();
+        let live = [1, 2];
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:old".into());
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:new".into());
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+    }
+
+    /// Make-before-break: a leftover non-target holding an active bundle is due
+    /// an unload once every target is ready (diverged); the missing target's
+    /// load is what counts first while it is not.
+    #[test]
+    fn routed_divergence_flags_a_leftover_non_target() {
+        let by_scope = one_scope("waddles.a", "sha256:a");
+        let scope = (1, 0, "waddles.a".to_string());
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(2, scope.clone(), "sha256:a".into());
+        let live = [1, 2];
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+        loaded.mark_loaded(1, scope, "sha256:a".into());
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+    }
+
+    /// Stale (deactivated) keys stay the change-diff path's business, and no
+    /// live session at all is never diverged.
+    #[test]
+    fn routed_divergence_ignores_stale_keys_and_empty_live_set() {
+        let by_scope = one_scope("waddles.a", "sha256:a");
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:a".into());
+        loaded.mark_loaded(1, (1, 0, "waddles.gone".to_string()), "sha256:g".into());
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &[1],
+            |_, _| vec![1]
+        ));
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &[],
+            |_, _| vec![]
+        ));
     }
 }
