@@ -283,7 +283,48 @@ fn note_unroutable(
     }
 }
 
+/// Defers the excess of NEW loads per executor session to a later tick when
+/// placement is sharded across more than one executor
+/// ([`bundle_active_set::MAX_LOADS_PER_SESSION_PER_TICK`]) so a joining
+/// executor (or one inheriting a dead peer's slots) is not handed its whole
+/// share at once. One executor and the broadcast modes are never capped. Runs
+/// before `LoadTracker::admit`, so a deferred load is never marked in flight.
+fn cap_new_loads<T>(
+    to_load: &mut Vec<T>,
+    router: &bundle_active_set::SessionRouter,
+    session_of: impl Fn(&T) -> bundle_active_set::SessionId,
+) {
+    if !router.is_multi_executor_sharded() {
+        return;
+    }
+    let deferred = bundle_active_set::cap_loads_per_session(
+        to_load,
+        session_of,
+        bundle_active_set::MAX_LOADS_PER_SESSION_PER_TICK,
+    );
+    if deferred > 0 {
+        tracing::info!(
+            deferred,
+            cap = bundle_active_set::MAX_LOADS_PER_SESSION_PER_TICK,
+            "changelog consumer: new loads exceed the per-session cap this tick; the rest are \
+             sent on later ticks (rebalance without a thundering herd)"
+        );
+    }
+}
+
 impl ConsumerState {
+    /// The placement router for `live` sessions under the current executor
+    /// membership and kill switch -- the ONE place the consumer builds it, so
+    /// planning and the divergence check always agree.
+    fn router(&self, live: &[bundle_active_set::SessionId]) -> bundle_active_set::SessionRouter {
+        bundle_active_set::SessionRouter::new(
+            live,
+            &self.executor_of,
+            self.sharding_enabled,
+            bundle_active_set::DEFAULT_REPLICAS,
+        )
+    }
+
     /// Test/startup-only constructor for an empty state seeded with a
     /// given `initial_seq` -- production code only ever obtains a
     /// [`ConsumerState`] via [`initial_state`], which also performs the
@@ -619,12 +660,7 @@ async fn apply_active_set(
     // Executor sharding (T6): each app goes only to its owner executors'
     // sessions -- broadcast when the kill switch is on or any live executor
     // predates the handshake's executor_id (WARN, see `note_routing`).
-    let router = bundle_active_set::SessionRouter::new(
-        live_sessions,
-        &state.executor_of,
-        state.sharding_enabled,
-        bundle_active_set::DEFAULT_REPLICAS,
-    );
+    let router = state.router(live_sessions);
     note_routing(state, &router);
     let language_table = bundle_active_set::partition::table();
     note_unroutable(state, &router, language_table, &active);
@@ -635,6 +671,7 @@ async fn apply_active_set(
         |scope, row| router.target_sessions(&scope.2, language_table.placement(&row.language)),
         |row| row.digest.as_str(),
     );
+    cap_new_loads(&mut plan.to_load, &router, |(session, _, _)| *session);
     // T2: never resend a Load that is still in flight, and hold a failed /
     // timed-out one back for its jittered backoff -- the 2026-11-11 retry
     // storm re-sent every 120 s timeout on the next tick while the executor
@@ -995,7 +1032,14 @@ pub async fn run_incremental_tick(
         // check compares per session, alpha 2026-10-03 follow-up): a single
         // out-of-sync live session is enough to force a resync, even if
         // another live session is already correct.
-        if bundle_active_set::any_session_diverged(&state.by_scope, &state.loaded, live_sessions) {
+        let router = state.router(live_sessions);
+        let language_table = bundle_active_set::partition::table();
+        if bundle_active_set::any_session_diverged_routed(
+            &state.by_scope,
+            &state.loaded,
+            live_sessions,
+            |scope, row| router.target_sessions(&scope.2, language_table.placement(&row.language)),
+        ) {
             apply_active_set(
                 state,
                 sink,
@@ -1594,6 +1638,23 @@ pub async fn run(
             );
             state.pending_full_sync = Some(FullSyncReason::Reconnect);
             metrics.executor_reconnect_detected_total.inc();
+        }
+        // A session REMOVED while placement is sharded changes its slots' owner
+        // sets: surviving owners must pick up the loads that restore the replica
+        // count NOW, not at the next change-log advance or the 15-min reconcile
+        // (new executors already force a Reconnect sync).
+        if let Some(reason) = bundle_active_set::rebalance_sync_due(
+            diff.removed.len(),
+            live_set.len(),
+            state.pending_full_sync,
+            &state.router(&live_sessions),
+        ) {
+            tracing::info!(
+                removed = ?diff.removed,
+                "changelog consumer: executor session(s) gone under sharding; \
+                 scheduling a rebalance sync so surviving owners restore the replica count"
+            );
+            state.pending_full_sync = Some(reason);
         }
         known_sessions = live_set;
 
@@ -3773,6 +3834,89 @@ mod tests {
     /// A load failure must never be recorded as loaded -- the next tick's
     /// diff recomputation naturally retries it (requirement: "failures
     /// retry on the next tick").
+    /// Regression (sharding): sessions that are NOT owners of an app never hold
+    /// it and must not read as "diverged" (that forced a spurious full-sync pass
+    /// on every poll tick). Owners hold it -> an unchanged-watermark tick is a no-op.
+    #[tokio::test]
+    async fn sharded_tick_does_not_flag_non_owner_sessions_as_diverged() {
+        let digest = format!("sha256:{}", "8".repeat(64));
+        let db = MockDatabase::new(DatabaseBackend::Postgres)
+            .append_query_results([vec![watermark_row(100)]])
+            .into_connection();
+        let ids = [(1, "exec-0"), (2, "exec-1"), (3, "exec-2"), (4, "exec-3")];
+        let executor_of: HashMap<u64, String> =
+            ids.iter().map(|(s, e)| (*s, e.to_string())).collect();
+        let mut state = ConsumerState::new(100);
+        state.set_routing(executor_of.clone(), true);
+        state.by_scope = by_scope_with_one_active_app(&digest);
+        let owners = state.router(&[1, 2, 3, 4]).target_sessions(
+            "waddles.a",
+            bundle_active_set::partition::table().placement("rust"),
+        );
+        assert_eq!(owners.len(), 2, "two of four sessions are non-owners");
+        for s in &owners {
+            state
+                .loaded
+                .mark_loaded(*s, (1, 0, "waddles.a".to_string()), digest.clone());
+        }
+        let sink = FakeSink::default();
+        let metrics = test_changelog_metrics();
+        run_incremental_tick(
+            &db,
+            &mut state,
+            Some(&sink as &dyn SessionBundleSink),
+            &[1, 2, 3, 4],
+            None,
+            &test_excluded_metric(),
+            &test_binding_metrics(),
+            &metrics,
+            &bundle_host_kv::CapabilitySnapshot::new(),
+            &bundle_active_set::ActiveVersionSnapshot::new(),
+        )
+        .await;
+        assert!(sink.calls().is_empty(), "{:?}", sink.calls());
+        assert_eq!(
+            metrics
+                .bundle_full_sync_total
+                .with_label_values(&["diverged"])
+                .get(),
+            0,
+            "non-owners must not force a full-sync pass"
+        );
+    }
+
+    /// The per-session load cap only applies when sharded across >1 executor.
+    #[test]
+    fn cap_new_loads_defers_only_when_multi_executor_sharded() {
+        let executor_of: HashMap<u64, String> = [(1, "exec-0"), (2, "exec-1")]
+            .iter()
+            .map(|(s, e)| (*s, e.to_string()))
+            .collect();
+        let mut state = ConsumerState::new(0);
+        state.set_routing(executor_of, true);
+        let n = bundle_active_set::MAX_LOADS_PER_SESSION_PER_TICK + 5;
+        let mut loads: Vec<u64> = (0..n).map(|_| 1u64).collect();
+        cap_new_loads(&mut loads, &state.router(&[1, 2]), |s| *s);
+        assert_eq!(
+            loads.len(),
+            bundle_active_set::MAX_LOADS_PER_SESSION_PER_TICK
+        );
+
+        let mut one: Vec<u64> = (0..n).map(|_| 1u64).collect();
+        cap_new_loads(&mut one, &state.router(&[1]), |s| *s);
+        assert_eq!(one.len(), n, "one live executor is never capped");
+
+        state.set_routing(
+            [(1u64, "exec-0".to_string()), (2, "exec-1".to_string())]
+                .into_iter()
+                .collect(),
+            false,
+        );
+        let mut off: Vec<u64> = (0..n).map(|_| 1u64).collect();
+        cap_new_loads(&mut off, &state.router(&[1, 2]), |s| *s);
+        assert_eq!(off.len(), n, "kill switch (broadcast) is never capped");
+    }
+
     #[tokio::test]
     async fn run_incremental_tick_retries_a_failed_load_on_the_next_tick() {
         let digest = format!("sha256:{}", "6".repeat(64));

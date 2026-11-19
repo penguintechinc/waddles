@@ -83,10 +83,13 @@ pub use changelog::{
 };
 pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
 pub use full_sync::{
-    any_session_diverged, digest_prefix, loaded_state_diverged, session_loaded_state_diverged,
-    should_send_full_sync, FullSyncReason,
+    any_session_diverged, any_session_diverged_routed, digest_prefix, loaded_state_diverged,
+    rebalance_sync_due, session_loaded_state_diverged, should_send_full_sync, FullSyncReason,
 };
-pub use load_tracker::{full_jitter_delay, jitter_unit, LoadAdmission, LoadBackoff, LoadTracker};
+pub use load_tracker::{
+    cap_loads_per_session, full_jitter_delay, jitter_unit, LoadAdmission, LoadBackoff, LoadTracker,
+    MAX_LOADS_PER_SESSION_PER_TICK,
+};
 pub use multi_tenant::{
     read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
     AppScope, ScopeKey,

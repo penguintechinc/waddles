@@ -65,6 +65,40 @@ pub fn full_jitter_delay(attempt: u32, policy: LoadBackoff, unit: f64) -> Durati
     ceiling.mul_f64(unit)
 }
 
+/// Most NEW `Load`s one stage sends to one executor session per tick when
+/// placement is sharded across more than one executor (user decision
+/// 2026-11-14, rebalance without a thundering herd). Backoff above only
+/// spaces RETRIES of a failed load; without this cap an executor that joins
+/// (or inherits a dead peer's slots) would receive its whole share at once,
+/// queue behind the executor's compile limiter, blow the 120 s stage call
+/// timeout and only then enter backoff. Deferred loads are simply sent on a
+/// later tick (the plan is state-based), never marked failed. One executor
+/// or a broadcast mode is NOT capped -- identical to pre-sharding behavior.
+pub const MAX_LOADS_PER_SESSION_PER_TICK: usize = 64;
+
+/// Keeps at most `max` entries per session in `to_load` (first come, in the
+/// given order) and returns how many were deferred to a later tick. Run it
+/// BEFORE [`LoadTracker::admit`] so a deferred load is never marked in
+/// flight.
+pub fn cap_loads_per_session<T>(
+    to_load: &mut Vec<T>,
+    session_of: impl Fn(&T) -> SessionId,
+    max: usize,
+) -> usize {
+    let mut sent: HashMap<SessionId, usize> = HashMap::new();
+    let before = to_load.len();
+    to_load.retain(|item| {
+        let n = sent.entry(session_of(item)).or_insert(0);
+        if *n < max {
+            *n += 1;
+            true
+        } else {
+            false
+        }
+    });
+    before - to_load.len()
+}
+
 /// A uniform-ish value in `[0, 1)` for jitter -- NOT cryptographic (it only
 /// de-synchronizes retries across replicas): xxh64 over the wall clock's
 /// nanos and a process-wide counter, so two calls never repeat even within
@@ -328,5 +362,32 @@ mod tests {
         // failed() on an unknown entry still records a backoff.
         assert!(t.failed(3, &key("c"), now, 0.5) <= Duration::from_secs(5));
         assert_eq!(t.attempts(3, &key("c")), 1);
+    }
+
+    /// The per-session cap defers the excess of a busy session without
+    /// touching other sessions, and a cap of N keeps exactly N.
+    #[test]
+    fn cap_loads_per_session_is_per_session_and_counts_deferred() {
+        let mut v: Vec<(SessionId, u32)> = (0..10).map(|i| (1, i)).collect();
+        v.extend((0..3).map(|i| (2, i)));
+        let deferred = cap_loads_per_session(&mut v, |(s, _)| *s, 4);
+        assert_eq!(deferred, 6, "session 1 had 10, keeps 4");
+        assert_eq!(v.iter().filter(|(s, _)| *s == 1).count(), 4);
+        assert_eq!(v.iter().filter(|(s, _)| *s == 2).count(), 3);
+        // Kept entries are the first ones in order.
+        assert_eq!(
+            v.iter()
+                .filter(|(s, _)| *s == 1)
+                .map(|(_, i)| *i)
+                .collect::<Vec<_>>(),
+            vec![0, 1, 2, 3]
+        );
+        // A cap above the load keeps everything.
+        let mut v: Vec<(SessionId, u32)> = (0..3).map(|i| (1, i)).collect();
+        assert_eq!(
+            cap_loads_per_session(&mut v, |(s, _)| *s, MAX_LOADS_PER_SESSION_PER_TICK),
+            0
+        );
+        assert_eq!(v.len(), 3);
     }
 }

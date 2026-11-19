@@ -194,6 +194,13 @@ impl SessionRouter {
         self.all.len()
     }
 
+    /// True when placement is sharded across more than one executor: the only mode in
+    /// which per-tick load capping applies (one executor and the broadcast modes keep
+    /// pre-sharding behaviour).
+    pub fn is_multi_executor_sharded(&self) -> bool {
+        self.mode == RoutingMode::Sharded && self.executors.len() > 1
+    }
+
     /// Distinct live executor ids, sorted.
     pub fn executors(&self) -> &[String] {
         &self.executors
@@ -619,6 +626,20 @@ mod tests {
         );
         assert_eq!(stream_entry_age("2000-3", 1500), Some(Duration::ZERO));
         assert_eq!(stream_entry_age("garbage", 1500), None);
+    }
+
+    /// Load capping applies only when sharded across more than one executor.
+    #[test]
+    fn multi_executor_sharded_only_for_sharded_with_several_executors() {
+        let router = |n: usize, enabled: bool| {
+            let live: Vec<SessionId> = (1..=n as u64).collect();
+            let map: HashMap<SessionId, String> =
+                live.iter().map(|s| (*s, format!("exec-{s}"))).collect();
+            SessionRouter::new(&live, &map, enabled, DEFAULT_REPLICAS)
+        };
+        assert!(router(3, true).is_multi_executor_sharded());
+        assert!(!router(1, true).is_multi_executor_sharded());
+        assert!(!router(3, false).is_multi_executor_sharded());
     }
 
     fn qualified(class: ExecutorClass, n: usize) -> Vec<String> {
