@@ -42,9 +42,10 @@ fn env_flag_var_name(key: &str) -> String {
     name
 }
 
-/// Parses `key`'s `FLAG_*` env baseline; `None` when unset or unrecognized.
-fn env_flag_value(key: &str) -> Option<bool> {
-    let raw = std::env::var(env_flag_var_name(key)).ok()?;
+/// Parses `key`'s `FLAG_*` baseline through an injected lookup, so tests never mutate the
+/// process-global environment.
+fn env_flag_value_from(key: &str, lookup: &dyn Fn(&str) -> Option<String>) -> Option<bool> {
+    let raw = lookup(&env_flag_var_name(key))?;
     match raw.trim().to_ascii_lowercase().as_str() {
         "true" | "1" | "on" | "yes" => Some(true),
         "false" | "0" | "off" | "no" => Some(false),
@@ -64,16 +65,25 @@ pub trait PosthogFlag {
 
 impl PosthogFlag for Arc<penguin_licensing::LicenseClient> {
     fn flag_on<'a>(&'a self, key: &'a str) -> Pin<Box<dyn Future<Output = bool> + Send + 'a>> {
-        Box::pin(async move {
-            // Side effect only: `validate` schedules a background refresh when the snapshot is
-            // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
-            let _ = self.validate().await;
-            self.snapshot()
-                .and_then(|snap| snap.flags.get(key).copied())
-                .or_else(|| env_flag_value(key))
-                .unwrap_or(false)
-        })
+        Box::pin(resolve_flag(self, key, &|name| std::env::var(name).ok()))
     }
+}
+
+/// Resolves `key` for `client`: PostHog snapshot, else the baseline from `lookup`, else OFF.
+/// Production passes the process env; tests pass a map.
+async fn resolve_flag(
+    client: &Arc<penguin_licensing::LicenseClient>,
+    key: &str,
+    lookup: &(dyn Fn(&str) -> Option<String> + Sync),
+) -> bool {
+    // Side effect only: `validate` schedules a background refresh when the snapshot is
+    // stale or missing -- bypass or not (`flag_enabled` returns early under bypass).
+    let _ = client.validate().await;
+    client
+        .snapshot()
+        .and_then(|snap| snap.flags.get(key).copied())
+        .or_else(|| env_flag_value_from(key, lookup))
+        .unwrap_or(false)
 }
 
 /// The real [`FeatureFlag`]: `key` resolved via a live
@@ -236,23 +246,15 @@ mod tests {
     }
 
     // regression: env must not beat an explicit PostHog OFF (3b)
-    // The std lock serializes process-global env access; the test is single-threaded.
-    #[allow(clippy::await_holding_lock)]
+    // The baseline is injected through a lookup; the process env is never mutated.
     #[tokio::test]
     async fn explicit_posthog_off_beats_env_baseline_true() {
-        static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = ENV_LOCK
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let client = seeded_client(r#"{"waddles.core.overlay-captions":false}"#, false).await;
         let var = env_flag_var_name(CAPTIONS_FLAG);
-        // SAFETY: this is the only test in the crate touching this variable; ENV_LOCK serializes it.
-        unsafe { std::env::set_var(&var, "true") };
-        let off = captions_flag(&Some(client)).enabled().await;
-        let unseen = captions_flag(&Some(seeded_client("{}", false).await))
-            .enabled()
-            .await;
-        unsafe { std::env::remove_var(&var) };
+        let lookup = |name: &str| (name == var).then(|| "true".to_string());
+        let client = seeded_client(r#"{"waddles.core.overlay-captions":false}"#, false).await;
+        let off = resolve_flag(&client, CAPTIONS_FLAG, &lookup).await;
+        let unseen_client = seeded_client("{}", false).await;
+        let unseen = resolve_flag(&unseen_client, CAPTIONS_FLAG, &lookup).await;
         assert!(!off, "explicit PostHog OFF beats FLAG_*=true");
         assert!(unseen, "an unseen key falls to the ENV baseline");
     }

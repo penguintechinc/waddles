@@ -403,6 +403,8 @@ mod tests {
 
     #[tokio::test]
     async fn rust_data_plane_enabled_is_false_for_a_fresh_client_with_no_snapshot() {
+        // Reads the FLAG_* env baseline: serialize against the env-mutating tests.
+        let _guard = ENV_LOCK.lock().unwrap();
         // `crate::crypto::ensure_installed()` first: `LicenseClient::new`
         // builds an HTTPS `reqwest::Client` (a different rustls crypto
         // backend than this crate's own `ring` pin -- see that module's
