@@ -177,6 +177,26 @@ pub fn any_session_diverged_routed(
             .any(|(_, scope, _)| active.contains_key(scope))
 }
 
+/// Decides whether a session-set change must schedule a
+/// [`FullSyncReason::Rebalance`] sync: only when at least one session was
+/// removed, at least one live session remains, placement is
+/// [`crate::sharding::RoutingMode::Sharded`], and no other full sync is already
+/// pending (a pending Reconnect/Reconcile already covers it, so repeated
+/// removals within one tick coalesce into the single pending sync). Returns the
+/// reason to schedule, or `None` to leave `pending` untouched.
+pub fn rebalance_sync_due(
+    removed_sessions: usize,
+    live_sessions: usize,
+    pending: Option<FullSyncReason>,
+    router: &crate::sharding::SessionRouter,
+) -> Option<FullSyncReason> {
+    (removed_sessions > 0
+        && live_sessions > 0
+        && pending.is_none()
+        && router.mode() == crate::sharding::RoutingMode::Sharded)
+        .then_some(FullSyncReason::Rebalance)
+}
+
 /// A short, stable-length prefix of a bundle digest for log lines -- never
 /// the full digest (noisy, and the full value is already available via
 /// `grep` against the per-bundle structured field when needed). Safe on any
@@ -443,5 +463,65 @@ mod tests {
             &[],
             |_, _| vec![]
         ));
+    }
+
+    fn router_of(n: u64, enabled: bool) -> crate::sharding::SessionRouter {
+        let live: Vec<SessionId> = (1..=n).collect();
+        let map: HashMap<SessionId, String> =
+            live.iter().map(|s| (*s, format!("exec-{s}"))).collect();
+        crate::sharding::SessionRouter::new(&live, &map, enabled, crate::sharding::DEFAULT_REPLICAS)
+    }
+
+    /// A removal under sharding schedules exactly one Rebalance sync, even when
+    /// several sessions vanish in the same tick (one decision, one reason).
+    #[test]
+    fn rebalance_due_when_sessions_removed_under_sharding() {
+        let r = router_of(2, true);
+        assert_eq!(
+            rebalance_sync_due(1, 2, None, &r),
+            Some(FullSyncReason::Rebalance)
+        );
+        assert_eq!(
+            rebalance_sync_due(3, 2, None, &r),
+            Some(FullSyncReason::Rebalance)
+        );
+        assert_eq!(FullSyncReason::Rebalance.as_str(), "rebalance");
+    }
+
+    /// Kill switch (broadcast), a missing executor id, nothing removed or no
+    /// survivor never schedule one; a single remaining executor still shards.
+    #[test]
+    fn rebalance_not_due_outside_sharding_or_without_removal() {
+        assert_eq!(rebalance_sync_due(1, 2, None, &router_of(2, false)), None);
+        assert_eq!(rebalance_sync_due(0, 2, None, &router_of(2, true)), None);
+        assert_eq!(rebalance_sync_due(1, 0, None, &router_of(0, true)), None);
+        let mut map = HashMap::new();
+        map.insert(1u64, "exec-1".to_string());
+        let missing_id = crate::sharding::SessionRouter::new(
+            &[1, 2],
+            &map,
+            true,
+            crate::sharding::DEFAULT_REPLICAS,
+        );
+        assert_eq!(rebalance_sync_due(1, 2, None, &missing_id), None);
+        assert_eq!(
+            rebalance_sync_due(1, 1, None, &router_of(1, true)),
+            Some(FullSyncReason::Rebalance)
+        );
+    }
+
+    /// Coalescing: any already-pending full sync (e.g. Reconnect from a joined
+    /// executor in the same tick) is kept, never overwritten by Rebalance.
+    #[test]
+    fn rebalance_coalesces_with_a_pending_full_sync() {
+        let r = router_of(2, true);
+        for pending in [
+            FullSyncReason::Reconnect,
+            FullSyncReason::Reconcile,
+            FullSyncReason::Diverged,
+            FullSyncReason::Rebalance,
+        ] {
+            assert_eq!(rebalance_sync_due(1, 2, Some(pending), &r), None);
+        }
     }
 }

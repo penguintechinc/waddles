@@ -1511,17 +1511,18 @@ pub async fn run(
         // sets: surviving owners must pick up the loads that restore the replica
         // count NOW, not at the next change-log advance or the 15-min reconcile
         // (new executors already force a Reconnect sync).
-        if !diff.removed.is_empty()
-            && !live_set.is_empty()
-            && state.pending_full_sync.is_none()
-            && state.router(&live_sessions).mode() == bundle_active_set::RoutingMode::Sharded
-        {
+        if let Some(reason) = bundle_active_set::rebalance_sync_due(
+            diff.removed.len(),
+            live_set.len(),
+            state.pending_full_sync,
+            &state.router(&live_sessions),
+        ) {
             tracing::info!(
                 removed = ?diff.removed,
                 "changelog consumer: executor session(s) gone under sharding; \
                  scheduling a rebalance sync so surviving owners restore the replica count"
             );
-            state.pending_full_sync = Some(FullSyncReason::Rebalance);
+            state.pending_full_sync = Some(reason);
         }
         known_sessions = live_set;
 

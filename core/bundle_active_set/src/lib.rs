@@ -84,7 +84,7 @@ pub use changelog::{
 pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
 pub use full_sync::{
     any_session_diverged, any_session_diverged_routed, digest_prefix, loaded_state_diverged,
-    session_loaded_state_diverged, should_send_full_sync, FullSyncReason,
+    rebalance_sync_due, session_loaded_state_diverged, should_send_full_sync, FullSyncReason,
 };
 pub use load_tracker::{
     cap_loads_per_session, full_jitter_delay, jitter_unit, LoadAdmission, LoadBackoff, LoadTracker,
