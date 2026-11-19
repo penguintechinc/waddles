@@ -116,7 +116,9 @@ struct Live {
     /// hub-api's internal gRPC endpoint (machine-JWT mint), from the live-hub manifest.
     grpc_url: String,
     admin_token: String,
-    community_a: i64,
+    /// Community public UUID: client-facing `/api/v1/communities/{uuid}/...` routes reject numeric
+    /// ids (#1434).
+    community_a_public_id: String,
     sa_path: PathBuf,
     bot_tokens: Vec<(String, String)>,
     channels: Vec<String>,
@@ -171,7 +173,10 @@ impl Live {
                 .to_string(),
             grpc_url: m["grpc_url"].as_str().expect("grpc_url").to_string(),
             admin_token: m["admin_token"].as_str().expect("admin_token").to_string(),
-            community_a: m["community_a"].as_i64().expect("community_a"),
+            community_a_public_id: m["community_a_public_id"]
+                .as_str()
+                .expect("community_a_public_id")
+                .to_string(),
             sa_path,
             bot_tokens,
             channels,
@@ -189,7 +194,7 @@ impl Live {
             .http
             .post(format!(
                 "{}/api/v1/communities/{}/provider-connections",
-                self.hub_url, self.community_a
+                self.hub_url, self.community_a_public_id
             ))
             .bearer_auth(&self.admin_token)
             .json(&json!({
@@ -201,8 +206,10 @@ impl Live {
             .await
             .expect("create request");
         let status = resp.status().as_u16();
-        let body: Value = resp.json().await.expect("create body");
-        assert_eq!(status, 201, "admin create twitch binding failed: {body}");
+        let text = resp.text().await.expect("create body text");
+        assert_eq!(status, 201, "admin create twitch binding failed: {text}");
+        let body: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("create body not JSON ({e}): {text}"));
         body["connection"]["id"].as_i64().expect("connection id")
     }
 
@@ -212,17 +219,15 @@ impl Live {
             .http
             .delete(format!(
                 "{}/api/v1/communities/{}/provider-connections/{connection}",
-                self.hub_url, self.community_a
+                self.hub_url, self.community_a_public_id
             ))
             .bearer_auth(&self.admin_token)
             .send()
             .await
             .expect("delete request");
-        assert!(
-            resp.status().is_success(),
-            "admin delete failed: {}",
-            resp.status()
-        );
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        assert!(status.is_success(), "admin delete failed: {status} {text}");
     }
 
     /// Spawns the REAL manager loop (real resolver, real Valkey lease, real IRC client).
