@@ -167,11 +167,11 @@ def test_real_rust_shared_refs_cover_sdk_wit_and_contracts() -> None:
     refs = mod.rust_shared_refs(head, root)
     n_rust = sum(1 for e in mod._entries(head).values() if e.get("language") == "rust")
     assert n_rust >= 10 and len(refs) == n_rust, (n_rust, len(refs))
-    music = refs["waddles.core.service.music-requests"]
+    music = refs["penguintechinc.waddles.music-requests"]
     assert "sdk/waddle-sdk-rs" in music
     assert any(r.startswith("wit/") for r in music)
     # rooms compiles webrtc's grants.rs via #[path]: a webrtc edit must bump rooms too.
-    assert "bundles/rust/webrtc/src/grants.rs" in refs["waddles.core.app.rooms"]
+    assert "bundles/rust/webrtc/src/grants.rs" in refs["penguintechinc.waddles.rooms"]
 
 
 def test_explicit_in_crate_test_fixture_include_flags() -> None:

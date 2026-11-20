@@ -1336,7 +1336,7 @@ pipeline:
       twitch: ""
       discord: ""
       youtube: ""
-      # Wix webhook connector (waddles.core.service.wix); required only when
+      # Wix webhook connector (penguintechinc.waddles.wix); required only when
       # svcIngest.connectorRuntime.connector.wix.enabled.
       wix: ""
       # Inbound-only RSI Spectrum connector (gh #486); required only when connector.spectrum is ON.
@@ -1369,7 +1369,7 @@ pipeline:
       limits:
         cpu: "250m"
         memory: "256Mi"
-  # Activates first-party waddles.core.* App Bundles under the platform's SYSTEM identity at
+  # Activates first-party penguintechinc.waddles.* App Bundles under the platform's SYSTEM identity at
   # deploy time (hub_api/cli/seed_core_bundles.py) -- no human global-admin approval, unlike a
   # third-party vendor bundle. `tenantSlugs` is a comma-separated CORE_BUNDLES_TENANT_SLUGS
   # override (empty = every catalog entry's own declared activation_targets, "default" tenant-
