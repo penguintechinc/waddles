@@ -984,7 +984,7 @@ fn app_id_validator_accepts_three_hyphenated_segments_only() {
         assert!(super::valid_app_id(ok), "{ok}");
     }
     for bad in [
-        "waddles.core.example.echo",
+        "waddles.legacy.four.segs",
         "penguintechinc.waddles",
         "penguintechinc.waddles.a_b",
         "penguintechinc.waddles.A",
