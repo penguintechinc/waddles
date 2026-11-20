@@ -698,6 +698,7 @@ name = "bundle-executor"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bundle-capability-gate",
  "clap",
  "ed25519-dalek",
  "hmac 0.12.1",
@@ -881,6 +882,7 @@ name = "bundle-host-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bundle-capability-gate",
  "bundle-host-crypto",
  "bytes",
  "futures",

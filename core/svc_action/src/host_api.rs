@@ -2127,7 +2127,8 @@ mod tests {
                     &Frame::new(
                         101,
                         Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
+                            app_id: "penguintechinc.waddles.fixture-bot-commands-default"
+                                .to_string(),
                             capability: penguin_bundle_host::wire::CapabilityKind::Context,
                             op: "get".to_string(),
                             args: serde_json::json!({}),

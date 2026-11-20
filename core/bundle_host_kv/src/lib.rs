@@ -999,7 +999,11 @@ mod tests {
     use backend::fake::FakeBackend;
 
     fn scope_a() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     fn scope_b_app() -> KvScope {
@@ -1007,7 +1011,11 @@ mod tests {
     }
 
     fn scope_other_tenant() -> KvScope {
-        KvScope::new("globex", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a")
+        KvScope::new(
+            "globex",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     /// A [`CapabilitySnapshot`] granting `storage.kv` to every `app_id`
@@ -1661,12 +1669,19 @@ mod v2_tests {
     use backend::fake::FakeBackend;
 
     fn scope() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     fn host() -> KvHost<FakeBackend> {
         let caps = Arc::new(CapabilitySnapshot::new());
-        caps.update("penguintechinc.waddles.fixture-bot-a", [authorize::KV_PERMISSION_ID.to_string()]);
+        caps.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            [authorize::KV_PERMISSION_ID.to_string()],
+        );
         KvHost::new(FakeBackend::new(), caps)
     }
 
@@ -1769,14 +1784,22 @@ mod v2_tests {
         let h = host();
         let s = scope();
         h.set(&s, 1, "ev.1", b"x", 0).await.unwrap();
-        let other_comm = KvScope::new("acme", Some("other".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        let other_comm = KvScope::new(
+            "acme",
+            Some("other".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         assert!(h
             .list(&other_comm, 2, "", None, 10)
             .await
             .unwrap()
             .keys
             .is_empty());
-        let other_tenant = KvScope::new("globex", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        let other_tenant = KvScope::new(
+            "globex",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         assert!(h
             .list(&other_tenant, 3, "", None, 10)
             .await
@@ -1891,7 +1914,10 @@ mod v2_tests {
             }
         }
         let caps = Arc::new(CapabilitySnapshot::new());
-        caps.update("penguintechinc.waddles.fixture-bot-a", [authorize::KV_PERMISSION_ID.to_string()]);
+        caps.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            [authorize::KV_PERMISSION_ID.to_string()],
+        );
         let h = KvHost::new(V1Only, caps);
         let s = scope();
         assert!(
@@ -1949,7 +1975,11 @@ mod report_failure_tests {
 
     fn report(err: &KvError) -> Vec<(tracing::Level, String)> {
         let capture = Capture::default();
-        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         tracing::subscriber::with_default(capture.clone(), || {
             report_failure("process", "get", &scope, err);
         });

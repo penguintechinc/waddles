@@ -248,8 +248,14 @@ mod tests {
             http_status: None,
             detail: "ok".to_string(),
         };
-        sink.record(1, Some(2), "penguintechinc.waddles.fixture-bot-commands-default", &record, None)
-            .await;
+        sink.record(
+            1,
+            Some(2),
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            &record,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -266,7 +272,13 @@ mod tests {
             detail: "bad".to_string(),
         };
         // Must not panic even though the insert fails.
-        sink.record(1, None, "penguintechinc.waddles.fixture-bot-commands-default", &record, None)
-            .await;
+        sink.record(
+            1,
+            None,
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            &record,
+            None,
+        )
+        .await;
     }
 }

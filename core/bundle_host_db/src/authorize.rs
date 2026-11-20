@@ -117,7 +117,10 @@ mod tests {
     fn authorize_db_denies_when_the_app_never_declared_storage_tables() {
         let scope = DbScope::new(7, 3, "penguintechinc.waddles.fixture-bot-a");
         let snapshot = CapabilitySnapshot::new();
-        snapshot.update("penguintechinc.waddles.fixture-bot-a", ["context".to_string()]);
+        snapshot.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            ["context".to_string()],
+        );
         let err = authorize_db(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");
     }

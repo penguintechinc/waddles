@@ -3897,7 +3897,10 @@ mod tests {
     /// exercise directly, including the deny-without-grant cases).
     pub(super) fn permissive_gate() -> Arc<CapabilityGate> {
         let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
-        for app_id in ["penguintechinc.waddles.fixture-bot-commands-default", "waddles.bot.other"] {
+        for app_id in [
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            "waddles.bot.other",
+        ] {
             let mut grants = std::collections::HashMap::new();
             for id in [
                 "platform.context",
@@ -4207,7 +4210,10 @@ mod tests {
     /// `kv_call_is_denied_when_storage_kv_is_undeclared` below is the one
     /// test exercising an ungranted app.
     fn caps_with_kv(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
-        caps_with_kv_and_capabilities(queue, &["penguintechinc.waddles.fixture-bot-commands-default"])
+        caps_with_kv_and_capabilities(
+            queue,
+            &["penguintechinc.waddles.fixture-bot-commands-default"],
+        )
     }
 
     fn caps_with_kv_and_capabilities(
@@ -5357,7 +5363,10 @@ mod tests {
     async fn kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler() {
         let caps = caps_with_kv_and_capabilities(
             FakeRelayQueue::default(),
-            &["penguintechinc.waddles.fixture-bot-commands-default", "waddles.bot.other"],
+            &[
+                "penguintechinc.waddles.fixture-bot-commands-default",
+                "waddles.bot.other",
+            ],
         );
         caps.handle(
             &scope(),
@@ -7036,7 +7045,10 @@ mod tests {
         assert!(
             harness.count(
                 "waddles_bundle_capability_authorized_total",
-                &[("app_id", "penguintechinc.waddles.fixture-bot-commands-default")]
+                &[(
+                    "app_id",
+                    "penguintechinc.waddles.fixture-bot-commands-default"
+                )]
             ) >= 1.0,
             "the gate's authorize() audit counter must reach OTel"
         );
@@ -7044,7 +7056,10 @@ mod tests {
             harness.count(
                 "waddles_bundle_capability_denied_total",
                 &[
-                    ("app_id", "penguintechinc.waddles.fixture-bot-commands-default"),
+                    (
+                        "app_id",
+                        "penguintechinc.waddles.fixture-bot-commands-default"
+                    ),
                     ("permission", "net.http.fqdn"),
                     ("reason", "not_granted"),
                 ]
@@ -7066,7 +7081,10 @@ mod tests {
             .expect("context succeeds");
         assert_eq!(result["tenant"], "acme");
         assert_eq!(result["community"], "main");
-        assert_eq!(result["app_id"], "penguintechinc.waddles.fixture-bot-commands-default");
+        assert_eq!(
+            result["app_id"],
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
     }
 
     #[tokio::test]

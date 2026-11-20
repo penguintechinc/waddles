@@ -575,9 +575,7 @@ async fn a_happy_path_app_to_service_returns_the_providers_result_and_emits_tele
     }
     for p in w.telemetry.points() {
         assert!(
-            !p.attrs
-                .values()
-                .any(|v| v == "hi" || v.contains("order-1")),  // exact "hi": every new app_id contains "chi" (penguintechinc)
+            !p.attrs.values().any(|v| v == "hi" || v.contains("order-1")), // exact "hi": every new app_id contains "chi" (penguintechinc)
             "request data leaked into a label: {:?}",
             p.attrs
         );

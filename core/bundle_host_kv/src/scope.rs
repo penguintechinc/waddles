@@ -226,7 +226,11 @@ mod tests {
 
     #[test]
     fn data_key_is_namespaced_by_tenant_community_and_app() {
-        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         assert_eq!(
             scope.data_key("counter"),
             "bundlekv:acme:main:penguintechinc.waddles.fixture-bot-a:data:counter"
@@ -244,7 +248,11 @@ mod tests {
 
     #[test]
     fn two_apps_in_the_same_community_never_share_a_prefix() {
-        let a = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        let a = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         let b = KvScope::new("acme", Some("main".to_string()), "waddles.bot.b");
         assert_ne!(a.data_key("counter"), b.data_key("counter"));
         assert!(!b.data_key("counter").starts_with(&a.app_prefix()));
@@ -272,8 +280,15 @@ mod tests {
     fn live_index_and_legacy_counter_are_distinct_keys() {
         // A deployment upgrading from the counter must never share a key
         // (and therefore a Valkey type) with the new sorted-set index.
-        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
-        assert_eq!(scope.live_key(), "bundlekv:acme:main:penguintechinc.waddles.fixture-bot-a:live");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
+        assert_eq!(
+            scope.live_key(),
+            "bundlekv:acme:main:penguintechinc.waddles.fixture-bot-a:live"
+        );
         assert_eq!(
             scope.legacy_count_key(),
             "bundlekv:acme:main:penguintechinc.waddles.fixture-bot-a:count"

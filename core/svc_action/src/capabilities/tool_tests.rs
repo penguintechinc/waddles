@@ -564,7 +564,12 @@ async fn e_depth_three_is_refused_and_depth_two_runs() {
         true,
     )
     .await;
-    let deep = scope_for(APP, APP_VERSION, &["penguintechinc.waddles.fixture-x-y-z", SVC2, APP], None);
+    let deep = scope_for(
+        APP,
+        APP_VERSION,
+        &["penguintechinc.waddles.fixture-x-y-z", SVC2, APP],
+        None,
+    );
     assert_eq!(
         run(&w, &deep, tool_call(SVC, "get_balance", None))
             .await

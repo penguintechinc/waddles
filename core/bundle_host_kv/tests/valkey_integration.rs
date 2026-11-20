@@ -168,7 +168,10 @@ async fn set_concurrently(
 #[tokio::test]
 async fn set_then_get_round_trips_through_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
 
     host.set(&scope, 1, "greeting", b"hello valkey", 0)
@@ -181,7 +184,10 @@ async fn set_then_get_round_trips_through_real_valkey() {
 #[tokio::test]
 async fn ttl_actually_expires_the_key_in_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", None, "penguintechinc.waddles.fixture-bot-a");
 
     host.set(&scope, 1, "ephemeral", b"gone-soon", 1)
@@ -199,7 +205,10 @@ async fn ttl_actually_expires_the_key_in_real_valkey() {
 #[tokio::test]
 async fn delete_is_reflected_immediately_in_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
 
     host.set(&scope, 1, "k", b"v", 0).await.unwrap();
@@ -210,7 +219,10 @@ async fn delete_is_reflected_immediately_in_real_valkey() {
 #[tokio::test]
 async fn increment_is_atomic_and_persists_across_calls_in_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
 
     assert_eq!(host.increment(&scope, 1, "hits", 5, 0).await.unwrap(), 5);
@@ -248,9 +260,16 @@ async fn cross_app_isolation_holds_against_real_valkey() {
 #[tokio::test]
 async fn cross_tenant_isolation_holds_against_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let acme = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let globex = scope("globex", Some("main"), "penguintechinc.waddles.fixture-bot-a");
+    let globex = scope(
+        "globex",
+        Some("main"),
+        "penguintechinc.waddles.fixture-bot-a",
+    );
 
     host.set(&acme, 1, "secret", b"acme-value", 0)
         .await
@@ -272,7 +291,10 @@ async fn key_count_quota_is_enforced_by_the_real_lua_script() {
     let mut seed_conn = connect(&url).await;
     seed_live_index(&mut seed_conn, &scope, MAX_KEYS_PER_APP).await;
 
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let err = host
         .set(&scope, 1, "one-too-many", b"x", 0)
         .await
@@ -287,7 +309,10 @@ async fn key_count_quota_is_enforced_by_the_real_lua_script() {
 async fn overwriting_an_existing_key_is_exempt_from_quota_against_real_valkey() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
 
     host.set(&scope, 1, "existing", b"v1", 0).await.unwrap();
 
@@ -311,7 +336,10 @@ async fn overwriting_an_existing_key_is_exempt_from_quota_against_real_valkey() 
 #[tokio::test]
 async fn value_size_quota_is_enforced_before_any_backend_round_trip() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
     let oversized = vec![0u8; MAX_VALUE_BYTES + 1];
 
@@ -356,7 +384,10 @@ async fn maxmemory_policy_check_reports_compliant_against_a_fresh_valkey_contain
 async fn a_deleted_live_index_is_rebuilt_via_scan_against_real_valkey() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
 
     host.set(&scope, 1, "existing-1", b"v1", 0).await.unwrap();
     host.set(&scope, 2, "existing-2", b"v2", 0).await.unwrap();
@@ -504,7 +535,10 @@ async fn concurrent_new_keys_never_exceed_the_live_quota_in_real_valkey() {
 async fn live_index_stays_exact_across_set_expire_overwrite_delete_in_real_valkey() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let mut probe = connect(&url).await;
 
     host.set(&scope, 1, "short", b"v", 2).await.unwrap();
@@ -586,7 +620,10 @@ async fn live_index_stays_exact_across_set_expire_overwrite_delete_in_real_valke
 async fn an_emptied_index_is_not_rebuilt_by_a_keyspace_scan_in_real_valkey() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let mut probe = connect(&url).await;
 
     host.set(&scope, 1, "cooldown", b"v", 100).await.unwrap(); // builds the index
@@ -623,7 +660,10 @@ async fn an_emptied_index_is_not_rebuilt_by_a_keyspace_scan_in_real_valkey() {
 async fn first_write_after_upgrade_is_not_blocked_by_phantoms_and_keeps_the_legacy_counter() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let mut probe = connect(&url).await;
 
     redis::AsyncCommands::set::<_, _, ()>(&mut probe, scope.legacy_count_key(), MAX_KEYS_PER_APP)
@@ -1066,7 +1106,10 @@ async fn mixed_rollout_concurrent_legacy_and_new_pods_never_undercount() {
 async fn legacy_counter_write_through_is_exact_and_can_never_fail_a_write() {
     let (_container, url) = start().await;
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let mut probe = connect(&url).await;
 
     plant_counter(&mut probe, &scope, "5").await;
@@ -1216,7 +1259,10 @@ async fn v2_cas_is_atomic_under_contention_in_real_valkey() {
 #[tokio::test]
 async fn v2_versions_track_content_and_v1_writes_invalidate_them() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
 
     assert!(host.get_versioned(&scope, 1, "k").await.unwrap().is_none());
@@ -1256,7 +1302,10 @@ async fn v2_versions_track_content_and_v1_writes_invalidate_them() {
 async fn v2_cas_creation_counts_against_the_key_quota() {
     let (_container, url) = start().await;
     let mut seed_conn = connect(&url).await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
     seed_live_index(&mut seed_conn, &scope, MAX_KEYS_PER_APP).await;
     let err = host.cas(&scope, 1, "new", 0, b"x", 0).await.unwrap_err();
@@ -1272,7 +1321,11 @@ async fn v2_list_is_sorted_prefix_scoped_paginated_and_isolated_in_real_valkey()
     );
     let a = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
     let b = scope("acme", Some("main"), "waddles.bot.b");
-    let other_comm = scope("acme", Some("other"), "penguintechinc.waddles.fixture-bot-a");
+    let other_comm = scope(
+        "acme",
+        Some("other"),
+        "penguintechinc.waddles.fixture-bot-a",
+    );
     for i in (0..25).rev() {
         host.set(&a, 1 + i as u64, &format!("ev.{i:02}"), b"x", 0)
             .await
@@ -1330,7 +1383,10 @@ async fn v2_list_is_sorted_prefix_scoped_paginated_and_isolated_in_real_valkey()
 #[tokio::test]
 async fn v2_byte_budget_is_enforced_per_invocation_in_real_valkey() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
     // 150 small ops in one invocation succeed (the old flat cap was 64)
     for i in 0..150 {
@@ -1373,7 +1429,10 @@ async fn cmd_calls(conn: &mut MultiplexedConnection, cmd: &str) -> u64 {
 async fn v2_list_visits_only_the_matching_range_in_a_large_keyspace() {
     let (_container, url) = start().await;
     let mut probe = connect(&url).await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
 
     // 3000 unrelated keys + 12 under the narrow prefix, written via v1 `set`
@@ -1452,7 +1511,10 @@ async fn v2_list_visits_only_the_matching_range_in_a_large_keyspace() {
 async fn v2_list_rebuilds_a_missing_lex_index_from_the_live_index() {
     let (_container, url) = start().await;
     let mut probe = connect(&url).await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
     for i in 0..5u64 {
         host.set(&scope, 1 + i, &format!("ev.{i}"), b"x", 0)
@@ -1473,7 +1535,10 @@ async fn v2_list_rebuilds_a_missing_lex_index_from_the_live_index() {
 #[tokio::test]
 async fn v2_list_calls_per_invocation_are_capped_and_cost_a_fixed_budget() {
     let (_container, url) = start().await;
-    let host = KvHost::new(connect(&url).await, granting(&["penguintechinc.waddles.fixture-bot-a"]));
+    let host = KvHost::new(
+        connect(&url).await,
+        granting(&["penguintechinc.waddles.fixture-bot-a"]),
+    );
     let scope = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
     host.set(&scope, 1, "a", b"x", 0).await.unwrap();
     let mut tripped_at = None;

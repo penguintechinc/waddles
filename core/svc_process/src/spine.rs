@@ -3387,7 +3387,10 @@ mod tests {
         let ring = test_ring();
         let d = fixture_delivered("acme", Some("main"), &ring, "k1");
         let digests = Arc::new(ActiveDigests::new());
-        digests.force_set_for_test(test_scope("penguintechinc.waddles.fixture-bot-commands-default"), String::new());
+        digests.force_set_for_test(
+            test_scope("penguintechinc.waddles.fixture-bot-commands-default"),
+            String::new(),
+        );
         let spine = FakeSpineOps::default();
         // No executor connection at all -- if `handle_delivered` ever tried
         // to invoke, it would fail before reaching the executor, proving
@@ -3698,8 +3701,12 @@ mod tests {
             "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
         deps.digest_source = DigestSource::Static(digest.clone());
         deps.version = "3".to_string();
-        deps.component_key = "bundles/penguintechinc.waddles.fixture-bot-commands-default/3/deadbeef.wasm".to_string();
-        deps.sidecar_key = "bundles/penguintechinc.waddles.fixture-bot-commands-default/3/deadbeef.json".to_string();
+        deps.component_key =
+            "bundles/penguintechinc.waddles.fixture-bot-commands-default/3/deadbeef.wasm"
+                .to_string();
+        deps.sidecar_key =
+            "bundles/penguintechinc.waddles.fixture-bot-commands-default/3/deadbeef.json"
+                .to_string();
         deps.app_version_snapshot
             .update(&[bundle_active_set::ActiveBundleRow {
                 app_id: deps.app_id.clone(),
@@ -4047,7 +4054,10 @@ mod tests {
             "waddles:t:acme:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action"
         );
         assert_eq!(appended[0].1.stage, "action");
-        assert_eq!(appended[0].1.app_id, "penguintechinc.waddles.fixture-bot-commands-default");
+        assert_eq!(
+            appended[0].1.app_id,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         // Binding/workstream/event_id carried unchanged (see the module
         // doc: the MAC formula doesn't cover app_id/stage).
         assert_eq!(appended[0].1.binding, d.env.binding);
@@ -4227,7 +4237,10 @@ mod tests {
             appended[0].0,
             "waddles:t:acme:c:main:app:penguintechinc.waddles.forums-pipeline:action"
         );
-        assert_eq!(appended[0].1.app_id, "penguintechinc.waddles.forums-pipeline");
+        assert_eq!(
+            appended[0].1.app_id,
+            "penguintechinc.waddles.forums-pipeline"
+        );
         assert!(!appended[0].1.event.payload.contains_key("_target_app_id"));
     }
 
@@ -4404,7 +4417,10 @@ mod tests {
         // `d.group`. This test's own job is only to prove `d.group` still
         // holds its distinct, correct value at the point this crate hands
         // the entry off -- asserted directly here.
-        assert_eq!(d.group, "penguintechinc.waddles.fixture-bot-commands-default");
+        assert_eq!(
+            d.group,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         assert_ne!(d.group, d.env.app_id);
     }
 
@@ -4576,7 +4592,8 @@ mod tests {
                     &Frame::new(
                         100 + n as u64,
                         Message::HostCall(HostCallBody {
-                            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
+                            app_id: "penguintechinc.waddles.fixture-bot-commands-default"
+                                .to_string(),
                             capability: CapabilityKind::Db,
                             op: op.to_string(),
                             args,

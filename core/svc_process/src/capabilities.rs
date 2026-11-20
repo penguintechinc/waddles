@@ -6090,7 +6090,10 @@ mod tests {
             .expect("context succeeds");
         assert_eq!(result["tenant"], "acme");
         assert_eq!(result["community"], "main");
-        assert_eq!(result["app_id"], "penguintechinc.waddles.fixture-bot-commands-default");
+        assert_eq!(
+            result["app_id"],
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
     }
 
     #[tokio::test]
@@ -6470,7 +6473,8 @@ mod tests {
 
     #[tokio::test]
     async fn kv_call_succeeds_when_storage_kv_is_declared() {
-        let c = caps_with_kv_and_capabilities(&["penguintechinc.waddles.fixture-bot-commands-default"]);
+        let c =
+            caps_with_kv_and_capabilities(&["penguintechinc.waddles.fixture-bot-commands-default"]);
         c.handle(call(
             CapabilityKind::Kv,
             "set",

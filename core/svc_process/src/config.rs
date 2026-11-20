@@ -1026,7 +1026,10 @@ mod tests {
             "--process-app-id",
             "penguintechinc.waddles.fixture-bot-commands-default",
         ]);
-        assert_eq!(cli.process_app_id, "penguintechinc.waddles.fixture-bot-commands-default");
+        assert_eq!(
+            cli.process_app_id,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
     }
 
     #[test]

@@ -176,16 +176,27 @@ mod tests {
 
     #[test]
     fn authorize_kv_grants_when_the_app_declares_storage_kv() {
-        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         let snapshot = snapshot_granting("penguintechinc.waddles.fixture-bot-a");
         assert_eq!(authorize_kv(&scope, &snapshot), Ok(()));
     }
 
     #[test]
     fn authorize_kv_denies_when_the_app_never_declared_storage_kv() {
-        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         let snapshot = CapabilitySnapshot::new();
-        snapshot.update("penguintechinc.waddles.fixture-bot-a", ["context".to_string(), "log".to_string()]);
+        snapshot.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            ["context".to_string(), "log".to_string()],
+        );
         let err = authorize_kv(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");
     }

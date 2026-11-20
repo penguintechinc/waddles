@@ -144,7 +144,8 @@ mod tests {
     const WS: &str = "8f14e45f-ceea-467e-adde-3fb5c9752730";
     const EV: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
     const TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
-    const KEY: &str = "waddles:t:acme:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action";
+    const KEY: &str =
+        "waddles:t:acme:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action";
     const APP: &str = "penguintechinc.waddles.fixture-bot-commands-default";
 
     fn ring() -> KeyRing {
