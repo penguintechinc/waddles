@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.live-now
 name: Live Now (Rust)
-version: 1.0.3
+version: 1.0.4
 feature: waddles.core.app
 module: core
 provider: builtin

@@ -94,13 +94,13 @@ fn manifests_drop_request_commands_overlay_and_economy_and_bump_the_version() {
             assert!(!m.contains(gone), "manifest still mentions {gone}");
         }
         assert!(m.contains("- '!dj'"), "!dj prefix kept");
-        assert!(m.contains("version: 1.1.0"));
+        assert!(m.contains("version: 1.1.1"));
     }
     let catalog = include_str!("../../../core-bundles.yaml");
     let at = catalog
         .find("app_id: penguintechinc.waddles.dj")
         .expect("dj catalog entry");
-    assert!(catalog[at..].lines().nth(1).unwrap().contains("\"1.1.0\""));
+    assert!(catalog[at..].lines().nth(1).unwrap().contains("\"1.1.1\""));
 }
 
 #[test]

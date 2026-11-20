@@ -2,7 +2,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.reputation-accrual
 name: Reputation Accrual Bundle (Rust)
-version: 1.0.1
+version: 1.0.2
 feature: waddles.core.app
 module: core
 provider: builtin

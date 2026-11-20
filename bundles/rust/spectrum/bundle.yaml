@@ -6,7 +6,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.spectrum
 name: RSI Spectrum Platform Connector (Rust, inbound-only)
-version: 0.1.1
+version: 0.1.2
 feature: waddles.core.service
 module: core
 provider: builtin
