@@ -1009,6 +1009,16 @@ def bind_community_authz_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
+def _define_if_absent(dal: Any, name: str, *fields: Any, **kwargs: Any) -> None:
+    """`dal.define_table(name, ...)` unless `name` is already bound on this DAL (reuse it).
+
+    Only the "already defined" case is skipped; every other error from `define_table` propagates.
+    """
+    if name in dal.tables:
+        return
+    dal.define_table(name, *fields, **kwargs)
+
+
 def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define the tables `githubSyncService.js` owns/queries -- M-automation port group.
 
@@ -1022,10 +1032,22 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     Lazy/idempotent, same rationale as `bind_community_authz_tables()`
     above (app.py is frozen for this port).
     """
-    if "github_repo_connections" in dal.tables:
+    # Per-table guards (not one early return on the first table): `support_tickets`/
+    # `support_ticket_comments` are ALSO bound (with a richer field list) by
+    # `bind_support_token_tables()`, and whichever binder runs first on a given DAL wins --
+    # an unconditional second `define_table()` raised "table already defined: support_tickets"
+    # at startup. Reuse the existing definition; any other `define_table` error still raises.
+    required = (
+        "github_repo_connections",
+        "ticket_github_sync",
+        "github_sync_log",
+        "support_tickets",
+        "support_ticket_comments",
+    )
+    if all(name in dal.tables for name in required):
         return
-
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "github_repo_connections",
         Field("community_id", "integer"),
         Field("vendor_id", "integer"),
@@ -1045,7 +1067,8 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "ticket_github_sync",
         Field("ticket_id", "integer", notnull=True),
         Field("github_repo_connection_id", "integer", notnull=True),
@@ -1059,7 +1082,8 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "github_sync_log",
         Field("ticket_github_sync_id", "integer"),
         Field("direction", "string", length=10, notnull=True),
@@ -1072,7 +1096,8 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
     # --- gap (5): not in any numbered migration, bound byte-faithful to Node ---
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "support_tickets",
         Field("subject", "string", length=255),
         Field("description", "text"),
@@ -1082,7 +1107,8 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "support_ticket_comments",
         Field("ticket_id", "integer", notnull=True),
         Field("content", "text"),
