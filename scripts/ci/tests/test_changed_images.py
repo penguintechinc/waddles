@@ -59,6 +59,7 @@ FIXTURES = {
         "svc-process",
         "svc-action",
         "svc-presentation",
+        "svc-streaming",
         "egress-proxy",
     },
     "core/hub_client/Cargo.lock": {
@@ -318,6 +319,7 @@ def test_real_git_diff_end_to_end(tmp_path: pathlib.Path) -> None:
         "svc-process",
         "svc-action",
         "svc-presentation",
+        "svc-streaming",
         "egress-proxy",
     }
     assert run(c0, c3) >= {"egress-proxy", "svc-ingest"}
