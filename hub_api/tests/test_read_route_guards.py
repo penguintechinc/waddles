@@ -9,13 +9,24 @@ url_map and fails for any such route that has no admin/member/owner guard stampe
 from __future__ import annotations
 
 # ruff: noqa: E501
-import inspect
-import re
+from pathlib import Path
 from typing import Any
 
 from app import create_app
-from services.route_guards import GUARD_ATTR
+from tests.route_guard_walker import (
+    chain as _chain,
+)
+from tests.route_guard_walker import (
+    guard_kind as _guard_kind,
+)
+from tests.route_guard_walker import (
+    has_enforcement_call,
+    inline_guard_gaps,
+    is_inline_stamped,
+    iter_routes,
+)
 from tests.test_app_factory import _test_config
+from tests.test_read_route_inline_guards import INLINE_GUARD_DENY_TESTS
 
 _COMMUNITY_ARGS = {"community_id", "community_public_id"}
 
@@ -35,15 +46,6 @@ JUSTIFIED_UNGUARDED: dict[tuple[str, str], str] = {
 }
 
 
-def _chain(view: Any) -> list[Any]:
-    """The view plus every function it wraps (`functools.wraps` `__wrapped__` chain)."""
-    out = []
-    while view is not None:
-        out.append(view)
-        view = getattr(view, "__wrapped__", None)
-    return out
-
-
 def _required_scopes(view: Any) -> list[str]:
     """Scopes passed to every `require_scope(...)` in the chain (read from its closure)."""
     scopes: list[str] = []
@@ -55,14 +57,6 @@ def _required_scopes(view: Any) -> list[str]:
         value = cells[code.co_freevars.index("required_scopes")].cell_contents
         scopes.extend(value)
     return scopes
-
-
-def _guard_kind(view: Any) -> str | None:
-    for fn in _chain(view):
-        kind = getattr(fn, GUARD_ATTR, None)
-        if kind:
-            return str(kind)
-    return None
 
 
 def _read_only(scopes: list[str]) -> bool:
@@ -87,6 +81,13 @@ def test_every_community_read_route_has_a_guard() -> None:
             candidates.add(key)
             if _guard_kind(view) is None and key not in JUSTIFIED_UNGUARDED:
                 unguarded.append((method, rule.rule, scopes))
+    # A `mark_guarded` stamp is only a label: it must also reach a real enforcement call and
+    # have a keyed deny test (`INLINE_GUARD_DENY_TESTS`).
+    inline_problems = inline_guard_gaps(iter_routes(application), INLINE_GUARD_DENY_TESTS)
+    assert not inline_problems, f"mark_guarded routes without proof: {inline_problems}"
+    live = {(m, r) for m, r, v in iter_routes(application) if is_inline_stamped(v)}
+    stale_inline = [k for k in INLINE_GUARD_DENY_TESTS if k not in live]
+    assert not stale_inline, f"INLINE_GUARD_DENY_TESTS names non-stamped routes: {stale_inline}"
     assert examined >= 40, f"walker examined only {examined} read routes; it is mis-pointed"
     assert not unguarded, (
         "community routes with only `:read` scopes are open to any signed-in tenant user; add "
@@ -107,43 +108,87 @@ def test_platform_analytics_routes_are_guarded() -> None:
     assert seen >= 5
 
 
-#: Inline enforcement markers recognised in a handler's (or its wrappers') source. A route
-#: with NO `require_scope` is only accepted when its chain visibly calls one of these.
-_INLINE_ENFORCEMENT = re.compile(
-    r"require_member_scope|require_community_scope|authorize_community|_require_member|_gated_|"
-    r"require_community_admin|require_community_member|_require_community_admin|"
-    r"resolve_editor_scopes|_admin_actor|_member_actor|is_community_admin|community_access|"
-    r"_require_admin|_require_manage|member_scopes_sync|resolve_community_membership|_guard\(community_id"
-)
-
-#: Path prefix -> reason, for scope-less community routes the walker cannot see enforced.
-#: PR #1472 is fixing the truly unscoped ones; entries go stale (and must be deleted) when a
-#: route gains a guard or scope. UNVERIFIED means "no enforcement the walker recognises".
+#: Path prefix -> reason, for scope-less community routes whose enforcement is not an
+#: authorization-primitive CALL the walker can follow (public/internal/own-data/DB-gated flows).
+#: Entries go stale (and must be deleted) when a route gains a guard or scope.
 NOSCOPE_ALLOWLIST: dict[str, str] = {
     "/api/v1/public/communities/": "public community profile/live status, by design",
     "/api/v1/internal/": "service-key authenticated internal route (not user reachable)",
     "/api/v1/communities/<cuuid:community_id>/join": "join flow: caller acts on their own join",
-    "/api/v1/<cuuid:community_id>/join-requests": "UNVERIFIED: own-request flow; PR #1472 triage",
-    "/api/v1/admin/<cuuid:community_id>/join-requests": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/banner": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/logo": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/profile": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/interaction/roles": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/reputation/": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/streams": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/support/": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/apps/community/<cuuid:community_id>/bundles/": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/<cuuid:community_id>/join-requests": (
+        "own-request flow: tenant fence services/join_request_service.py:115, own data only"
+    ),
+    "/api/v1/admin/<cuuid:community_id>/support/": (
+        "member self-service + category list: DB membership gate blueprints/v1/support.py:92 "
+        "(`_member_gate`); deny tests tests/test_v1_support_blueprint.py::TestMemberGate"
+    ),
+}
+
+#: Where the admin routes that used to be "UNVERIFIED" are enforced. The walker already proves a
+#: real primitive call exists; `test_enforcement_evidence_is_current` pins each citation to its
+#: line so a moved/removed check cannot leave a stale claim behind.
+ENFORCEMENT_EVIDENCE: dict[str, tuple[str, int, str]] = {
+    "admin join-requests list": (
+        "services/join_request_service.py",
+        204,
+        "require_community_scope",
+    ),
+    "admin join-requests approve": (
+        "services/join_request_service.py",
+        256,
+        "require_community_scope",
+    ),
+    "admin join-requests reject": (
+        "services/join_request_service.py",
+        320,
+        "require_community_scope",
+    ),
+    "admin profile update": (
+        "services/community_profile_service.py",
+        202,
+        "require_community_scope",
+    ),
+    "admin logo upload": ("services/community_profile_service.py", 269, "require_community_scope"),
+    "admin logo delete": ("services/community_profile_service.py", 293, "require_community_scope"),
+    "admin banner upload": (
+        "services/community_profile_service.py",
+        317,
+        "require_community_scope",
+    ),
+    "admin banner delete": (
+        "services/community_profile_service.py",
+        343,
+        "require_community_scope",
+    ),
+    "admin interaction/roles": (
+        "blueprints/v1/community_interaction.py",
+        235,
+        "resolve_editor_scopes",
+    ),
+    "admin reputation/": ("services/admin_service.py", 356, "require_community_admin"),
+    "admin streams": ("blueprints/v1/streaming.py", 129, "scope=SCOPE_STREAM_CONFIG"),
+    "bundles gateway membership": (
+        "blueprints/v1/bundle_admin_gateway.py",
+        134,
+        "authorize_community",
+    ),
+    "bundles descriptor scope": ("blueprints/v1/bundle_admin_gateway.py", 249, "caller_holds"),
+    "bundles config read": ("services/bundle_admin_gateway_service.py", 219, "_require_scope"),
+    "bundles config history": ("services/bundle_admin_gateway_service.py", 247, "_require_scope"),
+    "bundles config save": ("services/bundle_admin_gateway_service.py", 278, "_require_scope"),
+    "bundles actions/data views": (
+        "services/bundle_admin_gateway_service.py",
+        398,
+        "_require_scope",
+    ),
 }
 
 
-def _handler_source(view: Any) -> str:
-    out = ""
-    for fn in _chain(view):
-        try:
-            out += inspect.getsource(fn)
-        except (OSError, TypeError):
-            continue
-    return out
+def test_enforcement_evidence_is_current() -> None:
+    root = Path(__file__).resolve().parent.parent
+    for name, (rel, line, token) in ENFORCEMENT_EVIDENCE.items():
+        text = (root / rel).read_text().splitlines()[line - 1]
+        assert token in text, f"{name}: {rel}:{line} no longer contains `{token}`: {text!r}"
 
 
 def test_scopeless_community_routes_are_enforced_or_justified() -> None:
@@ -157,13 +202,13 @@ def test_scopeless_community_routes_are_enforced_or_justified() -> None:
         if _required_scopes(view):
             continue
         examined += 1
-        if _guard_kind(view) or _INLINE_ENFORCEMENT.search(_handler_source(view)):
+        if has_enforcement_call(view):
             continue
         flagged.add(rule.rule)
     assert examined >= 100, f"walker examined only {examined} scope-less routes"
     unjustified = sorted(r for r in flagged if not r.startswith(tuple(NOSCOPE_ALLOWLIST)))
     assert not unjustified, (
-        "community routes with NO require_scope and no recognised inline admin/member check; "
+        "community routes with NO require_scope and no enforcement call in its call chain; "
         f"add a guard or a justified NOSCOPE_ALLOWLIST entry: {unjustified}"
     )
     stale = [p for p in NOSCOPE_ALLOWLIST if not any(r.startswith(p) for r in flagged)]

@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,9 +20,16 @@ os.environ.setdefault("RCON_ENCRYPTION_KEY", "ab" * 32)
 
 from blueprints.v1 import bot as bot_blueprint  # noqa: E402
 from services import bot_ai_knowledge  # noqa: E402
+from services.community_common import ensure_community_tables  # noqa: E402
 from services.github_sync_service import decrypt_token  # noqa: E402
+from services.global_identity import ensure_tables as ensure_global_tables  # noqa: E402
 from tests.community_ids import public_id  # noqa: E402
-from tests.conftest import insert_global_admin  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    TENANT_SLUG,
+    insert_global_admin,
+    make_token,
+    seed_membership,
+)
 from tests.test_bot_blueprint import (  # noqa: E402,F401 - fixtures
     app,
     client,
@@ -44,6 +52,34 @@ SOURCE_FIELDS = {
 @pytest.fixture(autouse=True)
 def _key(monkeypatch: Any) -> None:
     monkeypatch.setenv("GITHUB_SYNC_ENCRYPTION_KEY", "cd" * 32)
+
+
+COMMUNITY_ADMIN_UID, COMMUNITY_MEMBER_UID = 41, 42
+
+
+@pytest.fixture
+def auth_headers(dal: Any, community_id: int) -> Any:
+    """Header factory whose DEFAULT caller is a real, seeded community admin of `community_id`.
+
+    Real guards run in this module (no `bypass_route_guards`): the caller's standing comes from
+    seeded `community_members`/`community_roles` rows. `user_id=` overrides pick other callers.
+    """
+    ensure_global_tables(dal, migrate=True)  # real `tenant_admins` for the standing lookup
+    ensure_community_tables(dal, migrate=True)
+    db = SimpleNamespace(dal=dal)
+    seed_membership(
+        db, community_id=community_id, user_id=COMMUNITY_ADMIN_UID, role="community-admin"
+    )
+    seed_membership(db, community_id=community_id, user_id=COMMUNITY_MEMBER_UID, role="member")
+
+    def _make(
+        *, scope: str = "", tenant: str = TENANT_SLUG, user_id: str = str(COMMUNITY_ADMIN_UID)
+    ) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {make_token(scope=scope, tenant=tenant, user_id=user_id)}"
+        }
+
+    return _make
 
 
 @pytest.fixture
@@ -196,7 +232,7 @@ class TestListScope:
             f"{BASE}?communityId={public_id(dal, other_tenant_community_id)}",
             headers=auth_headers(scope=READ),
         )
-        assert r.status_code == 403
+        assert r.status_code == 404
 
     async def test_scoped_list_only_that_community(
         self, client: Any, auth_headers: Any, dal: Any, community_id: int,
@@ -222,7 +258,7 @@ class TestListScope:
 
 
 class TestCreateScope:
-    async def test_other_tenant_community_403(
+    async def test_other_tenant_community_404(
         self, client: Any, auth_headers: Any, dal: Any, other_tenant_community_id: int
     ) -> None:
         r = await client.post(
@@ -234,7 +270,7 @@ class TestCreateScope:
                 "community_id": public_id(dal, other_tenant_community_id),
             },
         )
-        assert r.status_code == 403
+        assert r.status_code == 404
 
     async def test_global_create_non_superadmin_403(self, client: Any, auth_headers: Any) -> None:
         r = await client.post(
@@ -457,7 +493,7 @@ class TestSearchSuggestScope:
             headers=auth_headers(scope=_SCOPE[path]),
             json={**body, "communityId": public_id(dal, other_tenant_community_id)},
         )
-        assert r.status_code == 403
+        assert r.status_code == 404
         assert spy == []
 
     async def test_own_community_passes_scope_through(
@@ -524,7 +560,7 @@ class TestSearchSuggestScope:
             headers=auth_headers(scope=READ),
             json={"query": "q", "communityId": "00000000-0000-4000-8000-00000000dead"},
         )
-        assert r.status_code == 403
+        assert r.status_code == 404
         assert spy == []
 
     async def test_numeric_list_query_rejected(
@@ -631,4 +667,77 @@ class TestVendorOwnedConfusedDeputy:
 UUID_COMMUNITY_RESPONSES = True
 
 
-pytestmark = pytest.mark.usefixtures("bypass_route_guards")
+class TestWriteRoutesDenyNonAdminWithRealGuards:
+    """A tenant-wide `bot.ai_knowledge:write` scope is NOT community admin authority.
+
+    Real guards, seeded `community_members` rows: a plain member (and a non-member) holding the
+    write scope is refused on every community-scoped mutation, and nothing is written/started.
+    """
+
+    @pytest.fixture(params=[COMMUNITY_MEMBER_UID, 43], ids=["plain-member", "non-member"])
+    def caller(self, request: Any, auth_headers: Any) -> dict[str, str]:
+        return dict(auth_headers(scope=WRITE, user_id=str(request.param)))
+
+    async def test_create_denied(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int
+    ) -> None:
+        r = await client.post(
+            BASE,
+            headers=caller,
+            json={
+                "source_name": "x",
+                "source_type": "manual",
+                "community_id": public_id(dal, community_id),
+            },
+        )
+        assert r.status_code == 403
+        dal.commit()
+        assert dal(dal.ai_knowledge_sources.community_id == community_id).count() == 0
+
+    async def test_update_denied_and_unchanged(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int
+    ) -> None:
+        sid = _src(dal, community_id=community_id, source_name="keep")
+        r = await client.put(f"{BASE}/{sid}", headers=caller, json={"source_name": "pwned"})
+        assert r.status_code == 404  # indistinguishable from a missing source
+        assert _name(dal, sid) == "keep"
+
+    async def test_delete_denied_and_row_kept(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int
+    ) -> None:
+        sid = _src(dal, community_id=community_id)
+        r = await client.delete(f"{BASE}/{sid}", headers=caller)
+        assert r.status_code == 404
+        assert dal.ai_knowledge_sources[sid] is not None
+
+    async def test_reindex_denied_and_no_task(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int, monkeypatch: Any
+    ) -> None:
+        sid = _src(dal, community_id=community_id)
+        called: list[int] = []
+
+        async def fake(_d: Any, s: int) -> None:
+            called.append(s)
+
+        monkeypatch.setattr(bot_ai_knowledge, "index_source", fake)
+        r = await client.post(f"{BASE}/{sid}/reindex", headers=caller)
+        await asyncio.sleep(0)
+        assert r.status_code == 404
+        assert called == []
+
+    async def test_suggest_denied(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int, monkeypatch: Any
+    ) -> None:
+        called: list[int] = []
+
+        async def fake_gen(_d: Any, _t: int, _x: str, *, community_id: int | None = None) -> None:
+            called.append(1)
+
+        monkeypatch.setattr(bot_ai_knowledge, "generate_suggestion", fake_gen)
+        r = await client.post(
+            "/api/v1/admin/ai-knowledge/suggest",
+            headers=caller,
+            json={"ticketId": 1, "ticketText": "t", "communityId": public_id(dal, community_id)},
+        )
+        assert r.status_code == 403
+        assert called == []
