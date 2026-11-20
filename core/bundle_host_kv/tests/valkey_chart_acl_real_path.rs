@@ -191,11 +191,11 @@ async fn chart_acl_is_enforced_and_keeps_the_config_get_probe() {
 #[tokio::test]
 async fn every_kv_host_op_succeeds_under_the_chart_acl() {
     let v = start_acl_valkey();
-    let host = KvHost::new(connect(&v).await, granted("waddles.core.example.count"));
+    let host = KvHost::new(connect(&v).await, granted("penguintechinc.waddles.count"));
     let scope = KvScope::new(
         "default",
         Some("waddlebot".to_string()),
-        "waddles.core.example.count",
+        "penguintechinc.waddles.count",
     );
 
     // The `count` bundle's exact first call: a registry lookup on every `!`-prefixed message.

@@ -877,7 +877,7 @@ mod tests {
     }
 
     fn key() -> ConfigKey {
-        ConfigKey::new(1, 7, "waddles.core.app.calendar")
+        ConfigKey::new(1, 7, "penguintechinc.waddles.calendar")
     }
 
     fn fast() -> CacheConfig {
@@ -891,7 +891,7 @@ mod tests {
     fn version_key_matches_the_hub_api_publisher() {
         assert_eq!(
             version_key(&key()),
-            "waddles:bundle_config:v:1:7:waddles.core.app.calendar"
+            "waddles:bundle_config:v:1:7:penguintechinc.waddles.calendar"
         );
     }
 
@@ -975,7 +975,7 @@ mod tests {
         let cache = BundleConfigCache::new(src, None, CacheConfig::default());
         assert_eq!(&*cache.lookup(&key()).await, "{}");
         cache.set_defaults(
-            "waddles.core.app.calendar",
+            "penguintechinc.waddles.calendar",
             r#"{"default_duration_minutes":60}"#,
         );
         assert_eq!(
@@ -1004,14 +1004,18 @@ mod tests {
                 .with_seed_window(Duration::from_millis(50)),
         );
         for community in 0..160 {
-            cache.enqueue_seed(ConfigKey::new(1, community, "waddles.core.app.calendar"));
+            cache.enqueue_seed(ConfigKey::new(
+                1,
+                community,
+                "penguintechinc.waddles.calendar",
+            ));
         }
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(src.batches.load(Ordering::SeqCst), 1, "one batched load");
         assert_eq!(src.gets.load(Ordering::SeqCst), 0, "no per-scope loads");
         assert_eq!(cache.len(), 160);
         // A scope queued after the flush schedules a fresh (second) batch.
-        cache.enqueue_seed(ConfigKey::new(1, 999, "waddles.core.app.calendar"));
+        cache.enqueue_seed(ConfigKey::new(1, 999, "penguintechinc.waddles.calendar"));
         tokio::time::sleep(Duration::from_millis(250)).await;
         assert_eq!(src.batches.load(Ordering::SeqCst), 2);
         assert_eq!(cache.len(), 161);

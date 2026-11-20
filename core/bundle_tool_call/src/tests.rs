@@ -16,9 +16,9 @@ use penguin_bundle_host::wire::{ErrorBody, ErrorCode, Message, ResultBody};
 
 use super::*;
 
-const APP: &str = "waddles.test.app.caller";
-const SVC: &str = "waddles.core.economy.svc";
-const SVC2: &str = "waddles.core.other.svc";
+const APP: &str = "penguintechinc.waddles.caller-app";
+const SVC: &str = "penguintechinc.waddles.economy-svc";
+const SVC2: &str = "penguintechinc.waddles.other-svc";
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn gate_scope(app: &str) -> InvokeScope {
@@ -256,7 +256,7 @@ fn e_depth_three_is_depth_exceeded_and_depth_two_is_allowed() {
     // chain A -> B -> C is two hops taken; calling D is the third.
     let err = plan(
         &[APP, SVC, SVC2],
-        req("waddles.core.fourth.svc", "t", None),
+        req("penguintechinc.waddles.fourth-svc", "t", None),
         &snap,
         &gate,
     )
@@ -972,4 +972,24 @@ fn actor_with_non_object_args_is_rejected() {
     p.args = serde_json::json!([1]);
     p.idempotency_key = None;
     assert!(nested_payload(&p).is_err());
+}
+
+#[test]
+fn app_id_validator_accepts_three_hyphenated_segments_only() {
+    for ok in [
+        "penguintechinc.waddles.discord-invite",
+        "psychoboy.penguintwitchbot.wix-event-sync",
+        "penguintechinc.waddles.echo-pipeline",
+    ] {
+        assert!(super::valid_app_id(ok), "{ok}");
+    }
+    for bad in [
+        "waddles.core.example.echo",
+        "penguintechinc.waddles",
+        "penguintechinc.waddles.a_b",
+        "penguintechinc.waddles.A",
+        "penguintechinc..x",
+    ] {
+        assert!(!super::valid_app_id(bad), "{bad}");
+    }
 }

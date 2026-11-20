@@ -17,7 +17,7 @@
 //!   own `bundle_loader` module (`core/svc_process/src/bundle_loader.rs`,
 //!   `core/svc_action/src/bundle_loader.rs`) drives the actual calls.
 //! - Gate on the PostHog-compatible feature flag
-//!   (`waddles.core.db-bundle-config`) -- that is `penguin_licensing`,
+//!   (`penguintechinc.waddles.db-bundle-config`) -- that is `penguin_licensing`,
 //!   already a per-service dependency; see each service's own
 //!   `license.rs` for the flag-gate wiring, mirroring the existing
 //!   `waddles.core.rust-data-plane` gate.

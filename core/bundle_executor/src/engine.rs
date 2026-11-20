@@ -544,7 +544,7 @@ mod tests {
 
     fn manifest(digest: &str, world: WitWorld, perms: &[&str]) -> VerifiedManifest {
         VerifiedManifest::new(
-            "waddles.core.test-app",
+            "penguintechinc.waddles.test-app",
             digest,
             world,
             perms.iter().map(|p| p.to_string()).collect(),

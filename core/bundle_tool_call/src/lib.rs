@@ -123,7 +123,7 @@ impl ActorContext {
 /// `rooms:close`, `rooms:guests`) and moderation (`rooms:kick`, `rooms:mute`, `rooms:lock`,
 /// `rooms:hands`). A moderator holds exactly the moderation ones (what it can do today).
 ///
-/// Music scopes (`waddles.core.service.music-requests`): `music:requests.read`,
+/// Music scopes (`penguintechinc.waddles.music-requests`): `music:requests.read`,
 /// `music:history.read`, `music:requests.write` and `music:stats.read` for every member; moderator and above also get
 /// `music:requests.manage`, `music:dj.manage` and `music:settings.write`.
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
@@ -285,7 +285,7 @@ pub struct ToolRequest {
     pub idempotency_key: Option<String>,
 }
 
-/// `waddles.<seg>.<seg>.<seg>`, each segment `[a-z][a-z0-9-]{0,..}`-ish --
+/// `<org>.<repo>.<name>`, each segment lowercase alnum plus `-` --
 /// mirrors hub-api's `_APP_ID_RE` shape closely enough to reject anything that
 /// is not a plausible app id (the authoritative check is the snapshot lookup).
 fn valid_app_id(s: &str) -> bool {
@@ -293,13 +293,12 @@ fn valid_app_id(s: &str) -> bool {
         return false;
     }
     let segs: Vec<&str> = s.split('.').collect();
-    segs.len() == 4
-        && segs[0] == "waddles"
-        && segs[1..].iter().all(|seg| {
+    segs.len() == 3
+        && segs.iter().all(|seg| {
             !seg.is_empty()
                 && seg
                     .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
+                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         })
 }
 

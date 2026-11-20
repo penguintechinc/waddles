@@ -37,8 +37,8 @@ use wasmtime::Engine;
 
 const TOOLS_WASM: &[u8] = include_bytes!("fixtures/connector_tools_fixture.wasm");
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_connector.wasm");
-const TOOLS_APP: &str = "waddles.core.test.connector-tools";
-const ECHO_APP: &str = "waddles.core.example.echo";
+const TOOLS_APP: &str = "penguintechinc.waddles.test-connector-tools";
+const ECHO_APP: &str = "penguintechinc.waddles.echo";
 
 fn cfg() -> CliConfig {
     use clap::Parser;
@@ -211,7 +211,7 @@ async fn tool_import_is_linked_and_fails_typed_without_a_stage_bridge() {
     let err = host
         .call_tool(
             "relay".into(),
-            json(serde_json::json!({"target": "waddles.core.other", "tool": "x", "args": {}})),
+            json(serde_json::json!({"target": "penguintechinc.waddles.other", "tool": "x", "args": {}})),
         )
         .await
         .unwrap_err();
@@ -560,7 +560,7 @@ async fn tool_call_wire_failures_are_typed() {
     // Wrong app_id for a pinned digest -> UNKNOWN_BUNDLE (fail closed).
     let e = stage
         .invoke(
-            "waddles.core.someone-else",
+            "penguintechinc.waddles.someone-else",
             &digest_of(TOOLS_WASM),
             ExportKind::ToolCall,
             serde_json::json!({"tool": "echo", "args": {}}),
@@ -997,7 +997,7 @@ async fn unpinned_tool_call_never_fetches_from_the_component_source() {
     let mut stage = wire_rig_with_source(&[], CountingSource(Arc::clone(&fetches))).await;
     let e = stage
         .invoke(
-            "waddles.core.not-pinned",
+            "penguintechinc.waddles.not-pinned",
             &format!("sha256:{}", "a".repeat(64)),
             ExportKind::ToolCall,
             serde_json::json!({"tool": "echo", "args": {}}),
@@ -1270,7 +1270,7 @@ async fn build_request_wire_failures_are_typed() {
     // Wrong app_id for a pinned digest -> UNKNOWN_BUNDLE.
     let e = stage
         .invoke(
-            "waddles.core.someone-else",
+            "penguintechinc.waddles.someone-else",
             &pin,
             ExportKind::ConnectorBuildRequest,
             wire_action("chat.send", "{}"),

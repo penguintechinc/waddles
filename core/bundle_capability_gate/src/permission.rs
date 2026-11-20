@@ -289,7 +289,7 @@ pub enum PermissionFamily {
     /// callers.
     ReputationCommunityAdmin,
     /// `reputation.history.read` -- a user's reputation ledger page (core
-    /// bundles only: the host refuses any non-`waddles.core.` app).
+    /// bundles only: the host refuses any non-`penguintechinc.waddles.` app).
     ReputationHistoryRead,
     /// `reputation.tenant.read` -- the user's aggregate across the tenant's
     /// communities and the tenant auto-ban policy (core bundles only).
@@ -337,7 +337,7 @@ pub enum PermissionFamily {
     /// `connector.pii.read` -- gates the connector world's `identity.lookup`
     /// import, the ONE capability that returns raw PII (handle, display name)
     /// to a guest. `Dangerous`; global-approved, first-party-core-only (the
-    /// executor additionally refuses to link it for a non-`waddles.core.`
+    /// executor additionally refuses to link it for a non-`penguintechinc.waddles.`
     /// app_id, `VerifiedManifest::may_link_identity`).
     ConnectorPiiRead,
     FlagsRead,
@@ -363,7 +363,7 @@ pub enum PermissionFamily {
     ToolCall,
     /// `platform.table.read:<table>.<column>` -- read one allowlisted platform
     /// table column, row-scoped to the invocation's community+tenant.
-    /// `Dangerous`, NEVER auto-granted (not even to `waddles.core.*`).
+    /// `Dangerous`, NEVER auto-granted (not even to `penguintechinc.waddles.*`).
     PlatformTableRead,
     /// `platform.table.write:<table>.<column>` -- as above, write.
     PlatformTableWrite,
@@ -912,7 +912,7 @@ impl PermissionFamily {
                     max_calls: 20,
                     window: Duration::from_secs(1),
                 },
-                notes: "ledger history page; core bundles only (host refuses non-waddles.core. apps)",
+                notes: "ledger history page; core bundles only (host refuses non-penguintechinc.waddles. apps)",
             },
             Self::ReputationTenantRead => CatalogEntry {
                 family: *self,
@@ -1424,8 +1424,8 @@ impl PermissionId {
         Ok(())
     }
 
-    /// `tool.call` target: the 4-segment `waddles.<a>.<b>.<c>` app id
-    /// (`hub_api` `_APP_ID_RE`). Every char is RFC-3986 unreserved, so Python's
+    /// `tool.call` target: the 3-segment `<org>.<repo>.<name>` app id
+    /// (`hub_api` `_APP_ID_RE`); each segment may contain `-` and `_`. Every char is RFC-3986 unreserved, so Python's
     /// `quote(app_id, safe='')` (P1's `requested_tool_permission_id`) is the
     /// identity on a valid id and no percent-encoding exists on the wire; a
     /// `%`/`:` therefore can never be valid and is rejected.
@@ -1434,11 +1434,10 @@ impl PermissionId {
         let segment_ok = |s: &str| {
             let mut chars = s.chars();
             matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
-                && chars
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
+                && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
         };
         let parts: Vec<&str> = target.split('.').collect();
-        if parts.len() == 4 && parts[0] == "waddles" && parts[1..].iter().all(|p| segment_ok(p)) {
+        if parts.len() == 3 && parts.iter().all(|p| segment_ok(p)) {
             Ok(())
         } else {
             Err(err())
@@ -2149,9 +2148,10 @@ mod tests {
     fn tool_call_round_trips_a_real_p1_encoded_id() {
         // P1's quote(app_id, safe='') is the identity on a valid app id.
         for raw in [
-            "tool.call:waddles.core.economy.default:get_balance",
-            "tool.call:waddles.core.example_echo.v2:a.b_c",
-            "tool.call:waddles.some-vendor.x1.y_2:t",
+            "tool.call:penguintechinc.waddles.economy:get_balance",
+            "tool.call:penguintechinc.waddles.discord-invite:a.b_c",
+            "tool.call:psychoboy.penguintwitchbot.wix-event-sync:t",
+            "tool.call:some-vendor.x1.echo-pipeline-2:t",
         ] {
             let id = PermissionId::parse(raw).unwrap();
             assert_eq!(id.canonical_id(), raw);
@@ -2159,9 +2159,9 @@ mod tests {
             assert_eq!(id.risk(), Risk::Dangerous);
         }
         assert_eq!(
-            PermissionId::parse("tool.call:waddles.core.economy.default:get_balance").unwrap(),
+            PermissionId::parse("tool.call:penguintechinc.waddles.economy:get_balance").unwrap(),
             PermissionId::ToolCall {
-                target: "waddles.core.economy.default".into(),
+                target: "penguintechinc.waddles.economy".into(),
                 tool: "get_balance".into()
             }
         );
@@ -2174,17 +2174,22 @@ mod tests {
             "tool.call:",
             "tool.call:x",
             "tool.call::get",
-            "tool.call:waddles.core.economy.default:",
-            "tool.call:waddles.core.economy.default:Get",
-            "tool.call:waddles.core.economy.default:1get",
-            "tool.call:waddles.core:get",
-            "tool.call:waddles%2Ecore.economy.default:get",
-            "tool.call:a:waddles.core.economy.default:get",
-            "tool.call:other.core.economy.default:get",
+            "tool.call:penguintechinc.waddles.economy:",
+            "tool.call:penguintechinc.waddles.economy:Get",
+            "tool.call:penguintechinc.waddles.economy:1get",
+            "tool.call:penguintechinc.waddles:get",
+            "tool.call:penguintechinc%2Ewaddles.economy:get",
+            "tool.call:a:penguintechinc.waddles.economy:get",
+            "tool.call:penguintechinc.waddles.economy.default:get",
+            "tool.call:penguintechinc.waddles.-bad:get",
+            "tool.call:penguintechinc.waddles.a_b:get",
         ] {
             assert!(PermissionId::parse(raw).is_err(), "{raw} must be rejected");
         }
-        let long = format!("tool.call:waddles.core.economy.default:a{}", "b".repeat(64));
+        let long = format!(
+            "tool.call:penguintechinc.waddles.economy:a{}",
+            "b".repeat(64)
+        );
         assert!(PermissionId::parse(&long).is_err());
     }
 
