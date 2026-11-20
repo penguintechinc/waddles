@@ -29,6 +29,7 @@ from .scope_registry import (
     guard_scope_edit,
     normalize_scopes,
 )
+from .sql_util import execute_positional
 
 logger = logging.getLogger(__name__)
 
@@ -124,7 +125,8 @@ def can_create_channel(dal: Any, community_id: int, user_id: int, is_admin_like:
     if is_admin_like:
         return True
     ensure_community_tables(dal)
-    row = dal.executesql(
+    row = execute_positional(
+        dal,
         """
         SELECT c.config, cr.base_claims, cm.claims_cache
         FROM communities c
@@ -395,7 +397,8 @@ async def create_forum_reply(
     if not content:
         return None, "Reply content is required"
 
-    post = dal.executesql(
+    post = execute_positional(
+        dal,
         """
         SELECT p.id, p.is_locked, p.platform_thread_id, hc.community_server_channel_id
         FROM hub_forum_posts p JOIN hub_channels hc ON hc.id = p.hub_channel_id
@@ -468,7 +471,8 @@ def moderate_forum_post(
 def delete_forum_reply(dal: Any, community_id: int, reply_id: int) -> bool:
     """Delete a reply and decrement its post's reply counter."""
     ensure_community_tables(dal)
-    row = dal.executesql(
+    row = execute_positional(
+        dal,
         """
         SELECT r.post_id FROM hub_forum_replies r
         JOIN hub_forum_posts p ON r.post_id = p.id
@@ -726,7 +730,8 @@ def get_channel_permission_overrides(
         is None
     ):
         return None
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         """
         SELECT o.id, o.hub_channel_id, o.community_role_id, cr.name, cr.display_name,
                o.grant_scopes, o.deny_scopes, o.scope, o.created_at
