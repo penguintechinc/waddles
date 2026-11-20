@@ -1,0 +1,201 @@
+old	new	kind	rationale
+waddles.core.app.calendar	penguintechinc.waddles.calendar	app	<org>.<repo>.<bundle-name>
+waddles.core.app.galactic-avatars	penguintechinc.waddles.galactic-avatars	app	<org>.<repo>.<bundle-name>
+waddles.core.app.live-now	penguintechinc.waddles.live-now	app	<org>.<repo>.<bundle-name>
+waddles.core.app.reputation-accrual	penguintechinc.waddles.reputation-accrual	app	<org>.<repo>.<bundle-name>
+waddles.core.app.rooms	penguintechinc.waddles.rooms	app	<org>.<repo>.<bundle-name>
+waddles.core.app.stream-alerts	penguintechinc.waddles.stream-alerts	app	<org>.<repo>.<bundle-name>
+waddles.core.community.feed	penguintechinc.waddles.feed	app	<org>.<repo>.<bundle-name>
+waddles.core.example.about	penguintechinc.waddles.about	app	<org>.<repo>.<bundle-name>
+waddles.core.example.advice	penguintechinc.waddles.advice	app	<org>.<repo>.<bundle-name>
+waddles.core.example.affirmation	penguintechinc.waddles.affirmation	app	<org>.<repo>.<bundle-name>
+waddles.core.example.ai-teammates	penguintechinc.waddles.ai-teammates	app	<org>.<repo>.<bundle-name>
+waddles.core.example.alias	penguintechinc.waddles.alias	app	<org>.<repo>.<bundle-name>
+waddles.core.example.announce	penguintechinc.waddles.announce	app	<org>.<repo>.<bundle-name>
+waddles.core.example.ask	penguintechinc.waddles.ask	app	<org>.<repo>.<bundle-name>
+waddles.core.example.bingo	penguintechinc.waddles.bingo	app	<org>.<repo>.<bundle-name>
+waddles.core.example.birthday	penguintechinc.waddles.birthday	app	<org>.<repo>.<bundle-name>
+waddles.core.example.blackjack	penguintechinc.waddles.blackjack	app	<org>.<repo>.<bundle-name>
+waddles.core.example.bookmark	penguintechinc.waddles.bookmark	app	<org>.<repo>.<bundle-name>
+waddles.core.example.boop	penguintechinc.waddles.boop	app	<org>.<repo>.<bundle-name>
+waddles.core.example.bot	penguintechinc.waddles.bot	app	<org>.<repo>.<bundle-name>
+waddles.core.example.catfact	penguintechinc.waddles.catfact	app	<org>.<repo>.<bundle-name>
+waddles.core.example.chat	penguintechinc.waddles.chat	app	<org>.<repo>.<bundle-name>
+waddles.core.example.chatguard	penguintechinc.waddles.chatguard	app	<org>.<repo>.<bundle-name>
+waddles.core.example.choose	penguintechinc.waddles.choose	app	<org>.<repo>.<bundle-name>
+waddles.core.example.clap	penguintechinc.waddles.clap	app	<org>.<repo>.<bundle-name>
+waddles.core.example.coinflip	penguintechinc.waddles.coinflip	app	<org>.<repo>.<bundle-name>
+waddles.core.example.command	penguintechinc.waddles.command	app	<org>.<repo>.<bundle-name>
+waddles.core.example.commands	penguintechinc.waddles.commands	app	<org>.<repo>.<bundle-name>
+waddles.core.example.compliment	penguintechinc.waddles.compliment	app	<org>.<repo>.<bundle-name>
+waddles.core.example.count	penguintechinc.waddles.count	app	<org>.<repo>.<bundle-name>
+waddles.core.example.countdown	penguintechinc.waddles.countdown	app	<org>.<repo>.<bundle-name>
+waddles.core.example.counter	penguintechinc.waddles.counter	app	<org>.<repo>.<bundle-name>
+waddles.core.example.cringe	penguintechinc.waddles.cringe	app	<org>.<repo>.<bundle-name>
+waddles.core.example.csping	penguintechinc.waddles.csping	app	<org>.<repo>.<bundle-name>
+waddles.core.example.customcommand	penguintechinc.waddles.customcommand	app	<org>.<repo>.<bundle-name>
+waddles.core.example.dadjoke	penguintechinc.waddles.dadjoke	app	<org>.<repo>.<bundle-name>
+waddles.core.example.dailycounter	penguintechinc.waddles.dailycounter	app	<org>.<repo>.<bundle-name>
+waddles.core.example.dance	penguintechinc.waddles.dance	app	<org>.<repo>.<bundle-name>
+waddles.core.example.death	penguintechinc.waddles.death	app	<org>.<repo>.<bundle-name>
+waddles.core.example.define	penguintechinc.waddles.define	app	<org>.<repo>.<bundle-name>
+waddles.core.example.defuse	penguintechinc.waddles.defuse	app	<org>.<repo>.<bundle-name>
+waddles.core.example.dice	penguintechinc.waddles.dice	app	<org>.<repo>.<bundle-name>
+waddles.core.example.discord	penguintechinc.waddles.discord-invite	app	Collision with service bundle discord (keeps plain name); this bundle persists a per-community Discord invite link answering !discord, so named discord-invite
+waddles.core.example.dj	penguintechinc.waddles.dj	app	<org>.<repo>.<bundle-name>
+waddles.core.example.dogfact	penguintechinc.waddles.dogfact	app	<org>.<repo>.<bundle-name>
+waddles.core.example.donate	penguintechinc.waddles.donate	app	<org>.<repo>.<bundle-name>
+waddles.core.example.duel	penguintechinc.waddles.duel	app	<org>.<repo>.<bundle-name>
+waddles.core.example.echo	penguintechinc.waddles.echo	app	Plain name; former demo.echo moved to echo-pipeline
+waddles.core.example.eightball	penguintechinc.waddles.eightball	app	<org>.<repo>.<bundle-name>
+waddles.core.example.eli5	penguintechinc.waddles.eli5	app	<org>.<repo>.<bundle-name>
+waddles.core.example.emojify	penguintechinc.waddles.emojify	app	<org>.<repo>.<bundle-name>
+waddles.core.example.event	penguintechinc.waddles.event	app	<org>.<repo>.<bundle-name>
+waddles.core.example.fact	penguintechinc.waddles.fact	app	<org>.<repo>.<bundle-name>
+waddles.core.example.faq	penguintechinc.waddles.faq	app	<org>.<repo>.<bundle-name>
+waddles.core.example.first	penguintechinc.waddles.first	app	<org>.<repo>.<bundle-name>
+waddles.core.example.fish	penguintechinc.waddles.fish	app	<org>.<repo>.<bundle-name>
+waddles.core.example.fortune	penguintechinc.waddles.fortune	app	<org>.<repo>.<bundle-name>
+waddles.core.example.gamble	penguintechinc.waddles.gamble	app	<org>.<repo>.<bundle-name>
+waddles.core.example.game-servers	penguintechinc.waddles.game-servers	app	<org>.<repo>.<bundle-name>
+waddles.core.example.giveaway	penguintechinc.waddles.giveaway	app	<org>.<repo>.<bundle-name>
+waddles.core.example.greeter	penguintechinc.waddles.greeter	app	<org>.<repo>.<bundle-name>
+waddles.core.example.guess	penguintechinc.waddles.guess	app	<org>.<repo>.<bundle-name>
+waddles.core.example.hangman	penguintechinc.waddles.hangman	app	<org>.<repo>.<bundle-name>
+waddles.core.example.heist	penguintechinc.waddles.heist	app	<org>.<repo>.<bundle-name>
+waddles.core.example.hello	penguintechinc.waddles.hello	app	<org>.<repo>.<bundle-name>
+waddles.core.example.highfive	penguintechinc.waddles.highfive	app	<org>.<repo>.<bundle-name>
+waddles.core.example.horoscope	penguintechinc.waddles.horoscope	app	<org>.<repo>.<bundle-name>
+waddles.core.example.hug	penguintechinc.waddles.hug	app	<org>.<repo>.<bundle-name>
+waddles.core.example.hype	penguintechinc.waddles.hype	app	<org>.<repo>.<bundle-name>
+waddles.core.example.hypetrain	penguintechinc.waddles.hypetrain	app	<org>.<repo>.<bundle-name>
+waddles.core.example.insult	penguintechinc.waddles.insult	app	<org>.<repo>.<bundle-name>
+waddles.core.example.inventory	penguintechinc.waddles.inventory	app	<org>.<repo>.<bundle-name>
+waddles.core.example.iq	penguintechinc.waddles.iq	app	<org>.<repo>.<bundle-name>
+waddles.core.example.jackpot	penguintechinc.waddles.jackpot	app	<org>.<repo>.<bundle-name>
+waddles.core.example.joke	penguintechinc.waddles.joke	app	<org>.<repo>.<bundle-name>
+waddles.core.example.keywordgiveaway	penguintechinc.waddles.keywordgiveaway	app	<org>.<repo>.<bundle-name>
+waddles.core.example.kiss	penguintechinc.waddles.kiss	app	<org>.<repo>.<bundle-name>
+waddles.core.example.label	penguintechinc.waddles.label	app	<org>.<repo>.<bundle-name>
+waddles.core.example.lastseen	penguintechinc.waddles.lastseen	app	<org>.<repo>.<bundle-name>
+waddles.core.example.level	penguintechinc.waddles.level	app	<org>.<repo>.<bundle-name>
+waddles.core.example.lfg	penguintechinc.waddles.lfg	app	<org>.<repo>.<bundle-name>
+waddles.core.example.lottery	penguintechinc.waddles.lottery	app	<org>.<repo>.<bundle-name>
+waddles.core.example.love	penguintechinc.waddles.love	app	<org>.<repo>.<bundle-name>
+waddles.core.example.loyalty	penguintechinc.waddles.loyalty	app	<org>.<repo>.<bundle-name>
+waddles.core.example.lurk	penguintechinc.waddles.lurk	app	<org>.<repo>.<bundle-name>
+waddles.core.example.memories	penguintechinc.waddles.memories	app	<org>.<repo>.<bundle-name>
+waddles.core.example.merch	penguintechinc.waddles.merch	app	<org>.<repo>.<bundle-name>
+waddles.core.example.mock	penguintechinc.waddles.mock	app	<org>.<repo>.<bundle-name>
+waddles.core.example.mood	penguintechinc.waddles.mood	app	<org>.<repo>.<bundle-name>
+waddles.core.example.motivate	penguintechinc.waddles.motivate	app	<org>.<repo>.<bundle-name>
+waddles.core.example.music	penguintechinc.waddles.music	app	<org>.<repo>.<bundle-name>
+waddles.core.example.numberfact	penguintechinc.waddles.numberfact	app	<org>.<repo>.<bundle-name>
+waddles.core.example.pat	penguintechinc.waddles.pat	app	<org>.<repo>.<bundle-name>
+waddles.core.example.pickup	penguintechinc.waddles.pickup	app	<org>.<repo>.<bundle-name>
+waddles.core.example.ping	penguintechinc.waddles.ping	app	<org>.<repo>.<bundle-name>
+waddles.core.example.poke	penguintechinc.waddles.poke	app	<org>.<repo>.<bundle-name>
+waddles.core.example.poll	penguintechinc.waddles.poll	app	<org>.<repo>.<bundle-name>
+waddles.core.example.prediction	penguintechinc.waddles.prediction	app	<org>.<repo>.<bundle-name>
+waddles.core.example.pronouns	penguintechinc.waddles.pronouns	app	<org>.<repo>.<bundle-name>
+waddles.core.example.pyping	penguintechinc.waddles.pyping	app	<org>.<repo>.<bundle-name>
+waddles.core.example.queue	penguintechinc.waddles.queue	app	<org>.<repo>.<bundle-name>
+waddles.core.example.quote	penguintechinc.waddles.quote	app	<org>.<repo>.<bundle-name>
+waddles.core.example.raffle	penguintechinc.waddles.raffle	app	<org>.<repo>.<bundle-name>
+waddles.core.example.rank	penguintechinc.waddles.rank	app	<org>.<repo>.<bundle-name>
+waddles.core.example.rate	penguintechinc.waddles.rate	app	<org>.<repo>.<bundle-name>
+waddles.core.example.remind	penguintechinc.waddles.remind	app	<org>.<repo>.<bundle-name>
+waddles.core.example.rephrase	penguintechinc.waddles.rephrase	app	<org>.<repo>.<bundle-name>
+waddles.core.example.reverse	penguintechinc.waddles.reverse	app	<org>.<repo>.<bundle-name>
+waddles.core.example.riddle	penguintechinc.waddles.riddle	app	<org>.<repo>.<bundle-name>
+waddles.core.example.rip	penguintechinc.waddles.rip	app	<org>.<repo>.<bundle-name>
+waddles.core.example.roast	penguintechinc.waddles.roast	app	<org>.<repo>.<bundle-name>
+waddles.core.example.roll	penguintechinc.waddles.roll	app	<org>.<repo>.<bundle-name>
+waddles.core.example.roulette	penguintechinc.waddles.roulette	app	<org>.<repo>.<bundle-name>
+waddles.core.example.rps	penguintechinc.waddles.rps	app	<org>.<repo>.<bundle-name>
+waddles.core.example.rules	penguintechinc.waddles.rules	app	<org>.<repo>.<bundle-name>
+waddles.core.example.say	penguintechinc.waddles.say	app	<org>.<repo>.<bundle-name>
+waddles.core.example.scramble	penguintechinc.waddles.scramble	app	<org>.<repo>.<bundle-name>
+waddles.core.example.secret	penguintechinc.waddles.secret	app	<org>.<repo>.<bundle-name>
+waddles.core.example.sentiment	penguintechinc.waddles.sentiment	app	<org>.<repo>.<bundle-name>
+waddles.core.example.ship	penguintechinc.waddles.ship	app	<org>.<repo>.<bundle-name>
+waddles.core.example.shoutout	penguintechinc.waddles.shoutout	app	<org>.<repo>.<bundle-name>
+waddles.core.example.slap	penguintechinc.waddles.slap	app	<org>.<repo>.<bundle-name>
+waddles.core.example.slots	penguintechinc.waddles.slots	app	<org>.<repo>.<bundle-name>
+waddles.core.example.social	penguintechinc.waddles.social	app	<org>.<repo>.<bundle-name>
+waddles.core.example.socials	penguintechinc.waddles.socials	app	<org>.<repo>.<bundle-name>
+waddles.core.example.steal	penguintechinc.waddles.steal	app	<org>.<repo>.<bundle-name>
+waddles.core.example.summarize	penguintechinc.waddles.summarize	app	<org>.<repo>.<bundle-name>
+waddles.core.example.ticket	penguintechinc.waddles.ticket	app	<org>.<repo>.<bundle-name>
+waddles.core.example.time	penguintechinc.waddles.time	app	<org>.<repo>.<bundle-name>
+waddles.core.example.timer	penguintechinc.waddles.timer	app	<org>.<repo>.<bundle-name>
+waddles.core.example.tldr	penguintechinc.waddles.tldr	app	<org>.<repo>.<bundle-name>
+waddles.core.example.top	penguintechinc.waddles.top	app	<org>.<repo>.<bundle-name>
+waddles.core.example.translate	penguintechinc.waddles.translate	app	<org>.<repo>.<bundle-name>
+waddles.core.example.trivia	penguintechinc.waddles.trivia	app	<org>.<repo>.<bundle-name>
+waddles.core.example.truthordare	penguintechinc.waddles.truthordare	app	<org>.<repo>.<bundle-name>
+waddles.core.example.twitch-clips	penguintechinc.waddles.twitch-clips	app	<org>.<repo>.<bundle-name>
+waddles.core.example.uptime	penguintechinc.waddles.uptime	app	<org>.<repo>.<bundle-name>
+waddles.core.example.uwu	penguintechinc.waddles.uwu	app	<org>.<repo>.<bundle-name>
+waddles.core.example.vibecheck	penguintechinc.waddles.vibecheck	app	<org>.<repo>.<bundle-name>
+waddles.core.example.vote	penguintechinc.waddles.vote	app	<org>.<repo>.<bundle-name>
+waddles.core.example.waddle	penguintechinc.waddles.waddle	app	<org>.<repo>.<bundle-name>
+waddles.core.example.wave	penguintechinc.waddles.wave	app	<org>.<repo>.<bundle-name>
+waddles.core.example.weather	penguintechinc.waddles.weather	app	<org>.<repo>.<bundle-name>
+waddles.core.example.wheel	penguintechinc.waddles.wheel	app	<org>.<repo>.<bundle-name>
+waddles.core.example.winner	penguintechinc.waddles.winner	app	<org>.<repo>.<bundle-name>
+waddles.core.example.wordcount	penguintechinc.waddles.wordcount	app	<org>.<repo>.<bundle-name>
+waddles.core.example.wouldyourather	penguintechinc.waddles.wouldyourather	app	<org>.<repo>.<bundle-name>
+waddles.core.example.yomama	penguintechinc.waddles.yomama	app	<org>.<repo>.<bundle-name>
+waddles.core.integration.wix	penguintechinc.waddles.wix-event-sync	app	Collision with service bundle wix (keeps plain name); this bundle consumes Wix event.created/updated/canceled and mirrors them to Discord scheduled events, so named wix-event-sync
+waddles.core.service.ai	penguintechinc.waddles.ai	service	<org>.<repo>.<bundle-name>
+waddles.core.service.discord	penguintechinc.waddles.discord	service	Service bundle keeps plain name (collision with former example.discord)
+waddles.core.service.economy	penguintechinc.waddles.economy	service	<org>.<repo>.<bundle-name>
+waddles.core.service.gameserver	penguintechinc.waddles.gameserver	service	<org>.<repo>.<bundle-name>
+waddles.core.service.kick	penguintechinc.waddles.kick	service	<org>.<repo>.<bundle-name>
+waddles.core.service.music-requests	penguintechinc.waddles.music-requests	service	<org>.<repo>.<bundle-name>
+waddles.core.service.music-soundcloud	penguintechinc.waddles.music-soundcloud	service	<org>.<repo>.<bundle-name>
+waddles.core.service.music-spotify	penguintechinc.waddles.music-spotify	service	<org>.<repo>.<bundle-name>
+waddles.core.service.music-youtube	penguintechinc.waddles.music-youtube	service	<org>.<repo>.<bundle-name>
+waddles.core.service.reputation	penguintechinc.waddles.reputation	service	<org>.<repo>.<bundle-name>
+waddles.core.service.spectrum	penguintechinc.waddles.spectrum	service	<org>.<repo>.<bundle-name>
+waddles.core.service.twitch	penguintechinc.waddles.twitch	service	<org>.<repo>.<bundle-name>
+waddles.core.service.webrtc	penguintechinc.waddles.webrtc	service	<org>.<repo>.<bundle-name>
+waddles.core.service.wix	penguintechinc.waddles.wix	service	Service bundle keeps plain name (collision with former integration.wix)
+waddles.core.service.youtube	penguintechinc.waddles.youtube	service	<org>.<repo>.<bundle-name>
+waddles.integrations.superpenguin.alias	psychoboy.penguintwitchbot.alias	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.audiocommand	psychoboy.penguintwitchbot.audiocommand	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.balloon	psychoboy.penguintwitchbot.balloon	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.bonustickets	psychoboy.penguintwitchbot.bonustickets	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.channelpoints	psychoboy.penguintwitchbot.channelpoints	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.curling	psychoboy.penguintwitchbot.curling	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.dailycounter	psychoboy.penguintwitchbot.dailycounter	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.deathcounter	psychoboy.penguintwitchbot.deathcounter	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.defuse	psychoboy.penguintwitchbot.defuse	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.duel	psychoboy.penguintwitchbot.duel	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.ffa	psychoboy.penguintwitchbot.ffa	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.first	psychoboy.penguintwitchbot.first	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.fishing	psychoboy.penguintwitchbot.fishing	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.gamble	psychoboy.penguintwitchbot.gamble	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.giveaway	psychoboy.penguintwitchbot.giveaway	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.golf	psychoboy.penguintwitchbot.golf	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.heist	psychoboy.penguintwitchbot.heist	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.lastseen	psychoboy.penguintwitchbot.lastseen	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.parachute	psychoboy.penguintwitchbot.parachute	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.plinko	psychoboy.penguintwitchbot.plinko	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.quotes	psychoboy.penguintwitchbot.quotes	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.racing	psychoboy.penguintwitchbot.racing	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.raidtracker	psychoboy.penguintwitchbot.raidtracker	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.roll	psychoboy.penguintwitchbot.roll	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.roulette	psychoboy.penguintwitchbot.roulette	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.slots	psychoboy.penguintwitchbot.slots	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.steal	psychoboy.penguintwitchbot.steal	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.timers	psychoboy.penguintwitchbot.timers	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.top	psychoboy.penguintwitchbot.top	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.tts	psychoboy.penguintwitchbot.tts	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.ufoclaw	psychoboy.penguintwitchbot.ufoclaw	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.viewers	psychoboy.penguintwitchbot.viewers	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.weather	psychoboy.penguintwitchbot.weather	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.integrations.superpenguin.wheel	psychoboy.penguintwitchbot.wheel	app	PenguinTwitchBot C# port: psychoboy.penguintwitchbot.<name>
+waddles.core.demo.echo	penguintechinc.waddles.echo-pipeline	app	Collides with example.echo -> echo; seed-only catalog entry (migration 071) for the ingest+process stage-pipeline echo test, named echo-pipeline (no demo/example)
+waddles.integrations.waddleai.default	penguintechinc.waddles.waddleai	app	WaddleAI completion action bundle (migration 094); distinct from the tier_catalog waddleai key

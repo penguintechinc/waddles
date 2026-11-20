@@ -248,6 +248,7 @@ test-scripts:
 	@bash scripts/tests/test_release_auto_merge.sh
 	@bash scripts/tests/test_prune_agent_worktrees.sh
 	@python3 -m pytest -q -p no:cacheprovider scripts/ops
+	@python3 -m pytest -q -p no:cacheprovider scripts/rename/tests
 
 # Read-only command-latency SLA report (p99 < 1 s, first door -> outbound confirmed): p50/p95/p99
 # per command and per hop from the data-plane histograms. Zero samples = FAIL.
