@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any
 
 from .community_common import ensure_community_tables
+from .sql_util import execute_positional
 
 
 def _iso(value: Any) -> str | None:
@@ -160,7 +161,8 @@ def _run_stock_fn(
     `fn_name` is always one of the two hardcoded literals `add_stock`/
     `remove_stock` pass below, never caller-supplied.
     """
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         "SELECT * FROM " + fn_name + "($1, $2, $3, $4, $5)",  # nosec B608  # noqa: S608
         placeholders=[item_id, quantity, user_id, community_id, note],
     )
@@ -233,7 +235,7 @@ def list_all_checkouts(dal: Any, community_id: int, status: str | None) -> list[
         params.append(status)
     sql += " ORDER BY ic.checked_out_at DESC"
 
-    rows = dal.executesql(sql, placeholders=params)
+    rows = execute_positional(dal, sql, placeholders=params)
     return [
         Checkout(
             id=r[0],
@@ -268,7 +270,9 @@ class InventorySummary:
 def get_summary(dal: Any, community_id: int) -> InventorySummary:
     """Community-wide inventory summary via the `get_inventory_summary` SQL function."""
     ensure_community_tables(dal)
-    rows = dal.executesql("SELECT * FROM get_inventory_summary($1)", placeholders=[community_id])
+    rows = execute_positional(
+        dal, "SELECT * FROM get_inventory_summary($1)", placeholders=[community_id]
+    )
     if not rows:
         return InventorySummary(0, 0, 0, 0, 0, 0)
     r = rows[0]
@@ -319,7 +323,7 @@ def get_audit_log(
     params.extend([limit, offset])
     sql += f" ORDER BY il.created_at DESC LIMIT ${len(params) - 1} OFFSET ${len(params)}"
 
-    rows = dal.executesql(sql, placeholders=params)
+    rows = execute_positional(dal, sql, placeholders=params)
     return [
         LogEntry(
             id=r[0],
@@ -339,8 +343,8 @@ def list_available(dal: Any, community_id: int, search: str | None) -> list[Inve
     """Member view -- items with `available_quantity > 0`, optionally full-text searched."""
     ensure_community_tables(dal)
     if search:
-        rows = dal.executesql(
-            "SELECT * FROM search_inventory_items($1, $2)", placeholders=[community_id, search]
+        rows = execute_positional(
+            dal, "SELECT * FROM search_inventory_items($1, $2)", placeholders=[community_id, search]
         )
         return [
             InventoryItem(
@@ -432,7 +436,8 @@ def checkin_item(
 ) -> tuple[Checkout | None, str | None]:
     """Member return: restore `available_quantity`, log, and close the checkout row."""
     ensure_community_tables(dal)
-    row = dal.executesql(
+    row = execute_positional(
+        dal,
         """
         SELECT ic.id, ic.item_id, ic.quantity
         FROM inventory_checkouts ic
@@ -478,7 +483,8 @@ def checkin_item(
 def get_my_checkouts(dal: Any, community_id: int, user_id: int) -> list[Checkout]:
     """Caller's own active checkouts."""
     ensure_community_tables(dal)
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         """
         SELECT ic.id, ic.item_id, ic.quantity, ic.due_at, ic.status, ic.notes, ic.checked_out_at,
                ii.name, ii.category
