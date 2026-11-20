@@ -276,6 +276,8 @@ ignore:
   - .claude/**
   - "**/*.md"
   - LICENSE
+  # Cross-language golden vectors: read only by `cargo test` / pytest, never COPYed into an image.
+  - testdata/**
   - CONTRIBUTORS
   - .FUTURE
   - .version
