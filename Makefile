@@ -10,7 +10,7 @@
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        check-proto test-hub-api test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
+        check-proto test-hub-api audit-schema-drift test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -284,6 +284,10 @@ release-auto-merge:
 test-hub-api:
 	@bash scripts/test-hub-api.sh $(PYTEST_ARGS)
 
+# Code-vs-DB drift audit: every pydal column under hub_api/ vs a fresh-replayed throwaway Postgres.
+audit-schema-drift:
+	@python3 scripts/audit_schema_drift.py
+
 test-unit:
 	@echo "Running unit tests..."
 	@bash tests/k8s/alpha/05-unit-tests.sh
@@ -300,6 +304,10 @@ test-integration:
 	@echo "Running integration tests..."
 	@test -d tests/integration || { echo "tests/integration directory not found" >&2; exit 1; }
 	@bash scripts/test-api-all.sh
+
+.PHONY: webui-sweep
+webui-sweep: ## Sweep every hub webui route for console/network errors (env: BASE_URL, HOST_HEADER, WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD)
+	@cd tests/e2e && { test -d node_modules || npm ci --no-audit --no-fund; } && node webui-sweep/sweep.js
 
 test-e2e:
 	@echo "Running e2e tests..."
@@ -664,3 +672,19 @@ scaffold-superpenguin-bundle:
 .PHONY: prune-worktrees
 prune-worktrees:
 	@bash scripts/ops/prune-agent-worktrees.sh $(ARGS)
+
+# ---- Post-cutover verification sweeps (alpha; read-only by default) ----------
+# api-sweep:    every hub-api OpenAPI route as admin; no mutations unless ARGS=--allow-mutations
+# bundle-sweep: every catalog bundle -> resolved/loaded/invoked/described + app_id pattern
+# old-id-scan:  leftover old app_id prefixes in DB/Valkey/S3/ConfigMaps/pod env (exit 1 if any)
+# Access defaults to kubectl port-forward (dal2alpha/waddlebot); override BASE_URL/HOST_HEADER.
+# Pre-cutover baselines: add ARGS=--allow-old-ids.  Docs: tests/e2e/api-sweep/README.md
+.PHONY: api-sweep bundle-sweep old-id-scan
+api-sweep:
+	@bash tests/e2e/api-sweep/run.sh $(ARGS)
+
+bundle-sweep:
+	@bash tests/e2e/bundle-sweep/run.sh $(ARGS)
+
+old-id-scan:
+	@bash tests/e2e/old-id-scan.sh

@@ -269,3 +269,6 @@ coverage/
 # (CI helm v3 loaded a stale tgz -> unbounded spire-auto-enroll hook, #1395). Keep the
 # unpacked dir as the single source of truth.
 /k8s/helm/waddlebot/charts/*.tgz
+
+tests/e2e/webui-sweep/results/
+tests/e2e/node_modules/

@@ -178,6 +178,7 @@ impl AppState {
             Arc::new(crate::egress::hls::EmptyRunningPipelines)
                 as Arc<dyn crate::egress::hls::RunningPipelines>,
         );
+        let config_for_ledger = config.cli.clone();
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
@@ -188,10 +189,35 @@ impl AppState {
             whip_state,
             whep_state,
             rooms,
-            token_ledger: Arc::new(TokenLedgerClient::new()),
+            token_ledger: Arc::new(token_ledger_from_config(&config_for_ledger)),
             record: RecordReadiness::default(),
         }
     }
+}
+
+/// Builds the hub-api ledger client with this service's own machine-JWT credential
+/// (`SERVICE_JWT_TOKEN_ENDPOINT` + the projected ServiceAccount token). An unset endpoint is
+/// logged at ERROR once at boot and leaves the client credential-less: every admission debit then
+/// fails loud (`credential_unavailable`) rather than borrowing a member's token.
+///
+/// # Panics
+/// On an invalid endpoint/CA (a misconfigured pod crashes at boot).
+fn token_ledger_from_config(cli: &crate::config::CliConfig) -> TokenLedgerClient {
+    let client = TokenLedgerClient::new();
+    let Some(endpoint) = cli.service_jwt_token_endpoint.as_deref() else {
+        tracing::error!(
+            "SERVICE_JWT_TOKEN_ENDPOINT is unset: transcode-admission debits will fail loud (credential_unavailable) and streams start as passthrough"
+        );
+        return client;
+    };
+    let bearer = service_auth::BoundMachineJwtClient::with_timeouts(
+        endpoint,
+        cli.service_jwt_sa_token_path.clone(),
+        crate::billing::token_ledger::SCOPE_TOKEN_DEBIT,
+        service_auth::HttpTimeouts::from_env(),
+    )
+    .expect("SERVICE_JWT_TOKEN_ENDPOINT / HUB_API_GRPC_CA_FILE invalid for the machine-JWT client");
+    client.with_bearer_source(Arc::new(bearer))
 }
 
 /// Route label used when a request matched no route (404s, scanners). A

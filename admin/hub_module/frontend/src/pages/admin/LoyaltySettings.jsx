@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 /**
  * Admin config editor for one community's MVP core-currency loyalty system
@@ -16,6 +17,7 @@ function LoyaltySettings() {
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
+  const [gated, setGated] = useState(false);
   const [message, setMessage] = useState(null);
 
   useEffect(() => {
@@ -29,6 +31,7 @@ function LoyaltySettings() {
       const response = await adminApi.getLoyaltyConfig(communityId);
       setConfig(response.data.data);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       console.error('[LoyaltySettings] Load config failed', { communityId, status: err.response?.status });
       setMessage({ type: 'error', text: 'Failed to load loyalty configuration' });
     } finally {
@@ -103,6 +106,10 @@ function LoyaltySettings() {
     }
     const numValue = parseInt(value, 10);
     updateField(key, Number.isNaN(numValue) ? null : numValue);
+  }
+
+  if (gated) {
+    return <UpgradeNotice feature="Loyalty" />;
   }
 
   if (loading) {

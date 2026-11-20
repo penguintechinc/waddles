@@ -378,7 +378,70 @@ class TestCreditAuthz:
 
 
 class TestDebitAuthz:
-    """Debit is a community-member action -- own-community consumption."""
+    """Debit mutates the community ledger -- community-admin action (`token.billing:manage`)."""
+
+    async def test_plain_member_cannot_debit(self, client: Any, token_billing_db: Any) -> None:
+        """regression: unscoped-routes -- a plain member must not drain the community balance."""
+        product_id = _seed_product(token_billing_db)
+        community_id = _seed_community(token_billing_db)
+        _seed_balance(
+            token_billing_db, community_id=community_id, product_id=product_id, balance=10
+        )
+        headers = _member_headers(token_billing_db, community_id=community_id)
+
+        response = await client.post(
+            cpath(
+                token_billing_db,
+                "/api/v1/marketplace/communities/{community_id}/tokens/debit",
+                community_id,
+            ),
+            headers=headers,
+            json={"product_key": "ai_call", "amount": 3, "reason": "drain"},
+        )
+
+        assert response.status_code == 403
+        row = (
+            token_billing_db.dal(
+                token_billing_db.dal.community_token_balances.community_id == community_id
+            )
+            .select()
+            .first()
+        )
+        assert row.balance == 10
+
+    async def test_cross_tenant_admin_cannot_debit(
+        self, client: Any, token_billing_db: Any
+    ) -> None:
+        """A community-admin of ANOTHER tenant's community is refused (no ledger mutation)."""
+        _seed_product(token_billing_db)
+        other_tenant_id = token_billing_db.dal.tenants.insert(slug="other-tenant", is_active=True)
+        token_billing_db.dal.commit()
+        community_id = _seed_community(token_billing_db, tenant_id=other_tenant_id)
+        headers = _admin_headers(token_billing_db, community_id=community_id)
+
+        response = await client.post(
+            cpath(
+                token_billing_db,
+                "/api/v1/marketplace/communities/{community_id}/tokens/debit",
+                community_id,
+            ),
+            headers=headers,
+            json={"product_key": "ai_call", "amount": 1, "reason": "x"},
+        )
+
+        assert response.status_code in (403, 404)
+
+    async def test_unauthenticated_debit_is_401(self, client: Any, token_billing_db: Any) -> None:
+        community_id = _seed_community(token_billing_db)
+        response = await client.post(
+            cpath(
+                token_billing_db,
+                "/api/v1/marketplace/communities/{community_id}/tokens/debit",
+                community_id,
+            ),
+            json={"product_key": "ai_call", "amount": 1, "reason": "x"},
+        )
+        assert response.status_code == 401
 
     async def test_non_member_cannot_debit(self, client: Any, token_billing_db: Any) -> None:
         product_id = _seed_product(token_billing_db)
@@ -400,13 +463,13 @@ class TestDebitAuthz:
 
         assert response.status_code == 403
 
-    async def test_member_can_debit_own_community(self, client: Any, token_billing_db: Any) -> None:
+    async def test_admin_can_debit_own_community(self, client: Any, token_billing_db: Any) -> None:
         product_id = _seed_product(token_billing_db)
         community_id = _seed_community(token_billing_db)
         _seed_balance(
             token_billing_db, community_id=community_id, product_id=product_id, balance=10
         )
-        headers = _member_headers(token_billing_db, community_id=community_id)
+        headers = _admin_headers(token_billing_db, community_id=community_id)
 
         response = await client.post(
             cpath(
@@ -433,7 +496,7 @@ class TestDebitAuthz:
         product_id = _seed_product(token_billing_db)
         community_id = _seed_community(token_billing_db)
         _seed_balance(token_billing_db, community_id=community_id, product_id=product_id, balance=1)
-        headers = _member_headers(token_billing_db, community_id=community_id)
+        headers = _admin_headers(token_billing_db, community_id=community_id)
 
         response = await client.post(
             cpath(
@@ -453,7 +516,7 @@ class TestDebitAuthz:
     async def test_never_credited_is_402(self, client: Any, token_billing_db: Any) -> None:
         _seed_product(token_billing_db)
         community_id = _seed_community(token_billing_db)
-        headers = _member_headers(token_billing_db, community_id=community_id)
+        headers = _admin_headers(token_billing_db, community_id=community_id)
 
         response = await client.post(
             cpath(
@@ -471,7 +534,7 @@ class TestDebitAuthz:
 
     async def test_unknown_product_is_404(self, client: Any, token_billing_db: Any) -> None:
         community_id = _seed_community(token_billing_db)
-        headers = _member_headers(token_billing_db, community_id=community_id)
+        headers = _admin_headers(token_billing_db, community_id=community_id)
 
         response = await client.post(
             cpath(
@@ -513,7 +576,7 @@ class TestTransactionsAuthz:
         headers = _admin_headers(token_billing_db, community_id=community_id)
 
         # Generate one ledger row via a real debit through the API itself.
-        member_headers = _member_headers(token_billing_db, community_id=community_id, user_id=7)
+        member_headers = headers
         await client.post(
             cpath(
                 token_billing_db,
@@ -606,17 +669,16 @@ class TestTransactionsAuthz:
         _seed_balance(
             token_billing_db, community_id=community_id, product_id=product_id, balance=10
         )
-        member_headers = _member_headers(token_billing_db, community_id=community_id, user_id=7)
+        headers = _admin_headers(token_billing_db, community_id=community_id)
         await client.post(
             cpath(
                 token_billing_db,
                 "/api/v1/marketplace/communities/{community_id}/tokens/debit",
                 community_id,
             ),
-            headers=member_headers,
+            headers=headers,
             json={"product_key": "ai_call", "amount": 1, "reason": "x"},
         )
-        headers = _admin_headers(token_billing_db, community_id=community_id)
 
         # A `start` far in the future excludes the transaction just written.
         response = await client.get(

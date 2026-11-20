@@ -226,7 +226,7 @@ describe('OverlayBuilderTab', () => {
       }),
     );
     render(<OverlayBuilderTab communityId="7" />);
-    expect((await screen.findByRole('alert')).textContent).toContain('not enabled for this plan');
+    expect(await screen.findByText('Upgrade to Premium for this feature')).toBeTruthy();
   });
 
   it('removes a component and aligns another via presets', async () => {

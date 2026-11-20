@@ -37,9 +37,12 @@ from services.guild_pairing import create_pairing
 from tests import demo_pg_support as pg
 from tests.community_ids import install_community_ids
 
-pytestmark = pytest.mark.skipif(
-    not pg.DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not pg.DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
+    ),
+    pytest.mark.usefixtures("bypass_route_guards"),
+]
 
 WRITE = "community.guild_pairing:write"
 READ = "community.guild_pairing:read"

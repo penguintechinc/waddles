@@ -1,7 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { adminApi } from '../../services/api';
-import { ServedFeature } from '../../components/ui';
+import { ServedFeature, isLicensedFeatureError } from '../../components/ui';
 import { isFeatureServed } from '../../lib/unservedFeatures';
 import { UserGroupIcon, PuzzlePieceIcon, ComputerDesktopIcon, GlobeAltIcon } from '@heroicons/react/24/outline';
 
@@ -16,7 +16,11 @@ function AdminHome() {
         // Custom domains have no hub-api route yet: never call them.
         const [members, sources, domains] = await Promise.all([
           adminApi.getMembers(communityId, { limit: 1 }),
-          adminApi.getBrowserSources(communityId),
+          // A gated Browser Sources feature (402) must not blank the member count.
+          adminApi.getBrowserSources(communityId).catch((err) => {
+            if (isLicensedFeatureError(err)) return null;
+            throw err;
+          }),
           isFeatureServed('custom-domains') ? adminApi.getDomains(communityId) : null,
         ]);
         setStats({

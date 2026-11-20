@@ -42,6 +42,22 @@ def client(app: Quart) -> Any:
     return app.test_client()
 
 
+def _seed_membership(dal: Any, community_id: int, user_id: int, *, active: bool = True) -> None:
+    """Insert one `community_members` row (`user_id` is the legacy VARCHAR column)."""
+    dal.community_members.insert(
+        community_id=community_id, user_id=str(user_id), role="member", is_active=active
+    )
+    dal.commit()
+
+
+@pytest.fixture(autouse=True)
+def _seeded_members(support_token_db: Any) -> None:
+    """Users 1 and 2 are active members of the seeded community; 99 is deliberately not."""
+    dal, community_id = support_token_db
+    _seed_membership(dal, community_id, 1)
+    _seed_membership(dal, community_id, 2)
+
+
 async def _post_json(
     client: Any, path: str, headers: dict[str, str], payload: dict[str, Any]
 ) -> Any:
@@ -95,11 +111,171 @@ class TestAuthBypass:
         assert response.status_code == 401
 
 
+class TestMemberGate:
+    """regression: unscoped-routes -- member routes were tenant_middleware-only."""
+
+    async def test_non_member_cannot_read_categories(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=user_auth_headers(user_id=99),
+        )
+        assert response.status_code == 403
+
+    async def test_non_member_cannot_submit_ticket(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=99),
+            {"subject": "spam"},
+        )
+        assert response.status_code == 403
+        assert dal(dal.support_tickets).count() == 0
+
+    async def test_non_member_cannot_list_or_comment_own_tickets(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        mine = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id),
+            headers=user_auth_headers(user_id=99),
+        )
+        one = await client.get(
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}",
+                community_id,
+                ticket_id=1,
+            ),
+            headers=user_auth_headers(user_id=99),
+        )
+        comment = await _post_json(
+            client,
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id=1,
+            ),
+            user_auth_headers(user_id=99),
+            {"content": "hi"},
+        )
+        assert (mine.status_code, one.status_code, comment.status_code) == (403, 403, 403)
+
+    async def test_cross_tenant_community_is_404(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, _ = support_token_db
+        other = dal.tenants.insert(slug="other-tenant", is_active=True)
+        foreign_community = dal.communities.insert(name="foreign", tenant_id=other)
+        dal.commit()
+        _seed_membership(dal, foreign_community, 1)
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", foreign_community),
+            headers=user_auth_headers(user_id=1),
+        )
+        assert response.status_code == 404
+
+    async def test_deactivated_member_is_403(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        _seed_membership(dal, community_id, 50, active=False)
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=user_auth_headers(user_id=50),
+        )
+        assert response.status_code == 403
+
+    async def test_member_can_submit_ticket(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=1),
+            {"subject": "help"},
+        )
+        assert response.status_code == 201
+        assert dal(dal.support_tickets).count() == 1
+
+    async def test_cross_tenant_submit_is_404_and_writes_nothing(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, _ = support_token_db
+        other = dal.tenants.insert(slug="other-tenant-submit", is_active=True)
+        foreign_community = dal.communities.insert(name="foreign-submit", tenant_id=other)
+        dal.commit()
+        _seed_membership(dal, foreign_community, 1)
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", foreign_community),
+            user_auth_headers(user_id=1),
+            {"subject": "spam"},
+        )
+        assert response.status_code == 404
+        assert dal(dal.support_tickets).count() == 0
+
+    async def test_deactivated_member_cannot_submit(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        _seed_membership(dal, community_id, 51, active=False)
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=51),
+            {"subject": "spam"},
+        )
+        assert response.status_code == 403
+        assert dal(dal.support_tickets).count() == 0
+
+    async def test_support_admin_non_member_can_read_categories_but_not_submit(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        headers = user_auth_headers(user_id=99, scope="community.support:admin")
+        read = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=headers,
+        )
+        submit = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            headers,
+            {"subject": "x"},
+        )
+        assert (read.status_code, submit.status_code) == (200, 403)
+
+    async def test_member_gets_2xx(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id),
+            headers=user_auth_headers(user_id=1),
+        )
+        assert response.status_code == 200
+
+    async def test_unauthenticated_is_401(self, client: Any, support_token_db: Any) -> None:
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id)
+        )
+        assert response.status_code == 401
+
+
 class TestScopeEnforcement:
     async def test_categories_read_open_to_any_authenticated_member(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        """Matches Node's plain `requireAuth` (no `requireCommunityAdmin`) on this one route."""
+        """Categories need an ACTIVE community membership (the ticket-form read)."""
         dal, community_id = support_token_db
         response = await client.get(
             cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),

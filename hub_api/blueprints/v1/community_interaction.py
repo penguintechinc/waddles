@@ -29,6 +29,7 @@ from services.community_authz import resolve_editor_scopes
 from services.community_common import (
     api_error,
     community_in_tenant,
+    feature_not_enabled,
     get_current_user,
     is_valid_service_key,
 )
@@ -128,7 +129,7 @@ async def admin_list_channels(community_id: int) -> tuple[dict[str, object], int
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_INTERACTIONS, tenant=ctx.tenant_slug):
-        return api_error("Community interactions are not enabled for this plan", 402)
+        return feature_not_enabled("Community interactions are not enabled for this plan")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     channels = get_hub_channels(current_app.config["dal"], community_id)
@@ -424,7 +425,7 @@ async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[s
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_FORUMS, tenant=ctx.tenant_slug):
-        return api_error("Community forums are not enabled for this plan", 402)
+        return feature_not_enabled("Community forums are not enabled for this plan")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     page = max(1, int(request.args.get("page", "1") or 1))

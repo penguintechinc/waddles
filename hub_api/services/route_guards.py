@@ -98,6 +98,7 @@ def tenant_admin_guard(fn: Any) -> Any:
         try:
             user_id = get_current_user_id(request)
         except ApiError as exc:
+            logger.debug("handled %s in route guard: %s", type(exc).__name__, exc)
             return api_error(exc.message, exc.status_code, exc.code)
         dal = current_app.config["dal"]
         row = (
@@ -142,6 +143,7 @@ def platform_analytics_guard(fn: Any) -> Any:
         try:
             user_id = get_current_user_id(request)
         except ApiError as exc:
+            logger.debug("handled %s in route guard: %s", type(exc).__name__, exc)
             return api_error(exc.message, exc.status_code, exc.code)
         if not _caller_is_platform_analyst(current_app.config["dal"], user_id):
             return api_error("Platform analytics access required", status_code=403)
@@ -168,6 +170,7 @@ def machine_or_community_admin_guard(literal_scope: str) -> Callable[[Any], Any]
             try:
                 scopes = caller_token_scopes(request)
             except ApiError as exc:
+                logger.debug("handled %s in route guard: %s", type(exc).__name__, exc)
                 return api_error(exc.message, exc.status_code, exc.code)
             if literal_scope in scopes:
                 return await fn(*args, **kwargs)
@@ -182,6 +185,7 @@ def machine_or_community_admin_guard(literal_scope: str) -> Callable[[Any], Any]
             try:
                 standing = resolve_caller_standing_sync(request, dal, community_id=community_id)
             except ApiError as exc:
+                logger.debug("handled %s in route guard: %s", type(exc).__name__, exc)
                 return api_error(exc.message, exc.status_code, exc.code)
             if not standing.is_admin:
                 return api_error("Service identity or community admin required", status_code=403)

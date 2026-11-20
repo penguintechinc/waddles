@@ -12,6 +12,7 @@ import {
   ClipboardDocumentListIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 import { FormModalBuilder } from '../../components/FormModal';
 import EventDiscordSyncToggle from '../../components/calendar/EventDiscordSyncToggle';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
@@ -55,6 +56,7 @@ function AdminCalendarEvents() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [message, setMessage] = useState(null);
+  const [gated, setGated] = useState(false);
   const [showModal, setShowModal] = useState(false);
   const [editingEvent, setEditingEvent] = useState(null);
 
@@ -68,6 +70,7 @@ function AdminCalendarEvents() {
       const response = await adminApi.getCalendarEvents(communityId);
       setEvents(response.data?.events || []);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       setError('Failed to load events');
     } finally {
       setLoading(false);
@@ -185,6 +188,10 @@ function AdminCalendarEvents() {
       requires_approval: editingEvent.requires_approval || false,
     };
   }, [editingEvent]);
+
+  if (gated) {
+    return <UpgradeNotice feature="Calendar events" />;
+  }
 
   if (loading) {
     return (

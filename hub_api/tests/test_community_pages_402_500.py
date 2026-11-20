@@ -157,3 +157,6 @@ async def test_gate_off_answers_standard_licensed_feature_402(
     assert body["error"]["code"] == "FEATURE_NOT_ENABLED"
     assert isinstance(body["error"]["message"], str) and body["error"]["message"]
     assert gate.await_args.args[0] == flag
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

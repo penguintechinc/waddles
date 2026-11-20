@@ -392,6 +392,7 @@ RULES: tuple[Rule, ...] = (
     ref("ai_model_config", "updated_by_user_id", reason=_ACTOR),
     ref("ai_token_transactions", "actor_user_id", reason=_ACTOR),
     ref("analytics_suspected_bots", "reviewed_by", reason=_ACTOR),
+    ref("token_transactions", "actor_user_id", reason=_ACTOR),
     ref("announcements", "updated_by", reason=_ACTOR),
     ref(
         "dsar_requests",

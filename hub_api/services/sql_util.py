@@ -2,34 +2,30 @@
 
 Services write readable `$1..$n` SQL; `execute_positional` rewrites the markers into the live
 pydal adapter's native paramstyle (`%s` psycopg2, `?` sqlite3) so the same SQL runs on both.
-Never interpolate values into SQL -- always pass them as placeholders.
+The rewrite is delegated to `flask_core.positional_sql.convert_positional` (the single shared
+tokenizer). Never interpolate values into SQL -- always pass them as placeholders.
 """
 
 from __future__ import annotations
 
-import re
 from typing import Any
 
-_DOLLAR_PARAM = re.compile(r"\$(\d+)")
+from flask_core.positional_sql import PositionalSQLError, convert_positional
+
+__all__ = ["PositionalSQLError", "execute_positional", "positional_sql"]
 
 
 def positional_sql(dal: Any, sql: str, placeholders: list[Any]) -> tuple[str, list[Any]]:
     """Rewrite `$1..$n` markers into the live adapter's native positional marker.
 
     pydal passes SQL to the driver verbatim: psycopg2 (Postgres) wants `%s`, sqlite3 wants `?`,
-    and neither understands `$N` -- Postgres raised `there is no parameter $1` (alpha leaderboard
-    500). Markers may repeat or appear out of order; the returned list is re-expanded to match,
-    one value per occurrence, so callers keep writing readable `$N` SQL.
+    and neither understands `$N`. Delegates to `convert_positional`, so markers inside literals,
+    comments and dollar-quoted bodies are left alone, repeated/out-of-order markers are expanded
+    one value per occurrence, and `$0` or an out-of-range index raises `PositionalSQLError`.
     """
     engine = str(getattr(getattr(dal, "_adapter", None), "dbengine", "")).lower()
     marker = "?" if engine == "sqlite" else "%s"
-    ordered: list[Any] = []
-
-    def _sub(match: re.Match[str]) -> str:
-        ordered.append(placeholders[int(match.group(1)) - 1])
-        return marker
-
-    return _DOLLAR_PARAM.sub(_sub, sql), ordered
+    return convert_positional(sql, placeholders, marker)
 
 
 def execute_positional(dal: Any, sql: str, placeholders: list[Any]) -> Any:

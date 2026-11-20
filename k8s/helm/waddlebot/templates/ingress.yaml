@@ -1,5 +1,16 @@
 {{- if .Values.ingress.enabled -}}
 {{- $fullName := include "waddlebot.fullname" . -}}
+{{- /*
+Defence in depth: hub-api's /api/v1/internal prefix is service-to-service only (machine-JWT) and must
+never be reachable from the public Ingress. Refuse a path naming that prefix, or a prefix covering
+it ("/", "/api", "/api/v1") that targets hub-api directly (hub-webui is the only public front door).
+*/ -}}
+{{- range .Values.ingress.hosts }}{{ range .paths }}
+{{- $p := (.path | toString | lower | trimSuffix "/") }}
+{{- $target := printf "%s %s" ((.service | default "") | toString) ((.rawService | default "") | toString) }}
+{{- if regexMatch "^/api/v[0-9]+/internal" $p }}{{ fail (printf "ingress path %q exposes hub-api internal routes" .path) }}{{ end }}
+{{- if and (contains "hub-api" $target) (regexMatch "^(/api(/v[0-9]+)?)?$" $p) }}{{ fail (printf "ingress path %q routes a prefix covering /api/v1/internal directly to hub-api" .path) }}{{ end }}
+{{- end }}{{ end }}
 {{- if and .Values.ingress.className (not (semverCompare ">=1.18-0" .Capabilities.KubeVersion.GitVersion)) }}
   {{- if not (hasKey .Values.ingress.annotations "kubernetes.io/ingress.class") }}
   {{- $_ := set .Values.ingress.annotations "kubernetes.io/ingress.class" .Values.ingress.className}}

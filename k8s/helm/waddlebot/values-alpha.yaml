@@ -580,6 +580,13 @@ spire:
 # the command flags -- no manual PostHog UI step required either.
 posthog:
   enabled: false
+  # Flags come from the PostHog hosted by the license server (user decision 2026-11-20).
+  # Operator creates Secret `waddlebot-posthog-license` key POSTHOG_API_KEY (see k8s/dal2alpha/APPLY.md);
+  # optional -- absent => FLAG_* env baselines, then default OFF.
+  licenseServer:
+    host: "https://license.penguintech.io"
+    existingSecret: "waddlebot-posthog-license"
+    secretKey: "POSTHOG_API_KEY"
   bootstrap:
     enabled: true
   web:

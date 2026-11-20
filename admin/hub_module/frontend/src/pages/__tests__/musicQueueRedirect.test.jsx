@@ -17,7 +17,7 @@ vi.mock('../../services/api', async (importOriginal) => {
     ...actual,
     adminApi: {
       ...actual.adminApi,
-      updateModuleConfig: vi.fn().mockResolvedValue({ data: { success: true, config: { blacklist: [] } } }),
+      getMusicSettings: vi.fn().mockResolvedValue({ data: { success: true, settings: { blockedArtists: [] } } }),
     },
   };
 });
@@ -50,7 +50,7 @@ describe('legacy music-station removal', () => {
         </Routes>
       </MemoryRouter>,
     );
-    await screen.findByText(/Music Settings Tips/);
+    await screen.findByText('Blocked artists');
     expect(screen.queryByTestId('youtube-labels-section')).toBeNull();
   });
 });

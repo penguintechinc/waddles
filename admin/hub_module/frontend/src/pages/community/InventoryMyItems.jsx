@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArchiveBoxArrowDownIcon, ArrowUturnLeftIcon } from '@heroicons/react/24/outline';
 import { inventoryApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui/UpgradeNotice';
 
 const STATUS_COLORS = {
   active: 'bg-green-500/20 text-green-300 border-green-500/30',
@@ -13,6 +14,7 @@ function InventoryMyItems() {
   const [checkouts, setCheckouts] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [upgrade, setUpgrade] = useState(null);
   const [successMessage, setSuccessMessage] = useState('');
 
   const [showModal, setShowModal] = useState(false);
@@ -30,11 +32,14 @@ function InventoryMyItems() {
     try {
       setLoading(true);
       setError('');
+      setUpgrade(null);
       const res = await inventoryApi.getMyCheckouts(communityId);
       setCheckouts(res.data?.checkouts || []);
     } catch (err) {
       console.error('Failed to load checkouts:', err);
-      setError('Failed to load your claimed items.');
+      if (isLicensedFeatureError(err)) setUpgrade(err.response?.data?.error?.message || '');
+      else if (err.response?.status === 403) setError('Only active members of this community can use the Quartermaster.');
+      else setError('Failed to load your claimed items.');
     } finally {
       setLoading(false);
     }
@@ -95,6 +100,7 @@ function InventoryMyItems() {
         </div>
       )}
 
+      {upgrade !== null && <UpgradeNotice feature="The Quartermaster" serverMessage={upgrade || undefined} />}
       {error && <div className="text-red-400 text-sm">{error}</div>}
 
       {loading ? (

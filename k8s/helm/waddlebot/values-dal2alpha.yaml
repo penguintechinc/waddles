@@ -220,6 +220,16 @@ pipeline:
       FLAG_WADDLES_COMMUNITY_POLLS: "true"
       FLAG_WADDLES_COMMUNITY_FORMS: "true"
       FLAG_WADDLES_STREAMING_STREAM: "true"
+      # Remaining alpha 402s (#1466 sweep): free-tier flags (absent from flask_core.tier_catalog),
+      # so the ENV baseline applies. Licensed flags (loyalty/raffles/inventory/community_health)
+      # are NOT here: env can never stand in for them (entitlement.py) -- PostHog must define them.
+      FLAG_WADDLES_STREAMING_OVERLAYS: "true"
+      FLAG_WADDLES_STREAMING_OVERLAY_BUILDER: "true"
+      FLAG_WADDLES_STREAMING_RTC: "true"
+      FLAG_WADDLES_EVENT_CALENDAR: "true"
+      FLAG_WADDLES_COMMUNITY_CHAT: "true"
+      FLAG_WADDLES_COMMUNITY_INTERACTIONS: "true"
+      FLAG_WADDLES_COMMUNITY_FORUMS: "true"
       # Reserved catch-all tenant slug, explicit (see values-alpha.yaml); mirrors defaultTenantId.
       DEFAULT_TENANT_SLUG: "default"
       # Alpha capacity stopgap: svc-process shares one per-identity internal gRPC bucket (default
@@ -701,6 +711,13 @@ spire:
 # the command flags -- no manual PostHog UI step required either.
 posthog:
   enabled: false
+  # Flags come from the PostHog hosted by the license server (user decision 2026-11-20).
+  # Operator creates Secret `waddlebot-posthog-license` key POSTHOG_API_KEY (see k8s/dal2alpha/APPLY.md);
+  # optional -- absent => FLAG_* env baselines, then default OFF.
+  licenseServer:
+    host: "https://license.penguintech.io"
+    existingSecret: "waddlebot-posthog-license"
+    secretKey: "POSTHOG_API_KEY"
   bootstrap:
     enabled: true
   web:

@@ -29,11 +29,6 @@ _JUSTIFIED_GET_PATHS: dict[str, str] = {
     "/api/v1/communities/<cuuid:community_id>/calls/rooms/<room_id>/hands/mine": "calls._member_actor",
     "/api/v1/communities/<cuuid:community_id>/calls/rooms/<room_id>/participants": "calls._member_actor",
     "/api/v1/marketplace/communities/<cuuid:community_id>/subscriptions": "_require_community_admin",
-    # Out of scope for this change: fixed separately by PR #1469.
-    "/api/v1/admin/<cuuid:community_id>/inventory/items": "community_inventory: PR #1469",
-    "/api/v1/admin/<cuuid:community_id>/inventory/summary": "community_inventory: PR #1469",
-    "/api/v1/admin/<cuuid:community_id>/inventory/log": "community_inventory: PR #1469",
-    "/api/v1/admin/<cuuid:community_id>/inventory/checkouts": "community_inventory: PR #1469",
 }
 JUSTIFIED_UNGUARDED: dict[tuple[str, str], str] = {
     ("GET", path): reason for path, reason in _JUSTIFIED_GET_PATHS.items()
@@ -118,7 +113,7 @@ _INLINE_ENFORCEMENT = re.compile(
     r"require_member_scope|require_community_scope|authorize_community|_require_member|_gated_|"
     r"require_community_admin|require_community_member|_require_community_admin|"
     r"resolve_editor_scopes|_admin_actor|_member_actor|is_community_admin|community_access|"
-    r"_require_admin|_require_manage|member_scopes_sync|resolve_community_membership"
+    r"_require_admin|_require_manage|member_scopes_sync|resolve_community_membership|_guard\(community_id"
 )
 
 #: Path prefix -> reason, for scope-less community routes the walker cannot see enforced.
@@ -129,7 +124,6 @@ NOSCOPE_ALLOWLIST: dict[str, str] = {
     "/api/v1/internal/": "service-key authenticated internal route (not user reachable)",
     "/api/v1/communities/<cuuid:community_id>/join": "join flow: caller acts on their own join",
     "/api/v1/<cuuid:community_id>/join-requests": "UNVERIFIED: own-request flow; PR #1472 triage",
-    "/api/v1/<cuuid:community_id>/github-sync/": "UNVERIFIED: PR #1472 / follow-up",
     "/api/v1/admin/<cuuid:community_id>/join-requests": "UNVERIFIED: PR #1472 / follow-up",
     "/api/v1/admin/<cuuid:community_id>/banner": "UNVERIFIED: PR #1472 / follow-up",
     "/api/v1/admin/<cuuid:community_id>/logo": "UNVERIFIED: PR #1472 / follow-up",
@@ -138,7 +132,6 @@ NOSCOPE_ALLOWLIST: dict[str, str] = {
     "/api/v1/admin/<cuuid:community_id>/reputation/": "UNVERIFIED: PR #1472 / follow-up",
     "/api/v1/admin/<cuuid:community_id>/streams": "UNVERIFIED: PR #1472 / follow-up",
     "/api/v1/admin/<cuuid:community_id>/support/": "UNVERIFIED: PR #1472 / follow-up",
-    "/api/v1/admin/<cuuid:community_id>/workflows": "UNVERIFIED: PR #1472 / follow-up",
     "/api/v1/apps/community/<cuuid:community_id>/bundles/": "UNVERIFIED: PR #1472 / follow-up",
 }
 

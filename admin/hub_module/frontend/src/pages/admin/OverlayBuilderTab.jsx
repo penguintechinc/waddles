@@ -16,6 +16,7 @@ import {
   SparklesIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 /** Canvas presets; the server derives the same sizes from the stored resolution code. */
 const RESOLUTIONS = {
@@ -99,6 +100,7 @@ export default function OverlayBuilderTab({ communityId }) {
   const [components, setComponents] = useState([]);
   const [widgets, setWidgets] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [gated, setGated] = useState(false);
   const [error, setError] = useState(null);
   const [successMsg, setSuccessMsg] = useState(null);
   const [selectedId, setSelectedId] = useState(null);
@@ -138,6 +140,7 @@ export default function OverlayBuilderTab({ communityId }) {
       }
       setWidgets(widgetsRes?.data?.widgets || []);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       setError(apiMessage(err, 'Failed to load the overlay scene layout or available widgets.'));
       setLoading(false);
       return;
@@ -332,6 +335,10 @@ export default function OverlayBuilderTab({ communityId }) {
     };
     window.addEventListener('mousemove', move);
     window.addEventListener('mouseup', up);
+  }
+
+  if (gated) {
+    return <UpgradeNotice feature="The overlay builder" />;
   }
 
   if (loading) {

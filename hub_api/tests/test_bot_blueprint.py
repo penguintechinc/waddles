@@ -18,6 +18,7 @@ port exposes, not integration tests of the downstream services.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -393,10 +394,27 @@ class TestAIChatter:
             headers=auth_headers(scope="bot.ai_chatter:read"),
         )
         assert resp.status_code == 503
-        assert await resp.get_json() == {
-            "error": "service_unavailable",
-            "service": "ai-interaction",
-        }
+        body = await resp.get_json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "AI_CHATTER_UNAVAILABLE"
+        assert "service_unavailable" not in str(body)
+
+    async def test_unconfigured_upstream_put_is_typed_503(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        monkeypatch: Any,
+        community_uuid: str,
+    ) -> None:
+        monkeypatch.delenv("AI_INTERACTION_API_URL", raising=False)
+        resp = await client.put(
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
+            headers=auth_headers(scope="bot.ai_chatter:write"),
+            json={"enabled": True},
+        )
+        assert resp.status_code == 503
+        assert (await resp.get_json())["error"]["code"] == "AI_CHATTER_UNAVAILABLE"
 
     async def test_get_config_proxies_service_response(
         self,
@@ -1301,6 +1319,80 @@ async def test_ai_chatter_service_unavailable_is_typed_503(monkeypatch: pytest.M
         await bot_ai_chatter.update_chatter_config(
             1, bot_ai_chatter.AIChatterConfigUpdate(enabled=True)
         )
+
+
+class TestCredentialRedactionInRejections:
+    """Rejected-request handlers never echo URL userinfo/query or RCON secrets (logs + body)."""
+
+    # Built at runtime so secret scanners don't flag the planted sentinels.
+    _PW = "hunter2" + "-SENTINEL"
+    _TOK = "tok" + "-SENTINEL"
+    SECRET_URL = f"https://admin:{_PW}@127.0.0.1:8443/docs?token={_TOK}"
+    LEAKS = (_PW, _TOK, "admin:hunter2", "SENTINEL")
+
+    @pytest.fixture(autouse=True)
+    def _caller_is_super_admin(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _dal, _uid: True)
+
+    def _assert_clean(self, body: str, caplog: Any) -> None:
+        logs = "\n".join(
+            [r.getMessage() for r in caplog.records]
+            + [str(r.__dict__) for r in caplog.records]
+            + [r.exc_text or "" for r in caplog.records]
+        )
+        for leak in self.LEAKS:
+            assert leak not in body
+            assert leak not in logs
+
+    async def test_create_source_bad_url_not_echoed(
+        self, client: Any, auth_headers: Any, caplog: Any
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        response = await client.post(
+            "/api/v1/admin/ai-knowledge/sources",
+            headers=auth_headers(scope="bot.ai_knowledge:write"),
+            json={
+                "source_name": "Docs",
+                "source_type": "generic_url",
+                "source_url": self.SECRET_URL,
+            },
+        )
+        assert response.status_code == 400
+        body = await response.get_data(as_text=True)
+        assert "source_url rejected" in body
+        assert "127.0.0.1" in body  # redacted origin only
+        self._assert_clean(body, caplog)
+        assert any(r.getMessage() == "bot_request_rejected" for r in caplog.records)
+
+    async def test_update_source_bad_url_not_echoed(
+        self, client: Any, auth_headers: Any, caplog: Any
+    ) -> None:
+        created = await client.post(
+            "/api/v1/admin/ai-knowledge/sources",
+            headers=auth_headers(scope="bot.ai_knowledge:write"),
+            json={"source_name": "Manual", "source_type": "manual"},
+        )
+        source_id = (await created.get_json())["source"]["id"]
+        caplog.set_level(logging.DEBUG)
+        response = await client.put(
+            f"/api/v1/admin/ai-knowledge/sources/{source_id}",
+            headers=auth_headers(scope="bot.ai_knowledge:write"),
+            json={"source_url": self.SECRET_URL},
+        )
+        assert response.status_code == 400
+        self._assert_clean(await response.get_data(as_text=True), caplog)
+
+    async def test_rcon_create_private_host_not_leaking_password(
+        self, client: Any, auth_headers: Any, community_uuid: str, caplog: Any
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        response = await client.post(
+            f"/api/v1/admin/{community_uuid}/rcon/servers",
+            headers=auth_headers(scope="bot.server_manager:admin"),
+            json={"display_name": "S", "host": "10.0.0.5", "password": self._PW},
+        )
+        assert response.status_code == 400
+        self._assert_clean(await response.get_data(as_text=True), caplog)
 
 
 pytestmark = pytest.mark.usefixtures("bypass_route_guards")
