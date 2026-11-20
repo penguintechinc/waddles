@@ -16,7 +16,7 @@ Chat commands that ship as first-party App Bundles. This page covers how they be
 | State scope | kv state is scoped to tenant, community and bundle. No bundle shares state with another. |
 | Mod-only verbs | Checked against the caller's moderator/broadcaster role. If the platform supplies no role information the check fails closed (the verb is refused). |
 | Logging | PII-free. Logs carry platform, operation, counts and exception type, never chat text or usernames. |
-| App id | `waddles.core.example.<name>`, version `1.0.0`. |
+| App id | `penguintechinc.waddles.<name>`, version `1.0.0`. |
 
 Turn a command on by activating its bundle for the community.
 

@@ -20,7 +20,7 @@ Two disjoint identifier spaces, bridged one-way:
 ## Key design decisions (please confirm)
 
 **D1 — Bundle identity split (RECOMMENDED):**
-- `app_id` (reverse-DNS string, e.g. `waddles.core.example.about`) stays the **canonical, signed, public identity** — it remains in the signed manifest and is verified once at load. **Not re-signed, not changed.**
+- `app_id` (reverse-DNS string, e.g. `penguintechinc.waddles.about`) stays the **canonical, signed, public identity** — it remains in the signed manifest and is verified once at load. **Not re-signed, not changed.**
 - A new numeric **`bundle_id`** (surrogate PK on `app_catalog`) becomes the **data-plane routing/FK/lookup key** (active-set, grants, `target_bundle_id` cross-bundle routing, executor load map, consumer-group identity).
 - → The hot path keys on `bundle_id` (numeric); the `app_id` string survives only inside the verified-once manifest + display. **This avoids re-deriving signatures** (signatures stay keyed on `(app_id, version)`), which is the single biggest risk-reducer.
 - **⚠ Two guards this REQUIRES (second-opinion), or it's a hijack vector:** (1) on load-by-`bundle_id`, the host **must assert** `signed_app_id == catalog.app_id(bundle_id)` — else tampering the `bundle_id→app_id` mapping runs attacker bytes under a trusted identity; (2) `app_id` must pass **strict canonical validation** (`^[a-z0-9._-]+$`, NFC) *before* it enters signature verification, since the string stays in the verified path and is still exposed to canonicalization/homoglyph tricks there.
