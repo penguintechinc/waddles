@@ -205,6 +205,7 @@ _BLOCKED_STATUS: dict[str, int] = {
     svc.REASON_INSUFFICIENT_BALANCE: 402,
     svc.REASON_NO_BALANCE: 402,
     svc.REASON_LEDGER_UNAVAILABLE: 503,
+    svc.REASON_IDEMPOTENCY_CONFLICT: 409,
 }
 _BLOCKED_MESSAGES: dict[str, str] = {
     svc.REASON_UNKNOWN_PRODUCT: "Unknown or inactive token product.",
@@ -212,6 +213,9 @@ _BLOCKED_MESSAGES: dict[str, str] = {
     svc.REASON_NO_BALANCE: "This community has no balance for this token product yet.",
     svc.REASON_LEDGER_UNAVAILABLE: (
         "Token ledger is temporarily unavailable -- please try again shortly."
+    ),
+    svc.REASON_IDEMPOTENCY_CONFLICT: (
+        "Idempotency key already used by another request or its replay window has closed."
     ),
 }
 
@@ -438,6 +442,7 @@ async def service_debit_tokens(
             reason=data.reason,
             ref=data.ref,
             idempotency_key=data.idempotency_key,
+            actor_user_id=data.actor_user_id,
         )
     except ApiError as exc:
         return _err(exc)

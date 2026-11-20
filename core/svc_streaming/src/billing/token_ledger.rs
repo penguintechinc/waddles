@@ -63,6 +63,9 @@ pub const REASON_LEDGER_UNAVAILABLE: &str = "ledger_unavailable";
 /// Distinct from `ledger_unavailable` so a misconfigured allow-list is never mistaken for an
 /// outage; always logged at ERROR.
 pub const REASON_LEDGER_FORBIDDEN: &str = "ledger_forbidden";
+/// hub-api refused to replay the idempotency key (reused by another actor/amount or past its
+/// replay window): nothing was debited; the caller must start a NEW admission (new key).
+pub const REASON_IDEMPOTENCY_CONFLICT: &str = "idempotency_key_conflict";
 /// No service credential could be obtained (mint endpoint unset/unreachable/rejected).
 pub const REASON_CREDENTIAL_UNAVAILABLE: &str = "credential_unavailable";
 
@@ -319,6 +322,14 @@ impl TokenLedgerClient {
                 }
             },
             reqwest::StatusCode::PAYMENT_REQUIRED => TokenDebitResult::insufficient_balance(),
+            reqwest::StatusCode::CONFLICT => {
+                tracing::warn!(
+                    community_id,
+                    reason = REASON_IDEMPOTENCY_CONFLICT,
+                    "token_ledger: hub-api refused to replay the admission's idempotency key"
+                );
+                TokenDebitResult::blocked(REASON_IDEMPOTENCY_CONFLICT)
+            }
             status @ (reqwest::StatusCode::UNAUTHORIZED | reqwest::StatusCode::FORBIDDEN) => {
                 tracing::error!(
                     community_id,
@@ -464,6 +475,23 @@ mod tests {
         assert_eq!(captured.body["reason"], "svc_streaming_transcode_admission");
         assert_eq!(captured.body["ref"], "ref-1");
         assert_eq!(captured.body["idempotency_key"], "stream:3:adm-1");
+    }
+
+    #[tokio::test]
+    async fn debit_idempotency_conflict_maps_409_to_blocked_reason() {
+        let (base_url, _seen) = spawn_mock(
+            StatusCode::CONFLICT,
+            serde_json::json!({"success": false, "blocked_reason": "idempotency_key_conflict"}),
+        )
+        .await;
+
+        let result = debit(&test_client(), &base_url).await;
+
+        assert!(!result.ok);
+        assert_eq!(
+            result.blocked_reason.as_deref(),
+            Some(REASON_IDEMPOTENCY_CONFLICT)
+        );
     }
 
     #[tokio::test]

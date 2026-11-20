@@ -1,9 +1,9 @@
 """Token-debit idempotency on a REAL Postgres: concurrent same-key debits charge exactly once.
 
 sqlite cannot show the cross-connection race: pooled connections can all pass the replay
-pre-check and decrement, and only the UNIQUE `idempotency_key` index (alembic 0134) stops the
+pre-check and decrement, and only the UNIQUE `idempotency_key` index (alembic 0135) stops the
 losers' ledger INSERT -- whose rollback must also undo the loser's decrement. The test applies
-0134's own shipped SQL over the 076 ledger tables. Skipped (never failed) without docker.
+0135's own shipped SQL over the 076 ledger tables. Skipped (never failed) without docker.
 """
 
 from __future__ import annotations
@@ -58,9 +58,9 @@ CREATE TABLE IF NOT EXISTS token_transactions (
 
 
 def _migration_sql() -> tuple[str, ...]:
-    """Load alembic 0134's own statements so the test exercises the shipped DDL."""
-    path = _ALEMBIC_DIR / "versions" / "0134_token_debit_idempotency.py"
-    spec = importlib.util.spec_from_file_location("mig_0134", path)
+    """Load alembic 0135's own statements so the test exercises the shipped DDL."""
+    path = _ALEMBIC_DIR / "versions" / "0135_token_debit_idempotency.py"
+    spec = importlib.util.spec_from_file_location("mig_0135", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -69,7 +69,7 @@ def _migration_sql() -> tuple[str, ...]:
 
 @pytest.fixture(scope="module")
 def pg() -> Iterator[PgTestDatabase]:
-    """Migrated Postgres with the 076 ledger tables plus 0134's idempotency column/index."""
+    """Migrated Postgres with the 076 ledger tables plus 0135's idempotency column/index."""
     with migrated_postgres(f"token-idem-{os.getpid()}") as db:
         conn = psycopg2.connect(db.dsn)
         try:
@@ -143,7 +143,9 @@ def _balance_and_rows(pg: PgTestDatabase, community_id: int) -> tuple[int, int]:
         conn.close()
 
 
-async def _debit(adal: AsyncDAL, community_id: int, key: str | None) -> Any:
+async def _debit(
+    adal: AsyncDAL, community_id: int, key: str | None, actor: int | None = None
+) -> Any:
     return await debit_tokens(
         adal,
         adal.dal,
@@ -152,6 +154,7 @@ async def _debit(adal: AsyncDAL, community_id: int, key: str | None) -> Any:
         amount=3,
         reason="t",
         idempotency_key=key,
+        actor_user_id=actor,
     )
 
 
@@ -173,3 +176,14 @@ async def test_replay_then_new_key(pg: PgTestDatabase, adal: AsyncDAL) -> None:
     assert replay.transaction_id == first.transaction_id
     assert other.transaction_id != first.transaction_id
     assert _balance_and_rows(pg, cid) == (24, 2)
+
+
+async def test_racing_actors_on_one_key_charge_once(pg: PgTestDatabase, adal: AsyncDAL) -> None:
+    """Racing actors on one key: exactly one debit; every other actor is refused (409 outcome)."""
+    cid = _seed(pg, balance=30)
+    results = await asyncio.gather(*[_debit(adal, cid, "shared", actor=n) for n in range(1, 7)])
+    winners = [r for r in results if r.ok]
+    refused = [r for r in results if not r.ok]
+    assert len(winners) >= 1
+    assert all(r.blocked_reason == "idempotency_key_conflict" for r in refused)
+    assert _balance_and_rows(pg, cid) == (27, 1)

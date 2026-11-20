@@ -9,6 +9,7 @@ amount is bounded by `TOKEN_DEBIT_MAX_AMOUNT`. The real-Postgres cross-connectio
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import pytest
@@ -38,7 +39,13 @@ def _balance(db: Any, community_id: int, product_id: int) -> int:
     return int(row.balance)
 
 
-async def _debit(db: Any, community_id: int, amount: int = 3, key: str | None = None) -> Any:
+async def _debit(
+    db: Any,
+    community_id: int,
+    amount: int = 3,
+    key: str | None = None,
+    actor: int | None = None,
+) -> Any:
     return await debit_tokens(
         db,
         db.dal,
@@ -47,6 +54,7 @@ async def _debit(db: Any, community_id: int, amount: int = 3, key: str | None = 
         amount=amount,
         reason="t",
         idempotency_key=key,
+        actor_user_id=actor,
     )
 
 
@@ -121,3 +129,67 @@ async def test_overlong_key_rejected(token_billing_db: Any) -> None:
     cid, _ = _setup(token_billing_db)
     with pytest.raises(ApiError):
         await _debit(token_billing_db, cid, amount=1, key="x" * 200)
+
+
+async def test_same_key_different_actor_is_rejected_not_replayed(token_billing_db: Any) -> None:
+    cid, pid = _setup(token_billing_db)
+    first = await _debit(token_billing_db, cid, key="adm", actor=1)
+    other = await _debit(token_billing_db, cid, key="adm", actor=2)
+    assert first.ok
+    assert not other.ok
+    assert other.blocked_reason == svc.REASON_IDEMPOTENCY_CONFLICT
+    assert _balance(token_billing_db, cid, pid) == 7
+
+
+async def test_same_key_different_amount_is_rejected(token_billing_db: Any) -> None:
+    cid, pid = _setup(token_billing_db)
+    assert (await _debit(token_billing_db, cid, amount=3, key="adm", actor=1)).ok
+    changed = await _debit(token_billing_db, cid, amount=5, key="adm", actor=1)
+    assert changed.blocked_reason == svc.REASON_IDEMPOTENCY_CONFLICT
+    assert _balance(token_billing_db, cid, pid) == 7
+
+
+async def test_retry_within_ttl_replays_exactly_once(token_billing_db: Any) -> None:
+    cid, pid = _setup(token_billing_db)
+    first = await _debit(token_billing_db, cid, key="adm", actor=1)
+    retry = await _debit(token_billing_db, cid, key="adm", actor=1)
+    assert retry.ok and retry.transaction_id == first.transaction_id
+    assert _balance(token_billing_db, cid, pid) == 7
+
+
+async def test_reuse_after_ttl_is_rejected_never_a_free_replay(
+    token_billing_db: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cid, pid = _setup(token_billing_db)
+    dal = token_billing_db.dal
+    first = await _debit(token_billing_db, cid, key="adm", actor=1)
+    assert first.ok
+    # Age the recorded debit past the default 10-minute window.
+    old = datetime.now(UTC) - timedelta(seconds=svc.DEFAULT_IDEMPOTENCY_TTL_SECONDS + 5)
+    dal(dal.token_transactions.id == first.transaction_id).update(created_at=old)
+    dal.commit()
+    late = await _debit(token_billing_db, cid, key="adm", actor=1)
+    assert not late.ok
+    assert late.blocked_reason == svc.REASON_IDEMPOTENCY_CONFLICT
+    assert _balance(token_billing_db, cid, pid) == 7
+
+    # The window is configurable: a longer TTL makes the same row replayable again.
+    monkeypatch.setenv("TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS", "3600")
+    assert (await _debit(token_billing_db, cid, key="adm", actor=1)).ok
+    assert _balance(token_billing_db, cid, pid) == 7
+
+
+async def test_new_admission_after_a_started_one_debits_again(token_billing_db: Any) -> None:
+    """svc-streaming ends a run's key once it has started; the next start uses a new key."""
+    cid, pid = _setup(token_billing_db)
+    assert (await _debit(token_billing_db, cid, key="run-1", actor=1)).ok
+    assert (await _debit(token_billing_db, cid, key="run-2", actor=1)).ok
+    assert _balance(token_billing_db, cid, pid) == 4
+
+
+def test_ttl_defaults_and_bad_env_fall_back(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS", raising=False)
+    assert svc.idempotency_ttl_seconds() == svc.DEFAULT_IDEMPOTENCY_TTL_SECONDS == 600
+    for bad in ("x", "0", "-1"):
+        monkeypatch.setenv("TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS", bad)
+        assert svc.idempotency_ttl_seconds() == svc.DEFAULT_IDEMPOTENCY_TTL_SECONDS

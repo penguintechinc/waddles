@@ -1,29 +1,37 @@
 # Token debit: idempotency, amount bound, and route exposure
 
-## Idempotent debits
+## Idempotent debits (retry guard, not a coupon)
 
 `POST /api/v1/internal/communities/{id}/tokens/debit` (machine JWT, `svc-streaming` only) accepts an
-optional `idempotency_key` (1-128 chars).
+optional `idempotency_key` (1-128 chars). It identifies ONE admission attempt.
 
-- The key is scoped to community + product and stored on `token_transactions.idempotency_key`
-  (alembic `0134_token_debit_idempotency`; partial UNIQUE index, NULL for un-keyed rows).
-- A repeat of a key debits nothing and returns the ORIGINAL `balance_after` / `transaction_id`.
-- Concurrent same-key requests debit once: the UNIQUE index arbitrates, and the loser rolls back
-  its own decrement before returning the original result.
-- Un-keyed debits behave exactly as before (no de-duplication).
-- A replay returns the original result even if the retried request's `amount` differs.
+- Stored on `token_transactions.idempotency_key` (scoped to community + product) with the
+  `actor_user_id` it was for (alembic `0135_token_debit_idempotency`; partial UNIQUE index).
+- Same key, same actor, same amount, within the replay window: nothing is debited and the ORIGINAL
+  `balance_after` / `transaction_id` is returned. Concurrent same-key requests debit once (the
+  UNIQUE index arbitrates; the loser rolls back its own decrement).
+- Same key from a different actor, with a different amount, or older than the window: **409**
+  `idempotency_key_conflict`, nothing debited, nothing replayed.
+- Window: `TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS` (default `600`; non-integer or non-positive falls
+  back to the default).
+- Un-keyed debits behave as before (no de-duplication).
 
-svc-streaming sends `stream:{community_id}:{config_id}:{admission_id}` (never a timestamp).
-`admission_id` is the client's `Idempotency-Key` header on `POST .../configs/{id}/start`
-(`[A-Za-z0-9._-]`, max 64 chars); a client MUST reuse the same value when retrying one start
-attempt. With no (or an invalid) header a fresh UUID is used, i.e. the request is a new attempt and
-is not replay-protected.
+### svc-streaming key derivation
+
+`stream:{community_id}:{config_id}:{actor_user_id}:{run_session_id}`. The run-session id is
+allocated by svc-streaming itself the first time an actor starts a config and reused for retries of
+that start; the client's `Idempotency-Key` header is NOT used (a client reusing one key on every
+start would otherwise get free replays). The key is retired as soon as the pipeline has started (a
+later start after a stop is a new admission and debits again), on stop, and when hub-api answers
+409. A retry of a start whose pipeline is already running is neither admitted nor billed. Sessions
+are held in process memory; a svc-streaming restart between a debit and its retry bills the retry
+as a new admission.
 
 ## Maximum amount
 
 A single debit is rejected with 400 when `amount` exceeds `TOKEN_DEBIT_MAX_AMOUNT` (hub-api env,
-default `10000`; a non-integer or non-positive value falls back to the default). The bound applies
-to every `debit_tokens` caller, not only the internal route.
+default `10000`; a non-integer or non-positive value falls back to the default). It applies to
+every `debit_tokens` caller, not only the internal route.
 
 ## `/api/v1/internal/*` is not public
 
