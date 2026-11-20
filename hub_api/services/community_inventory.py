@@ -306,7 +306,7 @@ def get_audit_log(
                ii.name, hu.display_name
         FROM inventory_log il
         JOIN inventory_items ii ON il.item_id = ii.id
-        LEFT JOIN hub_users hu ON il.performed_by_user_id = hu.id
+        LEFT JOIN hub_users hu ON il.user_id = hu.id
         WHERE ii.community_id = $1
     """
     params: list[Any] = [community_id]

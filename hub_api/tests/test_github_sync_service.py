@@ -169,6 +169,31 @@ class TestCreateRepoConnectionValidation:
             )
 
 
+class TestBindIdempotentWithSupportBinder:
+    def test_binding_after_support_binder_reuses_support_tables(self, automation_db: Any) -> None:
+        """Regression: no `table already defined: support_tickets` at startup.
+
+        `bind_support_token_tables()` ran first on the same DAL.
+        """
+        from services.schema import bind_support_token_tables
+
+        dal = automation_db.dal
+        bind_support_token_tables(dal)
+        before = {f for f in dal.support_tickets.fields}
+        svc.bind_github_sync_tables(dal)  # must not raise
+        svc.bind_github_sync_tables(dal)  # and stays idempotent
+        assert {f for f in dal.support_tickets.fields} == before  # richer def reused
+        assert "github_repo_connections" in dal.tables
+
+    def test_binding_before_support_binder_still_works(self, automation_db: Any) -> None:
+        from services.schema import bind_support_token_tables
+
+        dal = automation_db.dal
+        svc.bind_github_sync_tables(dal)
+        bind_support_token_tables(dal)  # support binder guards per table
+        assert "support_tickets" in dal.tables
+
+
 class TestGetRepoConnectionsDecryptFailure:
     async def test_corrupted_token_masks_as_stars(self, automation_db: Any) -> None:
         dal = automation_db.dal

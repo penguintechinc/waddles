@@ -10,7 +10,7 @@
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
         test-data-plane-parity test-connector-parity gen-connector-parity-expected \
-        check-proto test-hub-api test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
+        check-proto test-hub-api audit-schema-drift test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -283,6 +283,10 @@ release-auto-merge:
 #   make test-hub-api PYTEST_ARGS="tests/test_config.py -x"
 test-hub-api:
 	@bash scripts/test-hub-api.sh $(PYTEST_ARGS)
+
+# Code-vs-DB drift audit: every pydal column under hub_api/ vs a fresh-replayed throwaway Postgres.
+audit-schema-drift:
+	@python3 scripts/audit_schema_drift.py
 
 test-unit:
 	@echo "Running unit tests..."
