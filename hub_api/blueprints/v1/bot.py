@@ -132,7 +132,7 @@ async def _require_community_admin_inline(
     community_id: int,
 ) -> tuple[dict[str, Any], int] | None:
     """403 unless the caller administers `community_id` (run after `_require_community`)."""
-    if not _caller_administers(community_id):
+    if not await _to_thread(_caller_administers, community_id):
         return _error("Community admin access required", 403, "FORBIDDEN")
     return None
 
@@ -315,6 +315,7 @@ async def get_shoutout_config(community_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/shoutout/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(ShoutoutConfigRequest)
 @validate_response(ShoutoutConfigResponse)
 async def update_shoutout_config(data: ShoutoutConfigRequest, community_id: int) -> Any:
@@ -357,6 +358,7 @@ async def get_shoutout_creators(community_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/shoutout/creators", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(ShoutoutCreatorRequest)
 async def add_shoutout_creator(data: ShoutoutCreatorRequest, community_id: int) -> Any:
     """`api.js` `addShoutoutCreator` -- `POST /api/v1/admin/:communityId/shoutout/creators`.
@@ -394,6 +396,7 @@ async def add_shoutout_creator(data: ShoutoutCreatorRequest, community_id: int) 
 @bot_bp.route("/<cuuid:community_id>/shoutout/creators/<int:creator_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(ShoutoutMessageResponse)
 async def remove_shoutout_creator(community_id: int, creator_id: int) -> Any:
     """`api.js` `removeShoutoutCreator` -- `DELETE .../shoutout/creators/:creatorId`."""
@@ -518,6 +521,7 @@ async def get_ai_chatter_config(community_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/ai-chatter/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_CHATTER_WRITE)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(AIChatterConfigRequest)
 @validate_response(AIChatterConfigResponse)
 async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: int) -> Any:
@@ -755,7 +759,7 @@ def _is_super_admin_sync(dal: Any, user_id: int) -> bool:
 
 async def _caller_is_super_admin() -> bool:
     """True when the authenticated caller is a global super admin."""
-    return await _to_thread(_is_super_admin_sync, _dal(), _user_id())
+    return bool(await _to_thread(_is_super_admin_sync, _dal(), _user_id()))
 
 
 async def _scope_allowed(community_id: int | None, vendor_id: int | None) -> bool:
@@ -774,7 +778,7 @@ async def _scope_allowed(community_id: int | None, vendor_id: int | None) -> boo
         # so on its own it would let a maintainer of another community drive this one's sources.
         return bool(
             await _to_thread(community_belongs_to_tenant, _dal(), community_id, ctx.tenant_id)
-        ) and _caller_administers(community_id)
+        ) and bool(await _to_thread(_caller_administers, community_id))
     uid = _user_id()
     return vendor_id is not None and uid > 0 and vendor_id == uid
 
@@ -799,17 +803,23 @@ async def _load_authorized_source(source_id: int) -> bool:
 
 
 async def _require_query_scope(community_id: int | None) -> tuple[dict[str, Any], int] | None:
-    """Scope gate for search/suggest: tenant-checked `community_id`, or super admin if omitted.
+    """Gate for list/search/suggest: community admin of a tenant-checked community, or super admin.
 
-    Without it a tenant admin could vector-search every community's knowledge chunks.
+    Without it a tenant admin could vector-search every community's knowledge chunks. With no
+    community only a global super admin passes (400 otherwise, as before).
     """
     if community_id is not None:
-        return await _require_community(community_id) or await _require_community_admin_inline(
-            community_id
-        )
-    if not await _caller_is_super_admin():
+        not_in_tenant = await _require_community(community_id)
+        if not_in_tenant:
+            return not_in_tenant
+    is_admin = community_id is not None and await _to_thread(_caller_administers, community_id)
+    if is_admin:
+        return None
+    if community_id is None:
+        if await _caller_is_super_admin():
+            return None
         return _error("communityId is required", 400, "BAD_REQUEST")
-    return None
+    return _error("Community admin access required", 403, "FORBIDDEN")
 
 
 @bot_bp.route("/ai-knowledge/sources", methods=["GET"])
@@ -828,16 +838,11 @@ async def list_knowledge_sources() -> Any:
     if raw_community:
         community_id = await resolve_public_community_id(raw_community)
         if community_id is None:
-            return _error("communityId must be a community UUID", 400, "BAD_REQUEST")
-    if community_id is None:
-        if not await _caller_is_super_admin():
-            return _error("communityId is required", 400, "BAD_REQUEST")
-    else:
-        denied = await _require_community(community_id) or await _require_community_admin_inline(
-            community_id
-        )
-        if denied:
-            return denied
+            # Same answer as a foreign-tenant community: no existence oracle.
+            return api_error("Community not found", status_code=404)
+    denied = await _require_query_scope(community_id)
+    if denied:
+        return denied
     sources = await _to_thread(bot_ai_knowledge.list_knowledge_sources, _dal(), community_id)
     return KnowledgeSourcesResponse(success=True, sources=await _source_dtos(sources))
 
@@ -985,8 +990,6 @@ async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
         return _error("query is required", 400, "BAD_REQUEST")
     community_id = await to_internal_community_id(data.communityId)
     denied = await _require_query_scope(community_id)
-    if denied is None and community_id is not None:
-        denied = await _require_community_admin_inline(community_id)
     if denied:
         return denied
     try:
@@ -1209,6 +1212,7 @@ class CommandLogResponse:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(ServersResponse)
 async def list_rcon_servers(community_id: int) -> Any:
     """`api.js` `rconApi.listServers` -- `GET .../:communityId/rcon/servers` (admin view)."""
@@ -1222,6 +1226,7 @@ async def list_rcon_servers(community_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(ServerCreateRequest)
 @validate_response(ServerResponse, 201)
 async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> Any:
@@ -1260,6 +1265,7 @@ async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> An
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(ServerUpdateRequest)
 @validate_response(ServerResponse)
 async def update_rcon_server(data: ServerUpdateRequest, community_id: int, server_id: int) -> Any:
@@ -1303,6 +1309,7 @@ async def update_rcon_server(data: ServerUpdateRequest, community_id: int, serve
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_rcon_server(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.deleteServer` -- `DELETE .../:communityId/rcon/servers/:serverId`."""
@@ -1324,6 +1331,7 @@ async def delete_rcon_server(community_id: int, server_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/test", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(TestConnectionRequest)
 async def test_rcon_connection(
     data: TestConnectionRequest, community_id: int, server_id: int
@@ -1348,6 +1356,7 @@ async def test_rcon_connection(
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/command", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(ExecuteCommandRequest)
 async def execute_rcon_command(
     data: ExecuteCommandRequest, community_id: int, server_id: int
@@ -1373,6 +1382,7 @@ async def execute_rcon_command(
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/kick", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(KickPlayerRequest)
 async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.kickPlayer` -- proxy passthrough, see module docstring."""
@@ -1401,6 +1411,7 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/ban", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(BanPlayerRequest)
 async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.banPlayer` -- proxy passthrough, see module docstring."""
@@ -1430,6 +1441,7 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def get_rcon_channels(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getChannels` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1442,6 +1454,7 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/move", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(MoveUserRequest)
 async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.moveUser` -- proxy passthrough, see module docstring."""
@@ -1465,6 +1478,7 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/message", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(SendMessageRequest)
 async def send_rcon_message(data: SendMessageRequest, community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.sendMessage` -- proxy passthrough, see module docstring."""
@@ -1493,6 +1507,7 @@ async def send_rcon_message(data: SendMessageRequest, community_id: int, server_
 @bot_bp.route("/<cuuid:community_id>/rcon/log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(CommandLogResponse)
 async def get_rcon_command_log(community_id: int) -> Any:
     """`api.js` `rconApi.getCommandLog` -- `GET /api/v1/admin/:communityId/rcon/log`."""
@@ -1516,6 +1531,7 @@ async def get_rcon_command_log(community_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/policy", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getAccessPolicy` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1528,6 +1544,7 @@ async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/policy", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.updateAccessPolicy` -- proxy passthrough, see module docstring.
 
@@ -1546,6 +1563,7 @@ async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/enforce", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.triggerEnforcement` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1558,6 +1576,7 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/access-log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getAccessLog` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)

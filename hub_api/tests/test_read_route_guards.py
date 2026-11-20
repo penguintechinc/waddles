@@ -118,6 +118,11 @@ NOSCOPE_ALLOWLIST: dict[str, str] = {
     "/api/v1/<cuuid:community_id>/join-requests": (
         "own-request flow: tenant fence services/join_request_service.py:115, own data only"
     ),
+    "/api/v1/admin/<cuuid:community_id>/inventory/": (
+        "member self-service: DB membership gate services/community_inventory_authz.py:115 "
+        "(`require_inventory_member`); deny tests tests/test_community_inventory.py::"
+        "TestMemberRoutesAuthorizeThroughTheCommunity"
+    ),
     "/api/v1/admin/<cuuid:community_id>/support/": (
         "member self-service + category list: DB membership gate blueprints/v1/support.py:92 "
         "(`_member_gate`); deny tests tests/test_v1_support_blueprint.py::TestMemberGate"
