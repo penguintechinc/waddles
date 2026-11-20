@@ -28734,7 +28734,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Submit a join request (self-service, own resource).
+      summary: Submit a join request (self-service; tenant-fenced, rate-limited, one
+        pending per user).
   /api/v1/{community_id}/join-requests/mine:
     get:
       description: ''

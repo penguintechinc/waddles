@@ -35,11 +35,12 @@ user_id_from_JWT)` instead.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -50,6 +51,7 @@ from services.errors import ApiError
 from services.pagination import parse_limit
 
 join_request_bp = Blueprint("v1_join_request", __name__, url_prefix="/api/v1")
+logger = logging.getLogger(__name__)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -155,14 +157,22 @@ class SimpleSuccessResponse:
 # crash documented in services/dto_response.py. jsonify_dto() is the
 # equivalent-safety workaround.
 async def submit_request(community_id: int, data: SubmitJoinRequestBody) -> tuple[Any, int]:
-    """Submit a join request (self-service, own resource)."""
+    """Submit a join request (self-service; tenant-fenced, rate-limited, one pending per user)."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # noqa: S101  # nosec B101
     try:
         user_id = get_current_user_id(request)
         submitted = await svc.submit_request(
-            async_dal, dal, community_id=community_id, user_id=user_id, message=data.message
+            async_dal,
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            tenant_id=ctx.tenant_id,
+            message=data.message,
         )
     except ApiError as exc:
+        logger.warning("join_request.submit_rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return jsonify_dto(
         SubmitJoinRequestResponse(
