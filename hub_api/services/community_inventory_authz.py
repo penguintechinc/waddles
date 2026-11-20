@@ -17,6 +17,7 @@ is authorised by membership in THAT community, never by a session-wide grant.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,6 +31,8 @@ from services.scope_registry import SCOPE_COMMUNITY_ADMIN
 
 BANNED_ROLE = "banned"
 
+logger = logging.getLogger(__name__)
+
 
 def _is_tenant_admin(dal: Any, ctx: TenantContext, user_id: int) -> bool:
     """True iff `user_id` holds a `tenant_admins` row for the caller's tenant."""
@@ -42,17 +45,35 @@ def _is_tenant_admin(dal: Any, ctx: TenantContext, user_id: int) -> bool:
     )
 
 
-def _soft_banned(dal: Any, community_id: int, user_uuid: str | None) -> bool:
-    """True iff the member has an unexpired soft-ban in this community."""
-    if not user_uuid:
-        return False
+def _identity_tokens(dal: Any, user_id: int, member: Any) -> set[str]:
+    """Every identity token the soft-ban table may key this member on.
+
+    The authoritative source is `hub_users.uuid` (looked up by the validated caller's numeric id,
+    never by anything on the membership row); the member row's own `user_uuid` is added too, so
+    a ban keyed on either token applies. An empty set means identity is unresolvable.
+    """
+    tokens: set[str] = set()
+    if "hub_users" in dal.tables and "uuid" in dal.hub_users.fields:
+        row = dal(dal.hub_users.id == user_id).select(dal.hub_users.uuid).first()
+        if row is not None and row.uuid:
+            tokens.add(str(row.uuid))
+    member_uuid = getattr(member, "user_uuid", None)
+    if member_uuid:
+        tokens.add(str(member_uuid))
+    return tokens
+
+
+def _soft_banned(dal: Any, community_id: int, user_uuids: set[str]) -> bool:
+    """True iff any of the member's identity tokens has an unexpired soft-ban in this community."""
+    if not user_uuids:
+        raise ValueError("soft-ban check requires at least one resolved identity token")
     _ensure_reputation_tables(dal)
     bans = dal.bundle_reputation_soft_bans
     now = datetime.now(UTC)  # expires_at is TIMESTAMPTZ (alembic 0097): compare aware, never naive
     return bool(
         dal(
             (bans.community_id == community_id)
-            & (bans.user_uuid == user_uuid)
+            & bans.user_uuid.belongs(sorted(user_uuids))
             & ((bans.expires_at == None) | (bans.expires_at > now))  # noqa: E711 - pydal idiom
         ).count()
     )
@@ -82,7 +103,17 @@ def require_inventory_member(
     role = getattr(member, "role", None)
     if isinstance(role, str) and role.strip().lower() == BANNED_ROLE:
         raise forbidden("Community membership required")
-    if _soft_banned(dal, community_id, getattr(member, "user_uuid", None)):
+    tokens = _identity_tokens(dal, user_id, member)
+    if not tokens:
+        # Fail closed: without an identity token the soft-ban table cannot be consulted.
+        logger.error(
+            "inventory soft-ban check denied: unresolvable identity "
+            "(community_id=%s, user_id=%s)",
+            community_id,
+            user_id,
+        )
+        raise forbidden("Community membership required")
+    if _soft_banned(dal, community_id, tokens):
         raise forbidden("Community membership required")
 
 
