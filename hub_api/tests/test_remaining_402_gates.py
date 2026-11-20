@@ -104,17 +104,46 @@ def entitlement_client(monkeypatch: pytest.MonkeyPatch) -> Any:
     return _install
 
 
-@pytest.fixture(autouse=True)
-def _inventory_authz_allows(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Neutralise inventory's per-community authz: this file pins the TIER/FLAG gate only.
+@pytest.fixture
+def community_db(community_db: Any) -> Any:
+    """Extend conftest's `community_db` with the real tables + rows the inventory guards read.
 
-    The authz gate (member/admin, tenant_admins + role tables the minimal `community_db` here does
-    not build) is covered end-to-end in `test_community_inventory.py`.
+    Builds the auth/membership/reputation tables (incl. `tenant_admins`) and seeds user 1 as an
+    active owner of the community, so the real per-community authz stack runs (nothing mocked).
     """
-    import blueprints.v1.community_inventory as inventory_module
+    from services.community_reputation_service import _ensure_reputation_tables
 
-    monkeypatch.setattr(inventory_module, "require_inventory_admin", lambda *_a, **_k: None)
-    monkeypatch.setattr(inventory_module, "require_inventory_member", lambda *_a, **_k: None)
+    dal, community_id = community_db
+    # conftest's fixture binds `tenant_admins` metadata-only (migrate=False): materialise it.
+    dal.define_table(
+        "tenant_admins",
+        dal.Field("tenant_id", "integer", notnull=True),
+        dal.Field("user_id", "integer", notnull=True),
+        dal.Field("role", "string", length=50, default="tenant-admin"),
+        dal.Field("created_at", "datetime"),
+        migrate=True,
+        redefine=True,
+    )
+    _ensure_reputation_tables(dal, migrate=True)
+    if not dal(dal.hub_users.id == 1).count():
+        dal.hub_users.insert(username="user1")
+    owner_role = dal.community_roles.insert(
+        community_id=community_id,
+        name="community-owner",
+        is_system=True,
+        role_kind=1,
+        base_claims={"scopes": []},
+    )
+    dal.community_members.insert(
+        community_id=community_id,
+        user_id="1",
+        role="community-owner",
+        is_active=True,
+        user_uuid="uuid-owner",
+        community_role_id=owner_role,
+    )
+    dal.commit()
+    return dal, community_id
 
 
 def _app(bp: Any, dal: Any) -> Quart:
