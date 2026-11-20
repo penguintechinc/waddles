@@ -6,11 +6,13 @@ import {
   UserIcon,
 } from '@heroicons/react/24/outline';
 import { calendarApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 function MyBookings() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [gated, setGated] = useState(false);
   const [activeTab, setActiveTab] = useState('host');
   const [bookings, setBookings] = useState([]);
   const [filter, setFilter] = useState('upcoming');
@@ -28,6 +30,7 @@ function MyBookings() {
       });
       setBookings(response.data.bookings || []);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       setError('Failed to load bookings');
     } finally {
       setLoading(false);
@@ -65,6 +68,10 @@ function MyBookings() {
         return <span className="badge">{status}</span>;
     }
   };
+
+  if (gated) {
+    return <UpgradeNotice feature="My bookings" />;
+  }
 
   if (loading) {
     return (

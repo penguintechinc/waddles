@@ -10,12 +10,14 @@ import {
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
 import OverlayBuilderTab from './OverlayBuilderTab';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 function AdminStreamOverlays() {
   const { communityId } = useParams();
   const [activeTab, setActiveTab] = useState('all-in-one');
 
   // All-in-One Overlay state
+  const [gated, setGated] = useState(false);
   const [overlay, setOverlay] = useState(null);
   const [stats, setStats] = useState(null);
   const [overlayLoading, setOverlayLoading] = useState(true);
@@ -42,6 +44,7 @@ function AdminStreamOverlays() {
       const response = await adminApi.getOverlay(communityId);
       setOverlay(response.data.overlay);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       setOverlayError('Failed to load overlay');
       console.error(err);
     } finally {
@@ -102,6 +105,7 @@ function AdminStreamOverlays() {
       const response = await adminApi.getBrowserSources(communityId);
       setSources(response.data.sources);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       console.error('Failed to fetch sources:', err);
     } finally {
       setSourcesLoading(false);
@@ -135,6 +139,10 @@ function AdminStreamOverlays() {
     { id: 'builder', label: 'Overlay Builder' },
     { id: 'individual', label: 'Individual Sources' },
   ];
+
+  if (gated) {
+    return <UpgradeNotice feature="Stream overlays" />;
+  }
 
   return (
     <div className="space-y-6">

@@ -11,6 +11,7 @@ import ChatChannelList from '../../components/chat/ChatChannelList';
 import ChatWindow from '../../components/chat/ChatWindow';
 import ChatInput from '../../components/chat/ChatInput';
 import RealtimeUnavailableBanner from '../../components/chat/RealtimeUnavailableBanner';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 export default function CommunityChat() {
   const { id } = useParams();
@@ -23,6 +24,7 @@ export default function CommunityChat() {
   const [typingUsers, setTypingUsers] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [gated, setGated] = useState(false);
 
   // Load channels on mount
   useEffect(() => {
@@ -146,6 +148,7 @@ export default function CommunityChat() {
         .then((res) => setMessages(res.data?.messages || []))
         .catch((err) => {
           console.error('[CommunityChat] History load failed', { message: err?.message });
+          if (isLicensedFeatureError(err)) setGated(true);
           setError('Failed to load chat history');
         })
         .finally(() => setLoading(false));
@@ -186,6 +189,10 @@ export default function CommunityChat() {
     setTypingUsers([]);
     setLoading(true);
   };
+
+  if (gated) {
+    return <UpgradeNotice feature="Community chat" />;
+  }
 
   return (
     <div className="min-h-screen bg-surface flex flex-col">

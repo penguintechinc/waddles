@@ -19,7 +19,7 @@ from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
-from services.community_common import community_in_tenant
+from services.community_common import community_in_tenant, feature_not_enabled
 from services.community_raffle import (
     MAX_FILE_SIZE_BYTES,
     VALID_EVENT_TYPES,
@@ -54,10 +54,7 @@ async def list_route(community_id: int) -> tuple[dict[str, object], int]:
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_RAFFLES, tenant=ctx.tenant_slug):
-        return {
-            "success": False,
-            "error": {"message": "Community raffles require a Professional plan or higher"},
-        }, 402
+        return feature_not_enabled("Community raffles require a Professional plan or higher")
     if not _tenant_ok(community_id):
         return {"success": False, "error": {"message": "Community not found"}}, 404
     customizations = get_customizations(current_app.config["dal"], community_id)
