@@ -14,14 +14,17 @@
 use axum::extract::{Path, State};
 use axum::Extension;
 use sea_orm::DatabaseConnection;
-use time::OffsetDateTime;
+use std::collections::HashMap;
+use std::sync::{LazyLock, Mutex};
 
-use crate::billing::token_ledger::TokenLedgerClient;
+use crate::billing::token_ledger::{TokenLedgerClient, REASON_IDEMPOTENCY_CONFLICT};
 use crate::db::entities::streaming_config;
 use crate::error::ApiError;
 use crate::http::auth::AuthenticatedClaims;
 use crate::http::AppState;
-use crate::pipeline::{InputSpec, ObjectStoreRef, OutputSpec, PipelineError, PipelineSpec};
+use crate::pipeline::{
+    InputSpec, ObjectStoreRef, OutputSpec, PipelineError, PipelineSpec, PipelineState,
+};
 use crate::spec_builder::{plan_push_outputs, DEFAULT_PROFILE};
 
 use super::common::{enabled_targets, fetch_config, pipeline_id_for_config};
@@ -54,6 +57,70 @@ fn map_pipeline_error(err: PipelineError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idempotency_key_is_stable_across_retries_and_timestamp_free() {
+        let first = admission_idempotency_key(7, 3, 42, "adm-1");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let retry = admission_idempotency_key(7, 3, 42, "adm-1");
+        assert_eq!(first, retry);
+        assert_eq!(first, "stream:7:3:42:adm-1");
+        assert_ne!(first, admission_idempotency_key(7, 3, 42, "adm-2"));
+        assert_ne!(first, admission_idempotency_key(7, 4, 42, "adm-1"));
+        assert_ne!(first, admission_idempotency_key(8, 3, 42, "adm-1"));
+        assert_ne!(first, admission_idempotency_key(7, 3, 43, "adm-1"));
+    }
+
+    /// Mirrors `resolve_transcode_admission`'s key derivation for a header-less request.
+    fn headerless_key(community_id: i32, config_id: i32, actor: i64) -> String {
+        let id = run_session_id(community_id, config_id, actor);
+        admission_idempotency_key(community_id, config_id, actor, &id)
+    }
+
+    #[test]
+    fn headerless_retries_of_the_same_admission_produce_the_same_key() {
+        // Distinct ids so this test cannot interact with others sharing the process-wide map.
+        let (community, config, actor) = (9_001, 9_002, 9_003);
+        let first = headerless_key(community, config, actor);
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let retry = headerless_key(community, config, actor);
+        assert_eq!(first, retry, "a retry must reuse the run's key");
+        assert!(first.starts_with("stream:9001:9002:9003:"));
+
+        // Another member starting the same config is a different admission.
+        assert_ne!(first, headerless_key(community, config, actor + 1));
+    }
+
+    #[test]
+    fn a_started_admission_key_is_never_reused_for_a_new_start() {
+        let (community, config, actor) = (9_201, 9_202, 9_203);
+        let first = headerless_key(community, config, actor);
+        // The pipeline started: its admission is spent.
+        end_run_session(community, config, actor);
+        let second = headerless_key(community, config, actor);
+        assert_ne!(first, second, "a new admission must carry a new key");
+        // ...and a retry of that new admission is stable again.
+        assert_eq!(second, headerless_key(community, config, actor));
+    }
+
+    #[test]
+    fn a_refused_key_is_retired_without_touching_other_actors() {
+        let (community, config) = (9_301, 9_302);
+        let mine = headerless_key(community, config, 1);
+        let other = headerless_key(community, config, 2);
+        end_run_session(community, config, 1);
+        assert_ne!(mine, headerless_key(community, config, 1));
+        assert_eq!(other, headerless_key(community, config, 2));
+    }
+
+    #[test]
+    fn stop_ends_the_actors_run_so_the_next_start_is_a_new_admission() {
+        let (community, config, actor) = (9_101, 9_102, 9_103);
+        let first = headerless_key(community, config, actor);
+        assert_eq!(first, headerless_key(community, config, actor));
+        end_run_session(community, config, actor);
+        assert_ne!(first, headerless_key(community, config, actor));
+    }
 
     #[test]
     fn map_pipeline_error_covers_every_variant() {
@@ -137,6 +204,61 @@ fn actor_user_id(claims: &crate::http::auth::Claims) -> Option<i64> {
     claims.sub.parse::<i64>().ok().filter(|id| *id > 0)
 }
 
+/// Upper bound on tracked run sessions; the map is cleared when reached so it cannot grow without
+/// bound (worst case: an in-flight retry after a clear is billed as a new admission).
+const MAX_RUN_SESSIONS: usize = 10_000;
+
+/// `(community_id, config_id, actor_user_id)` -> the run-session id svc-streaming allocated for the
+/// admission in progress. Held in process memory, like the pipeline registry it mirrors.
+type RunSessions = Mutex<HashMap<(i32, i32, i64), String>>;
+
+static RUN_SESSIONS: LazyLock<RunSessions> = LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Stable debit idempotency key for one admission:
+/// `stream:{community}:{config}:{actor}:{admission_id}`.
+///
+/// Deterministic in its inputs and deliberately timestamp-free, so a retry of the same admission
+/// produces the same key and hub-api debits once. The admission id is ALWAYS server-derived
+/// ([`run_session_id`]) -- never taken from the client, which could otherwise reuse one key on
+/// every start for free replays. The actor is part of the key so one member's admission can never
+/// satisfy another's (hub-api additionally rejects a key replayed by a different actor, and any
+/// replay older than its short TTL).
+pub fn admission_idempotency_key(
+    community_id: i32,
+    config_id: i32,
+    actor_user_id: i64,
+    admission_id: &str,
+) -> String {
+    format!("stream:{community_id}:{config_id}:{actor_user_id}:{admission_id}")
+}
+
+/// The run-session id svc-streaming allocates the first time an actor starts a config and then
+/// reuses for every retry of that start until the run is started, stopped or refused ([`end_run_session`]).
+///
+/// This is what makes a header-less retry produce the SAME debit key: the id is allocated once per
+/// run, not per request, so it is neither a timestamp nor re-rolled on retry. A stop followed by a
+/// later start allocates a fresh one -- a genuinely new run is billed again.
+fn run_session_id(community_id: i32, config_id: i32, actor_user_id: i64) -> String {
+    let mut sessions = RUN_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
+    if sessions.len() >= MAX_RUN_SESSIONS {
+        sessions.clear();
+    }
+    sessions
+        .entry((community_id, config_id, actor_user_id))
+        .or_insert_with(|| uuid::Uuid::new_v4().to_string())
+        .clone()
+}
+
+/// Ends one actor's run session for a config -- after a successful start (so the key is never
+/// reused for a later start) or when hub-api refused to replay it (so the next attempt gets a new
+/// key instead of being stuck on a dead one).
+fn end_run_session(community_id: i32, config_id: i32, actor_user_id: i64) {
+    RUN_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(&(community_id, config_id, actor_user_id));
+}
+
 /// TRANSCODE admission (BLOCK-WITH-FALLBACK, ported from the Python
 /// alpha's `services/streaming_service.py::start_forwarding`): if
 /// `config.transcode_enabled` is false, no ledger call is made and this
@@ -148,6 +270,10 @@ fn actor_user_id(claims: &crate::http::auth::Claims) -> Option<i64> {
 /// resolves to `false` -- `start()` still succeeds and the stream still
 /// starts, just as a passthrough. Never returns an `Err`: a
 /// billing/entitlement check must never take down a live-stream start.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat inputs of one admission decision, all resolved by the single caller"
+)]
 async fn resolve_transcode_admission(
     token_ledger: &TokenLedgerClient,
     hub_api_url: &str,
@@ -172,11 +298,10 @@ async fn resolve_transcode_admission(
         return false;
     };
 
-    let reference = format!(
-        "stream:{}:{}",
-        config.id,
-        crate::timestamp::to_rfc3339_offset(OffsetDateTime::now_utc())
-    );
+    let admission_id = run_session_id(community_id, config.id, actor_user_id);
+    let idempotency_key =
+        admission_idempotency_key(community_id, config.id, actor_user_id, &admission_id);
+    let reference = format!("stream:{}", config.id);
     let result = token_ledger
         .debit_transcoding_tokens(
             hub_api_url,
@@ -185,8 +310,13 @@ async fn resolve_transcode_admission(
             transcode_token_cost,
             transcode_product_key,
             &reference,
+            &idempotency_key,
         )
         .await;
+
+    if result.blocked_reason.as_deref() == Some(REASON_IDEMPOTENCY_CONFLICT) {
+        end_run_session(community_id, config.id, actor_user_id);
+    }
 
     if result.ok {
         tracing::info!(
@@ -233,6 +363,16 @@ pub async fn start(
 ) -> Result<ApiSuccess<PipelineStatusDto>, ApiError> {
     assert_tenant_owns_community(&db, &claims.tenant, community_id).await?;
     let config = fetch_config(&db, community_id, config_id).await?;
+    // A retry of a start that already succeeded (the client lost the response) must neither be
+    // admitted nor billed again: report the pipeline that is already up.
+    if let Ok(status) = engine.status(pipeline_id_for_config(config.id)).await {
+        if matches!(
+            status.state,
+            PipelineState::Starting | PipelineState::Running | PipelineState::Degraded
+        ) {
+            return Ok(ApiSuccess::ok(status.into()));
+        }
+    }
     let transcode_applied = resolve_transcode_admission(
         &state.token_ledger,
         &state.config.cli.hub_api_url,
@@ -252,6 +392,11 @@ pub async fn start(
     )
     .await?;
     let handle = engine.start(spec).await.map_err(map_pipeline_error)?;
+    // The pipeline is up: this admission is spent. Retire its key so a later start (after a stop)
+    // is a NEW admission that debits again -- a key is never reused across stream lifecycles.
+    if let Some(actor) = actor_user_id(&claims) {
+        end_run_session(community_id, config.id, actor);
+    }
     let status = engine.status(handle.id).await.map_err(map_pipeline_error)?;
     Ok(ApiSuccess::ok(status.into()))
 }
@@ -282,6 +427,10 @@ pub async fn stop(
     let config = fetch_config(&db, community_id, config_id).await?;
     let id = pipeline_id_for_config(config.id);
     engine.stop(id).await.map_err(map_pipeline_error)?;
+    // Retire only the stopping actor's session: other members' in-flight admissions are theirs.
+    if let Some(actor) = actor_user_id(&claims) {
+        end_run_session(community_id, config.id, actor);
+    }
     Ok(ApiSuccess::ok(PipelineStatusDto {
         id,
         state: "stopped".to_string(),

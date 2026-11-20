@@ -20688,6 +20688,12 @@ paths:
                 amount:
                   title: Amount
                   type: integer
+                idempotency_key:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idempotency Key
                 product_key:
                   title: Product Key
                   type: string

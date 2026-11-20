@@ -8,6 +8,7 @@
  */
 import http from 'node:http';
 import https from 'node:https';
+import { isBlockedApiPath } from './internal-guard.js';
 
 /** Hop-by-hop headers (RFC 9110 7.6.1) that must not be forwarded by a proxy. */
 const HOP_BY_HOP = new Set([
@@ -103,6 +104,13 @@ export function createProxy(target, options = {}) {
       : new http.Agent({ keepAlive: true });
 
   return function proxy(req, res) {
+    // Defence in depth: hub-api's /api/v{N}/internal/* is service-to-service only and must never
+    // be reachable through this public proxy -- refuse (404) before anything is forwarded.
+    if (isBlockedApiPath(req.originalUrl)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not Found' }));
+      return;
+    }
     const upstreamReq = transport.request(
       {
         protocol: upstream.protocol,
