@@ -196,10 +196,29 @@ async def post_version(
     )
 
 
+def _authorize_version_read(app_id: str) -> ApiError | None:
+    """403 unless the caller is a platform admin, or a vendor reading their OWN namespace.
+
+    Version state exposes reject reasons, scan status and artifact digests -- onboarding
+    data for platform admins and the owning vendor only, never any tenant member. Mirrors
+    the POST route's `platform:admin` OR (`vendor:onboard` + own namespace) rule.
+    """
+    try:
+        auth = authorize_onboarding_scope(request, app_id=app_id)
+        if not auth.is_admin:
+            enforce_vendor_namespace(app_id=app_id, caller_id=get_current_user_id(request))
+    except ApiError as exc:
+        return exc
+    return None
+
+
 @bundle_versions_bp.route("/<app_id>/versions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-async def list_versions_route(app_id: str) -> dict[str, object]:
-    """Every uploaded version of `app_id`, newest first."""
+async def list_versions_route(app_id: str) -> dict[str, object] | tuple[dict[str, object], int]:
+    """Every uploaded version of `app_id`, newest first (platform admin / owning vendor)."""
+    denied = _authorize_version_read(app_id)
+    if denied is not None:
+        return _err(denied)
     install_dal = _install_dal()
     rows = await svc.list_versions(install_dal, app_id=app_id)
     return {
@@ -212,7 +231,13 @@ async def list_versions_route(app_id: str) -> dict[str, object]:
 @tenant_middleware  # type: ignore[misc]
 @validate_response(VersionDTO)
 async def get_version(app_id: str, version: str) -> VersionDTO | tuple[dict[str, object], int]:
-    """The state-machine state, reject reason (if any), scan status and digest for one version."""
+    """The state-machine state, reject reason (if any), scan status and digest for one version.
+
+    Platform admin or the owning vendor only -- see `_authorize_version_read`.
+    """
+    denied = _authorize_version_read(app_id)
+    if denied is not None:
+        return _err(denied)
     install_dal = _install_dal()
     try:
         row = await svc.get_version(install_dal, app_id=app_id, version=version)

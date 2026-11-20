@@ -335,15 +335,21 @@ async def debit_tokens(
 ) -> TokenLedgerResponse | tuple[dict[str, object], int]:
     """Spend tokens from a community's balance -- the HTTP face of a metered feature's own spend.
 
-    Community-member action (`admin=False`): a member consuming a
-    premium feature on their own community's behalf, not a financial/
-    admin operation. Other backend features that meter their own
-    consumption should call `token_billing_service.debit_tokens()`
-    directly instead of round-tripping through this HTTP endpoint.
+    Community-admin action (`admin=True` + `token.billing:manage`): a debit mutates the
+    community's money-equivalent ledger, so a plain member must never be able to drain it.
+    Backend features that meter their own consumption call
+    `token_billing_service.debit_tokens()` directly instead of this HTTP endpoint.
     """
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=False)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_TOKEN_BILLING,
+        )
         result = await svc.debit_tokens(
             async_dal,
             dal,
