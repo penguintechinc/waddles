@@ -145,7 +145,7 @@ describe('AnnouncementsPanel', () => {
       throw httpError(402, { error: 'plan' });
     });
     const first = renderWithProviders(<AnnouncementsPanel communityId={'00000007-0000-4000-8000-000000000000'} canManage />);
-    expect(await screen.findByText('This feature requires a higher plan for this community')).toBeInTheDocument();
+    expect(await screen.findByText('Upgrade to Premium for this feature')).toBeInTheDocument();
     first.unmount();
     mockApiGet(() => {
       throw httpError(503, { error: 'service_unavailable' });

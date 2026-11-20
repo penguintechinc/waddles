@@ -150,7 +150,7 @@ describe('VoiceView', () => {
     it('flag off (402) shows "not enabled for this community" and no create button', async () => {
       serve({ [`GET ${BASE}`]: httpError(402, envelope('FEATURE_NOT_ENABLED', 'Calls / RTC is not enabled for this plan')) });
       renderView({ communityId: '00000007-0000-4000-8000-000000000000', allowAdHocVoice: true });
-      expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Calls are not enabled for this community');
+      expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Upgrade to Premium for this feature');
       expect(screen.queryByRole('button', { name: 'Create room' })).not.toBeInTheDocument();
       expect(screen.queryByTestId('voice-no-rooms')).not.toBeInTheDocument();
     });

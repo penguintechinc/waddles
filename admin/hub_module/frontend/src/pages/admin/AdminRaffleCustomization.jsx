@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
 import { useParams } from 'react-router-dom';
 import api from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 import { onActivate } from '../../components/ui/a11y';
 import {
   SpeakerWaveIcon,
@@ -331,6 +332,7 @@ function AdminRaffleCustomization() {
   const [customizations, setCustomizations] = useState({});
   const [loading, setLoading] = useState(true);
   const [pageMessage, setPageMessage] = useState(null);
+  const [gated, setGated] = useState(false);
 
   useEffect(() => {
     console.log('[AdminRaffleCustomization] Mounting', { communityId });
@@ -348,6 +350,7 @@ function AdminRaffleCustomization() {
         });
       }
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       console.error('[AdminRaffleCustomization] Failed to load', { error: err?.message });
       setPageMessage({ type: 'error', text: 'Failed to load raffle customizations' });
     } finally {
@@ -398,6 +401,10 @@ function AdminRaffleCustomization() {
     } else {
       throw new Error(response.data.error?.message || 'Upload failed');
     }
+  }
+
+  if (gated) {
+    return <UpgradeNotice feature="Raffle customization" />;
   }
 
   if (loading) {

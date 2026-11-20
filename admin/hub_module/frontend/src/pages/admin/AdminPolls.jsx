@@ -8,6 +8,7 @@ import {
   ClockIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError, getErrorMessage } from '../../components/ui';
 import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
 
@@ -16,6 +17,7 @@ function AdminPolls() {
   const [polls, setPolls] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [gated, setGated] = useState(false);
   const [message, setMessage] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedPoll, setSelectedPoll] = useState(null);
@@ -30,7 +32,11 @@ function AdminPolls() {
       const response = await adminApi.getPolls(communityId);
       setPolls(response.data?.polls || []);
     } catch (err) {
-      setError('Failed to load polls');
+      if (isLicensedFeatureError(err)) {
+        setGated(true);
+      } else {
+        setError('Failed to load polls');
+      }
     } finally {
       setLoading(false);
     }
@@ -58,7 +64,7 @@ function AdminPolls() {
       setShowCreateModal(false);
       loadPolls();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to create poll');
+      setError(getErrorMessage(err, 'Failed to create poll'));
       throw err;
     }
   };
@@ -70,7 +76,7 @@ function AdminPolls() {
       setMessage({ type: 'success', text: 'Poll deleted' });
       loadPolls();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to delete poll');
+      setError(getErrorMessage(err, 'Failed to delete poll'));
     }
   };
 
@@ -149,6 +155,10 @@ function AdminPolls() {
     if (!poll.vote_counts) return 0;
     return Object.values(poll.vote_counts).reduce((sum, count) => sum + count, 0);
   };
+
+  if (gated) {
+    return <UpgradeNotice feature="Polls" />;
+  }
 
   if (loading) {
     return (

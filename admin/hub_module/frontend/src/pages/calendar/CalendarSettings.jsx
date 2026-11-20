@@ -8,6 +8,7 @@ import {
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { calendarApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 const TIMEZONES = [
   'America/New_York',
@@ -47,6 +48,7 @@ function CalendarSettings() {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [gated, setGated] = useState(false);
   const [syncing, setSyncing] = useState({});
 
   const [connectedCalendars, setConnectedCalendars] = useState([]);
@@ -74,13 +76,19 @@ function CalendarSettings() {
     loadData();
   }, []);
 
+  // A licensed-feature 402 must reach the outer catch (upgrade notice); other failures degrade to defaults.
+  const keepGated = (fallback) => (err) => {
+    if (isLicensedFeatureError(err)) throw err;
+    return fallback;
+  };
+
   const loadData = async () => {
     try {
       setLoading(true);
       const [calendarsRes, settingsRes, weeklyRes] = await Promise.all([
-        calendarApi.getConnectedCalendars().catch(() => ({ data: { calendars: [] } })),
-        calendarApi.getAvailabilitySettings().catch(() => ({ data: { settings: {} } })),
-        calendarApi.getWeeklyAvailability().catch(() => ({ data: { availability: {} } })),
+        calendarApi.getConnectedCalendars().catch(keepGated({ data: { calendars: [] } })),
+        calendarApi.getAvailabilitySettings().catch(keepGated({ data: { settings: {} } })),
+        calendarApi.getWeeklyAvailability().catch(keepGated({ data: { availability: {} } })),
       ]);
       setConnectedCalendars(calendarsRes.data.calendars || []);
       if (settingsRes.data.settings) {
@@ -90,6 +98,7 @@ function CalendarSettings() {
         setWeeklyAvailability({ ...weeklyAvailability, ...weeklyRes.data.availability });
       }
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       setError('Failed to load settings');
     } finally {
       setLoading(false);
@@ -170,6 +179,10 @@ function CalendarSettings() {
       });
     }
   };
+
+  if (gated) {
+    return <UpgradeNotice feature="Calendar" />;
+  }
 
   if (loading) {
     return (

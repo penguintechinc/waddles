@@ -15,6 +15,8 @@ import {
   ExclamationTriangleIcon,
 } from '@heroicons/react/24/outline';
 import { vendorApi } from '../../services/api';
+import { PanelErrorState } from '../../components/ui';
+import { asArray, unwrapEnvelope, normalizeDiscountCodePage, normalizeModules } from './vendorWire';
 
 // ─── Toast ────────────────────────────────────────────────────────────────────
 
@@ -298,7 +300,7 @@ function CodeModal({ open, onClose, onSaved, editCode, modules }) {
               className="w-full bg-navy-900 border border-navy-600 text-white rounded-lg px-3 py-2 text-sm focus:border-sky-500"
             >
               <option value="">All My Modules</option>
-              {modules.map((m) => (
+              {asArray(modules).map((m) => (
                 <option key={m.id} value={m.id}>{m.name}</option>
               ))}
             </select>
@@ -524,13 +526,12 @@ function VendorDiscountCodes() {
       const params = { page: pageNum, limit: LIMIT };
       if (statusFilter !== 'all') params.status = statusFilter;
       const response = await vendorApi.getDiscountCodes(params);
-      const data = response.data;
-      setCodes(data?.codes || data?.items || []);
-      const total = data?.total || data?.pagination?.total || 0;
+      const { codes: rows, total } = normalizeDiscountCodePage(unwrapEnvelope(response));
+      setCodes(rows);
       setTotalPages(Math.max(1, Math.ceil(total / LIMIT)));
       setError(null);
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to load discount codes.');
+      setError(err);
       setCodes([]);
     } finally {
       setLoading(false);
@@ -540,7 +541,7 @@ function VendorDiscountCodes() {
   const loadModules = useCallback(async () => {
     try {
       const response = await vendorApi.getModules();
-      setModules(response.data?.modules || []);
+      setModules(normalizeModules(response.data));
     } catch {
       setModules([]);
     }
@@ -628,7 +629,7 @@ function VendorDiscountCodes() {
 
   const getModuleName = (module_id) => {
     if (!module_id) return 'All Modules';
-    const mod = modules.find((m) => String(m.id) === String(module_id));
+    const mod = asArray(modules).find((m) => String(m.id) === String(module_id));
     return mod ? mod.name : 'Unknown Module';
   };
 
@@ -699,9 +700,11 @@ function VendorDiscountCodes() {
 
         {/* Error */}
         {error && (
-          <div className="bg-red-500/10 border border-red-500/20 text-red-400 px-4 py-3 rounded-lg text-sm">
-            {error}
-          </div>
+          <PanelErrorState
+            feature="Discount codes"
+            error={error}
+            onRetry={() => loadCodes(page, filter)}
+          />
         )}
 
         {/* Filter tabs */}
@@ -726,7 +729,7 @@ function VendorDiscountCodes() {
           <div className="flex items-center justify-center h-48">
             <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-gold-400" />
           </div>
-        ) : codes.length === 0 ? (
+        ) : error ? null : codes.length === 0 ? (
           /* Empty state */
           <div className="bg-navy-800 border border-navy-700 rounded-lg p-12 text-center">
             <TicketIcon className="w-14 h-14 text-navy-600 mx-auto mb-4" />

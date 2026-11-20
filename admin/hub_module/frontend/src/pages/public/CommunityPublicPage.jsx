@@ -57,7 +57,8 @@ function CommunityPublicPage() {
         if (err.response?.status === 403) {
           setError('restricted');
         } else {
-          setError(err.response?.data?.error || 'Community not found');
+          // hub-api's error body is `{ error: { code, message } }`; render its message, never the object.
+          setError(getErrorMessage(err, 'Community not found'));
         }
       } finally {
         setLoading(false);

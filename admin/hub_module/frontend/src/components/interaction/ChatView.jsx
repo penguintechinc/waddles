@@ -2,6 +2,7 @@ import { useState, useEffect, useRef } from 'react';
 import { HashtagIcon, PaperAirplaneIcon } from '@heroicons/react/24/outline';
 import api from '../../services/api';
 import RealtimeUnavailableBanner from '../chat/RealtimeUnavailableBanner';
+import { UpgradeNotice, isLicensedFeatureError } from '../ui';
 
 /**
  * Channel chat view. With a live socket it joins/streams; when `degraded`
@@ -11,6 +12,7 @@ import RealtimeUnavailableBanner from '../chat/RealtimeUnavailableBanner';
 export default function ChatView({ channel, socket, degraded = false }) {
   const [messages, setMessages] = useState([]);
   const [inputValue, setInputValue] = useState('');
+  const [gated, setGated] = useState(false);
   const messagesEndRef = useRef(null);
   const channelName = channel ? 'hub-channel-' + channel.id : null;
 
@@ -34,6 +36,7 @@ export default function ChatView({ channel, socket, degraded = false }) {
       })
       .catch((err) => {
         console.error('[ChatView] History load failed', { message: err?.message });
+        if (!cancelled && isLicensedFeatureError(err)) setGated(true);
       });
     return () => {
       cancelled = true;
@@ -125,6 +128,10 @@ export default function ChatView({ channel, socket, degraded = false }) {
         Select a channel to start chatting
       </div>
     );
+  }
+
+  if (gated) {
+    return <UpgradeNotice feature="Community chat" />;
   }
 
   return (

@@ -3,7 +3,15 @@ import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
 import { CheckIcon, XMarkIcon } from '@heroicons/react/24/outline';
 
+/** True when hub-api reports the AI Chatter backend is not deployed (503 AI_CHATTER_UNAVAILABLE). */
+export function isChatterUnavailable(err) {
+  const status = err?.response?.status;
+  const code = err?.response?.data?.error?.code;
+  return code === 'AI_CHATTER_UNAVAILABLE' || status === 503;
+}
+
 function AdminAIChatterConfig() {
+  const [unavailable, setUnavailable] = useState(false);
   const { communityId } = useParams();
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
@@ -18,10 +26,15 @@ function AdminAIChatterConfig() {
     setLoading(true);
     try {
       const response = await adminApi.getAIChatterConfig(communityId);
-      setConfig(response.data);
+      // hub-api envelope is `{success, config}`; tolerate a bare config object too.
+      setConfig(response.data?.config ?? response.data);
     } catch (err) {
       console.error('Failed to fetch AI Chatter config:', err);
-      setMessage({ type: 'error', text: 'Failed to load AI Chatter configuration' });
+      if (isChatterUnavailable(err)) {
+        setUnavailable(true);
+      } else {
+        setMessage({ type: 'error', text: 'Failed to load AI Chatter configuration' });
+      }
     } finally {
       setLoading(false);
     }
@@ -50,6 +63,14 @@ function AdminAIChatterConfig() {
     return (
       <div className="flex justify-center py-12">
         <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-gold-400"></div>
+      </div>
+    );
+  }
+
+  if (unavailable) {
+    return (
+      <div role="status" className="text-center py-12 text-navy-300">
+        AI Chatter isn&apos;t available on this deployment yet.
       </div>
     );
   }
