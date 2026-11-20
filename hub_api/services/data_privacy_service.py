@@ -679,6 +679,16 @@ def _read_subject_uuids(dal: Any, *, user_id: int) -> tuple[str, ...]:
     return _subject_uuids(dal, user_id=user_id, identities=identities, members=members)
 
 
+def subject_uuids_of(dal: Any, *, user_id: int) -> tuple[str, ...]:
+    """Public, read-only: the canonical PII-free token set of a hub user.
+
+    Hub uuid, member `user_uuid`s (incl. rows reached via linked platform identities) and
+    platform-identity pseudonyms -- the same definition erasure/export use, so authorization
+    checks keyed on bundle-written tokens (soft/floor bans) cannot miss an identity form.
+    """
+    return _read_subject_uuids(dal, user_id=user_id)
+
+
 def _collect_erasure_scope(dal: Any, *, user_id: int) -> _ErasureScope:
     """Read the subject's identities, memberships, bundle-reputation tokens and active bans.
 

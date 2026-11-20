@@ -17,11 +17,13 @@ is authorised by membership in THAT community, never by a session-wide grant.
 
 from __future__ import annotations
 
+import logging
 from datetime import UTC, datetime
 from typing import Any
 
 from flask_core.tenancy import TenantContext
 
+from services import ban_suppression
 from services.community_authz import member_scopes_sync
 from services.community_reputation_service import _ensure_reputation_tables
 from services.errors import forbidden
@@ -29,6 +31,8 @@ from services.global_identity import is_global_admin_sync
 from services.scope_registry import SCOPE_COMMUNITY_ADMIN
 
 BANNED_ROLE = "banned"
+
+logger = logging.getLogger(__name__)
 
 
 def _is_tenant_admin(dal: Any, ctx: TenantContext, user_id: int) -> bool:
@@ -42,19 +46,49 @@ def _is_tenant_admin(dal: Any, ctx: TenantContext, user_id: int) -> bool:
     )
 
 
-def _soft_banned(dal: Any, community_id: int, user_uuid: str | None) -> bool:
-    """True iff the member has an unexpired soft-ban in this community."""
-    if not user_uuid:
-        return False
+def _identity_tokens(dal: Any, user_id: int, member: Any) -> set[str]:
+    """Every identity token the soft-ban table may key this member on.
+
+    The source is the canonical subject token set erasure/export already use
+    (`data_privacy_service.subject_uuids_of`: hub uuid, member `user_uuid`s incl. rows reached via
+    linked platform identities, and platform-identity pseudonyms), looked up by the validated
+    caller's numeric id and unioned with this member row's own `user_uuid`. An empty set means
+    identity is unresolvable.
+    """
+    from services.data_privacy_service import subject_uuids_of  # noqa: PLC0415 - avoid import cycle
+
+    tokens: set[str] = set(subject_uuids_of(dal, user_id=user_id))
+    member_uuid = getattr(member, "user_uuid", None)
+    if member_uuid:
+        tokens.add(str(member_uuid))
+    return tokens
+
+
+def _soft_banned(dal: Any, community_id: int, user_uuids: set[str]) -> bool:
+    """True iff any of the member's identity tokens has an unexpired soft-ban in this community."""
+    if not user_uuids:
+        raise ValueError("soft-ban check requires at least one resolved identity token")
     _ensure_reputation_tables(dal)
     bans = dal.bundle_reputation_soft_bans
     now = datetime.now(UTC)  # expires_at is TIMESTAMPTZ (alembic 0097): compare aware, never naive
     return bool(
         dal(
             (bans.community_id == community_id)
-            & (bans.user_uuid == user_uuid)
+            & bans.user_uuid.belongs(sorted(user_uuids))
             & ((bans.expires_at == None) | (bans.expires_at > now))  # noqa: E711 - pydal idiom
         ).count()
+    )
+
+
+def _floor_banned(dal: Any, ctx: TenantContext, user_uuids: set[str]) -> bool:
+    """True iff a tenant-level floor ban (enforced or queued) exists for any of the tokens.
+
+    Floor bans are keyed by tenant, not community, so they apply in every community of the tenant
+    regardless of the member row's role.
+    """
+    return any(
+        row.tenant_id == ctx.tenant_id and row.status in ban_suppression.FLOOR_BAN_ACTIVE_STATUSES
+        for row in ban_suppression.floor_ban_rows(dal, user_uuids)
     )
 
 
@@ -82,7 +116,17 @@ def require_inventory_member(
     role = getattr(member, "role", None)
     if isinstance(role, str) and role.strip().lower() == BANNED_ROLE:
         raise forbidden("Community membership required")
-    if _soft_banned(dal, community_id, getattr(member, "user_uuid", None)):
+    tokens = _identity_tokens(dal, user_id, member)
+    if not tokens:
+        # Fail closed: without an identity token the soft-ban table cannot be consulted.
+        logger.error(
+            "inventory soft-ban check denied: unresolvable identity "
+            "(community_id=%s, user_id=%s)",
+            community_id,
+            user_id,
+        )
+        raise forbidden("Community membership required")
+    if _soft_banned(dal, community_id, tokens) or _floor_banned(dal, ctx, tokens):
         raise forbidden("Community membership required")
 
 
