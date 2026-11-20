@@ -45,6 +45,7 @@ from pydal import (  # noqa: F401
 )
 
 from .db_errors import is_db_driver_error, log_db_error
+from .positional_sql import convert_positional
 
 logger = logging.getLogger(__name__)
 
@@ -344,18 +345,20 @@ class AsyncDAL:
 
         def _execute():
             try:
-                # Convert $N placeholders to %s for psycopg2
+                # Convert $N placeholders to the adapter's native marker
+                # (tokenizer: repeated/out-of-order/$10-safe, skips literals)
                 if params:
-                    converted_sql = sql
-                    for i in range(len(params), 0, -1):
-                        converted_sql = converted_sql.replace(f"${i}", "%s")
+                    engine = str(getattr(self.dal._adapter, "dbengine", "")).lower()
+                    converted_sql, expanded = convert_positional(
+                        sql, params, "?" if engine == "sqlite" else "%s"
+                    )
 
                     # Convert special types for psycopg2
                     import json as json_module
                     from uuid import UUID
 
                     converted_params = []
-                    for param in params:
+                    for param in expanded:
                         if isinstance(param, UUID):
                             converted_params.append(str(param))
                         elif isinstance(param, (dict, list)):
