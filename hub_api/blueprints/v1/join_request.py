@@ -35,6 +35,7 @@ user_id_from_JWT)` instead.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -50,6 +51,7 @@ from services.errors import ApiError
 from services.pagination import parse_limit
 
 join_request_bp = Blueprint("v1_join_request", __name__, url_prefix="/api/v1")
+logger = logging.getLogger(__name__)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -170,6 +172,7 @@ async def submit_request(community_id: int, data: SubmitJoinRequestBody) -> tupl
             message=data.message,
         )
     except ApiError as exc:
+        logger.warning("join_request.submit_rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return jsonify_dto(
         SubmitJoinRequestResponse(
