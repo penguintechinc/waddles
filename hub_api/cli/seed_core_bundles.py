@@ -75,6 +75,7 @@ from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
 from services import app_command_backfill, connector_publish_service, vendor_bundle_authz
+from services.app_id_ownership import claim_app_id
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
 from services.bundle_app_id import is_core_namespace, is_valid_app_id
 from services.bundle_approval_service import (
@@ -1099,6 +1100,10 @@ async def seed_one(
     its own client.
     """
     _guard_core_namespace(entry.app_id)
+    # Record the seeded id in `app_id_owners` (owner NULL = system actor) on EVERY run, including
+    # reseeds that skip `create_version`: idempotent for the same app_id, and a storage key already
+    # held by a DIFFERENT app_id fails loudly (409) instead of sharing that namespace.
+    await claim_app_id(install_dal, app_id=entry.app_id, owner_id=None, enforce_owner=False)
 
     manifest_bytes = (bundles_dir / entry.manifest_path).read_bytes()
     component_bytes = (bundles_dir / entry.artifact_path).read_bytes()

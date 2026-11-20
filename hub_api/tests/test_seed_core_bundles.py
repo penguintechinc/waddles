@@ -30,6 +30,7 @@ from cli.seed_core_bundles import (
     reconcile_removed_core_bundles,
     seed_one,
 )
+from services.bundle_app_id import bundle_storage_key
 from services.bundle_approval_service import activate_for_community
 from services.bundle_component_validator import ComponentValidationResult
 from services.bundle_permission_service import get_approved_permission_ids
@@ -517,6 +518,43 @@ async def test_seed_one_reruns_are_a_no_op(
 
     versions = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
     assert len(versions) == 1, "a no-op re-run must not publish a second app_versions row"
+
+
+async def test_seed_one_records_app_id_owner_idempotently_across_reseeds(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seeding twice leaves exactly one `app_id_owners` row (NULL owner = system actor)."""
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
+
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    rows = await install_dal(install_dal.app_id_owners.app_id == entry.app_id).select()
+    assert len(rows) == 1
+    assert rows[0].owner_id is None
+    assert rows[0].storage_key == bundle_storage_key(entry.app_id)
+
+
+async def test_seed_one_fails_loudly_when_its_storage_key_belongs_to_another_app_id(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing row holding this id's storage key (different app_id) refuses the seed."""
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
+    await install_dal.app_id_owners.async_insert(
+        app_id="evil.squatter.bundle",
+        owner_id=99,
+        storage_key=bundle_storage_key(entry.app_id),
+    )
+
+    with pytest.raises(ApiError) as exc:
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert exc.value.status_code == 409
+    versions = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
+    assert len(versions) == 0, "a refused seed must not publish anything"
 
 
 async def test_seed_one_self_heals_permission_grants_for_a_pre_catalog_bundle(
