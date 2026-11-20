@@ -11,10 +11,10 @@ from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v
 
 _VALID_MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station",
     "version": "3.0.0",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -726,14 +726,14 @@ def test_tool_call_risk_mirrors_the_rust_catalog() -> None:
     start = rust.index("Self::ToolCall => CatalogEntry {")
     entry = rust[start : rust.index("notes:", start)]
     assert "risk: Risk::Dangerous" in entry
-    assert resolve_risk("tool.call:waddles.economy.wallet.default:get_balance") == "dangerous"
+    assert resolve_risk("tool.call:penguintechinc.waddles.wallet:get_balance") == "dangerous"
 
 
 def test_tool_call_declaration_parses_as_dangerous() -> None:
     manifest = _parse(
         [
             {
-                "id": "tool.call:waddles.economy.wallet.default:get_balance",
+                "id": "tool.call:penguintechinc.waddles.wallet:get_balance",
                 "justification": "reads the caller's balance",
             }
         ]
@@ -744,7 +744,7 @@ def test_tool_call_declaration_parses_as_dangerous() -> None:
 
 def test_tool_call_declaration_requires_justification() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse([{"id": "tool.call:waddles.economy.wallet.default:get_balance"}])
+        _parse([{"id": "tool.call:penguintechinc.waddles.wallet:get_balance"}])
     assert "missing_justification" in str(exc.value)
 
 

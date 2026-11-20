@@ -31,10 +31,10 @@ from tests.conftest import TENANT_SLUG
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",
@@ -98,7 +98,7 @@ async def test_activate_for_community_requires_availability(install_dal: Any) ->
             install_dal,
             tenant_id=1,
             community_id=community_id,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=1,
         )
     assert exc.value.status_code == 409
@@ -111,12 +111,12 @@ async def test_activate_for_community_activates_it(install_dal: Any) -> None:
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=7,
     )
     active = (
         await install_dal(
-            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            (install_dal.app_active_versions.app_id == "penguintechinc.waddles.music")
             & (install_dal.app_active_versions.tenant_id == 1)
             & (install_dal.app_active_versions.community_id == community_id)
         ).select()
@@ -139,7 +139,7 @@ async def test_activate_for_community_refuses_a_community_from_a_different_tenan
             install_dal,
             tenant_id=1,
             community_id=other_community_id,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=1,
         )
     assert exc.value.status_code == 404
@@ -152,7 +152,7 @@ async def test_activate_for_community_refuses_an_unknown_community_id(install_da
             install_dal,
             tenant_id=1,
             community_id=999999,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=1,
         )
     assert exc.value.status_code == 404
@@ -168,7 +168,7 @@ async def test_activate_for_community_reactivation_upserts_the_pointer(install_d
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
     )
 
@@ -204,12 +204,12 @@ async def test_activate_for_community_reactivation_upserts_the_pointer(install_d
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
     )
 
     active_rows = await install_dal(
-        (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+        (install_dal.app_active_versions.app_id == "penguintechinc.waddles.music")
         & (install_dal.app_active_versions.tenant_id == 1)
         & (install_dal.app_active_versions.community_id == community_id)
     ).select()
@@ -243,17 +243,17 @@ async def test_activate_for_community_rolls_back_if_activation_fails(
             install_dal,
             tenant_id=1,
             community_id=community_id,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=1,
         )
 
     monkeypatch.undo()
 
     approvals = await install_dal(
-        install_dal.app_install_approvals.app_id == "waddles.socials.music.default"
+        install_dal.app_install_approvals.app_id == "penguintechinc.waddles.music"
     ).select()
     assert not approvals, "the approval row must roll back together with the failed activation"
-    active = await _active_rows(install_dal, app_id="waddles.socials.music.default", tenant_id=1)
+    active = await _active_rows(install_dal, app_id="penguintechinc.waddles.music", tenant_id=1)
     assert not active
 
 
@@ -264,7 +264,7 @@ async def test_deactivate_for_community_unknown_raises_404(install_dal: Any) -> 
             install_dal,
             tenant_id=1,
             community_id=community_id,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             deactivated_by=1,
         )
     assert exc.value.status_code == 404
@@ -277,17 +277,17 @@ async def test_deactivate_for_community_removes_pointer(install_dal: Any) -> Non
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
     )
     await deactivate_for_community(
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         deactivated_by=1,
     )
-    active = await _active_rows(install_dal, app_id="waddles.socials.music.default", tenant_id=1)
+    active = await _active_rows(install_dal, app_id="penguintechinc.waddles.music", tenant_id=1)
     assert not active
 
 
@@ -299,10 +299,10 @@ async def test_deactivate_for_community_removes_pointer(install_dal: Any) -> Non
 async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: list[str]) -> None:
     manifest = {
         "schema_version": 2,
-        "app_id": "waddles.socials.music.default",
+        "app_id": "penguintechinc.waddles.music",
         "name": "Music Station",
         "version": "3.0.2",
-        "feature": "waddles.socials.music",
+        "feature": "music",
         "module": "socials",
         "provider": "builtin",
         "language": "python",
@@ -317,7 +317,7 @@ async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: 
     }
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.2",
         artifact_digest="sha256:" + "c" * 64,
         language="python",
@@ -325,7 +325,7 @@ async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: 
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.2",
         tenant_id=1,
         artifact_kind="source",
@@ -339,10 +339,10 @@ async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: 
     from services.bundle_approval_service import install_version_globally
 
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.2", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.2", installed_by=1
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.music", updated_by=1
     )
 
 
@@ -351,7 +351,7 @@ async def _activate(install_dal: Any, *, community_id: int) -> Any:
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
     )
 
@@ -359,7 +359,9 @@ async def _activate(install_dal: Any, *, community_id: int) -> Any:
 async def test_activate_for_community_refuses_a_routes_to_target_that_does_not_exist(
     install_dal: Any,
 ) -> None:
-    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["waddles.nope.default"])
+    await _seed_uploaded_version_with_routes_to(
+        install_dal, routes_to=["penguintechinc.waddles.default"]
+    )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError) as excinfo:
         await _activate(install_dal, community_id=community_id)
@@ -378,11 +380,11 @@ async def test_activate_for_community_refuses_a_cross_tenant_routes_to_target(
         dal.tenants.insert(slug="other-corp", display_name="Other Corp", is_active=True)
     )
     dal.app_catalog.insert(
-        app_id="waddles.socials.forums.default",
+        app_id="penguintechinc.waddles.forums",
         name="Forums",
         manifest_version="3.0.0",
         module="socials",
-        feature="waddles.socials.forums",
+        feature="forums",
         provider="builtin",
         execution_model="native",
         is_default=False,
@@ -393,7 +395,7 @@ async def test_activate_for_community_refuses_a_cross_tenant_routes_to_target(
     dal.commit()
     now = datetime.now(UTC)
     forums_version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.forums.default",
+        app_id="penguintechinc.waddles.forums",
         version="1.0.0",
         artifact_digest="sha256:" + "e" * 64,
         language="python",
@@ -401,7 +403,7 @@ async def test_activate_for_community_refuses_a_cross_tenant_routes_to_target(
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.forums.default",
+        app_id="penguintechinc.waddles.forums",
         version="1.0.0",
         tenant_id=other_tenant_id,
         artifact_kind="source",
@@ -409,10 +411,10 @@ async def test_activate_for_community_refuses_a_cross_tenant_routes_to_target(
         status="PUBLISHED",
         manifest_json={
             "schema_version": 2,
-            "app_id": "waddles.socials.forums.default",
+            "app_id": "penguintechinc.waddles.forums",
             "name": "Forums",
             "version": "1.0.0",
-            "feature": "waddles.socials.forums",
+            "feature": "forums",
             "module": "socials",
             "provider": "builtin",
             "language": "python",
@@ -426,18 +428,18 @@ async def test_activate_for_community_refuses_a_cross_tenant_routes_to_target(
     from services.bundle_approval_service import install_version_globally
 
     await install_version_globally(
-        install_dal, app_id="waddles.socials.forums.default", version="1.0.0", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.forums", version="1.0.0", installed_by=1
     )
     # made available for the OTHER tenant only -- never TENANT_SLUG (id=1)
     await set_available(
         install_dal,
         tenant_id=other_tenant_id,
-        app_id="waddles.socials.forums.default",
+        app_id="penguintechinc.waddles.forums",
         updated_by=1,
     )
 
     await _seed_uploaded_version_with_routes_to(
-        install_dal, routes_to=["waddles.socials.forums.default"]
+        install_dal, routes_to=["penguintechinc.waddles.forums"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError) as excinfo:
@@ -451,11 +453,11 @@ async def test_activate_for_community_allows_a_same_tenant_routes_to_target(
 ) -> None:
     dal = bundle_install_db.dal
     dal.app_catalog.insert(
-        app_id="waddles.socials.forums.default",
+        app_id="penguintechinc.waddles.forums",
         name="Forums",
         manifest_version="3.0.0",
         module="socials",
-        feature="waddles.socials.forums",
+        feature="forums",
         provider="builtin",
         execution_model="native",
         is_default=False,
@@ -466,7 +468,7 @@ async def test_activate_for_community_allows_a_same_tenant_routes_to_target(
     dal.commit()
     now = datetime.now(UTC)
     forums_version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.forums.default",
+        app_id="penguintechinc.waddles.forums",
         version="1.0.0",
         artifact_digest="sha256:" + "e" * 64,
         language="python",
@@ -474,7 +476,7 @@ async def test_activate_for_community_allows_a_same_tenant_routes_to_target(
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.forums.default",
+        app_id="penguintechinc.waddles.forums",
         version="1.0.0",
         tenant_id=1,
         artifact_kind="source",
@@ -482,10 +484,10 @@ async def test_activate_for_community_allows_a_same_tenant_routes_to_target(
         status="PUBLISHED",
         manifest_json={
             "schema_version": 2,
-            "app_id": "waddles.socials.forums.default",
+            "app_id": "penguintechinc.waddles.forums",
             "name": "Forums",
             "version": "1.0.0",
-            "feature": "waddles.socials.forums",
+            "feature": "forums",
             "module": "socials",
             "provider": "builtin",
             "language": "python",
@@ -499,18 +501,18 @@ async def test_activate_for_community_allows_a_same_tenant_routes_to_target(
     from services.bundle_approval_service import install_version_globally
 
     await install_version_globally(
-        install_dal, app_id="waddles.socials.forums.default", version="1.0.0", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.forums", version="1.0.0", installed_by=1
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.forums.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.forums", updated_by=1
     )
 
     await _seed_uploaded_version_with_routes_to(
-        install_dal, routes_to=["waddles.socials.forums.default"]
+        install_dal, routes_to=["penguintechinc.waddles.forums"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     result = await _activate(install_dal, community_id=community_id)
-    assert result.app_id == "waddles.socials.music.default"
+    assert result.app_id == "penguintechinc.waddles.music"
 
 
 async def _seed_music_with_requested_tools(
@@ -519,10 +521,10 @@ async def _seed_music_with_requested_tools(
     """Seed + globally install the caller bundle with a `requested_tools` block."""
     manifest = {
         "schema_version": 2,
-        "app_id": "waddles.socials.music.default",
+        "app_id": "penguintechinc.waddles.music",
         "name": "Music Station",
         "version": "3.0.2",
-        "feature": "waddles.socials.music",
+        "feature": "music",
         "module": "socials",
         "provider": "builtin",
         "language": "python",
@@ -540,7 +542,7 @@ async def _seed_music_with_requested_tools(
     }
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.2",
         artifact_digest="sha256:" + "c" * 64,
         language="python",
@@ -548,7 +550,7 @@ async def _seed_music_with_requested_tools(
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.2",
         tenant_id=1,
         artifact_kind="source",
@@ -562,10 +564,10 @@ async def _seed_music_with_requested_tools(
     from services.bundle_approval_service import install_version_globally
 
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.2", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.2", installed_by=1
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.music", updated_by=1
     )
 
 
@@ -616,15 +618,17 @@ async def test_activate_enforces_tool_target_must_be_service(
     target_kind: str,
     allowed: bool,
 ) -> None:
-    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind=target_kind)
-    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    _insert_catalog_target(
+        bundle_install_db, app_id="penguintechinc.waddles.tools", kind=target_kind
+    )
+    await _make_target_available(install_dal, app_id="penguintechinc.waddles.tools")
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind=caller_kind, targets=["waddles.core.tools.default"]
+        install_dal, caller_kind=caller_kind, targets=["penguintechinc.waddles.tools"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     if allowed:
         result = await _activate(install_dal, community_id=community_id)
-        assert result.app_id == "waddles.socials.music.default"
+        assert result.app_id == "penguintechinc.waddles.music"
         return
     with pytest.raises(ApiError) as excinfo:
         await _activate(install_dal, community_id=community_id)
@@ -640,12 +644,12 @@ async def test_activate_refuses_a_requested_tool_target_available_only_in_anothe
         )
     )
     bundle_install_db.dal.commit()
-    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind="service")
+    _insert_catalog_target(bundle_install_db, app_id="penguintechinc.waddles.tools", kind="service")
     await _make_target_available(
-        install_dal, app_id="waddles.core.tools.default", tenant_id=other_tenant_id
+        install_dal, app_id="penguintechinc.waddles.tools", tenant_id=other_tenant_id
     )
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.tools"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError) as excinfo:
@@ -661,14 +665,16 @@ async def test_marketplace_lifecycle_activate_bundle_enforces_tool_target_gate(
     from services.marketplace_lifecycle_service import activate_bundle
 
     dal = bundle_install_db.dal
-    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind=target_kind)
-    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
-    await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+    _insert_catalog_target(
+        bundle_install_db, app_id="penguintechinc.waddles.tools", kind=target_kind
     )
-    _insert_catalog_target(bundle_install_db, app_id="waddles.socials.music.default", kind="app")
+    await _make_target_available(install_dal, app_id="penguintechinc.waddles.tools")
+    await _seed_music_with_requested_tools(
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.tools"]
+    )
+    _insert_catalog_target(bundle_install_db, app_id="penguintechinc.waddles.music", kind="app")
     dal.app_tenant_availability.insert(
-        tenant_id=1, app_id="waddles.socials.music.default", available=True
+        tenant_id=1, app_id="penguintechinc.waddles.music", available=True
     )
     dal.commit()
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
@@ -679,7 +685,7 @@ async def test_marketplace_lifecycle_activate_bundle_enforces_tool_target_gate(
             dal,
             community_id=int(community_id),
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             config=None,
             activated_by=1,
             install_dal=install_dal,
@@ -697,10 +703,10 @@ async def test_null_kind_target_fails_closed_as_app(
     bundle_install_db: Any, install_dal: Any
 ) -> None:
     """A NULL catalog kind is "app" (never inferred service, even in the core namespace)."""
-    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind=None)
-    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    _insert_catalog_target(bundle_install_db, app_id="penguintechinc.waddles.tools", kind=None)
+    await _make_target_available(install_dal, app_id="penguintechinc.waddles.tools")
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.tools"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError) as excinfo:
@@ -713,11 +719,11 @@ async def test_app_target_in_old_heuristic_module_is_not_a_tool_target(
 ) -> None:
     """An `app` whose module sat in the retired service-module heuristic is still refused."""
     _insert_catalog_target(
-        bundle_install_db, app_id="waddles.core.tools.default", kind="app", module="core"
+        bundle_install_db, app_id="penguintechinc.waddles.tools", kind="app", module="core"
     )
-    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    await _make_target_available(install_dal, app_id="penguintechinc.waddles.tools")
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.tools"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError) as excinfo:
@@ -728,10 +734,10 @@ async def test_app_target_in_old_heuristic_module_is_not_a_tool_target(
 async def test_matrix_refusal_writes_tool_target_refused_audit_row(
     bundle_install_db: Any, install_dal: Any
 ) -> None:
-    _insert_catalog_target(bundle_install_db, app_id="waddles.core.tools.default", kind="app")
-    await _make_target_available(install_dal, app_id="waddles.core.tools.default")
+    _insert_catalog_target(bundle_install_db, app_id="penguintechinc.waddles.tools", kind="app")
+    await _make_target_available(install_dal, app_id="penguintechinc.waddles.tools")
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.core.tools.default"]
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.tools"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError):
@@ -747,18 +753,18 @@ async def test_matrix_refusal_writes_tool_target_refused_audit_row(
     if isinstance(details, str):
         details = json.loads(details)
     assert details["reason"] == "tool_target_not_service"
-    assert details["target_app_id"] == "waddles.core.tools.default"
+    assert details["target_app_id"] == "penguintechinc.waddles.tools"
 
 
 async def test_activate_tenant_wide_refuses_missing_tool_target(install_dal: Any) -> None:
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.core.nope.default"]
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.nope"]
     )
     with pytest.raises(ApiError) as excinfo:
         await activate_tenant_wide(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=1,
         )
     assert excinfo.value.code == "tool_target_not_found"
@@ -768,7 +774,7 @@ async def test_activate_refuses_a_requested_tool_target_that_does_not_exist(
     install_dal: Any,
 ) -> None:
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.core.nope.default"]
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.nope"]
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError) as excinfo:
@@ -779,23 +785,25 @@ async def test_activate_refuses_a_requested_tool_target_that_does_not_exist(
 async def test_activate_tenant_wide_enforces_tool_target_must_be_service(
     bundle_install_db: Any, install_dal: Any
 ) -> None:
-    _insert_catalog_target(bundle_install_db, app_id="waddles.socials.other.default", kind="app")
-    await _make_target_available(install_dal, app_id="waddles.socials.other.default")
+    _insert_catalog_target(bundle_install_db, app_id="penguintechinc.waddles.other", kind="app")
+    await _make_target_available(install_dal, app_id="penguintechinc.waddles.other")
     await _seed_music_with_requested_tools(
-        install_dal, caller_kind="app", targets=["waddles.socials.other.default"]
+        install_dal, caller_kind="app", targets=["penguintechinc.waddles.other"]
     )
     with pytest.raises(ApiError) as excinfo:
         await activate_tenant_wide(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=1,
         )
     assert excinfo.value.code == "tool_target_not_service"
 
 
 async def test_activate_for_community_audits_a_routes_to_refusal(install_dal: Any) -> None:
-    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["waddles.nope.default"])
+    await _seed_uploaded_version_with_routes_to(
+        install_dal, routes_to=["penguintechinc.waddles.default"]
+    )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     with pytest.raises(ApiError):
         await _activate(install_dal, community_id=community_id)
@@ -807,7 +815,7 @@ async def test_activate_for_community_audits_a_routes_to_refusal(install_dal: An
     details = audit_row["details"]
     if isinstance(details, str):
         details = json.loads(details)
-    assert details["target_app_id"] == "waddles.nope.default"
+    assert details["target_app_id"] == "penguintechinc.waddles.default"
     assert details["reason"] == "routes_to_target_not_found"
 
 
@@ -817,7 +825,7 @@ async def test_activate_for_community_with_no_routes_to_skips_the_check_entirely
     await _install_and_make_available(install_dal)
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     row = await _activate(install_dal, community_id=community_id)
-    assert row.app_id == "waddles.socials.music.default"
+    assert row.app_id == "penguintechinc.waddles.music"
 
 
 # ---------------------------------------------------------------------------
@@ -866,18 +874,18 @@ async def test_activate_for_community_auto_binds_matching_sources_and_provisions
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
         valkey_client=fake_client,
     )
 
-    rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    rows = await _bindings(install_dal, app_id="penguintechinc.waddles.music")
     assert {r.source_id for r in rows} == {"tw-a", "tw-b"}
     assert all(r.platform == "twitch" and r.community_id == community_id for r in rows)
 
     assert fake_client.xgroup_create.await_count == 2
     called = {call.args[0]: call.args[1] for call in fake_client.xgroup_create.await_args_list}
-    app_id = "waddles.socials.music.default"
+    app_id = "penguintechinc.waddles.music"
     assert called == {
         f"waddles:t:{TENANT_SLUG}:c:acme-community:src:twitch:tw-a:events": app_id,
         f"waddles:t:{TENANT_SLUG}:c:acme-community:src:twitch:tw-b:events": app_id,
@@ -896,12 +904,12 @@ async def test_activate_for_community_zero_matching_sources_binds_nothing(
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
         valkey_client=fake_client,
     )
 
-    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert not await _bindings(install_dal, app_id="penguintechinc.waddles.music")
     fake_client.xgroup_create.assert_not_called()
 
 
@@ -915,11 +923,11 @@ async def test_activate_for_community_reactivation_replaces_bindings(install_dal
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
         valkey_client=AsyncMock(),
     )
-    first_rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    first_rows = await _bindings(install_dal, app_id="penguintechinc.waddles.music")
     assert {r.source_id for r in first_rows} == {"tw-a"}
 
     # tw-a is removed, tw-b is added, then a newer version is installed+made available+reactivated
@@ -958,11 +966,11 @@ async def test_activate_for_community_reactivation_replaces_bindings(install_dal
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
         valkey_client=AsyncMock(),
     )
-    rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    rows = await _bindings(install_dal, app_id="penguintechinc.waddles.music")
     assert {r.source_id for r in rows} == {"tw-b"}  # tw-a's stale binding is gone, not appended-to
 
 
@@ -974,20 +982,20 @@ async def test_deactivate_for_community_clears_bindings(install_dal: Any) -> Non
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=1,
         valkey_client=AsyncMock(),
     )
-    assert await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert await _bindings(install_dal, app_id="penguintechinc.waddles.music")
 
     await deactivate_for_community(
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         deactivated_by=1,
     )
-    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert not await _bindings(install_dal, app_id="penguintechinc.waddles.music")
 
 
 async def test_activate_for_community_rollback_also_rolls_back_bindings(
@@ -1014,14 +1022,14 @@ async def test_activate_for_community_rollback_also_rolls_back_bindings(
             install_dal,
             tenant_id=1,
             community_id=community_id,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=1,
             valkey_client=AsyncMock(),
         )
 
     monkeypatch.undo()
 
-    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert not await _bindings(install_dal, app_id="penguintechinc.waddles.music")
 
 
 # ---------------------------------------------------------------------------
@@ -1041,7 +1049,7 @@ async def test_activate_tenant_wide_requires_availability(install_dal: Any) -> N
         await activate_tenant_wide(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=None,
         )
     assert exc.value.status_code == 409
@@ -1059,7 +1067,7 @@ async def test_activate_tenant_wide_writes_the_sentinel_split(install_dal: Any) 
     approval_row = await activate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=None,
         valkey_client=AsyncMock(),
     )
@@ -1069,7 +1077,7 @@ async def test_activate_tenant_wide_writes_the_sentinel_split(install_dal: Any) 
 
     active = (
         await install_dal(
-            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            (install_dal.app_active_versions.app_id == "penguintechinc.waddles.music")
             & (install_dal.app_active_versions.tenant_id == 1)
             & (install_dal.app_active_versions.community_id == TENANT_WIDE_COMMUNITY_SENTINEL)
         ).select()
@@ -1090,18 +1098,18 @@ async def test_activate_tenant_wide_signs_and_uploads_the_sidecar(
     await activate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=None,
         valkey_client=AsyncMock(),
     )
     version_row = (
         await install_dal(
-            install_dal.app_versions.app_id == "waddles.socials.music.default"
+            install_dal.app_versions.app_id == "penguintechinc.waddles.music"
         ).select()
     ).first()
     assert version_row.artifact_signature
     bundle_signing_sidecar_upload_mock.assert_awaited_once()
-    assert bundle_signing_sidecar_upload_mock.await_args.args[0] == "waddles.socials.music.default"
+    assert bundle_signing_sidecar_upload_mock.await_args.args[0] == "penguintechinc.waddles.music"
 
 
 async def test_activate_tenant_wide_rolls_back_when_signing_key_missing(
@@ -1118,12 +1126,12 @@ async def test_activate_tenant_wide_rolls_back_when_signing_key_missing(
         await activate_tenant_wide(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             activated_by=None,
             valkey_client=AsyncMock(),
         )
     active = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+        install_dal.app_active_versions.app_id == "penguintechinc.waddles.music"
     ).select()
     assert active.first() is None
 
@@ -1140,12 +1148,12 @@ async def test_activate_tenant_wide_auto_binds_every_source_of_the_consumed_plat
     await activate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=None,
         valkey_client=fake_client,
     )
 
-    rows = await _bindings(install_dal, app_id="waddles.socials.music.default")
+    rows = await _bindings(install_dal, app_id="penguintechinc.waddles.music")
     assert {r.source_id for r in rows} == {"tw-a", "tw-b"}
     assert all(
         r.platform == "twitch" and r.community_id == TENANT_WIDE_COMMUNITY_SENTINEL for r in rows
@@ -1153,7 +1161,7 @@ async def test_activate_tenant_wide_auto_binds_every_source_of_the_consumed_plat
 
     assert fake_client.xgroup_create.await_count == 2
     called = {call.args[0]: call.args[1] for call in fake_client.xgroup_create.await_args_list}
-    app_id = "waddles.socials.music.default"
+    app_id = "penguintechinc.waddles.music"
     assert called == {
         f"waddles:t:{TENANT_SLUG}:c:_tenant:src:twitch:tw-a:events": app_id,
         f"waddles:t:{TENANT_SLUG}:c:_tenant:src:twitch:tw-b:events": app_id,
@@ -1168,12 +1176,12 @@ async def test_activate_tenant_wide_zero_matching_sources_binds_nothing(install_
     await activate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=None,
         valkey_client=fake_client,
     )
 
-    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert not await _bindings(install_dal, app_id="penguintechinc.waddles.music")
     fake_client.xgroup_create.assert_not_called()
 
 
@@ -1191,7 +1199,7 @@ async def test_deactivate_tenant_wide_unknown_raises_404(install_dal: Any) -> No
         await deactivate_tenant_wide(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             deactivated_by=None,
         )
     assert exc.value.status_code == 404
@@ -1203,13 +1211,13 @@ async def test_deactivate_tenant_wide_removes_pointer(install_dal: Any) -> None:
     await activate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=None,
         valkey_client=AsyncMock(),
     )
     active_before = (
         await install_dal(
-            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            (install_dal.app_active_versions.app_id == "penguintechinc.waddles.music")
             & (install_dal.app_active_versions.tenant_id == 1)
             & (install_dal.app_active_versions.community_id == TENANT_WIDE_COMMUNITY_SENTINEL)
         ).select()
@@ -1219,12 +1227,12 @@ async def test_deactivate_tenant_wide_removes_pointer(install_dal: Any) -> None:
     await deactivate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         deactivated_by=None,
     )
 
     active_after = await install_dal(
-        (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+        (install_dal.app_active_versions.app_id == "penguintechinc.waddles.music")
         & (install_dal.app_active_versions.tenant_id == 1)
         & (install_dal.app_active_versions.community_id == TENANT_WIDE_COMMUNITY_SENTINEL)
     ).select()
@@ -1237,16 +1245,16 @@ async def test_deactivate_tenant_wide_clears_bindings(install_dal: Any) -> None:
     await activate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         activated_by=None,
         valkey_client=AsyncMock(),
     )
-    assert await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert await _bindings(install_dal, app_id="penguintechinc.waddles.music")
 
     await deactivate_tenant_wide(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         deactivated_by=None,
     )
-    assert not await _bindings(install_dal, app_id="waddles.socials.music.default")
+    assert not await _bindings(install_dal, app_id="penguintechinc.waddles.music")

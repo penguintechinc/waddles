@@ -27,8 +27,8 @@ from services.bundle_data_provisioner import (
 from services.bundle_data_v2 import derive_v2_table_identity
 from services.errors import ApiError
 
-_APP = "waddles.cal.test"
-_OTHER_APP = "waddles.other.test"
+_APP = "penguintechinc.waddles.test"
+_OTHER_APP = "penguintechinc.waddles.test"
 _RAW_SCHEMA: dict[str, Any] = {
     "tables": [
         {
@@ -175,7 +175,7 @@ def test_schema_from_manifest_none_without_schema_and_422_on_invalid() -> None:
 
 
 def test_provider_is_derived_from_namespace_not_the_manifest() -> None:
-    assert provider_for("waddles.core.x.default") == "builtin"
+    assert provider_for("penguintechinc.waddles.x") == "builtin"
     assert provider_for(_APP) == "thirdparty"
 
 

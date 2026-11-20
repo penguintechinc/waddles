@@ -45,7 +45,7 @@ def _quotes_declaration() -> Any:
 
 
 def _quotes_identity() -> Any:
-    return derive_table_identity("waddles.core.quotes.quotes", provider="builtin")
+    return derive_table_identity("penguintechinc.waddles.quotes", provider="builtin")
 
 
 class TestIndexedColumnMapping:
@@ -316,7 +316,7 @@ class TestGoldenDdlSnapshots:
             },
             provider="builtin",
         )
-        identity = derive_table_identity("waddles.core.evil.evil", provider="builtin")
+        identity = derive_table_identity("penguintechinc.waddles.evil", provider="builtin")
         statements = generate_create_table_ddl(identity, decl)
         rendered = render_ddl_sql(statements, bundle_data_pg_conn)
         assert "DEFAULT 'x''; DROP TABLE app_core.evil; --'" in rendered[0]
@@ -329,14 +329,14 @@ class TestGoldenDdlSnapshots:
             {"columns": [{"name": "price", "type": "numeric(10,2)", "nullable": True}]},
             provider="builtin",
         )
-        identity = derive_table_identity("waddles.core.shop.shop", provider="builtin")
+        identity = derive_table_identity("penguintechinc.waddles.shop", provider="builtin")
         rendered = render_ddl_sql(generate_create_table_ddl(identity, decl), bundle_data_pg_conn)
         assert '"price" numeric(10,2)' in rendered[0]
 
     def test_long_app_id_produces_collision_resistant_short_identifiers(
         self, bundle_data_pg_conn: Any
     ) -> None:
-        long_app_id = "waddles.core." + ("segmentnamehere." * 4) + "app"
+        long_app_id = "penguintechinc.waddles." + ("segment-name-here-" * 4) + "app"
         identity = derive_table_identity(long_app_id, provider="builtin")
         decl = validate_table_declaration(
             {

@@ -1,9 +1,9 @@
 """Seeder: music-requests provisions its db-v2 tables and its consumers resolve (real Postgres).
 
 # regression: alpha helm upgrade 2026-11-16 -- the post-upgrade core-bundle seeder failed 3/164:
-# `waddles.core.service.music-requests` -> `bundle_data_provisioning_unavailable` (the
+# `penguintechinc.waddles.music-requests` -> `bundle_data_provisioning_unavailable` (the
 # waddles_bundle_migrator role had NO password and BUNDLE_MIGRATOR_PASSWORD was empty), then its
-# consumers `waddles.core.example.music` / `waddles.core.example.dj` -> 422
+# consumers `penguintechinc.waddles.music` / `penguintechinc.waddles.dj` -> 422
 # `tool_target_cross_tenant` (cascade: the service was never made available).
 
 Drives the REAL catalog rows (`bundles/core-bundles.yaml`) and REAL hub manifests through
@@ -55,8 +55,8 @@ pytestmark = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
 )
 
-SERVICE = "waddles.core.service.music-requests"
-CONSUMERS = ("waddles.core.example.music", "waddles.core.example.dj")
+SERVICE = "penguintechinc.waddles.music-requests"
+CONSUMERS = ("penguintechinc.waddles.music", "penguintechinc.waddles.dj")
 #: Throwaway value standing in for the chart-generated waddlebot-bundle-migrator Secret.
 MIGRATOR_PW = secrets.token_urlsafe(24)
 

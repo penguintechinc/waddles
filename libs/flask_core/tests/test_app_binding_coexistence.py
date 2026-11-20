@@ -31,10 +31,10 @@ from flask_core.app_binding import (
 from flask_core.app_manifest import AppManifest, parse_manifest
 from flask_core.app_registry import AppRegistry
 
-FEATURE = "waddles.bot.giveaway"
+FEATURE = "giveaway"
 
 _BASE_MANIFEST: Dict[str, object] = {
-    "app_id": f"{FEATURE}.giveaway-classic",
+    "app_id": f"penguintechinc.waddles.giveaway-classic",
     "name": "Giveaway (Classic)",
     "version": "1.0.0",
     "feature": FEATURE,
@@ -55,7 +55,7 @@ def app(
 ) -> AppManifest:
     """Build a validated :class:`AppManifest` under ``FEATURE`` for ``suffix``."""
     data = dict(_BASE_MANIFEST)
-    data["app_id"] = f"{FEATURE}.{suffix}"
+    data["app_id"] = f"penguintechinc.waddles.{suffix}"
     data["is_default"] = is_default
     data["compatible_with"] = list(compatible_with)
     data["incompatible_with"] = list(incompatible_with)
@@ -235,7 +235,7 @@ class TestDetectConflict:
     def test_symmetric_conflict_declared_by_the_active_app(self) -> None:
         """official-eventsub (active) declares legacy-irc-bridge incompatible;
         the candidate (legacy-irc-bridge) declares nothing itself."""
-        eventsub = app("official-eventsub", incompatible_with=(f"{FEATURE}.legacy-irc-bridge",))
+        eventsub = app("official-eventsub", incompatible_with=(f"penguintechinc.waddles.legacy-irc-bridge",))
         irc = app("legacy-irc-bridge")
         conflict = detect_conflict(irc, [eventsub])
         assert conflict == eventsub.app_id
@@ -243,7 +243,7 @@ class TestDetectConflict:
     def test_symmetric_conflict_declared_by_the_candidate(self) -> None:
         """legacy-irc-bridge (active) declares nothing; the candidate
         (official-eventsub) is the one declaring the incompatibility."""
-        eventsub = app("official-eventsub", incompatible_with=(f"{FEATURE}.legacy-irc-bridge",))
+        eventsub = app("official-eventsub", incompatible_with=(f"penguintechinc.waddles.legacy-irc-bridge",))
         irc = app("legacy-irc-bridge")
         conflict = detect_conflict(eventsub, [irc])
         assert conflict == irc.app_id
@@ -256,7 +256,7 @@ class TestDetectConflict:
     def test_no_false_positive_from_compatible_with_alone(self) -> None:
         """compatible_with is carried for future use and is not consulted by
         detect_conflict -- only incompatible_with drives a conflict."""
-        classic = app("giveaway-classic", compatible_with=(f"{FEATURE}.giveaway-raffle",))
+        classic = app("giveaway-classic", compatible_with=(f"penguintechinc.waddles.giveaway-raffle",))
         raffle = app("giveaway-raffle")
         assert detect_conflict(classic, [raffle]) is None
 
@@ -265,7 +265,7 @@ class TestDetectConflict:
         filters `active` down to currently-enabled app_activations rows
         before calling detect_conflict. A disabled, otherwise-incompatible
         app excluded from that filtered set must not surface as a conflict."""
-        eventsub = app("official-eventsub", incompatible_with=(f"{FEATURE}.legacy-irc-bridge",))
+        eventsub = app("official-eventsub", incompatible_with=(f"penguintechinc.waddles.legacy-irc-bridge",))
         irc = app("legacy-irc-bridge")
         activation_rows: List[Tuple[AppManifest, bool]] = [(eventsub, False)]  # disabled
         active = [manifest for manifest, enabled in activation_rows if enabled]
@@ -273,5 +273,5 @@ class TestDetectConflict:
         assert detect_conflict(irc, active) is None
 
     def test_candidate_never_conflicts_with_its_own_active_row(self) -> None:
-        eventsub = app("official-eventsub", incompatible_with=(f"{FEATURE}.official-eventsub",))
+        eventsub = app("official-eventsub", incompatible_with=(f"penguintechinc.waddles.official-eventsub",))
         assert detect_conflict(eventsub, [eventsub]) is None

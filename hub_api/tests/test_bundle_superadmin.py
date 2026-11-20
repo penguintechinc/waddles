@@ -13,8 +13,8 @@ from blueprints.v1.bundle_superadmin import BLUEPRINTS
 from services.bundle_approval_service import install_version_globally
 from tests.conftest import make_token
 
-_SVC = "waddles.integrations.tools.svc"
-_APP = "waddles.socials.music.default"
+_SVC = "acmecorp.widgets.svc"
+_APP = "penguintechinc.waddles.music"
 BASE = "/api/v1/superadmin/bundles"
 
 
@@ -25,7 +25,7 @@ def _manifest(app_id: str, version: str, **extra: Any) -> dict[str, Any]:
         "app_id": app_id,
         "name": f"Name of {app_id}",
         "version": version,
-        "feature": "waddles.socials.music",
+        "feature": "music",
         "module": "socials",
         "provider": "builtin",
         "language": "python",

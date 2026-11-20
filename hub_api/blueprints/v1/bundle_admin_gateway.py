@@ -50,7 +50,7 @@ bundle_admin_gateway_bp = Blueprint(
     url_prefix="/api/v1/apps/community/<cuuid:community_id>/bundles/<app_id>",
 )
 
-_APP_ID_RE = re.compile(r"^waddles\.[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$")
+_APP_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*\.[a-z0-9][a-z0-9_-]*\.[a-z0-9][a-z0-9_-]*$")
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 #: Requests per minute per (user, community, bundle, tool).
 ACTION_RATE_PER_MIN = 30

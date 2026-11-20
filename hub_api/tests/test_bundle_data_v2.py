@@ -52,7 +52,7 @@ _RAW: dict[str, Any] = {
         },
     ]
 }
-_APP = "waddles.cal.test"
+_APP = "penguintechinc.waddles.test"
 
 
 def _phys(logical: str, app: str = _APP) -> str:
@@ -145,10 +145,10 @@ class TestIdentityAndRegistry:
     def test_physical_names_are_injective_across_apps_and_logicals(self) -> None:
         """Regression (security review): `.`/`_` normalization and `__` must not alias names."""
         apps = [
-            "waddles.cal.test",
+            "penguintechinc.waddles.test",
             "waddles_cal_test",
             "waddles.cal_test",
-            "waddles.cal.test2",
+            "penguintechinc.waddles.test2",
             "a.b",
             "a_b",
             "waddles." + "x" * 70 + "1",

@@ -28,8 +28,8 @@ def _manifest(app_id: str, feature: str) -> object:
 
 def test_all_apps_returns_every_registration_in_order() -> None:
     registry = AppRegistry()
-    first = _manifest("waddles.bot.discord.gateway", "waddles.bot.discord")
-    second = _manifest("waddles.bot.twitch.gateway", "waddles.bot.twitch")
+    first = _manifest("penguintechinc.waddles.discord-gateway", "penguintechinc.waddles.discord")
+    second = _manifest("penguintechinc.waddles.twitch-gateway", "penguintechinc.waddles.twitch")
     registry.register(first)
     registry.register(second)
 

@@ -104,8 +104,8 @@ async def post_version(
 
     Authorization (spec Sec9.2 follow-on, `services/vendor_bundle_authz.py`):
     `platform:admin` (unrestricted `app_id`, this endpoint's original
-    behavior) OR `vendor:onboard` scoped to the caller's own
-    `waddles.integrations.vendor-{caller_id}.*` namespace -- checked
+    behavior) OR `vendor:onboard`, restricted to a well-formed
+    `<github-org>.<repo>.<bundle-name>` id outside the reserved `penguintechinc` org -- checked
     BEFORE any multipart part is read (security.md: never buffer an
     unauthorized caller's payload). A vendor's `source` part is refused
     outright: the
@@ -135,7 +135,7 @@ async def post_version(
 
     if not auth.is_admin:
         try:
-            enforce_vendor_namespace(app_id=app_id, caller_id=caller_id)
+            await enforce_vendor_namespace(install_dal, app_id=app_id, caller_id=caller_id)
         except ApiError as exc:
             return _err(exc)
         if source_file is not None:

@@ -114,13 +114,13 @@ class TestListBundles:
         tenant_id, _ = _seed_community(distribution_db)
         distribution_db.dal.app_tenant_availability.insert(
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             available=True,
             config_defaults={"greeting": "hi"},
         )
         distribution_db.dal.commit()
         (bundle,) = (await _list(config, pb.DISTRIBUTION_STAGE_INGEST)).bundles
-        assert bundle.app_id == "waddles.core.demo.echo"
+        assert bundle.app_id == "penguintechinc.waddles.echo-pipeline"
         assert not bundle.HasField("community_id")
         assert bundle.entrypoint == "builtin_handlers.echo_ingest:normalize"
         assert json.loads(bundle.config_json) == {"greeting": "hi"}
@@ -134,14 +134,14 @@ class TestListBundles:
         dal = distribution_db.dal
         dal.app_tenant_availability.insert(
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             available=True,
             config_defaults={"greeting": "hi", "volume": 1},
         )
         dal.app_activations.insert(
             community_id=community_id,
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             enabled=True,
             config={"greeting": "yo"},
         )
@@ -159,7 +159,7 @@ class TestListBundles:
         distribution_db.dal.app_activations.insert(
             community_id=community_id,
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             enabled=False,
             config={},
         )
@@ -171,14 +171,14 @@ class TestListBundles:
         """An action-only bundle never appears in an ingest list, and does in an action list."""
         _seed_bundle(
             distribution_db,
-            app_id="waddles.core.demo.actiononly",
+            app_id="penguintechinc.waddles.actiononly",
             stages={"action": {"entrypoint": "builtin_handlers.echo_action:run"}},
         )
         tenant_id, community_id = _seed_community(distribution_db)
         distribution_db.dal.app_activations.insert(
             community_id=community_id,
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.actiononly",
+            app_id="penguintechinc.waddles.actiononly",
             enabled=True,
             config={},
         )
@@ -186,7 +186,7 @@ class TestListBundles:
         ingest = await _list(config, pb.DISTRIBUTION_STAGE_INGEST, community_id=community_id)
         action = await _list(config, pb.DISTRIBUTION_STAGE_ACTION, community_id=community_id)
         assert list(ingest.bundles) == []
-        assert [b.app_id for b in action.bundles] == ["waddles.core.demo.actiononly"]
+        assert [b.app_id for b in action.bundles] == ["penguintechinc.waddles.actiononly"]
 
     async def test_tenant_comes_only_from_the_token(
         self, config: dict[str, Any], distribution_db: Any
@@ -198,14 +198,14 @@ class TestListBundles:
         _seed_bundle(distribution_db)
         tenant_a, _ = _seed_community(distribution_db)
         dal.app_tenant_availability.insert(
-            tenant_id=tenant_a, app_id="waddles.core.demo.echo", available=True
+            tenant_id=tenant_a, app_id="penguintechinc.waddles.echo-pipeline", available=True
         )
         dal.commit()
         mine = await _list(config, pb.DISTRIBUTION_STAGE_INGEST)
         theirs = await _list(
             config, pb.DISTRIBUTION_STAGE_INGEST, issuer=_issuer(tenant="other-corp")
         )
-        assert [b.app_id for b in mine.bundles] == ["waddles.core.demo.echo"]
+        assert [b.app_id for b in mine.bundles] == ["penguintechinc.waddles.echo-pipeline"]
         assert list(theirs.bundles) == []
         assert other_tenant
 
@@ -214,12 +214,14 @@ class TestListBundles:
     ) -> None:
         dal = distribution_db.dal
         _seed_bundle(distribution_db)
-        dal(dal.app_catalog.app_id == "waddles.core.demo.echo").update(status="yanked")
+        dal(dal.app_catalog.app_id == "penguintechinc.waddles.echo-pipeline").update(
+            status="yanked"
+        )
         dal.app_catalog.insert(
-            app_id="waddles.core.demo.prelegacy",
+            app_id="penguintechinc.waddles.prelegacy",
             manifest_version="1.0.0",
             module="core",
-            feature="waddles.core.demo",
+            feature="demo",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
@@ -227,7 +229,7 @@ class TestListBundles:
             stages=None,
         )
         tenant_id, _ = _seed_community(distribution_db)
-        for app_id in ("waddles.core.demo.echo", "waddles.core.demo.prelegacy"):
+        for app_id in ("penguintechinc.waddles.echo-pipeline", "penguintechinc.waddles.prelegacy"):
             dal.app_tenant_availability.insert(tenant_id=tenant_id, app_id=app_id, available=True)
         dal.commit()
         assert list((await _list(config, pb.DISTRIBUTION_STAGE_INGEST)).bundles) == []
