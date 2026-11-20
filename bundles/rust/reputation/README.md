@@ -1,4 +1,4 @@
-# waddles.core.service.reputation
+# penguintechinc.waddles.reputation
 
 Always-on `kind: service` bundle (Rust, `world stage-tools`) that will own community
 reputation behind tool calls (bundle-MCP-tools P5). It exports `tool-provider` and holds the
@@ -7,7 +7,7 @@ reputation behind tool calls (bundle-MCP-tools P5). It exports `tool-provider` a
 
 v1.1.0: the service owns the store, tools, soft-ban state and FLOOR ENFORCEMENT (soft/hard community floors + tenant
 floor, behind flag `waddles.reputation-auto-ban`, default OFF). It holds NO scoring weights: the default logic app
-bundle `waddles.core.app.reputation-accrual` (or an approved replacement that `provides: reputation-logic`) names the
+bundle `penguintechinc.waddles.reputation-accrual` (or an approved replacement that `provides: reputation-logic`) names the
 deltas. Tools, floors, caps and the third-party contract: `docs/bundle-reputation-service.md`.
 
 Tools: `get_score`, `get_many`, `rep`, `leaderboard` (community only), `adjust {user, delta, reason, platform?}`,

@@ -4,7 +4,7 @@
 # resolved to its platform-installed version, never per-community activated by an admin.
 # Mirrors bundle.yaml's kind/tool blocks (the seeder's agreement check enforces that).
 schema_version: 2
-app_id: waddles.core.service.reputation
+app_id: penguintechinc.waddles.reputation
 name: Reputation Service Bundle (Rust)
 version: 1.1.5
 feature: waddles.core.service
@@ -70,15 +70,15 @@ permissions:
     justification: "persists the per-community floor/threshold policy and tier ladder (no scoring weights live here)"
   - id: flags.read
     justification: "reads the waddles.reputation-auto-ban flag (default OFF) that gates every floor action"
-  - id: "tool.call:waddles.core.service.twitch:twitch.moderation.ban"
+  - id: "tool.call:penguintechinc.waddles.twitch:twitch.moderation.ban"
     justification: "hard/tenant floor ban on Twitch (flag-gated, default OFF)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.moderation.ban"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.moderation.ban"
     justification: "hard/tenant floor ban on Discord (flag-gated, default OFF)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.youtube:youtube.moderation.ban"
+  - id: "tool.call:penguintechinc.waddles.youtube:youtube.moderation.ban"
     justification: "hard/tenant floor ban on YouTube (flag-gated, default OFF)"
     params:
       write: true
@@ -86,13 +86,13 @@ routes_to: []
 requested_tools:
   - tool: twitch.moderation.ban
     access: write
-    target_app_id: waddles.core.service.twitch
+    target_app_id: penguintechinc.waddles.twitch
   - tool: discord.moderation.ban
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: youtube.moderation.ban
     access: write
-    target_app_id: waddles.core.service.youtube
+    target_app_id: penguintechinc.waddles.youtube
 # Tools this service exposes through tool-provider.call; identical in hub-manifest.yaml and
 # bundle.yaml (the seeder's agreement check fails on drift).
 exported_tools:

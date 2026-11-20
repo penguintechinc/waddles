@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.app.rooms
+app_id: penguintechinc.waddles.rooms
 name: Rooms App Bundle (Rust)
 version: 1.4.0
 feature: waddles.core.app
@@ -55,95 +55,95 @@ permissions:
   justification: resolves the verified caller to a community user UUID for room access decisions
 - id: storage.kv
   justification: persists room records, the per-room ACL, event links and schedules (community-scoped)
-- id: tool.call:waddles.core.service.webrtc:admin.verify
+- id: tool.call:penguintechinc.waddles.webrtc:admin.verify
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
     write: false
-- id: tool.call:waddles.core.service.webrtc:participant.self
+- id: tool.call:penguintechinc.waddles.webrtc:participant.self
   justification: asks the webrtc service for the caller's host-derived per-community call-participant id, so room ACLs and svc-streaming speak the same pseudonym and the global user uuid never leaves the platform
   params:
     write: false
-- id: tool.call:waddles.core.service.webrtc:room.create
+- id: tool.call:penguintechinc.waddles.webrtc:room.create
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.close
+- id: tool.call:penguintechinc.waddles.webrtc:room.close
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.update
+- id: tool.call:penguintechinc.waddles.webrtc:room.update
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:whip.endpoint
+- id: tool.call:penguintechinc.waddles.webrtc:whip.endpoint
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:whep.endpoint
+- id: tool.call:penguintechinc.waddles.webrtc:whep.endpoint
   justification: delegates room/token operations to the webrtc service; the media path stays in svc-streaming
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.list
+- id: tool.call:penguintechinc.waddles.webrtc:room.list
   justification: moderation front-end over the webrtc service (room.list); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: false
-- id: tool.call:waddles.core.service.webrtc:room.participants
+- id: tool.call:penguintechinc.waddles.webrtc:room.participants
   justification: moderation front-end over the webrtc service (room.participants); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: false
-- id: tool.call:waddles.core.service.webrtc:room.leave
+- id: tool.call:penguintechinc.waddles.webrtc:room.leave
   justification: moderation front-end over the webrtc service (room.leave); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.kick
+- id: tool.call:penguintechinc.waddles.webrtc:room.kick
   justification: moderation front-end over the webrtc service (room.kick); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.mute
+- id: tool.call:penguintechinc.waddles.webrtc:room.mute
   justification: moderation front-end over the webrtc service (room.mute); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.unmute
+- id: tool.call:penguintechinc.waddles.webrtc:room.unmute
   justification: moderation front-end over the webrtc service (room.unmute); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.mute_all
+- id: tool.call:penguintechinc.waddles.webrtc:room.mute_all
   justification: moderation front-end over the webrtc service (room.mute_all); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.lock
+- id: tool.call:penguintechinc.waddles.webrtc:room.lock
   justification: moderation front-end over the webrtc service (room.lock); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.unlock
+- id: tool.call:penguintechinc.waddles.webrtc:room.unlock
   justification: moderation front-end over the webrtc service (room.unlock); the bundle checks the per-room ACL role and the host re-checks it
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.hand.raise
+- id: tool.call:penguintechinc.waddles.webrtc:room.hand.raise
   justification: raised-hand queue front-end over the webrtc service (room.hand.raise); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.hand.lower
+- id: tool.call:penguintechinc.waddles.webrtc:room.hand.lower
   justification: raised-hand queue front-end over the webrtc service (room.hand.lower); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.hand.lower_other
+- id: tool.call:penguintechinc.waddles.webrtc:room.hand.lower_other
   justification: raised-hand queue front-end over the webrtc service (room.hand.lower_other); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.hand.list
+- id: tool.call:penguintechinc.waddles.webrtc:room.hand.list
   justification: raised-hand queue front-end over the webrtc service (room.hand.list); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: false
-- id: tool.call:waddles.core.service.webrtc:room.hand.list_all
+- id: tool.call:penguintechinc.waddles.webrtc:room.hand.list_all
   justification: raised-hand queue front-end over the webrtc service (room.hand.list_all); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: false
-- id: tool.call:waddles.core.service.webrtc:room.hand.ack
+- id: tool.call:penguintechinc.waddles.webrtc:room.hand.ack
   justification: raised-hand queue front-end over the webrtc service (room.hand.ack); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
-- id: tool.call:waddles.core.service.webrtc:room.hand.reset
+- id: tool.call:penguintechinc.waddles.webrtc:room.hand.reset
   justification: raised-hand queue front-end over the webrtc service (room.hand.reset); the queue is authoritative in svc-streaming, the host verifies the scope and the actor, and the bundle keeps no copy
   params:
     write: true
@@ -166,70 +166,70 @@ platform_compatibility:
 requested_tools:
 - tool: admin.verify
   access: read
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: participant.self
   access: read
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.create
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.close
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.update
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: whip.endpoint
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: whep.endpoint
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.list
   access: read
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.participants
   access: read
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.leave
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.kick
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.mute
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.unmute
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.mute_all
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.lock
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.unlock
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.hand.raise
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.hand.lower
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.hand.lower_other
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.hand.list
   access: read
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.hand.list_all
   access: read
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.hand.ack
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc
 - tool: room.hand.reset
   access: write
-  target_app_id: waddles.core.service.webrtc
+  target_app_id: penguintechinc.waddles.webrtc

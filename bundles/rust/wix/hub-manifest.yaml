@@ -5,7 +5,7 @@
 # against the connection's Wix app public key). Credentials are never in this file or the
 # component. Cutover flag: PostHog `waddles.connector-wix` (default OFF).
 schema_version: 2
-app_id: waddles.core.service.wix
+app_id: penguintechinc.waddles.wix
 name: Wix Webhook Connector (Rust)
 version: 1.1.1
 feature: waddles.core.service

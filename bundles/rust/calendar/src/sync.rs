@@ -92,7 +92,7 @@ impl SyncAdapter for DiscordAdapter {
         Target::Discord
     }
     fn app_id(&self) -> &'static str {
-        "waddles.core.service.discord"
+        "penguintechinc.waddles.discord"
     }
     fn build(
         &self,
@@ -158,7 +158,7 @@ impl SyncAdapter for TwitchAdapter {
         Target::Twitch
     }
     fn app_id(&self) -> &'static str {
-        "waddles.core.service.twitch"
+        "penguintechinc.waddles.twitch"
     }
     fn build(
         &self,
@@ -222,7 +222,7 @@ impl SyncAdapter for WixAdapter {
         Target::Wix
     }
     fn app_id(&self) -> &'static str {
-        "waddles.core.service.wix"
+        "penguintechinc.waddles.wix"
     }
     fn build(
         &self,

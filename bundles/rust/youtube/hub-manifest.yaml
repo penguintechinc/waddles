@@ -9,7 +9,7 @@
 # Cutover flag: PostHog `waddles.connector-youtube` (default OFF; the Python svc_ingest path runs
 # unchanged while OFF).
 schema_version: 2
-app_id: waddles.core.service.youtube
+app_id: penguintechinc.waddles.youtube
 name: YouTube Platform Connector (Rust)
 version: 1.1.0
 feature: waddles.core.service

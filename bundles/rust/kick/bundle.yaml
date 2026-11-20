@@ -6,7 +6,7 @@
 # Cutover flag: PostHog `waddles.connector-kick` (default OFF; the Python svc_ingest Kick path
 # runs unchanged while OFF).
 schema_version: 2
-app_id: waddles.core.service.kick
+app_id: penguintechinc.waddles.kick
 name: Kick Platform Connector (Rust)
 version: 1.0.3
 feature: waddles.core.service

@@ -2,7 +2,7 @@
 # holds no address, no secret, no socket. Server registration / allowlists / audit are service tools reached by the
 # generic bundle-admin gateway under the admin's verified scope (see README "Admin path").
 schema_version: 2
-app_id: waddles.core.example.game-servers
+app_id: penguintechinc.waddles.game-servers
 name: Game Servers (Rust)
 version: 1.0.1
 feature: waddles.core.example
@@ -53,13 +53,13 @@ permissions: []
 requested_tools:
 - tool: gameserver.server.list
   access: read
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 - tool: gameserver.status.query
   access: read
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 - tool: gameserver.rcon.exec
   access: write
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 community_config_schema:
   type: object
   additionalProperties: false

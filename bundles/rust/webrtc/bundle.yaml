@@ -1,6 +1,6 @@
 # exported_tools identical to hub-manifest.yaml (seeder agreement check).
 schema_version: 2
-app_id: waddles.core.service.webrtc
+app_id: penguintechinc.waddles.webrtc
 name: WebRTC Service Bundle (Rust)
 version: 1.4.1
 feature: waddles.core.service

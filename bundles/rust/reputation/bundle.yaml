@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.service.reputation
+app_id: penguintechinc.waddles.reputation
 name: Reputation Service Bundle (Rust)
 version: 1.1.5
 feature: waddles.core.service
@@ -31,13 +31,13 @@ permissions: []
 requested_tools:
   - tool: twitch.moderation.ban
     access: write
-    target_app_id: waddles.core.service.twitch
+    target_app_id: penguintechinc.waddles.twitch
   - tool: discord.moderation.ban
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: youtube.moderation.ban
     access: write
-    target_app_id: waddles.core.service.youtube
+    target_app_id: penguintechinc.waddles.youtube
 # Tools this service exposes through tool-provider.call; identical in hub-manifest.yaml and
 # bundle.yaml (the seeder's agreement check fails on drift).
 exported_tools:

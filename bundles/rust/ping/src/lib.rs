@@ -214,7 +214,7 @@ mod tests {
         StageEnvelope {
             tenant: "tenant-1".to_string(),
             community: None,
-            app_id: "waddles.core.example.ping".to_string(),
+            app_id: "penguintechinc.waddles.ping".to_string(),
             stage: "action".to_string(),
             event: PlatformEvent::with_payload(
                 platform,

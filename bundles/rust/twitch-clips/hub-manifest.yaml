@@ -1,9 +1,9 @@
-# hub-api install-pipeline manifest (bundle_manifest_v2, schema_version 2) for waddles.core.example.twitch-clips.
+# hub-api install-pipeline manifest (bundle_manifest_v2, schema_version 2) for penguintechinc.waddles.twitch-clips.
 # Keep version/permissions/stages in lockstep with bundle.yaml. `config_schema` and `admin_actions` are the
 # declarative contract for the generic bundle-admin gateway (tolerated by the v2 parser today).
 # limits.timeout_ms=10000 is the host's hard cap: create + bounded poll (<=7s) must fit one invocation.
 schema_version: 2
-app_id: waddles.core.example.twitch-clips
+app_id: penguintechinc.waddles.twitch-clips
 name: Twitch Clips Bundle (Rust)
 version: 1.0.3
 feature: waddles.core.example
@@ -53,15 +53,15 @@ permissions:
 - id: identity.resolve
   justification: Resolve the verified chat actor to a community UUID for per-user cooldown keys; never
     a handle
-- id: tool.call:waddles.core.service.twitch:twitch.clip.create
+- id: tool.call:penguintechinc.waddles.twitch:twitch.clip.create
   justification: Create a Twitch clip of the live stream; broadcaster is pinned host-side
   params:
     write: true
-- id: tool.call:waddles.core.service.twitch:twitch.clip.get
+- id: tool.call:penguintechinc.waddles.twitch:twitch.clip.get
   justification: Poll a just-created clip until Twitch finishes processing it
   params:
     write: false
-- id: tool.call:waddles.core.service.twitch:twitch.clip.list
+- id: tool.call:penguintechinc.waddles.twitch:twitch.clip.list
   justification: List the channel's recent clips for !clips
   params:
     write: false
@@ -69,13 +69,13 @@ routes_to: []
 requested_tools:
 - tool: twitch.clip.create
   access: write
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: twitch.clip.get
   access: read
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: twitch.clip.list
   access: read
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 community_config_schema: &id002
   type: object
   properties:

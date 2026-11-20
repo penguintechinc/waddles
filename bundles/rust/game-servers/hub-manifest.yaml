@@ -2,7 +2,7 @@
 # holds no address, no secret, no socket. Server registration / allowlists / audit are service tools reached by the
 # generic bundle-admin gateway under the admin's verified scope (see README "Admin path").
 schema_version: 2
-app_id: waddles.core.example.game-servers
+app_id: penguintechinc.waddles.game-servers
 name: Game Servers (Rust)
 version: 1.0.1
 feature: waddles.core.example
@@ -47,17 +47,17 @@ permissions:
 - id: chat.send:discord
   justification: replies to the invoking discord channel via the relay host import
     (relay.push -> chat.send:discord); also used for scheduled status posts
-- id: tool.call:waddles.core.service.gameserver:gameserver.server.list
+- id: tool.call:penguintechinc.waddles.gameserver:gameserver.server.list
   justification: resolves a typed server alias to the service's server UUID (enabled
     servers only)
   params:
     write: false
-- id: tool.call:waddles.core.service.gameserver:gameserver.status.query
+- id: tool.call:penguintechinc.waddles.gameserver:gameserver.status.query
   justification: serves !server status/players and scheduled status posts (read-only
     A2S / server-list ping done by the service)
   params:
     write: false
-- id: tool.call:waddles.core.service.gameserver:gameserver.rcon.exec
+- id: tool.call:penguintechinc.waddles.gameserver:gameserver.rcon.exec
   justification: serves the moderator-only !rcon command; the service enforces the
     per-server allowlist, rate limits, audit log and the verified actor's moderator
     scope
@@ -70,13 +70,13 @@ routes_to: []
 requested_tools:
 - tool: gameserver.server.list
   access: read
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 - tool: gameserver.status.query
   access: read
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 - tool: gameserver.rcon.exec
   access: write
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 community_config_schema:
   type: object
   additionalProperties: false

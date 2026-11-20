@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.app.calendar
+app_id: penguintechinc.waddles.calendar
 name: Calendar Bundle (Rust)
 version: 1.0.3
 feature: waddles.core.app
@@ -51,35 +51,35 @@ permissions:
     justification: "command replies to the invoking channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"
     justification: "command replies to the invoking channel via the relay host import (relay.push -> chat.send:twitch)"
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.create"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.create"
     justification: "push approved events to Discord scheduled events (sync is OFF until a community admin enables it)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.update"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.update"
     justification: "push edits of synced events to Discord scheduled events"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.cancel"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.cancel"
     justification: "cancel the Discord scheduled event when a synced event is cancelled"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.delete"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.delete"
     justification: "remove the Discord scheduled event when an admin hard-deletes a synced event"
     params:
       write: true
 requested_tools:
   - tool: discord.scheduled_event.create
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.update
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.cancel
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.delete
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
 community_config_schema:
   type: object
   additionalProperties: false

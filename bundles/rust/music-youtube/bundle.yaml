@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.service.music-youtube
+app_id: penguintechinc.waddles.music-youtube
 name: Music YouTube Service Bundle (Rust)
 version: 1.0.2
 feature: waddles.core.service

@@ -3,7 +3,7 @@
 # platform plumbing, resolved to its platform-installed version. Mirrors bundle.yaml's
 # kind/tool blocks; both are generated from tests/contract/*.json.
 schema_version: 2
-app_id: waddles.core.service.ai
+app_id: penguintechinc.waddles.ai
 name: AI Service Bundle (Rust)
 version: 1.0.2
 feature: waddles.core.service

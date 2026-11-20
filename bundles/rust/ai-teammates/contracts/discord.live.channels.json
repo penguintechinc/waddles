@@ -1,6 +1,6 @@
 {
   "tool": "discord.live.channels",
-  "target": "waddles.core.service.discord",
+  "target": "penguintechinc.waddles.discord",
   "access": "read",
   "source": "bundles/contracts/live-channels-contract.v1.json (PR #1119)",
   "request": {

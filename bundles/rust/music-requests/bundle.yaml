@@ -1,6 +1,6 @@
 # Music requests SERVICE bundle manifest (component build). exported_tools are identical to hub-manifest.yaml.
 schema_version: 2
-app_id: waddles.core.service.music-requests
+app_id: penguintechinc.waddles.music-requests
 name: Music Requests Service Bundle (Rust)
 version: 1.0.2
 feature: waddles.core.service

@@ -4,7 +4,7 @@
 # Spotify account, player control); the host resolves/refreshes them and injects Authorization.
 # exported_tools are identical in hub-manifest.yaml and bundle.yaml (seeder agreement check).
 schema_version: 2
-app_id: waddles.core.service.music-spotify
+app_id: penguintechinc.waddles.music-spotify
 name: Spotify Music Service Bundle (Rust)
 version: 1.0.2
 feature: waddles.core.service
