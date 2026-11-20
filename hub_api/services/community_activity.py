@@ -16,7 +16,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
-from .community_common import ensure_community_tables
+from .community_common import ensure_community_tables, execute_positional
 
 _DATE_FILTERS = {
     "weekly": "AND stat_date >= CURRENT_DATE - INTERVAL '7 days'",
@@ -112,8 +112,8 @@ def get_watch_time_leaderboard(
         " HAVING SUM(asd.watch_time_seconds) >= $2"
         " ORDER BY total_watch_time DESC LIMIT $3 OFFSET $4"
     )
-    rows = dal.executesql(
-        leaderboard_sql, placeholders=[community_id, min_seconds, effective_limit, offset]
+    rows = execute_positional(
+        dal, leaderboard_sql, placeholders=[community_id, min_seconds, effective_limit, offset]
     )
     count_sql = (
         "SELECT COUNT(*) FROM (SELECT COALESCE(hub_user_id, -1) AS uid"  # nosec B608  # noqa: S608
@@ -122,7 +122,7 @@ def get_watch_time_leaderboard(
         + " GROUP BY COALESCE(hub_user_id, -1), COALESCE(platform_user_id, '')"
         " HAVING SUM(watch_time_seconds) >= $2) t"
     )
-    total_rows = dal.executesql(count_sql, placeholders=[community_id, min_seconds])
+    total_rows = execute_positional(dal, count_sql, placeholders=[community_id, min_seconds])
     total = int(total_rows[0][0]) if total_rows else 0
 
     leaderboard = [
@@ -170,8 +170,8 @@ def get_message_leaderboard(
         " HAVING SUM(asd.message_count) >= $2"
         " ORDER BY total_messages DESC LIMIT $3 OFFSET $4"
     )
-    rows = dal.executesql(
-        leaderboard_sql, placeholders=[community_id, min_messages, effective_limit, offset]
+    rows = execute_positional(
+        dal, leaderboard_sql, placeholders=[community_id, min_messages, effective_limit, offset]
     )
     count_sql = (
         "SELECT COUNT(*) FROM (SELECT COALESCE(hub_user_id, -1) AS uid"  # nosec B608  # noqa: S608
@@ -180,7 +180,7 @@ def get_message_leaderboard(
         + " GROUP BY COALESCE(hub_user_id, -1), COALESCE(platform_user_id, '')"
         " HAVING SUM(message_count) >= $2) t"
     )
-    total_rows = dal.executesql(count_sql, placeholders=[community_id, min_messages])
+    total_rows = execute_positional(dal, count_sql, placeholders=[community_id, min_messages])
     total = int(total_rows[0][0]) if total_rows else 0
 
     leaderboard = [
@@ -251,7 +251,7 @@ def _period_stats(
         " FROM activity_stats_daily"
         " WHERE community_id = $1 AND hub_user_id = $2 " + date_filter
     )
-    rows = dal.executesql(sql, placeholders=[community_id, user_id])
+    rows = execute_positional(dal, sql, placeholders=[community_id, user_id])
     watch_time = int(rows[0][0] or 0) if rows else 0
     messages = int(rows[0][1] or 0) if rows else 0
     return ActivityPeriodStats(
@@ -275,7 +275,7 @@ def _user_rank(dal: Any, community_id: int, user_id: int, column: str) -> int | 
         " FROM activity_stats_daily WHERE community_id = $1 AND hub_user_id IS NOT NULL"
         " GROUP BY hub_user_id) t WHERE hub_user_id = $2"
     )
-    rows = dal.executesql(sql, placeholders=[community_id, user_id])
+    rows = execute_positional(dal, sql, placeholders=[community_id, user_id])
     return int(rows[0][0]) if rows else None
 
 
@@ -388,7 +388,8 @@ def _find_hub_user_id(dal: Any, platform: Any, platform_user_id: Any) -> int | N
     from an untyped request-body dict (`payload.get(...)`) at every call
     site; the SQL layer, not mypy, is the validation boundary here.
     """
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         "SELECT hub_user_id FROM hub_user_identities WHERE platform = $1 AND platform_user_id = $2",
         placeholders=[platform, platform_user_id],
     )
@@ -404,7 +405,8 @@ def _update_daily_stats(
     watch_seconds: int,
     message_count: int,
 ) -> None:
-    dal.executesql(
+    execute_positional(
+        dal,
         """
         INSERT INTO activity_stats_daily
           (community_id, hub_user_id, platform_user_id, platform_username, stat_date,
@@ -476,7 +478,8 @@ def record_watch_session(dal: Any, payload: dict[str, Any]) -> str | None:
             )
         dal.commit()
     elif event_type == "leave":
-        rows = dal.executesql(
+        rows = execute_positional(
+            dal,
             """
             UPDATE activity_watch_sessions
             SET is_active = false, session_end = NOW(),
@@ -569,7 +572,8 @@ def record_activity_batch(dal: Any, events: list[dict[str, Any]]) -> tuple[int, 
 def close_stale_watch_sessions(dal: Any, stale_minutes: int) -> int:
     """Force-close watch sessions idle past `stale_minutes`; roll duration into daily stats."""
     ensure_community_tables(dal)
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         """
         UPDATE activity_watch_sessions
         SET is_active = false,
