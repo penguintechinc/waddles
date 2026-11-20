@@ -46,9 +46,11 @@ metadata:
   labels:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-presentation
+{{- if .Values.pipeline.svcStreaming.enabled }}
 ---
 # svc-streaming debits the token ledger as itself (scope token.billing:debit, community-bound)
-# instead of forwarding a member's JWT -- its own identity, never the shared one.
+# instead of forwarding a member's JWT -- its own identity, never the shared one. Rendered only
+# with the Deployment that uses it (same `pipeline.svcStreaming.enabled` gate).
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -57,6 +59,7 @@ metadata:
   labels:
     {{- include "waddlebot.labels" . | nindent 4 }}
     app.kubernetes.io/component: svc-streaming
+{{- end }}
 ---
 # Least-privilege grant for hub-api's own ServiceAccount to call the
 # TokenReview API (`verify_service_account_token` in
