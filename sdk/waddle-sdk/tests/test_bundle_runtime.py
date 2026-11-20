@@ -17,6 +17,8 @@ from waddle_sdk.flask_core.bundle_runtime import (
     set_bundle_dal,
 )
 
+_ECHO_APP = "penguintechinc.waddles.echo"
+
 
 def test_get_bundle_dal_raises_when_unbound() -> None:
     """Calling get_bundle_dal() before set_bundle_dal() raises BundleRuntimeError."""
@@ -35,7 +37,7 @@ def test_bundle_context_scopes_correctly() -> None:
     """bundle_context() binds and then clears BundleContext around its block."""
     with pytest.raises(BundleRuntimeError):
         get_bundle_context()
-    with bundle_context(tenant="acme", community="main", app_id="penguintechinc.waddles.echo") as ctx:
+    with bundle_context(tenant="acme", community="main", app_id=_ECHO_APP) as ctx:
         assert ctx.tenant == "acme"
         assert get_bundle_context().community == "main"
     with pytest.raises(BundleRuntimeError):
