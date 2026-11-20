@@ -301,6 +301,10 @@ test-integration:
 	@test -d tests/integration || { echo "tests/integration directory not found" >&2; exit 1; }
 	@bash scripts/test-api-all.sh
 
+.PHONY: webui-sweep
+webui-sweep: ## Sweep every hub webui route for console/network errors (env: BASE_URL, HOST_HEADER, WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD)
+	@cd tests/e2e && { test -d node_modules || npm ci --no-audit --no-fund; } && node webui-sweep/sweep.js
+
 test-e2e:
 	@echo "Running e2e tests..."
 	@test -f scripts/e2e-test-alpha.sh || { echo "scripts/e2e-test-alpha.sh not found" >&2; exit 1; }
