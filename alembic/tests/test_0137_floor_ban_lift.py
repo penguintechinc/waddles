@@ -20,7 +20,7 @@ import psycopg2.errors
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from pg_docker import DOCKER_AVAILABLE, PgTestDatabase, migrated_postgres
+from pg_docker import DOCKER_AVAILABLE, PgTestDatabase, alembic_cli, migrated_postgres
 
 requires_docker = pytest.mark.skipif(
     not DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
@@ -243,3 +243,24 @@ class TestAfterLift:
         )[0][0]
         assert new_user != user
         assert _status(pg_db, rid) == 8
+
+
+@requires_docker
+class TestRoundTrip:
+    def test_downgrade_one_step_then_reupgrade(self, pg_db: PgTestDatabase) -> None:
+        """Fresh-DB upgrade to head (the fixture) -> downgrade -1 -> upgrade head, lifts intact."""
+        tid, cid = _setup(pg_db, "t-lift-roundtrip")
+        rid = _row(pg_db, tid, cid, str(uuid.uuid4()), 8)
+        alembic_cli("downgrade", "-1", dsn=pg_db.dsn)
+        cols = _q(
+            pg_db,
+            "SELECT column_name FROM information_schema.columns "
+            "WHERE table_name = 'bundle_reputation_floor_bans' AND column_name LIKE 'lifted_%%'",
+        )
+        assert cols == []
+        assert _status(pg_db, rid) == 2, "lifted rows return to done on downgrade"
+        alembic_cli("upgrade", "head", dsn=pg_db.dsn)
+        assert _q(
+            pg_db,
+            "SELECT to_regprocedure('reputation_floor_ban_lift(bigint, uuid[], uuid)')",
+        )[0][0]
