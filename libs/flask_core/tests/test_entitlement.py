@@ -745,3 +745,40 @@ def test_forwarded_host_flag_off_never_trusted(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.244.0.0/16")
     resolved = resolve_trusted_host("hub-api:8204", "waddles.app", "10.244.1.5")
     assert tier_check_bypassed(resolved, None) is False
+
+
+@pytest.mark.asyncio
+async def test_last_known_posthog_value_beats_env_when_posthog_goes_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Precedence PostHog -> last-known -> env: a cached PostHog OFF outranks env ON on outage."""
+    monkeypatch.setenv(ENV_VAR, "true")
+    client, flag_gate, _ = make_client(flag_result=False)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    flag_gate.result = None  # PostHog now unreachable / flag undefined
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    flag_gate.raises = RuntimeError("down")
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+
+
+@pytest.mark.asyncio
+async def test_posthog_outage_never_raises_and_falls_to_env_then_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never-seen flag + PostHog raising: env wins, then default OFF; no exception escapes."""
+    client, _, _ = make_client(flag_raises=RuntimeError("down"))
+    monkeypatch.setenv(ENV_VAR, "true")
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is True
+    monkeypatch.delenv(ENV_VAR)
+    assert await client.evaluate(ENV_FLAG, tenant="other") is False
+
+
+def test_posthog_flag_gate_applies_bounded_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK request timeout is bounded (default 3s) and env-tunable."""
+    monkeypatch.setenv("POSTHOG_API_KEY", "phc_test_key")
+    monkeypatch.delenv("POSTHOG_TIMEOUT_SECONDS", raising=False)
+    assert PostHogFlagGate.from_env()._client.timeout == 3.0
+    monkeypatch.setenv("POSTHOG_TIMEOUT_SECONDS", "7")
+    assert PostHogFlagGate.from_env()._client.timeout == 7.0
