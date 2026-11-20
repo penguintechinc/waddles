@@ -41,6 +41,7 @@ from flask_core.tenancy import TenantContext
 
 from services import community_authz
 from services import community_reputation_service as reputation_svc
+from services.current_user import get_current_user_id
 from services.errors import bad_request, forbidden, not_found
 from services.member_roles import ASSIGNABLE_MEMBER_ROLES
 from services.schema import bind_admin_tables
@@ -356,6 +357,26 @@ async def authorize_reputation_admin(
     await community_authz.require_community_admin(
         async_dal, dal, request, community_id=community_id, scope=SCOPE_REPUTATION_MANAGE
     )
+
+
+async def authorize_floor_ban_lift(
+    async_dal: Any, dal: Any, request: Any, *, community_id: int, ctx: TenantContext
+) -> None:
+    """404 unless the community is in the caller's tenant, then 403 unless a TENANT admin.
+
+    A floor ban is tenant-wide (it denies in every community of the tenant), so lifting it is a
+    tenant-level act: a community admin, however privileged in one community, cannot reverse it.
+    Super admins (the `system` tenant) and `tenant_admins` rows of this tenant pass.
+    """
+    _ensure_tables(dal)
+    await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
+    user_id = get_current_user_id(request)  # raises 401 if missing/invalid
+    if await community_authz.is_super_admin(async_dal, dal, user_id=user_id):
+        return
+    if not await community_authz._is_tenant_admin(
+        async_dal, dal, user_id=user_id, tenant_id=ctx.tenant_id
+    ):
+        raise forbidden("Tenant admin access required")
 
 
 async def adjust_reputation(

@@ -147,6 +147,7 @@ class AuditAction(StrEnum):
     ADMIN_REPUTATION_POLICY_CHANGED = "admin.reputation_policy_changed"
     ADMIN_REPUTATION_OVERRIDDEN = "admin.reputation_overridden"
     ADMIN_REPUTATION_SOFT_BAN_CHANGED = "admin.reputation_soft_ban_changed"
+    ADMIN_FLOOR_BAN_LIFTED = "admin.floor_ban_lifted"
     AUDIT_EXPORTED = "audit.exported"
     AUDIT_VERIFY_FAILED = "audit.verify_failed"
     # --- credential / secret lifecycle (inline-authz routes; the secret value is never logged) ---
@@ -517,6 +518,10 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("PUT", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
             ("DELETE", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
         ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_FLOOR_BAN_LIFTED),
+        (("DELETE", f"{_ADM}/reputation/floor-bans/<int:user_id>"),),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_SET),
