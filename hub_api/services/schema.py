@@ -92,6 +92,113 @@ from typing import Any
 from pydal import Field
 
 
+def _define_communities(dal: Any, *, migrate: bool, redefine: bool = False) -> None:
+    """Define the full `communities` pydal table (every column the hub-api services read).
+
+    Single source of truth: `bind_auth_tables` binds it first and `bind_tenant_tables`
+    re-binds it with `redefine=True`. Both MUST use the same complete field list -- a narrower
+    redefine silently drops columns (`description`, `platform`, `deleted_at`, ...) and every
+    query selecting them 500s with `AttributeError`.
+    """
+    kwargs: dict[str, Any] = {"redefine": True} if redefine else {}
+    dal.define_table(
+        "communities",
+        Field("name", "string", length=255),
+        Field("display_name", "string", length=255),
+        # Added by the Analytics-module port (M9): this table can only be
+        # `define_table()`-d once per DAL instance, and `create_app()`
+        # binds this M1 definition (via `_bind_reference_tables`) before
+        # any request runs -- `services/community_common.py::
+        # ensure_community_tables()`'s own idempotent guard then silently
+        # skips its (separately-defined) `tenant_id` column, so
+        # `community_in_tenant()` would `AttributeError` in production
+        # against a real app (pre-existing gap, only masked because every
+        # Community-module blueprint's own tests build an isolated app +
+        # dal that never loads `bind_auth_tables` at all). Extending here
+        # -- not redefining -- per this module's own docstring guidance for
+        # `tenants` columns, generalized to `communities`: the real
+        # Postgres column already exists (058_tenants_and_claims.sql),
+        # this just maps pydal onto it.
+        Field("tenant_id", "integer"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("member_count", "integer", default=0),
+        Field("config", "json"),
+        # license_key/license_expires_at/license_tier: added by the
+        # M-automation port group -- see module docstring gap (5).
+        Field("license_key", "string", length=255),
+        Field("license_expires_at", "datetime"),
+        Field("license_tier", "string", length=50),
+        # alembic 0084: external UUID id (UUIDs only cross the API boundary). The pydal-side
+        # default keeps non-Postgres (sqlite) rows addressable; Postgres inserts that bypass pydal
+        # still get the DB's own gen_random_uuid() default.
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        # Columns below added by the M3 Platform-admin group (adminController.js
+        # /superadminController.js), the M2 Core Tenancy-Misc group
+        # (communityProfileController.js / joinRequestController.js port),
+        # and the M3 Platform-admin/Public group (platformController.js/
+        # publicController.js -- see `hub_api/PORTING.md`) -- `communities`
+        # is bound once, here, by M1; every column any later group needs
+        # joins this same Field list rather than a second define_table()
+        # call (pydal allows exactly one per table name per DAL instance).
+        # `tenant_id`, `description`, `platform`, `owner_id`, `join_mode`,
+        # `is_public`, `deleted_at` match 000_create_base_schema.sql +
+        # 058_tenants_and_claims.sql's `ALTER TABLE communities ADD COLUMN
+        # tenant_id` verbatim. `tenant_id` is NOT NULL in Postgres -- every
+        # public/platform-admin query that lists communities MUST filter on
+        # this (security.md Tenant Isolation); see services/public_service.
+        # py's module docstring for the pre-auth resolution mechanism. Also
+        # relied on by the M7 Streaming (music/stream/streaming) group AND
+        # the M7 Streaming (overlay/calls) group: `flask_core.tenancy.
+        # tenant_scoped()`'s community_id-owning-table fallback path reads
+        # `dal.communities.tenant_id` directly -- no group before M7 queried
+        # a community_id-owning table through that helper, so this was the
+        # first caller to actually need the column bound (not just present
+        # in Postgres). `services/community_access.py` (overlay/calls) is
+        # the second `tenant_scoped()` caller with the identical need.
+        # `about_extended`, `social_links`, `website_url`,
+        # `discord_invite_url`, `visibility` are a pre-existing schema gap:
+        # `communityProfileController.js`'s own raw SQL reads/writes these
+        # exact column names on `communities`, but no numbered migration
+        # ever adds them (`social_links` migration 037 adds a same-named
+        # column to `community_members`, a DIFFERENT table -- not this
+        # one). Bound here anyway to stay byte-faithful to Node: a query
+        # touching these columns 500s against real Postgres exactly like
+        # Node's own controller does today. Needs a migration to
+        # reconcile -- out of scope for a "no schema changes" port PR.
+        # `logo_url`/`banner_url`/`primary_platform` are genuine columns
+        # platformController.js/publicController.js read, same
+        # 000_create_base_schema.sql origin as the rest of this list.
+        Field("tenant_id", "integer"),
+        Field("description", "text"),
+        Field("about_extended", "text"),  # gap -- see docstring above
+        Field("social_links", "json"),  # gap -- see docstring above
+        Field("website_url", "string", length=500),  # gap -- see docstring above
+        Field("discord_invite_url", "string", length=500),  # gap -- see docstring above
+        Field("visibility", "string", length=30, default="public"),  # gap -- see docstring above
+        Field("logo_url", "text"),
+        Field("banner_url", "text"),
+        Field("primary_platform", "string", length=50),
+        Field("platform", "string", length=50, default="discord"),
+        Field("platform_server_id", "string", length=255),
+        # VARCHAR in Postgres, not a hub_users.id FK -- see community_members.user_id below.
+        Field("owner_id", "string", length=255),
+        Field("owner_name", "string", length=255),
+        Field("community_type", "string", length=50, default="creator"),
+        Field("join_mode", "string", length=50, default="open"),
+        Field("is_public", "boolean", default=True),
+        Field("is_premium", "boolean", default=False),
+        Field("seat_limit", "integer"),
+        Field("created_by", "string", length=255),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        Field("deleted_at", "datetime"),
+        Field("deleted_by", "string", length=255),
+        migrate=migrate,
+        **kwargs,
+    )
+
+
 def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define every table the M1 auth/identity/passkey/profile/user-management group queries.
 
@@ -273,101 +380,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
-        "communities",
-        Field("name", "string", length=255),
-        Field("display_name", "string", length=255),
-        # Added by the Analytics-module port (M9): this table can only be
-        # `define_table()`-d once per DAL instance, and `create_app()`
-        # binds this M1 definition (via `_bind_reference_tables`) before
-        # any request runs -- `services/community_common.py::
-        # ensure_community_tables()`'s own idempotent guard then silently
-        # skips its (separately-defined) `tenant_id` column, so
-        # `community_in_tenant()` would `AttributeError` in production
-        # against a real app (pre-existing gap, only masked because every
-        # Community-module blueprint's own tests build an isolated app +
-        # dal that never loads `bind_auth_tables` at all). Extending here
-        # -- not redefining -- per this module's own docstring guidance for
-        # `tenants` columns, generalized to `communities`: the real
-        # Postgres column already exists (058_tenants_and_claims.sql),
-        # this just maps pydal onto it.
-        Field("tenant_id", "integer"),
-        Field("is_global", "boolean", default=False),
-        Field("is_active", "boolean", default=True),
-        Field("member_count", "integer", default=0),
-        Field("config", "json"),
-        # license_key/license_expires_at/license_tier: added by the
-        # M-automation port group -- see module docstring gap (5).
-        Field("license_key", "string", length=255),
-        Field("license_expires_at", "datetime"),
-        Field("license_tier", "string", length=50),
-        # alembic 0084: external UUID id (UUIDs only cross the API boundary). The pydal-side
-        # default keeps non-Postgres (sqlite) rows addressable; Postgres inserts that bypass pydal
-        # still get the DB's own gen_random_uuid() default.
-        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
-        # Columns below added by the M3 Platform-admin group (adminController.js
-        # /superadminController.js), the M2 Core Tenancy-Misc group
-        # (communityProfileController.js / joinRequestController.js port),
-        # and the M3 Platform-admin/Public group (platformController.js/
-        # publicController.js -- see `hub_api/PORTING.md`) -- `communities`
-        # is bound once, here, by M1; every column any later group needs
-        # joins this same Field list rather than a second define_table()
-        # call (pydal allows exactly one per table name per DAL instance).
-        # `tenant_id`, `description`, `platform`, `owner_id`, `join_mode`,
-        # `is_public`, `deleted_at` match 000_create_base_schema.sql +
-        # 058_tenants_and_claims.sql's `ALTER TABLE communities ADD COLUMN
-        # tenant_id` verbatim. `tenant_id` is NOT NULL in Postgres -- every
-        # public/platform-admin query that lists communities MUST filter on
-        # this (security.md Tenant Isolation); see services/public_service.
-        # py's module docstring for the pre-auth resolution mechanism. Also
-        # relied on by the M7 Streaming (music/stream/streaming) group AND
-        # the M7 Streaming (overlay/calls) group: `flask_core.tenancy.
-        # tenant_scoped()`'s community_id-owning-table fallback path reads
-        # `dal.communities.tenant_id` directly -- no group before M7 queried
-        # a community_id-owning table through that helper, so this was the
-        # first caller to actually need the column bound (not just present
-        # in Postgres). `services/community_access.py` (overlay/calls) is
-        # the second `tenant_scoped()` caller with the identical need.
-        # `about_extended`, `social_links`, `website_url`,
-        # `discord_invite_url`, `visibility` are a pre-existing schema gap:
-        # `communityProfileController.js`'s own raw SQL reads/writes these
-        # exact column names on `communities`, but no numbered migration
-        # ever adds them (`social_links` migration 037 adds a same-named
-        # column to `community_members`, a DIFFERENT table -- not this
-        # one). Bound here anyway to stay byte-faithful to Node: a query
-        # touching these columns 500s against real Postgres exactly like
-        # Node's own controller does today. Needs a migration to
-        # reconcile -- out of scope for a "no schema changes" port PR.
-        # `logo_url`/`banner_url`/`primary_platform` are genuine columns
-        # platformController.js/publicController.js read, same
-        # 000_create_base_schema.sql origin as the rest of this list.
-        Field("tenant_id", "integer"),
-        Field("description", "text"),
-        Field("about_extended", "text"),  # gap -- see docstring above
-        Field("social_links", "json"),  # gap -- see docstring above
-        Field("website_url", "string", length=500),  # gap -- see docstring above
-        Field("discord_invite_url", "string", length=500),  # gap -- see docstring above
-        Field("visibility", "string", length=30, default="public"),  # gap -- see docstring above
-        Field("logo_url", "text"),
-        Field("banner_url", "text"),
-        Field("primary_platform", "string", length=50),
-        Field("platform", "string", length=50, default="discord"),
-        Field("platform_server_id", "string", length=255),
-        # VARCHAR in Postgres, not a hub_users.id FK -- see community_members.user_id below.
-        Field("owner_id", "string", length=255),
-        Field("owner_name", "string", length=255),
-        Field("community_type", "string", length=50, default="creator"),
-        Field("join_mode", "string", length=50, default="open"),
-        Field("is_public", "boolean", default=True),
-        Field("is_premium", "boolean", default=False),
-        Field("seat_limit", "integer"),
-        Field("created_by", "string", length=255),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        Field("deleted_at", "datetime"),
-        Field("deleted_by", "string", length=255),
-        migrate=migrate,
-    )
+    _define_communities(dal, migrate=migrate)
 
     dal.define_table(
         "community_members",
@@ -1926,7 +1939,7 @@ def bind_superadmin_tenant_fields(dal: Any, *, migrate: bool = False) -> None:
     check so this only runs once per DAL instance rather than on every
     request.
     """
-    if "seat_limit" in dal.tenants.fields:
+    if "seat_limit" in dal.tenants.fields and "updated_at" in dal.tenants.fields:
         return
 
     dal.define_table(
@@ -2009,26 +2022,12 @@ def bind_tenant_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("allowed_module_ids", "list:integer"),
         Field("seat_limit", "integer"),
         Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
         migrate=migrate,
         redefine=True,
     )
 
-    dal.define_table(
-        "communities",
-        Field("name", "string", length=255),
-        Field("display_name", "string", length=255),
-        Field("is_global", "boolean", default=False),
-        Field("is_active", "boolean", default=True),
-        Field("member_count", "integer", default=0),
-        Field("config", "json"),
-        Field("tenant_id", "integer"),
-        Field("is_public", "boolean", default=True),
-        Field("community_type", "string", length=50, default="creator"),
-        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
-        Field("created_at", "datetime"),
-        migrate=migrate,
-        redefine=True,
-    )
+    _define_communities(dal, migrate=migrate, redefine=True)
 
     dal.define_table(
         "tenant_settings",
