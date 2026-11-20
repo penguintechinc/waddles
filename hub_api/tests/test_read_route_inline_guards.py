@@ -1,4 +1,4 @@
-# ruff: noqa: F811, F401
+# ruff: noqa: F811, F401, E501
 """Behavioural proof for the read routes guarded INLINE (stamped with `mark_guarded`).
 
 The walker only proves a stamp exists; these prove the handler really refuses a non-admin:
@@ -17,6 +17,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.ingest_sources import BLUEPRINTS as INGEST_BLUEPRINTS
 from services.community_common import ensure_community_tables
+from tests import test_community_inventory as _inventory_tests
 from tests.community_ids import public_id
 from tests.conftest import TENANT_SLUG, make_user_token, seed_membership
 
@@ -130,3 +131,34 @@ class TestIngestSourcesInlineGuard:
             headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 200
+
+
+#: Every `@mark_guarded` route -> the test that sends a plain-member request with the real guards
+#: (no `bypass_route_guards`) and asserts 403/404. `test_read_route_guards.py` fails any stamped
+#: route missing here, so a stamp can never be a bare label.
+INLINE_GUARD_DENY_TESTS: dict[tuple[str, str], Any] = {
+    (
+        "GET",
+        "/api/v1/admin/ai-knowledge/sources",
+    ): TestAiKnowledgeInlineGuard.test_member_cannot_list_sources,
+    (
+        "POST",
+        "/api/v1/admin/ai-knowledge/search",
+    ): TestAiKnowledgeInlineGuard.test_member_cannot_search,
+    (
+        "GET",
+        "/api/v1/communities/<string:community_public_id>/ingest-sources",
+    ): TestIngestSourcesInlineGuard.test_non_admin_member_cannot_list,
+    **{
+        ("GET", f"/api/v1/admin/<cuuid:community_id>/inventory/{suffix}"): (
+            _inventory_tests.TestAdminReadsRequireCommunityAdmin.test_plain_member_is_403_despite_universal_read_scope
+        )
+        for suffix in ("items", "checkouts", "summary", "log")
+    },
+}
+
+
+def test_deny_test_registry_points_at_real_tests() -> None:
+    assert len(INLINE_GUARD_DENY_TESTS) >= 7
+    for key, fn in INLINE_GUARD_DENY_TESTS.items():
+        assert callable(fn) and fn.__name__.startswith("test_"), key

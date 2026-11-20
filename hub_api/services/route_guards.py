@@ -30,6 +30,9 @@ logger = logging.getLogger(__name__)
 
 #: Attribute stamped on a guarded view (propagates through `functools.wraps`).
 GUARD_ATTR: Final = "__authz_guard__"
+#: Set only by `mark_guarded`: the stamp is a label, so the CI walker demands a real enforcement
+#: call in the handler AND a keyed deny test before it accepts the route.
+INLINE_ATTR: Final = "__authz_inline__"
 GUARD_ADMIN: Final = "admin"
 GUARD_MEMBER: Final = "member"
 GUARD_OWNER: Final = "owner"
@@ -74,10 +77,15 @@ community_member_guard = _guard(GUARD_MEMBER)
 
 
 def mark_guarded(kind: str) -> Callable[[Any], Any]:
-    """Stamp a view whose handler already enforces `kind` inline (owner/own-data checks)."""
+    """Stamp a view whose handler already enforces `kind` inline (owner/own-data checks).
+
+    Only a label: `tests/test_read_route_guards.py` requires a real enforcement call in the
+    handler's call chain and a registered deny test before accepting the stamp.
+    """
 
     def decorate(fn: Any) -> Any:
         setattr(fn, GUARD_ATTR, kind)
+        setattr(fn, INLINE_ATTR, True)
         return fn
 
     return decorate
