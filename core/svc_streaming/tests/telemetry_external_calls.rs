@@ -102,7 +102,15 @@ async fn token_ledger_debit_is_timed_and_propagates_the_callers_trace() {
     let span = tracing::info_span!("test_transcode_admission");
     let trace_id = span.context().span().span_context().trace_id().to_string();
     let result = client
-        .debit_transcoding_tokens(&format!("http://{addr}"), 42, 7, 3, "transcode", "ref-1")
+        .debit_transcoding_tokens(
+            &format!("http://{addr}"),
+            42,
+            7,
+            3,
+            "transcode",
+            "ref-1",
+            "key-1",
+        )
         .instrument(span)
         .await;
     assert!(result.ok, "debit succeeds against the mock: {result:?}");
@@ -123,7 +131,15 @@ async fn token_ledger_debit_is_timed_and_propagates_the_callers_trace() {
     // An unreachable ledger is a transport error: the call still resolves
     // (BLOCK-WITH-FALLBACK) but is timed under outcome=error.
     let down = client
-        .debit_transcoding_tokens("http://127.0.0.1:1", 42, 7, 3, "transcode", "ref-2")
+        .debit_transcoding_tokens(
+            "http://127.0.0.1:1",
+            42,
+            7,
+            3,
+            "transcode",
+            "ref-2",
+            "key-2",
+        )
         .await;
     assert!(!down.ok);
     let (errors, _) = sink.histogram(

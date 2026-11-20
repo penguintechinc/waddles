@@ -79,8 +79,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from functools import partial
 from typing import Any
 
@@ -95,6 +96,9 @@ REASON_UNKNOWN_PRODUCT = "unknown_product"
 REASON_INSUFFICIENT_BALANCE = "insufficient_balance"
 REASON_NO_BALANCE = "no_balance"
 REASON_LEDGER_UNAVAILABLE = "ledger_unavailable"
+#: An idempotency key was reused by a different actor, with a different amount, or after its
+#: replay window closed -- never a free replay (HTTP 409).
+REASON_IDEMPOTENCY_CONFLICT = "idempotency_key_conflict"
 
 #: Sentinel `_guarded_debit_sync` returns as its `outcome` on success --
 #: distinct from the `REASON_*` vocabulary above (a fully successful debit
@@ -440,8 +444,96 @@ async def credit_tokens(
     )
 
 
+#: Default ceiling for a single debit (tokens). Override with `TOKEN_DEBIT_MAX_AMOUNT`; see
+#: `docs/token-billing-debit.md`. Bounds the blast radius of a buggy or compromised caller.
+DEFAULT_MAX_DEBIT_AMOUNT = 10_000
+
+#: Longest caller-supplied idempotency key accepted (the stored key adds a `<cid>:<pid>:` prefix).
+MAX_IDEMPOTENCY_KEY_LEN = 128
+
+
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive-integer env setting; bad values log and fall back to `default`.
+
+    The fallback keeps the safety bound in force (never disables it) but is never silent: the
+    operator's bad value is logged at WARNING so the misconfiguration is visible.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("token_billing.bad_env name=%s -- not an integer, using %d", name, default)
+        return default
+    if value <= 0:
+        logger.warning("token_billing.bad_env name=%s -- not positive, using %d", name, default)
+        return default
+    return value
+
+
+def max_debit_amount() -> int:
+    """Return the configured per-debit ceiling (`TOKEN_DEBIT_MAX_AMOUNT`, default 10000).
+
+    Read per call so an operator override takes effect without a code change.
+    """
+    return _positive_int_env("TOKEN_DEBIT_MAX_AMOUNT", DEFAULT_MAX_DEBIT_AMOUNT)
+
+
+#: Default replay window (seconds) for an idempotency key. Override with
+#: `TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS`. A key is a retry guard for ONE admission attempt, not a
+#: reusable coupon: after this window a reused key is rejected, never replayed.
+DEFAULT_IDEMPOTENCY_TTL_SECONDS = 600
+
+
+def idempotency_ttl_seconds() -> int:
+    """Return the replay window (`TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS`, default 600)."""
+    return _positive_int_env("TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS", DEFAULT_IDEMPOTENCY_TTL_SECONDS)
+
+
+def _scoped_idempotency_key(community_id: int, product_id: int, key: str | None) -> str | None:
+    """Scope a caller key to its community+product so keys never collide across tenants."""
+    if key is None:
+        return None
+    return f"{community_id}:{product_id}:{key}"
+
+
+def _replay_sync(
+    dal: Any, scoped_key: str, *, actor_user_id: int | None, amount: int
+) -> tuple[str, int | None, int | None] | None:
+    """Resolve a previously-seen idempotency key: replay the ORIGINAL result, or refuse.
+
+    Returns `None` when the key was never used. A hit is replayed only when it is still inside
+    the replay window AND was recorded for the same actor and amount; otherwise the outcome is
+    `REASON_IDEMPOTENCY_CONFLICT` (nothing debited, nothing replayed) -- a reused key must never
+    turn into a free debit.
+    """
+    row = dal(dal.token_transactions.idempotency_key == scoped_key).select().first()
+    dal.commit()
+    if row is None:
+        return None
+    created = row.created_at
+    if created is not None and created.tzinfo is None:
+        created = created.replace(tzinfo=UTC)
+    expired = created is None or datetime.now(UTC) - created > timedelta(
+        seconds=idempotency_ttl_seconds()
+    )
+    stored_actor = None if row.actor_user_id is None else int(row.actor_user_id)
+    if expired or stored_actor != actor_user_id or -int(row.delta) != amount:
+        return REASON_IDEMPOTENCY_CONFLICT, None, None
+    return _OUTCOME_OK, int(row.balance_after), int(row.id)
+
+
 def _guarded_debit_sync(
-    dal: Any, *, community_id: int, product_id: int, amount: int, reason: str, ref: str | None
+    dal: Any,
+    *,
+    community_id: int,
+    product_id: int,
+    amount: int,
+    reason: str,
+    ref: str | None,
+    idempotency_key: str | None = None,
+    actor_user_id: int | None = None,
 ) -> tuple[str, int | None, int | None]:
     """The atomic debit unit -- see this module's top-of-file docstring for why this shape.
 
@@ -456,6 +548,11 @@ def _guarded_debit_sync(
     `REASON_NO_BALANCE`, with `balance_after`/`transaction_id` `None` for
     a blocked outcome.
     """
+    scoped_key = _scoped_idempotency_key(community_id, product_id, idempotency_key)
+    if scoped_key is not None:
+        replayed = _replay_sync(dal, scoped_key, actor_user_id=actor_user_id, amount=amount)
+        if replayed is not None:
+            return replayed
     now = datetime.now(UTC)
     updated = dal(
         (dal.community_token_balances.community_id == community_id)
@@ -484,15 +581,27 @@ def _guarded_debit_sync(
         .first()
     )
     balance_after = int(row.balance)
-    txn_id = dal.token_transactions.insert(
-        community_id=community_id,
-        product_id=product_id,
-        delta=-amount,
-        reason=reason,
-        ref=ref,
-        balance_after=balance_after,
-        created_at=now,
-    )
+    try:
+        txn_id = dal.token_transactions.insert(
+            community_id=community_id,
+            product_id=product_id,
+            delta=-amount,
+            reason=reason,
+            ref=ref,
+            balance_after=balance_after,
+            idempotency_key=scoped_key,
+            actor_user_id=actor_user_id,
+            created_at=now,
+        )
+    except Exception:
+        # A concurrent same-key debit committed first (UNIQUE idempotency_key). Roll back THIS
+        # call's decrement so the key debits exactly once, then return the original result.
+        dal.rollback()
+        if scoped_key is not None:
+            replayed = _replay_sync(dal, scoped_key, actor_user_id=actor_user_id, amount=amount)
+            if replayed is not None:
+                return replayed
+        raise
     dal.commit()
     return _OUTCOME_OK, balance_after, int(txn_id)
 
@@ -506,6 +615,8 @@ async def debit_tokens(
     amount: int,
     reason: str,
     ref: str | None = None,
+    idempotency_key: str | None = None,
+    actor_user_id: int | None = None,
 ) -> TokenLedgerResult:
     """Spend `amount` tokens of `product_key` from `community_id` -- the internal metering API.
 
@@ -518,7 +629,15 @@ async def debit_tokens(
     unavailable all return `ok=False` with a `blocked_reason`), so a
     metering call site can never crash the feature invoking it. Only a
     caller-fixable input error (non-positive `amount`) raises
-    :class:`ApiError`, matching `credit_tokens()`'s same convention.
+    :class:`ApiError`, matching `credit_tokens()`'s same convention -- as does an `amount`
+    above :func:`max_debit_amount` or an over-long `idempotency_key`.
+
+    `idempotency_key` (optional, stable per admission -- never a timestamp) makes the debit
+    replay-safe: a second call with the same key (scoped to community+product), for the same
+    `actor_user_id` and `amount`, within the replay window (`idempotency_ttl_seconds`) debits
+    NOTHING and returns the ORIGINAL balance_after/transaction_id; the UNIQUE column arbitrates
+    concurrent same-key calls so exactly one debits. A reused key from another actor, with another
+    amount, or after the window returns blocked `REASON_IDEMPOTENCY_CONFLICT` (never a replay).
 
     See this module's own top-of-file docstring for the atomicity
     argument (the single combined executor job + the WHERE-guarded
@@ -526,6 +645,10 @@ async def debit_tokens(
     """
     if amount <= 0:
         raise bad_request("Debit amount must be positive")
+    if amount > max_debit_amount():
+        raise bad_request(f"Debit amount exceeds the maximum of {max_debit_amount()}")
+    if idempotency_key is not None and not 0 < len(idempotency_key) <= MAX_IDEMPOTENCY_KEY_LEN:
+        raise bad_request(f"idempotency_key must be 1-{MAX_IDEMPOTENCY_KEY_LEN} characters")
 
     try:
         product = await _get_active_product(async_dal, dal, product_key)
@@ -548,6 +671,8 @@ async def debit_tokens(
                 amount=amount,
                 reason=reason,
                 ref=ref,
+                idempotency_key=idempotency_key,
+                actor_user_id=actor_user_id,
             ),
         )
     except Exception as exc:  # noqa: BLE001 -- ledger-unavailable boundary, see module docstring

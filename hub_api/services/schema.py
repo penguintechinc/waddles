@@ -2826,6 +2826,10 @@ def bind_token_billing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reason", "string", length=255, notnull=True),
         Field("ref", "string", length=255),
         Field("balance_after", "integer", notnull=True),
+        # Replay guard (alembic 0135): `<community_id>:<product_id>:<caller key>`, NULL for
+        # un-keyed rows; the UNIQUE constraint makes the database arbitrate a duplicate debit.
+        Field("idempotency_key", "string", length=255, unique=True),
+        Field("actor_user_id", "integer"),
         Field("created_at", "datetime"),
         migrate=migrate,
     )

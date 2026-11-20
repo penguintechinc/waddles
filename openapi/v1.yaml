@@ -20689,6 +20689,12 @@ paths:
                 amount:
                   title: Amount
                   type: integer
+                idempotency_key:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Idempotency Key
                 product_key:
                   title: Product Key
                   type: string
@@ -28735,7 +28741,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Submit a join request (self-service, own resource).
+      summary: Submit a join request (self-service; tenant-fenced, rate-limited, one
+        pending per user).
   /api/v1/{community_id}/join-requests/mine:
     get:
       description: ''
