@@ -450,7 +450,14 @@ def checkin_item(
         return None, "Active checkout not found"
 
     item_id, checked_out_qty = row[0][1], row[0][2]
-    qty = quantity_returned if quantity_returned else checked_out_qty
+    if quantity_returned is None:
+        qty = checked_out_qty
+    elif isinstance(quantity_returned, bool) or not 0 < quantity_returned <= checked_out_qty:
+        # Defence in depth (the route validates too): returning more than was checked out
+        # would inflate stock; zero/negative would silently deduct it.
+        return None, f"Quantity returned must be between 1 and {checked_out_qty}"
+    else:
+        qty = quantity_returned
 
     ok, message = _run_stock_fn(
         dal, "add_inventory_stock", item_id, qty, user_id, community_id, notes

@@ -111,6 +111,7 @@ def test_shared_crate_rebuilds_all_dependents_only() -> None:
         "svc-process",
         "svc-action",
         "svc-presentation",
+        "svc-streaming",
         "egress-proxy",
     }
 

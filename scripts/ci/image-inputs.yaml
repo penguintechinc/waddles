@@ -257,6 +257,7 @@ images:
       - core/svc_streaming/Cargo.lock
       - core/svc_streaming/build.rs
       - core/platform_keys/**
+      - core/service_auth/**
       - core/svc_streaming/src/**
       - core/svc_streaming/tests/**
 
