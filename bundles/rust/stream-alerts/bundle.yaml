@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.app.stream-alerts
+app_id: penguintechinc.waddles.stream-alerts
 name: Stream Alerts (Rust)
-version: 1.0.2
-feature: waddles.core.app
+version: 1.0.3
 module: core
 provider: builtin
 author: github:penguintechinc
@@ -32,7 +31,7 @@ stages:
       required_config: []
   presentation:
     owned_surfaces:
-      - waddles.core.app.stream-alerts.alerts
+      - penguintechinc.waddles.stream-alerts.alerts
 egress: []
 data:
   tables: []

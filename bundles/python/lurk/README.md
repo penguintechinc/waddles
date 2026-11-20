@@ -2,7 +2,7 @@
 
 `!lurk` / `!unlurk` -- a timed, per-viewer lurk with a templated confirmation and an elapsed-time
 welcome-back, plus mod-only per-community configuration. First-party (`provider: builtin`,
-`app_id: waddles.core.example.lurk`), net-new Waddles content -- no third-party source, so no
+`app_id: penguintechinc.waddles.lurk`), net-new Waddles content -- no third-party source, so no
 attribution to carry. kv-only (`storage.kv`); no `db`, no egress.
 
 `transform` only recognizes the command and forwards the normalized badge signal (no kv access);
@@ -134,5 +134,5 @@ pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=90
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.lurk`, activation target
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.lurk`, activation target
 `global` / `community_id: null`); dark until `waddles.command-lurk` is turned on.

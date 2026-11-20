@@ -588,7 +588,7 @@ async fn connector_parity() {
                 }
             };
             let app = std::env::var("PARITY_CONNECTOR_APP_ID")
-                .unwrap_or_else(|_| format!("waddles.core.parity.{platform}"));
+                .unwrap_or_else(|_| format!("penguintechinc.waddles.parity.{platform}"));
             let digest = std::env::var("PARITY_CONNECTOR_DIGEST").ok();
             let connector = load_connector(&app, bytes, world, digest.as_deref())
                 .await
@@ -628,7 +628,7 @@ async fn fixture_run(label: &str, mutate: Option<Mutator<'_>>) -> Report {
         m(&mut vectors);
     }
     let connector = load_connector(
-        "waddles.core.parity.fixture",
+        "penguintechinc.waddles.parity-fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
         None,
@@ -690,7 +690,7 @@ async fn wrong_event_type_actor_and_count_are_all_reported() {
 #[tokio::test]
 async fn zero_vectors_is_a_failure_not_a_pass() {
     let connector = load_connector(
-        "waddles.core.parity.fixture",
+        "penguintechinc.waddles.parity-fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
         None,
@@ -712,7 +712,7 @@ async fn zero_vectors_is_a_failure_not_a_pass() {
 #[tokio::test]
 async fn declared_divergence_is_honoured_and_stale_ones_fail() {
     let connector = load_connector(
-        "waddles.core.parity.fixture",
+        "penguintechinc.waddles.parity-fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
         None,
@@ -750,7 +750,7 @@ async fn declared_divergence_is_honoured_and_stale_ones_fail() {
 #[tokio::test]
 async fn bad_connector_inputs_fail_loud() {
     let err = load_connector(
-        "waddles.core.parity.x",
+        "penguintechinc.waddles.parity-x",
         b"not wasm".to_vec(),
         WitWorld::ConnectorTools,
         None,
@@ -760,7 +760,7 @@ async fn bad_connector_inputs_fail_loud() {
     .expect("garbage must not load");
     assert!(err.contains("failed to load"), "{err}");
     let err = load_connector(
-        "waddles.core.parity.fixture",
+        "penguintechinc.waddles.parity-fixture",
         FIXTURE_WASM.to_vec(),
         WitWorld::ConnectorTools,
         Some("sha256:00"),
@@ -821,7 +821,7 @@ fn expected_files_cover_the_corpus_and_actors_match_the_stub() {
 async fn identity_bridge_serves_real_lookups() {
     const IDENTITY_CONNECTOR: &[u8] = include_bytes!("fixtures/connector_fixture.wasm");
     let connector = load_connector(
-        "waddles.core.parity.identity",
+        "penguintechinc.waddles.parity-identity",
         IDENTITY_CONNECTOR.to_vec(),
         WitWorld::Connector,
         None,

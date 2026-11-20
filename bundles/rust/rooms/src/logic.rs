@@ -30,7 +30,7 @@ use sha2::{Digest, Sha256};
 use crate::grants;
 
 /// The webrtc service bundle this app is granted tools on.
-pub const SERVICE: &str = "waddles.core.service.webrtc";
+pub const SERVICE: &str = "penguintechinc.waddles.webrtc";
 /// Most rooms tracked per community (index bound).
 pub const MAX_ROOMS: usize = 256;
 /// Longest room label.

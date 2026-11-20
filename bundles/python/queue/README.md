@@ -2,7 +2,7 @@
 
 `!vqueue` -- a per-community **viewer queue**: viewers `join`/`leave` a line, anyone can see their
 place or the front of the line, and a moderator advances or clears it. First-party
-(`provider: builtin`, `app_id: waddles.core.example.queue`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.queue`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** -- the viewer-queue idea is a common stream-tool concept,
 but no third-party source, code or text is used, so no attribution applies. kv-only
 (`storage.kv`); no `db`, no egress.

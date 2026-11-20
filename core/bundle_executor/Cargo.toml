@@ -77,7 +77,7 @@ hmac = "=0.12.1"
 # Message shapes and correlation-id table shared verbatim with the stage
 # side (spec SS6.6). Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # at the time of this commit (PR penguintechinc/penguin-libs#93).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "96a5065f1d379ea0cfc7c7716c6eab628138330a", package = "penguin-bundle-host", version = "=0.6.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "dcfbadac813d7203e6f1764c363aee21ebd20c1c", package = "penguin-bundle-host", version = "=0.6.0" }
 tracing = "=0.1.44"
 # `penguin-logging` (spec SS4.5's dependency list) is deliberately NOT
 # depended on here, unlike every other Rust data-plane service in this
@@ -159,6 +159,9 @@ opentelemetry-otlp = { version = "=0.32.0", default-features = false, features =
 # bans sqlx/sea-orm, so a database-backed `KeyLoader` is supplied by an embedder through
 # `Executor::with_key_cache`, never linked here.
 platform-keys = { path = "../platform_keys", version = "=0.1.0", default-features = false }
+# The ONE Rust implementation of the app-id grammar / core-namespace check (golden vectors in
+# `testdata/bundle_app_id/vectors.json`); `crate::manifest::is_core_namespace` re-exports it.
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
 
 [dev-dependencies]
 # `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back

@@ -5,7 +5,7 @@ Alembic -- that raw SQL file was never applied (0001_baseline only replays
 legacy SQL files against a genuinely fresh DB; this DB's `schema_migrations`
 table already had entries when 0001 ran, so the file-by-file loop was
 skipped entirely). Without this row in `app_catalog`, svc_action never
-subscribes to `waddles.community.forums.default`'s `:action` Valkey key and
+subscribes to `penguintechinc.waddles.forums-pipeline`'s `:action` Valkey key and
 `community_forums_action.create_forum_post` is never invoked. Without the
 matching `app_tenant_availability` row, the bundle is registered but not
 activated for any tenant. Activation is tenant-wide via
@@ -25,7 +25,7 @@ down_revision = "0006_forum_nullable"
 branch_labels = None
 depends_on = None
 
-APP_ID = "waddles.community.forums.default"
+APP_ID = "penguintechinc.waddles.forums-pipeline"
 TENANT_SLUG = "global"
 
 

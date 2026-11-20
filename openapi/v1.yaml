@@ -15747,9 +15747,10 @@ paths:
 
         `platform:admin` (unrestricted `app_id`, this endpoint''s original
 
-        behavior) OR `vendor:onboard` scoped to the caller''s own
+        behavior) OR `vendor:onboard`, restricted to a well-formed
 
-        `waddles.integrations.vendor-{caller_id}.*` namespace -- checked
+        `<github-org>.<repo>.<bundle-name>` id outside the reserved `penguintechinc`
+        org -- checked
 
         BEFORE any multipart part is read (security.md: never buffer an
 

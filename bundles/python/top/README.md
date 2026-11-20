@@ -1,7 +1,7 @@
 # top (Python)
 
 `!top [N]` -- the community's top-N members by economy balance. First-party (`provider: builtin`,
-`app_id: waddles.core.example.top`), **read-only**, stateless, WASI component.
+`app_id: penguintechinc.waddles.top`), **read-only**, stateless, WASI component.
 
 Idea inspired by [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) by SuperPenguinTV
 (Psychoboy), used with permission -- ideas/design only, no code copied.

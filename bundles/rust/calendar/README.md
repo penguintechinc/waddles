@@ -1,6 +1,6 @@
 # calendar (Rust APP bundle)
 
-`waddles.core.app.calendar` -- community events, RSVP, approvals, chat commands, admin actions,
+`penguintechinc.waddles.calendar` -- community events, RSVP, approvals, chat commands, admin actions,
 and push-only event sync to Discord scheduled events (plus config-gated Twitch schedule / Wix
 events adapters). WASM component on the `stage-next-tools` world; it CALLS service-bundle tools
 (app -> service only, never app -> app). Spec: PR #1099 (calendar) + #1101 (catalog).
@@ -60,9 +60,9 @@ end defaults to start+1h.
 
 | Target | Tools consumed (target app) | Status |
 |---|---|---|
-| discord | `discord.scheduled_event.{create,update,cancel,delete}` (`waddles.core.service.discord`) | requested in manifest |
-| twitch | `twitch.schedule.{create,update,delete}` (`waddles.core.service.twitch`) | adapter + contract fixtures; NOT yet requested (tools not built) |
-| wix | `wix.event.{create,update,cancel}` (`waddles.core.service.wix`) | adapter + contract fixtures; NOT yet requested |
+| discord | `discord.scheduled_event.{create,update,cancel,delete}` (`penguintechinc.waddles.discord`) | requested in manifest |
+| twitch | `twitch.schedule.{create,update,delete}` (`penguintechinc.waddles.twitch`) | adapter + contract fixtures; NOT yet requested (tools not built) |
+| wix | `wix.event.{create,update,cancel}` (`penguintechinc.waddles.wix`) | adapter + contract fixtures; NOT yet requested |
 
 Enabling twitch/wix requires a manifest version bump adding their `requested_tools` once the
 service tools exist (least privilege: no grant is requested for a tool that does not exist).

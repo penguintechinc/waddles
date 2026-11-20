@@ -32,8 +32,8 @@ from services.bundle_approval_service import (
 )
 from tests.test_bundle_activation_service import _install_and_make_available
 
-_A = "waddles.socials.alpha.default"
-_B = "waddles.socials.beta.default"
+_A = "penguintechinc.waddles.alpha"
+_B = "penguintechinc.waddles.beta"
 
 
 def _manifest(

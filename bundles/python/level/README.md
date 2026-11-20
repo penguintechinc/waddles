@@ -2,7 +2,7 @@
 
 `!level` -- passive chat XP and levels. Every chatter earns XP for talking, a level is derived
 from the XP, and `!level leaderboard` shows who is on top. First-party (`provider: builtin`,
-`app_id: waddles.core.example.level`), **kv-only**, per community, activation-gated (no feature
+`app_id: penguintechinc.waddles.level`), **kv-only**, per community, activation-gated (no feature
 flag -- the installed -> enabled -> activated check is the only gate).
 
 Not the same as [`rank`](../rank/README.md): `rank` is a DB-backed ledger whose XP only changes

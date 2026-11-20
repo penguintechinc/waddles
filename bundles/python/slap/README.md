@@ -2,7 +2,7 @@
 
 `!slap [target]` -- a lighthearted, comically harmless flavor-text reply (rubber chickens, pool
 noodles, wet trout). Stateless chat fun, first-party (`provider: builtin`,
-`app_id: waddles.core.example.slap`, `author: PenguinTech/waddles`, Apache-2.0), **original
+`app_id: penguintechinc.waddles.slap`, `author: PenguinTech/waddles`, Apache-2.0), **original
 Waddles content** -- all flavor strings are written fresh, nothing reused from a third-party bot.
 Structural twin of `bundles/python/wave` (distinct flavor bank, no `command_prefix` overlap).
 

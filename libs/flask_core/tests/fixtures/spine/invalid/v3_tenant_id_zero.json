@@ -4,7 +4,7 @@
   "community": null,
   "tenant_id": 0,
   "community_id": 0,
-  "app_id": "waddles.bot.commands.default",
+  "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
   "stage": "process",
   "event": {
     "platform": "twitch",

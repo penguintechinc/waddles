@@ -31,7 +31,7 @@ const MAX_SESSIONS_PER_INVOCATION: usize = 2;
 /// Largest base64 field the stage accepts from the executor (the host caps are lower still).
 const MAX_B64_LEN: usize = 16 * 1024;
 /// First-party namespace: the only apps that may use this capability.
-const CORE_NAMESPACE: &str = "waddles.core.";
+const CORE_NAMESPACE: &str = "penguintechinc.waddles.";
 
 /// Live wiring for the `gameserver-net` capability. `None` on the handler means every
 /// `gameserver_net.*` call denies `not_implemented`.

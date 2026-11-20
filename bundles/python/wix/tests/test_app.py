@@ -24,7 +24,7 @@ WIX_B = "01234567-89ab-cdef-0123-456789abcdef"
 
 BUNDLE_DIR = Path(__file__).resolve().parent.parent
 REPO_BUNDLES = BUNDLE_DIR.parent.parent
-APP_ID = "waddles.core.integration.wix"
+APP_ID = "penguintechinc.waddles.wix-event-sync"
 VERSION = "1.1.1"
 
 #: Stage-faithful fakes: a host call from the wrong stage fails the test (fixture teardown).

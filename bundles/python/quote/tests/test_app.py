@@ -144,7 +144,7 @@ def _sample_envelope(
     return StageEnvelope(
         tenant="tenant-1",
         community=community,
-        app_id="waddles.core.example.quote",
+        app_id="penguintechinc.waddles.quote",
         stage="action",
         event=PlatformEvent(
             platform=platform,

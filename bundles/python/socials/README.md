@@ -2,7 +2,7 @@
 
 `!socials` -- per-community social-media links. Mods set `!socials set twitter https://twitter.com/me`;
 anyone reads `!socials` ("Follow us: twitter → <url>, youtube → <url>"). First-party
-(`provider: builtin`, `app_id: waddles.core.example.socials`), kv-only, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.socials`), kv-only, WASI component.
 Distinct from the `social` bundle (`!hug`/`!highfive`/`!pat`/`!social stats`).
 
 | | |

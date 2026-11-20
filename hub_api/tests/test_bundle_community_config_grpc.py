@@ -35,7 +35,7 @@ SCOPE = servicer.SCOPE_BUNDLE_CONFIG_READ
 PROC = spiffe_id("alpha", "svc-process")
 ACTION = spiffe_id("alpha", "svc-action")
 ROGUE = spiffe_id("alpha", "svc-rogue")
-APP = "waddles.socials.cfgdefaults.default"
+APP = "penguintechinc.waddles.cfgdefaults"
 ADMIN = CommunityMembership(
     "admin", frozenset({"community:manage_members", "bundles.admin:admin"}), True, False
 )
@@ -75,7 +75,7 @@ async def hub(env: dict[str, Any]) -> dict[str, Any]:
     manifest = {
         **_APP_MANIFEST,
         "app_id": APP,
-        "feature": "waddles.socials.cfgdefaults",
+        "feature": "cfgdefaults",
         "community_config_schema": _SCHEMA,
         "admin_tools": [],
         "requested_tools": [],
@@ -187,7 +187,7 @@ async def test_batch_omits_refused_and_inactive_scopes(hub: dict[str, Any], issu
     await _save(hub, {"default_duration_minutes": 30}, 0)
     batch = bundle_config_pb2.BatchGetCommunityConfigRequest(
         api_version="v1",
-        scopes=[_req(hub), _req(hub, app_id="waddles.socials.nothere.default")],
+        scopes=[_req(hub), _req(hub, app_id="penguintechinc.waddles.nothere")],
     )
     async with _stub(hub, issuer) as stub:
         out = await stub.BatchGetCommunityConfig(batch, metadata=_md(issuer), timeout=3.0)
@@ -236,7 +236,7 @@ async def test_refusals(hub: dict[str, Any], issuer: Any) -> None:
         assert (
             await _status(
                 stub.GetCommunityConfig(
-                    _req(hub, app_id="waddles.socials.nothere.default"),
+                    _req(hub, app_id="penguintechinc.waddles.nothere"),
                     metadata=_md(issuer),
                     timeout=3.0,
                 )
@@ -297,11 +297,11 @@ async def test_calendar_saved_default_duration_is_served(env: dict[str, Any], is
     `bundles/rust/calendar/tests/flow.rs` feeds the same bytes into `effective_config`.
     """
     cal, fixture = _calendar_files()
-    app_id = "waddles.core.app.calendar"
+    app_id = "penguintechinc.waddles.calendar"
     manifest = {
         **_APP_MANIFEST,
         "app_id": app_id,
-        "feature": "waddles.core.app",
+        "feature": "app",
         "community_config_schema": cal["community_config_schema"],
         "admin_tools": [],
         "requested_tools": [],

@@ -35,7 +35,7 @@ GUARD = StageGuard()
 
 async def _transform_in_context(event: PlatformEvent) -> PlatformEvent | None:
     """The real `transform` entry point, inside the bundle context the host binds around it."""
-    with bundle_context(tenant="t", community=COMMUNITY, app_id="waddles.core.example.steal"):
+    with bundle_context(tenant="t", community=COMMUNITY, app_id="penguintechinc.waddles.steal"):
         return await app.transform(event)
 
 
@@ -139,7 +139,7 @@ def _envelope(command: str, **payload: Any) -> StageEnvelope:
     return StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.steal",
+        app_id="penguintechinc.waddles.steal",
         stage="action",
         event=PlatformEvent(
             platform="twitch",
@@ -413,7 +413,7 @@ def _envelope_as(actor: str | None, command: str, **payload: Any) -> StageEnvelo
     return StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.steal",
+        app_id="penguintechinc.waddles.steal",
         stage="action",
         event=PlatformEvent(
             platform="twitch",
@@ -1338,7 +1338,7 @@ def test_the_whole_steal_settles_in_transform_and_dispatch_only_relays(
     env = StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.steal",
+        app_id="penguintechinc.waddles.steal",
         stage="action",
         event=out,
         ts="2026-10-05T00:00:00.000Z",
@@ -1363,7 +1363,7 @@ def test_dispatch_makes_no_economy_or_identity_call(host: _Host, command: str) -
     env = StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.steal",
+        app_id="penguintechinc.waddles.steal",
         stage="action",
         event=event,
         ts="2026-10-05T00:00:00.000Z",
@@ -1390,7 +1390,7 @@ def test_transform_failure_is_deferred_to_dispatch_not_relayed(
     env = StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.steal",
+        app_id="penguintechinc.waddles.steal",
         stage="action",
         event=out,
         ts="2026-10-05T00:00:00.000Z",

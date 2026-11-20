@@ -44,7 +44,7 @@ use docker_container::{start_container, DockerContainer};
 
 const SU_PW: &str = "postgres_test_superuser_pw";
 const ECO_PW: &str = "waddles_economy_runtime_test_pw";
-const APP_ID: &str = "waddles.core.test-economy";
+const APP_ID: &str = "penguintechinc.waddles.test-economy";
 const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");

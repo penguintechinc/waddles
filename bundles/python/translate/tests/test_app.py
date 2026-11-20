@@ -32,7 +32,7 @@ def _envelope(reply: PlatformEvent) -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
         community=None,
-        app_id="waddles.core.example.translate",
+        app_id="penguintechinc.waddles.translate",
         stage="action",
         event=reply,
         ts="2026-10-21T00:00:00.000Z",

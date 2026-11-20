@@ -2,7 +2,7 @@
 
 `!first` -- a per-community, per-UTC-day "who typed first" claim race. The first `!first` of the
 day wins; everyone after gets "you're #N to try". First-party (`provider: builtin`,
-`app_id: waddles.core.example.first`), kv-only, WASI component. No scheduler: the UTC date is
+`app_id: penguintechinc.waddles.first`), kv-only, WASI component. No scheduler: the UTC date is
 baked into the day's keys, so a new day is simply a fresh empty window.
 
 | | |

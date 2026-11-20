@@ -1,4 +1,4 @@
-# tldr (`waddles.core.example.tldr`)
+# tldr (`penguintechinc.waddles.tldr`)
 
 `!tldr <text>` -> a one-line TL;DR of the supplied text. Example: `!tldr <a long paragraph>`.
 

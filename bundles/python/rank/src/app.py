@@ -144,7 +144,7 @@ _KNOWN_COMMANDS = frozenset(
 
 #: The reputation SERVICE bundle that owns scores/tiers; `!rep` only reads through its `rep` tool
 #: (manifest `tool.call:` grant) -- no reputation state or policy lives in this bundle.
-_REP_SERVICE = "waddles.core.service.reputation"
+_REP_SERVICE = "penguintechinc.waddles.reputation"
 _REP_HEADS = frozenset({"!rep", "!reputation"})
 _REP_USAGE = "Usage: !rep | !rep @user"
 _REP_REFUSED = "Reputation lookup refused ({code})."

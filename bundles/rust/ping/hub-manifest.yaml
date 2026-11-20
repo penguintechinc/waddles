@@ -1,5 +1,5 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.ping.
+# penguintechinc.waddles.ping.
 #
 # Deliberately separate from this bundle's own `bundle.yaml` (that file targets the M1/M1.5
 # bundle-compiler/SDK schema -- `artifact: component`, `execution_model: wasi-component` --
@@ -10,7 +10,7 @@
 # by bundles/Dockerfile.core-bundles, so `artifact: prebuilt` (matching
 # core/bundle_compiler/tests/fixtures/manifests/valid_prebuilt.yaml's own shape).
 schema_version: 2
-app_id: waddles.core.example.ping
+app_id: penguintechinc.waddles.ping
 name: Ping Example Bundle (Rust)
 # 1.0.0 AND 1.0.1 are permanently retired -- fix/reproducible-core-bundles. 1.0.0: the alpha DB
 # already has an app_versions row published from a non-reproducible build (digest
@@ -34,8 +34,7 @@ name: Ping Example Bundle (Rust)
 # to bump (manifest-only change, but app_versions.artifact_digest is immutable+globally
 # UNIQUE per version string) and for the caveat that the resulting artifact digest actually
 # differing from 1.0.2's was not verified byte-level in this change.
-version: 1.0.7
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

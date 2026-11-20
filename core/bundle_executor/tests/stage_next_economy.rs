@@ -20,7 +20,7 @@ use bundle_executor::manifest::{VerifiedManifest, WitWorld};
 use common::{run_one, test_config, StageAnswer, TARGET_USER};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/economy_fixture.wasm");
-const APP_ID: &str = "waddles.test.economy-fixture";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-economy-fixture";
 const OTHER_USER: &str = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 
 async fn run(

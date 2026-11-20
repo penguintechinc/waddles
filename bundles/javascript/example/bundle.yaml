@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.example.echo
+app_id: penguintechinc.waddles.echo
 name: Echo Example Bundle (JS/TS)
 version: 1.0.1
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

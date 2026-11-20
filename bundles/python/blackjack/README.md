@@ -2,7 +2,7 @@
 
 `!blackjack <stake>` / `!hit` / `!stand` -- a solo game of blackjack against the dealer-bot over
 the shared community economy. First-party (`provider: builtin`,
-`app_id: waddles.core.example.blackjack`).
+`app_id: penguintechinc.waddles.blackjack`).
 
 | Command | Behavior |
 |---|---|
@@ -99,7 +99,7 @@ Needs a `bundles/core-bundles.yaml` row with **`wit_world: stage-next`** (it dec
 `economy.*` / `identity.resolve`; a `stage` build has no such import and the build script fails):
 
 ```yaml
-  - app_id: waddles.core.example.blackjack
+  - app_id: penguintechinc.waddles.blackjack
     version: "1.0.0"
     language: python
     wit_world: stage-next

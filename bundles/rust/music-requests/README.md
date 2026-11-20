@@ -1,4 +1,4 @@
-# waddles.core.service.music-requests
+# penguintechinc.waddles.music-requests
 
 The single per-community song-request queue, as a `kind: service` bundle (Rust, world `stage-tools`, exports
 `tool-provider`). The music app owns the user commands (`!sr`, `!queue`, `!songqueue`); the optional AI DJ layer reads and

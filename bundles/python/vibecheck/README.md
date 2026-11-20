@@ -1,6 +1,6 @@
 # vibecheck (Python)
 
-`!vibecheck [@user]` -> a random fun 'vibe: X%' mood readout, optionally for a mentioned user. First-party (`provider: builtin`, `app_id: waddles.core.example.vibecheck`), stateless
+`!vibecheck [@user]` -> a random fun 'vibe: X%' mood readout, optionally for a mentioned user. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.vibecheck`), stateless
 (no kv/db), WASI component. Static SFW lines original to Waddles; no AI, no external API.
 
 | | |

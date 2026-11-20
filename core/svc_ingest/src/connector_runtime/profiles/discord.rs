@@ -48,7 +48,7 @@ use crate::connector::{
 /// Platform slug (also the `ConnKey` platform and the pinned connector slug).
 pub const PLATFORM: &str = "discord";
 /// Core connector bundle id.
-pub const APP_ID: &str = "waddles.core.service.discord";
+pub const APP_ID: &str = "penguintechinc.waddles.discord";
 /// Provider name in hub-api's binding list.
 pub const PROVIDER: &str = "discord";
 /// Capability the binding list is scoped to.
@@ -411,7 +411,7 @@ mod tests {
     fn identity_is_the_discord_connector() {
         let p = DiscordProfile::default();
         assert_eq!(p.platform(), "discord");
-        assert_eq!(p.app_id(), "waddles.core.service.discord");
+        assert_eq!(p.app_id(), "penguintechinc.waddles.discord");
         assert_eq!(p.provider(), "discord");
         assert_eq!(p.capability(), "chat_ingest");
     }

@@ -120,7 +120,7 @@ COMMUNITY grant  (§3.3)
 ```
 schema = "app_core"      if app_id starts with vendor_bundle_authz.CORE_NAMESPACE_PREFIX ("waddles.core.")
        = "app_community" otherwise
-table  = f"{schema}.{sanitized_app_id}"   # e.g. app_core.waddles_core_example_echo
+table  = f"{schema}.{sanitized_app_id}"   # e.g. app_core.penguintechinc_waddles_echo
 ```
 
 `CORE_NAMESPACE_PREFIX` (`hub_api/services/vendor_bundle_authz.py:56`) is already enforced at submission — `bundle_approval_service.py:464` refuses any app_id outside `waddles.core.*` on the core-seeder path, and the inverse (a vendor claiming a `waddles.core.*` id) is refused on the vendor-submission path. A vendor bundle can therefore never reach the `app_core` schema; this spec adds no new namespace check, only a new *consumer* of the existing one. `sanitized_app_id` follows PR #415's own identifier-sanitization rule (dots/other non-identifier characters normalized, truncated with a hash suffix past Postgres's 63-byte `NAMEDATALEN` cap where needed) — not redefined here.

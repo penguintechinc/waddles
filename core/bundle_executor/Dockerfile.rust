@@ -23,6 +23,7 @@ RUN apt-get update \
 WORKDIR /repo
 COPY core/bundle_executor core/bundle_executor
 COPY core/platform_keys core/platform_keys
+COPY core/bundle_capability_gate core/bundle_capability_gate
 COPY wit wit
 WORKDIR /repo/core/bundle_executor
 # Bump CACHE_EPOCH (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon every cache mount id

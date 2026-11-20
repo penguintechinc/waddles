@@ -230,7 +230,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: Some(2),
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 target_type: "irc_relay".to_string(),
                 status: "success".to_string(),
                 attempt: 1,
@@ -248,8 +248,14 @@ mod tests {
             http_status: None,
             detail: "ok".to_string(),
         };
-        sink.record(1, Some(2), "waddles.bot.commands.default", &record, None)
-            .await;
+        sink.record(
+            1,
+            Some(2),
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            &record,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -266,7 +272,13 @@ mod tests {
             detail: "bad".to_string(),
         };
         // Must not panic even though the insert fails.
-        sink.record(1, None, "waddles.bot.commands.default", &record, None)
-            .await;
+        sink.record(
+            1,
+            None,
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            &record,
+            None,
+        )
+        .await;
     }
 }

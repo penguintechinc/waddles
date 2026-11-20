@@ -253,7 +253,7 @@ mod tests {
     #[test]
     fn tool_entry_resolves_the_live_digest_version_and_tool_facts() {
         let snap = ActiveVersionSnapshot::new();
-        let mut r = row("waddles.core.a.svc", "sha256:aa", 5);
+        let mut r = row("penguintechinc.waddles.a-svc", "sha256:aa", 5);
         r.tools = crate::tools::ToolManifestInfo {
             is_tool_service: true,
             exported: vec![crate::tools::ExportedToolInfo {
@@ -266,16 +266,16 @@ mod tests {
         };
         snap.update_scope(7, 3, &[r]);
         let e = snap
-            .tool_entry_in_scope(7, 3, "waddles.core.a.svc")
+            .tool_entry_in_scope(7, 3, "penguintechinc.waddles.a-svc")
             .unwrap();
         assert_eq!((e.digest.as_str(), e.version_id), ("sha256:aa", 5));
         assert!(e.tools.exported_tool("t").is_some());
         assert!(snap
-            .tool_entry_in_scope(7, 3, "waddles.core.missing.svc")
+            .tool_entry_in_scope(7, 3, "penguintechinc.waddles.missing-svc")
             .is_none());
         snap.update_scope(7, 3, &[]);
         assert!(snap
-            .tool_entry_in_scope(7, 3, "waddles.core.a.svc")
+            .tool_entry_in_scope(7, 3, "penguintechinc.waddles.a-svc")
             .is_none());
     }
 

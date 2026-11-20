@@ -46,7 +46,7 @@ bet, insufficient funds) reply in chat and release the cooldown; `denied`/`unava
 | `storage.kv` | cooldown + per-event outcome record |
 | `economy.wager` (`max_bet: 500`) | `wager` and `max-bet` |
 | `identity.resolve` | actor -> community user uuid |
-| `tool.call:waddles.core.service.economy:points_view` | currency alias |
+| `tool.call:penguintechinc.waddles.economy:points_view` | currency alias |
 | `chat.send:twitch` / `chat.send:discord` | relay the reply |
 
 Gated behind the PostHog flag `waddles.command-superpenguin-slots` (default OFF), checked after the command match and before the cooldown.
@@ -61,7 +61,7 @@ make build-superpenguin-slots-bundle   # pinned Dockerfile -> /tmp/superpenguin-
 
 ## Activation
 
-Not in `bundles/core-bundles.yaml` (third-party `waddles.integrations.*` namespace; seeder placement and the vendor-validator
+Not in `bundles/core-bundles.yaml` (third-party `psychoboy.penguintwitchbot.*` namespace; seeder placement and the vendor-validator
 `streaming-lifecycle` export rule are pending S0 decisions -- see `docs/sdk-cs.md` section 6 and `superpenguin-roll`'s README).
 
 ## App/service boundary (2026-11-07)

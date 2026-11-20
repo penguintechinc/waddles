@@ -8,7 +8,7 @@
 # Toolchain versions match this repo's own proven CI recipe verbatim
 # (.github/workflows/rust-waddle-sdk-rs.yml's example-bundle-component job,
 # .github/workflows/python-waddle-sdk.yml) -- cargo-component 0.21.1, wasm-tools 1.259.0, Rust
-# 1.97.1, componentize-py==0.25.1. waddles.core.example.csping's csharp-bundle-builder stage
+# 1.97.1, componentize-py==0.25.1. penguintechinc.waddles.csping's csharp-bundle-builder stage
 # mirrors bundles/csharp/csping/Dockerfile's own pinned toolchain (.NET SDK 10.0.401,
 # componentize-dotnet 0.8.0-preview00011, NativeAOT-LLVM 10.0.0-rc.1.26306.1).
 
@@ -87,7 +87,7 @@ ENV SOURCE_DATE_EPOCH=1704067200 \
     LC_ALL=C.UTF-8
 
 # --- ping
-# waddles.core.example.ping (Rust) -> WASI 0.2 component; the reproducible-build pins in
+# penguintechinc.waddles.ping (Rust) -> WASI 0.2 component; the reproducible-build pins in
 # rust-bundle-base are proven byte-identical for this artifact by core-bundles-reproducible.yml.
 FROM rust-bundle-base AS bundle-ping
 COPY bundles/rust/ping /repo/bundles/rust/ping
@@ -95,7 +95,7 @@ WORKDIR /repo/bundles/rust/ping
 RUN cargo component build --release --target wasm32-wasip2 --locked
 
 # --- reputation
-# waddles.core.service.reputation (bundle-MCP-tools P5, `kind: service`, world stage-tools):
+# penguintechinc.waddles.reputation (bundle-MCP-tools P5, `kind: service`, world stage-tools):
 # same toolchain and the SAME reproducible-build ENV pins as ping above (they are stage-level
 # ENV, inherited by this RUN). Its own manifest dir; ping's artifact above is unaffected.
 FROM rust-bundle-base AS bundle-reputation
@@ -318,7 +318,7 @@ COPY bundles/build_python_bundles.py bundles/build_python_bundles.py
 #
 # Reproducible-build pins (same proof requirement as the rust bundle stages above --
 # scripts/verify-core-bundles-reproducible.sh / `make verify-core-bundles-reproducible`;
-# waddles.core.example.pyping and the batch bundles remain intentionally EXCLUDED from that
+# penguintechinc.waddles.pyping and the batch bundles remain intentionally EXCLUDED from that
 # gate, see that script's own header comment). componentize-py wizens a real CPython
 # interpreter (imports every bundled module, then snapshots its post-import state into the
 # component's linear memory), so unlike a plain compiler invocation, ambient Python
@@ -346,7 +346,7 @@ ENV PYTHONHASHSEED=0 \
 RUN python3 bundles/build_python_bundles.py
 
 # ---------------------------------------------------------------------------
-# Stage 3: waddles.core.example.csping (C#) -> WASI 0.2 component
+# Stage 3: penguintechinc.waddles.csping (C#) -> WASI 0.2 component
 #
 # Mirrors bundles/csharp/csping/Dockerfile verbatim (same pinned base, same WASI SDK pin,
 # same rootless builder user) -- that file is this bundle's own standalone build, documented

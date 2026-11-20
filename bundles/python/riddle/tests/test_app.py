@@ -54,7 +54,7 @@ def _text(text, **kw):
 
 def _envelope(platform="twitch", text="reply", channel_id="12345"):
     return StageEnvelope(
-        tenant="tenant-1", community=None, app_id="waddles.core.example.riddle", stage="action",
+        tenant="tenant-1", community=None, app_id="penguintechinc.waddles.riddle", stage="action",
         event=_event(text, channel_id=channel_id, platform=platform),
         ts="2026-10-21T00:00:00.000Z",
     )

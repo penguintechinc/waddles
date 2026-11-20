@@ -1,9 +1,8 @@
 schema_version: 2
-app_id: waddles.core.example.wave
+app_id: penguintechinc.waddles.wave
 name: Wave Example Bundle (Python)
 # 1.0.2: activation-gated only -- removed the in-bundle waddles.command-wave feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.6
-feature: waddles.core.example
+version: 1.0.7
 module: core
 provider: builtin
 author: github:penguintechinc

@@ -1,7 +1,7 @@
 # jackpot (Python)
 
 `!jackpot <stake>` -- an accumulating community jackpot. First-party (`provider: builtin`,
-`app_id: waddles.core.example.jackpot`). **Inspired by PenguinTwitchBot by SuperPenguinTV (with
+`app_id: penguintechinc.waddles.jackpot`). **Inspired by PenguinTwitchBot by SuperPenguinTV (with
 permission) -- ideas/design only, no code copied** (same convention as `fish`/`heist`).
 
 | Command | Behavior |

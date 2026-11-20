@@ -23,7 +23,7 @@ use crate::connector::webhook_verify::{Scheme, WixSpec};
 /// Platform slug (also the `ConnKey` platform and the route owner).
 pub const PLATFORM: &str = "wix";
 /// Core connector bundle id.
-pub const APP_ID: &str = "waddles.core.service.wix";
+pub const APP_ID: &str = "penguintechinc.waddles.wix";
 /// Provider name in hub-api's binding list.
 pub const PROVIDER: &str = "wix";
 /// Capability the binding list is scoped to.
@@ -271,7 +271,7 @@ mod tests {
         let p = profile();
         assert_eq!(
             (p.platform(), p.app_id(), p.provider(), p.capability()),
-            ("wix", "waddles.core.service.wix", "wix", "webhook_ingest")
+            ("wix", "penguintechinc.waddles.wix", "wix", "webhook_ingest")
         );
     }
 }

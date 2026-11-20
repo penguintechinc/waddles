@@ -128,8 +128,8 @@ mod tests {
     use std::sync::Mutex;
     use tonic::{Request, Response, Status};
 
-    const APP: &str = "waddles.core.example.music";
-    const OWN: &str = "waddles.core.example.music.now_playing";
+    const APP: &str = "penguintechinc.waddles.music";
+    const OWN: &str = "penguintechinc.waddles.music.now_playing";
 
     #[derive(Default)]
     struct Seen(Mutex<Vec<(i64, String, String)>>);
@@ -235,10 +235,10 @@ mod tests {
     async fn a_bundle_cannot_publish_into_another_bundles_namespace() {
         let (w, seen) = wiring(true).await;
         for surface in [
-            "waddles.core.example.otherapp.now_playing",
-            "waddles.core.example.musicbox.queue",
+            "penguintechinc.waddles.otherapp.now_playing",
+            "penguintechinc.waddles.musicbox.queue",
             "alert",
-            "waddles.core.example.music",
+            "penguintechinc.waddles.music",
         ] {
             let e = publish(Some(&w), APP, 7, &args(surface, "{}"))
                 .await

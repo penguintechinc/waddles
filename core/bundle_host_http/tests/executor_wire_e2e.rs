@@ -52,7 +52,7 @@ use penguin_bundle_host::wire::{
 use sha2::{Digest, Sha256};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/http_fixture.wasm");
-const APP_ID: &str = "waddles.test.http-fixture";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-http-fixture";
 
 /// A public IPv4 literal: needs no DNS (the guard's resolver returns a
 /// literal as-is), is not in any forbidden range, and is granted below via a

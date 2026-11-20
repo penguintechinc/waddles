@@ -1,4 +1,4 @@
-# waddles.core.service.music-soundcloud
+# penguintechinc.waddles.music-soundcloud
 
 Always-on `kind: service` bundle (Rust, `world stage-tools`) exposing SoundCloud metadata to
 app bundles (the `dj` app) through gated tool calls. Parity: no legacy SoundCloud code exists

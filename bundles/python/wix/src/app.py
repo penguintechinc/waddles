@@ -1,4 +1,4 @@
-"""Wix event-only integration (`waddles.core.integration.wix`, #485).
+"""Wix event-only integration (`penguintechinc.waddles.wix-event-sync`, #485).
 
 This bundle exposes NO chat command. It consumes only the Wix webhook connector's normalized
 records and syncs EVENTS ONLY: `event.{created,updated,canceled}` -> `event_sync` (Wix events ->

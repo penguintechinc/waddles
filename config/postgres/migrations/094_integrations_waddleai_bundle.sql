@@ -30,7 +30,7 @@ INSERT INTO app_catalog (
     status,
     stages
 ) VALUES (
-    'waddles.integrations.waddleai.default',
+    'penguintechinc.waddles.waddleai',
     '1.0.0',
     'integrations',
     'waddles.integrations.waddleai',
@@ -49,7 +49,7 @@ ON CONFLICT (app_id) DO NOTHING;
 
 -- Activate the bundle for the global tenant (tenant-wide, all communities).
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.integrations.waddleai.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.waddleai', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

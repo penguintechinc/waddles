@@ -20,9 +20,9 @@ use crate::identity::InvocationIdentity;
 use crate::license::test_support::FixedGate;
 use bundle_tool_call::ToolRequest;
 
-const LOGIC: &str = "waddles.core.app.reputation-accrual";
-const REP: &str = "waddles.core.service.reputation";
-const DISCORD: &str = "waddles.core.service.discord";
+const LOGIC: &str = "penguintechinc.waddles.reputation-accrual";
+const REP: &str = "penguintechinc.waddles.reputation";
+const DISCORD: &str = "penguintechinc.waddles.discord";
 const BAN: &str = "discord.moderation.ban";
 const USER: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
 const OTHER_USER: &str = "9a8b7c6d-1111-4222-8333-444455556666";
@@ -393,7 +393,7 @@ async fn a_floor_ban_without_a_host_event_id_or_a_retry_token_is_refused() {
 #[tokio::test]
 async fn a_non_logic_app_chain_origin_is_forbidden_and_never_acts() {
     let w = standard(true, true).await;
-    *w.store.active.lock().unwrap() = Some(Some("waddles.core.app.other-logic".to_string()));
+    *w.store.active.lock().unwrap() = Some(Some("penguintechinc.waddles.other-logic".to_string()));
     let err = run(&w.caps, ban_call("community_hard_floor", Some("k1")))
         .await
         .unwrap_err();
@@ -565,7 +565,7 @@ async fn flag_off_or_unwired_refuses_before_touching_the_store() {
 async fn a_platform_the_action_stage_cannot_deliver_is_refused_loudly_not_queued_to_die() {
     let w = standard(true, true).await;
     let mut call = ban_call("community_hard_floor", Some("k1"));
-    call.args["target"] = serde_json::json!("waddles.core.service.twitch");
+    call.args["target"] = serde_json::json!("penguintechinc.waddles.twitch");
     call.args["tool"] = serde_json::json!("twitch.moderation.ban");
     // Ineligible-by-shape falls to the ordinary path (no grant for twitch): refused either way,
     // and nothing is ever enqueued.
@@ -741,7 +741,7 @@ fn only_a_floor_ban_on_the_matching_core_service_is_a_claim() {
     );
     assert_eq!(
         detect_claim(&req(
-            "waddles.core.service.twitch",
+            "penguintechinc.waddles.twitch",
             "twitch.moderation.ban",
             "tenant_floor"
         )),
@@ -750,7 +750,7 @@ fn only_a_floor_ban_on_the_matching_core_service_is_a_claim() {
     for bad in [
         req(DISCORD, BAN, "manual"),
         req(DISCORD, "discord.moderation.kick", "tenant_floor"),
-        req("waddles.core.service.twitch", BAN, "tenant_floor"),
+        req("penguintechinc.waddles.twitch", BAN, "tenant_floor"),
         req(DISCORD, "moderation.ban", "tenant_floor"),
         req("waddles.acme.service.discord", BAN, "tenant_floor"),
     ] {

@@ -340,3 +340,9 @@ pin fails until the oracle and the pin are regenerated together.
 
 See `sdk/waddle-sdk/tests/test_command.py` and `test_sub_modules.py` for the full parsed-
 shape matrix, including every rejection case (`CommandUsageError`).
+
+## Bundle `app_id` format
+
+Every bundle `app_id` is `<github-org>.<repo>.<bundle-name>` -- e.g. `penguintechinc.waddles.<name>` for
+this repo's own bundles and samples, `psychoboy.penguintwitchbot.<name>` for the PenguinTwitchBot ports.
+There are no aliases; the `feature` manifest field is not required to match the `app_id` prefix.

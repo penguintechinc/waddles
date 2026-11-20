@@ -1,10 +1,9 @@
-# hub-api install-pipeline manifest (schema_version 2, bundle_manifest_v2) for waddles.core.example.wordcount.
+# hub-api install-pipeline manifest (schema_version 2, bundle_manifest_v2) for penguintechinc.waddles.wordcount.
 # 1.0.0: new fun-pack bundle -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.wordcount
+app_id: penguintechinc.waddles.wordcount
 name: Per-User Word Counter Bundle (Python)
-version: 1.0.3
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc

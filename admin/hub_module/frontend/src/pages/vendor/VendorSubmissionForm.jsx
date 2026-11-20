@@ -10,12 +10,33 @@ import { bundleApi } from '../../services/api';
  * that pipeline is a separate, legacy system; this page is the bundle-
  * onboarding entrypoint for the WASI-component pipeline.
  *
- * Vendors may only upload a pre-built `.wasm` component into their own
- * `waddles.integrations.vendor-{id}.*` namespace -- source-tarball uploads
+ * Vendors may only upload a pre-built `.wasm` component under an app id of the
+ * form `<github-org>.<repo>.<bundle-name>` (lowercase; `penguintechinc`,
+ * `waddles` and `psychoboy` are reserved) -- source-tarball uploads
  * are 400-refused server-side (services/vendor_bundle_authz.py), so this
  * form never offers a source-upload field. `version` is not a form field:
  * the server derives it entirely from the manifest's own `version:` key.
  */
+/** Reserved org segments a vendor may never publish under. */
+const RESERVED_ORGS = ['penguintechinc', 'waddles', 'psychoboy'];
+
+/** Client-side mirror of hub-api's app_id shape: 3 lowercase segments, `-` allowed. */
+const APP_ID_RE = /^[a-z0-9][a-z0-9-]*(\.[a-z0-9][a-z0-9-]*){2}$/;
+
+/**
+ * Returns an error message for a malformed (or, for vendors, reserved) app id,
+ * else null. hub-api stays the authority; this only gives fast feedback.
+ */
+function appIdError(appId, allowReserved) {
+  if (!APP_ID_RE.test(appId)) {
+    return 'App ID must be <github-org>.<repo>.<bundle-name>: three lowercase segments (letters, digits, "-").';
+  }
+  if (!allowReserved && RESERVED_ORGS.includes(appId.split('.')[0])) {
+    return 'That org is reserved (penguintechinc, waddles and psychoboy are platform-only).';
+  }
+  return null;
+}
+
 function VendorSubmissionForm() {
   const navigate = useNavigate();
   const { user, loading: authLoading, isVendor, hasRole } = useAuth();
@@ -29,9 +50,7 @@ function VendorSubmissionForm() {
 
   const isPlatformAdmin =
     hasRole('admin') || hasRole('super_admin') || hasRole('platform-admin');
-  const namespaceHint = user
-    ? `waddles.integrations.vendor-${user.id}.<bundle-name>`
-    : 'waddles.integrations.vendor-<your-id>.<bundle-name>';
+  const namespaceHint = '<github-org>.<repo>.<bundle-name>';
 
   async function handleSubmit(e) {
     e.preventDefault();
@@ -42,6 +61,11 @@ function VendorSubmissionForm() {
     // browser (and jsdom) file-input validity messages are terse and
     // inconsistent across engines; `vendor-submit-error` gives one
     // consistent, styled message matching every other error path here.
+    const idError = appIdError(appId.trim(), isPlatformAdmin);
+    if (idError) {
+      setError(idError);
+      return;
+    }
     if (!manifestFile) {
       setError('A bundle manifest (YAML) is required.');
       return;
@@ -179,8 +203,9 @@ function VendorSubmissionForm() {
       <div>
         <h1 className="text-3xl font-bold text-white">Submit a Bundle Version</h1>
         <p className="text-navy-300 mt-1">
-          Upload a pre-built WASM component and its manifest. Your app id must fall within your
-          own vendor namespace: <code className="text-gold-400">{namespaceHint}</code>.
+          Upload a pre-built WASM component and its manifest. Your app id uses the format{' '}
+          <code className="text-gold-400">{namespaceHint}</code> (lowercase). The org{' '}
+          <code>penguintechinc</code>, <code>waddles</code> and <code>psychoboy</code> are reserved.
         </p>
       </div>
 
@@ -213,7 +238,7 @@ function VendorSubmissionForm() {
             type="text"
             value={appId}
             onChange={(e) => setAppId(e.target.value)}
-            placeholder={`waddles.integrations.vendor-${user?.id ?? '1'}.my-bundle`}
+            placeholder="my-org.my-repo.my-bundle"
             required
             className="w-full bg-navy-900 border border-navy-600 rounded px-3 py-2 text-white focus:outline-none focus:ring-2 focus:ring-gold-400"
           />

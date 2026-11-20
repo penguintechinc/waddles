@@ -32,8 +32,8 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0018_slack_youtube_apps.py"
 )
 
-SLACK_APP_ID = "waddles.bot.slack.default"
-YOUTUBE_APP_ID = "waddles.bot.youtube.default"
+SLACK_APP_ID = "penguintechinc.waddles.slack-pipeline"
+YOUTUBE_APP_ID = "penguintechinc.waddles.youtube-pipeline"
 TENANT_SLUG = "global"
 
 SLACK_CONFIG_DEFAULTS = {"bot_token_ref": "SLACK_BOT_TOKEN", "app_token_ref": "SLACK_APP_TOKEN"}
@@ -180,7 +180,7 @@ class TestUpgradeSeedsAppCatalog:
         assert '"communication_model": "rest_pull"' in upgrade_sql
 
     def test_slack_ingest_declares_no_communication_model_key(self, upgrade_sql) -> None:
-        """Matches the live waddles.bot.discord.default row's own shape --
+        """Matches the live penguintechinc.waddles.discord-pipeline row's own shape --
         discord's ingest stage carries no communication_model key either."""
         slack_ingest_start = upgrade_sql.index('"ingest": {"entrypoint": "bundles.slack_ingest')
         slack_ingest_end = upgrade_sql.index("}}, ", slack_ingest_start) + len("}}, ")

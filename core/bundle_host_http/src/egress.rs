@@ -724,7 +724,7 @@ pub struct EgressGuard {
     /// `app:` grants then fail loud (`secret_unavailable`).
     credentials: crate::credentials::CredentialSources,
     denied_total: prometheus::IntCounterVec,
-    /// Spec §13.5's `waddles.core.bundle-egress` flag: OFF ⇒ every call
+    /// Spec §13.5's `penguintechinc.waddles.bundle-egress` flag: OFF ⇒ every call
     /// denied `feature_disabled`, checked before anything else (scheme,
     /// allowlist, SSRF -- none of it runs at all while this capability is
     /// disabled). `min_tier: free`, so [`FeatureFlag::enabled`] alone gates
@@ -854,7 +854,10 @@ impl EgressGuard {
         args: &serde_json::Value,
     ) -> Result<serde_json::Value, HostResultError> {
         if !self.bundle_egress.enabled().await {
-            let err = denied("feature_disabled", "waddles.core.bundle-egress is disabled");
+            let err = denied(
+                "feature_disabled",
+                "penguintechinc.waddles.bundle-egress is disabled",
+            );
             self.denied_total
                 .with_label_values(&[app_id, &err.code])
                 .inc();
@@ -1356,7 +1359,10 @@ impl EgressGuard {
         target: &str,
     ) -> Result<ValidatedTarget, HostResultError> {
         if !self.bundle_egress.enabled().await {
-            let err = denied("feature_disabled", "waddles.core.bundle-egress is disabled");
+            let err = denied(
+                "feature_disabled",
+                "penguintechinc.waddles.bundle-egress is disabled",
+            );
             self.denied_total
                 .with_label_values(&[app_id, &err.code])
                 .inc();
@@ -4872,7 +4878,7 @@ mod tests {
         assert_eq!(err.code, "invalid_args");
     }
 
-    // -- spec §13.5 `waddles.core.bundle-egress` flag gate --
+    // -- spec §13.5 `penguintechinc.waddles.bundle-egress` flag gate --
 
     /// OFF ⇒ every egress call is denied `feature_disabled`, before any
     /// other check runs (even an otherwise-fully-valid, allowlisted

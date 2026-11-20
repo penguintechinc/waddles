@@ -1,11 +1,10 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.pyping -- see bundles/rust/ping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.pyping -- see bundles/rust/ping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 schema_version: 2
-app_id: waddles.core.example.pyping
+app_id: penguintechinc.waddles.pyping
 name: Ping Example Bundle (Python)
-version: 1.0.3
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc

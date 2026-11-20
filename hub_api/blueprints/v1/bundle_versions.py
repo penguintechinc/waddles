@@ -32,6 +32,7 @@ from quart_schema import validate_response
 from werkzeug.datastructures import FileStorage
 
 from services import bundle_version_service as svc
+from services.app_id_ownership import release_unused_claim
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request
 from services.vendor_bundle_authz import authorize_onboarding_scope, enforce_vendor_namespace
@@ -107,8 +108,8 @@ async def post_version(
 
     Authorization (spec Sec9.2 follow-on, `services/vendor_bundle_authz.py`):
     `platform:admin` (unrestricted `app_id`, this endpoint's original
-    behavior) OR `vendor:onboard` scoped to the caller's own
-    `waddles.integrations.vendor-{caller_id}.*` namespace -- checked
+    behavior) OR `vendor:onboard`, restricted to a well-formed
+    `<github-org>.<repo>.<bundle-name>` id outside the reserved `penguintechinc` org -- checked
     BEFORE any multipart part is read (security.md: never buffer an
     unauthorized caller's payload). A vendor's `source` part is refused
     outright: the
@@ -138,8 +139,9 @@ async def post_version(
 
     if not auth.is_admin:
         try:
-            enforce_vendor_namespace(app_id=app_id, caller_id=caller_id)
+            await enforce_vendor_namespace(install_dal, app_id=app_id, caller_id=caller_id)
         except ApiError as exc:
+            logger.debug("handled %s in post_version: %s", type(exc).__name__, exc.code)
             return _err(exc)
         if source_file is not None:
             return _err(
@@ -176,6 +178,7 @@ async def post_version(
             known_custom_platforms=frozenset(),
             allow_wildcard_consumes=False,
             allow_prebuilt=await _allow_prebuilt(install_dal),
+            enforce_owner=not auth.is_admin,
         )
         if row.artifact_kind == "prebuilt":
             assert component_bytes is not None  # nosec B101 -- create_version already enforced this
@@ -186,7 +189,12 @@ async def post_version(
                 component_bytes=component_bytes,
                 tenant_slug=ctx.tenant_slug,
             )
+        if not auth.is_admin and row.status == svc.STATUS_REJECTED:
+            # A vendor whose first upload is rejected (non-conformant component) must not keep
+            # the namespace claimed; a no-op once any live version exists.
+            await release_unused_claim(install_dal, app_id=app_id)
     except ApiError as exc:
+        logger.debug("handled %s in post_version: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return (
         CreateVersionResponse(
@@ -199,7 +207,7 @@ async def post_version(
     )
 
 
-def _authorize_version_read(app_id: str) -> ApiError | None:
+async def _authorize_version_read(app_id: str) -> ApiError | None:
     """403 unless the caller is a platform admin, or a vendor reading their OWN namespace.
 
     Version state exposes reject reasons, scan status and artifact digests -- onboarding
@@ -209,7 +217,9 @@ def _authorize_version_read(app_id: str) -> ApiError | None:
     try:
         auth = authorize_onboarding_scope(request, app_id=app_id)
         if not auth.is_admin:
-            enforce_vendor_namespace(app_id=app_id, caller_id=get_current_user_id(request))
+            await enforce_vendor_namespace(
+                _install_dal(), app_id=app_id, caller_id=get_current_user_id(request)
+            )
     except ApiError as exc:
         logger.debug("handled %s in bundle_versions: %s", type(exc).__name__, exc.code)
         return exc
@@ -220,7 +230,7 @@ def _authorize_version_read(app_id: str) -> ApiError | None:
 @tenant_middleware  # type: ignore[misc]
 async def list_versions_route(app_id: str) -> dict[str, object] | tuple[dict[str, object], int]:
     """Every uploaded version of `app_id`, newest first (platform admin / owning vendor)."""
-    denied = _authorize_version_read(app_id)
+    denied = await _authorize_version_read(app_id)
     if denied is not None:
         return _err(denied)
     install_dal = _install_dal()
@@ -239,7 +249,7 @@ async def get_version(app_id: str, version: str) -> VersionDTO | tuple[dict[str,
 
     Platform admin or the owning vendor only -- see `_authorize_version_read`.
     """
-    denied = _authorize_version_read(app_id)
+    denied = await _authorize_version_read(app_id)
     if denied is not None:
         return _err(denied)
     install_dal = _install_dal()

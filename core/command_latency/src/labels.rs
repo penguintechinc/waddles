@@ -153,7 +153,7 @@ mod tests {
     fn snap(cmds: &[&str]) -> Snapshot {
         Snapshot {
             commands: Some(cmds.iter().map(|s| (*s).to_string()).collect()),
-            bundles: Some(vec![("waddles.core.ping".into(), "rust".into())]),
+            bundles: Some(vec![("penguintechinc.waddles.ping".into(), "rust".into())]),
         }
     }
 
@@ -173,7 +173,7 @@ mod tests {
         assert_eq!(reg.command_count(), 0);
         assert!(refresh_once(&stub, &reg, w).await);
         assert!(reg.contains("ping"));
-        assert_eq!(reg.bundle_lang("waddles.core.ping"), "rust");
+        assert_eq!(reg.bundle_lang("penguintechinc.waddles.ping"), "rust");
         let failing = Stub {
             calls: AtomicUsize::new(0),
             fail_first: usize::MAX,

@@ -202,7 +202,7 @@ mod tests {
     use tokio::io::{duplex, DuplexStream};
 
     const PLATFORM: &str = "twitch";
-    const APP_ID: &str = "waddles.core.connector.twitch";
+    const APP_ID: &str = "penguintechinc.waddles.twitch";
     const DIGEST: &str = "sha256:abc";
 
     fn action() -> SenderAction {

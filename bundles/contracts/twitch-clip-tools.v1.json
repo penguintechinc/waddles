@@ -1,7 +1,7 @@
 {
   "contract": "twitch-clip-tools",
   "version": 1,
-  "target_app_id": "waddles.core.service.twitch",
+  "target_app_id": "penguintechinc.waddles.twitch",
   "notes": "Contract the Twitch platform service bundle MUST expose for twitch-clips. Broadcaster and community are pinned host-side: no tool accepts a broadcaster/channel/community argument. Failures use ToolError::InvalidArgs(\"<code>[: detail]\") with code in not_live|rate_limited|not_connected|clips_disabled|platform_unavailable. Output carries no creator handle (PII).",
   "tools": {
     "twitch.clip.create": {

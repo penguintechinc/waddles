@@ -1,4 +1,4 @@
-// Echo connector (`waddles.core.example.echo`-style) -- the B0 end-to-end
+// Echo connector (`penguintechinc.waddles.echo`-style) -- the B0 end-to-end
 // smoke connector (issue #840, spec
 // `docs/superpowers/specs/2026-09-28-connector-bundles.md` S5.1 row 1 / S6
 // phase 2). A synthetic, zero-real-traffic `receiver`: its `on-frame` is a

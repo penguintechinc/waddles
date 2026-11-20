@@ -130,7 +130,7 @@ def test_dispatch_relays_to_origin_platform(platform: str, host) -> None:
     envelope = StageEnvelope(
         tenant="t",
         community=None,
-        app_id="waddles.core.example.define",
+        app_id="penguintechinc.waddles.define",
         stage="action",
         event=_event("A short definition.", platform=platform),
         ts="2026-10-21T00:00:00.000Z",

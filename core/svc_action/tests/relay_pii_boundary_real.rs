@@ -24,7 +24,7 @@ use svc_action::egress::{EgressGuard, EgressLimits};
 use svc_action::flags::{boxed, StaticFlag};
 use svc_action::usage::UsageBatcher;
 
-const APP_ID: &str = "waddles.pii.boundary.test";
+const APP_ID: &str = "penguintechinc.waddles.fixture-pii-boundary-test";
 const TWITCH_QUEUE: &str = "waddles:transport:irc:twitch:outbound";
 const DISCORD_QUEUE: &str = "waddles:transport:irc:discord:outbound";
 const TOKEN: &str = "0b9f2c1e-7d3a-4c58-9a1e-5f6d7e8a9b0c";

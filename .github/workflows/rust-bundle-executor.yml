@@ -6,6 +6,8 @@ on:
     paths:
       - 'core/bundle_executor/**'
       - 'core/platform_keys/**'
+      - 'core/bundle_capability_gate/**'
+      - 'testdata/bundle_app_id/**'
       - 'wit/waddle-bundle/**'
       - 'wit/waddle-connector/**'
       - 'tests/data_plane_parity/**'
@@ -51,6 +53,8 @@ jobs:
           globs: |
             core/bundle_executor/**
             core/platform_keys/**
+            core/bundle_capability_gate/**
+            testdata/bundle_app_id/**
             wit/waddle-bundle/**
             wit/waddle-connector/**
             tests/data_plane_parity/**

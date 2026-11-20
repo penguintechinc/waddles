@@ -2,7 +2,7 @@
 
 `!so <user>` -- a customizable, per-community shoutout command, migrated from the `bot_process`
 monolith's `!so` feature. Community-scoped fun/promo content, first-party (`provider: builtin`,
-`app_id: waddles.core.example.shoutout`), **inspired by** superpenguintv (Psychoboy)'s
+`app_id: penguintechinc.waddles.shoutout`), **inspired by** superpenguintv (Psychoboy)'s
 [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) `!so` -- not a literal port. No
 original source code or text is reused; the command grammar, template system, auto-shoutout list,
 and sub-module gating are written fresh for this bundle. See `bundle.yaml`'s `author`/`notice`
@@ -140,7 +140,7 @@ docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp \
 ```
 
 Confirmed building a real `.wasm` component. Registered in `bundles/core-bundles.yaml`
-(`waddles.core.example.shoutout`).
+(`penguintechinc.waddles.shoutout`).
 
 ## Test
 

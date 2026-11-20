@@ -30,7 +30,7 @@ make test-connector-parity PLATFORM=discord
 | `PLATFORM` | `twitch`, `discord` or `youtube` (required) |
 | `PARITY_CONNECTOR_WASM` | built connector component. Set-but-missing = FAIL, never skip. Unset = fixture self-check |
 | `PARITY_CONNECTOR_DIGEST` | optional `sha256:<hex>` pin; mismatch fails |
-| `PARITY_CONNECTOR_APP_ID` | default `waddles.core.parity.<platform>` (must be `waddles.core.*`) |
+| `PARITY_CONNECTOR_APP_ID` | default `penguintechinc.waddles.parity-<platform>` (must be `penguintechinc.waddles.*`) |
 | `PARITY_CONNECTOR_WORLD` | `connector-tools` (default) or `connector` |
 
 **Use a per-agent `CARGO_TARGET_DIR`** (e.g. `/mnt/ssd/cargo-target-<agent>`): a shared target dir lets another

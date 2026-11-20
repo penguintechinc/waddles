@@ -27,7 +27,7 @@ namespace WaddleBundleSuperpenguinTop;
 public sealed class TopLogic : WaddleProcessStageNext
 {
     internal const string FlagKey = "waddles.command-superpenguin-top";
-    internal const string ReputationTarget = "waddles.core.service.reputation";
+    internal const string ReputationTarget = "penguintechinc.waddles.reputation";
     internal const int RepLimit = 10;
 
     protected override PlatformEventInfo? Transform(PlatformEventInfo @event, IWaddleHostNext host)

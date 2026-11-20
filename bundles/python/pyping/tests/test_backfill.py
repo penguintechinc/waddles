@@ -49,7 +49,7 @@ def _envelope(
     return StageEnvelope(
         tenant="tenant-1",
         community=None,
-        app_id="waddles.core.example.pyping",
+        app_id="penguintechinc.waddles.pyping",
         stage="action",
         event=PlatformEvent(
             platform=platform,

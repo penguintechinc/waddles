@@ -1,7 +1,7 @@
 # trivia (Python)
 
 `!trivia` -- a per-community trivia Q&A game. `kv`-only, first-party (`provider: builtin`,
-`app_id: waddles.core.example.trivia`, `author: PenguinTech/waddles`, Apache-2.0), **original
+`app_id: penguintechinc.waddles.trivia`, `author: PenguinTech/waddles`, Apache-2.0), **original
 Waddles content** (not a port; no third-party attribution applies). The questions are a small,
 fixed, auditable embedded bank (`QUESTION_BANK`, 8 entries) -- no external data source or
 scheduler.

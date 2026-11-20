@@ -31,7 +31,7 @@ from tests.test_seed_core_bundles import (
     _write_bundle,
 )
 
-_APP = "waddles.core.example.ping"
+_APP = "penguintechinc.waddles.ping"
 
 
 class TestStallRecoveryEnv:
@@ -270,10 +270,12 @@ class TestPermissionParsingThroughSeeder:
 
         tmp2 = tmp_path / "v2"
         tmp2.mkdir()
-        entry2 = _write_bundle(tmp2, manifest={**_MANIFEST, "app_id": "waddles.core.example.pong"})
+        entry2 = _write_bundle(
+            tmp2, manifest={**_MANIFEST, "app_id": "penguintechinc.waddles.pong"}
+        )
         await seed_one(install_dal, entry2, tmp2, valkey_client=AsyncMock())
         grants2 = await install_dal(
-            install_dal.community_permission_grants.app_id == "waddles.core.example.pong"
+            install_dal.community_permission_grants.app_id == "penguintechinc.waddles.pong"
         ).select()
         assert {g.permission_id for g in grants2} == {"storage.kv"}
         assert {g.community_id for g in grants2} == {seeder.TENANT_WIDE_COMMUNITY_SENTINEL}

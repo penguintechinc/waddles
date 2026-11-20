@@ -6,10 +6,9 @@
 # identical in bundle.yaml. No secrets here: YOUTUBE_API_KEY / YOUTUBE_OAUTH_AUTHORIZATION are
 # host-side secret-ref names resolved at send time.
 schema_version: 2
-app_id: waddles.core.service.music-youtube
+app_id: penguintechinc.waddles.music-youtube
 name: Music YouTube Service Bundle (Rust)
-version: 1.0.2
-feature: waddles.core.service
+version: 1.0.3
 module: core
 provider: builtin
 author: github:penguintechinc

@@ -12,7 +12,7 @@ public class FishingDispatchTests
         var replyJson = payload.Length > 0 ? payload
             : channelId is null ? $"{{\"text\":\"{text}\"}}" : $"{{\"text\":\"{text}\",\"channel_id\":\"{channelId}\"}}";
         return new StageEnvelopeInfo(
-            "tenant-1", null, "waddles.integrations.superpenguin.fishing", "action",
+            "tenant-1", null, "psychoboy.penguintwitchbot.fishing", "action",
             new PlatformEventInfo(platform, "chat.message", "user-1", replyJson, "2026-11-07T00:00:00.000Z"),
             "2026-11-07T00:00:00.000Z", null, null);
     }

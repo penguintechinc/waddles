@@ -1,4 +1,4 @@
-//! Typed client for the shared queue service `waddles.core.service.music-requests`
+//! Typed client for the shared queue service `penguintechinc.waddles.music-requests`
 //! (contract: `docs/music-requests-service.md`).
 //!
 //! Tools used: `requests.list`, `requests.add` (kind `dj`), `requests.advance_due`,
@@ -14,7 +14,7 @@ use crate::host::{Host, Level, ToolErr};
 use crate::model::{Track, clean_text};
 
 /// Service-bundle app id of the shared queue.
-pub const TARGET: &str = "waddles.core.service.music-requests";
+pub const TARGET: &str = "penguintechinc.waddles.music-requests";
 
 /// Failure talking to the queue service.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]

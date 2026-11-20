@@ -1,6 +1,6 @@
 """Populate the music app's missing `bot_token_ref` in `config_defaults`.
 
-0009_music_catalog activated `waddles.social.music.default` tenant-wide via
+0009_music_catalog activated `penguintechinc.waddles.music-pipeline` tenant-wide via
 `app_tenant_availability` but only ever set `(tenant_id, app_id, available)`
 -- `config_defaults` was left at its column default (`{}`), so
 `social_music_action.enqueue_song_request`'s Discord reply-in-place send
@@ -15,7 +15,7 @@ per-activation value like `bot_token_ref`: `082_discord_send_action_bundle
 .sql` and `085_social_quote_bundle.sql`'s own docstrings are explicit that
 `bot_token_ref`/`channel_id` are "per-activation config ... never seeded"
 into `app_catalog`. This mirrors the live value already set for
-`waddles.bot.discord.default`'s own `global`-tenant `config_defaults` row
+`penguintechinc.waddles.discord-pipeline`'s own `global`-tenant `config_defaults` row
 (`{"bot_token_ref": "DISCORD_BOT_TOKEN"}`) -- the same shared Discord bot
 connection/secret (`k8s/helm/waddlebot/templates/secrets.yaml`'s single
 `DISCORD_BOT_TOKEN`, wired into svc-action's env), since music's reply is
@@ -38,7 +38,7 @@ down_revision = "0009_music_catalog"
 branch_labels = None
 depends_on = None
 
-APP_ID = "waddles.social.music.default"
+APP_ID = "penguintechinc.waddles.music-pipeline"
 TENANT_SLUG = "global"
 BOT_TOKEN_REF = "DISCORD_BOT_TOKEN"
 

@@ -45,7 +45,7 @@ fn plan_of(d: &DesiredConnection) -> &SpectrumPlan {
 fn identity_constants() {
     let p = SpectrumProfile::new();
     assert_eq!(p.platform(), "spectrum");
-    assert_eq!(p.app_id(), "waddles.core.service.spectrum");
+    assert_eq!(p.app_id(), "penguintechinc.waddles.spectrum");
     assert_eq!(p.provider(), "spectrum");
     assert_eq!(p.capability(), "chat_ingest");
 }
