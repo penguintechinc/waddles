@@ -123,9 +123,12 @@ KNOWN_EXECUTION_MODELS = frozenset({"native", "thirdparty"})
 # competing vocabulary.
 KNOWN_COMMUNICATION_MODELS = frozenset({"webhook_push", "rest_pull"})
 
-_SEGMENT = r"[a-z0-9][a-z0-9_-]*"
+# Same single grammar as hub_api `services.bundle_app_id` / Rust `is_valid_app_id`: segments
+# `[a-z0-9][a-z0-9-]*` (NO `_`; GitHub org/repo `_` maps to `-`), exactly three, <= 127 bytes.
+_SEGMENT = r"[a-z0-9][a-z0-9-]*"
 # <github-org>.<repo>.<bundle-name> -- exactly three dot-separated tokens.
-_APP_ID_RE = re.compile(rf"^{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
+_APP_ID_RE = re.compile(rf"(?:{_SEGMENT})\.(?:{_SEGMENT})\.(?:{_SEGMENT})")
+_APP_ID_MAX_LEN = 127
 # feature is descriptive only (optional): dotted lowercase tokens, unrelated to app_id.
 _FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$")
 _FEATURE_MAX_LEN = 128
@@ -470,7 +473,7 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
     if not _SEMVER_RE.match(version):
         raise ManifestError(REASON_BAD_SEMVER, f"{version!r} is not valid SemVer 2.0.0")
 
-    if not _APP_ID_RE.match(app_id):
+    if len(app_id) > _APP_ID_MAX_LEN or not _APP_ID_RE.fullmatch(app_id):
         raise ManifestError(
             REASON_NOT_NAMESPACED,
             f"app_id {app_id!r} must be '<github-org>.<repo>.<bundle-name>'",
@@ -529,7 +532,7 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
     compatible_with = tuple(data.get("compatible_with", ()))
     incompatible_with = tuple(data.get("incompatible_with", ()))
     for other_app_id in (*compatible_with, *incompatible_with):
-        if not _APP_ID_RE.match(other_app_id):
+        if len(other_app_id) > _APP_ID_MAX_LEN or not _APP_ID_RE.fullmatch(other_app_id):
             raise ManifestError(
                 REASON_INVALID_COMPAT_APP_ID,
                 f"compatible_with/incompatible_with entry {other_app_id!r} must be "

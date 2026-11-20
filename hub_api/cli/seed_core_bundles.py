@@ -76,6 +76,7 @@ from penguin_dal import AsyncDB
 from config import HubAPIConfig
 from services import app_command_backfill, connector_publish_service, vendor_bundle_authz
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
+from services.bundle_app_id import is_core_namespace, is_valid_app_id
 from services.bundle_approval_service import (
     activate_for_community,
     activate_tenant_wide,
@@ -148,7 +149,6 @@ _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
 #: shape every real first-party app_id already uses (`bundle_manifest_v2._APP_ID_RE`s
 #: own `[a-z0-9][a-z0-9_-]*` segments, minus underscores: no legitimate core app_id has ever
 #: used one). Deliberately ASCII-only -- see `_guard_core_namespace()`'s own docstring.
-_APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
 #: Catalog `language` values whose artifact is a deterministic COMPILED build (cargo-component /
 #: .NET / Go). The byte-identical digest check (`app_versions` immutable per version string) is
@@ -498,12 +498,12 @@ def _guard_core_namespace(app_id: str) -> None:
     `"penguintechinc.waddlesx.*"` (a near-miss) is refused by the prefix check itself,
     same as before -- covered here only for the charset/normalization checks' own scope.
     """
-    if unicodedata.normalize("NFKC", app_id) != app_id or not _APP_ID_CHARSET_RE.match(app_id):
+    if unicodedata.normalize("NFKC", app_id) != app_id or not is_valid_app_id(app_id):
         raise CoreBundleSeederError(
-            f"refusing to seed {app_id!r}: not a well-formed lowercase dotted app_id "
-            "(ASCII a-z0-9.- only, NFKC-normalization must be a no-op)"
+            f"refusing to seed {app_id!r}: not a well-formed '<org>.<repo>.<name>' app_id "
+            "(ASCII [a-z0-9-] segments only, NFKC-normalization must be a no-op)"
         )
-    if not app_id.startswith(vendor_bundle_authz.CORE_NAMESPACE_PREFIX):
+    if not is_core_namespace(app_id):
         raise CoreBundleSeederError(
             f"refusing to seed {app_id!r}: core-bundle-seeder only seeds "
             f"{vendor_bundle_authz.CORE_NAMESPACE_PREFIX}* app_ids -- a vendor bundle must go "

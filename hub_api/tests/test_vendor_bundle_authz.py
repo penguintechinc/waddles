@@ -78,9 +78,19 @@ class _FakeDal:
 _NOBODY = _FakeDal([])
 
 
+@pytest.fixture(autouse=True)
+def _no_owner_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Default: no `app_id_owners` row yet (legacy upload-history fallback applies)."""
+
+    async def _none(_dal: object, _app_id: str) -> tuple[bool, int | None]:
+        return False, None
+
+    monkeypatch.setattr("services.vendor_bundle_authz.owner_of", _none)
+
+
 async def test_valid_new_vendor_id_passes() -> None:
     await enforce_vendor_namespace(_NOBODY, app_id="acmecorp.widgets.mybundle", caller_id=42)
-    await enforce_vendor_namespace(_NOBODY, app_id="acme-corp.my_repo.discord-invite", caller_id=42)
+    await enforce_vendor_namespace(_NOBODY, app_id="acme-corp.my-repo.discord-invite", caller_id=42)
 
 
 async def test_vendors_own_new_version_passes() -> None:
@@ -127,3 +137,20 @@ async def test_vendor_path_rejects_reserved_and_malformed_ids(app_id: str) -> No
 async def test_reserved_org_check_is_on_the_segment_not_a_string_prefix() -> None:
     """`penguintechinc-fan` is a different org from `penguintechinc` and is not reserved."""
     await enforce_vendor_namespace(_NOBODY, app_id="penguintechinc-fan.waddles.x", caller_id=42)
+
+
+async def test_owner_row_of_another_publisher_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def _owned(_dal: object, _app_id: str) -> tuple[bool, int | None]:
+        return True, 7
+
+    monkeypatch.setattr("services.vendor_bundle_authz.owner_of", _owned)
+    with pytest.raises(ApiError) as exc:
+        await enforce_vendor_namespace(_NOBODY, app_id="acmecorp.widgets.mybundle", caller_id=42)
+    assert exc.value.status_code == 403
+    await enforce_vendor_namespace(_NOBODY, app_id="acmecorp.widgets.mybundle", caller_id=7)
+
+
+async def test_underscore_segment_is_rejected_on_the_vendor_path() -> None:
+    with pytest.raises(ApiError) as exc:
+        await enforce_vendor_namespace(_NOBODY, app_id="acme.my_repo.x", caller_id=42)
+    assert exc.value.status_code == 403

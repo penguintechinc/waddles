@@ -521,7 +521,7 @@ async def test_pg_real_schema_listing_is_tenant_scoped(
 ) -> None:  # noqa: F811
     """Two tenants activate the same scheduled app; each filter returns only its own scope."""
     n = next(_SEQ)
-    app_id = f"penguintechinc.waddles.pgsched{n}.default"
+    app_id = f"penguintechinc.waddles.pgsched{n}-default"
     t1, t2 = await _pg_tenant(pg_dal, n * 2), await _pg_tenant(pg_dal, n * 2 + 1)
     c1, c2 = (
         await _pg_community(pg_dal, t1, f"pg-a-{n}"),

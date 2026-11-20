@@ -680,9 +680,10 @@ mod tests {
 
         assert_eq!(
             call.resource,
-            ResolvedResource::KvKeyPrefix(
-                "waddles:app:7:3:penguintechinc.waddles.echo:state".to_string()
-            )
+            ResolvedResource::KvKeyPrefix(format!(
+                "waddles:app:7:3:{}:state",
+                crate::resource::bundle_storage_key("penguintechinc.waddles.echo")
+            ))
         );
     }
 

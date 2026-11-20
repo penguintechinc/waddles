@@ -1424,23 +1424,18 @@ impl PermissionId {
         Ok(())
     }
 
-    /// `tool.call` target: the 3-segment `<org>.<repo>.<name>` app id
-    /// (`hub_api` `_APP_ID_RE`); each segment may contain `-` and `_`. Every char is RFC-3986 unreserved, so Python's
-    /// `quote(app_id, safe='')` (P1's `requested_tool_permission_id`) is the
-    /// identity on a valid id and no percent-encoding exists on the wire; a
-    /// `%`/`:` therefore can never be valid and is rejected.
+    /// `tool.call` target: a valid 3-segment `<org>.<repo>.<name>` app id (the one
+    /// shared grammar, [`crate::resource::is_valid_app_id`]: segments
+    /// `[a-z0-9][a-z0-9-]*`, no `_`). Every char is RFC-3986 unreserved, so Python's
+    /// `quote(app_id, safe='')` is the identity on a valid id and no percent-encoding
+    /// exists on the wire; a `%`/`:` therefore can never be valid and is rejected.
     fn validate_tool_target(target: &str) -> Result<(), ParsePermissionIdError> {
-        let err = || ParsePermissionIdError::UnknownPermission(format!("tool.call:{target}"));
-        let segment_ok = |s: &str| {
-            let mut chars = s.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
-                && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-        };
-        let parts: Vec<&str> = target.split('.').collect();
-        if parts.len() == 3 && parts.iter().all(|p| segment_ok(p)) {
+        if crate::resource::is_valid_app_id(target) {
             Ok(())
         } else {
-            Err(err())
+            Err(ParsePermissionIdError::UnknownPermission(format!(
+                "tool.call:{target}"
+            )))
         }
     }
 
@@ -1701,7 +1696,7 @@ mod tests {
         assert_eq!(id.risk(), Risk::Dangerous);
         assert_eq!(id.canonical_id(), "storage.read:waddles.harness.media");
         for op in ["list", "write", "delete"] {
-            let raw = format!("storage.{op}:a.b");
+            let raw = format!("storage.{op}:a.b.c");
             assert_eq!(PermissionId::parse(&raw).unwrap().canonical_id(), raw);
         }
         for bad in [
@@ -1710,6 +1705,8 @@ mod tests {
             "storage.read:A",
             "storage.read:a/b",
             "storage.read:a b",
+            "storage.read:a.b",
+            "storage.read:a.b_c.d",
             "storage.rm:a",
             "storage.read",
         ] {

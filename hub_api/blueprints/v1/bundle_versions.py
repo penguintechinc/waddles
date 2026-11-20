@@ -140,6 +140,7 @@ async def post_version(
         try:
             await enforce_vendor_namespace(install_dal, app_id=app_id, caller_id=caller_id)
         except ApiError as exc:
+            logger.debug("handled %s in post_version: %s", type(exc).__name__, exc.code)
             return _err(exc)
         if source_file is not None:
             return _err(
@@ -176,6 +177,7 @@ async def post_version(
             known_custom_platforms=frozenset(),
             allow_wildcard_consumes=False,
             allow_prebuilt=await _allow_prebuilt(install_dal),
+            enforce_owner=not auth.is_admin,
         )
         if row.artifact_kind == "prebuilt":
             assert component_bytes is not None  # nosec B101 -- create_version already enforced this
@@ -187,6 +189,7 @@ async def post_version(
                 tenant_slug=ctx.tenant_slug,
             )
     except ApiError as exc:
+        logger.debug("handled %s in post_version: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return (
         CreateVersionResponse(

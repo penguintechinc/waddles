@@ -33,7 +33,7 @@ _ENTRY = {
 }
 _RAW = {
     "schema_version": 2,
-    "app_id": "penguintechinc.waddles.role_sync",
+    "app_id": "penguintechinc.waddles.role-sync",
     "name": "Role sync",
     "version": "1.0.0",
     "feature": "role_sync",

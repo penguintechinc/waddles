@@ -285,21 +285,11 @@ pub struct ToolRequest {
     pub idempotency_key: Option<String>,
 }
 
-/// `<org>.<repo>.<name>`, each segment lowercase alnum plus `-` --
-/// mirrors hub-api's `_APP_ID_RE` shape closely enough to reject anything that
-/// is not a plausible app id (the authoritative check is the snapshot lookup).
+/// `<org>.<repo>.<name>` -- the one shared app-id grammar
+/// ([`bundle_capability_gate::is_valid_app_id`]: three `[a-z0-9][a-z0-9-]*`
+/// segments, <= 127 bytes). The authoritative check is still the snapshot lookup.
 fn valid_app_id(s: &str) -> bool {
-    if s.len() > 128 {
-        return false;
-    }
-    let segs: Vec<&str> = s.split('.').collect();
-    segs.len() == 3
-        && segs.iter().all(|seg| {
-            !seg.is_empty()
-                && seg
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-        })
+    bundle_capability_gate::is_valid_app_id(s)
 }
 
 /// `^[a-z][a-z0-9_.]{0,63}$` (hub-api `_TOOL_NAME_RE`).

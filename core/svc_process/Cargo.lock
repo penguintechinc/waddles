@@ -831,6 +831,7 @@ name = "bundle-host-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bundle-capability-gate",
  "bundle-host-crypto",
  "bytes",
  "futures",

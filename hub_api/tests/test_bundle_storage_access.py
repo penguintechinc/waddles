@@ -25,7 +25,7 @@ _ENTRY = {
 }
 _RAW = {
     "schema_version": 2,
-    "app_id": "penguintechinc.waddles.role_sync",
+    "app_id": "penguintechinc.waddles.role-sync",
     "name": "Role sync",
     "version": "1.0.0",
     "feature": "role_sync",
@@ -84,7 +84,7 @@ def test_manifest_folds_into_dangerous_permissions() -> None:
     [
         {"prefix_owner": "../x"},
         {"prefix_owner": "Bad Owner"},
-        {"prefix_owner": "penguintechinc.waddles.role_sync"},
+        {"prefix_owner": "penguintechinc.waddles.role-sync"},
         {"ops": []},
         {"ops": ["admin"]},
         {"reason": ""},

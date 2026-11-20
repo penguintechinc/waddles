@@ -38,6 +38,7 @@ from sqlalchemy import func, select
 from services import bundle_audit, valkey_admin_client
 from services.bundle_access_grants import is_access_grant_id, summarize_access_grants
 from services.bundle_access_grants import kinds as access_grant_kinds
+from services.bundle_app_id import is_core_namespace
 from services.bundle_approval_service import _reparse_trusted
 from services.bundle_manifest_v2 import BundleManifestV2, PermissionDeclaration
 from services.bundle_permission_catalog import (
@@ -288,7 +289,7 @@ async def record_permission_requests(
     by its own caller, never a human review gate.
     """
     if approval_source == _SYSTEM_APPROVAL_SOURCE:
-        if not app_id.startswith(CORE_NAMESPACE_PREFIX):
+        if not is_core_namespace(app_id):
             raise forbidden(
                 f"approval_source={_SYSTEM_APPROVAL_SOURCE!r} is reserved for "
                 f"{CORE_NAMESPACE_PREFIX!r} bundles"

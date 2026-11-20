@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import logging
 import os
-import re
 from typing import Any, Final
 
 import grpc
@@ -22,6 +21,7 @@ from waddles.hub.internal.v1 import bundle_schedule_pb2, bundle_schedule_pb2_grp
 
 from grpc_internal.interceptors import service_claims
 from services import bundle_schedule_service as schedules
+from services.bundle_app_id import is_valid_app_id
 
 logger = logging.getLogger(__name__)
 
@@ -37,7 +37,6 @@ BUNDLE_SCHEDULE_SCOPES: Final[dict[str, str]] = {
 
 #: Service names (last SPIFFE path segment) allowed to call.
 DEFAULT_ALLOWED_SERVICES: Final = ("svc-ingest",)
-_APP_ID_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _MAX_ID: Final = 2**31 - 1
 
 
@@ -61,7 +60,7 @@ def _filters_valid(request: bundle_schedule_pb2.ListBundleSchedulesRequest) -> b
         return False
     if request.HasField("community_id") and not 0 <= request.community_id <= _MAX_ID:
         return False
-    return not (request.HasField("app_id") and _APP_ID_RE.fullmatch(request.app_id) is None)
+    return not (request.HasField("app_id") and not is_valid_app_id(request.app_id))
 
 
 class BundleScheduleServicer(bundle_schedule_pb2_grpc.BundleScheduleServiceServicer):  # type: ignore[misc]

@@ -54,6 +54,7 @@ from flask_core.stream_pipeline import bundle_stream_key
 from penguin_dal import AsyncDB
 
 from services import storage_service, valkey_admin_client
+from services.app_id_ownership import claim_app_id
 from services.bundle_component_validator import (
     ComponentValidatorUnavailableError,
     validate_component,
@@ -220,8 +221,13 @@ async def create_version(
     allow_wildcard_consumes: bool,
     allow_prebuilt: bool,
     trusted_source: bool = False,
+    enforce_owner: bool = True,
 ) -> Any:
     """Validate and persist a new bundle version upload at status `UPLOADED`.
+
+    Atomically claims `app_id` in `app_id_owners` first (`claim_app_id`): a second publisher is
+    refused 403, and an app_id whose storage key collides with a different app_id's is refused
+    409. `enforce_owner=False` (platform admin) never refuses on ownership, only on a collision.
 
     Raises `ApiError` 400 (manifest rule failure or a manifest `app_id`
     that does not match `app_id`, `code` = the rule's `reason` /
@@ -257,6 +263,10 @@ async def create_version(
         manifest.app_id == app_id,
         f"manifest app_id {manifest.app_id!r} does not match the URL app_id {app_id!r}",
         "app_id_mismatch",
+    )
+
+    await claim_app_id(
+        install_dal, app_id=app_id, owner_id=requested_by, enforce_owner=enforce_owner
     )
 
     if manifest.artifact == "source" and source_bytes is None:

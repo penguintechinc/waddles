@@ -18,11 +18,11 @@ from dataclasses import dataclass
 from typing import Any
 
 from services.bundle_access_grants import AccessGrantKind, register_kind
+from services.bundle_app_id import is_valid_app_id
 
 STORAGE_OPS = ("delete", "list", "read", "write")
 MAX_REASON_LEN = 280
 
-_OWNER_RE = re.compile(r"[a-z0-9][a-z0-9._-]{0,62}")
 _ID_RE = re.compile(r"storage\.(?P<op>read|list|write|delete):(?P<owner>.+)")
 _PREFIXES = tuple(f"storage.{op}:" for op in STORAGE_OPS)
 
@@ -48,7 +48,7 @@ class StorageAccessRequest:
 
 def is_valid_owner(owner: str) -> bool:
     """`True` for a well-formed bundle app_id usable as a prefix owner."""
-    return _OWNER_RE.fullmatch(owner) is not None and ".." not in owner
+    return is_valid_app_id(owner)
 
 
 def is_storage_access_id(permission_id: str) -> bool:

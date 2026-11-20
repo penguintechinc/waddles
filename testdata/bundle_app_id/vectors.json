@@ -1,0 +1,123 @@
+{
+  "_comment": "Golden vectors read by BOTH core/bundle_capability_gate (cargo test) and hub_api/tests/test_bundle_app_id.py. storage_keys are sha256-derived; regenerate with scripts/ci/gen_app_id_vectors.py only when the algorithm intentionally changes.",
+  "valid": [
+    "penguintechinc.waddles.echo",
+    "penguintechinc.waddles.discord-invite",
+    "psychoboy.penguintwitchbot.roll",
+    "acme.bot.kv-store",
+    "acme.bot-kv.store",
+    "0.0.0",
+    "a.b.c",
+    "a-.b-.c-",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccccccccccccccccccccccc"
+  ],
+  "invalid": [
+    "",
+    "a.b",
+    "a.b.c.d",
+    "a..c",
+    ".a.b",
+    "a.b.",
+    "acme.bot_kv.store",
+    "acme.bot.kv_store",
+    "penguintechinc.waddles.fixture_bot",
+    "-a.b.c",
+    "a.-b.c",
+    "a.b.-c",
+    "A.b.c",
+    "a.b.C",
+    "a.b.c\n",
+    "a.b.c ",
+    "a:b.c.d",
+    "a/b.c.d",
+    "a.b.c%41",
+    "\u00fc.b.c",
+    "waddles.core.x.y",
+    "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccc"
+  ],
+  "core": {
+    "yes": [
+      "penguintechinc.waddles.echo",
+      "penguintechinc.waddles.discord-invite",
+      "penguintechinc.waddles.x",
+      "penguintechinc.waddles.0"
+    ],
+    "no": [
+      "",
+      "waddles.core.x",
+      "penguintechinc.waddles.",
+      "penguintechinc.waddles.a.b",
+      "penguintechinc.waddles.-x",
+      "penguintechinc.waddles.X",
+      "penguintechinc.waddles.x_y",
+      "penguintechinc.waddles.x\n",
+      "penguintechinc.other.x",
+      "psychoboy.penguintwitchbot.roll",
+      "penguintechinc.waddlesx",
+      "penguintechinc.waddles",
+      "xpenguintechinc.waddles.x"
+    ]
+  },
+  "storage_keys": [
+    {
+      "app_id": "penguintechinc.waddles.echo",
+      "expected": "penguintechinc_waddles_echo_47331d77e79bb257"
+    },
+    {
+      "app_id": "penguintechinc.waddles.discord-invite",
+      "expected": "penguintechinc_waddles_discord_invite_01e4255889e09d23"
+    },
+    {
+      "app_id": "psychoboy.penguintwitchbot.roll",
+      "expected": "psychoboy_penguintwitchbot_roll_35e0bf5face3611c"
+    },
+    {
+      "app_id": "acme.bot.kv-store",
+      "expected": "acme_bot_kv_store_5796f6b5aa420504"
+    },
+    {
+      "app_id": "acme.bot_kv.store",
+      "expected": "acme_bot_kv_store_166889c02081d759"
+    },
+    {
+      "app_id": "acme.bot-kv.store",
+      "expected": "acme_bot_kv_store_0cd7f03063c5bf8c"
+    },
+    {
+      "app_id": "0.0.0",
+      "expected": "b_0_0_0_f0b8c77d978d7b4a"
+    },
+    {
+      "app_id": "a-.b-.c-",
+      "expected": "a_b_c_82a73e0b95f180eb"
+    },
+    {
+      "app_id": "UP.per.Case",
+      "expected": "up_per_case_fb65d9fbea389ece"
+    },
+    {
+      "app_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ccccccccccccccccccccccccc",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_72f918afadd96726"
+    },
+    {
+      "app_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.ddddddddddddddddddddddddd",
+      "expected": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa_b8f04466ff7d1317"
+    },
+    {
+      "app_id": "",
+      "expected": "b_e3b0c44298fc1c14"
+    },
+    {
+      "app_id": "..",
+      "expected": "b_5ec1f7e700f37c3d"
+    },
+    {
+      "app_id": "\u00fc.b.c",
+      "expected": "b_b_c_5d14cc7e1e5d9058"
+    },
+    {
+      "app_id": "a.b.c\n",
+      "expected": "a_b_c_5509d18a8093bf49"
+    }
+  ]
+}

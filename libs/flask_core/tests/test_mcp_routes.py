@@ -111,7 +111,7 @@ def seeded_registries(tenants: dict[str, int]) -> AsyncIterator[None]:
     )
     app_registry.load(
         {
-            "app_id": "penguintechinc.waddles.enterprise_thing",
+            "app_id": "penguintechinc.waddles.enterprise-thing",
             "name": "Enterprise Thing (default)",
             "version": "1.0.0",
             "feature": "waddles.bot.enterprise_thing",

@@ -47,27 +47,13 @@ impl WitWorld {
     }
 }
 
-/// Namespace prefix reserved for first-party core bundles (mirrors PR #419
-/// S1.1's `CORE_NAMESPACE_PREFIX` for `storage.tables`, applied here to the
-/// `connector` world per this design's S3.1/S3.2 "no exceptions" carve-out:
-/// `connector.*`/`connector.pii.read` are never grantable to a non-core
-/// `app_id`).
-pub const CORE_NAMESPACE_PREFIX: &str = "penguintechinc.waddles.";
-
-/// True only for a well-formed first-party core id: the reserved
-/// `penguintechinc.waddles.` prefix followed by exactly one non-empty
-/// `[a-z0-9][a-z0-9_-]*` segment. A bare string prefix match would also trust
-/// ids such as `penguintechinc.waddles.x.y`; hub-api additionally refuses
-/// vendor submissions under this org, so trust never rests on the name alone.
-#[must_use]
-pub fn is_core_namespace(app_id: &str) -> bool {
-    let Some(rest) = app_id.strip_prefix(CORE_NAMESPACE_PREFIX) else {
-        return false;
-    };
-    let mut chars = rest.chars();
-    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
-        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
+/// Namespace prefix reserved for first-party core bundles and the strict
+/// "prefix + exactly one valid segment" check -- re-exported from the ONE
+/// implementation, `bundle_capability_gate::resource`, so the connector-world
+/// "no exceptions" carve-out (`connector.*`/`connector.pii.read` are never
+/// grantable to a non-core `app_id`) can never drift from the `storage.tables`
+/// schema choice. Golden vectors: `testdata/bundle_app_id/vectors.json`.
+pub use bundle_capability_gate::{is_core_namespace, CORE_NAMESPACE_PREFIX};
 
 /// Gates `identity.lookup` (spec S1, S3.1, S3.2.1 gate 2).
 pub const PERM_CONNECTOR_PII_READ: &str = "connector.pii.read";

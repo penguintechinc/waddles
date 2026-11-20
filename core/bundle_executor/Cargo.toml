@@ -159,6 +159,9 @@ opentelemetry-otlp = { version = "=0.32.0", default-features = false, features =
 # bans sqlx/sea-orm, so a database-backed `KeyLoader` is supplied by an embedder through
 # `Executor::with_key_cache`, never linked here.
 platform-keys = { path = "../platform_keys", version = "=0.1.0", default-features = false }
+# The ONE Rust implementation of the app-id grammar / core-namespace check (golden vectors in
+# `testdata/bundle_app_id/vectors.json`); `crate::manifest::is_core_namespace` re-exports it.
+bundle-capability-gate = { path = "../bundle_capability_gate", version = "=0.1.0" }
 
 [dev-dependencies]
 # `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back

@@ -125,6 +125,7 @@ images:
     groups: [ctx-root]
     inputs:
       - core/bundle_executor/**
+      - core/bundle_capability_gate/**
       - core/platform_keys/**
       - wit/**
 

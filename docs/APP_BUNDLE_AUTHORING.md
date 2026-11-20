@@ -38,7 +38,10 @@ not a FROZEN-status change — the pipeline/entrypoint contract below is unaffec
 Every bundle has exactly one `app_id` of the form `<github-org>.<repo>.<bundle-name>`.
 
 - **Three segments**, dot-separated: the GitHub org that owns the source, the repo that holds it, and the bundle's own name.
-- **Lowercase only**; each segment matches `[a-z0-9-]` (no dots, underscores or uppercase inside a segment).
+- **One grammar, enforced everywhere** (hub-api, gRPC servicers, Rust gate, tool-call parsing): each segment matches `[a-z0-9][a-z0-9-]*`, exactly three segments, at most 127 bytes. No uppercase, dots or **underscores** inside a segment.
+- **GitHub names map `_` to `-`** when lowercased: repo `Stream_Tools` under org `Acme_Corp` publishes as `acme-corp.stream-tools.<bundle-name>`.
+- **Storage namespaces are derived, never hand-written**: the table, kv namespace and object prefix for an app are `<readable>_<sha256(app_id)[:16]>` (`bundle_storage_key`), so distinct ids can never share state even when they sanitise alike (`acme.bot.kv-store` vs `acme.bot-kv.store`). The id grammar and key derivation are pinned by golden vectors in `testdata/bundle_app_id/vectors.json`, read by both the Rust and Python test suites.
+- **Ownership is first-claim**: the first publisher to register an `app_id` owns it (`app_id_owners`); a second publisher is refused, as is any id whose storage key already belongs to another id.
 - **`penguintechinc` is reserved** for first-party bundles. Third-party publishers use their own GitHub org and repo; a manifest claiming `penguintechinc` from any other source is rejected.
 
 | Publisher | Example `app_id` |

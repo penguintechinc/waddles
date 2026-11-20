@@ -28,7 +28,6 @@ platform admin, exactly as the old `superpenguin` ids were.
 from __future__ import annotations
 
 import logging
-import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +35,9 @@ from flask_core.auth import verify_jwt_token
 from flask_core.authz import has_required_scopes
 from quart import Request
 
+from services.app_id_ownership import owner_of
+from services.bundle_app_id import CORE_NAMESPACE_PREFIX as _CORE_NAMESPACE_PREFIX
+from services.bundle_app_id import is_valid_app_id
 from services.errors import forbidden, unauthorized
 
 logger = logging.getLogger(__name__)
@@ -44,19 +46,14 @@ PLATFORM_ADMIN_SCOPE = "platform:admin"
 VENDOR_ONBOARD_SCOPE = "vendor:onboard"
 
 #: The reserved first-party namespace -- never onboardable by a vendor,
-#: regardless of scope.
-CORE_NAMESPACE_PREFIX = "penguintechinc.waddles."
+#: regardless of scope. Re-exported from the one grammar module.
+CORE_NAMESPACE_PREFIX = _CORE_NAMESPACE_PREFIX
 
 #: Org segments no vendor-path app_id may use, for any repo: `penguintechinc` is the
 #: first-party org, `waddles` blocks the legacy `waddles.<x>.<y>` shape (which still matches
 #: the 3-segment pattern), and `psychoboy` is the first-party-hosted SuperPenguinTV port
 #: namespace, seeded by us (`seed_core_bundles`, `requested_by` NULL) and platform-admin only.
 RESERVED_ORGS: frozenset[str] = frozenset({"penguintechinc", "waddles", "psychoboy"})
-
-_SEGMENT = r"[a-z0-9][a-z0-9_-]*"
-#: `<github-org>.<repo>.<bundle-name>` -- mirrors `bundle_manifest_v2._APP_ID_RE`.
-_VENDOR_APP_ID_RE = re.compile(rf"^{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
-_APP_ID_MAX_LEN = 127
 
 
 @dataclass(slots=True, frozen=True)
@@ -133,16 +130,24 @@ async def enforce_vendor_namespace(install_dal: Any, *, app_id: str, caller_id: 
     the GitHub org is a separate follow-up (OAuth / vendor_orgs mapping).
     """
     reason: str | None = None
-    if len(app_id) > _APP_ID_MAX_LEN or not _VENDOR_APP_ID_RE.fullmatch(app_id):
-        reason = "app_id must be '<github-org>.<repo>.<bundle-name>' (lowercase)"
+    if not is_valid_app_id(app_id):
+        reason = "app_id must be '<github-org>.<repo>.<bundle-name>' ([a-z0-9-] segments)"
     elif app_id.split(".", 1)[0] in RESERVED_ORGS:
         reason = "this org namespace is reserved (first-party / platform-admin only)"
     else:
-        rows = await install_dal(install_dal.app_version_uploads.app_id == app_id).select(
-            install_dal.app_version_uploads.requested_by
-        )
-        if any(row.requested_by != caller_id for row in rows):
-            reason = "this app_id is already registered by another publisher"
+        has_owner, owner_id = await owner_of(install_dal, app_id)
+        if has_owner:
+            if owner_id != caller_id:
+                reason = "this app_id is already registered by another publisher"
+        else:
+            # No claim row yet (legacy rows predate `app_id_owners`): fall back to the upload
+            # history so a pre-existing foreign upload still locks the id. The authoritative,
+            # race-free claim is `claim_app_id`, run in the upload transaction.
+            rows = await install_dal(install_dal.app_version_uploads.app_id == app_id).select(
+                install_dal.app_version_uploads.requested_by
+            )
+            if any(row.requested_by != caller_id for row in rows):
+                reason = "this app_id is already registered by another publisher"
     if reason is not None:
         logger.warning(
             "bundle onboarding: app_id refused on the vendor path",

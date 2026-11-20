@@ -173,11 +173,9 @@ class TestIdentityAndRegistry:
         assert a.table != b.table and a.table.endswith("__ab_cd")
 
     def test_v1_namespace_is_disjoint_from_v2(self) -> None:
-        """v1 rejects `__`; every v2 name has one -> a v1 app can never squat a v2 table."""
+        """v1 names never contain `__` (runs collapse); every v2 name has one -> no squatting."""
         for app in ["a..b", "a._b", "x__y", "x.._y"]:
-            with pytest.raises(TableDeclarationError) as e:
-                derive_table_identity(app, provider="thirdparty")
-            assert e.value.reason == "invalid_table_identity"
+            assert "__" not in derive_table_identity(app, provider="thirdparty").table
         assert "__" in derive_v2_table_identity(_APP, "events", provider="thirdparty").table
 
     def test_guest_cannot_smuggle_a_separator(self) -> None:
