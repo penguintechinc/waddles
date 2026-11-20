@@ -53,6 +53,7 @@ RUN apt-get update \
 # Gate: make check-core-docker-context.
 WORKDIR /build
 COPY platform_keys ./platform_keys
+COPY service_auth ./service_auth
 WORKDIR /build/svc_streaming
 COPY svc_streaming/Cargo.toml svc_streaming/Cargo.lock ./
 # tests/ must exist: Cargo.toml declares [[test]] e2e_real_media with an

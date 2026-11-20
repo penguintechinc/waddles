@@ -44,6 +44,16 @@ override uses H.264 (the only codec FLV carries); an SRT target inherits the
 config's. Any non-default codec needs `transcode_enabled` (re-encoding is the
 token-gated transcode feature).
 
+**Transcode admission auth.** `POST .../start` debits the community token ledger through hub-api's
+internal route (`POST /api/v1/internal/communities/{id}/tokens/debit`) authenticated as THIS service
+(community-bound machine JWT, scope `token.billing:debit`, minted via `SERVICE_JWT_TOKEN_ENDPOINT` +
+the projected ServiceAccount token at `SERVICE_JWT_SA_TOKEN_PATH`, CA from `HUB_API_GRPC_CA_FILE`).
+The starting member is sent as `actor_user_id`; hub-api verifies active membership. The member's JWT
+is never forwarded. Documented degrade: any refusal or outage resolves to passthrough (no transcode)
+so billing never takes down a stream, but each cause is logged at ERROR with its own reason
+(`ledger_forbidden`, `credential_unavailable`, `ledger_unavailable`) and an unset
+`SERVICE_JWT_TOKEN_ENDPOINT` is logged at boot.
+
 What each container can carry with the bundled ffmpeg (Debian 5.1.x):
 
 | Output | H.264 | H.265 | AV1 | AAC | Opus |

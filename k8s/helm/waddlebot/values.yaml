@@ -3260,6 +3260,16 @@ serviceJwt:
         # feature/bundle-community-config-live -- live per-community bundle config for
         # get-context().config_json (hub_api BundleConfigService); read-only, ids only.
         - "bundle-config:read"
+    # svc-streaming's transcode admission debits the community token ledger AS ITSELF
+    # (hub_api/blueprints/v1/token_billing.py `service_debit_tokens`): a community-bound
+    # `token.billing:debit` machine JWT, with the acting member passed as `actor_user_id` (hub-api
+    # verifies active membership). Pinned to the DEDICATED `svc-streaming` ServiceAccount.
+    svc-streaming:
+      spiffeId: "spiffe://penguintech.io/{{ .Values.global.environment | default \"alpha\" }}/svc-streaming"
+      serviceAccount: svc-streaming
+      tenant: system
+      allowedScopes:
+        - "token.billing:debit"
     # Overlay detokenization (core/svc_presentation/src/overlay/detok.rs): resolves
     # `{user:<uuid>}` to display names via ResolveDisplayNames only -- never mints
     # pseudonyms or calls egress, so exactly one scope.
