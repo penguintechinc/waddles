@@ -109,16 +109,16 @@ def test_services_are_seeded_before_any_bundle_that_requests_their_tools(tmp_pat
             target = req["target_app_id"] if isinstance(req, dict) else req
             consumers += 1
             assert target in position, f"{entry.app_id} requests unknown tool target {target}"
-            assert (
-                position[target] < position[entry.app_id]
-            ), f"{entry.app_id} would be seeded before its tool target {target}"
+            assert position[target] < position[entry.app_id], (
+                f"{entry.app_id} would be seeded before its tool target {target}"
+            )
     assert consumers > 0, "no requested_tools examined -- the ordering check proved nothing"
 
 
 def test_order_services_first_tolerates_an_unreadable_manifest(tmp_path: Path) -> None:
     """A missing manifest stays in place (seed_one fails that entry loudly) -- no abort."""
     entry = seeder.CatalogEntry(
-        app_id="waddles.core.example.nope",
+        app_id="penguintechinc.waddles.nope",
         version="1.0.0",
         language="rust",
         manifest_path="missing.yaml",

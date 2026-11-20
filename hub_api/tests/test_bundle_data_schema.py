@@ -12,6 +12,9 @@ happens, so the payload never reaches the DDL layer at all.
 
 from __future__ import annotations
 
+import hashlib
+import re
+
 import pytest
 
 from services.bundle_data_schema import (
@@ -47,6 +50,7 @@ from services.bundle_data_schema import (
     column_name_suggests_pii,
     derive_table_identity,
     parse_default_literal,
+    sanitize_app_id,
     validate_table_declaration,
 )
 
@@ -115,7 +119,7 @@ class TestTrailingNewlineRegexAnchorBypass:
     `re.fullmatch`), never `^...$` -- otherwise a payload like `"'hello'\n"`
     passes `_STRING_RE` and `raw[1:-1]` silently slices off the closing quote
     instead of the trailing newline, and `"scorex\n"` passes
-    `_COLUMN_NAME_RE`/`_SANITIZED_CHARSET_RE`. Covers every literal shape,
+    `_COLUMN_NAME_RE`. Covers every literal shape,
     column names, app ids, and index-column references.
     """
 
@@ -156,15 +160,22 @@ class TestTrailingNewlineRegexAnchorBypass:
     @pytest.mark.parametrize(
         "app_id",
         [
-            "waddles.core.fishing.fishing_core\n",
-            "\nwaddles.core.fishing.fishing_core",
-            "waddles.core.fishing.fishing_core\r\n",
+            "penguintechinc.waddles.fishing_core\n",
+            "\npenguintechinc.waddles.fishing_core",
+            "penguintechinc.waddles.fishing_core\r\n",
         ],
     )
-    def test_app_id_with_embedded_newline_rejected(self, app_id: str) -> None:
-        with pytest.raises(TableDeclarationError) as exc:
-            derive_table_identity(app_id, provider="builtin")
-        assert exc.value.reason == REASON_INVALID_TABLE_IDENTITY
+    def test_app_id_with_embedded_newline_never_yields_an_unsafe_identifier(
+        self, app_id: str
+    ) -> None:
+        # Mirrors Rust `sanitized_app_id`: a newline maps to `_`, so the result is either a
+        # safe identifier or a reserved-shape rejection -- never a name carrying the newline.
+        try:
+            identity = derive_table_identity(app_id, provider="builtin")
+        except TableDeclarationError as exc:
+            assert exc.reason == REASON_INVALID_TABLE_IDENTITY
+        else:
+            assert re.fullmatch(r"[a-z][a-z0-9_]*", identity.table)
 
     @pytest.mark.parametrize(
         "col_ref",
@@ -663,7 +674,7 @@ class TestIndexes:
 class TestDeriveTableIdentity:
     def test_invalid_provider_rejected(self) -> None:
         with pytest.raises(TableDeclarationError) as exc:
-            derive_table_identity("waddles.core.quotes.quotes", provider="evil")
+            derive_table_identity("penguintechinc.waddles.quotes", provider="evil")
         assert exc.value.reason == "invalid_provider"
 
     def test_app_id_not_starting_with_a_letter_rejected(self) -> None:
@@ -672,24 +683,24 @@ class TestDeriveTableIdentity:
         assert exc.value.reason == REASON_INVALID_TABLE_IDENTITY
 
     def test_builtin_provider_maps_to_app_core_schema(self) -> None:
-        identity = derive_table_identity("waddles.core.fishing.fishing_core", provider="builtin")
+        identity = derive_table_identity("penguintechinc.waddles.fishing_core", provider="builtin")
         assert identity.schema == APP_CORE_SCHEMA
-        assert identity.table == "waddles_core_fishing_fishing_core"
+        assert identity.table == "penguintechinc_waddles_fishing_core"
 
     def test_thirdparty_provider_maps_to_app_community_schema(self) -> None:
         identity = derive_table_identity(
-            "waddles.social.fishing.superpenguin_fishing_core", provider="thirdparty"
+            "penguintechinc.waddles.superpenguin_fishing_core", provider="thirdparty"
         )
         assert identity.schema == APP_COMMUNITY_SCHEMA
 
     def test_schema_is_never_taken_from_a_manifest_looking_claim(self) -> None:
         # Even an app_id that *looks* like it's claiming app_core placement
         # doesn't get to choose -- only `provider` decides the schema.
-        identity = derive_table_identity("waddles.core.evil.app_core", provider="thirdparty")
+        identity = derive_table_identity("penguintechinc.waddles.app_core", provider="thirdparty")
         assert identity.schema == APP_COMMUNITY_SCHEMA
 
     def test_long_app_id_is_truncated_with_hash_suffix(self) -> None:
-        long_app_id = "waddles." + ("segment." * 20) + "app"
+        long_app_id = "penguintechinc.waddles." + ("segment-" * 20) + "app"
         identity = derive_table_identity(long_app_id, provider="builtin")
         assert len(identity.table) <= 63
         assert "_" in identity.table
@@ -697,7 +708,7 @@ class TestDeriveTableIdentity:
         assert len(digest_suffix) == 8
 
     def test_truncated_names_for_different_app_ids_do_not_collide(self) -> None:
-        base = "waddles." + ("segment." * 20)
+        base = "penguintechinc.waddles." + ("segment-" * 20)
         id_a = derive_table_identity(base + "app_a", provider="builtin")
         id_b = derive_table_identity(base + "app_b", provider="builtin")
         assert id_a.table != id_b.table
@@ -705,19 +716,68 @@ class TestDeriveTableIdentity:
     @pytest.mark.parametrize(
         "app_id",
         [
-            "waddles.core.fishing.fish'; DROP TABLE app_core.x; --",
-            'waddles.core.fishing.fish"quote',
-            "waddles.core.fishing.fish$$tag$$",
-            "waddles.core.fishing.fish;drop",
-            "waddles.core.fishing.fish/*comment*/",
-            "waddles.core.fishing.fish\x00null",
+            "penguintechinc.waddles.fish'; DROP TABLE app_core.x; --",
+            'penguintechinc.waddles.fish"quote',
+            "penguintechinc.waddles.fish$$tag$$",
+            "penguintechinc.waddles.fish;drop",
+            "penguintechinc.waddles.fish/*comment*/",
+            "penguintechinc.waddles.fish\x00null",
             "WADDLES.CORE.FISHING.MixedCase!",
         ],
     )
-    def test_injection_shaped_app_id_rejected(self, app_id: str) -> None:
-        with pytest.raises(TableDeclarationError) as exc:
-            derive_table_identity(app_id, provider="builtin")
-        assert exc.value.reason == REASON_INVALID_TABLE_IDENTITY
+    def test_injection_shaped_app_id_never_yields_an_unsafe_identifier(self, app_id: str) -> None:
+        # Every non-[a-z0-9] char becomes `_` (Rust parity), so no injection payload can survive
+        # into the identifier; shapes that collapse to the reserved `__` are rejected outright.
+        try:
+            identity = derive_table_identity(app_id, provider="builtin")
+        except TableDeclarationError as exc:
+            assert exc.reason == REASON_INVALID_TABLE_IDENTITY
+        else:
+            assert re.fullmatch(r"[a-z][a-z0-9_]*", identity.table)
+            assert len(identity.table) <= 63
+
+    @pytest.mark.parametrize(
+        ("app_id", "expected"),
+        [
+            ("penguintechinc.waddles.discord-invite", "penguintechinc_waddles_discord_invite"),
+            ("penguintechinc.waddles.live-now", "penguintechinc_waddles_live_now"),
+            ("psychoboy.penguintwitchbot.roll", "psychoboy_penguintwitchbot_roll"),
+            ("Acme-Corp.Widgets.X1", "acme_corp_widgets_x1"),
+        ],
+    )
+    def test_hyphens_map_to_underscore_like_rust(self, app_id: str, expected: str) -> None:
+        """Parity with Rust `sanitized_app_id`: hyphens become underscores."""
+        assert sanitize_app_id(app_id) == expected
+        identity = derive_table_identity(app_id, provider="builtin")
+        assert identity.table == expected
+        assert re.fullmatch(r"[a-z][a-z0-9_]*", identity.table)
+
+    def test_non_ascii_and_every_non_alnum_char_map_to_underscore(self) -> None:
+        # Rust maps per `char`: one `_` per non-ASCII-alphanumeric char (here U+00FF and '-').
+        assert sanitize_app_id("a.b-c\u00ffd") == "a_b_c_d"
+        assert sanitize_app_id("A.Z0") == "a_z0"
+
+    def test_exactly_63_chars_is_not_truncated(self) -> None:
+        app_id = "a" + "b" * 62
+        assert len(app_id) == 63
+        assert derive_table_identity(app_id, provider="builtin").table == app_id
+
+    def test_64_chars_is_truncated_to_63_with_underscore_plus_8_hex_suffix(self) -> None:
+        app_id = "a" + "b" * 63
+        table = derive_table_identity(app_id, provider="builtin").table
+        digest = hashlib.sha256(app_id.encode("utf-8")).hexdigest()[:8]
+        assert len(table) == 63
+        assert table == "a" + "b" * 53 + "_" + digest
+
+    def test_hyphenated_long_id_truncation_matches_rust_layout(self) -> None:
+        app_id = "penguintechinc.waddles." + "very-long-bundle-name-" * 4 + "x"
+        table = derive_table_identity(app_id, provider="builtin").table
+        sanitized = sanitize_app_id(app_id)
+        digest = hashlib.sha256(app_id.encode("utf-8")).hexdigest()[:8]
+        assert len(sanitized) > 63
+        assert table == sanitized[:54] + "_" + digest
+        assert len(table) == 63
+        assert "-" not in table
 
     def test_empty_app_id_rejected(self) -> None:
         with pytest.raises(TableDeclarationError) as exc:

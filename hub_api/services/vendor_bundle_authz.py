@@ -8,35 +8,28 @@ role names. Two independent paths satisfy this endpoint:
     endpoint's original (pre-vendor-onboarding) behavior.
   - `vendor:onboard` scope (minted only when `hub_users.is_vendor`,
     see `services/auth_service.py::create_session_token`) -- restricted
-    to the caller's own `waddles.integrations.vendor-{caller_id}.*`
-    namespace. `waddles.core.*` (the reserved first-party namespace) and
-    every other vendor's `waddles.integrations.vendor-{other_id}.*` are
-    refused with 403, never a silent narrowing or a 404 (no ambiguity
-    about why).
+    to a well-formed third-party `app_id`. `penguintechinc.waddles.*`
+    (the reserved first-party namespace) and every other `penguintechinc`
+    org id are refused with 403, as are the admin-only third-party ports
+    (`psychoboy.penguintwitchbot.*`) -- never a silent narrowing or a 404 (no
+    ambiguity about why).
 
-**Namespace shape, and why it is NOT the bare `vendor.{id}.*` a literal
-reading of "vendor namespacing" might suggest.** Every `app_id` is
-hard-validated by `services/bundle_manifest_v2.py`'s `_APP_ID_RE` against
-`waddles.<module>.<feature-name>.<app>`, where `<module>` MUST be one of
-`flask_core.app_manifest.KNOWN_MODULES` -- a small, deliberately closed
-taxonomy with its own dedicated exact-set regression test
-(`libs/core_platform_module/tests/test_known_modules_expansion.py`)
-guarding against silent widening. Rather than adding a new `"vendor"`
-module value to that shared, platform-wide taxonomy (used far beyond
-bundle onboarding -- Helm deployment grouping, every product's
-`features.py`), this module reuses the EXISTING `"integrations"` module
-(semantically apt: a vendor bundle is, by definition, a third-party
-integration -- see the manifest's own `provider: thirdparty` field) and
-places the vendor id in the FEATURE-NAME segment instead:
-`waddles.integrations.vendor-{vendor_id}.{app-name}`. This needs zero
-changes to the manifest grammar or its guarded taxonomy, at the cost of
-diverging from the task's shorthand `vendor.{id}.*` phrasing -- flagged
-here explicitly since it is a security-relevant naming decision.
+**Namespace shape.** Every `app_id` is `<github-org>.<repo>.<bundle-name>`
+(lowercase, three segments; `services/bundle_manifest_v2.py`'s
+`_APP_ID_RE`). First-party bundles are `penguintechinc.waddles.<name>`
+and are the ONLY ids that get the core trust treatment (`app_core`
+schema, no human approval). Because that trust now rests on an org
+string, the `penguintechinc` org segment is reserved: a vendor-path
+publish may never use it, whatever the repo or bundle name.
+`psychoboy.penguintwitchbot.*` (the SuperPenguinTV ports) is third-party
+(`app_community`, human approval) and may only be onboarded by a
+platform admin, exactly as the old `superpenguin` ids were.
 """
 
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass
 
 from flask_core.auth import verify_jwt_token
@@ -52,12 +45,18 @@ VENDOR_ONBOARD_SCOPE = "vendor:onboard"
 
 #: The reserved first-party namespace -- never onboardable by a vendor,
 #: regardless of scope.
-CORE_NAMESPACE_PREFIX = "waddles.core."
+CORE_NAMESPACE_PREFIX = "penguintechinc.waddles."
 
+#: The reserved org segment: no vendor-path app_id may use it for any repo.
+RESERVED_ORG = "penguintechinc"
 
-def vendor_namespace_prefix(vendor_id: int) -> str:
-    """The one `app_id` namespace `vendor_id` may onboard into."""
-    return f"waddles.integrations.vendor-{vendor_id}."
+#: Third-party namespaces that only a platform admin may onboard into.
+ADMIN_ONLY_PREFIXES: tuple[str, ...] = ("psychoboy.penguintwitchbot.",)
+
+_SEGMENT = r"[a-z0-9][a-z0-9_-]*"
+#: `<github-org>.<repo>.<bundle-name>` -- mirrors `bundle_manifest_v2._APP_ID_RE`.
+_VENDOR_APP_ID_RE = re.compile(rf"^{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
+_APP_ID_MAX_LEN = 127
 
 
 @dataclass(slots=True, frozen=True)
@@ -123,26 +122,29 @@ def authorize_onboarding_scope(request: Request, *, app_id: str) -> OnboardingAu
     return OnboardingAuthorization(is_admin=False)
 
 
-def enforce_vendor_namespace(*, app_id: str, caller_id: int) -> None:
-    """403s unless `app_id` falls under the calling vendor's own namespace prefix.
+def enforce_vendor_namespace(*, app_id: str) -> None:
+    """403s unless `app_id` is a well-formed, non-reserved third-party id.
 
-    Covers both required rejections in one check: `waddles.core.*` and
-    every other vendor's `waddles.integrations.vendor-{other_id}.*` both
-    simply fail to match this caller's own required prefix.
+    Rejects: anything that is not `<github-org>.<repo>.<bundle-name>`; any id whose
+    org segment is the reserved `penguintechinc` (this covers
+    `penguintechinc.waddles.*` and `penguintechinc.<other-repo>.*` alike); and
+    the admin-only third-party ports (`psychoboy.penguintwitchbot.*`).
     """
-    required_prefix = vendor_namespace_prefix(caller_id)
-    if not app_id.startswith(required_prefix):
+    reason: str | None = None
+    if len(app_id) > _APP_ID_MAX_LEN or not _VENDOR_APP_ID_RE.fullmatch(app_id):
+        reason = "app_id must be '<github-org>.<repo>.<bundle-name>' (lowercase)"
+    elif app_id.split(".", 1)[0] == RESERVED_ORG:
+        reason = f"the {RESERVED_ORG!r} org namespace is reserved for first-party bundles"
+    elif app_id.startswith(ADMIN_ONLY_PREFIXES):
+        reason = "this namespace may only be onboarded by a platform admin"
+    if reason is not None:
         logger.warning(
-            "bundle onboarding: app_id outside caller's vendor namespace",
+            "bundle onboarding: app_id refused on the vendor path",
             extra={
                 "event_type": "AUTHZ",
                 "action": "enforce_vendor_namespace",
                 "result": "FORBIDDEN",
                 "app_id": app_id,
-                "required_prefix": required_prefix,
             },
         )
-        raise forbidden(
-            f"vendors may only onboard app_id under {required_prefix!r} "
-            "(waddles.core.* and other vendors' namespaces are reserved)"
-        )
+        raise forbidden(f"vendors may not onboard this app_id: {reason}")

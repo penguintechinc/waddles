@@ -103,13 +103,13 @@ def test_offline_load_opens_the_imported_legacy_key_and_signs_verifiably(
     signer = PlatformSigner.from_vault(cache=cache)
     assert signer.key_id == "waddlebot-1"
     sig_b64, key_id = signer.sign(
-        app_id="waddles.core.x", version="1.0.0", digest="ab" * 32, approval_id=7
+        app_id="penguintechinc.waddles.x", version="1.0.0", digest="ab" * 32, approval_id=7
     )
     legacy_public = Ed25519PrivateKey.from_private_bytes(GOOD_SEED).public_key()
     legacy_public.verify(  # raises InvalidSignature if executor trust would reject it
         base64.b64decode(sig_b64),
         build_signing_payload(
-            app_id="waddles.core.x", version="1.0.0", digest="ab" * 32, approval_id=7
+            app_id="penguintechinc.waddles.x", version="1.0.0", digest="ab" * 32, approval_id=7
         ),
     )
     assert key_id == "waddlebot-1"

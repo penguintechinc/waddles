@@ -617,7 +617,15 @@ def validate_table_declaration(raw: Mapping[str, Any], *, provider: str) -> Tabl
 APP_CORE_SCHEMA = "app_core"
 APP_COMMUNITY_SCHEMA = "app_community"
 
-_SANITIZED_CHARSET_RE = re.compile(r"\A[a-z0-9_]+\Z")
+
+def sanitize_app_id(app_id: str) -> str:
+    """Map `app_id` to an identifier charset, exactly as Rust `sanitized_app_id` does.
+
+    ASCII letters/digits are kept (letters lower-cased); every other character -- `.`,
+    `-`, `_`, non-ASCII -- becomes `_`. Never raises: validation of the result is the
+    caller's job.
+    """
+    return "".join(c.lower() if (c.isascii() and c.isalnum()) else "_" for c in app_id)
 
 
 @dataclass(slots=True, frozen=True)
@@ -639,13 +647,16 @@ def derive_table_identity(app_id: str, *, provider: str) -> TableIdentity:
 
     Schema is chosen **server-side from `provider`**, never from anything
     the manifest itself claims (§3.4) -- `builtin` (first-party
-    `waddles.core.*`) -> `app_core`, everything else -> `app_community`.
+    `penguintechinc.waddles.*`) -> `app_core`, everything else -> `app_community`.
 
-    Table name is `app_id`, lower-cased with `.` mapped to `_`; any other
-    character outside `[a-z0-9_]` is **rejected**, not silently dropped.
-    If the result would exceed Postgres's 63-byte `NAMEDATALEN`, it is
-    truncated and given an 8-hex-char `sha256(app_id)` suffix so two
-    truncated names can never collide on their shared prefix alone.
+    Table name is `sanitized_app_id(app_id)` -- byte-identical to the Rust
+    `bundle_capability_gate::resource::sanitized_app_id`: every character that is
+    not an ASCII letter/digit (`.`, `-`, `_`, anything else) maps to `_` and ASCII
+    letters are lower-cased, so a hyphenated id such as `...discord-invite` still
+    yields a valid unquoted Postgres identifier. If the result would exceed
+    Postgres's 63-byte `NAMEDATALEN`, it is truncated and given an
+    `_` + 8-hex-char `sha256(app_id)` suffix so two truncated names can never
+    collide on their shared prefix alone.
     """
     if provider not in ("builtin", "thirdparty"):
         raise TableDeclarationError(
@@ -658,12 +669,7 @@ def derive_table_identity(app_id: str, *, provider: str) -> TableIdentity:
 
     schema = APP_CORE_SCHEMA if provider == "builtin" else APP_COMMUNITY_SCHEMA
 
-    sanitized = app_id.lower().replace(".", "_")
-    if not _SANITIZED_CHARSET_RE.fullmatch(sanitized):
-        raise TableDeclarationError(
-            REASON_INVALID_TABLE_IDENTITY,
-            f"app_id {app_id!r} contains characters outside [a-z0-9_.] after lower-casing",
-        )
+    sanitized = sanitize_app_id(app_id)
     if not sanitized[0].isalpha():
         raise TableDeclarationError(
             REASON_INVALID_TABLE_IDENTITY, f"app_id {app_id!r} must start with a letter"

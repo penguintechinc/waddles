@@ -110,7 +110,7 @@ ECONOMY_ELEVATED_IDS = frozenset({"economy.transfer_from", "economy.app_mint"})
 #: The economy SERVICE bundle itself holds `economy.transfer_from` as the host's
 #: own gate for exposing the primitive (the grant that matters is the CALLING
 #: app's); it is the only bundle the seeder may grant an elevated id.
-ECONOMY_SERVICE_APP_ID = "waddles.core.service.economy"
+ECONOMY_SERVICE_APP_ID = "penguintechinc.waddles.economy"
 _ECONOMY_SERVICE_SELF_GRANTS = frozenset({"economy.transfer_from"})
 
 
@@ -347,7 +347,7 @@ async def record_permission_requests(
 async def seed_core_permission_requests(
     install_dal: AsyncDB, *, app_id: str, version: str, manifest: BundleManifestV2
 ) -> None:
-    """Sec3.6: pre-grant every permission a `waddles.core.*` bundle's manifest declares.
+    """Sec3.6: pre-grant every permission a `penguintechinc.waddles.*` bundle's manifest declares.
 
     Called from `seed_core_bundles.py` alongside its existing
     `install_version_globally(install_source="system:core-seeder")` call

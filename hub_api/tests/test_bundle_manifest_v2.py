@@ -12,10 +12,10 @@ from services.bundle_manifest_v2 import (
 
 _VALID_MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station Song Request",
     "version": "3.0.0",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -53,7 +53,7 @@ def _parse_trusted(overrides: dict) -> object:
 
 def test_valid_manifest_parses() -> None:
     manifest = _parse({})
-    assert manifest.app_id == "waddles.socials.music.default"  # type: ignore[attr-defined]
+    assert manifest.app_id == "penguintechinc.waddles.music"  # type: ignore[attr-defined]
     assert manifest.consumes[0].platform == "twitch"  # type: ignore[attr-defined]
 
 
@@ -254,14 +254,14 @@ def test_invalid_egress_host_rejected() -> None:
 
 
 def test_routes_to_is_parsed_through() -> None:
-    manifest = {**_VALID_MANIFEST, "routes_to": ["waddles.community.forums.default"]}
+    manifest = {**_VALID_MANIFEST, "routes_to": ["penguintechinc.waddles.forums"]}
     parsed = parse_bundle_manifest_v2(
         manifest,
         known_custom_platforms=frozenset(),
         allow_wildcard_consumes=False,
         allow_prebuilt=True,
     )
-    assert parsed.routes_to == ("waddles.community.forums.default",)
+    assert parsed.routes_to == ("penguintechinc.waddles.forums",)
 
 
 def test_missing_required_field_rejected() -> None:
@@ -361,9 +361,9 @@ def test_empty_alternative_to_entry_rejected() -> None:
 
 
 def test_alternative_to_list_parses_through() -> None:
-    manifest = _parse({"alternative_to": ["waddles.socials.music.default", "Spotify Jukebox"]})
+    manifest = _parse({"alternative_to": ["penguintechinc.waddles.music", "Spotify Jukebox"]})
     assert manifest.alternative_to == (  # type: ignore[attr-defined]
-        "waddles.socials.music.default",
+        "penguintechinc.waddles.music",
         "Spotify Jukebox",
     )
 
@@ -439,12 +439,12 @@ def test_kind_invalid() -> None:
 @pytest.mark.parametrize(
     ("app_id", "module", "expected"),
     [
-        ("waddles.core.auth", "auth", "app"),
-        ("waddles.x.y", "core", "app"),
-        ("waddles.x.y", "reputation", "app"),
-        ("waddles.x.y", "economy", "app"),
-        ("waddles.x.y", "connector", "app"),
-        ("waddles.socials.music.default", "socials", "app"),
+        ("penguintechinc.waddles.auth", "auth", "app"),
+        ("penguintechinc.waddles.y", "core", "app"),
+        ("penguintechinc.waddles.y", "reputation", "app"),
+        ("penguintechinc.waddles.y", "economy", "app"),
+        ("penguintechinc.waddles.y", "connector", "app"),
+        ("penguintechinc.waddles.music", "socials", "app"),
     ],
 )
 def test_infer_kind_never_grants_service(app_id: str, module: str, expected: str) -> None:
@@ -658,8 +658,8 @@ _VENDOR = {"provider": "thirdparty", "author": "Vendor", "license": "MIT"}
         {
             "kind": "service",
             "module": "core",
-            "app_id": "waddles.core.x.default",
-            "feature": "waddles.core.x",
+            "app_id": "penguintechinc.waddles.x",
+            "feature": "x",
         },
     ],
 )
@@ -679,16 +679,14 @@ def test_untrusted_inferred_service_grants_no_tools_or_capability() -> None:
     from services.bundle_approval_service import _derive_capabilities
 
     # Absent kind is always "app" (inference never grants service); no trust, no mcp.tools.
-    m = _parse(
-        {"module": "core", "feature": "waddles.core.music", "app_id": "waddles.core.music.default"}
-    )
+    m = _parse({"module": "core", "feature": "music", "app_id": "penguintechinc.waddles.music"})
     assert m.kind == "app"  # type: ignore[attr-defined]
     assert (
         _parse(
             {
                 "module": "integrations",
-                "feature": "waddles.integrations.x",
-                "app_id": "waddles.integrations.x.default",
+                "feature": "x",
+                "app_id": "acmecorp.widgets.x",
             }
         ).kind
         == "app"
@@ -699,8 +697,8 @@ def test_untrusted_inferred_service_grants_no_tools_or_capability() -> None:
         _parse(
             {
                 "module": "core",
-                "feature": "waddles.core.music",
-                "app_id": "waddles.core.music.default",
+                "feature": "music",
+                "app_id": "penguintechinc.waddles.music",
                 "exported_tools": [_tool()],
             }
         )
@@ -730,7 +728,7 @@ def test_derive_capability_requires_trusted_flag() -> None:
 
 
 def test_integrations_module_not_inferred_service() -> None:
-    assert _infer_kind("waddles.integrations.x.default", "integrations") == "app"
+    assert _infer_kind("acmecorp.widgets.x", "integrations") == "app"
 
 
 def _tool_summary(*tools: dict) -> dict:
@@ -773,7 +771,9 @@ def test_tool_removal_narrows_and_order_is_hash_stable() -> None:
     assert classify_diff(_tool_summary(_tool("a")), ab) == "narrowed"
 
 
-def _rt(target: str = "waddles.svc.economy.default", tool: str = "balance", **over: object) -> dict:
+def _rt(
+    target: str = "penguintechinc.waddles.economy", tool: str = "balance", **over: object
+) -> dict:
     return {"target_app_id": target, "tool": tool, "access": "read", **over}
 
 
@@ -781,8 +781,8 @@ def test_requested_tools_parse_two_for_app() -> None:
     m = _parse({"requested_tools": [_rt(), _rt(tool="spend", access="write")]})
     got = [(r.target_app_id, r.tool, r.access) for r in m.requested_tools]  # type: ignore[attr-defined]
     assert got == [
-        ("waddles.svc.economy.default", "balance", "read"),
-        ("waddles.svc.economy.default", "spend", "write"),
+        ("penguintechinc.waddles.economy", "balance", "read"),
+        ("penguintechinc.waddles.economy", "spend", "write"),
     ]
 
 
@@ -820,8 +820,8 @@ def test_explicit_service_trusted_stays_service_core_namespace() -> None:
         {
             "kind": "service",
             "module": "core",
-            "feature": "waddles.core.music",
-            "app_id": "waddles.core.music.default",
+            "feature": "music",
+            "app_id": "penguintechinc.waddles.music",
         }
     )
     assert m.kind == "service"  # type: ignore[attr-defined]
@@ -835,7 +835,7 @@ def test_untrusted_explicit_service_kind_rejected_untrusted_service_kind() -> No
 
 @pytest.mark.parametrize(
     ("target", "tool"),
-    [("waddles.svc:evil.default", "balance"), ("waddles.svc.economy.default", "bal:ance")],
+    [("waddles.svc:evil.default", "balance"), ("penguintechinc.waddles.economy", "bal:ance")],
 )
 def test_requested_tools_colon_in_names_rejected(target: str, tool: str) -> None:
     with pytest.raises(ManifestV2Error) as exc:
@@ -963,7 +963,7 @@ def test_overlay_widgets_valid_parse() -> None:
                     "description": "Current track",
                     "category": "music",
                     "output_kind": "surface",
-                    "surface_id": "waddles.socials.music.default.now_playing",
+                    "surface_id": "penguintechinc.waddles.music.now_playing",
                     "default_x": 48,
                     "default_y": 860,
                     "default_width": 460,
@@ -971,14 +971,14 @@ def test_overlay_widgets_valid_parse() -> None:
                     "props_schema": {"theme": {"type": "string"}},
                 }
             ],
-            ["waddles.socials.music.default.now_playing"],
+            ["penguintechinc.waddles.music.now_playing"],
         )
     )
     (w,) = manifest.overlay_widgets
     assert (w.widget_id, w.output_kind, w.surface_id, w.default_width) == (
         "dj.music.album_now_playing",
         "surface",
-        "waddles.socials.music.default.now_playing",
+        "penguintechinc.waddles.music.now_playing",
         460,
     )
     assert w.allow_standalone_output is True
@@ -1051,20 +1051,20 @@ def test_surface_widget_requires_owned_surface() -> None:
             "widget_id": "w.a",
             "display_name": "A",
             "output_kind": "surface",
-            "surface_id": "waddles.socials.music.default.one",
+            "surface_id": "penguintechinc.waddles.music.one",
         }
     ]
     with pytest.raises(ManifestV2Error) as exc:
         _parse(_presentation(widget))
     assert exc.value.reason == "widget_surface_not_owned"
     with pytest.raises(ManifestV2Error) as exc:
-        _parse(_presentation(widget, ["waddles.socials.music.default.two"]))
+        _parse(_presentation(widget, ["penguintechinc.waddles.music.two"]))
     assert exc.value.reason == "widget_surface_not_owned"
     assert (
-        _parse(_presentation(widget, ["waddles.socials.music.default.one"]))
+        _parse(_presentation(widget, ["penguintechinc.waddles.music.one"]))
         .overlay_widgets[0]
         .surface_id
-        == "waddles.socials.music.default.one"
+        == "penguintechinc.waddles.music.one"
     )
 
 
@@ -1077,7 +1077,13 @@ def test_owned_surfaces_must_be_surface_id_list(owned: object) -> None:
 
 @pytest.mark.parametrize(
     "owned",
-    [["music.now"], ["waddles.socials.music.default2.x"], ["waddles.socials.music"], ["other"]],
+    [
+        ["music.now"],
+        ["penguintechinc.waddles.default2.x"],
+        ["penguintechinc.waddles"],
+        ["penguintechinc.waddles.musicx"],
+        ["other"],
+    ],
 )
 def test_owned_surface_must_be_namespaced_under_app_id(owned: list[str]) -> None:
     with pytest.raises(ManifestV2Error) as exc:
@@ -1086,5 +1092,5 @@ def test_owned_surface_must_be_namespaced_under_app_id(owned: list[str]) -> None
 
 
 def test_owned_surface_equal_to_app_id_or_prefixed_is_accepted() -> None:
-    app = "waddles.socials.music.default"
+    app = "penguintechinc.waddles.music"
     assert _parse(_presentation([], [app, f"{app}.now"])).overlay_widgets == ()

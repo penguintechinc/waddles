@@ -19,10 +19,10 @@ from tests.conftest import make_token, make_user_token
 
 _MANIFEST_YAML = b"""
 schema_version: 2
-app_id: waddles.socials.music.default
+app_id: penguintechinc.waddles.music
 name: Music Station Song Request
 version: 3.0.1
-feature: waddles.socials.music
+feature: music
 module: socials
 provider: builtin
 author: github:penguintechinc
@@ -41,10 +41,10 @@ stages:
 #: the feature-name segment (see that module's own docstring for why).
 _VENDOR_COMPONENT_MANIFEST_YAML = b"""
 schema_version: 2
-app_id: waddles.integrations.vendor-42.mybundle
+app_id: acmecorp.widgets.mybundle
 name: Vendor Bundle
 version: 1.0.0
-feature: waddles.integrations.vendor-42
+feature: vendor-42
 module: integrations
 provider: thirdparty
 author: Acme Corp
@@ -98,7 +98,7 @@ async def test_post_version_requires_platform_admin_scope(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(source=None),
     )
@@ -109,7 +109,7 @@ async def test_post_version_happy_path(app: Quart) -> None:
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(),
     )
@@ -124,7 +124,7 @@ async def test_post_version_response_matches_dto_shape(app: Quart) -> None:
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(),
     )
@@ -137,7 +137,7 @@ async def test_post_version_missing_manifest_is_400(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(manifest=None),
     )
@@ -149,7 +149,7 @@ async def test_post_version_manifest_app_id_mismatching_the_url_is_400(app: Quar
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.forums.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.forums/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(),
     )
@@ -163,7 +163,7 @@ async def test_post_version_oversize_source_is_413_without_a_500(app: Quart) -> 
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(source=b"x" * (16_777_216 + 1)),
     )
@@ -176,7 +176,7 @@ async def test_get_version_returns_404_for_unknown_version(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/9.9.9",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/9.9.9",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 404
@@ -186,12 +186,12 @@ async def test_get_version_after_post_reflects_state(app: Quart) -> None:
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(),
     )
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
@@ -216,7 +216,7 @@ def mock_component_pipeline(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     monkeypatch.setattr(
         svc.storage_service,
         "upload_bundle_component",
-        AsyncMock(return_value="bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc.wasm"),
+        AsyncMock(return_value="bundles/acmecorp.widgets.mybundle/1.0.0/abc.wasm"),
     )
     fake_client = AsyncMock()
     monkeypatch.setattr(svc.valkey_admin_client, "build_client", lambda: fake_client)
@@ -233,7 +233,7 @@ async def test_vendor_can_onboard_a_component_in_their_own_namespace(
     token = make_user_token(user_id=42, scope="vendor:onboard")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.integrations.vendor-42.mybundle/versions",
+        "/api/v1/apps/acmecorp.widgets.mybundle/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_vendor_component_files(),
     )
@@ -252,11 +252,11 @@ async def test_vendor_cannot_onboard_the_core_namespace(
     token = make_user_token(user_id=42, scope="vendor:onboard")
     client = app.test_client()
     manifest = _VENDOR_COMPONENT_MANIFEST_YAML.replace(
-        b"waddles.integrations.vendor-42.mybundle", b"waddles.core.socials.music"
-    ).replace(b"feature: waddles.integrations.vendor-42", b"feature: waddles.core.socials")
+        b"acmecorp.widgets.mybundle", b"penguintechinc.waddles.music"
+    ).replace(b"feature: vendor-42", b"feature: socials")
     manifest = manifest.replace(b"module: integrations", b"module: core")
     response = await client.post(
-        "/api/v1/apps/waddles.core.socials.music/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_vendor_component_files(manifest),
     )
@@ -270,7 +270,7 @@ async def test_vendor_cannot_onboard_another_vendors_namespace(
     client = app.test_client()
     response = await client.post(
         # ...but the URL targets vendor 99's namespace
-        "/api/v1/apps/waddles.integrations.vendor-99.other/versions",
+        "/api/v1/apps/acmecorp.widgets.other/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_vendor_component_files(),
     )
@@ -283,7 +283,7 @@ async def test_vendor_source_upload_is_rejected(
     token = make_user_token(user_id=42, scope="vendor:onboard")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.integrations.vendor-42.mybundle/versions",
+        "/api/v1/apps/acmecorp.widgets.mybundle/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(
             manifest=_VENDOR_COMPONENT_MANIFEST_YAML, source=b"fake-tarball", component=None
@@ -300,7 +300,7 @@ async def test_vendor_with_no_scope_at_all_is_403(
     token = make_token(scope="")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.integrations.vendor-42.mybundle/versions",
+        "/api/v1/apps/acmecorp.widgets.mybundle/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_vendor_component_files(),
     )
@@ -316,7 +316,7 @@ async def test_nonconformant_component_is_202_with_rejected_status(
     token = make_user_token(user_id=42, scope="vendor:onboard")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.integrations.vendor-42.mybundle/versions",
+        "/api/v1/apps/acmecorp.widgets.mybundle/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_vendor_component_files(),
     )
@@ -350,7 +350,7 @@ async def test_reonboarding_a_second_version_tolerates_busygroup(
             b"version: 1.0.0", b"version: " + version
         )
         response = await client.post(
-            "/api/v1/apps/waddles.integrations.vendor-42.mybundle/versions",
+            "/api/v1/apps/acmecorp.widgets.mybundle/versions",
             headers={"Authorization": f"Bearer {token}"},
             files=_vendor_component_files(manifest),
         )
@@ -363,12 +363,12 @@ async def test_list_versions_route(app: Quart) -> None:
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_upload_files(),
     )
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200

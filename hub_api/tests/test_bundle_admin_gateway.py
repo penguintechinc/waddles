@@ -26,8 +26,8 @@ from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public
 from tests.conftest import make_user_token, make_user_token_with_roles
 
 REPO = Path(__file__).resolve().parents[2]
-SVC_APP = "waddles.core.service.reputation"
-APP = "waddles.socials.demo.default"
+SVC_APP = "penguintechinc.waddles.reputation"
+APP = "penguintechinc.waddles.demo"
 BASE = f"/api/v1/apps/community/%s/bundles/{APP}"
 SVC_BASE = f"/api/v1/apps/community/%s/bundles/{SVC_APP}"
 
@@ -41,7 +41,7 @@ _SVC_MANIFEST: dict[str, Any] = {
     "author": "github:penguintechinc",
     "name": "Rep",
     "version": "1.0.0",
-    "feature": "waddles.core.service",
+    "feature": "service",
     "module": "core",
     "provider": "builtin",
     "language": "rust",
@@ -98,7 +98,7 @@ _APP_MANIFEST: dict[str, Any] = {
     "author": "github:penguintechinc",
     "name": "Demo",
     "version": "1.0.0",
-    "feature": "waddles.socials.demo",
+    "feature": "demo",
     "module": "socials",
     "provider": "builtin",
     "language": "rust",
@@ -469,8 +469,8 @@ def test_signature_binds_every_field() -> None:
         ("community_id", 8),
         ("tenant_id", 4),
         ("args_json", "{}"),
-        ("target_app_id", "waddles.a.b.c"),
-        ("caller_app_id", "waddles.a.b.c"),
+        ("target_app_id", "penguintechinc.waddles.c"),
+        ("caller_app_id", "penguintechinc.waddles.c"),
     ]:
         other = dataclasses.replace(_CALL, **{field_name: value})
         assert tt.sign_call(b"k" * 16, "k", other, request_id="r", exp_ms=1) != base, field_name

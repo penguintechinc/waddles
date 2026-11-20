@@ -17,7 +17,7 @@ from services import bundle_permission_service as perm_svc
 from services.bundle_manifest_v2 import parse_bundle_manifest_v2
 from services.errors import ApiError
 
-_APP_ID = "waddles.socials.music.default"
+_APP_ID = "penguintechinc.waddles.music"
 _VERSION = "3.0.0"
 
 
@@ -40,7 +40,7 @@ def _manifest_raw(permissions: list[dict[str, Any]]) -> dict[str, Any]:
         "app_id": _APP_ID,
         "name": "Music Station",
         "version": _VERSION,
-        "feature": "waddles.socials.music",
+        "feature": "music",
         "module": "socials",
         "provider": "builtin",
         "author": "github:penguintechinc",
