@@ -788,3 +788,93 @@ async def test_process_prebuilt_component_is_idempotent_on_busygroup(
         valkey_client=fake_client,
     )
     assert row.status == STATUS_PUBLISHED  # never raised despite BUSYGROUP on every call
+
+
+_VENDOR_APP = "acme.widgets.mybundle"
+
+
+def _vendor_manifest(**over: Any) -> dict[str, Any]:
+    return {**_MANIFEST, "app_id": _VENDOR_APP, **over}
+
+
+async def _owner_rows(install_dal: Any, app_id: str) -> list[Any]:
+    return list(await install_dal(install_dal.app_id_owners.app_id == app_id).select())
+
+
+async def _upload(install_dal: Any, *, by: int | None, manifest: dict[str, Any], **kw: Any) -> Any:
+    args: dict[str, Any] = {
+        "tenant_id": 1,
+        "app_id": _VENDOR_APP,
+        "requested_by": by,
+        "manifest_bytes": yaml.safe_dump(manifest).encode(),
+        "source_bytes": b"x",
+        "component_bytes": None,
+        "known_custom_platforms": frozenset(),
+        "allow_wildcard_consumes": False,
+        "allow_prebuilt": True,
+    }
+    args.update(kw)
+    return await create_version(install_dal, **args)
+
+
+async def test_invalid_upload_leaves_no_claim_and_another_vendor_can_claim(
+    install_dal: Any,
+) -> None:
+    # bad manifest
+    with pytest.raises(ApiError):
+        await _upload(install_dal, by=1, manifest=_vendor_manifest(schema_version=1))
+    # missing source part
+    with pytest.raises(ApiError) as exc:
+        await _upload(install_dal, by=1, manifest=_vendor_manifest(), source_bytes=None)
+    assert exc.value.code == "missing_part"
+    assert await _owner_rows(install_dal, _VENDOR_APP) == []
+
+    row = await _upload(install_dal, by=2, manifest=_vendor_manifest())
+    assert row.status == STATUS_UPLOADED
+    owners = await _owner_rows(install_dal, _VENDOR_APP)
+    assert [o.owner_id for o in owners] == [2]
+
+
+async def test_failure_after_the_claim_releases_it(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(svc, "_write_upload", _boom)
+    with pytest.raises(RuntimeError):
+        await _upload(install_dal, by=1, manifest=_vendor_manifest())
+    assert await _owner_rows(install_dal, _VENDOR_APP) == []
+
+
+async def test_second_vendor_is_refused_after_a_successful_first_upload(
+    install_dal: Any,
+) -> None:
+    await _upload(install_dal, by=1, manifest=_vendor_manifest())
+    with pytest.raises(ApiError) as exc:
+        await _upload(install_dal, by=2, manifest=_vendor_manifest(version="3.0.2"))
+    assert exc.value.status_code == 403
+
+
+async def test_admin_upload_to_legacy_id_owner_is_the_earliest_uploader(
+    install_dal: Any,
+) -> None:
+    now = datetime.now(UTC)
+    for who, version, at in ((7, "1.0.0", now - timedelta(days=2)), (8, "1.0.1", now)):
+        await install_dal.app_version_uploads.async_insert(
+            app_id=_VENDOR_APP,
+            version=version,
+            tenant_id=1,
+            requested_by=who,
+            artifact_kind="source",
+            language="python",
+            status=STATUS_UPLOADED,
+            manifest_json={},
+            created_at=at,
+            updated_at=at,
+            status_changed_at=at,
+        )
+    await _upload(
+        install_dal, by=99, manifest=_vendor_manifest(version="2.0.0"), enforce_owner=False
+    )
+    assert [o.owner_id for o in await _owner_rows(install_dal, _VENDOR_APP)] == [7]

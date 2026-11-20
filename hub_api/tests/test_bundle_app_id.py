@@ -120,7 +120,7 @@ async def test_concurrent_claims_exactly_one_wins(dal: _Dal) -> None:
         *(claim_app_id(dal, app_id="acme.bot.race", owner_id=n) for n in range(1, 9)),
         return_exceptions=True,
     )
-    winners = [r for r in results if r is None]
+    winners = [r for r in results if r is True]
     refused = [r for r in results if isinstance(r, ApiError) and r.status_code == 403]
     assert len(winners) == 1, results
     assert len(refused) == 7, results

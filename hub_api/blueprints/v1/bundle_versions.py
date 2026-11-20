@@ -32,6 +32,7 @@ from quart_schema import validate_response
 from werkzeug.datastructures import FileStorage
 
 from services import bundle_version_service as svc
+from services.app_id_ownership import release_unused_claim
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request
 from services.vendor_bundle_authz import authorize_onboarding_scope, enforce_vendor_namespace
@@ -188,6 +189,10 @@ async def post_version(
                 component_bytes=component_bytes,
                 tenant_slug=ctx.tenant_slug,
             )
+        if not auth.is_admin and row.status == svc.STATUS_REJECTED:
+            # A vendor whose first upload is rejected (non-conformant component) must not keep
+            # the namespace claimed; a no-op once any live version exists.
+            await release_unused_claim(install_dal, app_id=app_id)
     except ApiError as exc:
         logger.debug("handled %s in post_version: %s", type(exc).__name__, exc.code)
         return _err(exc)

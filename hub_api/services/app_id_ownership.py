@@ -39,8 +39,11 @@ async def claim_app_id(
     app_id: str,
     owner_id: int | None,
     enforce_owner: bool = True,
-) -> None:
+) -> bool:
     """Atomically claim `app_id` for `owner_id`; refuse a foreign owner or a key collision.
+
+    Returns True when THIS call inserted the row (so a caller whose later work fails may release
+    it with `release_unused_claim`), False when the row already existed (idempotent re-claim).
 
     Idempotent for the existing owner. Raises 403 when `app_id` is already owned by someone else
     and `enforce_owner` is true, and 409 when a different app_id already holds the same
@@ -50,7 +53,7 @@ async def claim_app_id(
     params = {"app_id": app_id, "owner_id": owner_id, "storage_key": key}
     claimed = await raw_sql_write(dal, _CLAIM_SQL, params)
     if len(claimed) > 0:
-        return
+        return True
 
     rows = await raw_sql_rows(dal, _LOOKUP_SQL, {"app_id": app_id, "storage_key": key})
     own = next((r for r in rows if r["app_id"] == app_id), None)
@@ -68,6 +71,23 @@ async def claim_app_id(
             extra={"event_type": "AUTHZ", "action": "claim_app_id", "result": "FORBIDDEN"},
         )
         raise forbidden("this app_id is already registered by another publisher")
+    return False
+
+
+_RELEASE_SQL = (
+    "DELETE FROM app_id_owners WHERE app_id = :app_id "
+    "AND NOT EXISTS (SELECT 1 FROM app_version_uploads u "
+    "WHERE u.app_id = :app_id AND u.status <> 'REJECTED')"
+)
+
+
+async def release_unused_claim(dal: Any, *, app_id: str) -> None:
+    """Delete `app_id`'s claim when no non-REJECTED upload exists for it.
+
+    The compensating action for a failed or rejected first upload: an invalid upload must not
+    leave an ownership row that squats the namespace. A no-op once any live version exists.
+    """
+    await raw_sql_write(dal, _RELEASE_SQL, {"app_id": app_id})
 
 
 async def owner_of(dal: Any, app_id: str) -> tuple[bool, int | None]:
@@ -80,4 +100,4 @@ async def owner_of(dal: Any, app_id: str) -> tuple[bool, int | None]:
     return False, None
 
 
-__all__ = ["claim_app_id", "owner_of"]
+__all__ = ["claim_app_id", "owner_of", "release_unused_claim"]
