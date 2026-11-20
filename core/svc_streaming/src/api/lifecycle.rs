@@ -12,8 +12,6 @@
 //! JWT and a `streaming_configs.transcode_enabled` row at the same time.
 
 use axum::extract::{Path, State};
-use axum::http::header::AUTHORIZATION;
-use axum::http::HeaderMap;
 use axum::Extension;
 use sea_orm::DatabaseConnection;
 use time::OffsetDateTime;
@@ -131,21 +129,12 @@ async fn build_pipeline_spec(
     })
 }
 
-/// Extracts the raw `Bearer` token from the request's `Authorization`
-/// header for pass-through to hub-api's token ledger -- [`AuthenticatedClaims`]
-/// already validated this same header and decoded it into
-/// `crate::http::auth::Claims`, but does not retain the raw token string,
-/// so [`start`] re-reads the header directly rather than widening that
-/// extractor's public shape. Returns
-/// `None` if the header is missing/malformed, which should not happen
-/// (axum's extractor ordering means [`AuthenticatedClaims`] already
-/// rejected the request if so) -- treated as "no admission possible",
-/// falling back to passthrough rather than panicking.
-fn raw_bearer_token(headers: &HeaderMap) -> Option<&str> {
-    headers
-        .get(AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+/// The acting member's hub-api user id: the validated JWT's `sub` (a `hub_users.id`). The
+/// member's token itself is never forwarded to hub-api -- the debit is authenticated with this
+/// service's own machine JWT and names the member as the actor. `None` for a non-numeric `sub`
+/// (a service/legacy token), which cannot be admitted as a member.
+fn actor_user_id(claims: &crate::http::auth::Claims) -> Option<i64> {
+    claims.sub.parse::<i64>().ok().filter(|id| *id > 0)
 }
 
 /// TRANSCODE admission (BLOCK-WITH-FALLBACK, ported from the Python
@@ -162,7 +151,7 @@ fn raw_bearer_token(headers: &HeaderMap) -> Option<&str> {
 async fn resolve_transcode_admission(
     token_ledger: &TokenLedgerClient,
     hub_api_url: &str,
-    bearer_token: Option<&str>,
+    actor_user_id: Option<i64>,
     transcode_token_cost: i64,
     transcode_product_key: &str,
     community_id: i32,
@@ -172,16 +161,13 @@ async fn resolve_transcode_admission(
         return false;
     }
 
-    let Some(bearer_token) = bearer_token else {
-        // Should not happen (see `raw_bearer_token`'s doc comment) -- a
-        // missing bearer at this point means admission cannot be
-        // attempted at all, so fail closed on the ledger call the same
-        // way an unreachable ledger would: fall back to passthrough
-        // rather than guessing an entitlement this handler can't verify.
+    let Some(actor_user_id) = actor_user_id else {
+        // The caller's `sub` is not a member user id, so there is no member to bill: admission
+        // cannot be attempted. Loud, then the documented passthrough degrade.
         tracing::error!(
             community_id,
             config_id = config.id,
-            "lifecycle: transcode admission requested but no bearer token present on the request, falling back to passthrough"
+            "lifecycle: transcode admission requested but the caller's sub is not a numeric member id, falling back to passthrough"
         );
         return false;
     };
@@ -194,7 +180,7 @@ async fn resolve_transcode_admission(
     let result = token_ledger
         .debit_transcoding_tokens(
             hub_api_url,
-            bearer_token,
+            actor_user_id,
             community_id,
             transcode_token_cost,
             transcode_product_key,
@@ -242,7 +228,6 @@ pub async fn start(
     Path((community_id, config_id)): Path<(i32, i32)>,
     AuthenticatedClaims(claims): AuthenticatedClaims,
     State(state): State<AppState>,
-    headers: HeaderMap,
     DbConn(db): DbConn,
     Extension(engine): Extension<SharedEngine>,
 ) -> Result<ApiSuccess<PipelineStatusDto>, ApiError> {
@@ -251,7 +236,7 @@ pub async fn start(
     let transcode_applied = resolve_transcode_admission(
         &state.token_ledger,
         &state.config.cli.hub_api_url,
-        raw_bearer_token(&headers),
+        actor_user_id(&claims),
         state.config.cli.transcode_token_cost,
         &state.config.cli.transcode_product_key,
         community_id,

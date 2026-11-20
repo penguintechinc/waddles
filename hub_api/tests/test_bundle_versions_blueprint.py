@@ -435,3 +435,26 @@ async def test_vendor_cannot_read_other_vendors_versions(app: Quart) -> None:
     )
     assert listing.status_code == 403
     assert one.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "app_id",
+    [
+        "waddles.core.socials.music",
+        "penguintechinc.music.default",
+        "waddles.integrations.vendor-4.other",  # prefix-collision: vendor-4 is not vendor-42
+    ],
+)
+async def test_vendor_cannot_read_reserved_or_foreign_version_state(
+    app: Quart, app_id: str
+) -> None:
+    token = make_user_token(user_id=42, scope="vendor:onboard")
+    client = app.test_client()
+    listing = await client.get(
+        f"/api/v1/apps/{app_id}/versions", headers={"Authorization": f"Bearer {token}"}
+    )
+    one = await client.get(
+        f"/api/v1/apps/{app_id}/versions/1.0.0", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert listing.status_code == 403
+    assert one.status_code == 403
