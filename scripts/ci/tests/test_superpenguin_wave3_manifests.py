@@ -20,8 +20,8 @@ NAMES = (
     "viewers",
 )
 SERVICES = {
-    "waddles.core.service.economy": ROOT / "bundles/rust/economy/bundle.yaml",
-    "waddles.core.service.reputation": ROOT / "bundles/rust/reputation/bundle.yaml",
+    "penguintechinc.waddles.economy": ROOT / "bundles/rust/economy/bundle.yaml",
+    "penguintechinc.waddles.reputation": ROOT / "bundles/rust/reputation/bundle.yaml",
 }
 
 
@@ -79,8 +79,8 @@ def test_every_tool_request_matches_a_real_service_export_and_has_its_grant(name
 def test_top_reads_only_service_leaderboards():
     manifest = _load("top", "bundle.yaml")
     assert {(r["target_app_id"], r["tool"]) for r in manifest["requested_tools"]} == {
-        ("waddles.core.service.economy", "points_leaders"),
-        ("waddles.core.service.reputation", "leaderboard"),
+        ("penguintechinc.waddles.economy", "points_leaders"),
+        ("penguintechinc.waddles.reputation", "leaderboard"),
     }
     assert all(r["access"] == "read" for r in manifest["requested_tools"])
 
