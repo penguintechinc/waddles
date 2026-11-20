@@ -41,7 +41,6 @@ import httpx
 from flask_core.auth import (
     DEFAULT_TENANT_SLUG,
     JWT_CLOCK_SKEW_SECONDS,
-    MEMBER_BASELINE_SCOPES,
     SCOPE_BUNDLES,
     create_jwt_token,
     verify_jwt_token,
@@ -292,7 +291,6 @@ async def _scopes_for(
     """
     roles: list[str] = []
     scopes: set[str] = set(SCOPE_BUNDLES["global"]["viewer"])  # every session gets *:read
-    scopes.update(MEMBER_BASELINE_SCOPES)  # + member-tier actions `*:read` cannot cover
     if user is None:
         return roles, scopes
     if await is_global_admin(async_dal, dal, user_id=user.id):

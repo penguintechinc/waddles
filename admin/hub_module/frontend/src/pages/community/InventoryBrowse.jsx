@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { ArchiveBoxIcon, MagnifyingGlassIcon, ShoppingCartIcon } from '@heroicons/react/24/outline';
 import { inventoryApi } from '../../services/api';
+import UpgradeNotice, { isUpgradeRequired, upgradeMessage } from '../../components/UpgradeNotice';
 
 function InventoryBrowse() {
   const { communityId } = useParams();
@@ -9,6 +10,7 @@ function InventoryBrowse() {
   const [loading, setLoading] = useState(true);
   const [search, setSearch] = useState('');
   const [error, setError] = useState('');
+  const [upgrade, setUpgrade] = useState(null);
   const [successMessage, setSuccessMessage] = useState('');
 
   const [showModal, setShowModal] = useState(false);
@@ -32,11 +34,14 @@ function InventoryBrowse() {
     try {
       setLoading(true);
       setError('');
+      setUpgrade(null);
       const res = await inventoryApi.listAvailable(communityId, { search });
       setItems(res.data?.items || []);
     } catch (err) {
       console.error('Failed to load inventory:', err);
-      setError('Failed to load inventory items.');
+      if (isUpgradeRequired(err)) setUpgrade(upgradeMessage(err) || '');
+      else if (err.response?.status === 403) setError('Only active members of this community can use the Quartermaster.');
+      else setError('Failed to load inventory items.');
     } finally {
       setLoading(false);
     }
@@ -106,6 +111,7 @@ function InventoryBrowse() {
         />
       </div>
 
+      {upgrade !== null && <UpgradeNotice feature="The Quartermaster" message={upgrade} />}
       {error && <div className="text-red-400 text-sm">{error}</div>}
 
       {loading ? (

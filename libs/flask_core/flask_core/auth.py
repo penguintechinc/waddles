@@ -716,12 +716,6 @@ def verify_service_key(provided_key: str, expected_key: Optional[str]) -> bool:
 #: ladder. No bundle grants the unbounded '*': narrower levels restrict what
 #: a broader level granted, they never expand it. Middleware checks these
 #: scopes only -- never the role/bundle name.
-#: Member-tier action scopes every authenticated session carries (alongside the viewer bundle's
-#: `*:read`). The `*:read` wildcard cannot cover a non-read action, so a member action like
-#: borrowing Quartermaster items (`community.inventory:use`) would otherwise be unreachable for
-#: every non-admin session -- 403 on the member routes. Never include write/admin actions here.
-MEMBER_BASELINE_SCOPES: List[str] = ['community.inventory:use']
-
 SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
     'global': {
         'admin': ['*:read', '*:write', '*:admin', '*:delete', 'settings:write', 'users:admin'],
@@ -778,7 +772,7 @@ SCOPE_BUNDLES: Dict[str, Dict[str, List[str]]] = {
             'community:read', 'community:write', 'bot.command:admin', 'social.polls:write',
             'rooms:kick', 'rooms:mute', 'rooms:lock', 'rooms:hands',
         ],
-        'viewer': ['community:read', 'social.polls:read', *MEMBER_BASELINE_SCOPES],
+        'viewer': ['community:read', 'social.polls:read'],
     },
 }
 
