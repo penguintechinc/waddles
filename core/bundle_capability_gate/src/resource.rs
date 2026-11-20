@@ -16,14 +16,29 @@ use uuid::Uuid;
 
 use crate::scope::{InvokeScope, TenantTier};
 
-/// `waddles.core.*` app ids get the `app_core` schema; every other app id
+/// `penguintechinc.waddles.*` app ids get the `app_core` schema; every other app id
 /// gets `app_community` (spec SS1.1). Mirrors
 /// `hub_api/services/vendor_bundle_authz.py::CORE_NAMESPACE_PREFIX` --
 /// enforced at bundle submission on the hub-api side, so a vendor bundle can
-/// never reach this crate with a `waddles.core.*` app_id in the first place;
+/// never reach this crate with a `penguintechinc.waddles.*` app_id in the first place;
 /// this constant exists only so this crate's own schema derivation agrees
 /// with that already-enforced invariant, not to re-enforce it.
-pub const CORE_NAMESPACE_PREFIX: &str = "waddles.core.";
+pub const CORE_NAMESPACE_PREFIX: &str = "penguintechinc.waddles.";
+
+/// True only for a well-formed first-party core id: the reserved
+/// `penguintechinc.waddles.` prefix followed by exactly one non-empty
+/// `[a-z0-9][a-z0-9_-]*` segment. A bare string prefix match would also trust
+/// ids such as `penguintechinc.waddles.x.y`; hub-api additionally refuses
+/// vendor submissions under this org, so trust never rests on the name alone.
+#[must_use]
+pub fn is_core_namespace(app_id: &str) -> bool {
+    let Some(rest) = app_id.strip_prefix(CORE_NAMESPACE_PREFIX) else {
+        return false;
+    };
+    let mut chars = rest.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
 
 const POSTGRES_NAMEDATALEN_MAX: usize = 63;
 
@@ -208,9 +223,9 @@ pub fn sanitized_app_id(app_id: &str) -> String {
 }
 
 /// `storage.tables`' schema-qualified resource (spec SS1.1): `app_core` for
-/// `waddles.core.*` app ids, `app_community` otherwise.
+/// `penguintechinc.waddles.*` app ids, `app_community` otherwise.
 pub fn resolve_table(scope: &InvokeScope) -> ResolvedResource {
-    let schema = if scope.app_id().starts_with(CORE_NAMESPACE_PREFIX) {
+    let schema = if is_core_namespace(scope.app_id()) {
         "app_core"
     } else {
         "app_community"
@@ -279,15 +294,46 @@ mod tests {
     #[test]
     fn sanitized_app_id_lowercases_and_replaces_non_identifier_chars() {
         assert_eq!(
-            sanitized_app_id("waddles.core.example_echo"),
-            "waddles_core_example_echo"
+            sanitized_app_id("penguintechinc.waddles.echo"),
+            "penguintechinc_waddles_echo"
+        );
+    }
+
+    #[test]
+    fn core_namespace_accepts_hyphenated_and_rejects_lookalikes() {
+        for ok in [
+            "penguintechinc.waddles.discord-invite",
+            "penguintechinc.waddles.wix-event-sync",
+        ] {
+            assert!(is_core_namespace(ok), "{ok}");
+        }
+        assert!(is_core_namespace("penguintechinc.waddles.x"));
+        for bad in [
+            "waddles.core.x",
+            "penguintechinc.waddles.",
+            "penguintechinc.waddles.a.b",
+            "penguintechinc.waddles.-x",
+            "penguintechinc.waddles.X",
+            "penguintechinc.other.x",
+            "psychoboy.penguintwitchbot.roll",
+            "penguintechinc.waddlesx",
+        ] {
+            assert!(!is_core_namespace(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn hyphenated_ids_sanitize_to_underscores() {
+        assert_eq!(
+            sanitized_app_id("penguintechinc.waddles.discord-invite"),
+            "penguintechinc_waddles_discord_invite"
         );
     }
 
     #[test]
     fn sanitized_app_id_is_stable_and_deterministic() {
-        let a = sanitized_app_id("waddles.core.fishing-bundle");
-        let b = sanitized_app_id("waddles.core.fishing-bundle");
+        let a = sanitized_app_id("penguintechinc.waddles.fishing-bundle");
+        let b = sanitized_app_id("penguintechinc.waddles.fishing-bundle");
         assert_eq!(a, b);
     }
 
@@ -312,11 +358,11 @@ mod tests {
 
     #[test]
     fn resolve_table_uses_app_core_schema_for_core_namespace() {
-        let scope = scope_with_app_id("waddles.core.example_echo");
+        let scope = scope_with_app_id("penguintechinc.waddles.echo");
         let resolved = resolve_table(&scope);
         assert_eq!(
             resolved.schema_qualified_table().unwrap(),
-            "app_core.waddles_core_example_echo"
+            "app_core.penguintechinc_waddles_echo"
         );
     }
 

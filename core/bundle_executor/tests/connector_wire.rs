@@ -32,8 +32,8 @@ use tokio::io::{duplex, DuplexStream};
 
 const ECHO_WASM: &[u8] = include_bytes!("fixtures/echo_connector.wasm");
 const FAULTY_WASM: &[u8] = include_bytes!("fixtures/faulty_connector.wasm");
-const ECHO_APP: &str = "waddles.core.example.echo";
-const FAULTY_APP: &str = "waddles.core.test.faulty";
+const ECHO_APP: &str = "penguintechinc.waddles.echo";
+const FAULTY_APP: &str = "penguintechinc.waddles.test-faulty";
 
 struct NoSource;
 

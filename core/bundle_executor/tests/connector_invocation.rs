@@ -109,7 +109,7 @@ async fn load(rig: &Rig, app_id: &str, bytes: &[u8], limits: ConnectorLimits) ->
 #[tokio::test]
 async fn echo_on_connect_returns_its_handshake_bytes() {
     let rig = rig();
-    let host = load(&rig, "waddles.core.example.echo", ECHO_WASM, limits()).await;
+    let host = load(&rig, "penguintechinc.waddles.echo", ECHO_WASM, limits()).await;
     let reply = host.on_connect(ctx()).await.unwrap();
     assert_eq!(reply.value.bytes, b"echo-hello");
     assert!(reply.value.secret_refs.is_empty());
@@ -122,7 +122,7 @@ async fn echo_on_connect_returns_its_handshake_bytes() {
 #[tokio::test]
 async fn echo_on_frame_normalizes_like_the_legacy_ingest_handler() {
     let rig = rig();
-    let host = load(&rig, "waddles.core.example.echo", ECHO_WASM, limits()).await;
+    let host = load(&rig, "penguintechinc.waddles.echo", ECHO_WASM, limits()).await;
     let reply = host
         .on_frame(frame(
             br#"{"source":"echo","text":"  hello world  ","actor":"alice"}"#,
@@ -143,7 +143,7 @@ async fn echo_on_frame_normalizes_like_the_legacy_ingest_handler() {
 #[tokio::test]
 async fn echo_defaults_actor_and_keeps_an_explicit_event_type_and_timestamp() {
     let rig = rig();
-    let host = load(&rig, "waddles.core.example.echo", ECHO_WASM, limits()).await;
+    let host = load(&rig, "penguintechinc.waddles.echo", ECHO_WASM, limits()).await;
     let reply = host
         .on_frame(frame(
             br#"{"source":"echo","text":"x","event_type":"chat.message","occurred_at":"2026-01-02T03:04:05.006Z"}"#,
@@ -159,7 +159,7 @@ async fn echo_defaults_actor_and_keeps_an_explicit_event_type_and_timestamp() {
 #[tokio::test]
 async fn echo_rejects_a_malformed_frame_with_a_typed_guest_error_not_a_trap() {
     let rig = rig();
-    let host = load(&rig, "waddles.core.example.echo", ECHO_WASM, limits()).await;
+    let host = load(&rig, "penguintechinc.waddles.echo", ECHO_WASM, limits()).await;
     for bad in [
         br#"{"text":"no source"}"#.as_slice(),
         br#"{"source":"echo"}"#.as_slice(),
@@ -178,7 +178,7 @@ async fn echo_rejects_a_malformed_frame_with_a_typed_guest_error_not_a_trap() {
 #[tokio::test]
 async fn echo_heartbeat_and_disconnect_are_callable() {
     let rig = rig();
-    let host = load(&rig, "waddles.core.example.echo", ECHO_WASM, limits()).await;
+    let host = load(&rig, "penguintechinc.waddles.echo", ECHO_WASM, limits()).await;
     assert_eq!(host.on_heartbeat_due(ctx()).await.unwrap().value, None);
     host.on_disconnect(ctx(), "test".to_string()).await.unwrap();
 }
@@ -189,7 +189,7 @@ async fn load_refuses_a_non_connector_world_manifest() {
     let err = ConnectorHost::load(
         &rig.engine,
         &rig.linkers,
-        &manifest("waddles.core.example.echo", ECHO_WASM, WitWorld::Stage),
+        &manifest("penguintechinc.waddles.echo", ECHO_WASM, WitWorld::Stage),
         ECHO_WASM.to_vec(),
         limits(),
         None,
@@ -223,7 +223,11 @@ async fn load_refuses_bytes_that_do_not_match_the_manifest_digest() {
     let err = ConnectorHost::load(
         &rig.engine,
         &rig.linkers,
-        &manifest("waddles.core.example.echo", ECHO_WASM, WitWorld::Connector),
+        &manifest(
+            "penguintechinc.waddles.echo",
+            ECHO_WASM,
+            WitWorld::Connector,
+        ),
         FAULTY_WASM.to_vec(),
         limits(),
         None,
@@ -245,7 +249,7 @@ async fn load_refuses_a_stage_component_claiming_the_connector_world() {
         &rig.engine,
         &rig.linkers,
         &manifest(
-            "waddles.core.example.echo",
+            "penguintechinc.waddles.echo",
             stage_bytes,
             WitWorld::Connector,
         ),
@@ -262,7 +266,13 @@ async fn load_refuses_a_stage_component_claiming_the_connector_world() {
 #[tokio::test]
 async fn a_guest_trap_is_contained_and_the_host_keeps_serving() {
     let rig = rig();
-    let host = load(&rig, "waddles.core.test.faulty", FAULTY_WASM, limits()).await;
+    let host = load(
+        &rig,
+        "penguintechinc.waddles.test-faulty",
+        FAULTY_WASM,
+        limits(),
+    )
+    .await;
     let err = host.on_frame(frame(b"trap")).await.unwrap_err();
     assert!(matches!(err, ConnectorCallError::Trap(_)), "{err:?}");
     assert!(err.is_sandbox_trip());
@@ -282,7 +292,7 @@ async fn an_unbounded_loop_is_stopped_by_fuel_before_the_deadline() {
     let mut l = limits();
     l.fuel = 2_000_000;
     l.deadline_ms = 30_000; // far away: only fuel can stop this call
-    let host = load(&rig, "waddles.core.test.faulty", FAULTY_WASM, l).await;
+    let host = load(&rig, "penguintechinc.waddles.test-faulty", FAULTY_WASM, l).await;
     let started = std::time::Instant::now();
     let err = host.on_frame(frame(b"spin")).await.unwrap_err();
     assert!(
@@ -302,7 +312,7 @@ async fn an_unbounded_loop_is_stopped_by_the_epoch_deadline_when_fuel_is_plentif
     let mut l = limits();
     l.fuel = u64::MAX;
     l.deadline_ms = 150;
-    let host = load(&rig, "waddles.core.test.faulty", FAULTY_WASM, l).await;
+    let host = load(&rig, "penguintechinc.waddles.test-faulty", FAULTY_WASM, l).await;
     let err = host.on_frame(frame(b"spin")).await.unwrap_err();
     assert!(
         matches!(err, ConnectorCallError::DeadlineExceeded(_)),
@@ -315,7 +325,7 @@ async fn a_memory_hog_is_stopped_by_the_per_instance_cap() {
     let rig = rig();
     let mut l = limits();
     l.memory_limit_mb = 16;
-    let host = load(&rig, "waddles.core.test.faulty", FAULTY_WASM, l).await;
+    let host = load(&rig, "penguintechinc.waddles.test-faulty", FAULTY_WASM, l).await;
     let err = host.on_frame(frame(b"grow")).await.unwrap_err();
     assert!(matches!(err, ConnectorCallError::MemoryLimit(_)), "{err:?}");
 }
@@ -328,7 +338,7 @@ async fn a_full_pool_is_typed_back_pressure_not_an_unbounded_queue() {
     l.pool_wait = Duration::from_millis(50);
     l.fuel = u64::MAX;
     l.deadline_ms = 1_500;
-    let host = load(&rig, "waddles.core.test.faulty", FAULTY_WASM, l).await;
+    let host = load(&rig, "penguintechinc.waddles.test-faulty", FAULTY_WASM, l).await;
 
     // One slow call occupies the only slot...
     let busy = {
@@ -357,7 +367,7 @@ async fn a_full_pool_is_typed_back_pressure_not_an_unbounded_queue() {
 #[tokio::test]
 async fn concurrent_calls_proceed_in_parallel_across_the_pool() {
     let rig = rig();
-    let host = load(&rig, "waddles.core.example.echo", ECHO_WASM, limits()).await;
+    let host = load(&rig, "penguintechinc.waddles.echo", ECHO_WASM, limits()).await;
     let mut tasks = Vec::new();
     for i in 0..16 {
         let host = host.clone();

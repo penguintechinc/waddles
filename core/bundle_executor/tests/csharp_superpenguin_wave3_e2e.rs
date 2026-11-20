@@ -143,7 +143,7 @@ impl StageModel {
                 args["target"].as_str().unwrap(),
                 args["tool"].as_str().unwrap(),
             ) {
-                ("waddles.core.service.economy", "points_leaders") => {
+                ("penguintechinc.waddles.economy", "points_leaders") => {
                     ok(serde_json::json!({ "ok": {
                     "entries": [{ "user": ACTOR_UUID, "balance": 4200 }], "alias": "stars" } }))
                 }

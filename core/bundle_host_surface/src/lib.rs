@@ -124,7 +124,7 @@ impl PublishArgs {
     }
 }
 
-/// `true` for ids shaped like `waddles.core.example.music.now_playing` / `alert`: lowercase
+/// `true` for ids shaped like `penguintechinc.waddles.music.now_playing` / `alert`: lowercase
 /// segments of `[a-z0-9_]` joined by single dots, at most 64 bytes.
 pub fn valid_surface_id(id: &str) -> bool {
     !id.is_empty()
@@ -401,7 +401,7 @@ mod tests {
     fn surface_id_grammar() {
         for ok in [
             "alert",
-            "waddles.core.example.music.now_playing",
+            "penguintechinc.waddles.music.now_playing",
             "live.channels",
             "a1.b2_c",
         ] {
@@ -427,32 +427,32 @@ mod tests {
     #[test]
     fn policy_reads_only_surface_permissions() {
         let p = SurfacePolicy::from_permissions([
-            "overlay.surface.waddles.core.example.music.now_playing",
+            "overlay.surface.penguintechinc.waddles.music.now_playing",
             "overlay.surface.alert",
             "overlay.media",
             "overlay.surface.BAD ID",
             "kv.read",
         ]);
-        assert!(p.allows("waddles.core.example.music.now_playing"));
+        assert!(p.allows("penguintechinc.waddles.music.now_playing"));
         assert!(p.allows("alert"));
-        assert!(!p.allows("waddles.core.example.music.queue"));
+        assert!(!p.allows("penguintechinc.waddles.music.queue"));
         assert!(!p.allows("BAD ID"));
     }
 
     #[test]
     fn a_bundle_owns_exactly_its_own_namespace() {
-        let p = SurfacePolicy::for_app("waddles.core.example.music", ["overlay.surface.alert"]);
-        assert!(p.allows("waddles.core.example.music.now_playing"));
-        assert!(p.allows("waddles.core.example.music.queue"));
+        let p = SurfacePolicy::for_app("penguintechinc.waddles.music", ["overlay.surface.alert"]);
+        assert!(p.allows("penguintechinc.waddles.music.now_playing"));
+        assert!(p.allows("penguintechinc.waddles.music.queue"));
         assert!(p.allows("alert"), "explicit grants still apply");
         // Another bundle's namespace, a prefix sibling, the bare prefix and the empty name.
-        assert!(!p.allows("waddles.core.example.musicbox.queue"));
-        assert!(!p.allows("waddles.core.example.otherapp.now_playing"));
-        assert!(!p.allows("waddles.core.example.music"));
-        assert!(!p.allows("waddles.core.example.music."));
+        assert!(!p.allows("penguintechinc.waddles.example-musicbox-queue"));
+        assert!(!p.allows("penguintechinc.waddles.example-otherapp-now_playing"));
+        assert!(!p.allows("penguintechinc.waddles.music"));
+        assert!(!p.allows("penguintechinc.waddles.music."));
         assert!(!p.allows("live.channels"));
         // A policy without an app id owns nothing.
-        assert!(!SurfacePolicy::default().allows("waddles.core.example.music.queue"));
+        assert!(!SurfacePolicy::default().allows("penguintechinc.waddles.music.queue"));
     }
 
     #[test]
@@ -608,7 +608,7 @@ mod tests {
         let big = format!("\"{}\"", "a".repeat(HARD_MAX_PAYLOAD_BYTES));
         for (surface, community, body, want) in [
             ("BAD ID", 1, "{}", "invalid"),
-            ("waddles.core.example.music.queue", 1, "{}", "not_granted"),
+            ("penguintechinc.waddles.music.queue", 1, "{}", "not_granted"),
             ("alert", 0, "{}", "invalid"),
             ("alert", 1, big.as_str(), "too_large"),
             ("alert", 1, "not json", "invalid"),

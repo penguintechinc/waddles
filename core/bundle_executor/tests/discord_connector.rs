@@ -24,7 +24,7 @@ use bundle_executor::manifest::{VerifiedManifest, WitWorld, PERM_CONNECTOR_PII_R
 use sha2::{Digest, Sha256};
 
 const WASM: &[u8] = include_bytes!("fixtures/discord_connector.wasm");
-const APP: &str = "waddles.core.service.discord";
+const APP: &str = "penguintechinc.waddles.discord";
 
 fn digest_of(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();

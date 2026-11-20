@@ -106,7 +106,7 @@ fn prebuilt_artifact_succeeds_without_scanning_or_compiling() {
 
     let manifest_json = std::fs::read_to_string(out.path().join("manifest.json")).unwrap();
     let parsed: serde_json::Value = serde_json::from_str(&manifest_json).unwrap();
-    assert_eq!(parsed["app_id"], "waddles.core.example.prebuilt");
+    assert_eq!(parsed["app_id"], "penguintechinc.waddles.example-prebuilt");
     assert_eq!(parsed["artifact"], "prebuilt");
     assert_eq!(parsed["language"], "other");
 }

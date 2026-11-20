@@ -71,7 +71,7 @@ impl DistributionService for FakeHub {
 
 fn bundle() -> DistributionBundle {
     DistributionBundle {
-        app_id: "waddles.core.demo.echo".into(),
+        app_id: "penguintechinc.waddles.echo-pipeline".into(),
         community_id: Some(7),
         entrypoint: Some("builtin_handlers.echo_ingest:normalize".into()),
         spec_json: b"{}".to_vec(),
