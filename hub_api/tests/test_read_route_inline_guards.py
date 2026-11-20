@@ -1,4 +1,4 @@
-# ruff: noqa: F811
+# ruff: noqa: F811, F401
 """Behavioural proof for the read routes guarded INLINE (stamped with `mark_guarded`).
 
 The walker only proves a stamp exists; these prove the handler really refuses a non-admin:
@@ -21,8 +21,12 @@ from tests.community_ids import public_id
 from tests.conftest import TENANT_SLUG, make_user_token, seed_membership
 
 # Fixtures reused from the bot blueprint tests (real schema, seeded tenant + community).
-from tests.test_bot_blueprint import (  # noqa: F401
+from tests.test_bot_blueprint import (
     app as bot_app,
+)
+from tests.test_bot_blueprint import (
+    community_id,
+    dal,
 )
 
 ADMIN_UID, MEMBER_UID, OUTSIDER_UID = 21, 22, 23
