@@ -8,6 +8,7 @@ import {
   ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline';
 import { adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError, getErrorMessage } from '../../components/ui';
 import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
 
@@ -68,6 +69,7 @@ function AdminForms() {
   const [forms, setForms] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [gated, setGated] = useState(false);
   const [message, setMessage] = useState(null);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [selectedForm, setSelectedForm] = useState(null);
@@ -83,7 +85,11 @@ function AdminForms() {
       const response = await adminApi.getForms(communityId);
       setForms(response.data?.forms || []);
     } catch (err) {
-      setError('Failed to load forms');
+      if (isLicensedFeatureError(err)) {
+        setGated(true);
+      } else {
+        setError('Failed to load forms');
+      }
     } finally {
       setLoading(false);
     }
@@ -114,7 +120,7 @@ function AdminForms() {
       setShowCreateModal(false);
       loadForms();
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to create form');
+      setError(getErrorMessage(err, 'Failed to create form'));
       throw err;
     }
   };
@@ -127,7 +133,7 @@ function AdminForms() {
       loadForms();
       if (selectedForm?.id === formId) setSelectedForm(null);
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to delete form');
+      setError(getErrorMessage(err, 'Failed to delete form'));
     }
   };
 
@@ -220,6 +226,10 @@ function AdminForms() {
       defaultValue: true,
     },
   ], []);
+
+  if (gated) {
+    return <UpgradeNotice feature="Forms" />;
+  }
 
   if (loading) {
     return (

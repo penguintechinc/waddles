@@ -28,6 +28,7 @@ services/clip_service.py`.
 from __future__ import annotations
 
 import os
+import re
 from datetime import datetime
 from typing import Any
 
@@ -397,7 +398,9 @@ def is_valid_service_key(request: Any) -> bool:
     return bool(verify_service_key(provided, expected))
 
 
-def api_error(message: str, status_code: int) -> tuple[dict[str, object], int]:
+def api_error(
+    message: str, status_code: int, code: str | None = None
+) -> tuple[dict[str, object], int]:
     """Typed error envelope, same shape as `flask_core.api_utils.error_response`.
 
     `error_response` itself is untyped (flask_core has no py.typed marker,
@@ -412,10 +415,47 @@ def api_error(message: str, status_code: int) -> tuple[dict[str, object], int]:
         "success": False,
         "error": {
             "message": message,
-            "code": f"ERROR_{status_code}",
+            "code": code or f"ERROR_{status_code}",
             "timestamp": datetime.utcnow().isoformat(),
         },
     }, status_code
+
+
+#: Wire `error.code` of every licensed-feature 402; hub-webui keys its upsell state on it.
+FEATURE_NOT_ENABLED_CODE = "FEATURE_NOT_ENABLED"
+
+
+def feature_not_enabled(message: str) -> tuple[dict[str, object], int]:
+    """Standard 402 licensed-feature envelope (`FEATURE_NOT_ENABLED`), as `payment_required`."""
+    return api_error(message, 402, FEATURE_NOT_ENABLED_CODE)
+
+
+_DOLLAR_PARAM = re.compile(r"\$(\d+)")
+
+
+def positional_sql(dal: Any, sql: str, placeholders: list[Any]) -> tuple[str, list[Any]]:
+    """Rewrite `$1..$n` markers into the live adapter's native positional marker.
+
+    pydal passes SQL to the driver verbatim: psycopg2 (Postgres) wants `%s`, sqlite3 wants `?`,
+    and neither understands `$N` -- Postgres raised `there is no parameter $1` (alpha leaderboard
+    500). Markers may repeat or appear out of order; the returned list is re-expanded to match,
+    one value per occurrence, so callers keep writing readable `$N` SQL.
+    """
+    engine = str(getattr(getattr(dal, "_adapter", None), "dbengine", "")).lower()
+    marker = "?" if engine == "sqlite" else "%s"
+    ordered: list[Any] = []
+
+    def _sub(match: re.Match[str]) -> str:
+        ordered.append(placeholders[int(match.group(1)) - 1])
+        return marker
+
+    return _DOLLAR_PARAM.sub(_sub, sql), ordered
+
+
+def execute_positional(dal: Any, sql: str, placeholders: list[Any]) -> Any:
+    """`dal.executesql` for `$N`-style SQL, adapted to the adapter's paramstyle."""
+    native_sql, values = positional_sql(dal, sql, placeholders)
+    return dal.executesql(native_sql, placeholders=values)
 
 
 def sql_bool(value: Any) -> bool:

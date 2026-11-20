@@ -41,6 +41,7 @@ from services.community_activity import (
 from services.community_common import (
     api_error,
     community_in_tenant,
+    feature_not_enabled,
     get_current_user,
     is_valid_service_key,
 )
@@ -81,7 +82,7 @@ async def watch_time_leaderboard(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_ACTIVITY, tenant=ctx.tenant_slug):
-        return api_error("Community activity tracking is not enabled for this plan", 402)
+        return feature_not_enabled("Community activity tracking is not enabled for this plan")
     dal = current_app.config["dal"]
     if not community_in_tenant(dal, community_id, ctx):
         return api_error("Community not found", status_code=404)

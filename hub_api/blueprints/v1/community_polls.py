@@ -17,7 +17,7 @@ from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
 from services import community_engagement_proxy as proxy
-from services.community_common import community_in_tenant
+from services.community_common import community_in_tenant, feature_not_enabled
 
 polls_bp = Blueprint("v1_community_polls", __name__, url_prefix="/api/v1/admin")
 
@@ -34,7 +34,7 @@ async def list_polls(community_id: int) -> tuple[dict[str, object], int]:
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_POLLS, tenant=ctx.tenant_slug):
-        return {"success": False, "error": "Community polls are not enabled for this plan"}, 402
+        return feature_not_enabled("Community polls are not enabled for this plan")
     if not community_in_tenant(current_app.config["dal"], community_id, ctx):
         return {"success": False, "error": "Community not found"}, 404
     return await proxy.get_polls(community_id, request.headers.get("Authorization"))
