@@ -462,8 +462,14 @@ class PostHogFlagGate:
         """
         api_key = os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY", "")
         host = os.getenv("POSTHOG_HOST", "https://license.penguintech.io")
+        # Bounded request timeout: an unreachable host (egress blocked) must not stall
+        # a request path for the SDK's 15s default; failure -> None -> degraded chain.
+        timeout = float(os.getenv("POSTHOG_TIMEOUT_SECONDS", "3"))
         client = Posthog(
-            project_api_key=api_key or "disabled", host=host, disabled=not api_key
+            project_api_key=api_key or "disabled",
+            host=host,
+            disabled=not api_key,
+            timeout=timeout,
         )
         return cls(client)
 
@@ -763,20 +769,6 @@ class EntitlementClient:
             self._record_decision(False, "tier_unverifiable", required)
             return False
 
-        # ENV BASELINE (PostHog -> ENV -> default). Only when PostHog could not
-        # define the flag AND the flag is a plain FEATURE flag (free tier, no
-        # licence requirement). Licensed/tiered flags never reach this branch's
-        # result: `licensed` is True for them, so they stay licence-server-only.
-        if flag_result is None and not licensed:
-            env_value = env_flag_value(flag_key)
-            if env_value is not None:
-                logger.info(
-                    "entitlement.env_baseline",
-                    extra={"flag_key": flag_key, "tenant": tenant, "value": env_value},
-                )
-                self._record_decision(env_value, "env_baseline", required)
-                return env_value
-
         if flag_result is None or tier_result is None:
             cached = self._cache.get(cache_key)
             if cached is not None and cached.expires_at > now:
@@ -790,6 +782,19 @@ class EntitlementClient:
                 )
                 self._record_decision(cached.value, "degraded_cache", required)
                 return cached.value
+            # ENV BASELINE (PostHog -> last-known -> ENV -> default). Only when PostHog could not
+            # define the flag AND the flag is a plain FEATURE flag (free tier, no
+            # licence requirement). Licensed/tiered flags never reach this branch's
+            # result: `licensed` is True for them, so they stay licence-server-only.
+            if flag_result is None and not licensed:
+                env_value = env_flag_value(flag_key)
+                if env_value is not None:
+                    logger.info(
+                        "entitlement.env_baseline",
+                        extra={"flag_key": flag_key, "tenant": tenant, "value": env_value},
+                    )
+                    self._record_decision(env_value, "env_baseline", required)
+                    return env_value
             logger.info(
                 "entitlement.degraded_default",
                 extra={"flag_key": flag_key, "tenant": tenant, "default": default},

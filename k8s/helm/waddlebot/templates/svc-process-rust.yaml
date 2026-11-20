@@ -115,6 +115,7 @@ spec:
             name: {{ .Values.posthog.bootstrap.secretName | default "posthog-bootstrap-secret" }}
             optional: true
         env:
+        {{- include "waddlebot.posthog.licenseKeyEnv" (dict "root" $ "name" "POSTHOG_KEY") | nindent 8 }}
         {{- include "waddlebot.otel.env" (dict "root" $ "service" "svc-process-rust") | nindent 8 }}
         # H-1/H-3 -- this workload's OWN least-privilege database identity (role waddles_svc_process;
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database

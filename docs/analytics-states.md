@@ -40,3 +40,10 @@ The core analytics service was deleted (PR #1233), so cross-community analytics
 (`/me/*`, `/community/*`, `/platform/{growth,activity,community-health,overview}`) report
 "unavailable" until a data source is wired. Tracked in issues #894, #448 and #1226. The community
 admin analytics page remains a "not available yet" placeholder by design.
+
+## AI Chatter (same pattern)
+
+`GET/PUT /api/v1/admin/<community>/ai-chatter/config` return 503 with the standard envelope and
+`error.code = AI_CHATTER_UNAVAILABLE` when `AI_INTERACTION_API_URL` is unset (legacy ai-interaction
+service deleted; no chart deploys a replacement). `AdminAIChatterConfig` renders a neutral
+"isn't available on this deployment yet" status instead of an error.

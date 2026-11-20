@@ -17,6 +17,7 @@ from typing import Any
 
 from .community_common import ensure_community_tables
 from .community_public_id import lookup_public_ids_sync
+from .sql_util import execute_positional
 
 
 @dataclass(slots=True, frozen=True)
@@ -102,7 +103,8 @@ def get_chat_history(
 def get_chat_channels(dal: Any, community_id: int) -> list[ChatChannel]:
     """Distinct channels with message count + last-message time, `general` always present."""
     ensure_community_tables(dal)
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         """
         SELECT channel_name, COUNT(*) AS message_count, MAX(created_at) AS last_message_at
         FROM hub_chat_messages

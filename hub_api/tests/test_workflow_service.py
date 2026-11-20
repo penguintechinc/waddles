@@ -108,7 +108,7 @@ class TestWorkflowCoreProxyClientRequest:
         assert result.ok is True
         assert result.body is None
 
-    async def test_transport_error_raises_service_unavailable(
+    async def test_connect_timeout_raises_workflow_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -118,8 +118,37 @@ class TestWorkflowCoreProxyClientRequest:
         client = WorkflowCoreProxyClient(base_url="http://workflow-core:8070")
         with pytest.raises(ApiError) as exc_info:
             await client.request("GET", "/workflows")
-        assert exc_info.value.status_code == 500
-        assert exc_info.value.code == "SERVICE_UNAVAILABLE"
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.code == "WORKFLOW_UNAVAILABLE"
+
+    async def test_dns_failure_raises_workflow_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """regression: alpha has no workflow-core -> `[Errno -2] Name or service not known` 500."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("[Errno -2] Name or service not known", request=request)
+
+        _patch_transport(monkeypatch, handler)
+        client = WorkflowCoreProxyClient(base_url="http://workflow-core:8070")
+        with pytest.raises(ApiError) as exc_info:
+            await client.request("GET", "/workflows")
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.code == "WORKFLOW_UNAVAILABLE"
+        assert "Errno" not in exc_info.value.message
+
+    async def test_read_timeout_is_a_real_upstream_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("slow", request=request)
+
+        _patch_transport(monkeypatch, handler)
+        client = WorkflowCoreProxyClient(base_url="http://workflow-core:8070")
+        with pytest.raises(ApiError) as exc_info:
+            await client.request("GET", "/workflows")
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.code == "WORKFLOW_UPSTREAM_ERROR"
 
     def test_base_url_defaults_to_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("WORKFLOW_CORE_URL", "http://workflow-core.svc:9000")

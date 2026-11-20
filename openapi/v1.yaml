@@ -13451,8 +13451,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/support/categories` -- open to any authenticated
-        tenant member.'
+      summary: '`GET /api/v1/admin/<id>/support/categories` -- active member or support
+        admin.'
     post:
       description: ''
       operationId: post_create_category
@@ -15699,7 +15699,8 @@ paths:
       responses:
         default:
           description: Undocumented response
-      summary: Every uploaded version of `app_id`, newest first.
+      summary: Every uploaded version of `app_id`, newest first (platform admin /
+        owning vendor).
     post:
       description: '
 
@@ -15766,7 +15767,9 @@ paths:
         `component`).'
   /api/v1/apps/{app_id}/versions/{version}:
     get:
-      description: ''
+      description: '
+
+        Platform admin or the owning vendor only -- see `_authorize_version_read`.'
       operationId: get_get_version
       parameters:
       - in: path
@@ -20649,6 +20652,116 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/internal/communities/<id>/connections/<provider>/token`.'
+  /api/v1/internal/communities/{community_id}/tokens/debit:
+    post:
+      description: '
+
+        Auth: community-bound machine JWT (`token.billing:debit`, `system` tenant,
+        `community`
+
+        claim == `<id>`; see `machine_authenticated`) from the allow-listed `svc-streaming`
+
+        identity. The acting member (`actor_user_id`) must hold an active membership
+        row in this
+
+        very community, so a service can never spend a community''s tokens for an
+        outsider or a
+
+        member of another tenant''s community. 403 otherwise; no ledger mutation.'
+      operationId: post_service_debit_tokens
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          type: integer
+      requestBody:
+        content:
+          application/json:
+            schema:
+              description: 'Request DTO for the service-to-service debit: the debit
+                plus the acting member''s id.'
+              properties:
+                actor_user_id:
+                  title: Actor User Id
+                  type: integer
+                amount:
+                  title: Amount
+                  type: integer
+                product_key:
+                  title: Product Key
+                  type: string
+                reason:
+                  title: Reason
+                  type: string
+                ref:
+                  anyOf:
+                  - type: string
+                  - type: 'null'
+                  default: null
+                  title: Ref
+              required:
+              - product_key
+              - amount
+              - reason
+              - actor_user_id
+              title: ServiceDebitRequest
+              type: object
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: 'Response DTO for a successful credit/debit -- deliberately
+                  flat.
+
+
+                  Flat (no nested dataclass field) so `@validate_response` is safe
+                  even
+
+                  though the underlying service call awaits `insert_async()`
+
+                  (`hub_api/PORTING.md` Gotcha #3 -- the crash class is specific to
+                  a
+
+                  NESTED dataclass response field, and "flat responses... were
+
+                  empirically confirmed safe with normal @validate_response" per that
+
+                  gotcha''s own writeup).'
+                properties:
+                  balance_after:
+                    title: Balance After
+                    type: integer
+                  success:
+                    title: Success
+                    type: boolean
+                  transaction_id:
+                    title: Transaction Id
+                    type: integer
+                required:
+                - success
+                - balance_after
+                - transaction_id
+                title: TokenLedgerResponse
+                type: object
+          description: 'Response DTO for a successful credit/debit -- deliberately
+            flat.
+
+
+            Flat (no nested dataclass field) so `@validate_response` is safe even
+
+            though the underlying service call awaits `insert_async()`
+
+            (`hub_api/PORTING.md` Gotcha #3 -- the crash class is specific to a
+
+            NESTED dataclass response field, and "flat responses... were
+
+            empirically confirmed safe with normal @validate_response" per that
+
+            gotcha''s own writeup).'
+      summary: Debit a community's balance on behalf of an ACTIVE member -- machine
+        identity only.
   /api/v1/internal/dataplane/app-commands/desired:
     get:
       description: ''
@@ -21736,15 +21849,15 @@ paths:
     post:
       description: '
 
-        Community-member action (`admin=False`): a member consuming a
+        Community-admin action (`admin=True` + `token.billing:manage`): a debit mutates
+        the
 
-        premium feature on their own community''s behalf, not a financial/
+        community''s money-equivalent ledger, so a plain member must never be able
+        to drain it.
 
-        admin operation. Other backend features that meter their own
+        Services that meter on a member''s behalf (svc-streaming) use `service_debit_tokens`
 
-        consumption should call `token_billing_service.debit_tokens()`
-
-        directly instead of round-tripping through this HTTP endpoint.'
+        below with a machine identity; they never forward the member''s JWT here.'
       operationId: post_debit_tokens
       parameters:
       - in: path

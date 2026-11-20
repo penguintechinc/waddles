@@ -21,7 +21,12 @@ from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
-from services.community_common import api_error, community_in_tenant, get_current_user
+from services.community_common import (
+    api_error,
+    community_in_tenant,
+    feature_not_enabled,
+    get_current_user,
+)
 from services.community_inventory import (
     add_stock,
     checkin_item,
@@ -63,7 +68,7 @@ async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_INVENTORY, tenant=ctx.tenant_slug):
-        return api_error("Community inventory requires a Professional plan or higher", 402)
+        return feature_not_enabled("Community inventory requires a Professional plan or higher")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     items = list_items(current_app.config["dal"], community_id)
