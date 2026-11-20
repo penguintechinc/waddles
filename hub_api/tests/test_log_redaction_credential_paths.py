@@ -362,3 +362,22 @@ class TestKnowledgeCrawlerLogs:
         assert SENTINEL not in text
         assert "Chunk index error type=builtins.RuntimeError" in text
         assert "source_id=7" in text and "host=docs.example.com" in text
+
+
+class TestKnowledgeSourceUrlErrorMessages:
+    """`KnowledgeServiceError` / `SSRFError` text never carries URL userinfo or query secrets."""
+
+    def test_validate_source_url_message_has_origin_only(self) -> None:
+        url = f"https://user:{SENTINEL}@127.0.0.1:9/p?access_token={SENTINEL}"
+        with pytest.raises(bot_ai_knowledge.KnowledgeServiceError) as err:
+            bot_ai_knowledge._validate_source_url(url)
+        assert SENTINEL not in str(err.value)
+        assert "user:" not in str(err.value)
+        assert err.value.status == 400
+
+    def test_no_host_ssrf_error_omits_url(self) -> None:
+        from services.url_guard import validate_url
+
+        with pytest.raises(SSRFError) as err:
+            validate_url(f"https://:{SENTINEL}@/x?t={SENTINEL}")
+        assert SENTINEL not in str(err.value)
