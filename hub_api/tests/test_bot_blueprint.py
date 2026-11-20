@@ -393,10 +393,27 @@ class TestAIChatter:
             headers=auth_headers(scope="bot.ai_chatter:read"),
         )
         assert resp.status_code == 503
-        assert await resp.get_json() == {
-            "error": "service_unavailable",
-            "service": "ai-interaction",
-        }
+        body = await resp.get_json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "AI_CHATTER_UNAVAILABLE"
+        assert "service_unavailable" not in str(body)
+
+    async def test_unconfigured_upstream_put_is_typed_503(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        monkeypatch: Any,
+        community_uuid: str,
+    ) -> None:
+        monkeypatch.delenv("AI_INTERACTION_API_URL", raising=False)
+        resp = await client.put(
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
+            headers=auth_headers(scope="bot.ai_chatter:write"),
+            json={"enabled": True},
+        )
+        assert resp.status_code == 503
+        assert (await resp.get_json())["error"]["code"] == "AI_CHATTER_UNAVAILABLE"
 
     async def test_get_config_proxies_service_response(
         self,

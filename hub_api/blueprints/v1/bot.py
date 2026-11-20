@@ -423,6 +423,21 @@ class AIChatterConfigResponse:
     config: AIChatterConfigDTO
 
 
+#: Stable machine-readable code the webui classifies on (neutral "not available" panel).
+CODE_AI_CHATTER_UNAVAILABLE = "AI_CHATTER_UNAVAILABLE"
+
+
+def _chatter_unavailable() -> tuple[dict[str, Any], int]:
+    """503 standard envelope when `AI_INTERACTION_API_URL` is unset (backend not deployed).
+
+    Same shape as the analytics unavailable state (`{success, error:{code,message}}`) so the
+    webui renders a neutral panel instead of the raw `service_unavailable` token.
+    """
+    return _error(
+        "AI Chatter is not available on this deployment yet", 503, CODE_AI_CHATTER_UNAVAILABLE
+    )
+
+
 def _chatter_dto(config: dict[str, Any]) -> AIChatterConfigDTO:
     """Project relayed upstream config onto `AIChatterConfigDTO`."""
     known = {f.name for f in dataclasses.fields(AIChatterConfigDTO)}
@@ -439,7 +454,7 @@ async def get_ai_chatter_config(community_id: int) -> Any:
     if denied:
         return denied
     if not bot_ai_chatter.is_configured():
-        return {"error": "service_unavailable", "service": bot_ai_chatter.SERVICE_NAME}, 503
+        return _chatter_unavailable()
     config = await bot_ai_chatter.get_chatter_config(community_id)
     return AIChatterConfigResponse(success=True, config=_chatter_dto(config))
 
@@ -455,7 +470,7 @@ async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: i
     if denied:
         return denied
     if not bot_ai_chatter.is_configured():
-        return {"error": "service_unavailable", "service": bot_ai_chatter.SERVICE_NAME}, 503
+        return _chatter_unavailable()
     update = bot_ai_chatter.AIChatterConfigUpdate(
         enabled=data.enabled,
         max_responses_per_window=data.max_responses_per_window,
