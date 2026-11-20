@@ -104,6 +104,19 @@ def entitlement_client(monkeypatch: pytest.MonkeyPatch) -> Any:
     return _install
 
 
+@pytest.fixture(autouse=True)
+def _inventory_authz_allows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Neutralise inventory's per-community authz: this file pins the TIER/FLAG gate only.
+
+    The authz gate (member/admin, tenant_admins + role tables the minimal `community_db` here does
+    not build) is covered end-to-end in `test_community_inventory.py`.
+    """
+    import blueprints.v1.community_inventory as inventory_module
+
+    monkeypatch.setattr(inventory_module, "require_inventory_admin", lambda *_a, **_k: None)
+    monkeypatch.setattr(inventory_module, "require_inventory_member", lambda *_a, **_k: None)
+
+
 def _app(bp: Any, dal: Any) -> Quart:
     app = Quart(__name__)
     QuartSchema(app)
