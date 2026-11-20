@@ -54,8 +54,8 @@ def _clean_registry() -> Any:
 
 
 def test_invoke_encodes_canonical_json_args_and_decodes_the_ok_value(host: FakeToolHost) -> None:
-    host.script("waddles.core.economy", "adjust_balance", {"balance": 5})
-    out = _run(tool.invoke("waddles.core.economy", "adjust_balance", {"b": 1, "a": [1, 2]}))
+    host.script("penguintechinc.waddles.economy", "adjust_balance", {"balance": 5})
+    out = _run(tool.invoke("penguintechinc.waddles.economy", "adjust_balance", {"b": 1, "a": [1, 2]}))
     assert out == {"balance": 5}
     (call,) = host.calls
     assert call.args == b'{"a":[1,2],"b":1}'

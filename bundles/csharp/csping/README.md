@@ -30,7 +30,7 @@ pins, same WIT world, same compiled output shape).
 
 | | |
 |---|---|
-| App id | `waddles.core.example.csping` (`provider: builtin`, `language: csharp`, WASI component) |
+| App id | `penguintechinc.waddles.csping` (`provider: builtin`, `language: csharp`, WASI component) |
 | Command | `!csping` -> `pong (c#)`; the command name matches case-sensitively (`!CSPING`, `!csping-not-quite`, `hello` produce no reply) |
 | Verbs | none -- trailing arguments are ignored, there are no sub-commands |
 | Platforms | Twitch, Discord (`chat.message`); the pong relays to the event's **own** origin platform |

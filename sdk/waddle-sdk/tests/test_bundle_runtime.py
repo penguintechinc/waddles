@@ -35,7 +35,7 @@ def test_bundle_context_scopes_correctly() -> None:
     """bundle_context() binds and then clears BundleContext around its block."""
     with pytest.raises(BundleRuntimeError):
         get_bundle_context()
-    with bundle_context(tenant="acme", community="main", app_id="waddles.core.example.echo") as ctx:
+    with bundle_context(tenant="acme", community="main", app_id="penguintechinc.waddles.echo") as ctx:
         assert ctx.tenant == "acme"
         assert get_bundle_context().community == "main"
     with pytest.raises(BundleRuntimeError):

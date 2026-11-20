@@ -13,9 +13,9 @@ from waddle_sdk.flask_core.feature_flags import feature_enabled, tier, tier_at_l
 
 def test_feature_enabled_falls_back_to_default_outside_a_component() -> None:
     """No wit_world module is importable in a host-side pytest run -- degrade to default."""
-    assert asyncio.run(feature_enabled("waddles.core.example", tenant="acme", default=True)) is True
+    assert asyncio.run(feature_enabled("penguintechinc.waddles.example", tenant="acme", default=True)) is True
     assert (
-        asyncio.run(feature_enabled("waddles.core.example", tenant="acme", default=False)) is False
+        asyncio.run(feature_enabled("penguintechinc.waddles.example", tenant="acme", default=False)) is False
     )
 
 
@@ -23,7 +23,7 @@ def test_feature_enabled_uses_the_wit_import_when_available(monkeypatch) -> None
     """When `wit_world` is importable, the WIT `flags.enabled` import answers, not the fallback."""
 
     def fake_enabled(key: str, default_value: bool) -> bool:
-        assert key == "waddles.core.example"
+        assert key == "penguintechinc.waddles.example"
         return not default_value  # prove the WIT path, not the fallback, answered
 
     fake_wit_world = types.ModuleType("wit_world")
@@ -33,7 +33,7 @@ def test_feature_enabled_uses_the_wit_import_when_available(monkeypatch) -> None
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
 
     result = asyncio.run(
-        feature_enabled("waddles.core.example", tenant="acme", community=1, default=False)
+        feature_enabled("penguintechinc.waddles.example", tenant="acme", community=1, default=False)
     )
     assert result is True
 
@@ -54,10 +54,10 @@ def test_feature_enabled_degrades_when_wit_world_has_no_flags_attribute(monkeypa
     monkeypatch.setitem(sys.modules, "wit_world", fake_wit_world)
 
     assert (
-        asyncio.run(feature_enabled("waddles.core.example", tenant="acme", default=True)) is True
+        asyncio.run(feature_enabled("penguintechinc.waddles.example", tenant="acme", default=True)) is True
     )
     assert (
-        asyncio.run(feature_enabled("waddles.core.example", tenant="acme", default=False)) is False
+        asyncio.run(feature_enabled("penguintechinc.waddles.example", tenant="acme", default=False)) is False
     )
 
 

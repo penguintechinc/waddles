@@ -16,8 +16,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CS = ROOT / "bundles" / "csharp"
-ECONOMY = "waddles.core.service.economy"
-REPUTATION = "waddles.core.service.reputation"
+ECONOMY = "penguintechinc.waddles.economy"
+REPUTATION = "penguintechinc.waddles.reputation"
 CHAT = [
     {
         "id": "chat.send:discord",
@@ -365,12 +365,13 @@ def build(
     )
     tools_req = [t["req"] for t in spec["tools"]]
     consumes = spec["consumes"]
+    # app_id format: <github-org>.<repo>.<bundle-name> (PenguinTwitchBot ports: psychoboy.penguintwitchbot.<name>).
     m: dict[str, Any] = {
         "schema_version": 2,
-        "app_id": f"waddles.integrations.superpenguin.{name}",
+        "app_id": f"psychoboy.penguintwitchbot.{name}",
         "name": f"{spec['title']} (SuperPenguinTV)",
         "version": "1.0.0",
-        "feature": "waddles.integrations.superpenguin",
+        "feature": "psychoboy.penguintwitchbot",
         "module": "integrations",
         "provider": "thirdparty",
         "language": "csharp",

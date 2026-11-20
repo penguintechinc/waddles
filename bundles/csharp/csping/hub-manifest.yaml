@@ -1,5 +1,5 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.csping -- see bundles/rust/ping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.csping -- see bundles/rust/ping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema: M2a
 # install-hooks, which understands only `artifact: source|prebuilt`, vs. `bundle.yaml`'s
 # M1/M1.5 bundle-compiler/SDK schema).
@@ -10,7 +10,7 @@
 # (componentize-dotnet/NativeAOT-LLVM is a from-scratch spike, not yet run through two
 # independent --no-cache builds), so it is intentionally excluded from
 # scripts/verify-core-bundles-reproducible.sh's byte-identity gate, the same way
-# waddles.core.example.pyping is -- see that script's own comment and
+# penguintechinc.waddles.pyping is -- see that script's own comment and
 # bundles/Dockerfile.core-bundles's csharp-bundle-builder stage comment.
 #
 # 1.0.0 is permanently retired -- fix/csping-version-bump. alpha's app_versions already has a
@@ -22,10 +22,10 @@
 # bundles/rust/ping/hub-manifest.yaml's own 1.0.0/1.0.1 retirement comment -- now also matching
 # ping's "no prior burned-slot history" pattern in having exactly one retired slot.
 schema_version: 2
-app_id: waddles.core.example.csping
+app_id: penguintechinc.waddles.csping
 name: Ping Example Bundle (C#)
 version: 1.0.3
-feature: waddles.core.example
+feature: penguintechinc.waddles
 module: core
 provider: builtin
 author: github:penguintechinc

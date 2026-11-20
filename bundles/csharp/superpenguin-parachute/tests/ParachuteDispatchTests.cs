@@ -14,7 +14,7 @@ public class ParachuteDispatchTests
             ? $"{{\"text\":\"{text}\"}}"
             : $"{{\"text\":\"{text}\",\"channel_id\":\"{channelId}\"}}";
         return new StageEnvelopeInfo(
-            "tenant-1", null, "waddles.integrations.superpenguin.parachute", "action",
+            "tenant-1", null, "psychoboy.penguintwitchbot.parachute", "action",
             new PlatformEventInfo(platform, "chat.message", "user-1", replyJson, "2026-09-28T00:00:00.000Z"),
             "2026-09-28T00:00:00.000Z", null, null);
     }
@@ -79,7 +79,7 @@ public class ParachuteDispatchTests
         // A JSON array fails to deserialize as `ChatReplyPayload` (an empty object would parse with null fields
         // and hit the MISSING_CHANNEL path instead).
         var envelope = new StageEnvelopeInfo(
-            "tenant-1", null, "waddles.integrations.superpenguin.parachute", "action",
+            "tenant-1", null, "psychoboy.penguintwitchbot.parachute", "action",
             new PlatformEventInfo("twitch", "chat.message", "user-1", "[]", "2026-09-28T00:00:00.000Z"),
             "2026-09-28T00:00:00.000Z", null, null);
 

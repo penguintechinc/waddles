@@ -7,7 +7,7 @@ not a first-party core row. This is the **event-award policy**; the economy serv
 
 | | |
 |---|---|
-| App id | `waddles.integrations.superpenguin.bonustickets` |
+| App id | `psychoboy.penguintwitchbot.bonustickets` |
 | Flag (default OFF) | `waddles.command-superpenguin-bonustickets` |
 | World | `stage-next-tools` (C# NativeAOT-LLVM component) |
 | Consumes | `chat.message` (twitch, discord): every line, to track who is active |

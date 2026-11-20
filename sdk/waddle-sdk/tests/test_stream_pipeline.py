@@ -38,7 +38,7 @@ def test_stage_envelope_round_trips_with_optional_fields_absent() -> None:
     env = StageEnvelope(
         tenant="acme",
         community=None,
-        app_id="waddles.core.example.echo",
+        app_id="penguintechinc.waddles.echo",
         stage="process",
         event=e,
         ts="2026-09-14T12:00:00.123Z",

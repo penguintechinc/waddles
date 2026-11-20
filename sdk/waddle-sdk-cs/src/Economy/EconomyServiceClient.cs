@@ -45,7 +45,7 @@ public sealed class EconomyServiceClient(IToolClient tools, string messageId, st
 
     /// <summary>
     /// Moves <paramref name="amount"/> from <paramref name="from"/> to <paramref name="to"/> through `transfer_from`. Needs the
-    /// dangerous `tool.call:waddles.core.service.economy:transfer_from` grant; without it the host answers not-granted, which
+    /// dangerous `tool.call:penguintechinc.waddles.economy:transfer_from` grant; without it the host answers not-granted, which
     /// surfaces as <see cref="EconomyErrorKind.Denied"/> with message `not_granted` (callers must refuse loudly, never fake it).
     /// </summary>
     public void TransferFrom(string from, string to, ulong amount, string reason)
