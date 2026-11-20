@@ -82,6 +82,14 @@ jobs:
       - name: ci-gate tier policy tests
         run: python -m pytest -q scripts/ci/tests/test_ci_gate_tier.py
 
+      # Multi-page `gh api --paginate` array flattening used by ci-gate.
+      - name: ci-gate merge-pages tests
+        run: bash scripts/ci/tests/test_ci_gate_merge_pages.sh
+
+      # Bounded retry on transient 5xx + loud failure on non-array responses.
+      - name: ci-gate fetch retry tests
+        run: bash scripts/ci/tests/test_ci_gate_fetch.sh
+
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
     # bare dal2-alpha-ci image has no `make` (and sudo is blocked): stays on hosted ubuntu-latest until a custom runner image bakes it in
