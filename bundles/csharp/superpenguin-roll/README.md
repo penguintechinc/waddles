@@ -52,7 +52,7 @@ Boxcars 10x (expected return 33/36 of the stake). Deviation from the original (f
 | `storage.kv` | per-user cooldown (180 s, per command) + per-event outcome record (idempotent redelivery) |
 | `economy.wager` (`max_bet: 500`) | `wager` and `max-bet` |
 | `identity.resolve` | actor -> community user uuid |
-| `tool.call:waddles.core.service.economy:points_view` | currency alias for display |
+| `tool.call:penguintechinc.waddles.economy:points_view` | currency alias for display |
 | `chat.send:twitch` / `chat.send:discord` | relay the reply |
 
 ## Platforms

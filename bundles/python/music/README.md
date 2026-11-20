@@ -1,7 +1,7 @@
 # music (Python)
 
 `!sr`/`!songrequest` + `!music`/`!queue` -- a per-community song-request QUEUE. Community-scoped
-fun/utility content, first-party (`provider: builtin`, `app_id: waddles.core.example.music`),
+fun/utility content, first-party (`provider: builtin`, `app_id: penguintechinc.waddles.music`),
 **inspired by** superpenguintv (Psychoboy)'s
 [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) song-request feature -- not a
 literal port. No original source code or text is reused; the command grammar, queue data shape,
@@ -15,7 +15,7 @@ through the grammar -- same documented extension as `shoutout`'s own bare-positi
 (the request text may start with any token, including one that looks like a VERB).
 
 **Chat front end only (1.1.0+).** The queue, now-playing state, history and stats live in the shared
-service `waddles.core.service.music-requests` (see `docs/music-requests-service.md`); this bundle
+service `penguintechinc.waddles.music-requests` (see `docs/music-requests-service.md`); this bundle
 turns chat commands into its tool calls (process stage) and relays the reply + publishes the overlay
 surfaces (action stage). It works fully with the optional AI DJ absent and never references it.
 Privilege is decided by the service's host-verified scopes, never chat badges: a typed `forbidden`
@@ -52,6 +52,6 @@ command (text only: title, artist, duration; no requester, no URLs).
 
 ## Permissions
 
-`storage.kv` (migration only), `overlay.media`, `chat.send:discord|twitch`, and `tool.call:waddles.core.service.music-requests:<tool>`
+`storage.kv` (migration only), `overlay.media`, `chat.send:discord|twitch`, and `tool.call:penguintechinc.waddles.music-requests:<tool>`
 for each tool above (`requested_tools` in `hub-manifest.yaml`). Built against WIT world `stage-next-tools`
 (`bundles/core-bundles.yaml`). Tests: `python3 -m pytest bundles/python/music/tests`.

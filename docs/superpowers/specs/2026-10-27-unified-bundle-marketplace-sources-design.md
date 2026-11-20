@@ -26,7 +26,7 @@ Why now: install today is one-bundle-at-a-time (`POST /bundles`, `bundle_version
 | Executor verifies only platform Ed25519 keys; fail-closed without `BUNDLE_SIGNING_PUBLIC_KEYS` | `core/bundle_executor/src/signing.rs:149,203,237` |
 | Platform signs at approval; private key env-only | `hub_api/services/bundle_signing_service.py:48,107,173` |
 | Signing payload binds `app_id, version, digest, approval_id` | `bundle_signing_service.py:78` |
-| `app_id` shape `waddles.<seg>.<seg>.<seg>`; `feature` = app_id minus last segment | `bundle_manifest_v2.py:42,432-447` |
+| `app_id` shape `<github-org>.<repo>.<bundle-name>`; the owner is the first segment (`<github-org>`) | `bundle_manifest_v2.py:42,432-447` |
 | `waddles.core.` reserved; seeder-only via `_guard_core_namespace` | `vendor_bundle_authz.py:56`, `seed_core_bundles.py:420` |
 | Third-party namespace precedent: `waddles.integrations.vendor-{id}.{app}` (no regex widening) | `vendor_bundle_authz.py:59` |
 | Version FSM UPLOADED..PUBLISHED/REJECTED; prebuilt publishes straight to PUBLISHED, "staged != approved" | `bundle_version_service.py:73-95,455-517` |
@@ -75,7 +75,7 @@ Alembic head is `0061` (`alembic/versions/0061_port_legacy_sql_103_codec.py`); t
 3. **Guards:** max clone bytes, max file count, max single-file size, max path depth, symlink rejection (no links escaping the root), no path traversal; wall-clock timeout. A violation rejects the whole scan with a logged reason.
 4. **Walk** exactly `bundles/{python,rust,csharp,javascript}/*/`; require `bundle.yaml` + `hub-manifest.yaml`; ignore everything else.
 5. **Validate** `hub-manifest.yaml` with `parse_bundle_manifest_v2` (`bundle_manifest_v2.py:399`); reject, don't repair, on error. `version` must be semver.
-6. **Namespace rewrite/enforce:** manifest `app_id` must equal the assigned source-scoped id `waddles.integrations.src-{source_public_id_short}.{app}` — i.e. the *feature segment* is source-scoped, reusing the vendor mechanism's no-regex-change trick (`vendor_bundle_authz.py:59`). Manifest `app_id` that claims `waddles.core.*` or another source's prefix is a hard reject (extend `enforce_vendor_namespace` at `:127` to a `source` variant). `app_id` collisions across sources are impossible by construction. Decided (Q4): the platform assigns the scoped segment and rewrites the manifest `app_id` at scan time; `_APP_ID_RE` is not widened.
+6. **Namespace enforce:** manifest `app_id` must be `<github-org>.<repo>.<bundle-name>` with `<github-org>.<repo>` equal to the source's own GitHub org and repo. A manifest claiming `penguintechinc` from any other source is a hard reject. `app_id` collisions across sources are impossible by construction.
 7. **Supply-chain check:** parse the bundle's dependency manifests (`pyproject.toml`, `Cargo.toml`/`Cargo.lock`, `*.csproj`, `package.json`/lock) against the PRC/sanctioned denylist (general.md); a hit rejects the bundle. Also reuse the permission summary (`get_permission_summary`, `bundle_approval_service.py:315`) so the approver sees capabilities.
 8. Output: per-bundle `ScanResult` (slotted dataclass) -> feeds 4.4 / 4.5.
 

@@ -1,6 +1,6 @@
 # Community economy service
 
-`waddles.core.service.economy` is an always-on trusted service bundle. It exports
+`penguintechinc.waddles.economy` is an always-on trusted service bundle. It exports
 `get_balance`, `points_view`, `adjust_balance`, `transfer`, `give`, `points_set`,
 `pay_pot`, `exchange`, and `points_leaders` through `tool.invoke`.
 

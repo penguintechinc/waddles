@@ -1,7 +1,7 @@
 # eli5 (Python, AI-backed)
 
 `!eli5 <thing>` -- a simple 'explain like I'm 5' explanation of the thing. First-party (`provider: builtin`,
-`app_id: waddles.core.example.eli5`), stateless, WASI component built against `world stage-next`
+`app_id: penguintechinc.waddles.eli5`), stateless, WASI component built against `world stage-next`
 (the `ai` import). Modeled on `eightball`.
 
 | | |

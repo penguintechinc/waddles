@@ -1,8 +1,8 @@
 # Twitch clips (app bundle)
 
-`waddles.core.example.twitch-clips` - Rust APP bundle on `world stage-next-tools`. It owns no
+`penguintechinc.waddles.twitch-clips` - Rust APP bundle on `world stage-next-tools`. It owns no
 Twitch credentials and no Helix code: clips are created, polled and listed only through the Twitch
-platform service bundle's tools (`waddles.core.service.twitch`: `twitch.clip.{create,get,list}`),
+platform service bundle's tools (`penguintechinc.waddles.twitch`: `twitch.clip.{create,get,list}`),
 whose broadcaster is pinned host-side. App bundles invoke, service bundles own tools.
 
 ## Chat commands (Twitch)

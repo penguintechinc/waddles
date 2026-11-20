@@ -1,4 +1,4 @@
-# Reputation accrual app bundle (`waddles.core.app.reputation-accrual`)
+# Reputation accrual app bundle (`penguintechinc.waddles.reputation-accrual`)
 
 Default reputation LOGIC bundle (`provides: reputation-logic`), Rust/WASM on `stage-next-tools`.
 Turns platform events into reputation deltas and calls the reputation SERVICE bundle's `adjust`
@@ -52,7 +52,7 @@ cargo component build --release --target wasm32-wasip2 --locked
 
 ## Per-community opt-out (`accrual_enabled`)
 
-Community config (bundle-admin gateway `PUT /api/v1/apps/community/<id>/bundles/waddles.core.app.reputation-accrual/config`)
+Community config (bundle-admin gateway `PUT /api/v1/apps/community/<id>/bundles/penguintechinc.waddles.reputation-accrual/config`)
 accepts `accrual_enabled` (boolean, default `true`). An explicit `false` makes the bundle return outcome
 `community_disabled` for every event of that community: no tool call, no accrual. Only an explicit `false`
 disables; absent / `{}` / unparseable keeps accrual ON. Used for the synthetic latency-canary community

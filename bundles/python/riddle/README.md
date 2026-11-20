@@ -1,6 +1,6 @@
 # riddle (Python)
 
-Static-list riddles; answers revealed by number so no state is stored. First-party (`provider: builtin`, `app_id: waddles.core.example.riddle`), stateless WASI component, modeled on `eightball`.
+Static-list riddles; answers revealed by number so no state is stored. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.riddle`), stateless WASI component, modeled on `eightball`.
 
 | | |
 |---|---|

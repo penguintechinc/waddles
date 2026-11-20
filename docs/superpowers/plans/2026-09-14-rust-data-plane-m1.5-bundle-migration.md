@@ -3494,7 +3494,7 @@ EOF
 | `community_loyalty_process.py` | `waddles.community.loyalty.default` | yes |
 | `community_polls_process.py` | `waddles.community.polls.default` | yes |
 | `community_reputation_process.py` | `waddles.community.reputation.default` | **no — new row** |
-| `echo_process.py` | `waddles.core.demo.echo` | yes |
+| `echo_process.py` | `penguintechinc.waddles.echo-pipeline` | yes |
 | `inventory_process.py` | `waddles.community.inventory.default` | **no — new row** |
 | `marketing_engagement_process.py` | `waddles.marketing.engagement.default` | yes |
 | `social_alias_process.py` | `waddles.social.alias.default` | yes |
@@ -3626,7 +3626,7 @@ _CONSUMES_BY_APP_ID: dict[str, str] = {
     # The echo demo bundle "consumed everything" -- per the M1.5 mapping
     # table, five explicit per-platform rules, never platform: "*", so this
     # migration does not require allow_wildcard_consumes anywhere.
-    "waddles.core.demo.echo": (
+    "penguintechinc.waddles.echo-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"]}, '
         '{"platform": "discord", "event_types": ["chat.message"]}, '
         '{"platform": "slack", "event_types": ["chat.message"]}, '

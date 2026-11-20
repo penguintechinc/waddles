@@ -1,4 +1,4 @@
-# waddles.core.service.music-youtube
+# penguintechinc.waddles.music-youtube
 
 Always-on `kind: service` bundle (Rust, `world stage-tools`) exposing the **common music tool
 contract** for YouTube. Search/metadata only: Waddles never re-streams or downloads audio;

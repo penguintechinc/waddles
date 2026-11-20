@@ -1,4 +1,4 @@
-# waddles.core.service.ai
+# penguintechinc.waddles.ai
 
 Always-on `kind: service` bundle (Rust, `world stage-tools`) exposing guarded AI tools to app
 bundles (AI Teammates, DJ, ...) through `tool.invoke`. It wraps the host `ai.generate`

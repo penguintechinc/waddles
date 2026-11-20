@@ -1,7 +1,7 @@
 # remind (Python)
 
 `!remind` -- a per-user, per-community reminder store. `kv`-only, first-party
-(`provider: builtin`, `app_id: waddles.core.example.remind`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.remind`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** (not a port; no third-party attribution applies).
 
 > **Delivery is not implemented, by design.** The `stage` WIT world gives a bundle no scheduler /

@@ -1,7 +1,7 @@
 # heist (Python)
 
 `!heist <amount>` -- a timed group gamble. First-party (`provider: builtin`,
-`app_id: waddles.core.example.heist`). Concept inspired by superpenguintv (Psychoboy)'s
+`app_id: penguintechinc.waddles.heist`). Concept inspired by superpenguintv (Psychoboy)'s
 [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) heist (Apache-2.0 here,
 original implementation -- no source or text reused, same convention as `fish`).
 

@@ -1,7 +1,7 @@
 # chat (Python)
 
 `!chat-history [list]` / `!channels [list]` -- community chat lookup commands. First-party
-(`provider: builtin`, `app_id: waddles.core.example.chat`), stateless, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.chat`), stateless, WASI component.
 
 **Status: BUILD-ONLY / INERT, and the read path is unavailable by design.** Both commands
 recognize and always reply with an explicit "not available from this bundle

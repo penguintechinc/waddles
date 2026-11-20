@@ -1,7 +1,7 @@
 # inventory (Python)
 
 `!inventory`/`!inv` -- a community-scoped, per-user item collection. Community-scoped fun/
-engagement content, first-party (`provider: builtin`, `app_id: waddles.core.example.inventory`),
+engagement content, first-party (`provider: builtin`, `app_id: penguintechinc.waddles.inventory`),
 **inspired by** the general shape common to Twitch economy bots, including superpenguintv
 (Psychoboy)'s [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) -- not a literal
 port. No original source code or text is reused; the command grammar, data model, optimistic-
@@ -192,5 +192,5 @@ Current result: 245 tests, `src/app.py` at 100% statement+branch coverage.
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.inventory`, activation target
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.inventory`, activation target
 `global`); dark until `waddles.command-inventory` is turned on.

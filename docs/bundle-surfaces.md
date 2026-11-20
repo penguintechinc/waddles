@@ -27,8 +27,8 @@ behind the community's VIEW key.
 
 | id | consumer | replay | cap | rate/min |
 |---|---|---|---|---|
-| `waddles.core.example.music.now_playing` | Music Station card | yes | 4 KiB | 120 |
-| `waddles.core.example.music.queue` (<=50 tracks) | Music Station list | yes | 16 KiB | 120 |
+| `penguintechinc.waddles.music.now_playing` | Music Station card | yes | 4 KiB | 120 |
+| `penguintechinc.waddles.music.queue` (<=50 tracks) | Music Station list | yes | 16 KiB | 120 |
 | `live.channels` | who's-live widget | yes | 16 KiB | 30 |
 | `clip.alert` | clip popup (event) | no | 2 KiB | 20 |
 | `alert` | generic alert; also bridged into `alert_box` | no | 2 KiB | 60 |

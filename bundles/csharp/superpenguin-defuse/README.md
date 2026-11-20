@@ -40,7 +40,7 @@ refusals reply in chat and release the cooldown; `denied`/`unavailable`/`backend
 | `storage.kv` | cooldown + per-event outcome record |
 | `economy.wager` (`max_bet: 500`) | `wager` and `max-bet` |
 | `identity.resolve` | actor -> community user uuid |
-| `tool.call:waddles.core.service.economy:points_view` | currency alias |
+| `tool.call:penguintechinc.waddles.economy:points_view` | currency alias |
 | `chat.send:twitch` / `chat.send:discord` | relay the reply |
 
 Gated behind the PostHog flag `waddles.command-superpenguin-defuse` (default OFF), checked after the command match and before the cooldown.

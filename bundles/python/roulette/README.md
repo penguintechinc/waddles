@@ -1,7 +1,7 @@
 # roulette (Python)
 
 `!roulette` -- a flavor-only russian-roulette chat minigame. Community-scoped fun content,
-first-party (`provider: builtin`, `app_id: waddles.core.example.roulette`). Net-new Waddles
+first-party (`provider: builtin`, `app_id: penguintechinc.waddles.roulette`). Net-new Waddles
 content -- no inspiration source, no attribution/notice required (contrast `bundles/python/fish`,
 which credits superpenguintv (Psychoboy) for its catch-and-track concept).
 
@@ -157,4 +157,4 @@ cooldown bounds/TTL semantics, PII-free-log regression and `_entry_wiring`.
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.roulette`).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.roulette`).

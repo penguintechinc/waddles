@@ -27,7 +27,7 @@ admin_tools:               # tools the admin UI may call
   tool: leaderboard        # exported tool name on target_app_id
   kind: read               # read = paginated data view | action = audited write path
   scope: community:moderate   # community:moderate | community:admin
-  target_app_id: waddles.core.service.reputation   # default: this bundle (service bundle)
+  target_app_id: penguintechinc.waddles.reputation   # default: this bundle (service bundle)
 ```
 
 Rules enforced at ingest (`parse_bundle_manifest_v2`): a tool on **another** bundle must also be in

@@ -147,7 +147,7 @@ runs as `waddles_bundle_migrator` on a dedicated psycopg2 connection (host/port/
 `DATABASE_URL`, role from `BUNDLE_MIGRATOR_USER`, password from `BUNDLE_MIGRATOR_PASSWORD`; unset
 password => 503 `bundle_data_provisioning_unavailable`, approval refused). The table provider
 (`builtin` -> `app_core`, else `thirdparty` -> `app_community`) is derived from the app-id namespace
-(`waddles.core.` prefix), never from the manifest's own claim.
+(`penguintechinc.` owner segment), never from the manifest's own claim.
 
 ### Role passwords (Helm chart)
 

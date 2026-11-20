@@ -1,7 +1,7 @@
 # wave (Python)
 
 `!wave [target]` -- a wholesome, wave-themed greeting. Stateless chat fun, first-party
-(`provider: builtin`, `app_id: waddles.core.example.wave`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.wave`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** -- flavor strings written fresh, nothing reused from a
 third-party bot. Deliberately distinct from `bundles/python/social` (`!hug`/`!highfive`/`!pat`,
 which keep per-user given/received kv counters): `!wave` has **no state, no cooldown, no tally**,
