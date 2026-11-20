@@ -1024,9 +1024,9 @@ mod tests {
         let cli = CliConfig::parse_from([
             "svc-process",
             "--process-app-id",
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
         ]);
-        assert_eq!(cli.process_app_id, "waddles.bot.commands.default");
+        assert_eq!(cli.process_app_id, "penguintechinc.waddles.fixture-bot-commands-default");
     }
 
     #[test]

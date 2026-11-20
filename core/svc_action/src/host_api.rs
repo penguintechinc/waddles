@@ -1292,7 +1292,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 7,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: 1,
             },
             bundle_capability_gate::GrantSet {
@@ -1568,7 +1568,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Clock,
                         op: "now-millis".to_string(),
                         args: serde_json::json!({}),
@@ -1627,7 +1627,7 @@ mod tests {
             .request(Message::Load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
                 component_key: "k".to_string(),
@@ -1645,7 +1645,7 @@ mod tests {
         let result = connection
             .invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -1655,7 +1655,7 @@ mod tests {
                 crate::capabilities::InvokeScope {
                     tenant: "acme".to_string(),
                     community: None,
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: None,
                     origin_platform: None,
                     origin_guild_id: None,
@@ -1807,7 +1807,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Relay,
                         op: "send".to_string(),
                         args: crate::senders::twitch_relay_args(
@@ -1862,7 +1862,7 @@ mod tests {
             .request(Message::Load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
                 component_key: "k".to_string(),
@@ -1879,7 +1879,7 @@ mod tests {
         let result = connection
             .invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -1889,7 +1889,7 @@ mod tests {
                 InvokeScope {
                     tenant: "acme".to_string(),
                     community: Some("main".to_string()),
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: Some("somechannel".to_string()),
                     origin_platform: Some("twitch".to_string()),
                     origin_guild_id: None,
@@ -1988,7 +1988,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Clock,
                         op: "now-millis".to_string(),
                         args: serde_json::json!({}),
@@ -2127,7 +2127,7 @@ mod tests {
                     &Frame::new(
                         101,
                         Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                            app_id: "waddles.bot.commands.default".to_string(),
+                            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                             capability: penguin_bundle_host::wire::CapabilityKind::Context,
                             op: "get".to_string(),
                             args: serde_json::json!({}),
@@ -2189,7 +2189,7 @@ mod tests {
         let (result_a, result_b) = tokio::join!(
             connection.invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:aa".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -2199,7 +2199,7 @@ mod tests {
                 InvokeScope {
                     tenant: "tenant-a".to_string(),
                     community: None,
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: None,
                     origin_platform: None,
                     origin_guild_id: None,
@@ -2214,7 +2214,7 @@ mod tests {
             ),
             connection.invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:bb".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -2224,7 +2224,7 @@ mod tests {
                 InvokeScope {
                     tenant: "tenant-b".to_string(),
                     community: None,
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: None,
                     origin_platform: None,
                     origin_guild_id: None,
@@ -3051,7 +3051,7 @@ mod tests {
             Frame::new(
                 id,
                 Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     capability: penguin_bundle_host::wire::CapabilityKind::Clock,
                     op: "now-millis".to_string(),
                     args: serde_json::json!({}),

@@ -68,7 +68,7 @@ def test_full_d30_stage_envelope_deserializes() -> None:
     assert envelope.schema_version == 2
     assert envelope.tenant == "global"
     assert envelope.community is None
-    assert envelope.app_id == "waddles.bot.commands.default"
+    assert envelope.app_id == "penguintechinc.waddles.fixture-bot-commands-default"
     assert envelope.stage == "process"
     assert envelope.target_app_id is None
     assert envelope.workstream_id == "8f14e45f-ceea-467e-adde-3fb5c9752730"

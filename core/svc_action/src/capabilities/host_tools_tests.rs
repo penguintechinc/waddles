@@ -1438,7 +1438,7 @@ async fn relay_push_can_never_reach_host_tool_only_ops_even_with_every_grant() {
             .handle(
                 &scope(),
                 HostCallBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     capability: CapabilityKind::Relay,
                     op: "send".to_string(),
                     args: json!({
@@ -1466,7 +1466,7 @@ async fn relay_push_refuses_eventsub_create_and_delete_but_list_still_queues() {
             .handle(
                 &scope(),
                 HostCallBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     capability: CapabilityKind::Relay,
                     op: "send".to_string(),
                     args: json!({
@@ -1487,7 +1487,7 @@ async fn relay_push_refuses_eventsub_create_and_delete_but_list_still_queues() {
     c.handle(
         &scope(),
         HostCallBody {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             capability: CapabilityKind::Relay,
             op: "send".to_string(),
             args: json!({
@@ -1710,7 +1710,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
                 .handle(
                     &twitch_event(Some("500")),
                     HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: CapabilityKind::Relay,
                         op: "send".to_string(),
                         args: json!({
@@ -1738,7 +1738,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
         .handle(
             &twitch_event(Some("500")),
             HostCallBody {
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 capability: CapabilityKind::Relay,
                 op: "send".to_string(),
                 args: json!({

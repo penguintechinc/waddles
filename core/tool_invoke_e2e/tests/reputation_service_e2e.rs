@@ -58,7 +58,7 @@ const CALLER_WASM: &[u8] =
     include_bytes!("../../bundle_executor/tests/fixtures/tool_caller_fixture.wasm");
 const REP_WASM: &[u8] = include_bytes!("fixtures/reputation_service.wasm");
 
-const CALLER: &str = "waddles.e2e.app.giveaway";
+const CALLER: &str = "penguintechinc.waddles.fixture-e2e-app-giveaway";
 const REP: &str = "penguintechinc.waddles.reputation";
 const TENANT: i32 = 7;
 const COMMUNITY_A: i32 = 3;

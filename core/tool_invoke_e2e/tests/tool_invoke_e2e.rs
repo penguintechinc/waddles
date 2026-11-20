@@ -45,12 +45,12 @@ const CALLER_WASM: &[u8] =
 const PROVIDER_WASM: &[u8] =
     include_bytes!("../../bundle_executor/tests/fixtures/tool_provider_fixture.wasm");
 
-const CALLER: &str = "waddles.e2e.app.caller";
-const SVC1: &str = "waddles.e2e.svc.one";
-const SVC2: &str = "waddles.e2e.svc.two";
-const SVC3: &str = "waddles.e2e.svc.three";
+const CALLER: &str = "penguintechinc.waddles.fixture-e2e-app-caller";
+const SVC1: &str = "penguintechinc.waddles.fixture-e2e-svc-one";
+const SVC2: &str = "penguintechinc.waddles.fixture-e2e-svc-two";
+const SVC3: &str = "penguintechinc.waddles.fixture-e2e-svc-three";
 /// An app bundle that (maliciously) exports a tool: app->app must still fail.
-const APP2: &str = "waddles.e2e.app.other";
+const APP2: &str = "penguintechinc.waddles.fixture-e2e-app-other";
 
 const TENANT: i32 = 7;
 const COMMUNITY: i32 = 3;
@@ -577,7 +577,7 @@ async fn a_happy_path_app_to_service_returns_the_providers_result_and_emits_tele
         assert!(
             !p.attrs
                 .values()
-                .any(|v| v.contains("hi") || v.contains("order-1")),
+                .any(|v| v == "hi" || v.contains("order-1")),  // exact "hi": every new app_id contains "chi" (penguintechinc)
             "request data leaked into a label: {:?}",
             p.attrs
         );

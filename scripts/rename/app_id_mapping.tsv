@@ -243,3 +243,33 @@ waddles.test.stage-v2-py	penguintechinc.waddles.fixture-test-stage-v2-py	fixture
 waddles.test.app.caller	penguintechinc.waddles.fixture-test-app-caller	fixture	nested-call fixture (valid 3-seg id)
 waddles.x.y.z	penguintechinc.waddles.fixture-x-y-z	fixture	fixture id
 waddles.core.example.orph	penguintechinc.waddles.fixture-orph	fixture	source-group reconciler fixture
+waddles.app.a.v1	penguintechinc.waddles.fixture-app-a-v1	fixture	spine-validated test fixture id
+waddles.bot.commands.default	penguintechinc.waddles.fixture-bot-commands-default	fixture	spine-validated test fixture id
+waddles.btest.dest.v1	penguintechinc.waddles.fixture-btest-dest-v1	fixture	spine-validated test fixture id
+waddles.btest.fault0.v1	penguintechinc.waddles.fixture-btest-fault0-v1	fixture	spine-validated test fixture id
+waddles.btest.keyless.v1	penguintechinc.waddles.fixture-btest-keyless-v1	fixture	spine-validated test fixture id
+waddles.btest.pool.v1	penguintechinc.waddles.fixture-btest-pool-v1	fixture	spine-validated test fixture id
+waddles.mtest.batch.v1	penguintechinc.waddles.fixture-mtest-batch-v1	fixture	spine-validated test fixture id
+waddles.mtest.exhausted.v1	penguintechinc.waddles.fixture-mtest-exhausted-v1	fixture	spine-validated test fixture id
+waddles.mtest.hopfail.v1	penguintechinc.waddles.fixture-mtest-hopfail-v1	fixture	spine-validated test fixture id
+waddles.mtest.hostapierr.v1	penguintechinc.waddles.fixture-mtest-hostapierr-v1	fixture	spine-validated test fixture id
+waddles.mtest.malformed.v1	penguintechinc.waddles.fixture-mtest-malformed-v1	fixture	spine-validated test fixture id
+waddles.mtest.noexecutor.v1	penguintechinc.waddles.fixture-mtest-noexecutor-v1	fixture	spine-validated test fixture id
+waddles.mtest.nonretryable.v1	penguintechinc.waddles.fixture-mtest-nonretryable-v1	fixture	spine-validated test fixture id
+waddles.mtest.spineerror.v1	penguintechinc.waddles.fixture-mtest-spineerror-v1	fixture	spine-validated test fixture id
+waddles.mtest.success.v1	penguintechinc.waddles.fixture-mtest-success-v1	fixture	spine-validated test fixture id
+waddles.mtest.triptimeout.v1	penguintechinc.waddles.fixture-mtest-triptimeout-v1	fixture	spine-validated test fixture id
+waddles.mtest.unknownbundle.v1	penguintechinc.waddles.fixture-mtest-unknownbundle-v1	fixture	spine-validated test fixture id
+waddles.e2e.app.caller	penguintechinc.waddles.fixture-e2e-app-caller	fixture	spine-validated test fixture id
+waddles.e2e.app.giveaway	penguintechinc.waddles.fixture-e2e-app-giveaway	fixture	spine-validated test fixture id
+waddles.e2e.app.other	penguintechinc.waddles.fixture-e2e-app-other	fixture	spine-validated test fixture id
+waddles.e2e.svc.one	penguintechinc.waddles.fixture-e2e-svc-one	fixture	spine-validated test fixture id
+waddles.e2e.svc.three	penguintechinc.waddles.fixture-e2e-svc-three	fixture	spine-validated test fixture id
+waddles.e2e.svc.two	penguintechinc.waddles.fixture-e2e-svc-two	fixture	spine-validated test fixture id
+waddles.mtest.tripmemory.v1	penguintechinc.waddles.fixture-mtest-tripmemory-v1	fixture	spine-validated test fixture id
+waddles.mtest.triptrap.v1	penguintechinc.waddles.fixture-mtest-triptrap-v1	fixture	spine-validated test fixture id
+waddles.mtest.tripdenied.v1	penguintechinc.waddles.fixture-mtest-tripdenied-v1	fixture	spine-validated test fixture id
+waddles.mtest.loadok.v1	penguintechinc.waddles.fixture-mtest-loadok-v1	fixture	spine-validated test fixture id
+waddles.mtest.loaderr.v1	penguintechinc.waddles.fixture-mtest-loaderr-v1	fixture	spine-validated test fixture id
+waddles.app.b.v1	penguintechinc.waddles.fixture-app-b-v1	fixture	spine-validated test fixture id
+waddles.btest.fault	penguintechinc.waddles.fixture-btest-fault	fixture	spine-validated test fixture id

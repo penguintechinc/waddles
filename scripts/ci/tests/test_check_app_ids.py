@@ -67,7 +67,7 @@ def test_each_source_family_fails_on_one_injected_bad_id(tmp_path):
             "app_id: " + OLD_EXAMPLE,
         ),
         "bundles/core-bundles.yaml": ("app_id: " + GOOD, "app_id: " + OLD_SERVICE),
-        "core/x/src/lib.rs": (GOOD, "waddles.bot.commands.default"),
+        "core/x/src/lib.rs": (GOOD, "penguintechinc.waddles.fixture-bot-commands-default"),
         "alembic/versions/0001_x.py": (GOOD, "penguintechinc.waddles.echo-demo"),
         "config/postgres/migrations/001.sql": (
             f"VALUES ('{GOOD}'",

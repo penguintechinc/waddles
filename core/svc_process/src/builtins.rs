@@ -230,7 +230,7 @@ mod tests {
             "schema_version": 2,
             "tenant": "acme",
             "community": "main",
-            "app_id": "waddles.bot.commands.default",
+            "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
             "stage": "process",
             "event": {
                 "platform": "twitch",
