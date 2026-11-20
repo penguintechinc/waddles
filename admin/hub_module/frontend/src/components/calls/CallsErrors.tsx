@@ -1,4 +1,4 @@
-import { Alert, EmptyState, ErrorState } from '../ui';
+import { Alert, ErrorState, UpgradeNotice } from '../ui';
 import { toCallsError } from '../../services/callsApi';
 import { describeCallsError } from './describeCallsError';
 
@@ -19,11 +19,7 @@ export function CallsErrorPanel({ error, onRetry }: CallsErrorPanelProps) {
   if (err.kind === 'feature-disabled') {
     return (
       <div data-testid="calls-feature-disabled" role="status">
-        <EmptyState
-          title={title}
-          description="Voice and video calls are a plan feature that is switched off for this community. Nothing is wrong with your account or the server."
-          testId="calls-feature-disabled-body"
-        />
+        <UpgradeNotice feature="Calls" serverMessage={message} />
       </div>
     );
   }

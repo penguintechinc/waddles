@@ -227,7 +227,7 @@ describe('AdminCommunityCalls', () => {
       serve({ [`GET ${BASE}`]: httpError(402, envelope('FEATURE_NOT_ENABLED', 'Calls / RTC is not enabled for this plan')) });
       renderPage();
       const state = await screen.findByTestId('calls-feature-disabled');
-      expect(state).toHaveTextContent('Calls are not enabled for this community');
+      expect(state).toHaveTextContent('Upgrade to Premium for this feature');
       expect(screen.queryByRole('button', { name: 'Create room' })).not.toBeInTheDocument();
       expect(screen.queryByTestId('calls-no-rooms')).not.toBeInTheDocument();
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();

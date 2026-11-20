@@ -1,6 +1,7 @@
 import { useState, useEffect, useMemo } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 import { FormModalBuilder } from '../../components/FormModal';
 import { getPlatformIcon, getPlatformColor } from '../../utils/platformConfig';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
@@ -27,6 +28,7 @@ function LoyaltyLeaderboard() {
   const { communityId } = useParams();
   const [entries, setEntries] = useState([]);
   const [stats, setStats] = useState(null);
+  const [gated, setGated] = useState(false);
   const [config, setConfig] = useState(null);
   const [loading, setLoading] = useState(true);
   const [limit, setLimit] = useState(25);
@@ -56,6 +58,7 @@ function LoyaltyLeaderboard() {
       setStats(statsRes.data.data || null);
       setConfig(configRes.data.data || null);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       console.error('[LoyaltyLeaderboard] Load failed', { communityId, status: err.response?.status });
       setMessage({ type: 'error', text: 'Failed to load loyalty data' });
     } finally {
@@ -166,6 +169,10 @@ function LoyaltyLeaderboard() {
       helpText: `This will reset ALL user loyalty currency balances to zero. ${stats?.total_users || 0} users will lose a total of ${formatCurrency(stats?.total_currency || 0, config?.currency_symbol)} currency.`,
     },
   ], [stats, config]);
+
+  if (gated) {
+    return <UpgradeNotice feature="Loyalty" />;
+  }
 
   return (
     <div>

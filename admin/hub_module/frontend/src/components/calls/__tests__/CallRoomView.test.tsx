@@ -298,7 +298,7 @@ describe('CallRoomView', () => {
       serve(memberRoutes({ [`POST ${MEMBER}/join`]: httpError(402, envelope('FEATURE_NOT_ENABLED', 'Calls / RTC is not enabled for this plan')) }));
       renderRoom();
       fireEvent.click(await screen.findByRole('button', { name: 'Join with microphone' }));
-      expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Calls are not enabled for this community');
+      expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Upgrade to Premium for this feature');
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
     });
 
