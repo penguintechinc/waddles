@@ -429,21 +429,34 @@ async def test_vendor_can_read_own_namespace_versions(app: Quart) -> None:
     token = make_user_token(user_id=42, scope="vendor:onboard")
     client = app.test_client()
     response = await client.get(
-        "/api/v1/apps/waddles.integrations.vendor-42.mybundle/versions",
+        "/api/v1/apps/acmecorp.widgets.mybundle/versions",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
 
 
-async def test_vendor_cannot_read_other_vendors_versions(app: Quart) -> None:
-    token = make_user_token(user_id=42, scope="vendor:onboard")
+async def test_vendor_cannot_read_other_vendors_versions(
+    app: Quart, mock_component_pipeline: AsyncMock
+) -> None:
+    """An app_id belongs to the vendor who first registered it (ownership lock)."""
     client = app.test_client()
+    owner = make_user_token(user_id=99, scope="vendor:onboard")
+    manifest = _VENDOR_COMPONENT_MANIFEST_YAML.replace(
+        b"acmecorp.widgets.mybundle", b"otherco.widgets.other"
+    )
+    posted = await client.post(
+        "/api/v1/apps/otherco.widgets.other/versions",
+        headers={"Authorization": f"Bearer {owner}"},
+        files=_vendor_component_files(manifest),
+    )
+    assert posted.status_code == 202
+    token = make_user_token(user_id=42, scope="vendor:onboard")
     listing = await client.get(
-        "/api/v1/apps/waddles.integrations.vendor-99.other/versions",
+        "/api/v1/apps/otherco.widgets.other/versions",
         headers={"Authorization": f"Bearer {token}"},
     )
     one = await client.get(
-        "/api/v1/apps/waddles.integrations.vendor-99.other/versions/1.0.0",
+        "/api/v1/apps/otherco.widgets.other/versions/1.0.0",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert listing.status_code == 403
@@ -453,9 +466,9 @@ async def test_vendor_cannot_read_other_vendors_versions(app: Quart) -> None:
 @pytest.mark.parametrize(
     "app_id",
     [
-        "waddles.core.socials.music",
-        "penguintechinc.music.default",
-        "waddles.integrations.vendor-4.other",  # prefix-collision: vendor-4 is not vendor-42
+        "penguintechinc.waddles.music",  # reserved first-party org
+        "penguintechinc.other.thing",  # reserved org, any repo
+        "Acmecorp.widgets.mybundle",  # not lowercase / not a well-formed id
     ],
 )
 async def test_vendor_cannot_read_reserved_or_foreign_version_state(
