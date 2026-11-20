@@ -329,7 +329,12 @@ function VendorAnalytics() {
       const res = await vendorApi.getAnalyticsSales({ period: p });
       setSales(normalizeSales(unwrapEnvelope(res)));
     } catch (err) {
-      setSalesError(getErrorMessage(err, 'Failed to load sales data'));
+      // 404 = the route exists but the caller has no seller row yet (not a path mismatch).
+      setSalesError(
+        err.response?.status === 404
+          ? 'No vendor profile yet. Create one in Vendor Settings to see sales analytics.'
+          : getErrorMessage(err, 'Failed to load sales data'),
+      );
     } finally {
       setSalesLoading(false);
     }
