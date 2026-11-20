@@ -797,8 +797,9 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     # digest_conflict. 1.0.1 is the first version built from the corrected Dockerfile.
     versions_by_app_id = {e.app_id: e.version for e in entries}
     # 1.0.1 -> 1.0.2: manifest-only bump declaring `chat.send:<platform>` (least privilege).
-    # 1.0.2 -> 1.0.3: manifest-only bump backfilling the validated `author` (github:penguintechinc).
-    assert versions_by_app_id["penguintechinc.waddles.csping"] == "1.0.3"
+    # 1.0.2 -> 1.0.3: manifest-only author backfill.
+    # 1.0.3 -> 1.0.4: app_id cutover (the new app_id changes the signed payload).
+    assert versions_by_app_id["penguintechinc.waddles.csping"] == "1.0.4"
 
 
 def test_load_catalog_defaults_a_missing_activation_targets_to_default(tmp_path: Path) -> None:

@@ -1743,7 +1743,7 @@ mod mixed_version_tests {
     const SCAN_LIMIT: u64 = MAX * 2;
 
     fn scope() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a")
     }
 
     /// A new (post-fix) pod's write: reconcile-if-missing, then the quota

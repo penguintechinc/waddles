@@ -12,7 +12,6 @@ name: Chat History Bundle (Python)
 # https://github.com/penguintechinc/waddles/issues/678
 # 1.0.2: activation-gated only -- removed the in-bundle waddles.command-chat feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
 version: 1.0.4
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

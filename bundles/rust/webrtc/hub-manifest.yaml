@@ -5,7 +5,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.webrtc
 name: WebRTC Service Bundle (Rust)
 version: 1.4.2
-feature: waddles.core.service
 module: core
 provider: builtin
 author: github:penguintechinc

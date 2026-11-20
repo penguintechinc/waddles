@@ -7,7 +7,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.gameserver
 name: Game Server Service Bundle (Rust)
 version: 1.0.3
-feature: waddles.core.service
 module: core
 provider: builtin
 author: github:penguintechinc

@@ -7,7 +7,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.ai-teammates
 name: AI Teammates (Researcher, Receptionist, Producer)
 version: 1.0.4
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

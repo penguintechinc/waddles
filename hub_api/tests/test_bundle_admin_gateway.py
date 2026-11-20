@@ -632,7 +632,7 @@ async def test_service_bundle_without_config_schema_is_404(env: dict[str, Any]) 
 async def test_inactive_bundle_and_bad_ids(env: dict[str, Any]) -> None:
     c = env["app"].test_client()
     r = await c.get(
-        f"/api/v1/apps/community/{env['pid']}/bundles/waddles.no.such.bundle/admin",
+        f"/api/v1/apps/community/{env['pid']}/bundles/penguintechinc.waddles.no-such-bundle/admin",
         headers=_h(10),
     )
     assert r.status_code == 404

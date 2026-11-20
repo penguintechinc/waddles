@@ -229,7 +229,7 @@ struct Run {
 }
 
 async fn run_steps(app: &str, wasm: Vec<u8>, steps: &[Step]) -> Vec<Run> {
-    let app_id = format!("waddles.integrations.superpenguin.{app}");
+    let app_id = format!("psychoboy.penguintwitchbot.{app}");
     let flag_key = format!("waddles.command-superpenguin-{app}");
     let (executor_io, stage_io) = tokio::io::duplex(256 * 1024);
     let digest = format!("sha256:{:x}", Sha256::digest(&wasm));

@@ -2,7 +2,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.economy
 name: Economy Service Bundle (Rust)
 version: 1.0.5
-feature: waddles.core.service
 module: core
 provider: builtin
 language: rust

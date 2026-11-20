@@ -27,8 +27,8 @@ from services.bundle_data_provisioner import (
 from services.bundle_data_v2 import derive_v2_table_identity
 from services.errors import ApiError
 
-_APP = "penguintechinc.waddles.test"
-_OTHER_APP = "penguintechinc.waddles.test"
+_APP = "acme.cal.test"
+_OTHER_APP = "acme.other.test"
 _RAW_SCHEMA: dict[str, Any] = {
     "tables": [
         {

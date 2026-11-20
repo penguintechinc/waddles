@@ -5380,7 +5380,7 @@ _MANIFEST = BundleManifestV2(
     language="python", artifact="source", execution_model="native", is_default=True,
     stages={"process": {}}, egress=(EgressRule(host="api.spotify.com", methods=("GET", "POST")),),
     data_tables=("music_queue",), limits=Limits(timeout_ms=2000, memory_mb=64, egress_rps=10),
-    permissions=(), routes_to=("waddles.community.forums.default",),
+    permissions=(), routes_to=("penguintechinc.waddles.forums-pipeline",),
     consumes=(ConsumeRule(platform="twitch", source_id=None, event_types=("chat.message",), filters={}),),
 )
 
@@ -5402,7 +5402,7 @@ def test_summary_lists_grant_labels_in_words() -> None:
 
 def test_summary_lists_routes_to() -> None:
     summary = _summary()
-    assert summary["routesTo"] == ["waddles.community.forums.default"]
+    assert summary["routesTo"] == ["penguintechinc.waddles.forums-pipeline"]
 
 
 def test_summary_lists_capabilities_actually_imported() -> None:

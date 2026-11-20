@@ -2,7 +2,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.rooms
 name: Rooms App Bundle (Rust)
 version: 1.4.1
-feature: waddles.core.app
 module: core
 provider: builtin
 author: github:penguintechinc

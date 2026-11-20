@@ -35,7 +35,6 @@ name: Ping Example Bundle (Rust)
 # UNIQUE per version string) and for the caveat that the resulting artifact digest actually
 # differing from 1.0.2's was not verified byte-level in this change.
 version: 1.0.8
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

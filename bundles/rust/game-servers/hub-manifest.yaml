@@ -5,7 +5,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.game-servers
 name: Game Servers (Rust)
 version: 1.0.2
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

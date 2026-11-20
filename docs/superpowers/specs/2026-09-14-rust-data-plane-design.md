@@ -371,7 +371,7 @@ Configured modes combine as **AND** — with the HMAC signature and with each ot
 | Current hook (`core/svc_process/runner.py`) | Becomes |
 |---|---|
 | Content-moderation gate (`services/moderation_gate.py`), which no community may opt out of | **Rust built-in**, runs before the bundle call |
-| Moderation-enforcement routing (stamp + synthetic enqueue to `waddles.community.moderation.default`'s `:action`) | **Rust built-in**, runs after the gate |
+| Moderation-enforcement routing (stamp + synthetic enqueue to `penguintechinc.waddles.moderation-pipeline`'s `:action`) | **Rust built-in**, runs after the gate |
 | Cross-app routing via `PROCESS_TARGET_APP_ID_KEY` (`_target_app_id`) | **Rust built-in** of the enqueue step — the reserved key is popped off the payload before enqueue, exactly as today |
 | `bot_process` command dispatch | **Bundle** (`waddles.bot.commands.default`) |
 | Raid auto-shoutout (`_maybe_shoutout_raid`, flag `waddles.bot.shoutout`) | **Bundle** |
@@ -725,7 +725,7 @@ A bundle's process output goes **only** to its own action stream, read by exactl
 **The one cross-bundle path is `_target_app_id`, and it is now a declared capability.** A process bundle that wants to route an event to another app must list that app in its manifest:
 
 ```yaml
-routes_to: ["waddles.community.forums.default"]
+routes_to: ["penguintechinc.waddles.forums-pipeline"]
 ```
 
 | Rule | Behaviour |

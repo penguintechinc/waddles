@@ -126,7 +126,7 @@ def test_stage_envelope_from_wit_record() -> None:
     wit_envelope = wit_shapes.WitStageEnvelope(
         tenant="acme",
         community="main",
-        app_id="waddles.social.alias.default",
+        app_id="penguintechinc.waddles.alias-pipeline",
         stage="process",
         event=wit_event,
         ts="ts",
@@ -155,7 +155,7 @@ def test_stage_envelope_from_wit_record_v1_has_no_numeric_scope() -> None:
         wit_shapes.WitStageEnvelope(
             tenant="acme",
             community="main",
-            app_id="waddles.social.alias.default",
+            app_id="penguintechinc.waddles.alias-pipeline",
             stage="process",
             event=_wit_event(),
             ts="ts",
@@ -176,7 +176,7 @@ def test_stage_envelope_from_wit_record_v2_carries_authoritative_numeric_scope()
             community_id=7,
             tenant="acme",
             community="main",
-            app_id="waddles.social.alias.default",
+            app_id="penguintechinc.waddles.alias-pipeline",
             stage="action",
             event=_wit_event(),
             ts="ts",
@@ -198,7 +198,7 @@ def test_stage_envelope_v2_tenant_wide_is_community_zero() -> None:
             community_id=0,
             tenant="acme",
             community=None,
-            app_id="waddles.social.alias.default",
+            app_id="penguintechinc.waddles.alias-pipeline",
             stage="action",
             event=_wit_event(),
             ts="ts",
@@ -231,7 +231,7 @@ def test_stage_envelope_rejects_invalid_numeric_scope(
         StageEnvelope(
             tenant="acme",
             community=None,
-            app_id="waddles.social.alias.default",
+            app_id="penguintechinc.waddles.alias-pipeline",
             stage="action",
             event=PlatformEvent(
                 platform="discord",

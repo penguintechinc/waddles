@@ -226,25 +226,25 @@ mod tests {
 
     #[test]
     fn data_key_is_namespaced_by_tenant_community_and_app() {
-        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
         assert_eq!(
             scope.data_key("counter"),
-            "bundlekv:acme:main:waddles.bot.a:data:counter"
+            "bundlekv:acme:main:penguintechinc.waddles.fixture-bot-a:data:counter"
         );
     }
 
     #[test]
     fn data_key_renders_tenant_wide_segment_when_community_is_none() {
-        let scope = KvScope::new("acme", None, "waddles.bot.a");
+        let scope = KvScope::new("acme", None, "penguintechinc.waddles.fixture-bot-a");
         assert_eq!(
             scope.data_key("counter"),
-            "bundlekv:acme:_tenant:waddles.bot.a:data:counter"
+            "bundlekv:acme:_tenant:penguintechinc.waddles.fixture-bot-a:data:counter"
         );
     }
 
     #[test]
     fn two_apps_in_the_same_community_never_share_a_prefix() {
-        let a = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        let a = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
         let b = KvScope::new("acme", Some("main".to_string()), "waddles.bot.b");
         assert_ne!(a.data_key("counter"), b.data_key("counter"));
         assert!(!b.data_key("counter").starts_with(&a.app_prefix()));
@@ -252,14 +252,14 @@ mod tests {
 
     #[test]
     fn two_tenants_with_the_same_app_id_never_share_a_prefix() {
-        let a = KvScope::new("acme", None, "waddles.bot.a");
-        let b = KvScope::new("globex", None, "waddles.bot.a");
+        let a = KvScope::new("acme", None, "penguintechinc.waddles.fixture-bot-a");
+        let b = KvScope::new("globex", None, "penguintechinc.waddles.fixture-bot-a");
         assert_ne!(a.data_key("counter"), b.data_key("counter"));
     }
 
     #[test]
     fn live_count_and_rate_keys_cannot_collide_with_any_valid_data_key() {
-        let scope = KvScope::new("acme", None, "waddles.bot.a");
+        let scope = KvScope::new("acme", None, "penguintechinc.waddles.fixture-bot-a");
         // Even a guest key literally named "live", "count" or "opr:1" (the
         // latter is rejected by validate_guest_key for containing ':',
         // proving the point twice over) lands under `:data:`, never bare.
@@ -272,11 +272,11 @@ mod tests {
     fn live_index_and_legacy_counter_are_distinct_keys() {
         // A deployment upgrading from the counter must never share a key
         // (and therefore a Valkey type) with the new sorted-set index.
-        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
-        assert_eq!(scope.live_key(), "bundlekv:acme:main:waddles.bot.a:live");
+        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.fixture-bot-a");
+        assert_eq!(scope.live_key(), "bundlekv:acme:main:penguintechinc.waddles.fixture-bot-a:live");
         assert_eq!(
             scope.legacy_count_key(),
-            "bundlekv:acme:main:waddles.bot.a:count"
+            "bundlekv:acme:main:penguintechinc.waddles.fixture-bot-a:count"
         );
         assert_ne!(scope.live_key(), scope.legacy_count_key());
     }

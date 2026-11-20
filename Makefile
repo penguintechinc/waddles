@@ -249,6 +249,14 @@ test-scripts:
 	@bash scripts/tests/test_prune_agent_worktrees.sh
 	@python3 -m pytest -q -p no:cacheprovider scripts/ops
 	@python3 -m pytest -q -p no:cacheprovider scripts/rename/tests
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/tests/test_check_app_ids.py
+	@$(MAKE) check-app-ids
+
+# Structural app_id guard: every bundle app_id (catalog SQL/alembic seeds, manifests, core-bundles.yaml,
+# Rust *_APP_ID consts, tool.call grants) must be <org>.<repo>.<name>; zero ids examined = FAIL.
+.PHONY: check-app-ids
+check-app-ids:
+	@python3 -I scripts/ci/check_app_ids.py
 
 # Read-only command-latency SLA report (p99 < 1 s, first door -> outbound confirmed): p50/p95/p99
 # per command and per hop from the data-plane histograms. Zero samples = FAIL.

@@ -4,8 +4,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.love
 name: Love/Ship Compatibility Bundle (Python)
-version: 1.0.7
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

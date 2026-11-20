@@ -93,7 +93,7 @@ def test_full_d30_stage_envelope_round_trips() -> None:
 def test_community_scoped_stage_envelope_deserializes() -> None:
     envelope = StageEnvelope.from_dict(_load(VALID_DIR / "stage_envelope_community_scoped.json"))
     assert envelope.community == "main"
-    assert envelope.target_app_id == "waddles.community.forums.default"
+    assert envelope.target_app_id == "penguintechinc.waddles.forums-pipeline"
     assert envelope.session_id == "gw-session-abc123"
     assert envelope.schema_version == 2
 

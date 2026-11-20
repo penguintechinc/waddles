@@ -4,8 +4,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.fish
 name: Fishing Game Bundle (Python)
-version: 1.0.8
-feature: waddles.core.example
+version: 1.0.9
 module: core
 provider: builtin
 author: github:penguintechinc

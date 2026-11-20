@@ -9,7 +9,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.discord
 name: Discord Platform Connector (Rust)
 version: 1.0.9
-feature: waddles.core.service
 module: core
 provider: builtin
 language: rust

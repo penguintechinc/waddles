@@ -23,7 +23,7 @@ use docker_container::{start_container_blocking, DockerContainer};
 const IMAGE: &str = "postgres:17.6-bookworm";
 const SU_PW: &str = "postgres_test_superuser_pw";
 const ROLE_PW: &str = "waddles_platform_table_test_pw";
-const APP_ID: &str = "waddles.test.role_sync";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-role-sync";
 const DDL: &str = include_str!("../../../scripts/db/bundle_platform_table.sql");
 
 const TENANT: i32 = 1;

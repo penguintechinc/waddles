@@ -37,7 +37,7 @@ def aad(parts: list[str], dek_version: int) -> bytes:
 def main() -> None:
     dek = bytes(range(1, 33))
     tenant = "42"
-    parts = ["42", "7", "waddles.bot.a", "kv", "counters.total"]
+    parts = ["42", "7", "penguintechinc.waddles.fixture-bot-a", "kv", "counters.total"]
     version = 3
     nonce = bytes(range(0xA0, 0xAC))
     plaintext = b'{"hello":"world"}'
@@ -46,7 +46,7 @@ def main() -> None:
     envelope = MAGIC + bytes([ALG]) + struct.pack(">I", version) + nonce + ct
 
     bidx_key = subkey(dek, tenant, "waddles-bundle-bidx-v1")
-    ctx = b"".join(field(p) for p in ["7", "waddles.bot.a", "users", "handle"])
+    ctx = b"".join(field(p) for p in ["7", "penguintechinc.waddles.fixture-bot-a", "users", "handle"])
     bidx = hmac.new(bidx_key, ctx + b"alice", hashlib.sha256).digest()
 
     print(
@@ -60,7 +60,7 @@ def main() -> None:
                 "plaintext_hex": plaintext.hex(),
                 "data_subkey_hex": data_key.hex(),
                 "envelope_hex": envelope.hex(),
-                "blind_context": ["7", "waddles.bot.a", "users", "handle"],
+                "blind_context": ["7", "penguintechinc.waddles.fixture-bot-a", "users", "handle"],
                 "blind_value_hex": b"alice".hex(),
                 "blind_index_hex": bidx.hex(),
             },

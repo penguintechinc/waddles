@@ -3,7 +3,7 @@
 
 One table (`BUNDLES`) drives all three files so the two manifests can never drift. The MIT notice is the upstream LICENSE
 verbatim (taken from bundles/csharp/superpenguin-first/LICENSE, itself a verbatim copy of Psychoboy/PenguinTwitchBot's).
-Usage: python3 scripts/superpenguin-scaffold/gen_manifests.py   (from the repo root; rewrites the three files per bundle)
+Usage: python3 scripts/superpenguin-scaffold/gen_penguintwitchbot_manifests.py   (from the repo root; rewrites the three files per bundle)
 """
 
 from __future__ import annotations
@@ -452,7 +452,7 @@ def main() -> int:
     for name, spec in BUNDLES.items():
         d = CS / f"superpenguin-{name}"
         if not d.is_dir():
-            print(f"gen_manifests: missing {d}", file=sys.stderr)
+            print(f"gen_penguintwitchbot_manifests: missing {d}", file=sys.stderr)
             return 1
         for hub, fname in ((False, "bundle.yaml"), (True, "hub-manifest.yaml")):
             text = yaml.dump(
@@ -465,7 +465,7 @@ def main() -> int:
             )
             (d / fname).write_text(text)
         (d / "README.md").write_text(readme(name, spec))
-        print(f"gen_manifests: wrote {name} ({len(BUNDLES)} bundles total)")
+        print(f"gen_penguintwitchbot_manifests: wrote {name} ({len(BUNDLES)} bundles total)")
     return 0
 
 

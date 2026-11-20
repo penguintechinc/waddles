@@ -121,7 +121,9 @@ async def test_upload_bundle_component_targets_the_bundle_bucket_not_the_assets_
     monkeypatch.setenv("S3_BUCKET_NAME", "waddlebot-assets")
     mock_client = MagicMock()
     with patch("services.storage_service._client", return_value=mock_client):
-        await upload_bundle_component("waddles.core.demo.echo", "1.0.0", "abc123", b"wasm-bytes")
+        await upload_bundle_component(
+            "penguintechinc.waddles.echo-pipeline", "1.0.0", "abc123", b"wasm-bytes"
+        )
 
     component_call, sidecar_call = mock_client.put_object.call_args_list
     assert component_call.kwargs["Bucket"] == "waddles-bundles"
@@ -138,8 +140,10 @@ async def test_bundle_sidecar_write_and_read_use_the_bundle_bucket() -> None:
     mock_client = MagicMock()
     mock_client.get_object.return_value = {"Body": MagicMock(read=lambda: b'{"signature":"x"}')}
     with patch("services.storage_service._client", return_value=mock_client):
-        await write_bundle_sidecar("waddles.core.example.ping", "1.0.0", "abc", {"signature": "x"})
-        doc = await read_bundle_sidecar("waddles.core.example.ping", "1.0.0", "abc")
+        await write_bundle_sidecar(
+            "penguintechinc.waddles.ping", "1.0.0", "abc", {"signature": "x"}
+        )
+        doc = await read_bundle_sidecar("penguintechinc.waddles.ping", "1.0.0", "abc")
 
     assert mock_client.put_object.call_args.kwargs["Bucket"] == _bundle_bucket()
     assert mock_client.get_object.call_args.kwargs["Bucket"] == _bundle_bucket()

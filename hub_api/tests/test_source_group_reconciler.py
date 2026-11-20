@@ -222,7 +222,7 @@ def _uniq(prefix: str) -> str:
 async def test_fresh_binding_gets_its_group(dal: Any, client: Any) -> None:
     """A binding with no group at all is provisioned on the stream svc-process will read."""
     slug, comm = _uniq("t"), _uniq("c")
-    apps = ["waddles.core.example.ping", "waddles.core.example.roll"]
+    apps = ["penguintechinc.waddles.ping", "penguintechinc.waddles.roll"]
     await _seed(dal, slug=slug, community=comm, apps=apps)
 
     result = await rec.reconcile_once(dal, client)
@@ -235,7 +235,7 @@ async def test_fresh_binding_gets_its_group(dal: Any, client: Any) -> None:
 async def test_renamed_tenant_slug_is_reconciled_to_the_new_stream(dal: Any, client: Any) -> None:
     """The incident: groups exist only on the OLD-slug stream; the new-slug stream gets them."""
     old_slug, new_slug, comm = _uniq("global"), _uniq("default"), _uniq("c")
-    apps = ["waddles.core.example.ping", "waddles.core.example.dj"]
+    apps = ["penguintechinc.waddles.ping", "penguintechinc.waddles.dj"]
     tenant_id, _ = await _seed(dal, slug=old_slug, community=comm, apps=apps)
     old_stream = source_stream_key(old_slug, comm, "discord", "dg-1")
     for app in apps:  # what hub-api provisioned BEFORE migration 0098's rename
@@ -259,12 +259,12 @@ async def test_second_run_is_idempotent_and_keeps_group_state(
 ) -> None:
     """Re-running creates nothing, never resets a group's cursor, and counts `exists`."""
     slug, comm = _uniq("t"), _uniq("c")
-    await _seed(dal, slug=slug, community=comm, apps=["waddles.core.example.ping"])
+    await _seed(dal, slug=slug, community=comm, apps=["penguintechinc.waddles.ping"])
     stream = source_stream_key(slug, comm, "discord", "dg-1")
 
     first = await rec.reconcile_once(dal, client)
     await client.xadd(stream, {"k": "v"})
-    got = await client.xreadgroup("waddles.core.example.ping", "c1", {stream: ">"}, count=1)
+    got = await client.xreadgroup("penguintechinc.waddles.ping", "c1", {stream: ">"}, count=1)
     assert got and got[0][1], "group created by the reconcile must deliver later events"
     before = (await client.xinfo_groups(stream))[0]
     second = await rec.reconcile_once(dal, client)
@@ -281,29 +281,29 @@ async def test_second_run_is_idempotent_and_keeps_group_state(
 async def test_group_starts_at_dollar_so_old_backlog_is_not_replayed(dal: Any, client: Any) -> None:
     """Start id is `$`: pre-existing entries are not replayed into a late-provisioned group."""
     slug, comm = _uniq("t"), _uniq("c")
-    await _seed(dal, slug=slug, community=comm, apps=["waddles.core.example.ping"])
+    await _seed(dal, slug=slug, community=comm, apps=["penguintechinc.waddles.ping"])
     stream = source_stream_key(slug, comm, "discord", "dg-1")
     await client.xadd(stream, {"old": "1"})
 
     await rec.reconcile_once(dal, client)
-    old = await client.xreadgroup("waddles.core.example.ping", "c1", {stream: ">"}, count=10)
+    old = await client.xreadgroup("penguintechinc.waddles.ping", "c1", {stream: ">"}, count=10)
     assert not old or not old[0][1]
     await client.xadd(stream, {"new": "1"})
-    new = await client.xreadgroup("waddles.core.example.ping", "c1", {stream: ">"}, count=10)
+    new = await client.xreadgroup("penguintechinc.waddles.ping", "c1", {stream: ">"}, count=10)
     assert [fields for _id, fields in new[0][1]] == [{"new": "1"}]
 
 
 async def test_tenant_wide_binding_uses_the_tenant_segment(dal: Any, client: Any) -> None:
     """community_id 0 (tenant-wide sentinel) renders `c:_tenant`, matching Scope::source_stream."""
     slug = _uniq("t")
-    await _seed(dal, slug=slug, community=None, apps=["waddles.core.example.ping"])
+    await _seed(dal, slug=slug, community=None, apps=["penguintechinc.waddles.ping"])
 
     result = await rec.reconcile_once(dal, client)
 
     assert result.failed == 0
     stream = source_stream_key(slug, None, "discord", "dg-1")
     assert f":t:{slug}:c:_tenant:src:" in stream
-    assert await _groups(client, stream) == {"waddles.core.example.ping"}
+    assert await _groups(client, stream) == {"penguintechinc.waddles.ping"}
 
 
 async def test_denied_xgroup_fails_loudly(
@@ -314,7 +314,7 @@ async def test_denied_xgroup_fails_loudly(
 ) -> None:
     """Wrong ACL: ERROR log per binding, `failed` counted, pass marked error, nothing swallowed."""
     slug, comm = _uniq("t"), _uniq("c")
-    apps = ["waddles.core.example.ping", "waddles.core.example.roll"]
+    apps = ["penguintechinc.waddles.ping", "penguintechinc.waddles.roll"]
     await _seed(dal, slug=slug, community=comm, apps=apps)
     limited = aioredis.from_url(f"redis://lim:x@{valkey_no_stream_addr}/0", decode_responses=True)
     try:
@@ -336,7 +336,7 @@ async def test_run_pass_marks_error_and_logs_when_valkey_unreachable(
     dal: Any, caplog: pytest.LogCaptureFixture, metrics: dict[str, _Counters]
 ) -> None:
     """A dead Valkey: the pass logs at ERROR with a traceback, counts `error`, never raises."""
-    await _seed(dal, slug=_uniq("t"), community=_uniq("c"), apps=["waddles.core.example.ping"])
+    await _seed(dal, slug=_uniq("t"), community=_uniq("c"), apps=["penguintechinc.waddles.ping"])
 
     def dead() -> Any:
         return aioredis.from_url(
@@ -374,7 +374,7 @@ async def test_loop_waits_for_readiness_then_reconciles_and_repeats(
 ) -> None:
     """Gated until `is_ready`; then reconciles at startup and each interval until cancelled."""
     slug, comm = _uniq("t"), _uniq("c")
-    await _seed(dal, slug=slug, community=comm, apps=["waddles.core.example.ping"])
+    await _seed(dal, slug=slug, community=comm, apps=["penguintechinc.waddles.ping"])
     stream = source_stream_key(slug, comm, "discord", "dg-1")
     ready = {"v": False}
     sleeps: list[float] = []
@@ -400,7 +400,7 @@ async def test_loop_waits_for_readiness_then_reconciles_and_repeats(
         )
 
     assert sleeps == [7.0, 7.0, 7.0]
-    assert await _groups(client, stream) == {"waddles.core.example.ping"}
+    assert await _groups(client, stream) == {"penguintechinc.waddles.ping"}
 
 
 async def test_binding_with_missing_community_is_counted_unresolvable(
@@ -429,7 +429,7 @@ async def test_binding_with_missing_community_is_counted_unresolvable(
 async def test_pg_real_schema_incident_reconcile(pg_dal: Any, client: Any) -> None:
     """The reconcile query + incident scenario against the real migrated Postgres schema."""
     old_slug, new_slug, comm = _uniq("global"), _uniq("default"), _uniq("c")
-    apps = ["waddles.core.example.ping", "waddles.core.example.roll"]
+    apps = ["penguintechinc.waddles.ping", "penguintechinc.waddles.roll"]
     tenant_id, _ = await _seed(pg_dal, slug=old_slug, community=comm, apps=apps, catalog=True)
     old_stream = source_stream_key(old_slug, comm, "discord", "dg-1")
     for app in apps:

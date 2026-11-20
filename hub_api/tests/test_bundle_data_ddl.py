@@ -232,7 +232,7 @@ class TestGoldenDdlSnapshots:
         rendered = render_ddl_sql(statements, bundle_data_pg_conn)
 
         assert rendered[0] == (
-            'CREATE TABLE "app_core"."waddles_core_quotes_quotes" (\n'
+            'CREATE TABLE "app_core"."penguintechinc_waddles_quotes" (\n'
             "    row_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),\n"
             "    tenant_id integer NOT NULL,\n"
             "    community_id integer NOT NULL,\n"
@@ -245,24 +245,24 @@ class TestGoldenDdlSnapshots:
             ")"
         )
         assert rendered[1] == (
-            'CREATE INDEX "waddles_core_quotes_quotes_idx_tenant_id_kind" '
-            'ON "app_core"."waddles_core_quotes_quotes" ("tenant_id", "kind")'
+            'CREATE INDEX "penguintechinc_waddles_quotes_idx_tenant_id_kind" '
+            'ON "app_core"."penguintechinc_waddles_quotes" ("tenant_id", "kind")'
         )
         assert rendered[2] == (
-            'ALTER TABLE "app_core"."waddles_core_quotes_quotes" ENABLE ROW LEVEL SECURITY'
+            'ALTER TABLE "app_core"."penguintechinc_waddles_quotes" ENABLE ROW LEVEL SECURITY'
         )
         assert rendered[3] == (
-            'ALTER TABLE "app_core"."waddles_core_quotes_quotes" FORCE ROW LEVEL SECURITY'
+            'ALTER TABLE "app_core"."penguintechinc_waddles_quotes" FORCE ROW LEVEL SECURITY'
         )
         assert rendered[4] == (
-            'CREATE POLICY "waddles_core_quotes_quotes_tenant_isolation" '
-            'ON "app_core"."waddles_core_quotes_quotes" USING '
+            'CREATE POLICY "penguintechinc_waddles_quotes_tenant_isolation" '
+            'ON "app_core"."penguintechinc_waddles_quotes" USING '
             "(tenant_id = NULLIF(current_setting('waddles.tenant_id', true), '')::integer "
             "AND community_id = NULLIF(current_setting('waddles.community_id', true), "
             "'')::integer)"
         )
         assert rendered[5] == (
-            'GRANT SELECT, INSERT, UPDATE, DELETE ON "app_core"."waddles_core_quotes_quotes" '
+            'GRANT SELECT, INSERT, UPDATE, DELETE ON "app_core"."penguintechinc_waddles_quotes" '
             'TO "waddles_bundle_runtime"'
         )
         assert len(rendered) == 6
@@ -270,7 +270,7 @@ class TestGoldenDdlSnapshots:
     def test_drop_table_ddl_golden(self, bundle_data_pg_conn: Any) -> None:
         identity = _quotes_identity()
         rendered = render_ddl_sql([generate_drop_table_ddl(identity)], bundle_data_pg_conn)
-        assert rendered[0] == 'DROP TABLE IF EXISTS "app_core"."waddles_core_quotes_quotes"'
+        assert rendered[0] == 'DROP TABLE IF EXISTS "app_core"."penguintechinc_waddles_quotes"'
 
     def test_additive_migration_ddl_golden(self, bundle_data_pg_conn: Any) -> None:
         identity = _quotes_identity()
@@ -290,11 +290,11 @@ class TestGoldenDdlSnapshots:
             generate_additive_migration_ddl(identity, plan), bundle_data_pg_conn
         )
         assert rendered[0] == (
-            'ALTER TABLE "app_core"."waddles_core_quotes_quotes" ADD COLUMN "author_ref" uuid'
+            'ALTER TABLE "app_core"."penguintechinc_waddles_quotes" ADD COLUMN "author_ref" uuid'
         )
         assert rendered[1] == (
-            'CREATE INDEX "waddles_core_quotes_quotes_idx_tenant_id_author_ref" '
-            'ON "app_core"."waddles_core_quotes_quotes" ("tenant_id", "author_ref")'
+            'CREATE INDEX "penguintechinc_waddles_quotes_idx_tenant_id_author_ref" '
+            'ON "app_core"."penguintechinc_waddles_quotes" ("tenant_id", "author_ref")'
         )
 
     def test_default_literal_defense_in_depth_injection_payload_is_a_bound_parameter(
@@ -369,7 +369,7 @@ class TestRealPostgresApplyAndRlsIsolation:
                 cur.execute(statement)
             cur.execute(
                 "SELECT column_name FROM information_schema.columns "
-                "WHERE table_schema = 'app_core' AND table_name = 'waddles_core_quotes_quotes' "
+                "WHERE table_schema = 'app_core' AND table_name = 'penguintechinc_waddles_quotes' "
                 "ORDER BY ordinal_position"
             )
             columns = [row[0] for row in cur.fetchall()]
@@ -395,11 +395,11 @@ class TestRealPostgresApplyAndRlsIsolation:
             # Seed rows for two different tenants as the table owner
             # (bypasses RLS at insert time -- this is setup, not the assertion).
             cur.execute(
-                "INSERT INTO app_core.waddles_core_quotes_quotes "
+                "INSERT INTO app_core.penguintechinc_waddles_quotes "
                 "(tenant_id, community_id, kind, body) VALUES (1, 1, 'motivational', 'tenant one')"
             )
             cur.execute(
-                "INSERT INTO app_core.waddles_core_quotes_quotes "
+                "INSERT INTO app_core.penguintechinc_waddles_quotes "
                 "(tenant_id, community_id, kind, body) VALUES (2, 1, 'motivational', 'tenant two')"
             )
 
@@ -411,7 +411,7 @@ class TestRealPostgresApplyAndRlsIsolation:
             cur.execute("SET ROLE waddles_bundle_runtime")
             cur.execute("SET waddles.tenant_id = '1'")
             cur.execute("SET waddles.community_id = '1'")
-            cur.execute("SELECT body FROM app_core.waddles_core_quotes_quotes")
+            cur.execute("SELECT body FROM app_core.penguintechinc_waddles_quotes")
             tenant_one_rows = [row[0] for row in cur.fetchall()]
             cur.execute("RESET ROLE")
 
@@ -421,7 +421,7 @@ class TestRealPostgresApplyAndRlsIsolation:
             cur.execute("SET ROLE waddles_bundle_runtime")
             cur.execute("SET waddles.tenant_id = '2'")
             cur.execute("SET waddles.community_id = '1'")
-            cur.execute("SELECT body FROM app_core.waddles_core_quotes_quotes")
+            cur.execute("SELECT body FROM app_core.penguintechinc_waddles_quotes")
             tenant_two_rows = [row[0] for row in cur.fetchall()]
             cur.execute("RESET ROLE")
 
@@ -434,7 +434,7 @@ class TestRealPostgresApplyAndRlsIsolation:
             for statement in generate_create_table_ddl(identity, decl):
                 cur.execute(statement)
             cur.execute(
-                "INSERT INTO app_core.waddles_core_quotes_quotes "
+                "INSERT INTO app_core.penguintechinc_waddles_quotes "
                 "(tenant_id, community_id, kind, body) VALUES (1, 1, 'motivational', 'tenant one')"
             )
 
@@ -445,7 +445,7 @@ class TestRealPostgresApplyAndRlsIsolation:
         # must return zero rows, never every row.
         with bundle_data_pg_conn.cursor() as cur:
             cur.execute("SET ROLE waddles_bundle_runtime")
-            cur.execute("SELECT body FROM app_core.waddles_core_quotes_quotes")
+            cur.execute("SELECT body FROM app_core.penguintechinc_waddles_quotes")
             rows = [row[0] for row in cur.fetchall()]
             cur.execute("RESET ROLE")
 
@@ -472,12 +472,12 @@ class TestRealPostgresApplyAndRlsIsolation:
             cur.execute("SET waddles.tenant_id = '1'")
             cur.execute("SET waddles.community_id = '1'")
             cur.execute(
-                "INSERT INTO app_core.waddles_core_quotes_quotes "
+                "INSERT INTO app_core.penguintechinc_waddles_quotes "
                 "(tenant_id, community_id, kind, body) VALUES (1, 1, 'motivational', 'owner row')"
             )
             cur.execute("RESET waddles.tenant_id")
             cur.execute("RESET waddles.community_id")
-            cur.execute("SELECT body FROM app_core.waddles_core_quotes_quotes")
+            cur.execute("SELECT body FROM app_core.penguintechinc_waddles_quotes")
             rows = [row[0] for row in cur.fetchall()]
             cur.execute("RESET ROLE")
 

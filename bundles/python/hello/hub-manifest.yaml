@@ -4,8 +4,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.hello
 name: Hello Example Bundle (Python)
-version: 1.0.5
-feature: waddles.core.example
+version: 1.0.6
 module: core
 provider: builtin
 author: github:penguintechinc

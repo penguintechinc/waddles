@@ -37,7 +37,7 @@ def test_manifests_agree_and_carry_attribution_and_the_verbatim_mit_notice(name)
     assert (
         manifest["app_id"]
         == install["app_id"]
-        == f"waddles.integrations.superpenguin.{name}"
+        == f"psychoboy.penguintwitchbot.{name}"
     )
     assert manifest["language"] == install["language"] == "csharp"
     assert manifest["author"] == install["author"] == "github/psychoboy"

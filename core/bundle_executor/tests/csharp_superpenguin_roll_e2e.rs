@@ -645,7 +645,7 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
         let wasm = std::fs::read(path).expect("a real built component is required for EVERY port");
         assert!(wasm.len() > 1_000_000);
         let runs = run_for(
-            format!("waddles.integrations.superpenguin.{game}"),
+            format!("psychoboy.penguintwitchbot.{game}"),
             format!("waddles.command-superpenguin-{game}"),
             wasm,
             vec![

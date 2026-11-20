@@ -2,7 +2,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.calendar
 name: Calendar Bundle (Rust)
 version: 1.0.4
-feature: waddles.core.app
 module: core
 provider: builtin
 author: github:penguintechinc

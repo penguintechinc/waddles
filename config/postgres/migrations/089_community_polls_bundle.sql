@@ -48,7 +48,7 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.community.polls.default',
+    'penguintechinc.waddles.polls-pipeline',
     '1.0.0',
     'community',
     'waddles.community.polls',
@@ -68,7 +68,7 @@ ON CONFLICT (app_id) DO NOTHING;
 
 -- Activate tenant-wide
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.community.polls.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.polls-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

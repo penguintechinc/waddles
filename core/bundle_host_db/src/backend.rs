@@ -1463,11 +1463,11 @@ mod tests {
     }
 
     fn scoped() -> DbScope {
-        DbScope::new(TENANT_ID, COMMUNITY_ID, "waddles.bot.a")
+        DbScope::new(TENANT_ID, COMMUNITY_ID, "penguintechinc.waddles.fixture-bot-a")
     }
 
     fn tenant_wide() -> DbScope {
-        DbScope::new(TENANT_ID, TENANT_WIDE_COMMUNITY_ID, "waddles.bot.a")
+        DbScope::new(TENANT_ID, TENANT_WIDE_COMMUNITY_ID, "penguintechinc.waddles.fixture-bot-a")
     }
 
     /// A backend over a scripted mock connection, plus a handle to read back
@@ -1606,7 +1606,7 @@ mod tests {
         );
         assert_prologue(&stmts, &scope);
         assert_eq!(stmts[3].sql, LOCK_SQL);
-        assert_eq!(bound(&stmts[3]), vec![text("7:3:waddles.bot.a")]);
+        assert_eq!(bound(&stmts[3]), vec![text("7:3:penguintechinc.waddles.fixture-bot-a")]);
         assert_eq!(
             stmts[4].sql,
             "SELECT COUNT(*) AS n FROM \"app_core\".\"fishing_core\" \
@@ -1646,7 +1646,7 @@ mod tests {
 
         let stmts = h.statements();
         assert_prologue(&stmts, &scope);
-        assert_eq!(bound(&stmts[3]), vec![text("7:0:waddles.bot.a")]);
+        assert_eq!(bound(&stmts[3]), vec![text("7:0:penguintechinc.waddles.fixture-bot-a")]);
         assert_eq!(
             stmts[4].sql,
             "SELECT COUNT(*) AS n FROM \"app_core\".\"fishing_core\" \

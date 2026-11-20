@@ -8,7 +8,6 @@ name: Ping Example Bundle (Rust)
 # the two manifests describe the same real bundle and must not silently diverge on what it
 # actually consumes.
 version: 1.0.8
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

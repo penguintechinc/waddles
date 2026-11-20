@@ -2,7 +2,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.galactic-avatars
 name: Galactic Avatars (Rust)
 version: 1.0.3
-feature: waddles.core.app
 module: core
 provider: builtin
 author: github:penguintechinc

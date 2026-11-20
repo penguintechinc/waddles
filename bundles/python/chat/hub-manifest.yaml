@@ -12,7 +12,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.chat
 name: Chat History Bundle (Python)
 version: 1.0.4
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

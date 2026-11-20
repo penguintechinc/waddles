@@ -10,7 +10,6 @@ app_id: penguintechinc.waddles.music-soundcloud
 name: SoundCloud Music Service Bundle (Rust)
 version: 1.0.3
 author: github:penguintechinc
-feature: waddles.core.service
 module: core
 provider: builtin
 language: rust

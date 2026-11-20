@@ -515,7 +515,7 @@ mod tests {
         .expect("serializable fixture")
     }
 
-    const APP_ID: &str = "waddles.test.signing";
+    const APP_ID: &str = "penguintechinc.waddles.fixture-test-signing";
     const VERSION: &str = "1";
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const APPROVAL_ID: i64 = 42;

@@ -4204,7 +4204,7 @@ mod tests {
             actor: None,
             payload: serde_json::from_value(serde_json::json!({
                 "text": "posted",
-                "_target_app_id": "waddles.community.forums.default"
+                "_target_app_id": "penguintechinc.waddles.forums-pipeline"
             }))
             .unwrap(),
             occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
@@ -4215,7 +4215,7 @@ mod tests {
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
         deps.approved_targets.insert(
-            "waddles.community.forums.default".to_string(),
+            "penguintechinc.waddles.forums-pipeline".to_string(),
             "acme".to_string(),
         );
 
@@ -4225,9 +4225,9 @@ mod tests {
         assert_eq!(appended.len(), 1);
         assert_eq!(
             appended[0].0,
-            "waddles:t:acme:c:main:app:waddles.community.forums.default:action"
+            "waddles:t:acme:c:main:app:penguintechinc.waddles.forums-pipeline:action"
         );
-        assert_eq!(appended[0].1.app_id, "waddles.community.forums.default");
+        assert_eq!(appended[0].1.app_id, "penguintechinc.waddles.forums-pipeline");
         assert!(!appended[0].1.event.payload.contains_key("_target_app_id"));
     }
 

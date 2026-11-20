@@ -24,7 +24,7 @@
 schema_version: 2
 app_id: penguintechinc.waddles.csping
 name: Ping Example Bundle (C#)
-version: 1.0.3
+version: 1.0.4
 feature: penguintechinc.waddles
 module: core
 provider: builtin

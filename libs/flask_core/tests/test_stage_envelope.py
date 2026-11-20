@@ -155,10 +155,10 @@ def test_stage_envelope_target_app_id_defaults_to_none() -> None:
 
 
 def test_stage_envelope_target_app_id_round_trips() -> None:
-    envelope = _make_envelope(target_app_id="waddles.community.forums.default")
+    envelope = _make_envelope(target_app_id="penguintechinc.waddles.forums-pipeline")
     restored = StageEnvelope.from_dict(envelope.to_dict())
     assert restored == envelope
-    assert restored.target_app_id == "waddles.community.forums.default"
+    assert restored.target_app_id == "penguintechinc.waddles.forums-pipeline"
 
 
 def test_stage_envelope_from_dict_missing_target_app_id_key_defaults_to_none() -> None:

@@ -34,7 +34,7 @@ use bundle_executor::manifest::{VerifiedManifest, WitWorld};
 use common::{run_many_detailed, test_config, Scenario, StageAnswer};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/identity_fixture.wasm");
-const APP_ID: &str = "waddles.test.identity-fixture";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-identity-fixture";
 
 const ALICE: &str = "aaaaaaaa-1111-4222-8333-444444444444";
 const BOB: &str = "bbbbbbbb-1111-4222-8333-444444444444";

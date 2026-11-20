@@ -2,7 +2,6 @@ schema_version: 2
 app_id: penguintechinc.waddles.twitch
 name: Twitch Platform Connector (Rust)
 version: 1.3.3
-feature: waddles.core.service
 module: core
 provider: builtin
 language: rust

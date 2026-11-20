@@ -4,7 +4,6 @@ name: Live Now (Rust)
 # Keep in lockstep with hub-manifest.yaml (that file is what hub-api reads; this one targets the
 # bundle-compiler schema and must not diverge on what the bundle consumes/requests).
 version: 1.0.4
-feature: waddles.core.app
 module: core
 provider: builtin
 author: github:penguintechinc
