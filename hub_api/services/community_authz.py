@@ -71,6 +71,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from typing import Any
 
 from flask_core.auth import verify_jwt_token
@@ -648,6 +649,24 @@ class CallerStanding:
     bypass: bool
 
 
+def _soft_banned(dal: Any, community_id: int, user_uuid: str | None) -> bool:
+    """True iff the member has an unexpired soft-ban (`bundle_reputation_soft_bans`) here.
+
+    Same rule as the inventory authz (#1469); skipped when the table is not bound.
+    """
+    if not user_uuid or "bundle_reputation_soft_bans" not in dal.tables:
+        return False
+    bans = dal.bundle_reputation_soft_bans
+    now = datetime.now(UTC)  # expires_at is TIMESTAMPTZ: compare aware, never naive
+    return bool(
+        dal(
+            (bans.community_id == community_id)
+            & (bans.user_uuid == user_uuid)
+            & ((bans.expires_at == None) | (bans.expires_at > now))  # noqa: E711 - pydal idiom
+        ).count()
+    )
+
+
 def resolve_caller_standing_sync(request: Any, dal: Any, *, community_id: int) -> CallerStanding:
     """Resolve the caller's membership/admin standing in `community_id` (sync DAL).
 
@@ -690,7 +709,28 @@ def resolve_caller_standing_sync(request: Any, dal: Any, *, community_id: int) -
     role = member.role if "role" in dal.community_members.fields else None
     if isinstance(role, str) and role.strip().lower() == "banned":
         return CallerStanding(is_member=False, is_admin=False, bypass=False)
+    if _soft_banned(dal, community_id, getattr(member, "user_uuid", None)):
+        return CallerStanding(is_member=False, is_admin=False, bypass=False)
     scopes = member_scopes_sync(dal, community_id, user_id)
     return CallerStanding(
         is_member=True, is_admin=bool(scopes & (ADMIN_SCOPES | {"community:admin"})), bypass=False
     )
+
+
+def caller_token_scopes(request: Any) -> frozenset[str]:
+    """The bearer JWT's literal `scope` claim (401 when absent/invalid) -- no wildcard expansion.
+
+    Unlike `_decode_caller` it does not require a numeric `sub`: service tokens carry a
+    non-numeric subject.
+    """
+    auth_header = request.headers.get("Authorization")
+    if not auth_header or not auth_header.startswith("Bearer "):
+        raise unauthorized("Authentication required")
+    payload = verify_jwt_token(auth_header[7:])
+    if payload is None:
+        raise unauthorized("Invalid or expired token")
+    return _parse_scope_claim(payload.get("scope"))
+
+
+def _parse_scope_claim(raw: Any) -> frozenset[str]:
+    return frozenset(raw.split()) if isinstance(raw, str) else frozenset()

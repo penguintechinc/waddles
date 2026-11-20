@@ -239,3 +239,15 @@ class TestClientIpSpoofResistance:
     ) -> None:
         async with app_standard_tier.test_request_context("/"):
             assert _client_ip(trusted_proxy_hops=2) == "unknown"
+
+
+class TestDiscountCodeValidationIsRateLimited:
+    """`POST .../discount-codes/validate` is a guessable-secret oracle: auth-tier bucket."""
+
+    async def test_validate_trips_the_auth_tier_limit(self, app_auth_tier: Quart) -> None:
+        async with app_auth_tier.test_app():
+            client = app_auth_tier.test_client()
+            path = "/api/v1/marketplace/vendor/discount-codes/validate"
+            statuses = [(await client.post(path, json={})).status_code for _ in range(3)]
+            assert 429 not in statuses[:2]
+            assert statuses[2] == 429

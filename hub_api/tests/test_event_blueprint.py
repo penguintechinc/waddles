@@ -234,11 +234,23 @@ class TestRouteTableCharacterization:
 
     @pytest.mark.parametrize("route", ALL_ROUTES, ids=lambda r: r.name)
     async def test_gated_route_with_correct_scope_reaches_proxy(
-        self, cpid: str, client: Any, route: Any, auth_headers: Any, proxy_stub: AsyncMock
+        self,
+        cpid: str,
+        client: Any,
+        route: Any,
+        auth_headers: Any,
+        proxy_stub: AsyncMock,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A token carrying exactly the declared scope reaches the handler (not 401/403)."""
         if route.scope is None:
             pytest.skip("public route -- covered by TestPublicBookingRoutes")
+        if route.member_guard:  # membership is proven in test_read_route_authz.py
+            from tests.conftest import apply_route_guard_bypass
+
+            apply_route_guard_bypass(monkeypatch)
+            # this fixture's `communities` table has no tenant_id column
+            monkeypatch.setattr("services.route_guards.community_in_tenant", lambda *_a, **_k: True)
         response = await client.open(
             _full_path(route, cpid),
             method=route.method,

@@ -62,6 +62,7 @@ from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, Response, request
 
 from services.event_calendar_proxy import EventCalendarProxyClient, UserContext
+from services.route_guards import community_member_guard
 
 #: Two-gate feature flags (license tier AND PostHog) for the Event module's
 #: two capabilities -- `libs/event_module/features.py`'s
@@ -126,6 +127,9 @@ class ProxyRoute:
     #: `scope=None` booking routes -- no tenant context to evaluate a gate
     #: against; see `_make_handler`).
     feature_flag: str | None = FEATURE_EVENT_CALENDAR
+    #: `True` = community MEMBER guard (tenant fence 404 + active non-banned member, else 403)
+    #: layered under the scope check; for `:read` routes the viewer's `*:read` would admit anyone.
+    member_guard: bool = False
 
 
 # calendarController.js -- /api/v1/calendar/* (user-facing)
@@ -229,7 +233,8 @@ _CALENDAR_ADMIN_ROUTES: tuple[ProxyRoute, ...] = (
     ProxyRoute("adm_attendees", "/<community_id>/calendar/events/<event_id>/attendees", "GET",
                "/api/v1/calendar/{community_id}/events/{event_id}/attendees", SCOPE_ADMIN),
     ProxyRoute("adm_rsvp_counts", "/<community_id>/calendar/events/<event_id>/rsvp-counts", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}/rsvp-counts", SCOPE_READ),
+               "/api/v1/calendar/{community_id}/events/{event_id}/rsvp-counts", SCOPE_READ,
+               member_guard=True),
     # Ticket types -- ticketController.js -> FEATURE_EVENT_TICKETING
     ProxyRoute("adm_list_ticket_types",
                "/<community_id>/calendar/events/<event_id>/ticket-types", "GET",
@@ -307,7 +312,7 @@ _CALENDAR_ADMIN_ROUTES: tuple[ProxyRoute, ...] = (
                has_body=True),
     ProxyRoute("adm_my_permissions", "/<community_id>/calendar/events/<event_id>/my-permissions",
                "GET", "/api/v1/calendar/{community_id}/events/{event_id}/my-permissions",
-               SCOPE_READ),
+               SCOPE_READ, member_guard=True),
     # Ticketing configuration -- ticketController.js -> FEATURE_EVENT_TICKETING
     ProxyRoute("adm_enable_ticketing",
                "/<community_id>/calendar/events/<event_id>/ticketing/enable", "POST",
@@ -435,6 +440,8 @@ def _register(bp: Blueprint, routes: tuple[ProxyRoute, ...]) -> None:
             # `Callable[..., Any]` -- already `Any`-typed at both ends
             # under `follow_imports = "skip"` (pyproject.toml), so no
             # ignore is needed or accepted (`warn_unused_ignores = true`).
+            if route.member_guard:
+                view = community_member_guard(view)
             view = require_scope(route.scope)(view)
             view = tenant_middleware(view)
         # Client-facing community ids are public UUIDs: the app-level hook swaps the `cuuid`

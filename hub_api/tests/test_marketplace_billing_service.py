@@ -423,96 +423,73 @@ class TestDiscountCodes:
         deleted = svc.delete_discount_code(dal, vendor_id, dto.id)
         assert deleted.isActive is False
 
-    def test_validate_code_not_found(self, seeded: Any) -> None:
-        dal, _t, _c = seeded
-        result = svc.validate_discount_code(dal, "NOPE", None)
-        assert result.valid is False
-        assert result.reason == "CODE_NOT_FOUND"
+    def _module(self, dal: Any, seller_id: int, slug: str = "m1") -> int:
+        from services.schema import bind_marketplace_vendor_tables
+
+        bind_marketplace_vendor_tables(dal, migrate=True)
+        return int(
+            dal.marketplace_modules.insert(
+                seller_id=seller_id,
+                name=slug,
+                slug=slug,
+                webhook_url="https://x.invalid/h",
+                webhook_secret="s",
+            )
+        )
+
+    def _code(self, dal: Any, vendor_id: int, code: str, **kw: Any) -> None:
+        now = dt.datetime.utcnow()
+        fields: dict[str, Any] = {
+            "code": code,
+            "vendor_id": vendor_id,
+            "discount_type": "percentage",
+            "discount_value": 10,
+            "valid_from": now - dt.timedelta(days=1),
+            "is_active": True,
+            "created_at": now,
+            "updated_at": now,
+        }
+        fields.update(kw)
+        dal.vendor_discount_codes.insert(**fields)
+        dal.commit()
 
     def test_validate_empty_code_raises(self, seeded: Any) -> None:
         dal, _t, _c = seeded
         with pytest.raises(ApiError):
-            svc.validate_discount_code(dal, "", None)
+            svc.validate_discount_code(dal, "", 1)
 
-    def test_validate_inactive_code(self, seeded: Any) -> None:
+    def test_validate_success_returns_only_the_discount(self, seeded: Any) -> None:
         dal, _t, _c = seeded
         vendor_id = self._vendor(dal)
-        dto = svc.create_discount_code(
-            dal,
-            vendor_id,
-            code="INACTIVE",
-            discount_type="percentage",
-            discount_value=10,
-            module_id=None,
-            valid_from=None,
-            valid_until=None,
-            max_uses=None,
-            description=None,
+        module_id = self._module(dal, vendor_id)
+        self._code(dal, vendor_id, "GOOD", max_uses=5)
+        result = svc.validate_discount_code(dal, "good", module_id)
+        assert result == svc.DiscountValidationDTO(
+            valid=True, discountType="percentage", discountValue=10.0
         )
-        svc.delete_discount_code(dal, vendor_id, dto.id)
-        result = svc.validate_discount_code(dal, "INACTIVE", None)
-        assert result.valid is False
-        assert result.reason == "CODE_INACTIVE"
 
-    def test_validate_max_uses_reached(self, seeded: Any) -> None:
+    def test_unrelated_vendors_code_is_refused(self, seeded: Any) -> None:
         dal, _t, _c = seeded
         vendor_id = self._vendor(dal)
+        other = int(dal.hub_users.insert(username="v2", email="v2@x.com"))
+        module_id = self._module(dal, other)
+        self._code(dal, vendor_id, "MINE")
+        assert svc.validate_discount_code(dal, "MINE", module_id).valid is False
+
+    def test_all_failures_are_identical(self, seeded: Any) -> None:
+        dal, _t, _c = seeded
+        vendor_id = self._vendor(dal)
+        module_id = self._module(dal, vendor_id)
         now = dt.datetime.utcnow()
-        dal.vendor_discount_codes.insert(
-            code="MAXED",
-            vendor_id=vendor_id,
-            discount_type="percentage",
-            discount_value=10,
-            max_uses=1,
-            current_uses=1,
-            valid_from=now,
-            is_active=True,
-            created_at=now,
-            updated_at=now,
-        )
-        dal.commit()
-        result = svc.validate_discount_code(dal, "MAXED", None)
-        assert result.valid is False
-        assert result.reason == "CODE_MAX_USES_REACHED"
-
-    def test_validate_wrong_module(self, seeded: Any) -> None:
-        dal, _t, _c = seeded
-        vendor_id = self._vendor(dal)
-        dto = svc.create_discount_code(
-            dal,
-            vendor_id,
-            code="SCOPED",
-            discount_type="percentage",
-            discount_value=10,
-            module_id=42,
-            valid_from=None,
-            valid_until=None,
-            max_uses=None,
-            description=None,
-        )
-        assert dto.moduleId == 42
-        result = svc.validate_discount_code(dal, "SCOPED", 999)
-        assert result.valid is False
-        assert result.reason == "CODE_WRONG_MODULE"
-
-    def test_validate_success(self, seeded: Any) -> None:
-        dal, _t, _c = seeded
-        vendor_id = self._vendor(dal)
-        svc.create_discount_code(
-            dal,
-            vendor_id,
-            code="GOOD",
-            discount_type="percentage",
-            discount_value=10,
-            module_id=None,
-            valid_from=None,
-            valid_until=None,
-            max_uses=5,
-            description=None,
-        )
-        result = svc.validate_discount_code(dal, "good", None)
-        assert result.valid is True
-        assert result.usesRemaining == 5
+        self._code(dal, vendor_id, "OFF", is_active=False)
+        self._code(dal, vendor_id, "OLD", valid_until=now - dt.timedelta(days=1))
+        self._code(dal, vendor_id, "MAXED", max_uses=1, current_uses=1)
+        self._code(dal, vendor_id, "SCOPED", module_id=module_id + 99)
+        results = {
+            svc.validate_discount_code(dal, c, module_id)
+            for c in ("NOPE", "OFF", "OLD", "MAXED", "SCOPED")
+        }
+        assert results == {svc.DiscountValidationDTO(valid=False)}
 
     def test_redeem_free_type_zeroes_price(self, seeded: Any) -> None:
         dal, _t, community_id = seeded

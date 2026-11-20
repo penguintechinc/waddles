@@ -419,3 +419,25 @@ class TestListBundles:
         finally:
             distribution_db.read_dal = None
             replica_dal.close()
+
+
+class TestHumanCallerRefused:
+    """A viewer session (`*:read`, no literal `distribution:read`) is not a service identity."""
+
+    async def test_viewer_without_community_is_403(self, client: Any) -> None:
+        r = await client.get(
+            "/api/v1/distribution/bundles?stage=ingest", headers=_headers(scope="*:read")
+        )
+        assert r.status_code == 403
+
+    async def test_viewer_with_arbitrary_numeric_community_is_not_served(self, client: Any) -> None:
+        r = await client.get(
+            "/api/v1/distribution/bundles?stage=ingest&community_id=1",
+            headers=_headers(scope="*:read"),
+        )
+        assert r.status_code in (403, 404)
+
+    async def test_service_token_still_served(self, client: Any, distribution_db: Any) -> None:
+        _seed_bundle(distribution_db)
+        r = await client.get("/api/v1/distribution/bundles?stage=ingest", headers=_headers())
+        assert r.status_code == 200

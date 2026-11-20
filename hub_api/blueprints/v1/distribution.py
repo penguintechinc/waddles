@@ -44,6 +44,7 @@ from quart_schema import validate_response
 
 from services import distribution_service as svc
 from services.errors import ApiError
+from services.route_guards import machine_or_community_admin_guard
 from services.schema import bind_app_bundle_tables
 
 distribution_bp = Blueprint("v1_distribution", __name__, url_prefix="/api/v1/distribution")
@@ -150,6 +151,7 @@ class DistributionBundlesResponse:
 @distribution_bp.route("/bundles", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("distribution:read")  # type: ignore[misc]
+@machine_or_community_admin_guard("distribution:read")  # type: ignore[misc]
 @validate_response(DistributionBundlesResponse)
 async def list_distribution_bundles() -> (
     DistributionBundlesResponse | tuple[dict[str, object], int]

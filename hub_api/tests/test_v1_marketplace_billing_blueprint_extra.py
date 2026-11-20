@@ -358,6 +358,9 @@ class TestDiscountCodeCrudBlueprint:
         self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any
     ) -> None:
         dal, _t, _c = marketplace_billing_db
+        from services.schema import bind_marketplace_vendor_tables
+
+        bind_marketplace_vendor_tables(dal, migrate=True)
         vendor_id = int(dal.hub_users.insert(username="v7", email="v7@x.com"))
         dal.commit()
         response = await client.post(
@@ -366,12 +369,13 @@ class TestDiscountCodeCrudBlueprint:
                 **user_auth_headers(user_id=vendor_id, scope="marketplace.discount:read"),
                 "Content-Type": "application/json",
             },
-            data=b'{"code": "NOPE"}',
+            data=b'{"code": "NOPE", "moduleId": 1}',
         )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["valid"] is False
-        assert body["reason"] == "CODE_NOT_FOUND"
+        assert body.get("reason") is None
+        assert body.get("vendorId") is None
 
     async def test_redeem_no_longer_valid_returns_409(
         self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any

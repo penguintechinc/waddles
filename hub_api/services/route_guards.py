@@ -20,7 +20,7 @@ from typing import Any, Final
 from flask_core.tenancy import get_tenant_context
 from quart import current_app, request
 
-from services.community_authz import resolve_caller_standing_sync
+from services.community_authz import caller_token_scopes, resolve_caller_standing_sync
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError
@@ -149,3 +149,45 @@ def platform_analytics_guard(fn: Any) -> Any:
 
     setattr(wrapper, GUARD_ATTR, GUARD_PLATFORM)
     return wrapper
+
+
+GUARD_MACHINE: Final = "machine"
+
+
+def machine_or_community_admin_guard(literal_scope: str) -> Callable[[Any], Any]:
+    """Allow a service identity (token carries `literal_scope` verbatim) or a community admin.
+
+    A viewer session's `*:read` covers `literal_scope` only by wildcard, so a human never
+    qualifies as a service. A human caller must name a `community_id` (query) that is in their
+    tenant and that they administer; anyone else gets 403.
+    """
+
+    def decorate(fn: Any) -> Any:
+        @functools.wraps(fn)
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
+            try:
+                scopes = caller_token_scopes(request)
+            except ApiError as exc:
+                return api_error(exc.message, exc.status_code, exc.code)
+            if literal_scope in scopes:
+                return await fn(*args, **kwargs)
+            ctx = get_tenant_context(request)
+            raw = request.args.get("community_id")
+            if ctx is None or not raw or not raw.isdigit():
+                return api_error("Service identity or community admin required", status_code=403)
+            dal = current_app.config["dal"]
+            community_id = int(raw)
+            if not community_in_tenant(dal, community_id, ctx):
+                return api_error("Community not found", status_code=404)
+            try:
+                standing = resolve_caller_standing_sync(request, dal, community_id=community_id)
+            except ApiError as exc:
+                return api_error(exc.message, exc.status_code, exc.code)
+            if not standing.is_admin:
+                return api_error("Service identity or community admin required", status_code=403)
+            return await fn(*args, **kwargs)
+
+        setattr(wrapper, GUARD_ATTR, GUARD_MACHINE)
+        return wrapper
+
+    return decorate

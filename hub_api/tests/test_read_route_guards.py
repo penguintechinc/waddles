@@ -9,6 +9,8 @@ url_map and fails for any such route that has no admin/member/owner guard stampe
 from __future__ import annotations
 
 # ruff: noqa: E501
+import inspect
+import re
 from typing import Any
 
 from app import create_app
@@ -32,9 +34,6 @@ _JUSTIFIED_GET_PATHS: dict[str, str] = {
     "/api/v1/admin/<cuuid:community_id>/inventory/summary": "community_inventory: PR #1469",
     "/api/v1/admin/<cuuid:community_id>/inventory/log": "community_inventory: PR #1469",
     "/api/v1/admin/<cuuid:community_id>/inventory/checkouts": "community_inventory: PR #1469",
-    # FOLLOW-UP (not among the 53 audited routes): event.py ProxyRoutes, downstream-owned check.
-    "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/rsvp-counts": "FOLLOW-UP event.py ProxyRoute",
-    "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/my-permissions": "FOLLOW-UP event.py ProxyRoute",
 }
 JUSTIFIED_UNGUARDED: dict[tuple[str, str], str] = {
     ("GET", path): reason for path, reason in _JUSTIFIED_GET_PATHS.items()
@@ -111,3 +110,68 @@ def test_platform_analytics_routes_are_guarded() -> None:
             seen += 1
             assert _guard_kind(application.view_functions[rule.endpoint]) == "platform", rule.rule
     assert seen >= 5
+
+
+#: Inline enforcement markers recognised in a handler's (or its wrappers') source. A route
+#: with NO `require_scope` is only accepted when its chain visibly calls one of these.
+_INLINE_ENFORCEMENT = re.compile(
+    r"require_member_scope|require_community_scope|authorize_community|_require_member|_gated_|"
+    r"require_community_admin|require_community_member|_require_community_admin|"
+    r"resolve_editor_scopes|_admin_actor|_member_actor|is_community_admin|community_access|"
+    r"_require_admin|_require_manage|member_scopes_sync|resolve_community_membership"
+)
+
+#: Path prefix -> reason, for scope-less community routes the walker cannot see enforced.
+#: PR #1472 is fixing the truly unscoped ones; entries go stale (and must be deleted) when a
+#: route gains a guard or scope. UNVERIFIED means "no enforcement the walker recognises".
+NOSCOPE_ALLOWLIST: dict[str, str] = {
+    "/api/v1/public/communities/": "public community profile/live status, by design",
+    "/api/v1/internal/": "service-key authenticated internal route (not user reachable)",
+    "/api/v1/communities/<cuuid:community_id>/join": "join flow: caller acts on their own join",
+    "/api/v1/<cuuid:community_id>/join-requests": "UNVERIFIED: own-request flow; PR #1472 triage",
+    "/api/v1/<cuuid:community_id>/github-sync/": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/join-requests": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/banner": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/logo": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/profile": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/interaction/roles": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/reputation/": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/streams": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/support/": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/admin/<cuuid:community_id>/workflows": "UNVERIFIED: PR #1472 / follow-up",
+    "/api/v1/apps/community/<cuuid:community_id>/bundles/": "UNVERIFIED: PR #1472 / follow-up",
+}
+
+
+def _handler_source(view: Any) -> str:
+    out = ""
+    for fn in _chain(view):
+        try:
+            out += inspect.getsource(fn)
+        except (OSError, TypeError):
+            continue
+    return out
+
+
+def test_scopeless_community_routes_are_enforced_or_justified() -> None:
+    application = create_app(_test_config())
+    examined = 0
+    flagged: set[str] = set()
+    for rule in application.url_map.iter_rules():
+        if not _COMMUNITY_ARGS & set(rule.arguments):
+            continue
+        view = application.view_functions[rule.endpoint]
+        if _required_scopes(view):
+            continue
+        examined += 1
+        if _guard_kind(view) or _INLINE_ENFORCEMENT.search(_handler_source(view)):
+            continue
+        flagged.add(rule.rule)
+    assert examined >= 100, f"walker examined only {examined} scope-less routes"
+    unjustified = sorted(r for r in flagged if not r.startswith(tuple(NOSCOPE_ALLOWLIST)))
+    assert not unjustified, (
+        "community routes with NO require_scope and no recognised inline admin/member check; "
+        f"add a guard or a justified NOSCOPE_ALLOWLIST entry: {unjustified}"
+    )
+    stale = [p for p in NOSCOPE_ALLOWLIST if not any(r.startswith(p) for r in flagged)]
+    assert not stale, f"NOSCOPE_ALLOWLIST entries no longer match any flagged route: {stale}"

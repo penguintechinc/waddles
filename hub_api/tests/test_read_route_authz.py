@@ -168,3 +168,37 @@ class TestPlatformAnalytics:
         uid = insert_global_admin(seeded[0])
         r = await app.test_client().get("/api/v1/analytics/platform/overview", headers=_hdr(uid))
         assert r.status_code == 200
+
+
+class TestEventReadRoutes:
+    """event.py ProxyRoutes `rsvp-counts` / `my-permissions` carry a member guard."""
+
+    @pytest.fixture
+    def event_app(self, seeded: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
+        import blueprints.v1.event as event_module
+        from services.event_calendar_proxy import ProxyResult
+
+        dal = seeded[0]
+        quart_app = Quart(__name__)
+        QuartSchema(quart_app)
+        quart_app.config["dal"] = dal
+        install_community_ids(quart_app, dal)
+        quart_app.register_blueprint(event_module.event_calendar_admin_bp)
+        monkeypatch.setattr(event_module, "feature_enabled", AsyncMock(return_value=True))
+        monkeypatch.setattr(
+            event_module._proxy_client,
+            "request",
+            AsyncMock(return_value=ProxyResult(ok=True, status_code=200, body={"success": True})),
+        )
+        return quart_app
+
+    @pytest.mark.parametrize("leaf", ["rsvp-counts", "my-permissions"])
+    async def test_non_member_403_member_200_cross_tenant_404(
+        self, event_app: Quart, seeded: Any, leaf: str
+    ) -> None:
+        dal, cid, foreign = seeded
+        base = "/api/v1/admin/{community_id}/calendar/events/11/" + leaf
+        c = event_app.test_client()
+        assert (await c.get(cpath(dal, base, cid), headers=_hdr(OUTSIDER_UID))).status_code == 403
+        assert (await c.get(cpath(dal, base, cid), headers=_hdr(MEMBER_UID))).status_code == 200
+        assert (await c.get(cpath(dal, base, foreign), headers=_hdr(MEMBER_UID))).status_code == 404
