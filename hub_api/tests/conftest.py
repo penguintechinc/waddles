@@ -2229,3 +2229,35 @@ def _uuid_community_guard_denominator(request: pytest.FixtureRequest):  # type: 
         f"{module.__name__}: UUID_COMMUNITY_RESPONSES guard examined {examined} community id "
         "keys across the module (zero examined proves nothing)"
     )
+
+
+def apply_route_guard_bypass(monkeypatch: Any) -> None:
+    """Make the read-route guards (`services.route_guards`) admit every caller as an admin.
+
+    For legacy blueprint-contract test modules that exercise handler behaviour with a bare
+    token and no seeded membership. The guards themselves are proven by
+    `tests/test_read_route_guards.py` and `tests/test_read_route_authz.py`, which never use it.
+    The tenant fence (`community_in_tenant` -> 404) still runs.
+    """
+    import blueprints.v1.bot as bot_module
+    import blueprints.v1.ingest_sources as ingest_module
+    from services import route_guards
+    from services.community_authz import CallerStanding
+
+    standing = CallerStanding(is_member=True, is_admin=True, bypass=True)
+
+    def _admin(*_a: Any, **_k: Any) -> CallerStanding:
+        return standing
+
+    monkeypatch.setattr(route_guards, "resolve_caller_standing_sync", _admin)
+    monkeypatch.setattr(bot_module, "resolve_caller_standing_sync", _admin)
+    monkeypatch.setattr(ingest_module, "resolve_caller_standing_sync", _admin)
+    monkeypatch.setattr(route_guards, "get_current_user_id", lambda _r: 1)
+    monkeypatch.setattr(route_guards, "is_global_admin_sync", lambda *_a, **_k: True)
+
+
+@pytest.fixture
+def bypass_route_guards(monkeypatch: Any) -> Any:
+    """Fixture form of `apply_route_guard_bypass` (re-call it after a `monkeypatch.undo()`)."""
+    apply_route_guard_bypass(monkeypatch)
+    yield

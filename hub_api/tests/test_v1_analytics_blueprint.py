@@ -610,3 +610,6 @@ class TestMaskedFailure:
         )
         assert response.status_code == 404
         assert (await response.get_json())["success"] is False
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

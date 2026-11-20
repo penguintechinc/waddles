@@ -44,6 +44,7 @@ from services.current_user import get_current_user_id
 from services.db_routing import get_read_dals, reads_from_replica
 from services.errors import ApiError, bad_request, not_found
 from services.pagination import parse_limit
+from services.route_guards import community_admin_guard
 
 loyalty_bp = Blueprint("v1_community_loyalty", __name__, url_prefix="/api/v1/admin")
 
@@ -126,6 +127,7 @@ def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
 @loyalty_bp.route("/<cuuid:community_id>/loyalty/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/config`."""
     ctx = get_tenant_context(request)
@@ -184,6 +186,7 @@ async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
 @loyalty_bp.route("/<cuuid:community_id>/loyalty/leaderboard", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @reads_from_replica("community_loyalty.get_leaderboard")
 async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/leaderboard?limit=`."""
@@ -273,6 +276,7 @@ async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
 @loyalty_bp.route("/<cuuid:community_id>/loyalty/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @reads_from_replica("community_loyalty.get_stats")
 async def get_stats(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/stats`."""

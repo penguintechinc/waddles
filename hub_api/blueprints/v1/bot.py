@@ -48,6 +48,7 @@ from quart_schema import validate_request, validate_response
 
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
+from services.community_authz import resolve_caller_standing_sync
 from services.community_public_id import (
     lookup_public_ids,
     resolve_public_community_id,
@@ -55,6 +56,12 @@ from services.community_public_id import (
 )
 from services.errors import ApiError
 from services.global_identity import is_global_admin_sync
+from services.route_guards import (
+    GUARD_ADMIN,
+    community_admin_guard,
+    community_member_guard,
+    mark_guarded,
+)
 
 bot_bp = Blueprint("v1_bot", __name__, url_prefix="/api/v1/admin")
 
@@ -90,6 +97,20 @@ async def _require_community(community_id: int) -> tuple[dict[str, Any], int] | 
     ok = await asyncio.to_thread(community_belongs_to_tenant, dal, community_id, ctx.tenant_id)
     if not ok:
         return _error("Community not found for this tenant", 403, "FORBIDDEN")
+    return None
+
+
+async def _require_community_admin_inline(
+    community_id: int,
+) -> tuple[dict[str, Any], int] | None:
+    """403 unless the caller administers `community_id` (run after `_require_community`)."""
+    from quart import current_app
+
+    standing = resolve_caller_standing_sync(
+        request, current_app.config["dal"], community_id=community_id
+    )
+    if not standing.is_admin:
+        return _error("Community admin access required", 403, "FORBIDDEN")
     return None
 
 
@@ -247,6 +268,7 @@ class ShoutoutHistoryResponse:
 @bot_bp.route("/<cuuid:community_id>/shoutout/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(ShoutoutConfigResponse)
 async def get_shoutout_config(community_id: int) -> Any:
     """`api.js` `getShoutoutConfig` -- `GET /api/v1/admin/:communityId/shoutout/config`."""
@@ -290,6 +312,7 @@ async def update_shoutout_config(data: ShoutoutConfigRequest, community_id: int)
 @bot_bp.route("/<cuuid:community_id>/shoutout/creators", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(ShoutoutCreatorsResponse)
 async def get_shoutout_creators(community_id: int) -> Any:
     """`api.js` `getShoutoutCreators` -- `GET /api/v1/admin/:communityId/shoutout/creators`."""
@@ -357,6 +380,7 @@ async def remove_shoutout_creator(community_id: int, creator_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/shoutout/history", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_READ)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(ShoutoutHistoryResponse)
 async def get_shoutout_history(community_id: int) -> Any:
     """`api.js` `getShoutoutHistory` -- `GET /api/v1/admin/:communityId/shoutout/history`."""
@@ -432,6 +456,7 @@ def _chatter_dto(config: dict[str, Any]) -> AIChatterConfigDTO:
 @bot_bp.route("/<cuuid:community_id>/ai-chatter/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_CHATTER_READ)  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AIChatterConfigResponse)
 async def get_ai_chatter_config(community_id: int) -> Any:
     """`api.js` `getAIChatterConfig` -- proxy passthrough, see module docstring."""
@@ -742,6 +767,7 @@ async def _require_query_scope(community_id: int | None) -> tuple[dict[str, Any]
 @bot_bp.route("/ai-knowledge/sources", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 @validate_response(KnowledgeSourcesResponse)
 async def list_knowledge_sources() -> Any:
     """`aiKnowledgeController.listSources` -- `GET .../ai-knowledge/sources?communityId=`.
@@ -759,7 +785,9 @@ async def list_knowledge_sources() -> Any:
         if not await _caller_is_super_admin():
             return _error("communityId is required", 400, "BAD_REQUEST")
     else:
-        denied = await _require_community(community_id)
+        denied = await _require_community(community_id) or await _require_community_admin_inline(
+            community_id
+        )
         if denied:
             return denied
     sources = await asyncio.to_thread(bot_ai_knowledge.list_knowledge_sources, _dal(), community_id)
@@ -888,6 +916,7 @@ def _suggestion_dto(suggestion: bot_ai_knowledge.TicketSuggestion) -> TicketSugg
 @bot_bp.route("/ai-knowledge/search", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_READ)  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 @validate_request(KnowledgeSearchRequest)
 @validate_response(KnowledgeSearchResponse)
 async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
@@ -896,6 +925,8 @@ async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
         return _error("query is required", 400, "BAD_REQUEST")
     community_id = await to_internal_community_id(data.communityId)
     denied = await _require_query_scope(community_id)
+    if denied is None and community_id is not None:
+        denied = await _require_community_admin_inline(community_id)
     if denied:
         return denied
     try:
@@ -1440,6 +1471,7 @@ async def get_rcon_access_log(community_id: int, server_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/info", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(ServersMemberResponse)
 async def list_rcon_info(community_id: int) -> Any:
     """`api.js` `rconApi.listInfo` -- `GET .../rcon/info` (member view, reuses `listServers`)."""
@@ -1453,6 +1485,7 @@ async def list_rcon_info(community_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/info/<int:server_id>/status", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getServerStatus` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)
@@ -1465,6 +1498,7 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
 @bot_bp.route("/<cuuid:community_id>/rcon/info/<int:server_id>/players", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def get_rcon_player_list(community_id: int, server_id: int) -> Any:
     """`api.js` `rconApi.getPlayerList` -- proxy passthrough, see module docstring."""
     denied = await _require_community(community_id)

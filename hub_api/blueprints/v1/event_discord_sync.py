@@ -64,6 +64,7 @@ from services import guild_pairing as pairing_svc
 from services.community_common import community_in_tenant, is_valid_service_key
 from services.community_public_id import lookup_public_id
 from services.errors import ApiError, bad_request, not_found, payment_required
+from services.route_guards import community_admin_guard
 from services.schema import bind_calendar_sync_tables
 
 logger = logging.getLogger(__name__)
@@ -121,6 +122,7 @@ async def _admin_gate(community_id: int) -> tuple[dict[str, object], int] | None
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(EventSyncStateResponse)
 async def get_event_sync(
     community_id: int,

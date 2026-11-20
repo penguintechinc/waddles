@@ -637,3 +637,60 @@ def member_scopes_sync(dal: Any, community_id: int, user_id: int) -> frozenset[s
     if _row_kind(role_row) == KIND_ADMIN:
         return effective_scopes(KIND_ADMIN, None)
     return _parse_claims_scopes(member.claims_cache) or _parse_claims_scopes(role_row.base_claims)
+
+
+@dataclass(slots=True, frozen=True)
+class CallerStanding:
+    """The caller's standing in one community: `is_member`, `is_admin`, and bypass origin."""
+
+    is_member: bool
+    is_admin: bool
+    bypass: bool
+
+
+def resolve_caller_standing_sync(request: Any, dal: Any, *, community_id: int) -> CallerStanding:
+    """Resolve the caller's membership/admin standing in `community_id` (sync DAL).
+
+    Backs the read-route guards in `services.route_guards`. Global admins (`users:admin` on the
+    token) and tenant admins of the community's tenant are admin-equivalent. Everyone else is a
+    member only with an ACTIVE `community_members` row whose role is not `banned`; they are
+    admin only when that role carries an admin scope (admin kind computed from the registry).
+    The token's own `scope` claim never counts -- viewer's universal `*:read` is exactly what
+    the guarded routes must not trust. The caller must have already proven the community
+    belongs to the caller's tenant.
+    """
+    ctx = get_tenant_context(request)
+    if ctx is None:
+        raise forbidden("Tenant context not resolved")
+    user_id, token_scopes = _decode_caller(request)
+    if SCOPE_GLOBAL_ADMIN in token_scopes:
+        return CallerStanding(is_member=True, is_admin=True, bypass=True)
+    if "tenant_admins" in dal.tables:
+        tenant_admin = (
+            dal(
+                (dal.tenant_admins.user_id == user_id)
+                & (dal.tenant_admins.tenant_id == ctx.tenant_id)
+            )
+            .select()
+            .first()
+        )
+        if tenant_admin is not None:
+            return CallerStanding(is_member=True, is_admin=True, bypass=True)
+    member = (
+        dal(
+            (dal.community_members.community_id == community_id)
+            & (dal.community_members.user_id == str(user_id))
+            & (dal.community_members.is_active == True)  # noqa: E712
+        )
+        .select()
+        .first()
+    )
+    if member is None:
+        return CallerStanding(is_member=False, is_admin=False, bypass=False)
+    role = member.role if "role" in dal.community_members.fields else None
+    if isinstance(role, str) and role.strip().lower() == "banned":
+        return CallerStanding(is_member=False, is_admin=False, bypass=False)
+    scopes = member_scopes_sync(dal, community_id, user_id)
+    return CallerStanding(
+        is_member=True, is_admin=bool(scopes & (ADMIN_SCOPES | {"community:admin"})), bypass=False
+    )

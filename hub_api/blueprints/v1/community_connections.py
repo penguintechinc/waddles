@@ -85,6 +85,7 @@ from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, not_found, payment_required
 from services.machine_auth import machine_authenticated
+from services.route_guards import community_admin_guard
 
 logger = logging.getLogger(__name__)
 
@@ -207,6 +208,7 @@ def _callback_html(*, provider: str, ok: bool, error: str | None = None) -> Resp
 @connections_bp.route("/communities/<cuuid:community_id>/connections", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.connections:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/communities/<id>/connections`."""
     ctx = get_tenant_context(request)

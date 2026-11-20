@@ -164,3 +164,6 @@ async def test_no_pairings_is_404(client: Any, auth_headers: Any, event_sync_db:
 
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).
 UUID_COMMUNITY_RESPONSES = True
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

@@ -45,6 +45,7 @@ from services.community_common import (
     feature_not_enabled,
     get_current_user,
 )
+from services.route_guards import community_admin_guard
 
 announcements_bp = Blueprint("v1_community_announcements", __name__, url_prefix="/api/v1/admin")
 
@@ -62,6 +63,7 @@ def _tenant_ok(community_id: int) -> bool:
 @announcements_bp.route("/<cuuid:community_id>/announcements", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementListResponse)
 async def list_route(community_id: int) -> AnnouncementListResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/announcements`."""
@@ -89,6 +91,7 @@ async def list_route(community_id: int) -> AnnouncementListResponse | tuple[dict
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def get_route(
     community_id: int, announcement_id: int
@@ -295,6 +298,7 @@ async def broadcast_route(community_id: int, announcement_id: int) -> tuple[dict
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def broadcast_status_route(
     community_id: int, announcement_id: int
 ) -> tuple[dict[str, object], int]:

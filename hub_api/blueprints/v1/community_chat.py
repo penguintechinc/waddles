@@ -42,6 +42,7 @@ from services.community_chat import (
 )
 from services.community_common import api_error, community_in_tenant
 from services.pagination import parse_limit
+from services.route_guards import community_member_guard
 
 chat_bp = Blueprint("v1_community_chat", __name__, url_prefix="/api/v1/community")
 
@@ -53,6 +54,7 @@ FEATURE_COMMUNITY_CHAT = "waddles.community.chat"
 @chat_bp.route("/<cuuid:community_id>/chat/history", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.chat:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(ChatHistoryResponse)
 async def chat_history(community_id: int) -> ChatHistoryResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/chat/history` -- paginated message history."""
@@ -77,6 +79,7 @@ async def chat_history(community_id: int) -> ChatHistoryResponse | tuple[dict[st
 @chat_bp.route("/<cuuid:community_id>/chat/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.chat:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(ChatChannelsResponse)
 async def chat_channels(community_id: int) -> ChatChannelsResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/chat/channels` -- distinct channels + activity."""

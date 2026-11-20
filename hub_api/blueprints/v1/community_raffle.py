@@ -28,6 +28,7 @@ from services.community_raffle import (
     store_sound,
     upsert_customization,
 )
+from services.route_guards import community_admin_guard
 
 raffle_bp = Blueprint("v1_community_raffle", __name__, url_prefix="/api/v1/admin")
 
@@ -49,6 +50,7 @@ def _tenant_ok(community_id: int) -> bool:
 @raffle_bp.route("/<cuuid:community_id>/raffle-customization", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def list_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/raffle-customization`."""
     ctx = get_tenant_context(request)

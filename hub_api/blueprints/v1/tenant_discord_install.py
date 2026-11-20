@@ -53,6 +53,7 @@ from services.discord_install_service import (
     complete_install,
 )
 from services.errors import ApiError, bad_request, unauthorized
+from services.route_guards import tenant_admin_guard
 from services.tenant_discord_app import get_install_status
 from services.tenant_discord_install_state import DEFAULT_TTL_SECONDS
 
@@ -226,6 +227,7 @@ class InstallStatusResponse:
 @tenant_discord_install_bp.route("/tenants/discord/install/status", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant.discord_install:read")  # type: ignore[misc]
+@tenant_admin_guard  # type: ignore[misc]
 @validate_response(InstallStatusResponse)
 async def install_status() -> InstallStatusResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/tenants/discord/install/status` -- the CALLER's tenant only (from the JWT)."""

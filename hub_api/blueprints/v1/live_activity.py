@@ -33,6 +33,7 @@ from quart_schema import validate_response
 from services import live_activity as svc
 from services.community_common import api_error, community_in_tenant
 from services.pagination import parse_limit
+from services.route_guards import community_admin_guard
 
 live_activity_bp = Blueprint("v1_live_activity", __name__, url_prefix="/api/v1")
 
@@ -43,6 +44,7 @@ DEFAULT_LIST_LIMIT = 50
 @live_activity_bp.route("/community/<cuuid:community_id>/live-activity", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.live_activity:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(svc.LiveActivityListResponse)
 async def list_live_activity(
     community_id: int,
@@ -63,6 +65,7 @@ async def list_live_activity(
 @live_activity_bp.route("/community/<cuuid:community_id>/live-activity/stream", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.live_activity:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def stream_live_activity(community_id: int) -> Response | tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/live-activity/stream` -- SSE, see `services/live_activity.py`.
 

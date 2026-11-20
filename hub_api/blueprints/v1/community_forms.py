@@ -18,6 +18,7 @@ from quart import Blueprint, current_app, request
 
 from services import community_engagement_proxy as proxy
 from services.community_common import community_in_tenant, feature_not_enabled
+from services.route_guards import community_admin_guard
 
 forms_bp = Blueprint("v1_community_forms", __name__, url_prefix="/api/v1/admin")
 
@@ -29,6 +30,7 @@ FEATURE_COMMUNITY_FORMS = "waddles.community.forms"
 @forms_bp.route("/<cuuid:community_id>/forms", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def list_forms(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/forms`."""
     ctx = get_tenant_context(request)
@@ -43,6 +45,7 @@ async def list_forms(community_id: int) -> tuple[dict[str, object], int]:
 @forms_bp.route("/<cuuid:community_id>/forms/<int:form_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def get_form(community_id: int, form_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/forms/<formId>`."""
     ctx = get_tenant_context(request)
@@ -80,6 +83,7 @@ async def delete_form(community_id: int, form_id: int) -> tuple[dict[str, object
 @forms_bp.route("/<cuuid:community_id>/forms/<int:form_id>/submissions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def form_submissions(community_id: int, form_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/forms/<formId>/submissions`."""
     ctx = get_tenant_context(request)

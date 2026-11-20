@@ -132,7 +132,7 @@ class TestTenantIsolation:
         response = await client.get(f"/api/v1/admin/{community_uuid}/shoutout/config")
         assert response.status_code == 401
 
-    async def test_community_from_other_tenant_is_403(
+    async def test_community_from_other_tenant_is_404(
         self,
         client: Any,
         auth_headers: Any,
@@ -149,14 +149,14 @@ class TestTenantIsolation:
         response = await client.get(
             f"/api/v1/admin/{other_tenant_community_uuid}/shoutout/config", headers=headers
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
 
-    async def test_unknown_community_is_403(self, client: Any, auth_headers: Any) -> None:
+    async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         headers = auth_headers(scope="bot.shoutout:read")
         response = await client.get(
             f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/shoutout/config", headers=headers
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
 
 
 class TestScopeEnforcement:
@@ -1301,3 +1301,6 @@ async def test_ai_chatter_service_unavailable_is_typed_503(monkeypatch: pytest.M
         await bot_ai_chatter.update_chatter_config(
             1, bot_ai_chatter.AIChatterConfigUpdate(enabled=True)
         )
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")
