@@ -212,6 +212,14 @@ pipeline:
     # once its key is provisioned. Never put license-tier flags here.
     extraEnv:
       FLAG_WADDLES_TENANT_DISCORD_INSTALL: "true"
+      # Community pages 402 on alpha (no PostHog key on hub-api -> flag unresolved -> default OFF).
+      # All free-tier flags (not in flask_core.tier_catalog), so the ENV baseline applies; bypass
+      # domains never force flags on. Do NOT add licensed keys (inventory/loyalty/raffles/...).
+      FLAG_WADDLES_COMMUNITY_ACTIVITY: "true"
+      FLAG_WADDLES_COMMUNITY_ANNOUNCEMENTS: "true"
+      FLAG_WADDLES_COMMUNITY_POLLS: "true"
+      FLAG_WADDLES_COMMUNITY_FORMS: "true"
+      FLAG_WADDLES_STREAMING_STREAM: "true"
       # Reserved catch-all tenant slug, explicit (see values-alpha.yaml); mirrors defaultTenantId.
       DEFAULT_TENANT_SLUG: "default"
       # Alpha capacity stopgap: svc-process shares one per-identity internal gRPC bucket (default

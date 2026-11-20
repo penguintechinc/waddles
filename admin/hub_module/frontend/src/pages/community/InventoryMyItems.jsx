@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link } from 'react-router-dom';
 import { ArchiveBoxArrowDownIcon, ArrowUturnLeftIcon } from '@heroicons/react/24/outline';
 import { inventoryApi } from '../../services/api';
-import UpgradeNotice, { isUpgradeRequired, upgradeMessage } from '../../components/UpgradeNotice';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui/UpgradeNotice';
 
 const STATUS_COLORS = {
   active: 'bg-green-500/20 text-green-300 border-green-500/30',
@@ -37,7 +37,7 @@ function InventoryMyItems() {
       setCheckouts(res.data?.checkouts || []);
     } catch (err) {
       console.error('Failed to load checkouts:', err);
-      if (isUpgradeRequired(err)) setUpgrade(upgradeMessage(err) || '');
+      if (isLicensedFeatureError(err)) setUpgrade(err.response?.data?.error?.message || '');
       else if (err.response?.status === 403) setError('Only active members of this community can use the Quartermaster.');
       else setError('Failed to load your claimed items.');
     } finally {
@@ -100,7 +100,7 @@ function InventoryMyItems() {
         </div>
       )}
 
-      {upgrade !== null && <UpgradeNotice feature="The Quartermaster" message={upgrade} />}
+      {upgrade !== null && <UpgradeNotice feature="The Quartermaster" serverMessage={upgrade || undefined} />}
       {error && <div className="text-red-400 text-sm">{error}</div>}
 
       {loading ? (

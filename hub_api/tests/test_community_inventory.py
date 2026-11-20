@@ -174,7 +174,7 @@ class TestItemCrud:
         response = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "", "quantity": 5},
         )
         assert response.status_code == 400
@@ -183,7 +183,7 @@ class TestItemCrud:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         _, community_id = community_db
-        write_headers = auth_headers(scope="community.inventory:write")
+        write_headers = auth_headers(scope="community.inventory:write", user_id="2")
 
         create_resp = await _post_json(
             client,
@@ -264,7 +264,7 @@ class TestCheckoutCheckin:
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Boom Mic", "quantity": 2},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
@@ -304,7 +304,7 @@ class TestCheckoutCheckin:
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Rare Lens", "quantity": 1},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
@@ -389,7 +389,7 @@ class TestCheckoutCheckin:
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Tripod", "quantity": 5},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
@@ -418,7 +418,7 @@ class TestUpdateDeleteNotFound:
         response = await client.put(
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/9999",
             headers={
-                **auth_headers(scope="community.inventory:write"),
+                **auth_headers(scope="community.inventory:write", user_id="2"),
                 "Content-Type": "application/json",
             },
             data=json_module.dumps({"name": "x"}),
@@ -431,7 +431,7 @@ class TestUpdateDeleteNotFound:
         _, community_id = community_db
         response = await client.delete(
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/9999",
-            headers=auth_headers(scope="community.inventory:write"),
+            headers=auth_headers(scope="community.inventory:write", user_id="2"),
         )
         assert response.status_code == 404
 
@@ -445,7 +445,7 @@ class TestStockAdjustments:
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Batteries", "quantity": 10},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
@@ -454,7 +454,7 @@ class TestStockAdjustments:
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}"
             f"/inventory/items/{item_id}/stock/add",
-            auth_headers(scope="community.inventory:write", user_id="1"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": 5, "notes": "restock"},
         )
         assert response.status_code == 200
@@ -467,7 +467,7 @@ class TestStockAdjustments:
         response = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/1/stock/add",
-            auth_headers(scope="community.inventory:write", user_id="1"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": -1},
         )
         assert response.status_code == 400
@@ -480,7 +480,7 @@ class TestStockAdjustments:
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Cables", "quantity": 10},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
@@ -489,7 +489,7 @@ class TestStockAdjustments:
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}"
             f"/inventory/items/{item_id}/stock/remove",
-            auth_headers(scope="community.inventory:write", user_id="1"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": 4, "notes": "damaged"},
         )
         assert response.status_code == 200
@@ -503,7 +503,7 @@ class TestStockAdjustments:
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}"
             f"/inventory/items/1/stock/remove",
-            auth_headers(scope="community.inventory:write", user_id="1"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": 0},
         )
         assert response.status_code == 400
@@ -520,7 +520,7 @@ class TestListCheckoutsAuditAndSummary:
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Camera", "quantity": 3},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
@@ -592,7 +592,7 @@ class TestListCheckoutsAuditAndSummary:
         create_resp = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Mixer", "quantity": 2},
         )
         item_id = (await create_resp.get_json())["item"]["id"]
@@ -600,7 +600,7 @@ class TestListCheckoutsAuditAndSummary:
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}"
             f"/inventory/items/{item_id}/stock/add",
-            auth_headers(scope="community.inventory:write", user_id="1"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": 1},
         )
         # `get_audit_log`'s raw SQL joins on `il.performed_by_user_id`, but the
@@ -696,7 +696,7 @@ class TestAvailableItems:
         await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items",
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Drone", "quantity": 1},
         )
         response = await client.get(
@@ -921,7 +921,7 @@ class TestCheckinQuantityValidation:
         item = await _post_json(
             client,
             _url(db, cid, "items"),
-            auth_headers(scope="community.inventory:write"),
+            auth_headers(scope="community.inventory:write", user_id="2"),
             {"name": "Lens", "quantity": 5},
         )
         item_id = (await item.get_json())["item"]["id"]
@@ -970,3 +970,88 @@ class TestCheckinQuantityValidation:
         for bad in (0, -5, 3):
             result, err = inventory_svc.checkin_item(dal, cid, MEMBER, dto.id, bad, None)
             assert result is None and "between 1 and 2" in (err or "")
+
+
+WRITE_ROUTES = [
+    ("POST", "items", {"name": "X", "quantity": 1}),
+    ("PUT", "items/1", {"name": "Y"}),
+    ("DELETE", "items/1", None),
+    ("POST", "items/1/stock/add", {"quantity": 1}),
+    ("POST", "items/1/stock/remove", {"quantity": 1}),
+]
+
+
+async def _write_call(
+    client: Any, method: str, url: str, headers: dict[str, str], body: Any
+) -> Any:
+    if body is None:
+        return await client.open(url, method=method, headers=headers)
+    return await client.open(
+        url,
+        method=method,
+        headers={**headers, "Content-Type": "application/json"},
+        data=json_module.dumps(body),
+    )
+
+
+class TestWriteRoutesRequireCommunityAdmin:
+    @pytest.mark.parametrize("who", [MEMBER, STRANGER])
+    @pytest.mark.parametrize("method,suffix,body", WRITE_ROUTES)
+    async def test_non_admin_is_403_even_with_the_write_scope(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_db: Any,
+        who: int,
+        method: str,
+        suffix: str,
+        body: Any,
+    ) -> None:
+        dal, cid = community_db
+        headers = auth_headers(scope="community.inventory:write", user_id=str(who))
+        resp = await _write_call(client, method, _url(dal, cid, suffix), headers, body)
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("method,suffix,body", WRITE_ROUTES)
+    async def test_flag_off_is_402(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_db: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        method: str,
+        suffix: str,
+        body: Any,
+    ) -> None:
+        import blueprints.v1.community_inventory as inventory_module
+
+        monkeypatch.setattr(inventory_module, "feature_enabled", AsyncMock(return_value=False))
+        dal, cid = community_db
+        headers = auth_headers(scope="community.inventory:write", user_id=str(ADMIN))
+        resp = await _write_call(client, method, _url(dal, cid, suffix), headers, body)
+        assert resp.status_code == 402
+
+
+class TestSoftBanExpiryBoundary:
+    """`expires_at` is TIMESTAMPTZ: the check compares an aware UTC `now`."""
+
+    @pytest.mark.parametrize("delta_seconds,status", [(1, 403), (-1, 200)])
+    async def test_expiry_one_second_either_side(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_db: Any,
+        delta_seconds: int,
+        status: int,
+    ) -> None:
+        from datetime import UTC, datetime, timedelta
+
+        dal, cid = community_db
+        dal(dal.bundle_reputation_soft_bans.user_uuid == "uuid-soft").update(
+            expires_at=datetime.now(UTC) + timedelta(seconds=delta_seconds)
+        )
+        dal.commit()
+        resp = await client.get(
+            _url(dal, cid, "available"), headers=_hdr(auth_headers, SOFT_BANNED)
+        )
+        assert resp.status_code == status

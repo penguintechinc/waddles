@@ -100,8 +100,9 @@ async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=True)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     dto, err = create_item(current_app.config["dal"], community_id, payload)
     if err:
@@ -115,8 +116,9 @@ async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/inventory/items/<itemId>`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=True)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     dto = update_item(current_app.config["dal"], community_id, item_id, payload)
     if dto is None:
@@ -129,8 +131,9 @@ async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/inventory/items/<itemId>`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=True)
+    if denied:
+        return denied
     if not delete_item(current_app.config["dal"], community_id, item_id):
         return {"error": "Item not found"}, 404
     return {"message": "Item deleted"}, 200
@@ -144,8 +147,9 @@ async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
 @auth_required  # type: ignore[misc]
 async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/add`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=True)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     try:
         quantity = int(payload.get("quantity"))  # type: ignore[arg-type]  # TypeError caught below
@@ -176,8 +180,9 @@ async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, ob
 @auth_required  # type: ignore[misc]
 async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/remove`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=True)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     try:
         quantity = int(payload.get("quantity"))  # type: ignore[arg-type]  # TypeError caught below

@@ -33,6 +33,8 @@ export { Skeleton, SkeletonLines } from './Skeleton';
 export { LoadingState } from './LoadingState';
 export type { LoadingStateProps } from './LoadingState';
 export { EmptyState } from './EmptyState';
+export { UpgradeNotice, isLicensedFeatureError } from './UpgradeNotice';
+export type { UpgradeNoticeProps } from './UpgradeNotice';
 export type { EmptyStateProps } from './EmptyState';
 export { ErrorState } from './ErrorState';
 export type { ErrorStateProps } from './ErrorState';

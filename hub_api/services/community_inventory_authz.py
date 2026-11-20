@@ -48,7 +48,7 @@ def _soft_banned(dal: Any, community_id: int, user_uuid: str | None) -> bool:
         return False
     _ensure_reputation_tables(dal)
     bans = dal.bundle_reputation_soft_bans
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now = datetime.now(UTC)  # expires_at is TIMESTAMPTZ (alembic 0097): compare aware, never naive
     return bool(
         dal(
             (bans.community_id == community_id)

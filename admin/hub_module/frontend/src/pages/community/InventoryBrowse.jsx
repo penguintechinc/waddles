@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { ArchiveBoxIcon, MagnifyingGlassIcon, ShoppingCartIcon } from '@heroicons/react/24/outline';
 import { inventoryApi } from '../../services/api';
-import UpgradeNotice, { isUpgradeRequired, upgradeMessage } from '../../components/UpgradeNotice';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui/UpgradeNotice';
 
 function InventoryBrowse() {
   const { communityId } = useParams();
@@ -39,7 +39,7 @@ function InventoryBrowse() {
       setItems(res.data?.items || []);
     } catch (err) {
       console.error('Failed to load inventory:', err);
-      if (isUpgradeRequired(err)) setUpgrade(upgradeMessage(err) || '');
+      if (isLicensedFeatureError(err)) setUpgrade(err.response?.data?.error?.message || '');
       else if (err.response?.status === 403) setError('Only active members of this community can use the Quartermaster.');
       else setError('Failed to load inventory items.');
     } finally {
@@ -111,7 +111,7 @@ function InventoryBrowse() {
         />
       </div>
 
-      {upgrade !== null && <UpgradeNotice feature="The Quartermaster" message={upgrade} />}
+      {upgrade !== null && <UpgradeNotice feature="The Quartermaster" serverMessage={upgrade || undefined} />}
       {error && <div className="text-red-400 text-sm">{error}</div>}
 
       {loading ? (
