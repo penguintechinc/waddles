@@ -639,3 +639,50 @@ def test_rooms_idle_expiry_env_is_rendered_and_overridable(helm: str, env: str) 
     over = _env(_container(_streaming_deployment(_render(helm, env, extra))))
     assert over["ROOMS_EMPTY_TIMEOUT_DEFAULT_SECS"]["value"] == "60"
     assert over["ROOMS_EMPTY_TIMEOUT_MAX_SECS"]["value"] == "3600"
+
+
+def _hub_identities(docs: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
+    hub = [d for d in docs if d["kind"] == "Deployment" and _comp(d) == "hub-api"]
+    assert len(hub) == 1
+    env = _env(hub[0]["spec"]["template"]["spec"]["containers"][0])
+    identities = json.loads(env["SERVICE_JWT_IDENTITIES"]["value"])
+    assert identities, "hub-api must render a non-empty service-identity allow-list"
+    return identities
+
+
+def test_token_debit_identity_is_gated_on_svc_streaming_enabled(helm: str) -> None:
+    """The svc-streaming ServiceAccount, its `token.billing:debit` allow-list entry and the pod's
+    machine-JWT wiring render only with the Deployment that uses them."""
+    off = _render(helm, "ci")
+    assert not [
+        d
+        for d in off
+        if d["kind"] == "ServiceAccount" and d["metadata"]["name"] == "svc-streaming"
+    ]
+    off_ids = [i["service_id"] for i in _hub_identities(off)]
+    assert not [s for s in off_ids if s.endswith("/svc-streaming")], off_ids
+    assert "token.billing:debit" not in json.dumps(off)
+
+    on = _render(helm, "alpha")
+    sas = [
+        d
+        for d in on
+        if d["kind"] == "ServiceAccount" and d["metadata"]["name"] == "svc-streaming"
+    ]
+    assert len(sas) == 1
+    entry = [i for i in _hub_identities(on) if i["service_id"].endswith("/svc-streaming")]
+    assert len(entry) == 1
+    assert entry[0]["allowed_scopes"] == ["token.billing:debit"]
+    assert entry[0]["k8s_service_account"] == "svc-streaming"
+    dep = _streaming_deployment(on)
+    pod = dep["spec"]["template"]["spec"]
+    assert pod["serviceAccountName"] == "svc-streaming"
+    env = _env(_container(dep))
+    for name in (
+        "SERVICE_JWT_TOKEN_ENDPOINT",
+        "SERVICE_JWT_SA_TOKEN_PATH",
+        "HUB_API_GRPC_CA_FILE",
+    ):
+        assert name in env, name
+    volumes = {v["name"] for v in pod["volumes"]}
+    assert {"service-jwt-bootstrap-token", "hub-api-grpc-ca"} <= volumes

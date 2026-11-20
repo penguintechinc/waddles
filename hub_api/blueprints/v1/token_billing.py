@@ -387,6 +387,7 @@ async def debit_tokens(
             ref=data.ref,
         )
     except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc.code)
         return _err(exc)
     if not result.ok:
         return _blocked_response(result)
@@ -445,6 +446,7 @@ async def service_debit_tokens(
             actor_user_id=data.actor_user_id,
         )
     except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc.code)
         return _err(exc)
     if not result.ok:
         return _blocked_response(result)

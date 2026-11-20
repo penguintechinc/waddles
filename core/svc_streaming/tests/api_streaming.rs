@@ -18,6 +18,7 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use tower::ServiceExt;
 
 use svc_streaming::api::{router_for_testing, SharedEngine};
+use svc_streaming::billing::token_ledger::{ServiceBearer, TokenLedgerClient};
 use svc_streaming::config::{CliConfig, Config, Secret};
 use svc_streaming::http::auth::Claims;
 use svc_streaming::http::AppState;
@@ -158,7 +159,8 @@ fn sign_token(claims: &Claims) -> String {
 fn claims_for_tenant(state: &AppState, tenant: &str) -> Claims {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     Claims {
-        sub: "user-123".into(),
+        // A numeric `hub_users.id`: transcode admission bills this member as the debit actor.
+        sub: MEMBER_USER_ID.to_string(),
         iss: state.config.cli.jwt_issuer.clone(),
         aud: state.config.cli.jwt_audience.clone(),
         iat: now,
@@ -169,6 +171,9 @@ fn claims_for_tenant(state: &AppState, tenant: &str) -> Claims {
         roles: vec![],
     }
 }
+
+/// The acting member's hub-api user id (the JWT `sub`) used by every request in this file.
+const MEMBER_USER_ID: i64 = 42;
 
 fn bearer_for_owned_tenant() -> String {
     let token = sign_token(&claims_for_tenant(&test_state(), "tenant-abc"));
@@ -1164,13 +1169,41 @@ async fn add_target_with_an_unknown_protocol_or_codec_is_rejected() {
     }
 }
 
-/// Spawns a mock hub-api whose token ledger always admits the debit.
+/// Service-credential stand-in for the machine-JWT mint (the real client needs hub-api gRPC).
+struct FixedServiceBearer;
+
+#[async_trait::async_trait]
+impl ServiceBearer for FixedServiceBearer {
+    async fn bearer_for(&self, community_id: i64) -> Result<Arc<str>, String> {
+        Ok(Arc::from(format!("service-jwt-c{community_id}")))
+    }
+}
+
+/// Spawns a mock hub-api whose INTERNAL token-ledger route admits the debit, but only when the
+/// request carries the service credential and names the JWT's member as `actor_user_id` (a
+/// forwarded member token or a missing actor would be refused, like the real hub-api).
 async fn spawn_admitting_ledger() -> String {
     let app = axum::Router::new().route(
-        "/api/v1/marketplace/communities/{community_id}/tokens/debit",
-        axum::routing::post(|| async {
-            axum::Json(serde_json::json!({"success": true, "balance_after": 55}))
-        }),
+        "/api/v1/internal/communities/{community_id}/tokens/debit",
+        axum::routing::post(
+            |axum::extract::Path(community_id): axum::extract::Path<i64>,
+             headers: axum::http::HeaderMap,
+             axum::Json(body): axum::Json<serde_json::Value>| async move {
+                let expected = format!("Bearer service-jwt-c{community_id}");
+                let authed = headers
+                    .get(AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .is_some_and(|v| v == expected);
+                if authed && body["actor_user_id"] == MEMBER_USER_ID {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({"success": true, "balance_after": 55})),
+                    )
+                } else {
+                    (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({})))
+                }
+            },
+        ),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1185,7 +1218,7 @@ async fn build_app_capturing(hub_api_url: &str) -> (axum::Router, DatabaseConnec
     let engine = FakeEngine::default();
     let cli = CliConfig::try_parse_from(["svc-streaming", "--hub-api-url", hub_api_url])
         .expect("cli parses");
-    let state = AppState::new(
+    let mut state = AppState::new(
         Config {
             cli,
             db_password: Secret::new("db-pass"),
@@ -1195,6 +1228,8 @@ async fn build_app_capturing(hub_api_url: &str) -> (axum::Router, DatabaseConnec
         },
         prometheus::Registry::new(),
     );
+    state.token_ledger =
+        Arc::new(TokenLedgerClient::new().with_bearer_source(Arc::new(FixedServiceBearer)));
     let shared: SharedEngine = Arc::new(engine.clone());
     let app = router_for_testing(db.clone(), shared).with_state(state);
     (app, db, engine)
