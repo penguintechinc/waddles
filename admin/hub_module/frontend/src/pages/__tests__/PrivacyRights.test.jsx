@@ -6,6 +6,8 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../hooks/useCookieConsent', () => ({
   useCookieConsent: () => ({ consent: {}, setDoNotSell: vi.fn(), loading: false }),
 }));
+const auth = vi.hoisted(() => ({ isAuthenticated: true, loading: false }));
+vi.mock('../../contexts/AuthContext', () => ({ useAuth: () => auth }));
 vi.mock('../../services/api', () => ({ default: { get: vi.fn(), delete: vi.fn() } }));
 vi.mock('../../services/userPrivacyRequestsApi', () => ({
   userPrivacyRequestsApi: { list: vi.fn(), create: vi.fn() },
@@ -16,7 +18,32 @@ import PrivacyRights from '../PrivacyRights';
 const row = { id: 'r1', requestType: 2, status: 3, regime: 1, requestedAt: '2026-11-01T10:00:00Z', dueAt: '2026-12-01T10:00:00Z', completedAt: null };
 const mount = () => render(<MemoryRouter><PrivacyRights /></MemoryRouter>);
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.clearAllMocks();
+  auth.isAuthenticated = true;
+  auth.loading = false;
+});
+
+describe('PrivacyRights while signed out (regression: 401 privacy-requests + 400 auth/refresh)', () => {
+  it("never fetches the user's requests; shows sign-in prompts and the public do-not-sell control", async () => {
+    auth.isAuthenticated = false;
+    mount();
+    expect(await screen.findByTestId('requests-signin')).toBeTruthy();
+    expect(screen.getByTestId('export-signin')).toBeTruthy();
+    expect(screen.getByTestId('delete-signin')).toBeTruthy();
+    expect(screen.getByTestId('toggle-do-not-sell')).toBeTruthy();
+    expect(screen.queryByTestId('export-data')).toBeNull();
+    expect(api.list).not.toHaveBeenCalled();
+  });
+
+  it('waits for the auth check before fetching', () => {
+    auth.isAuthenticated = false;
+    auth.loading = true;
+    mount();
+    expect(api.list).not.toHaveBeenCalled();
+    expect(screen.queryByTestId('requests-signin')).toBeNull();
+  });
+});
 
 describe('PrivacyRights requests section', () => {
   it('lists own requests with status and due date', async () => {

@@ -108,7 +108,7 @@ describe('TownHall', () => {
     it('flag off (402): "not enabled for this community", no retry', async () => {
       serve({ [`GET ${TOWN_HALL}`]: httpError(402, envelope('FEATURE_NOT_ENABLED', 'Calls / RTC is not enabled for this plan')) });
       renderPage();
-      expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Calls are not enabled for this community');
+      expect(await screen.findByTestId('calls-feature-disabled')).toHaveTextContent('Upgrade to Premium for this feature');
       expect(screen.queryByRole('button', { name: 'Try again' })).not.toBeInTheDocument();
     });
 

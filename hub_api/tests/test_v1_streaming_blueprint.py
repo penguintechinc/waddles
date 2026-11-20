@@ -149,6 +149,25 @@ class TestAuth:
         assert (await client.post(_url(a, "/key/regenerate"), headers=headers)).status_code == 403
 
 
+class TestUnknownCommunity:
+    async def test_global_admin_on_unknown_community_is_404_not_fk_500(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        """Regression: unknown community UUID must 404, not hit the streaming_configs FK.
+
+        Unknown UUID -> id -1; a global admin passed authz and the insert hit
+        `streaming_configs_community_id_fkey` (500 on alpha). Must be a clean 404, no row.
+        """
+        import uuid
+
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=1, scope='users:admin')}"}
+        url = f"/api/v1/admin/{uuid.uuid4()}/streams"
+        for method in ("get", "post"):
+            response = await getattr(client, method)(url, headers=headers)
+            assert response.status_code == 404, method
+        assert streaming_db.dal(streaming_db.dal.streaming_configs).count() == 0
+
+
 class TestKeyLifecycle:
     async def test_get_before_create_is_null_config(self, client: Any, streaming_db: Any) -> None:
         cid = _community(streaming_db)

@@ -655,6 +655,8 @@ pub struct ValkeySink {
     client: redis::Client,
     conn: tokio::sync::OnceCell<redis::aio::ConnectionManager>,
     response_timeout: Duration,
+    /// Stream-name override; `None` (production) uses the name the caller passes ([`STREAM`]).
+    stream_override: Option<String>,
 }
 
 impl ValkeySink {
@@ -665,7 +667,16 @@ impl ValkeySink {
             client,
             conn: tokio::sync::OnceCell::new(),
             response_timeout,
+            stream_override: None,
         }
+    }
+
+    /// Redirects every `XADD` to `stream` instead of [`STREAM`], so integration tests sharing one
+    /// Valkey can each use a private key. Production never calls this.
+    #[must_use]
+    pub fn with_stream(mut self, stream: impl Into<String>) -> Self {
+        self.stream_override = Some(stream.into());
+        self
     }
 }
 
@@ -686,6 +697,7 @@ impl AnalyticsSink for ValkeySink {
             .await
             .map_err(|e| format!("connect: {e}"))?
             .clone();
+        let stream = self.stream_override.as_deref().unwrap_or(stream);
         let mut cmd = redis::cmd("XADD");
         cmd.arg(stream).arg("MAXLEN").arg("~").arg(maxlen).arg("*");
         for (k, v) in fields {

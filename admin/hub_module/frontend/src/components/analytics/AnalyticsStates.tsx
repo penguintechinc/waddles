@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import type { AnalyticsFailure } from './classifyAnalyticsError';
+import { UpgradeNotice } from '../ui/UpgradeNotice';
 
 export interface AnalyticsEmptyProps {
   /** Headline, e.g. "No events yet" / "No data yet". */
@@ -36,12 +37,11 @@ export function AnalyticsUnavailable({ message }: { message?: string }) {
   );
 }
 
-/** Neutral notice for a plan/flag-gated widget (HTTP 402). */
+/** Standard "Upgrade to Premium" notice for a plan/flag-gated widget (HTTP 402). */
 export function AnalyticsFeatureNotice({ message }: { message: string }) {
   return (
-    <div role="status" data-testid="analytics-feature-notice" className="py-6 text-center">
-      <p className="text-sm font-medium text-sky-100">Not included in your plan</p>
-      <p className="mt-1 text-sm text-navy-400">{message}</p>
+    <div role="status" data-testid="analytics-feature-notice" className="py-6">
+      <UpgradeNotice feature="Analytics" serverMessage={message} />
     </div>
   );
 }

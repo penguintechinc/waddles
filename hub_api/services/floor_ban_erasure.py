@@ -26,6 +26,7 @@ from typing import Any
 
 from services import ban_suppression
 from services.ban_suppression import ActiveRestriction, FloorBanRow
+from services.sql_util import execute_positional
 from services.suppression_keys import SuppressionKeySource, current_code
 
 logger = logging.getLogger(__name__)
@@ -52,7 +53,7 @@ def _postgres_call(dal: Any) -> EraseCall:
     """The production call: the SECURITY DEFINER function over the erasure transaction's DAL."""
 
     def call(token: str, tenant_id: int, platform: str, code: bytes | None) -> tuple[int, int, int]:
-        rows = dal.executesql(_ERASE_SQL, placeholders=[token, tenant_id, platform, code])
+        rows = execute_positional(dal, _ERASE_SQL, placeholders=[token, tenant_id, platform, code])
         if not rows:
             raise FloorBanErasureError("reputation_floor_ban_erase_subject returned no result")
         deleted, pseudonymised, pending = rows[0]

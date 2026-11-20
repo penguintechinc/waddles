@@ -1118,6 +1118,16 @@ posthog:
   # hosted default (https://license.penguintech.io).
   host: ""
 
+  # License-server-hosted PostHog (flags for hub-api + Rust data plane). `host` is the fallback
+  # POSTHOG_HOST when posthog.host is blank and in-cluster PostHog is off. `existingSecret` names a
+  # pre-created operator Secret holding the project's public `phc_...` key under `secretKey`
+  # (external credential: never auto-generated, never rendered by this chart). Empty = no key
+  # wired; flags use FLAG_* env then default OFF. Missing Secret at runtime is tolerated.
+  licenseServer:
+    host: "https://license.penguintech.io"
+    existingSecret: ""
+    secretKey: "POSTHOG_API_KEY"
+
   # POSTHOG_API_KEY (personal/project API key, feature_flag:read scope) moved
   # to the `waddlebot-platform-credentials` Secret -- see `platformCredentials`
   # above -- so an untouched/placeholder value here can never overwrite a
