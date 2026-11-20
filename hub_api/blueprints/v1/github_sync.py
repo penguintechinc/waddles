@@ -45,15 +45,18 @@ import logging
 from dataclasses import asdict, dataclass
 from typing import Any, cast
 
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, Response, current_app, jsonify, request
 
 from services import github_sync_service as svc
-from services.community_authz import require_community_admin, require_valid_community_id
+from services.community_authz import (
+    community_belongs_to_tenant,
+    require_community_admin,
+    require_valid_community_id,
+)
 from services.community_public_id import lookup_public_ids
 from services.current_user import get_current_user_id
-from services.errors import ApiError, bad_request
-from services.schema import bind_github_sync_tables
+from services.errors import ApiError, bad_request, not_found
 from services.scope_registry import SCOPE_GITHUB_MANAGE
 
 logger = logging.getLogger(__name__)
@@ -82,6 +85,13 @@ async def _guard(raw_community_id: str) -> int | tuple[dict[str, object], int]:
     try:
         community_id = require_valid_community_id(raw_community_id)
         async_dal, dal = _dal()
+        # SECURITY: the URL community must belong to the caller's own tenant. A foreign
+        # tenant's community is a 404 (never 403) so its existence is not confirmed.
+        ctx = get_tenant_context(request)
+        if ctx is None or not await community_belongs_to_tenant(
+            async_dal, dal, community_id=community_id, tenant_id=ctx.tenant_id
+        ):
+            raise not_found("Community not found")
         await require_community_admin(
             async_dal, dal, request, community_id=community_id, scope=SCOPE_GITHUB_MANAGE
         )
@@ -260,33 +270,10 @@ async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, 
         return _err(bad_request("Invalid ticket ID"))
 
     async_dal, dal = _dal()
-    bind_github_sync_tables(dal)
-    rows = await async_dal.select_async(
-        dal(dal.ticket_github_sync.ticket_id == tid),
-        dal.ticket_github_sync.ALL,
-        dal.github_repo_connections.ALL,
-        left=dal.github_repo_connections.on(
-            dal.ticket_github_sync.github_repo_connection_id == dal.github_repo_connections.id
-        ),
-        orderby=~dal.ticket_github_sync.created_at,
-    )
-    data = [
-        {
-            "id": r.ticket_github_sync.id,
-            "ticket_id": r.ticket_github_sync.ticket_id,
-            "github_issue_number": r.ticket_github_sync.github_issue_number,
-            "github_issue_node_id": r.ticket_github_sync.github_issue_node_id,
-            "sync_status": r.ticket_github_sync.sync_status,
-            "last_synced_at": r.ticket_github_sync.last_synced_at,
-            "last_error": r.ticket_github_sync.last_error,
-            "retry_count": r.ticket_github_sync.retry_count,
-            "created_at": r.ticket_github_sync.created_at,
-            "repo_owner": r.github_repo_connections.repo_owner,
-            "repo_name": r.github_repo_connections.repo_name,
-            "sync_mode": r.github_repo_connections.sync_mode,
-        }
-        for r in rows
-    ]
+    try:
+        data = await svc.get_ticket_sync_status(async_dal, dal, ticket_id=tid, community_id=guard)
+    except ApiError as exc:
+        return _err(exc)
     return {"status": "success", "data": data}, 200
 
 
@@ -318,7 +305,11 @@ async def trigger_sync(
     async_dal, dal = _dal()
     try:
         record = await svc.sync_ticket_to_github(
-            async_dal, dal, ticket_id=tid, repo_connection_id=repo_connection_id
+            async_dal,
+            dal,
+            ticket_id=tid,
+            repo_connection_id=repo_connection_id,
+            community_id=guard,
         )
     except ApiError as exc:
         return _err(exc)
