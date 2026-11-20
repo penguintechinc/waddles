@@ -85,7 +85,10 @@ spec:
       {{- end }}
     spec:
       {{- include "waddlebot.terminationGracePeriod" (dict "root" $ "seconds" $.Values.pipeline.svcStreaming.terminationGracePeriodSeconds) | nindent 6 }}
-      serviceAccountName: {{ include "waddlebot.serviceAccountName" . }}
+      # Dedicated ServiceAccount (templates/service-jwt-rbac.yaml): hub-api's machine-JWT
+      # allow-list (serviceJwt.identities.svc-streaming) pins this exact name, so no other pod
+      # can bootstrap the token-debit identity.
+      serviceAccountName: svc-streaming
       {{- if and (eq $variant "nvidia") .Values.streaming.nvidia.runtimeClassName }}
       # NVIDIA container runtime -- injects host-matched libcuda/libnvidia-encode into the pod.
       runtimeClassName: {{ .Values.streaming.nvidia.runtimeClassName | quote }}
@@ -222,6 +225,15 @@ spec:
         # Internal CA + plaintext refusal for svc-streaming's own hub-api ledger client.
         {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
         {{- end }}
+        # Machine-JWT bootstrap (core/svc_streaming/src/billing/service_credential.rs): the
+        # transcode-admission debit authenticates as THIS service (community-bound
+        # `token.billing:debit` JWT minted via hub-api ServiceAuthService over gRPC, pinned CA),
+        # never by forwarding a member's JWT. The audience-scoped projected token is mounted below.
+        - name: SERVICE_JWT_TOKEN_ENDPOINT
+          value: {{ .Values.pipeline.rustDataPlane.serviceJwtTokenEndpoint | default (printf "https://%s:%v" (include "waddlebot.hubApiGrpcHost" .) .Values.pipeline.hubApi.grpcPort) | quote }}
+        - name: SERVICE_JWT_SA_TOKEN_PATH
+          value: "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+        {{- include "waddlebot.hubApiGrpcCaEnv" . | nindent 8 }}
         - name: RTMP_PORT
           value: {{ .Values.pipeline.svcStreaming.rtmpPort | quote }}
         - name: SRT_PORT
@@ -326,6 +338,8 @@ spec:
           {{- end }}
           {{- toYaml (dict "requests" .Values.pipeline.svcStreaming.resources.requests "limits" $limits) | nindent 10 }}
         volumeMounts:
+        {{- include "waddlebot.serviceJwtBootstrapVolumeMount" . | nindent 8 }}
+        {{- include "waddlebot.hubApiGrpcCaVolumeMount" . | nindent 8 }}
         {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
@@ -348,6 +362,8 @@ spec:
           mountPath: /dev/dri
         {{- end }}
       volumes:
+      {{- include "waddlebot.serviceJwtBootstrapVolume" . | nindent 6 }}
+      {{- include "waddlebot.hubApiGrpcCaVolume" . | nindent 6 }}
       {{- include "waddlebot.transitTls.caVolume" . | nindent 6 }}
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}

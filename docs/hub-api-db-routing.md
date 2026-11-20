@@ -226,6 +226,7 @@ reaching a standby, and raw SQL (`executesql_async`) runs on the replica too.
 | `v1/tenant_twitch_install.py` | 2: POST /authorize (authorize); GET /callback (callback) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |
 | `v1/token_billing.py` | 3: GET / (list_token_products); GET /<int:community_id>/tokens/balances (get_balances); GET /<int:community_id>/tokens/transactions (get_transactions) | AUTH/SESSION/SECURITY | primary | metered balance/ledger: money, freshness |
 | `v1/token_billing.py` | 2: POST /<int:community_id>/tokens/credit (credit_tokens); POST /<int:community_id>/tokens/debit (debit_tokens) | WRITE | primary | mutating route |
+| `v1/token_billing.py` | 1: POST /<int:community_id>/tokens/debit (service_debit_tokens, `/api/v1/internal/communities`) | WRITE | primary | machine-JWT service debit for an active member (svc-streaming) |
 | `v1/user_management.py` | 4: GET / (list_users); GET /<int:user_id> (get_user); GET /<int:user_id>/sessions (list_user_sessions) (+1 more) | AUTH/SESSION/SECURITY | primary | user/role admin: authz + read-after-write |
 | `v1/user_management.py` | 10: POST / (create_user); PUT /<int:user_id> (update_user); DELETE /<int:user_id> (delete_user) (+7 more) | WRITE | primary | mutating route |
 | `v1/workflow.py` | 12: GET /<community_id>/workflows (list_workflows); GET /<community_id>/workflows/<workflow_id> (get_workflow); PUT /<community_id>/workflows/<workflow_id> (update_workflow) (+9 more) | NO-DB | n/a | no DAL access in the handler (proxy / cache / flag / static) |

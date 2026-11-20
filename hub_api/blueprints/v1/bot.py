@@ -76,6 +76,32 @@ def _error(message: str, status: int, code: str) -> tuple[dict[str, Any], int]:
     return {"success": False, "error": {"code": code, "message": message}}, status
 
 
+async def _to_thread(fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """Run a sync-DAL `fn` on a pool thread, rolling the thread's connection back on failure.
+
+    pydal connections are thread-local and the default executor reuses threads. A failed
+    statement leaves that connection's transaction aborted; without a rollback every later
+    request landing on the same thread dies with `InFailedSqlTransaction` (the alpha 500s on
+    `shoutout/creators` and `rcon/servers`). Rollback runs ON the failing thread, then the
+    original exception is re-raised unchanged -- no error is swallowed.
+    """
+    from quart import current_app
+
+    dal = current_app.config["dal"]
+
+    def _run() -> Any:
+        try:
+            return fn(*args, **kwargs)
+        except BaseException:
+            try:
+                dal.rollback()
+            except Exception:  # nosec B110 - rollback is best-effort; the original error is re-raised
+                logging.getLogger(__name__).warning("bot_dal_rollback_failed", exc_info=True)
+            raise
+
+    return await asyncio.to_thread(_run)
+
+
 async def _require_community(community_id: int) -> tuple[dict[str, Any], int] | None:
     """Verify `community_id` belongs to the caller's resolved tenant; `None` if OK.
 
@@ -87,7 +113,7 @@ async def _require_community(community_id: int) -> tuple[dict[str, Any], int] | 
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 - tenant_middleware already enforced this
     dal = _dal()
-    ok = await asyncio.to_thread(community_belongs_to_tenant, dal, community_id, ctx.tenant_id)
+    ok = await _to_thread(community_belongs_to_tenant, dal, community_id, ctx.tenant_id)
     if not ok:
         return _error("Community not found for this tenant", 403, "FORBIDDEN")
     return None
@@ -100,7 +126,7 @@ async def _require_server(community_id: int, server_id: int) -> None:
     indistinguishable from a missing one, independent of the downstream module's own checks.
     """
     try:
-        await asyncio.to_thread(bot_rcon.get_active_server, _dal(), community_id, server_id)
+        await _to_thread(bot_rcon.get_active_server, _dal(), community_id, server_id)
     except bot_rcon.RconNotFoundError as exc:
         raise ApiError(str(exc), 404, "NOT_FOUND") from exc
 
@@ -253,9 +279,7 @@ async def get_shoutout_config(community_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    config = await asyncio.to_thread(
-        bot_shoutout.get_or_create_shoutout_config, _dal(), community_id
-    )
+    config = await _to_thread(bot_shoutout.get_or_create_shoutout_config, _dal(), community_id)
     return ShoutoutConfigResponse(success=True, config=config)
 
 
@@ -269,7 +293,7 @@ async def update_shoutout_config(data: ShoutoutConfigRequest, community_id: int)
     denied = await _require_community(community_id)
     if denied:
         return denied
-    config = await asyncio.to_thread(
+    config = await _to_thread(
         bot_shoutout.update_shoutout_config,
         _dal(),
         community_id,
@@ -296,7 +320,7 @@ async def get_shoutout_creators(community_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    creators = await asyncio.to_thread(bot_shoutout.list_shoutout_creators, _dal(), community_id)
+    creators = await _to_thread(bot_shoutout.list_shoutout_creators, _dal(), community_id)
     return ShoutoutCreatorsResponse(success=True, creators=creators)
 
 
@@ -324,7 +348,7 @@ async def add_shoutout_creator(data: ShoutoutCreatorRequest, community_id: int) 
         return denied
     if not data.platform or not data.username:
         return _error("Platform and username are required", 400, "BAD_REQUEST")
-    creator = await asyncio.to_thread(
+    creator = await _to_thread(
         bot_shoutout.add_shoutout_creator,
         _dal(),
         community_id,
@@ -346,7 +370,7 @@ async def remove_shoutout_creator(community_id: int, creator_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    removed = await asyncio.to_thread(
+    removed = await _to_thread(
         bot_shoutout.remove_shoutout_creator, _dal(), community_id, creator_id
     )
     if not removed:
@@ -365,7 +389,7 @@ async def get_shoutout_history(community_id: int) -> Any:
         return denied
     page = max(1, _int_arg("page", 1))
     limit = min(100, max(1, _int_arg("limit", 25)))
-    entries, total = await asyncio.to_thread(
+    entries, total = await _to_thread(
         bot_shoutout.list_shoutout_history, _dal(), community_id, page=page, limit=limit
     )
     total_pages = -(-total // limit) if limit else 0  # ceil div
@@ -699,7 +723,7 @@ def _is_super_admin_sync(dal: Any, user_id: int) -> bool:
 
 async def _caller_is_super_admin() -> bool:
     """True when the authenticated caller is a global super admin."""
-    return await asyncio.to_thread(_is_super_admin_sync, _dal(), _user_id())
+    return await _to_thread(_is_super_admin_sync, _dal(), _user_id())
 
 
 async def _scope_allowed(community_id: int | None, vendor_id: int | None) -> bool:
@@ -715,9 +739,7 @@ async def _scope_allowed(community_id: int | None, vendor_id: int | None) -> boo
         ctx = get_tenant_context(request)
         assert ctx is not None  # nosec B101 - tenant_middleware already enforced this
         return bool(
-            await asyncio.to_thread(
-                community_belongs_to_tenant, _dal(), community_id, ctx.tenant_id
-            )
+            await _to_thread(community_belongs_to_tenant, _dal(), community_id, ctx.tenant_id)
         )
     uid = _user_id()
     return vendor_id is not None and uid > 0 and vendor_id == uid
@@ -732,7 +754,7 @@ async def _load_authorized_source(source_id: int) -> bool:
     Callers answer 404 (never 403) on False so a foreign source id is
     indistinguishable from a missing one -- no cross-tenant existence oracle.
     """
-    row = await asyncio.to_thread(lambda: _dal().ai_knowledge_sources[source_id])
+    row = await _to_thread(lambda: _dal().ai_knowledge_sources[source_id])
     if row is None:
         return False
     if not await _scope_allowed(row.community_id, row.vendor_id):
@@ -777,7 +799,7 @@ async def list_knowledge_sources() -> Any:
         denied = await _require_community(community_id)
         if denied:
             return denied
-    sources = await asyncio.to_thread(bot_ai_knowledge.list_knowledge_sources, _dal(), community_id)
+    sources = await _to_thread(bot_ai_knowledge.list_knowledge_sources, _dal(), community_id)
     return KnowledgeSourcesResponse(success=True, sources=await _source_dtos(sources))
 
 
@@ -812,8 +834,12 @@ async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
     )
     dal = _dal()
     try:
-        source = await asyncio.to_thread(bot_ai_knowledge.add_knowledge_source, dal, payload)
+        source = await _to_thread(bot_ai_knowledge.add_knowledge_source, dal, payload)
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "status": exc.status},
+        )
         return _error(str(exc), exc.status, "BAD_REQUEST" if exc.status == 400 else "ERROR")
 
     if source.source_type != "manual":
@@ -852,10 +878,14 @@ async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id:
     if "token" not in updates and data.encrypted_token is not None:
         updates["token"] = data.encrypted_token  # deprecated alias
     try:
-        source = await asyncio.to_thread(
+        source = await _to_thread(
             bot_ai_knowledge.update_knowledge_source, _dal(), source_id, updates
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "status": exc.status},
+        )
         return _error(str(exc), exc.status, "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST")
     return KnowledgeSourceResponse(success=True, source=(await _source_dtos([source]))[0])
 
@@ -869,8 +899,12 @@ async def delete_knowledge_source(source_id: int) -> Any:
     if not await _load_authorized_source(source_id):
         return _error(_SOURCE_NOT_FOUND, 404, "NOT_FOUND")
     try:
-        await asyncio.to_thread(bot_ai_knowledge.delete_knowledge_source, _dal(), source_id)
+        await _to_thread(bot_ai_knowledge.delete_knowledge_source, _dal(), source_id)
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "status": exc.status},
+        )
         return _error(str(exc), exc.status, "NOT_FOUND")
     return SimpleSuccessResponse(success=True)
 
@@ -987,13 +1021,11 @@ async def submit_suggestion_feedback(data: SuggestionFeedbackRequest, suggestion
         bot_ai_knowledge.validate_feedback(data.feedback)
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         raise ApiError(str(exc), exc.status, "BAD_REQUEST") from exc
-    exists, owner = await asyncio.to_thread(
-        bot_ai_knowledge.get_suggestion_scope, _dal(), suggestion_id
-    )
+    exists, owner = await _to_thread(bot_ai_knowledge.get_suggestion_scope, _dal(), suggestion_id)
     if not exists or not await _scope_allowed(owner, None):
         return _error("Suggestion not found", 404, "NOT_FOUND")
     try:
-        suggestion = await asyncio.to_thread(
+        suggestion = await _to_thread(
             partial(
                 bot_ai_knowledge.record_feedback,
                 _dal(),
@@ -1141,7 +1173,7 @@ async def list_rcon_servers(community_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    servers = await asyncio.to_thread(bot_rcon.list_servers, _dal(), community_id, is_admin=True)
+    servers = await _to_thread(bot_rcon.list_servers, _dal(), community_id, is_admin=True)
     return ServersResponse(servers=servers)
 
 
@@ -1170,10 +1202,15 @@ async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> An
         metadata=data.metadata,
     )
     try:
-        server = await asyncio.to_thread(
+        server = await _to_thread(
             bot_rcon.create_server, _dal(), community_id, payload, added_by=_user_id()
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
     return ServerResponse(server=server), 201
 
@@ -1203,12 +1240,20 @@ async def update_rcon_server(data: ServerUpdateRequest, community_id: int, serve
         metadata=data.metadata,
     )
     try:
-        server = await asyncio.to_thread(
-            bot_rcon.update_server, _dal(), community_id, server_id, payload
-        )
+        server = await _to_thread(bot_rcon.update_server, _dal(), community_id, server_id, payload)
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
     except bot_rcon.RconNotFoundError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 404, "NOT_FOUND")
     return ServerResponse(server=server)
 
@@ -1223,8 +1268,13 @@ async def delete_rcon_server(community_id: int, server_id: int) -> Any:
     if denied:
         return denied
     try:
-        await asyncio.to_thread(bot_rcon.delete_server, _dal(), community_id, server_id)
+        await _to_thread(bot_rcon.delete_server, _dal(), community_id, server_id)
     except bot_rcon.RconNotFoundError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 404, "NOT_FOUND")
     return MessageResponse(message="Server deleted")
 
@@ -1245,6 +1295,11 @@ async def test_rcon_connection(
             _dal(), community_id, server_id, password=data.password
         )
     except bot_rcon.RconNotFoundError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 404, "NOT_FOUND")
 
 
@@ -1265,6 +1320,11 @@ async def execute_rcon_command(
             _dal(), community_id, server_id, command=data.command, user_id=_user_id()
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1288,6 +1348,11 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
             user_id=_user_id(),
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1312,6 +1377,11 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
             user_id=_user_id(),
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1342,6 +1412,11 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
             _dal(), community_id, server_id, target_user_id=data.user_id, channel_id=data.channel_id
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1365,6 +1440,11 @@ async def send_rcon_message(data: SendMessageRequest, community_id: int, server_
             target_mode=data.target_mode,
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1380,7 +1460,7 @@ async def get_rcon_command_log(community_id: int) -> Any:
     limit = min(200, max(1, _int_arg("limit", 50)))
     offset = max(0, _int_arg("offset", 0))
     server_id = _int_arg("server_id", 0) or None
-    entries = await asyncio.to_thread(
+    entries = await _to_thread(
         bot_rcon.get_command_log,
         _dal(),
         community_id,
@@ -1461,7 +1541,7 @@ async def list_rcon_info(community_id: int) -> Any:
     denied = await _require_community(community_id)
     if denied:
         return denied
-    servers = await asyncio.to_thread(bot_rcon.list_servers, _dal(), community_id, is_admin=False)
+    servers = await _to_thread(bot_rcon.list_servers, _dal(), community_id, is_admin=False)
     return ServersMemberResponse(servers=servers)
 
 

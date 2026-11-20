@@ -21,9 +21,32 @@ from typing import Any
 
 import httpx
 import pytest
+from pydal import Field
 
 import services.github_sync_service as svc
 from services.errors import ApiError
+
+
+@pytest.fixture(autouse=True)
+def _ticket_community_column(automation_db: Any) -> None:
+    """Give the fixture's narrow `support_tickets` the real table's `community_id` column.
+
+    Production `support_tickets` has `community_id`; `bind_github_sync_tables()` binds a
+    narrower shape. Rows default to community 1 so legacy inserts stay owned by community 1.
+    """
+    dal = automation_db.dal
+    if "community_id" in dal.support_tickets.fields:
+        return
+    dal.executesql("ALTER TABLE support_tickets ADD COLUMN community_id INTEGER DEFAULT 1")
+    dal.commit()
+    dal.define_table(
+        "support_tickets",
+        *[f.clone() for f in dal.support_tickets if f.name != "id"],
+        Field("community_id", "integer"),
+        redefine=True,
+        migrate=False,
+    )
+
 
 ENCRYPTION_KEY = "11" * 32
 
@@ -169,6 +192,31 @@ class TestCreateRepoConnectionValidation:
             )
 
 
+class TestBindIdempotentWithSupportBinder:
+    def test_binding_after_support_binder_reuses_support_tables(self, automation_db: Any) -> None:
+        """Regression: no `table already defined: support_tickets` at startup.
+
+        `bind_support_token_tables()` ran first on the same DAL.
+        """
+        from services.schema import bind_support_token_tables
+
+        dal = automation_db.dal
+        bind_support_token_tables(dal)
+        before = {f for f in dal.support_tickets.fields}
+        svc.bind_github_sync_tables(dal)  # must not raise
+        svc.bind_github_sync_tables(dal)  # and stays idempotent
+        assert {f for f in dal.support_tickets.fields} == before  # richer def reused
+        assert "github_repo_connections" in dal.tables
+
+    def test_binding_before_support_binder_still_works(self, automation_db: Any) -> None:
+        from services.schema import bind_support_token_tables
+
+        dal = automation_db.dal
+        svc.bind_github_sync_tables(dal)
+        bind_support_token_tables(dal)  # support binder guards per table
+        assert "support_tickets" in dal.tables
+
+
 class TestGetRepoConnectionsDecryptFailure:
     async def test_corrupted_token_masks_as_stars(self, automation_db: Any) -> None:
         dal = automation_db.dal
@@ -215,7 +263,12 @@ class TestSyncCommentToGithub:
     async def test_no_active_sync_record_is_noop(self, automation_db: Any) -> None:
         # No ticket_github_sync row for this ticket at all -- must not raise.
         await svc.sync_comment_to_github(
-            automation_db, automation_db.dal, ticket_id=999, comment_text="hi", author_name="alice"
+            automation_db,
+            automation_db.dal,
+            ticket_id=999,
+            comment_text="hi",
+            author_name="alice",
+            community_id=1,
         )
 
     async def test_posts_comment_and_logs_success(
@@ -250,7 +303,12 @@ class TestSyncCommentToGithub:
         monkeypatch.setattr(svc, "_github_request", fake_request)
 
         await svc.sync_comment_to_github(
-            automation_db, dal, ticket_id=42, comment_text="Thanks!", author_name="alice"
+            automation_db,
+            dal,
+            ticket_id=42,
+            comment_text="Thanks!",
+            author_name="alice",
+            community_id=1,
         )
         assert captured["path"] == "/repos/owner/repo/issues/7/comments"
         assert "Thanks!" in captured["body"]["body"]
@@ -276,7 +334,7 @@ class TestSyncCommentToGithub:
         dal.commit()
         # Must not raise -- matches Node's silent-return on decrypt failure.
         await svc.sync_comment_to_github(
-            automation_db, dal, ticket_id=42, comment_text="hi", author_name="alice"
+            automation_db, dal, ticket_id=42, comment_text="hi", author_name="alice", community_id=1
         )
 
 
@@ -284,7 +342,11 @@ class TestSyncTicketToGithubFailurePaths:
     async def test_ticket_not_found_raises(self, automation_db: Any) -> None:
         with pytest.raises(ApiError, match="Ticket not found"):
             await svc.sync_ticket_to_github(
-                automation_db, automation_db.dal, ticket_id=999, repo_connection_id=1
+                automation_db,
+                automation_db.dal,
+                ticket_id=999,
+                repo_connection_id=1,
+                community_id=1,
             )
 
     async def test_connection_not_found_raises(self, automation_db: Any) -> None:
@@ -296,7 +358,7 @@ class TestSyncTicketToGithubFailurePaths:
         dal.commit()
         with pytest.raises(ApiError, match="Repo connection not found"):
             await svc.sync_ticket_to_github(
-                automation_db, dal, ticket_id=ticket_id, repo_connection_id=999
+                automation_db, dal, ticket_id=ticket_id, repo_connection_id=999, community_id=1
             )
 
     async def test_github_api_failure_records_failed_sync(
@@ -327,7 +389,7 @@ class TestSyncTicketToGithubFailurePaths:
 
         with pytest.raises(ApiError, match="GitHub API error 422"):
             await svc.sync_ticket_to_github(
-                automation_db, dal, ticket_id=ticket_id, repo_connection_id=conn_id
+                automation_db, dal, ticket_id=ticket_id, repo_connection_id=conn_id, community_id=1
             )
 
         rows = await automation_db.select_async(dal(dal.ticket_github_sync.ticket_id == ticket_id))
@@ -361,7 +423,7 @@ class TestSyncTicketToGithubFailurePaths:
 
         with pytest.raises(ApiError, match="no issue number"):
             await svc.sync_ticket_to_github(
-                automation_db, dal, ticket_id=ticket_id, repo_connection_id=conn_id
+                automation_db, dal, ticket_id=ticket_id, repo_connection_id=conn_id, community_id=1
             )
 
 

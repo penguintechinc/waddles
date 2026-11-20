@@ -42,8 +42,27 @@ app modules still get a valid POSTHOG_HOST pointed at the hosted plane.
 {{- else if .Values.posthog.enabled -}}
 {{ printf "http://posthog-web:%v" .Values.posthog.web.port }}
 {{- else -}}
-https://license.penguintech.io
+{{ .Values.posthog.licenseServer.host | default "https://license.penguintech.io" }}
 {{- end -}}
+{{- end -}}
+
+{{/*
+Optional env var carrying the project API key (`phc_...`) for the license-server-hosted PostHog.
+Renders nothing unless posthog.licenseServer.existingSecret is set. `optional: true` -- a missing
+Secret/key leaves the var unset so flags fall back to FLAG_* env then default OFF; the pod still
+starts. Explicit `env` beats `envFrom`, so this wins over any envFrom-provided value.
+Call: include "waddlebot.posthog.licenseKeyEnv" (dict "root" $ "name" "POSTHOG_API_KEY")
+*/}}
+{{- define "waddlebot.posthog.licenseKeyEnv" -}}
+{{- $ls := .root.Values.posthog.licenseServer -}}
+{{- if $ls.existingSecret }}
+- name: {{ .name }}
+  valueFrom:
+    secretKeyRef:
+      name: {{ $ls.existingSecret | quote }}
+      key: {{ $ls.secretKey | default "POSTHOG_API_KEY" | quote }}
+      optional: true
+{{- end }}
 {{- end -}}
 
 {{/* Shared PostHog app env (web + worker containers). */}}

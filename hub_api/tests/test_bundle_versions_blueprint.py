@@ -173,7 +173,7 @@ async def test_post_version_oversize_source_is_413_without_a_500(app: Quart) -> 
 
 
 async def test_get_version_returns_404_for_unknown_version(app: Quart) -> None:
-    token = make_token(scope="")
+    token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.get(
         "/api/v1/apps/penguintechinc.waddles.music/versions/9.9.9",
@@ -387,3 +387,87 @@ async def test_list_versions_route(app: Quart) -> None:
     assert response.status_code == 200
     body = await response.get_json()
     assert body["versions"][0]["version"] == "3.0.1"
+
+
+# regression: unscoped-routes -- GET version state was tenant_middleware-only.
+
+
+async def test_get_version_without_scope_is_403(app: Quart) -> None:
+    admin = make_token(scope="platform:admin", user_id="1")
+    client = app.test_client()
+    await client.post(
+        "/api/v1/apps/waddles.socials.music.default/versions",
+        headers={"Authorization": f"Bearer {admin}"},
+        files=_upload_files(),
+    )
+    plain = make_user_token(user_id=7, scope="")
+    response = await client.get(
+        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1",
+        headers={"Authorization": f"Bearer {plain}"},
+    )
+    assert response.status_code == 403
+
+
+async def test_list_versions_without_scope_is_403(app: Quart) -> None:
+    plain = make_user_token(user_id=7, scope="")
+    response = await app.test_client().get(
+        "/api/v1/apps/waddles.socials.music.default/versions",
+        headers={"Authorization": f"Bearer {plain}"},
+    )
+    assert response.status_code == 403
+
+
+async def test_versions_read_unauthenticated_is_401(app: Quart) -> None:
+    client = app.test_client()
+    listing = await client.get("/api/v1/apps/waddles.socials.music.default/versions")
+    one = await client.get("/api/v1/apps/waddles.socials.music.default/versions/3.0.1")
+    assert listing.status_code == 401
+    assert one.status_code == 401
+
+
+async def test_vendor_can_read_own_namespace_versions(app: Quart) -> None:
+    token = make_user_token(user_id=42, scope="vendor:onboard")
+    client = app.test_client()
+    response = await client.get(
+        "/api/v1/apps/waddles.integrations.vendor-42.mybundle/versions",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert response.status_code == 200
+
+
+async def test_vendor_cannot_read_other_vendors_versions(app: Quart) -> None:
+    token = make_user_token(user_id=42, scope="vendor:onboard")
+    client = app.test_client()
+    listing = await client.get(
+        "/api/v1/apps/waddles.integrations.vendor-99.other/versions",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    one = await client.get(
+        "/api/v1/apps/waddles.integrations.vendor-99.other/versions/1.0.0",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert listing.status_code == 403
+    assert one.status_code == 403
+
+
+@pytest.mark.parametrize(
+    "app_id",
+    [
+        "waddles.core.socials.music",
+        "penguintechinc.music.default",
+        "waddles.integrations.vendor-4.other",  # prefix-collision: vendor-4 is not vendor-42
+    ],
+)
+async def test_vendor_cannot_read_reserved_or_foreign_version_state(
+    app: Quart, app_id: str
+) -> None:
+    token = make_user_token(user_id=42, scope="vendor:onboard")
+    client = app.test_client()
+    listing = await client.get(
+        f"/api/v1/apps/{app_id}/versions", headers={"Authorization": f"Bearer {token}"}
+    )
+    one = await client.get(
+        f"/api/v1/apps/{app_id}/versions/1.0.0", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert listing.status_code == 403
+    assert one.status_code == 403

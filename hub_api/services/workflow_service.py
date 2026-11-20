@@ -104,11 +104,24 @@ class WorkflowCoreProxyClient:
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
                 response = await client.request(method, url, json=json_body, params=params)
-        except httpx.HTTPError as exc:
-            # Node's proxyRequest() catch-all: no `err.response` -> statusCode 500,
-            # code SERVICE_UNAVAILABLE.
+        except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+            # `workflow-core` is not deployed on every environment (alpha has no such service, so
+            # its DNS name does not resolve). Not reachable == "unavailable": the standard 503
+            # envelope (same pattern as `ANALYTICS_UNAVAILABLE`), never a 500.
+            logger.warning("workflow_core_unreachable error_type=%s", type(exc).__name__)
             raise ApiError(
-                f"Failed to connect to workflow service: {exc}", 500, "SERVICE_UNAVAILABLE"
+                "Workflow service is not available on this deployment.",
+                503,
+                "WORKFLOW_UNAVAILABLE",
+            ) from exc
+        except httpx.HTTPError as exc:
+            # Reached (or half-reached) a configured upstream and it failed (read timeout,
+            # protocol error): a real error, kept distinct from "unavailable".
+            logger.error("workflow_core_request_failed error_type=%s", type(exc).__name__)
+            raise ApiError(
+                f"Workflow service request failed: {type(exc).__name__}",
+                502,
+                "WORKFLOW_UPSTREAM_ERROR",
             ) from exc
 
         try:
