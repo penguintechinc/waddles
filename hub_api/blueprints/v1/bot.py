@@ -823,8 +823,7 @@ async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         logger.warning(
             "bot_request_rejected",
-            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
-            exc_info=True,
+            extra={"error_type": type(exc).__name__, "status": exc.status},
         )
         return _error(str(exc), exc.status, "BAD_REQUEST" if exc.status == 400 else "ERROR")
 
@@ -870,8 +869,7 @@ async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id:
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         logger.warning(
             "bot_request_rejected",
-            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
-            exc_info=True,
+            extra={"error_type": type(exc).__name__, "status": exc.status},
         )
         return _error(str(exc), exc.status, "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST")
     return KnowledgeSourceResponse(success=True, source=(await _source_dtos([source]))[0])
@@ -890,8 +888,7 @@ async def delete_knowledge_source(source_id: int) -> Any:
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         logger.warning(
             "bot_request_rejected",
-            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
-            exc_info=True,
+            extra={"error_type": type(exc).__name__, "status": exc.status},
         )
         return _error(str(exc), exc.status, "NOT_FOUND")
     return SimpleSuccessResponse(success=True)
