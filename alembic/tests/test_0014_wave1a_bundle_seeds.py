@@ -59,7 +59,7 @@ EXPECTED_ENTRYPOINT_MODULES = {
         "marketing_engagement_action",
     ),
     "waddles.streaming.stream.default": (None, "streaming_stream_action"),
-    "waddles.integrations.waddleai.default": (None, "integrations_waddleai_action"),
+    "penguintechinc.waddles.waddleai": (None, "integrations_waddleai_action"),
 }
 
 # The four numbered files (084/091/095/096) that this migration only

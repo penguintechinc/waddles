@@ -72,7 +72,7 @@ SEEDED_APP_IDS = (
     "waddles.community.announcements.default",
     "waddles.marketing.engagement.default",
     "waddles.streaming.stream.default",
-    "waddles.integrations.waddleai.default",
+    "penguintechinc.waddles.waddleai",
 )
 
 # Every numbered legacy SQL file this revision accounts for -- ported
@@ -491,7 +491,7 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.integrations.waddleai.default',
+            'penguintechinc.waddles.waddleai',
             '1.0.0',
             'integrations',
             'waddles.integrations.waddleai',
@@ -521,7 +521,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.integrations.waddleai.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.waddleai', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING

@@ -21,7 +21,7 @@
 -- this directory.
 --
 -- `bundles.echo_process:transform` itself is NOT deleted or altered by
--- this migration -- migration 071's own `waddles.core.demo.echo` app_id
+-- this migration -- migration 071's own `penguintechinc.waddles.echo-pipeline` app_id
 -- keeps referencing it unchanged, so it remains a valid, live demo/test
 -- bundle.
 --
