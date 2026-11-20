@@ -118,11 +118,13 @@ NOSCOPE_ALLOWLIST: dict[str, str] = {
     "/api/v1/<cuuid:community_id>/join-requests": (
         "own-request flow: tenant fence services/join_request_service.py:115, own data only"
     ),
-    "/api/v1/admin/<cuuid:community_id>/inventory/": (
-        "member self-service: DB membership gate services/community_inventory_authz.py:115 "
-        "(`require_inventory_member`); deny tests tests/test_community_inventory.py::"
-        "TestMemberRoutesAuthorizeThroughTheCommunity"
-    ),
+    # Inventory MEMBER routes (admin routes all carry `require_scope`): exact rules, enforced by the
+    # DB membership gate services/community_inventory_authz.py:115 (`require_inventory_member`);
+    # deny tests: tests/test_community_inventory.py::TestMemberRoutesAuthorizeThroughTheCommunity.
+    "/api/v1/admin/<cuuid:community_id>/inventory/available": "member gate community_inventory_authz.py:115",
+    "/api/v1/admin/<cuuid:community_id>/inventory/checkout": "member gate community_inventory_authz.py:115",
+    "/api/v1/admin/<cuuid:community_id>/inventory/checkin": "member gate community_inventory_authz.py:115",
+    "/api/v1/admin/<cuuid:community_id>/inventory/my-items": "member gate community_inventory_authz.py:115",
     "/api/v1/admin/<cuuid:community_id>/support/": (
         "member self-service + category list: DB membership gate blueprints/v1/support.py:92 "
         "(`_member_gate`); deny tests tests/test_v1_support_blueprint.py::TestMemberGate"
@@ -189,6 +191,15 @@ ENFORCEMENT_EVIDENCE: dict[str, tuple[str, int, str]] = {
 }
 
 
+def _covered(rule: str, entry: str) -> bool:
+    """True when an allowlist entry covers `rule`: exact, or any path below it.
+
+    Segment-aware, never a bare string prefix, so `.../checkout` cannot silently exempt a future
+    `.../checkouts`.
+    """
+    return rule == entry or rule.startswith(entry if entry.endswith("/") else entry + "/")
+
+
 def test_enforcement_evidence_is_current() -> None:
     root = Path(__file__).resolve().parent.parent
     for name, (rel, line, token) in ENFORCEMENT_EVIDENCE.items():
@@ -211,10 +222,10 @@ def test_scopeless_community_routes_are_enforced_or_justified() -> None:
             continue
         flagged.add(rule.rule)
     assert examined >= 100, f"walker examined only {examined} scope-less routes"
-    unjustified = sorted(r for r in flagged if not r.startswith(tuple(NOSCOPE_ALLOWLIST)))
+    unjustified = sorted(r for r in flagged if not any(_covered(r, p) for p in NOSCOPE_ALLOWLIST))
     assert not unjustified, (
         "community routes with NO require_scope and no enforcement call in its call chain; "
         f"add a guard or a justified NOSCOPE_ALLOWLIST entry: {unjustified}"
     )
-    stale = [p for p in NOSCOPE_ALLOWLIST if not any(r.startswith(p) for r in flagged)]
+    stale = [p for p in NOSCOPE_ALLOWLIST if not any(_covered(r, p) for r in flagged)]
     assert not stale, f"NOSCOPE_ALLOWLIST entries no longer match any flagged route: {stale}"
