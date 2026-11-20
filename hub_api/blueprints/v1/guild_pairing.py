@@ -50,6 +50,7 @@ from services.community_common import community_in_tenant
 from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, conflict, not_found, payment_required
+from services.route_guards import community_admin_guard
 
 logger = logging.getLogger(__name__)
 
@@ -211,6 +212,7 @@ async def _feature_gate_and_tenant_check(community_id: int) -> tuple[dict[str, o
 @guild_pairing_bp.route("/communities/<cuuid:community_id>/guild-pairings", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(GuildPairingListResponse)
 async def list_pairings(
     community_id: int,
@@ -432,6 +434,7 @@ async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleSyncBindingListResponse)
 async def list_bindings(
     community_id: int, pairing_id: int
@@ -512,6 +515,7 @@ async def delete_binding(community_id: int, pairing_id: int, binding_id: int) ->
 @guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/roles", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(DiscordGuildRolesResponse)
 async def list_discord_roles(
     community_id: int,
@@ -542,6 +546,7 @@ async def _list_roles_for_mirror(dal: Any, community_id: int, guild_id: str) -> 
 @guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/role-mirrors", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleMirrorMappingListResponse)
 async def list_role_mirrors(
     community_id: int,

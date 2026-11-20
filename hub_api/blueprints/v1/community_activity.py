@@ -45,6 +45,7 @@ from services.community_common import (
     get_current_user,
     is_valid_service_key,
 )
+from services.route_guards import community_member_guard
 
 activity_member_bp = Blueprint(
     "v1_community_activity_member", __name__, url_prefix="/api/v1/community"
@@ -74,6 +75,7 @@ def _int_arg(name: str, default: int) -> int:
 @activity_member_bp.route("/<cuuid:community_id>/leaderboard/watch-time", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(LeaderboardResponse)
 async def watch_time_leaderboard(
     community_id: int,
@@ -96,6 +98,7 @@ async def watch_time_leaderboard(
 @activity_member_bp.route("/<cuuid:community_id>/leaderboard/messages", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(LeaderboardResponse)
 async def message_leaderboard(
     community_id: int,

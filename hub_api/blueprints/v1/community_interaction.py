@@ -54,6 +54,7 @@ from services.community_interaction import (
     update_hub_channel,
 )
 from services.errors import ApiError, forbidden
+from services.route_guards import community_member_guard
 from services.scope_registry import (
     SCOPE_CHANNELS_MANAGE,
     SCOPE_FORUMS_MANAGE,
@@ -379,6 +380,7 @@ async def admin_update_overrides(
 @interaction_member_bp.route("/<cuuid:community_id>/interact/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def member_list_channels(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/interact/channels`."""
     if not _tenant_ok(community_id):
@@ -417,6 +419,7 @@ async def member_create_channel(community_id: int) -> tuple[dict[str, object], i
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/interact/forum/<channelId>/posts`."""
     ctx = get_tenant_context(request)
@@ -442,6 +445,7 @@ async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[s
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def member_forum_post(
     community_id: int, channel_id: int, post_id: int
 ) -> tuple[dict[str, object], int]:

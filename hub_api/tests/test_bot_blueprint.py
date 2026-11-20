@@ -133,7 +133,7 @@ class TestTenantIsolation:
         response = await client.get(f"/api/v1/admin/{community_uuid}/shoutout/config")
         assert response.status_code == 401
 
-    async def test_community_from_other_tenant_is_403(
+    async def test_community_from_other_tenant_is_404(
         self,
         client: Any,
         auth_headers: Any,
@@ -150,14 +150,14 @@ class TestTenantIsolation:
         response = await client.get(
             f"/api/v1/admin/{other_tenant_community_uuid}/shoutout/config", headers=headers
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
 
-    async def test_unknown_community_is_403(self, client: Any, auth_headers: Any) -> None:
+    async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         headers = auth_headers(scope="bot.shoutout:read")
         response = await client.get(
             f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/shoutout/config", headers=headers
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
 
 
 class TestScopeEnforcement:
@@ -1393,3 +1393,6 @@ class TestCredentialRedactionInRejections:
         )
         assert response.status_code == 400
         self._assert_clean(await response.get_data(as_text=True), caplog)
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

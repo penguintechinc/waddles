@@ -47,6 +47,7 @@ from services.community_inventory_authz import require_inventory_admin, require_
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.pagination import parse_limit
+from services.route_guards import GUARD_ADMIN, mark_guarded
 
 logger = logging.getLogger(__name__)
 
@@ -95,6 +96,7 @@ async def _guard(community_id: int, *, admin: bool) -> tuple[dict[str, object], 
 @inventory_bp.route("/<cuuid:community_id>/inventory/items", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/items`."""
     denied = await _guard(community_id, admin=True)
@@ -217,6 +219,7 @@ async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str,
 @inventory_bp.route("/<cuuid:community_id>/inventory/checkouts", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/checkouts`."""
     denied = await _guard(community_id, admin=True)
@@ -231,6 +234,7 @@ async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], in
 @inventory_bp.route("/<cuuid:community_id>/inventory/summary", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/summary`."""
     denied = await _guard(community_id, admin=True)
@@ -242,6 +246,7 @@ async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
 @inventory_bp.route("/<cuuid:community_id>/inventory/log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/log`."""
     denied = await _guard(community_id, admin=True)

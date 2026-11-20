@@ -424,7 +424,7 @@ class ValidateDiscountCodeRequest:
     """Request DTO for `POST /vendor/discount-codes/validate`."""
 
     code: str
-    moduleId: int | None = None
+    moduleId: int
 
 
 @discount_bp.route("/validate", methods=["POST"])

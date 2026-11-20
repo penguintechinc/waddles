@@ -22731,13 +22731,11 @@ paths:
                   title: Code
                   type: string
                 moduleId:
-                  anyOf:
-                  - type: integer
-                  - type: 'null'
-                  default: null
                   title: Moduleid
+                  type: integer
               required:
               - code
+              - moduleId
               title: ValidateDiscountCodeRequest
               type: object
       responses:
@@ -22745,14 +22743,18 @@ paths:
           content:
             application/json:
               schema:
-                description: Response for `POST /vendor/discount-codes/validate`.
+                description: 'Response for `POST /vendor/discount-codes/validate`.
+
+
+                  Deliberately minimal: a failure is always the bare `valid=False`
+                  (no reason that would
+
+                  reveal whether a code exists, expired or is exhausted), and a success
+                  carries only the
+
+                  discount a checkout needs -- never the vendor, code id or remaining
+                  uses.'
                 properties:
-                  discountCodeId:
-                    anyOf:
-                    - type: integer
-                    - type: 'null'
-                    default: null
-                    title: Discountcodeid
                   discountType:
                     anyOf:
                     - type: string
@@ -22765,38 +22767,23 @@ paths:
                     - type: 'null'
                     default: null
                     title: Discountvalue
-                  moduleId:
-                    anyOf:
-                    - type: integer
-                    - type: 'null'
-                    default: null
-                    title: Moduleid
-                  reason:
-                    anyOf:
-                    - type: string
-                    - type: 'null'
-                    default: null
-                    title: Reason
-                  usesRemaining:
-                    anyOf:
-                    - type: integer
-                    - type: 'null'
-                    default: null
-                    title: Usesremaining
                   valid:
                     title: Valid
                     type: boolean
-                  vendorId:
-                    anyOf:
-                    - type: integer
-                    - type: 'null'
-                    default: null
-                    title: Vendorid
                 required:
                 - valid
                 title: DiscountValidationDTO
                 type: object
-          description: Response for `POST /vendor/discount-codes/validate`.
+          description: 'Response for `POST /vendor/discount-codes/validate`.
+
+
+            Deliberately minimal: a failure is always the bare `valid=False` (no reason
+            that would
+
+            reveal whether a code exists, expired or is exhausted), and a success
+            carries only the
+
+            discount a checkout needs -- never the vendor, code id or remaining uses.'
       summary: '`POST /vendor/discount-codes/validate` -- any authenticated caller
         (Node''s `requireAuth`).'
   /api/v1/marketplace/vendor/discount-codes/{code_id}:

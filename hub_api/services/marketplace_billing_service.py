@@ -41,6 +41,7 @@ from services.community_authz import member_scopes_sync
 from services.community_public_id import lookup_public_ids_sync
 from services.errors import bad_request, conflict, forbidden, not_found
 from services.global_identity import is_global_admin_sync
+from services.schema import bind_marketplace_vendor_tables
 from services.scope_registry import SCOPE_BILLING_MANAGE
 
 _VALID_DISCOUNT_TYPES = ("percentage", "fixed_amount", "free")
@@ -559,46 +560,47 @@ def delete_discount_code(dal: Any, vendor_id: int, code_id: int) -> DiscountCode
 
 @dataclass(slots=True, frozen=True)
 class DiscountValidationDTO:
-    """Response for `POST /vendor/discount-codes/validate`."""
+    """Response for `POST /vendor/discount-codes/validate`.
+
+    Deliberately minimal: a failure is always the bare `valid=False` (no reason that would
+    reveal whether a code exists, expired or is exhausted), and a success carries only the
+    discount a checkout needs -- never the vendor, code id or remaining uses.
+    """
 
     valid: bool
-    reason: str | None = None
-    discountCodeId: int | None = None
     discountType: str | None = None
     discountValue: float | None = None
-    vendorId: int | None = None
-    moduleId: int | None = None
-    usesRemaining: int | None = None
 
 
-def validate_discount_code(dal: Any, code: str, module_id: int | None) -> DiscountValidationDTO:
-    """Public-shape validity check -- active, in-window, under `max_uses`, module-scoped if set."""
+_INVALID_CODE = DiscountValidationDTO(valid=False)
+
+
+def validate_discount_code(dal: Any, code: str, module_id: int) -> DiscountValidationDTO:
+    """Checkout validity of `code` for the module being bought (`module_id`).
+
+    Scoped to the purchase context: the code must belong to the module's seller and, if it
+    names a module, that same module. Every failure returns the identical `valid=False`.
+    """
     if not code:
         raise bad_request("code is required")
 
+    if "marketplace_modules" not in dal.tables:
+        bind_marketplace_vendor_tables(dal)
+    module = dal(dal.marketplace_modules.id == module_id).select().first()
     row = dal(dal.vendor_discount_codes.code == code.strip().upper()).select().first()
-    if row is None:
-        return DiscountValidationDTO(valid=False, reason="CODE_NOT_FOUND")
-    if not row.is_active:
-        return DiscountValidationDTO(valid=False, reason="CODE_INACTIVE")
+    if module is None or row is None or row.vendor_id != module.seller_id:
+        return _INVALID_CODE
     now = dt.datetime.utcnow()
-    if row.valid_from and row.valid_from > now:
-        return DiscountValidationDTO(valid=False, reason="CODE_NOT_YET_VALID")
-    if row.valid_until and row.valid_until < now:
-        return DiscountValidationDTO(valid=False, reason="CODE_EXPIRED")
-    if row.max_uses is not None and row.current_uses >= row.max_uses:
-        return DiscountValidationDTO(valid=False, reason="CODE_MAX_USES_REACHED")
-    if row.module_id is not None and module_id is not None and row.module_id != module_id:
-        return DiscountValidationDTO(valid=False, reason="CODE_WRONG_MODULE")
-
+    if (
+        not row.is_active
+        or (row.valid_from and row.valid_from > now)
+        or (row.valid_until and row.valid_until < now)
+        or (row.max_uses is not None and row.current_uses >= row.max_uses)
+        or (row.module_id is not None and row.module_id != module_id)
+    ):
+        return _INVALID_CODE
     return DiscountValidationDTO(
-        valid=True,
-        discountCodeId=row.id,
-        discountType=row.discount_type,
-        discountValue=float(row.discount_value),
-        vendorId=row.vendor_id,
-        moduleId=row.module_id,
-        usesRemaining=(row.max_uses - row.current_uses) if row.max_uses is not None else None,
+        valid=True, discountType=row.discount_type, discountValue=float(row.discount_value)
     )
 
 

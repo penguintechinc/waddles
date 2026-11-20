@@ -654,3 +654,6 @@ async def test_cross_tenant_source_uuid_is_404_for_patch_delete_and_cursor(app: 
     assert cursor_resp.status_code == 422
     untouched = (await install_dal(install_dal.ingest_sources.id == other_row.id).select()).first()
     assert untouched is not None and untouched.label == "other"
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

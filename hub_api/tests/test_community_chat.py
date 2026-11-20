@@ -117,3 +117,6 @@ class TestChatHistory:
 
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).
 UUID_COMMUNITY_RESPONSES = True
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

@@ -77,7 +77,9 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import ingest_source_registry_service as svc
+from services.community_authz import resolve_caller_standing_sync
 from services.errors import ApiError
+from services.route_guards import GUARD_ADMIN, mark_guarded
 
 logger = logging.getLogger(__name__)
 
@@ -215,6 +217,15 @@ def _parse_limit(raw: str | None) -> int | None:
         raise ApiError("limit must be an integer", 422, "invalid_limit") from exc
 
 
+def _require_community_admin(community_id: int) -> None:
+    """Raise 403 unless the caller administers `community_id` (tenant fence already applied)."""
+    standing = resolve_caller_standing_sync(
+        request, current_app.config["dal"], community_id=community_id
+    )
+    if not standing.is_admin:
+        raise ApiError("Community admin access required", 403, "FORBIDDEN")
+
+
 async def _community(community_public_id: str) -> tuple[int, str]:
     """Resolve the path community UUID to `(internal id, public id)`, tenant-fenced (404)."""
     return await svc.resolve_community(
@@ -238,6 +249,7 @@ async def _source_internal_id(community_id: int, ingest_source_id: str) -> int:
 @ingest_sources_bp.route("", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 @validate_response(IngestSourceListResponse)
 async def list_ingest_sources(
     community_public_id: str,
@@ -247,6 +259,7 @@ async def list_ingest_sources(
     install_dal = _install_dal()
     try:
         community_id, community_pid = await _community(community_public_id)
+        _require_community_admin(community_id)
         limit = _parse_limit(request.args.get("limit")) or _DEFAULT_LIMIT
         cursor: int | None = None
         raw_cursor = request.args.get("cursor")

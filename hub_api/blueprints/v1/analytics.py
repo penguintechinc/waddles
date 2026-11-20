@@ -101,6 +101,7 @@ from services.analytics_proxy import AnalyticsCoreProxyClient
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_async_dal, reads_from_replica
+from services.route_guards import platform_analytics_guard
 
 analytics_bp = Blueprint("v1_analytics", __name__, url_prefix="/api/v1/analytics")
 
@@ -230,6 +231,7 @@ async def get_member_reputation(community_id: int, user_id: int) -> Any:
 @analytics_bp.route("/platform/overview", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 @reads_from_replica("analytics.get_platform_overview")
 async def get_platform_overview() -> Any:
     """`GET /api/v1/analytics/platform/overview`."""
@@ -239,6 +241,7 @@ async def get_platform_overview() -> Any:
 @analytics_bp.route("/platform/reputation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 @reads_from_replica("analytics.get_platform_reputation")
 async def get_platform_reputation() -> Any:
     """`GET /api/v1/analytics/platform/reputation`."""
@@ -248,6 +251,7 @@ async def get_platform_reputation() -> Any:
 @analytics_bp.route("/platform/growth", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 async def get_platform_growth() -> Any:
     """`GET /api/v1/analytics/platform/growth`."""
     period = request.args.get("period", "90d")
@@ -257,6 +261,7 @@ async def get_platform_growth() -> Any:
 @analytics_bp.route("/platform/activity", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 async def get_platform_activity() -> Any:
     """`GET /api/v1/analytics/platform/activity`."""
     return await svc.activity_breakdown(_proxy_client)
@@ -265,6 +270,7 @@ async def get_platform_activity() -> Any:
 @analytics_bp.route("/platform/community-health", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 async def get_platform_community_health() -> Any:
     """`GET /api/v1/analytics/platform/community-health`.
 

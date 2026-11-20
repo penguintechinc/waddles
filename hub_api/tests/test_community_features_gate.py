@@ -234,3 +234,6 @@ class TestLoyaltyFeatureGateIsProfessionalTier:
 
         assert response.status_code == 402
         assert gate.await_args.args[0] == "waddles.community.loyalty"
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

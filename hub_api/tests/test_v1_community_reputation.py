@@ -282,3 +282,6 @@ class TestGetLeaderboard:
         )
         body = await response.get_json()
         assert len(body["data"]["entries"]) == 1
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

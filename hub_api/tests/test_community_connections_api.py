@@ -1009,3 +1009,6 @@ class TestCommunityScopeInvariant:
         kwargs = spies["upsert_connection"].await_args.kwargs
         assert kwargs["tenant_id"] == 42
         assert spies["upsert_connection"].await_args.args[1] == 7  # server-side state, not query
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

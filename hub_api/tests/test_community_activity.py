@@ -534,3 +534,6 @@ class TestAdminLeaderboardConfigUpdate:
             data=json_module.dumps({"enabled_platforms": ["not-a-real-platform"]}),
         )
         assert response.status_code == 400
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

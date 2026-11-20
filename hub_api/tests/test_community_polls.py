@@ -163,3 +163,6 @@ class TestProxyPassthrough:
         )
         assert response.status_code == 200
         assert (await response.get_json())["message"] == "Poll deleted"
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

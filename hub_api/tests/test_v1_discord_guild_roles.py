@@ -272,6 +272,9 @@ async def test_real_resolver_with_no_tenant_credentials_is_503(
 ) -> None:
     _pair(guild_pairing_db)
     monkeypatch.undo()  # drop the fake resolver -> real DefaultCredentialResolver, empty DB
+    from tests.conftest import apply_route_guard_bypass
+
+    apply_route_guard_bypass(monkeypatch)
     import blueprints.v1.guild_pairing as bp
 
     monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=True))
@@ -386,3 +389,6 @@ async def test_guild_paired_to_other_community_is_404_and_never_calls_discord(
     assert resp.status_code == 404
     assert (await resp.get_json())["error"]["code"] == "DISCORD_PAIRING_NOT_FOUND"
     assert seen == []
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

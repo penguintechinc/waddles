@@ -191,3 +191,6 @@ class TestStreamLiveActivity:
             assert live.headers["Content-Type"].startswith("text/event-stream")
             assert live.headers["Cache-Control"] == "no-cache"
             await live.disconnect()
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")
