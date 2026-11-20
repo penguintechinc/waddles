@@ -39,7 +39,12 @@ from services.community_announcements import (
     unpin_announcement,
     update_announcement,
 )
-from services.community_common import api_error, community_in_tenant, get_current_user
+from services.community_common import (
+    api_error,
+    community_in_tenant,
+    feature_not_enabled,
+    get_current_user,
+)
 
 announcements_bp = Blueprint("v1_community_announcements", __name__, url_prefix="/api/v1/admin")
 
@@ -63,7 +68,7 @@ async def list_route(community_id: int) -> AnnouncementListResponse | tuple[dict
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_ANNOUNCEMENTS, tenant=ctx.tenant_slug):
-        return api_error("Community announcements are not enabled for this plan", 402)
+        return feature_not_enabled("Community announcements are not enabled for this plan")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     page = max(1, int(request.args.get("page", "1") or 1))

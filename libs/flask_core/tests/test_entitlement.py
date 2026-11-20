@@ -782,3 +782,28 @@ def test_posthog_flag_gate_applies_bounded_timeout(
     assert PostHogFlagGate.from_env()._client.timeout == 3.0
     monkeypatch.setenv("POSTHOG_TIMEOUT_SECONDS", "7")
     assert PostHogFlagGate.from_env()._client.timeout == 7.0
+
+@pytest.mark.parametrize(
+    ("host", "flag", "expected"),
+    [
+        # Alpha's real edge host (with port) and the other bypass domains pass the TIER gate.
+        ("waddles-alpha.penguintech.cloud:8443", True, True),
+        ("waddles-alpha.penguintech.cloud", True, True),
+        ("foo.penguincloud.io:443", True, True),
+        # The flag gate is never skipped by a bypass domain.
+        ("waddles-alpha.penguintech.cloud:8443", False, False),
+        # Lookalike / non-bypass host on a Free tenant stays denied on the tier gate.
+        ("waddles-alpha.penguintech.cloud.evil.com:8443", True, False),
+        ("customer.example.com", True, False),
+        (None, True, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_bypass_domain_passes_tier_gate_but_never_the_flag_gate(
+    host: Optional[str], flag: bool, expected: bool
+) -> None:
+    """Regression (alpha 402s): a licensed flag passes on a bypass host incl. `host:port` form."""
+    client, _, _ = make_client(
+        flag_result=flag, tier="free", tier_requirements={FLAG_KEY: "professional"}
+    )
+    assert await client.evaluate(FLAG_KEY, tenant=TENANT, request_host=host) is expected
