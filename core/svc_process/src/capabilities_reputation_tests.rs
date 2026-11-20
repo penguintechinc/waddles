@@ -16,7 +16,7 @@ use uuid::Uuid;
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-reputation";
+const APP_ID: &str = "penguintechinc.waddles.test-reputation";
 const VERSION: i64 = 1;
 
 type RecordedCall = (
@@ -1814,7 +1814,7 @@ async fn a_system_flag_stripped_by_an_untrusted_hop_makes_the_core_write_forbidd
     let hop = base.for_tool_call(
         Some("tool:k".into()),
         "acme.third-party-logic",
-        "waddles.core.service.reputation",
+        "penguintechinc.waddles.reputation",
     );
     assert!(!hop.is_system_originated());
     let mut f = ext_fixture_as(v2_grants(), Some("member"));

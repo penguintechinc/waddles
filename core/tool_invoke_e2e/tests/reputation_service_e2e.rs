@@ -59,7 +59,7 @@ const CALLER_WASM: &[u8] =
 const REP_WASM: &[u8] = include_bytes!("fixtures/reputation_service.wasm");
 
 const CALLER: &str = "waddles.e2e.app.giveaway";
-const REP: &str = "waddles.core.service.reputation";
+const REP: &str = "penguintechinc.waddles.reputation";
 const TENANT: i32 = 7;
 const COMMUNITY_A: i32 = 3;
 const COMMUNITY_B: i32 = 4;
@@ -1168,7 +1168,7 @@ async fn i_activity_writes_from_a_non_active_logic_origin_are_forbidden_end_to_e
     // Another bundle is the tenant's active reputation-logic app (or none):
     // the chain origin (CALLER) is refused before any write, whatever the
     // service tool or its grants say.
-    for active in [Some("waddles.core.app.reputation-accrual"), None] {
+    for active in [Some("penguintechinc.waddles.reputation-accrual"), None] {
         let w = World::new(None, None).await;
         *w.store.active_logic.lock().unwrap() = Some(active.map(str::to_string));
         let out = w

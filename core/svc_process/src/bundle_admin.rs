@@ -693,7 +693,7 @@ mod tests {
 
     const KEY: &[u8] = &[7u8; 32];
     const NOW: i64 = 1_800_000_000_000;
-    const APP: &str = "waddles.core.service.reputation";
+    const APP: &str = "penguintechinc.waddles.reputation";
 
     fn ring() -> KeyRing {
         KeyRing::parse(&format!("k1:{}", hex::encode(KEY))).unwrap()
@@ -759,7 +759,7 @@ mod tests {
         // tool "override", args '{"amount":5}'), request_id "r-1", exp_ms 1800000120000.
         let r = req("r-1", 1_800_000_120_000, "community:admin");
         assert_eq!(
-            r.sig, "k1:13eba2d368d58a6ddbcc47ec5f8ff5cfa91e38c7b697548f365a4b7460bb34ec",
+            r.sig, "k1:92728619e6fa89c724d312a3192dedbafd1f33f167e46567c12b9f32fe1a04f9",
             "update this vector from hub-api's sign_call if the field order ever changes"
         );
     }
@@ -775,8 +775,8 @@ mod tests {
             ("community_id", json!(4)),
             ("actor_user_id", json!(43)),
             ("actor_scope", json!("community:owner")),
-            ("caller_app_id", json!("waddles.core.service.other")),
-            ("target_app_id", json!("waddles.core.service.other")),
+            ("caller_app_id", json!("penguintechinc.waddles.other")),
+            ("target_app_id", json!("penguintechinc.waddles.other")),
             ("tool", json!("leaderboard")),
             ("args_json", json!(r#"{"amount":500}"#)),
             ("request_id", json!("r-2")),

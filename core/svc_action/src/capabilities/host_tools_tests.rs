@@ -37,7 +37,7 @@ mod twitch_manifest_tests;
 mod youtube_manifest_tests;
 
 const APP: &str = "waddles.test.app.caller";
-const TWITCH_SVC: &str = "waddles.core.service.twitch";
+const TWITCH_SVC: &str = "penguintechinc.waddles.twitch";
 const DISCORD_SVC: &str = super::super::event_sync::DISCORD_SERVICE_APP_ID;
 const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
 const UUID_B: &str = "7a1d2c3e-1111-4222-8333-444455556666";
@@ -316,7 +316,7 @@ fn ban_decl() -> HostOpDecl {
 
 /// The registered platform service bundle id of `platform`.
 fn svc_for(platform: &str) -> String {
-    format!("waddles.core.service.{platform}")
+    format!("penguintechinc.waddles.{platform}")
 }
 
 fn invoke(tool: &str, args: Value) -> HostCallBody {
@@ -1590,7 +1590,7 @@ async fn host_ops_run_only_from_the_registered_platform_service_bundle() {
     for target in [
         "waddles.bot.other",
         DISCORD_SVC,
-        "waddles.core.service.youtube",
+        "penguintechinc.waddles.youtube",
     ] {
         plan.target_app_id = target.to_string();
         let r = c.run_host_tool(&twitch_event(Some("500")), &plan, &d).await;

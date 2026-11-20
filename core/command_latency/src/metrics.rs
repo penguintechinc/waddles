@@ -346,7 +346,7 @@ mod tests {
         ));
         assert!(!m.record_e2e(
             "ping",
-            "waddles.core.ping",
+            "penguintechinc.waddles.ping",
             "rust",
             Outcome::Ok,
             Door::Gateway,
@@ -354,7 +354,7 @@ mod tests {
         ));
         assert!(m.record_e2e(
             "ping",
-            "waddles.core.ping",
+            "penguintechinc.waddles.ping",
             "rust",
             Outcome::Ok,
             Door::Gateway,
@@ -362,7 +362,7 @@ mod tests {
         ));
         assert!(m.record_e2e(
             "ping",
-            "waddles.core.ping",
+            "penguintechinc.waddles.ping",
             "rust",
             Outcome::Timeout,
             Door::Sink,
@@ -385,7 +385,7 @@ mod tests {
         crate::switch::set_disabled(true);
         assert!(!m.record_e2e(
             "ping",
-            "waddles.core.ping",
+            "penguintechinc.waddles.ping",
             "rust",
             Outcome::Ok,
             Door::Gateway,

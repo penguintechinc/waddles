@@ -54,7 +54,7 @@ use tokio::sync::oneshot;
 use tokio_tungstenite::tungstenite::Message;
 
 const WASM: &[u8] = include_bytes!("fixtures/twitch_connector.wasm");
-const TWITCH_APP: &str = "waddles.core.service.twitch";
+const TWITCH_APP: &str = "penguintechinc.waddles.twitch";
 const CHANNEL: &str = "somechannel";
 const OTHER_CHANNEL: &str = "otherchannel";
 const TOKEN: &str = "tok_FAKE_0123456789";

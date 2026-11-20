@@ -50,7 +50,7 @@ use docker_container::{start_container, DockerContainer};
 const SU_PW: &str = "postgres_test_superuser_pw";
 const ECO_PW: &str = "waddles_economy_runtime_test_pw";
 const READER_PW: &str = "waddles_bundle_reader_test_pw";
-const APP_ID: &str = "waddles.core.test-identity";
+const APP_ID: &str = "penguintechinc.waddles.test-identity";
 const IDENTITY_DDL: &str = include_str!("../../../scripts/db/bundle_identity_resolve.sql");
 const ROLE_DDL: &str = include_str!("../../../scripts/db/bundle_identity_role.sql");
 const ECONOMY_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");

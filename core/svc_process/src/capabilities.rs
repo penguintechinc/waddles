@@ -100,7 +100,7 @@ const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
 /// The first-party reputation SERVICE bundle: when it is the origin of the
 /// call chain (chain length 1) its activity writes are core internals and are
 /// exempt from the logic-bundle exclusivity check.
-const REPUTATION_SERVICE_APP_ID: &str = "waddles.core.service.reputation";
+const REPUTATION_SERVICE_APP_ID: &str = "penguintechinc.waddles.reputation";
 /// Scope a HUMAN-originated moderation-class reputation call must hold (admins
 /// hold it too: the role mapping is cumulative).
 const REPUTATION_MODERATE_SCOPE: &str = "community:moderate";
@@ -3400,7 +3400,7 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// Fail-loud order as the other reputation handlers: (1) argument parsing;
     /// (2) a real community; (3) the core-only rule for the ops whose
     /// permission is first-party-only (`history`, the tenant reads, moderation
-    /// writes): a non-`waddles.core.` app is refused `forbidden` BEFORE the
+    /// writes): a non-`penguintechinc.waddles.` app is refused `forbidden` BEFORE the
     /// gate; (4) the idempotency ordinal of a mutating op (before the gate);
     /// (5) the gate; (6) wiring/flag; (7) the store. The reason CLASS is fixed
     /// by the op (`apply` = activity under `reputation.community.write`,
@@ -3578,7 +3578,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 ..
             }
         );
-        if core_only && !self.app_id.starts_with("waddles.core.") {
+        if core_only && !self.app_id.starts_with("penguintechinc.waddles.") {
             return Err(denied(
                 "forbidden",
                 "this reputation operation is restricted to first-party core bundles",
