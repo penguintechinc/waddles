@@ -37,7 +37,8 @@ fn stages_join_one_trace_and_errors_are_recorded_on_the_span() {
         drop(ingest);
 
         // ---- process: remote parent from the envelope, children inherit it ------------------
-        let process = tracing::info_span!("process.consume", app_id = "waddles.core.example.ping");
+        let process =
+            tracing::info_span!("process.consume", app_id = "penguintechinc.waddles.ping");
         assert!(set_remote_parent(&process, &traceparent, Some(tracestate)));
         {
             let _g = process.enter();
@@ -52,7 +53,7 @@ fn stages_join_one_trace_and_errors_are_recorded_on_the_span() {
         drop(process);
 
         // ---- action: same remote parent ----------------------------------------------------
-        let action = tracing::info_span!("action.dispatch", app_id = "waddles.core.example.ping");
+        let action = tracing::info_span!("action.dispatch", app_id = "penguintechinc.waddles.ping");
         assert!(set_remote_parent(&action, &traceparent, Some(tracestate)));
         drop(action);
     });

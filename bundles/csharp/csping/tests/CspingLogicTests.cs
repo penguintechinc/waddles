@@ -39,7 +39,7 @@ file sealed class RecordingLog : ILogClient
 
 file sealed class FakeHost(IRelayClient relay, ILogClient? log = null) : IWaddleHost
 {
-    public BundleContextInfo Context { get; } = new("tenant-1", null, "waddles.core.example.csping", "waddles.core.example", "1.0.0", "msg-1", "{}");
+    public BundleContextInfo Context { get; } = new("tenant-1", null, "penguintechinc.waddles.csping", "penguintechinc.waddles", "1.0.0", "msg-1", "{}");
     public IKvClient Kv => throw new NotSupportedException("!csping needs no kv");
     public IDbClient Db => throw new NotSupportedException("!csping needs no db");
     public IRelayClient Relay { get; } = relay;
@@ -129,7 +129,7 @@ public class CspingDispatchTests
 {
     private static StageEnvelopeInfo EnvelopeWithReply(string platform, string text, string? channelId) =>
         new(
-            "tenant-1", null, "waddles.core.example.csping", "action",
+            "tenant-1", null, "penguintechinc.waddles.csping", "action",
             new PlatformEventInfo(
                 platform,
                 "chat.message",
@@ -186,7 +186,7 @@ public class CspingDispatchTests
         // parses into a reply with null Text/ChannelId and hits the
         // MISSING_CHANNEL path instead).
         var envelope = new StageEnvelopeInfo(
-            "tenant-1", null, "waddles.core.example.csping", "action",
+            "tenant-1", null, "penguintechinc.waddles.csping", "action",
             new PlatformEventInfo("twitch", "chat.message", "user-1", "[]", "2026-10-03T00:00:00.000Z"),
             "2026-10-03T00:00:00.000Z", null, null);
 
@@ -252,7 +252,7 @@ public class CspingHygieneTests
     private const string PiiText = "PIITEXT_secret_phrase";
 
     private static StageEnvelopeInfo EnvelopeFor(PlatformEventInfo reply) =>
-        new("tenant-1", null, "waddles.core.example.csping", "action", reply, "2026-10-09T00:00:00.000Z", null, null);
+        new("tenant-1", null, "penguintechinc.waddles.csping", "action", reply, "2026-10-09T00:00:00.000Z", null, null);
 
     // regression: gh-674 -- a bundle runs outside the PII boundary: neither the actor nor typed
     // text may be copied into a reply payload, a relay message or any log line, on any path.

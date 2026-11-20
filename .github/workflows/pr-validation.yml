@@ -235,7 +235,7 @@ jobs:
           WADDLES_TEST_VALKEY_URL: redis://localhost:6379/0
         run: make test-unit
 
-      - name: Script tests (release-merge, prune-worktrees, release-auto-merge)
+      - name: Script tests (release-merge, prune-worktrees, release-auto-merge, app_id guard)
         run: make test-scripts
 
   alembic-migration-chain:

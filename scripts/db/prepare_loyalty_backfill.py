@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 from uuid import UUID
 
-SERVICE = "waddles.core.service.economy"
+SERVICE = "penguintechinc.waddles.economy"
 # Mirrors `bundle_host_economy::DEFAULT_MAX_SUPPLY` (the ceiling svc_process
 # enforces at runtime). A backfill may never create a community total the live
 # host would refuse to mint into.

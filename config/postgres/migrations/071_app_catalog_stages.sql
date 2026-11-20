@@ -38,7 +38,7 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.core.demo.echo',
+    'penguintechinc.waddles.echo-pipeline',
     '1.0.0',
     'core',
     'waddles.core.demo',

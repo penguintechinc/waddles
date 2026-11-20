@@ -243,7 +243,7 @@ mod tests {
             canvas: CanvasResolution::Res2k.into(),
             components: vec![SceneComponentDto {
                 instance_id: "0195f3a2-8c11-7000-8000-000000000001".to_string(),
-                bundle_app_id: "waddles.core.dj".to_string(),
+                bundle_app_id: "penguintechinc.waddles.dj".to_string(),
                 widget_id: "now_playing".to_string(),
                 surface_id: "music.now_playing".to_string(),
                 output_kind: WidgetOutputKind::Surface,

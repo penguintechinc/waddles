@@ -3,7 +3,7 @@
 //! A chat-stage APP on `world stage-next-tools`. The process stage records chat activity in a
 //! community-scoped kv roster (hashed keys only) and emits a strip frame when it changed; the
 //! action stage re-validates it and calls `overlay.publish-surface` on this bundle's own
-//! namespaced surface (`waddles.core.app.galactic-avatars.stage_strip`). All logic lives in
+//! namespaced surface (`penguintechinc.waddles.galactic-avatars.stage_strip`). All logic lives in
 //! [`logic`]; this file supplies the wasm seam and the WIT exports.
 pub mod logic;
 

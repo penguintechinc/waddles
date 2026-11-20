@@ -1,7 +1,7 @@
 # fish (Python)
 
 `!fish` -- a weighted-random, per-community fishing minigame. Community-scoped fun content,
-first-party (`provider: builtin`, `app_id: waddles.core.example.fish`), **inspired by**
+first-party (`provider: builtin`, `app_id: penguintechinc.waddles.fish`), **inspired by**
 superpenguintv (Psychoboy)'s [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot)
 fishing feature -- not a literal port. No original source code or text is reused; the catch
 table, weights, flavor text, cooldown mechanism, and all game logic are written fresh for this
@@ -111,4 +111,4 @@ ERROR, PII-free logs (gh-674), kv key charset over every key touched (gh-631).
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.fish`).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.fish`).

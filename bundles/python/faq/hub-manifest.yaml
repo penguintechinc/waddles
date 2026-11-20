@@ -1,10 +1,9 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.faq.
+# hub-api install-pipeline manifest (schema_version 2) for penguintechinc.waddles.faq.
 # 1.0.0: v2 port, KV-backed -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.faq
+app_id: penguintechinc.waddles.faq
 name: Community FAQ Bundle (Python)
-version: 1.0.4
-feature: waddles.core.example
+version: 1.0.5
 module: core
 provider: builtin
 author: github:penguintechinc

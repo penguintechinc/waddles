@@ -225,7 +225,7 @@ mod tests {
         let _ = oneshot::channel::<()>();
         let state = ExecState::new(
             Some(HostBridge::new(connection)),
-            "waddles.core.service.gameserver".to_string(),
+            "penguintechinc.waddles.gameserver".to_string(),
             7,
         );
         (state, seen_rx)

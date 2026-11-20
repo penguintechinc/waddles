@@ -1,8 +1,8 @@
 schema_version: 2
-app_id: waddles.integrations.superpenguin.gamble
+app_id: psychoboy.penguintwitchbot.gamble
 name: Gamble (SuperPenguinTV PastyGames)
 version: 1.0.0
-feature: waddles.integrations.superpenguin
+feature: psychoboy.penguintwitchbot
 module: integrations
 provider: thirdparty
 language: csharp
@@ -86,7 +86,7 @@ permissions:
 - id: chat.send:twitch
   justification: gamble replies to the invoking user/channel via the relay host import
     (relay.push -> chat.send:twitch)
-- id: tool.call:waddles.core.service.economy:points_view
+- id: tool.call:penguintechinc.waddles.economy:points_view
   justification: Use the economy service points_view contract; the app owns only game
     rules
   params:
@@ -106,5 +106,5 @@ platform_compatibility:
 requested_tools:
 - tool: points_view
   access: read
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 collection: superpenguintv

@@ -32,7 +32,7 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0016_moderation_enforce_app.py"
 )
 
-APP_ID = "waddles.community.moderation.default"
+APP_ID = "penguintechinc.waddles.moderation-pipeline"
 TENANT_SLUG = "global"
 BOT_TOKEN_REF = "DISCORD_BOT_TOKEN"
 

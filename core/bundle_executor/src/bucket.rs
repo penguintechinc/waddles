@@ -1079,7 +1079,7 @@ mod tests {
         use crate::wire::RequestHandler as _;
         use penguin_bundle_host::wire::{ExportKind, InvokeBody, LoadBody, LoadLimits};
 
-        const APP_ID: &str = "waddles.test.bucket-e2e";
+        const APP_ID: &str = "penguintechinc.waddles.fixture-test-bucket-e2e";
         const FIXTURE_WASM: &[u8] = include_bytes!("../tests/fixtures/hostile_fixture.wasm");
 
         fn fixture_digest() -> String {

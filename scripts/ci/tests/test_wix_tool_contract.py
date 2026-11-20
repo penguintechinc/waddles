@@ -65,7 +65,7 @@ def test_consumed_discord_args_satisfy_the_discord_schemas() -> None:
 @pytest.mark.parametrize("manifest", ["bundle.yaml", "hub-manifest.yaml"])
 def test_python_manifests_declare_every_consumed_tool(manifest: str) -> None:
     doc = _load(PY_WIX / manifest)
-    svc = "waddles.core.service.discord"
+    svc = "penguintechinc.waddles.discord"
     perms = {p["id"] for p in doc["permissions"]}
     requested = {(r["tool"], r["target_app_id"], r["access"]) for r in doc["requested_tools"]}
     for name in CONSUMED:

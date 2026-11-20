@@ -525,7 +525,7 @@ def _envelope(platform: str, payload: dict[str, Any]) -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
         community=COMMUNITY,
-        app_id="waddles.core.example.greeter",
+        app_id="penguintechinc.waddles.greeter",
         stage="action",
         event=PlatformEvent(
             platform=platform,

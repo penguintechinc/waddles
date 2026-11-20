@@ -1,7 +1,7 @@
 """Trusted one-shot import of the legacy Music Station queue into the music-requests service.
 
 The legacy hub-api queue (`music_station_queue` joined to `music_tracks`, migration 072) is
-retired; the single queue now lives in the `waddles.core.service.music-requests` bundle's
+retired; the single queue now lives in the `penguintechinc.waddles.music-requests` bundle's
 db-v2 tables. This control-plane job copies each community's still-queued/playing legacy
 rows into the service's physical `requests` table exactly once:
 
@@ -36,7 +36,7 @@ from services.bundle_data_v2 import derive_v2_table_identity
 logger = logging.getLogger(__name__)
 
 #: The music-requests service bundle whose tables receive the import.
-MUSIC_REQUESTS_APP_ID = "waddles.core.service.music-requests"
+MUSIC_REQUESTS_APP_ID = "penguintechinc.waddles.music-requests"
 _PROVIDER = "builtin"
 
 #: RLS scope GUCs the bundle tables' policy compares against (`bundle_data_ddl`).

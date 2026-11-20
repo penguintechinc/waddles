@@ -3897,7 +3897,10 @@ mod tests {
     /// exercise directly, including the deny-without-grant cases).
     pub(super) fn permissive_gate() -> Arc<CapabilityGate> {
         let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
-        for app_id in ["waddles.bot.commands.default", "waddles.bot.other"] {
+        for app_id in [
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            "waddles.bot.other",
+        ] {
             let mut grants = std::collections::HashMap::new();
             for id in [
                 "platform.context",
@@ -4199,7 +4202,7 @@ mod tests {
         assert!(caps.relay_queue.pushed.lock().unwrap().is_empty());
     }
 
-    /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the
+    /// Grants `storage.kv` to `"penguintechinc.waddles.fixture-bot-commands-default"` -- the
     /// `app_id` every `scope()`/`call()` helper in this module uses -- so
     /// every existing `kv_*` test below (which is testing `handle_kv`'s
     /// argument parsing/error mapping, not the gate itself) is unaffected
@@ -4207,7 +4210,10 @@ mod tests {
     /// `kv_call_is_denied_when_storage_kv_is_undeclared` below is the one
     /// test exercising an ungranted app.
     fn caps_with_kv(queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue, FakeKvBackend> {
-        caps_with_kv_and_capabilities(queue, &["waddles.bot.commands.default"])
+        caps_with_kv_and_capabilities(
+            queue,
+            &["penguintechinc.waddles.fixture-bot-commands-default"],
+        )
     }
 
     fn caps_with_kv_and_capabilities(
@@ -4234,7 +4240,7 @@ mod tests {
         InvokeScope {
             tenant: "acme".to_string(),
             community: Some("main".to_string()),
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             origin_channel_id: None,
             origin_platform: None,
             origin_guild_id: None,
@@ -4437,7 +4443,7 @@ mod tests {
         };
         let src = Arc::new(StaticConfigSource::new());
         src.set(
-            ConfigKey::new(7, 3, "waddles.bot.commands.default"),
+            ConfigKey::new(7, 3, "penguintechinc.waddles.fixture-bot-commands-default"),
             2,
             r#"{"default_duration_minutes":45}"#,
         );
@@ -4492,7 +4498,7 @@ mod tests {
 
     fn call(capability: CapabilityKind, op: &str, args: serde_json::Value) -> HostCallBody {
         HostCallBody {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             capability,
             op: op.to_string(),
             args,
@@ -4607,7 +4613,7 @@ mod tests {
     async fn kv_call_succeeds_when_storage_kv_is_declared() {
         let caps = caps_with_kv_and_capabilities(
             FakeRelayQueue::default(),
-            &["waddles.bot.commands.default"],
+            &["penguintechinc.waddles.fixture-bot-commands-default"],
         );
         caps.handle(
             &scope(),
@@ -4986,7 +4992,7 @@ mod tests {
             "{fields}"
         );
         assert!(
-            fields.contains("app_id=waddles.bot.commands.default"),
+            fields.contains("app_id=penguintechinc.waddles.fixture-bot-commands-default"),
             "{fields}"
         );
         for leaked in ["secretvictim", "somechannel"] {
@@ -5245,7 +5251,7 @@ mod tests {
     async fn db_capability_denies_no_table_when_flag_on_but_unprovisioned() {
         let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
         capabilities.db.as_ref().unwrap().capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             ["storage.tables".to_string()],
         );
         let err = capabilities
@@ -5266,7 +5272,7 @@ mod tests {
     async fn db_capability_query_op_denies_no_table_when_unprovisioned() {
         let capabilities = caps(FakeRelayQueue::default()).with_db(mock_db_wiring(true));
         capabilities.db.as_ref().unwrap().capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             ["storage.tables".to_string()],
         );
         let err = capabilities
@@ -5357,7 +5363,10 @@ mod tests {
     async fn kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler() {
         let caps = caps_with_kv_and_capabilities(
             FakeRelayQueue::default(),
-            &["waddles.bot.commands.default", "waddles.bot.other"],
+            &[
+                "penguintechinc.waddles.fixture-bot-commands-default",
+                "waddles.bot.other",
+            ],
         );
         caps.handle(
             &scope(),
@@ -6484,7 +6493,7 @@ mod tests {
         // community (or app) never shares it.
         let windows = caps.relay_queue.windows.lock().unwrap();
         assert!(
-            windows.contains_key("waddles:ratelimit:dm.send:app:7:3:waddles.bot.commands.default"),
+            windows.contains_key("waddles:ratelimit:dm.send:app:7:3:penguintechinc.waddles.fixture-bot-commands-default"),
             "{:?}",
             windows.keys().collect::<Vec<_>>()
         );
@@ -7036,7 +7045,10 @@ mod tests {
         assert!(
             harness.count(
                 "waddles_bundle_capability_authorized_total",
-                &[("app_id", "waddles.bot.commands.default")]
+                &[(
+                    "app_id",
+                    "penguintechinc.waddles.fixture-bot-commands-default"
+                )]
             ) >= 1.0,
             "the gate's authorize() audit counter must reach OTel"
         );
@@ -7044,7 +7056,10 @@ mod tests {
             harness.count(
                 "waddles_bundle_capability_denied_total",
                 &[
-                    ("app_id", "waddles.bot.commands.default"),
+                    (
+                        "app_id",
+                        "penguintechinc.waddles.fixture-bot-commands-default"
+                    ),
                     ("permission", "net.http.fqdn"),
                     ("reason", "not_granted"),
                 ]
@@ -7066,7 +7081,10 @@ mod tests {
             .expect("context succeeds");
         assert_eq!(result["tenant"], "acme");
         assert_eq!(result["community"], "main");
-        assert_eq!(result["app_id"], "waddles.bot.commands.default");
+        assert_eq!(
+            result["app_id"],
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
     }
 
     #[tokio::test]
@@ -7300,7 +7318,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 7,
                 community_id: 3,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: 1,
             },
             bundle_capability_gate::GrantSet {
@@ -7352,7 +7370,7 @@ mod tests {
         let key = bundle_capability_gate::GrantScopeKey {
             tenant_id: 7,
             community_id: 3,
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             app_version: 1,
         };
         let loader = Arc::new(bundle_capability_gate::InMemoryGrantLoader::new());
@@ -7379,7 +7397,7 @@ mod tests {
         ));
         let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
         kv_capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
         );
         let caps = StageCapabilities::new(
@@ -7846,7 +7864,7 @@ mod tests {
                 bundle_capability_gate::GrantScopeKey {
                     tenant_id: 7,
                     community_id: 3,
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     app_version: 1,
                 },
                 bundle_capability_gate::GrantSet {

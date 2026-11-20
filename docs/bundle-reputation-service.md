@@ -4,8 +4,8 @@ Two cooperating bundles, split on purpose:
 
 | Bundle | Kind | Owns | Does NOT own |
 |---|---|---|---|
-| `waddles.core.service.reputation` (v1.1.0) | `service`, always-on, ONE per platform | the store access, tools, caps/idempotency/ledger/audit (host capability), soft-ban state, FLOOR ENFORCEMENT (community soft/hard + tenant), floor/threshold config, tiers (display) | scoring weights, event->delta mapping |
-| `waddles.core.app.reputation-accrual` (v1.0.0) | `app`, `provides: reputation-logic` | event->delta mapping, weights, cooldowns, low-score notice; per-community config in its own kv | the store, caps, floors, bans |
+| `penguintechinc.waddles.reputation` (v1.1.0) | `service`, always-on, ONE per platform | the store access, tools, caps/idempotency/ledger/audit (host capability), soft-ban state, FLOOR ENFORCEMENT (community soft/hard + tenant), floor/threshold config, tiers (display) | scoring weights, event->delta mapping |
+| `penguintechinc.waddles.reputation-accrual` (v1.0.0) | `app`, `provides: reputation-logic` | event->delta mapping, weights, cooldowns, low-score notice; per-community config in its own kv | the store, caps, floors, bans |
 
 Floors are admin limits, not scoring logic, so they live with the store. Scoring is replaceable: any approved
 app bundle that `provides: reputation-logic` can take the accrual bundle's place (contract below).
@@ -37,7 +37,7 @@ a human-originated invocation additionally needs the verified actor to hold `com
 only a SYSTEM-originated invocation is exempt (host-derived from an allowlist of platform event types:
 `channel.follow|followed|subscribe|cheer|raid|ban|unban|moderate`, `channel.subscription.{gift,gifts,new,renewal}`,
 `moderation.ban|timeout` (internal types such as `reputation.floor_check` are never system-origin; svc-ingest drops reserved `reputation.*`/`internal.*` types); `message`, `interaction.command`, `chat.*` and every unknown
-type are human; the flag never survives a hop through a non-`waddles.core.` bundle).
+type are human; the flag never survives a hop through a non-`penguintechinc.` bundle).
 
 ## Service tools
 

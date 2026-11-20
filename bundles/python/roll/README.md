@@ -1,7 +1,7 @@
 # roll (Python)
 
 `!roll [NdM]` -- a bounds-validated dice roll. Stateless chat fun, first-party
-(`provider: builtin`, `app_id: waddles.core.example.roll`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.roll`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content**: not a port and no third-party code or text reused.
 Contrast `bundles/csharp/superpenguin-roll`, the *line-for-line* port of superpenguintv
 (Psychoboy)'s [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) roll command

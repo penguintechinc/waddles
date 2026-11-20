@@ -195,7 +195,7 @@ mod tests {
         HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("waddles.core.example_echo")
+            .app_id("penguintechinc.waddles.echo")
             .app_version(1)
             .tenant_tier(TenantTier::Free)
             .build()

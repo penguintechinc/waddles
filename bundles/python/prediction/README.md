@@ -1,7 +1,7 @@
 # prediction (Python)
 
 `!prediction` / `!predict` -- community predictions on a pari-mutuel point pool. First-party
-(`provider: builtin`, `app_id: waddles.core.example.prediction`), net-new Waddles content (the
+(`provider: builtin`, `app_id: penguintechinc.waddles.prediction`), net-new Waddles content (the
 open / bet / resolve shape is a generic stream-community mechanic; no attribution required).
 Points only; no real-money ties. Activation-gated only -- no feature flag.
 

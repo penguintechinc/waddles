@@ -34,8 +34,8 @@ const auth = vi.mocked(useAuth);
 const api = vi.mocked(bundleActivationApi);
 
 const ROWS: BundleActivation[] = [
-  { appId: 'waddles.core.ping', communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 3, version: '3.0.1', activatedAt: '2026-03-04T10:30:00Z' },
-  { appId: 'waddles.core.pong', communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 4, activatedAt: null },
+  { appId: 'penguintechinc.waddles.ping', communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 3, version: '3.0.1', activatedAt: '2026-03-04T10:30:00Z' },
+  { appId: 'penguintechinc.waddles.pong', communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 4, activatedAt: null },
 ];
 
 let flags: Record<string, boolean>;
@@ -102,24 +102,24 @@ describe('AdminCommunityBundles listing', () => {
   it('loads activations for the community UUID', async () => {
     mount();
     expect(screen.getByRole('status')).toHaveTextContent('Loading bundles');
-    expect(await screen.findByTestId('bundle-row-waddles.core.ping')).toBeInTheDocument();
+    expect(await screen.findByTestId('bundle-row-penguintechinc.waddles.ping')).toBeInTheDocument();
     expect(api.list).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000');
   });
 
   it('renders each activation with its date, or "unknown" when none', async () => {
     mount();
-    const ping = within(await screen.findByTestId('bundle-row-waddles.core.ping'));
-    expect(ping.getByText('waddles.core.ping')).toBeInTheDocument();
-    expect(ping.getByTestId('bundle-version-waddles.core.ping')).toHaveTextContent('3.0.1');
+    const ping = within(await screen.findByTestId('bundle-row-penguintechinc.waddles.ping'));
+    expect(ping.getByText('penguintechinc.waddles.ping')).toBeInTheDocument();
+    expect(ping.getByTestId('bundle-version-penguintechinc.waddles.ping')).toHaveTextContent('3.0.1');
     expect(ping.getByText(new Date('2026-03-04T10:30:00Z').toLocaleString(), { exact: false })).toBeInTheDocument();
-    expect(within(screen.getByTestId('bundle-row-waddles.core.pong')).getByText(/unknown/)).toBeInTheDocument();
+    expect(within(screen.getByTestId('bundle-row-penguintechinc.waddles.pong')).getByText(/unknown/)).toBeInTheDocument();
   });
 
   it('shows the read-only PostHog command flag state per bundle', async () => {
-    flags['waddles.command-waddles.core.ping'] = true;
+    flags['waddles.command-penguintechinc.waddles.ping'] = true;
     mount();
-    expect(within(await screen.findByTestId('bundle-row-waddles.core.ping')).getByText('command flag: on')).toBeInTheDocument();
-    expect(within(screen.getByTestId('bundle-row-waddles.core.pong')).getByText('command flag: off')).toBeInTheDocument();
+    expect(within(await screen.findByTestId('bundle-row-penguintechinc.waddles.ping')).getByText('command flag: on')).toBeInTheDocument();
+    expect(within(screen.getByTestId('bundle-row-penguintechinc.waddles.pong')).getByText('command flag: off')).toBeInTheDocument();
   });
 
   it('shows the empty state', async () => {
@@ -138,7 +138,7 @@ describe('AdminCommunityBundles listing', () => {
   it('hides management controls from non-admins', async () => {
     setAdmin(false);
     mount();
-    await screen.findByTestId('bundle-row-waddles.core.ping');
+    await screen.findByTestId('bundle-row-penguintechinc.waddles.ping');
     expect(screen.queryByRole('button', { name: /Activate a new bundle/ })).not.toBeInTheDocument();
     expect(screen.queryByRole('button', { name: /Deactivate waddles/ })).not.toBeInTheDocument();
   });
@@ -147,17 +147,17 @@ describe('AdminCommunityBundles listing', () => {
 describe('AdminCommunityBundles activate', () => {
   async function openActivate() {
     mount();
-    await screen.findByTestId('bundle-row-waddles.core.ping');
+    await screen.findByTestId('bundle-row-penguintechinc.waddles.ping');
     fireEvent.click(screen.getByRole('button', { name: 'Activate a new bundle for this community' }));
     return screen.getByRole('dialog', { name: 'Activate Bundle' });
   }
 
   it('activates the trimmed app id, closes the modal and refetches the list', async () => {
     const dialog = within(await openActivate());
-    fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: '  waddles.core.new  ' } });
+    fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: '  penguintechinc.waddles.new  ' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Activate' }));
 
-    await waitFor(() => expect(api.activate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.new', []));
+    await waitFor(() => expect(api.activate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.new', []));
     await waitFor(() => expect(screen.queryByRole('dialog', { name: 'Activate Bundle' })).not.toBeInTheDocument());
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
@@ -175,14 +175,14 @@ describe('AdminCommunityBundles activate', () => {
   it('shows a failure alert and keeps the modal open when activation fails', async () => {
     api.activate.mockRejectedValue(new Error('conflict'));
     const dialog = within(await openActivate());
-    fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: 'waddles.core.new' } });
+    fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: 'penguintechinc.waddles.new' } });
     fireEvent.click(dialog.getByRole('button', { name: 'Activate' }));
 
     expect(await screen.findByText('Failed to activate bundle. Please try again.')).toBeInTheDocument();
     expect(screen.getByRole('dialog', { name: 'Activate Bundle' })).toBeInTheDocument();
     expect(console.error).toHaveBeenCalledWith(
       '[CommunityBundles] ActivateFailed',
-      expect.objectContaining({ communityId: '00000007-0000-4000-8000-000000000000', appId: 'waddles.core.new' }),
+      expect.objectContaining({ communityId: '00000007-0000-4000-8000-000000000000', appId: 'penguintechinc.waddles.new' }),
     );
   });
 
@@ -214,14 +214,14 @@ describe('AdminCommunityBundles activate', () => {
         ],
       });
       const dialog = within(await openActivate());
-      fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: 'waddles.core.rolesync' } });
+      fireEvent.change(dialog.getByLabelText('App ID'), { target: { value: 'penguintechinc.waddles.rolesync' } });
       fireEvent.click(dialog.getByRole('button', { name: 'Activate' }));
       return screen.findByTestId('access-grants-dialog');
     }
 
     it('shows the bold red warning and does not activate until acknowledged', async () => {
       const grants = within(await startActivation());
-      expect(api.accessGrants).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.rolesync');
+      expect(api.accessGrants).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.rolesync');
       expect(grants.getByTestId('access-grant-warning').className).toContain('border-red-500');
       expect(grants.getByTestId('access-grant-entry')).toHaveTextContent('community_members');
       expect(grants.getByTestId('access-grant-entry')).toHaveTextContent('ops: read, write');
@@ -237,7 +237,7 @@ describe('AdminCommunityBundles activate', () => {
       fireEvent.click(grants.getByTestId('access-grant-ack'));
       fireEvent.click(grants.getByTestId('access-grants-confirm'));
       await waitFor(() =>
-        expect(api.activate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.rolesync', IDS),
+        expect(api.activate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.rolesync', IDS),
       );
     });
   });
@@ -246,18 +246,18 @@ describe('AdminCommunityBundles activate', () => {
 describe('AdminCommunityBundles deactivate', () => {
   async function askDeactivate() {
     mount();
-    await screen.findByTestId('bundle-row-waddles.core.ping');
-    fireEvent.click(screen.getByRole('button', { name: 'Deactivate waddles.core.ping' }));
-    return screen.getByRole('dialog', { name: 'Deactivate waddles.core.ping?' });
+    await screen.findByTestId('bundle-row-penguintechinc.waddles.ping');
+    fireEvent.click(screen.getByRole('button', { name: 'Deactivate penguintechinc.waddles.ping' }));
+    return screen.getByRole('dialog', { name: 'Deactivate penguintechinc.waddles.ping?' });
   }
 
   it('confirms by app id, deactivates, closes and refetches', async () => {
     const dialog = within(await askDeactivate());
     fireEvent.click(dialog.getByRole('button', { name: 'Deactivate' }));
 
-    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'waddles.core.ping'));
+    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.ping'));
     await waitFor(() =>
-      expect(screen.queryByRole('dialog', { name: 'Deactivate waddles.core.ping?' })).not.toBeInTheDocument(),
+      expect(screen.queryByRole('dialog', { name: 'Deactivate penguintechinc.waddles.ping?' })).not.toBeInTheDocument(),
     );
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
@@ -270,7 +270,7 @@ describe('AdminCommunityBundles deactivate', () => {
     expect(await screen.findByText('Failed to deactivate bundle. Please try again.')).toBeInTheDocument();
     expect(console.error).toHaveBeenCalledWith(
       '[CommunityBundles] DeactivateFailed',
-      expect.objectContaining({ appId: 'waddles.core.ping' }),
+      expect.objectContaining({ appId: 'penguintechinc.waddles.ping' }),
     );
   });
 

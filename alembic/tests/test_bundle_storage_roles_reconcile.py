@@ -2,7 +2,7 @@
 
 # regression: alpha helm upgrade 2026-11-16 -- waddles_bundle_migrator existed with NO password
 # (0030 ran without BUNDLE_MIGRATOR_PASSWORD), so the core-bundle seeder failed
-# `bundle_data_provisioning_unavailable` for waddles.core.service.music-requests.
+# `bundle_data_provisioning_unavailable` for penguintechinc.waddles.music-requests.
 
 `migrated_postgres` migrates WITHOUT BUNDLE_MIGRATOR_PASSWORD / BUNDLE_RUNTIME_PASSWORD -- exactly
 alpha's state. Covers: no password -> set; already set -> verifier byte-identical (true no-op);

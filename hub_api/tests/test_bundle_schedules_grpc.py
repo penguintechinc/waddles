@@ -299,7 +299,7 @@ async def test_tls_listener_serves_the_listing_end_to_end(
     monkeypatch.setenv("GRPC_PORT", str(port))
     monkeypatch.delenv("GRPC_TLS_CLIENT_CA_PATH", raising=False)
     community = await install_dal.communities.async_insert(tenant_id=1, name="tls-community")
-    app_id = "waddles.socials.tls.default"
+    app_id = "penguintechinc.waddles.tls"
     await _publish_and_activate(install_dal, app_id, _scheduled(app_id), community)
 
     server = await start_internal_grpc_server(
@@ -324,8 +324,8 @@ async def test_empty_list_when_nothing_is_scheduled(
     community = await install_dal.communities.async_insert(tenant_id=1, name="plain-community")
     await _publish_and_activate(
         install_dal,
-        "waddles.socials.plain.default",
-        _manifest("waddles.socials.plain.default"),
+        "penguintechinc.waddles.plain",
+        _manifest("penguintechinc.waddles.plain"),
         community,
     )
     status, body = await _get(_app(install_dal, issuer), issuer)
@@ -337,12 +337,12 @@ async def test_lists_scheduled_scope_with_exact_field_set(
 ) -> None:
     """Regression: the row carries exactly the svc-ingest `TargetDto` fields -- no extras leak."""
     community = await install_dal.communities.async_insert(tenant_id=1, name="sched-community")
-    app_id = "waddles.socials.sched.default"
+    app_id = "penguintechinc.waddles.sched"
     await _publish_and_activate(install_dal, app_id, _scheduled(app_id), community)
     await _publish_and_activate(
         install_dal,
-        "waddles.socials.plain2.default",
-        _manifest("waddles.socials.plain2.default"),
+        "penguintechinc.waddles.plain2",
+        _manifest("penguintechinc.waddles.plain2"),
         community,
     )
 
@@ -383,7 +383,7 @@ async def test_activation_binds_hub_stream_on_app_id_slug(
 async def test_tenant_wide_activation_is_community_zero_without_name(
     install_dal: Any, issuer: ServiceJwtIssuer
 ) -> None:
-    app_id = "waddles.socials.wide.default"
+    app_id = "penguintechinc.waddles.wide"
     await _publish_and_activate(install_dal, app_id, _scheduled(app_id, jitter=None), None)
 
     status, body = await _get(_app(install_dal, issuer), issuer, "?app_id=" + app_id)
@@ -397,7 +397,7 @@ async def test_tenant_wide_activation_is_community_zero_without_name(
 async def test_filters_narrow_and_empty_results(install_dal: Any, issuer: ServiceJwtIssuer) -> None:
     c1 = await install_dal.communities.async_insert(tenant_id=1, name="f-one")
     c2 = await install_dal.communities.async_insert(tenant_id=1, name="f-two")
-    a1, a2 = "waddles.socials.fone.default", "waddles.socials.ftwo.default"
+    a1, a2 = "penguintechinc.waddles.fone", "penguintechinc.waddles.ftwo"
     await _publish_and_activate(install_dal, a1, _scheduled(a1), c1)
     await _publish_and_activate(install_dal, a2, _scheduled(a2), c2)
     app = _app(install_dal, issuer)
@@ -432,7 +432,7 @@ async def test_missing_binding_is_excluded_loudly(
 ) -> None:
     """No `(hub, slug)` binding -> svc-process has no consumer: excluded + ERROR log, not listed."""
     community = await install_dal.communities.async_insert(tenant_id=1, name="nobind-community")
-    app_id = "waddles.socials.nobind.default"
+    app_id = "penguintechinc.waddles.nobind"
     await _publish_and_activate(install_dal, app_id, _scheduled(app_id), community)
     table = install_dal.metadata.tables["app_source_bindings"]
     async with install_dal.engine.begin() as conn:
@@ -451,7 +451,7 @@ async def test_stored_manifest_without_own_source_rule_is_excluded(
 ) -> None:
     """A pre-enforcement manifest whose hub rule names someone else's stream is never scheduled."""
     community = await install_dal.communities.async_insert(tenant_id=1, name="badrule-community")
-    app_id = "waddles.socials.badrule.default"
+    app_id = "penguintechinc.waddles.badrule"
     manifest = _scheduled(app_id)
     await _publish_and_activate(install_dal, app_id, manifest, community)
     uploads = install_dal.metadata.tables["app_version_uploads"]
@@ -469,7 +469,7 @@ async def test_stored_manifest_without_own_source_rule_is_excluded(
 async def test_activation_of_unscheduled_hub_rule_is_not_bound(install_dal: Any) -> None:
     """A bundle WITHOUT `schedule` gets no hub binding (nothing ticks it)."""
     community = await install_dal.communities.async_insert(tenant_id=1, name="unsched-community")
-    app_id = "waddles.socials.unsched.default"
+    app_id = "penguintechinc.waddles.unsched"
     await _publish_and_activate(install_dal, app_id, _manifest(app_id), community)
     table = install_dal.metadata.tables["app_source_bindings"]
     async with install_dal.engine.connect() as conn:
@@ -521,7 +521,7 @@ async def test_pg_real_schema_listing_is_tenant_scoped(
 ) -> None:  # noqa: F811
     """Two tenants activate the same scheduled app; each filter returns only its own scope."""
     n = next(_SEQ)
-    app_id = f"waddles.socials.pgsched{n}.default"
+    app_id = f"penguintechinc.waddles.pgsched{n}-default"
     t1, t2 = await _pg_tenant(pg_dal, n * 2), await _pg_tenant(pg_dal, n * 2 + 1)
     c1, c2 = (
         await _pg_community(pg_dal, t1, f"pg-a-{n}"),
@@ -577,7 +577,10 @@ async def test_pg_unscheduled_and_unbound_are_not_listed(
     n = next(_SEQ) + 1000
     tenant = await _pg_tenant(pg_dal, n)
     community = await _pg_community(pg_dal, tenant, f"pg-c-{n}")
-    plain, sched = f"waddles.socials.pgplain{n}.default", f"waddles.socials.pgnb{n}.default"
+    plain, sched = (
+        f"penguintechinc.waddles.pgplain{n}.default",
+        f"penguintechinc.waddles.pgnb{n}.default",
+    )
     for manifest in (_manifest(plain), _scheduled(sched)):
         await _pg_publish(pg_dal, tenant, manifest)
         await activate_for_community_with_warnings(

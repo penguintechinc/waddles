@@ -28,7 +28,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 /// App id of the reputation service bundle whose tools are called.
-pub const TARGET: &str = "waddles.core.service.reputation";
+pub const TARGET: &str = "penguintechinc.waddles.reputation";
 /// Gate flag (default OFF) enabling accrual.
 pub const FLAG_ENABLE: &str = "waddles.reputation-accrual";
 /// Opt-out kill switch: ON means do nothing.

@@ -1,10 +1,9 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.ticket.
+# hub-api install-pipeline manifest (schema_version 2) for penguintechinc.waddles.ticket.
 # 1.0.0: v2 port, KV-backed -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.ticket
+app_id: penguintechinc.waddles.ticket
 name: Support Ticket Bundle (Python)
-version: 1.0.6
-feature: waddles.core.example
+version: 1.0.7
 module: core
 provider: builtin
 author: github:penguintechinc

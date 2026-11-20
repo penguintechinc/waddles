@@ -10,7 +10,7 @@ subscribes the app_id's own `:action` key, mirroring the exact
 routability gap `0014_wave1a_bundle_seeds`/`0016_moderation_enforce_app`/
 `0017_loyalty_shoutout_apps`/`0018_slack_youtube_apps` each close for their own app_ids.
 
-The `stages` blob mirrors the live `waddles.bot.discord.default` row's
+The `stages` blob mirrors the live `penguintechinc.waddles.discord-pipeline` row's
 own key shape (verified via `kubectl exec` psql, read-only: `ingest` uses
 `entrypoint`/`consumes`/`config`/`spec`, `action` uses `entrypoint`/
 `config`/`spec` -- discord's own row carries no `communication_model` key
@@ -49,7 +49,7 @@ down_revision = "0018_slack_youtube_apps"
 branch_labels = None
 depends_on = None
 
-KICK_APP_ID = "waddles.bot.kick.default"
+KICK_APP_ID = "penguintechinc.waddles.kick-pipeline"
 TENANT_SLUG = "global"
 
 

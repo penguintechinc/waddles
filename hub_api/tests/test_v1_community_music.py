@@ -488,4 +488,6 @@ def test_unsafe_identifier_refused() -> None:
 
 def test_contract_app_id_derives() -> None:
     """The real service app_id must be derivable, or its tables can never be provisioned."""
-    derive_v2_table_identity("waddles.core.service.music-requests", "requests", provider="builtin")
+    derive_v2_table_identity(
+        "penguintechinc.waddles.music-requests", "requests", provider="builtin"
+    )

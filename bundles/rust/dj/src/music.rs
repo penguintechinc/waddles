@@ -17,9 +17,9 @@ use serde_json::{Value, json};
 use crate::host::{Host, Level, ToolErr};
 use crate::model::{PROVIDERS, Track, WireTrack};
 
-/// Service-bundle app id for a provider (`waddles.core.service.music-<p>`).
+/// Service-bundle app id for a provider (`penguintechinc.waddles.music-<p>`).
 pub fn target(provider: &str) -> String {
-    format!("waddles.core.service.music-{provider}")
+    format!("penguintechinc.waddles.music-{provider}")
 }
 
 /// Tool name for a provider operation (`music.<p>.<op>`).
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn targets_and_tools_follow_the_catalog_naming() {
-        assert_eq!(target("youtube"), "waddles.core.service.music-youtube");
+        assert_eq!(target("youtube"), "penguintechinc.waddles.music-youtube");
         assert_eq!(
             tool("spotify", "playlist.get"),
             "music.spotify.playlist.get"

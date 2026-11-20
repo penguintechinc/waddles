@@ -86,6 +86,7 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    func,
     text,
 )
 
@@ -2045,6 +2046,15 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("ip_address", String(45)),
         Column("user_agent", String),
         Column("created_at", DateTime),
+    )
+    # `app_id_owners` (alembic 0136): atomic first-claim ownership + UNIQUE storage key.
+    Table(
+        "app_id_owners",
+        metadata,
+        Column("app_id", String(127), primary_key=True),
+        Column("owner_id", Integer),
+        Column("storage_key", String(63), nullable=False, unique=True),
+        Column("created_at", DateTime, server_default=func.now(), nullable=False),
     )
     metadata.create_all(conn)
     # pydal-created `tenants` / `app_catalog` pre-date migration 0082's `public_id`; mirror it

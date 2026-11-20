@@ -1,8 +1,8 @@
 schema_version: 2
-app_id: waddles.integrations.superpenguin.giveaway
+app_id: psychoboy.penguintwitchbot.giveaway
 name: Ticket Giveaway and Raffle (SuperPenguinTV GiveawayFeature)
 version: 1.0.0
-feature: waddles.integrations.superpenguin
+feature: psychoboy.penguintwitchbot
 module: integrations
 provider: thirdparty
 language: csharp
@@ -76,12 +76,12 @@ permissions:
   justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
 - id: chat.send:twitch
   justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
-- id: tool.call:waddles.core.service.economy:points_view
+- id: tool.call:penguintechinc.waddles.economy:points_view
   justification: Use the economy service points_view contract for the currency alias and the max-entry
     balance; the app owns only giveaway policy
   params:
     write: false
-- id: tool.call:waddles.core.service.economy:adjust_balance
+- id: tool.call:penguintechinc.waddles.economy:adjust_balance
   justification: Use the economy service adjust_balance contract to charge entries and pay raffle winners;
     the service owns caps and idempotency
   params:
@@ -97,10 +97,10 @@ routes_to: []
 requested_tools:
 - tool: points_view
   access: read
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 - tool: adjust_balance
   access: write
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 collection: superpenguintv
 overlay_assets:
 - path: giveaway.js

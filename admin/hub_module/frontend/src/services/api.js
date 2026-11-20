@@ -1021,7 +1021,7 @@ export const superadminTenantApi = {
 // ── Bundle Onboarding API (hub_api/blueprints/v1/bundle_versions.py +
 // bundle_approvals.py) ─────────────────────────────────────────────
 // `app_id` is a URL path segment, not a query value -- encoded so a
-// namespace like `waddles.integrations.vendor-42.mybundle` round-trips
+// namespace like `acme.widgets.mybundle` round-trips
 // safely even though it already only contains URL-safe characters.
 export const bundleApi = {
   // multipart: `manifest` (YAML, required) + `component` (prebuilt WASM,

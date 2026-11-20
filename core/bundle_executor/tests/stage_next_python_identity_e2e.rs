@@ -27,7 +27,7 @@ mod common;
 
 use common::{run_many_detailed, Scenario, StageAnswer};
 
-const APP_ID: &str = "waddles.test.identity-py";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-identity-py";
 const ALICE: &str = "aaaaaaaa-1111-4222-8333-444444444444";
 const BOB: &str = "bbbbbbbb-1111-4222-8333-444444444444";
 /// The opaque pseudonym token the bundle was shown in `{user:<token>}`.

@@ -18,7 +18,7 @@ export function describeError(err: unknown): string {
   return 'Something went wrong talking to the server. Try again.';
 }
 
-/** Display name from an app id (`waddles.<publisher>.<category>.<name>` -> "Name"). */
+/** Display name from an app id (`<github-org>.<repo>.<name>` -> "Name"). */
 export function bundleName(appId: string): string {
   const last = appId.split('.').pop() ?? appId;
   return last.replace(/[-_]+/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase());

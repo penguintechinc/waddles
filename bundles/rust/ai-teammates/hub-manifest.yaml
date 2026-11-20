@@ -4,10 +4,9 @@
 # Command triggers: !research, !onboard, !teammate, !producer (NOT !ask -- the python `ask` bundle owns it
 # until it is retired; flipping the Researcher to !ask afterwards is a one-line change).
 schema_version: 2
-app_id: waddles.core.example.ai-teammates
+app_id: penguintechinc.waddles.ai-teammates
 name: AI Teammates (Researcher, Receptionist, Producer)
-version: 1.0.3
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc
@@ -56,27 +55,27 @@ permissions:
   justification: Relay teammate replies to the originating discord channel via the relay host import
 - id: chat.send:youtube
   justification: Relay teammate replies to the originating youtube channel via the relay host import
-- id: tool.call:waddles.core.service.ai:ai.complete
+- id: tool.call:penguintechinc.waddles.ai:ai.complete
   justification: Researcher answers, Receptionist greeting line and Producer starter via the AI service
   params:
     write: false
-- id: tool.call:waddles.core.service.ai:ai.classify
+- id: tool.call:penguintechinc.waddles.ai:ai.classify
   justification: Producer moderation check of every generated post before it is sent
   params:
     write: false
-- id: tool.call:waddles.core.service.ai:ai.rag.query
+- id: tool.call:penguintechinc.waddles.ai:ai.rag.query
   justification: Researcher and onboarding Q&A retrieve from the community knowledge base
   params:
     write: false
-- id: tool.call:waddles.core.service.twitch:twitch.live.channels
+- id: tool.call:penguintechinc.waddles.twitch:twitch.live.channels
   justification: Producer checks which configured channels are live (twitch.live.channels)
   params:
     write: false
-- id: tool.call:waddles.core.service.discord:discord.live.channels
+- id: tool.call:penguintechinc.waddles.discord:discord.live.channels
   justification: Producer checks which configured channels are live (discord.live.channels)
   params:
     write: false
-- id: tool.call:waddles.core.service.youtube:youtube.live.channels
+- id: tool.call:penguintechinc.waddles.youtube:youtube.live.channels
   justification: Producer checks which configured channels are live (youtube.live.channels)
   params:
     write: false
@@ -86,22 +85,22 @@ routes_to: []
 requested_tools:
 - tool: ai.complete
   access: read
-  target_app_id: waddles.core.service.ai
+  target_app_id: penguintechinc.waddles.ai
 - tool: ai.classify
   access: read
-  target_app_id: waddles.core.service.ai
+  target_app_id: penguintechinc.waddles.ai
 - tool: ai.rag.query
   access: read
-  target_app_id: waddles.core.service.ai
+  target_app_id: penguintechinc.waddles.ai
 - tool: twitch.live.channels
   access: read
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: discord.live.channels
   access: read
-  target_app_id: waddles.core.service.discord
+  target_app_id: penguintechinc.waddles.discord
 - tool: youtube.live.channels
   access: read
-  target_app_id: waddles.core.service.youtube
+  target_app_id: penguintechinc.waddles.youtube
 community_config_schema:
   type: object
   additionalProperties: false

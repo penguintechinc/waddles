@@ -1,8 +1,8 @@
 schema_version: 2
-app_id: waddles.integrations.superpenguin.tts
+app_id: psychoboy.penguintwitchbot.tts
 name: Text to Speech Commands (SuperPenguinTV TTS)
 version: 1.0.0
-feature: waddles.integrations.superpenguin
+feature: psychoboy.penguintwitchbot
 module: integrations
 provider: thirdparty
 language: csharp
@@ -76,7 +76,7 @@ permissions:
   justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
 - id: chat.send:twitch
   justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
-- id: tool.call:waddles.core.service.media:tts_synthesize
+- id: tool.call:penguintechinc.waddles.media:tts_synthesize
   justification: Use the media service tts_synthesize contract (text, voice -> https url); the app owns
     only command and voice policy. The tool does not exist yet
   params:
@@ -92,7 +92,7 @@ routes_to: []
 requested_tools:
 - tool: tts_synthesize
   access: read
-  target_app_id: waddles.core.service.media
+  target_app_id: penguintechinc.waddles.media
 collection: superpenguintv
 overlay_assets:
 - path: index.html

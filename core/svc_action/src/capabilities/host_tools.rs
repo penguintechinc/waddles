@@ -345,7 +345,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         }
         // Host ops run ONLY from the registered platform service bundle: a manifest naming a
         // platform op on any other target is refused, whatever its declaration says.
-        let service = format!("waddles.core.service.{}", decl.platform);
+        let service = format!("penguintechinc.waddles.{}", decl.platform);
         if plan.target_app_id != service {
             return Err(ToolRefusal::Forbidden(format!(
                 "{NOT_SUPPORTED}: host ops of platform {:?} are served only by {service}",

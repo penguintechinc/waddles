@@ -1,7 +1,7 @@
 # dance (Python)
 
 `!dance [@user]` -- a lighthearted flavor-text reply: the caller busts out a dance move. First-party
-(`provider: builtin`, `app_id: waddles.core.example.dance`), stateless relay, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.dance`), stateless relay, WASI component.
 
 | | |
 |---|---|

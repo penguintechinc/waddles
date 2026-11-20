@@ -1,8 +1,8 @@
-# Discord platform connector (`waddles.core.service.discord`)
+# Discord platform connector (`penguintechinc.waddles.discord`)
 
 P6b Task 2. A core `kind: service` WASM component on `world connector-tools` that supplies **only the
 Discord wire spec** on top of the generic host transports. It is **not** the Discord app bundle
-(`bundles/python/discord`, `waddles.core.example.discord`).
+(`bundles/python/discord`, `penguintechinc.waddles.discord-invite`).
 
 Cutover: PostHog flag `waddles.connector-discord`, **default OFF**. While OFF the hardcoded path
 (`core/svc_ingest/src/ingest/discord.rs`, `discord_identify_budget.rs`, `discord_rest.rs`) runs unchanged
@@ -131,8 +131,8 @@ harness does not bridge the guest `http` lookup).
 (`access: write`, `risk: dangerous`) in `exported_tools`; the guest only validates arguments through the same template
 builder. The HOST executes them (svc-action `tool.invoke` -> signed `event.*` outbound entry -> svc-ingest executor ->
 this connector's template; guild + credential from the community binding). App bundles call them with a manifest
-`requested_tools: [{tool: discord.scheduled_event.create, access: write, target_app_id: waddles.core.service.discord}]`
-and the approved grant `tool.call:waddles.core.service.discord:discord.scheduled_event.create` (`params: {write: true}`).
+`requested_tools: [{tool: discord.scheduled_event.create, access: write, target_app_id: penguintechinc.waddles.discord}]`
+and the approved grant `tool.call:penguintechinc.waddles.discord:discord.scheduled_event.create` (`params: {write: true}`).
 
 
 * The connector never holds a token (`secret-refs: [("Authorization","discord-bot")]`) and never chooses the

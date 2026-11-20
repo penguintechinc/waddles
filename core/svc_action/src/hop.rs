@@ -144,8 +144,9 @@ mod tests {
     const WS: &str = "8f14e45f-ceea-467e-adde-3fb5c9752730";
     const EV: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";
     const TRACE: &str = "4bf92f3577b34da6a3ce929d0e0e4736";
-    const KEY: &str = "waddles:t:acme:c:main:app:waddles.bot.commands.default:action";
-    const APP: &str = "waddles.bot.commands.default";
+    const KEY: &str =
+        "waddles:t:acme:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action";
+    const APP: &str = "penguintechinc.waddles.fixture-bot-commands-default";
 
     fn ring() -> KeyRing {
         KeyRing::new(vec![
@@ -284,7 +285,7 @@ mod tests {
     fn valid_mac_but_wrong_tenant_stream_key_is_rejected() {
         let ring = ring();
         let env = valid_envelope(mac_for(&ring, "k1"), "k1");
-        let key = "waddles:t:other-tenant:c:main:app:waddles.bot.commands.default:action";
+        let key = "waddles:t:other-tenant:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action";
         let err = verify_hop(&ring, &env, key, APP).unwrap_err();
         assert_eq!(err.as_metric_reason(), "tenant_mismatch");
     }
@@ -293,7 +294,7 @@ mod tests {
     fn community_mismatch_between_envelope_and_key_is_rejected() {
         let ring = ring();
         let env = valid_envelope(mac_for(&ring, "k1"), "k1");
-        let key = "waddles:t:acme:c:other-community:app:waddles.bot.commands.default:action";
+        let key = "waddles:t:acme:c:other-community:app:penguintechinc.waddles.fixture-bot-commands-default:action";
         let err = verify_hop(&ring, &env, key, APP).unwrap_err();
         assert_eq!(err.as_metric_reason(), "community_mismatch");
     }

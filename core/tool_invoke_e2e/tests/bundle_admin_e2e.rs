@@ -46,7 +46,7 @@ use tool_invoke_e2e::{digest_of, Rig};
 use uuid::Uuid;
 
 const REP_WASM: &[u8] = include_bytes!("fixtures/reputation_service.wasm");
-const REP: &str = "waddles.core.service.reputation";
+const REP: &str = "penguintechinc.waddles.reputation";
 const TENANT: i32 = 7;
 const COMMUNITY: i32 = 3;
 const V_REP: i64 = 22;

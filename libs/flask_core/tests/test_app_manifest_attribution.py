@@ -29,10 +29,10 @@ from flask_core.app_manifest import (
 )
 
 _BASE: dict[str, Any] = {
-    "app_id": "waddles.integrations.vendor-42.mybundle",
+    "app_id": "acmecorp.widgets.mybundle",
     "name": "Vendor Bundle",
     "version": "1.0.0",
-    "feature": "waddles.integrations.vendor-42",
+    "feature": "vendor-42",
     "module": "integrations",
     "provider": "builtin",
 }

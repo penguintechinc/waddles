@@ -31,7 +31,7 @@ from typing import Any
 from services.marketplace_lifecycle_service import activate_bundle, make_available
 from tests.conftest import LIFECYCLE_COMMUNITY_ID, LIFECYCLE_TENANT_ID
 
-APP_ID = "waddles.bot.shoutout.concurrency-test"
+APP_ID = "acme.widgets.concurrency-test"
 
 
 def _seed_catalog_row(lifecycle_db: Any, *, app_id: str = APP_ID) -> None:

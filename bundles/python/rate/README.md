@@ -1,6 +1,6 @@
 # rate (Python)
 
-Deterministic, SFW X/10 ratings with tasteful flavor text; `@` is defused so a rating cannot mass-ping. First-party (`provider: builtin`, `app_id: waddles.core.example.rate`), stateless WASI component, modeled on `eightball`.
+Deterministic, SFW X/10 ratings with tasteful flavor text; `@` is defused so a rating cannot mass-ping. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.rate`), stateless WASI component, modeled on `eightball`.
 
 | | |
 |---|---|

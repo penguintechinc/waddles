@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.ping
+app_id: penguintechinc.waddles.ping
 name: Ping Example Bundle (Rust)
 # See hub-manifest.yaml's own comment -- 1.0.0 AND 1.0.1 are permanently retired
 # (fix/reproducible-core-bundles), keep these two files' version fields in lockstep. 1.0.3
@@ -7,8 +7,7 @@ name: Ping Example Bundle (Rust)
 # hub-manifest.yaml's own -- this file isn't what hub-api reads for activation/auto-bind, but
 # the two manifests describe the same real bundle and must not silently diverge on what it
 # actually consumes.
-version: 1.0.7
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

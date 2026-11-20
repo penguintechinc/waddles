@@ -2,7 +2,7 @@
 
 `!kgiveaway` -- a per-community **keyword giveaway**: a mod opens it with a keyword, viewers enter
 by typing the keyword (or `!kgiveaway enter`), a mod closes it, draws a random winner and can
-reroll. First-party (`provider: builtin`, `app_id: waddles.core.example.keywordgiveaway`),
+reroll. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.keywordgiveaway`),
 kv-only, WASI component. Original Waddles content.
 
 | | |

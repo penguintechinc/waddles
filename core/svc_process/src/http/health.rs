@@ -307,7 +307,7 @@ mod tests {
     // forever (alpha 2026-10-02)
     #[tokio::test]
     async fn readiness_is_503_when_the_consumer_loop_is_configured_but_not_running() {
-        let state = readiness_state("waddles.core.example.ping", false);
+        let state = readiness_state("penguintechinc.waddles.ping", false);
         state
             .connections
             .set_active(crate::host_api::test_connection());
@@ -328,7 +328,7 @@ mod tests {
     // forever (alpha 2026-10-02)
     #[tokio::test]
     async fn readiness_is_ok_once_the_configured_consumer_loop_is_running_and_executor_connected() {
-        let state = readiness_state("waddles.core.example.ping", true);
+        let state = readiness_state("penguintechinc.waddles.ping", true);
         state
             .connections
             .set_active(crate::host_api::test_connection());
@@ -344,7 +344,7 @@ mod tests {
     /// live; `executor_connected` is still reported, informationally.
     #[tokio::test]
     async fn readiness_is_ok_when_consumer_loop_running_but_no_executor() {
-        let state = readiness_state("waddles.core.example.ping", true);
+        let state = readiness_state("penguintechinc.waddles.ping", true);
         let (code, Json(body)) = readiness(State(state)).await;
         assert_eq!(code, axum::http::StatusCode::OK);
         assert_eq!(body.status, "ok");

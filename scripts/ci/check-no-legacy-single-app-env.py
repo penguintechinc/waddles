@@ -14,7 +14,7 @@ defaults every operator inherits before choosing an environment) and every
 
 Regression this guards: alpha 2026-10-03 -- a legacy single-app consumer
 (driven by PROCESS_APP_ID/ACTION_APP_ID) competed in the same Valkey consumer
-group as the multi-tenant one for `waddles.core.example.ping`, intermittently
+group as the multi-tenant one for `penguintechinc.waddles.ping`, intermittently
 dead-lettering `!ping`. The chart-side half of the fix is these env vars never
 rendering unless an operator explicitly sets the driving value -- this script
 is the regression gate for that half.

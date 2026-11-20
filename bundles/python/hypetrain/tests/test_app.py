@@ -717,7 +717,7 @@ def _envelope(event: PlatformEvent) -> StageEnvelope:
     return StageEnvelope(
         tenant="t",
         community="c",
-        app_id="waddles.core.example.hypetrain",
+        app_id="penguintechinc.waddles.hypetrain",
         stage="action",
         event=event,
         ts=_at(0),

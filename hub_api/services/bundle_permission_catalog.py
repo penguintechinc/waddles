@@ -28,6 +28,8 @@ import os
 import re
 from typing import Literal
 
+from services.bundle_app_id import APP_ID_PATTERN
+from services.bundle_app_id import CORE_NAMESPACE_PREFIX as _CORE_NAMESPACE_PREFIX
 from services.bundle_storage_access import (
     STORAGE_OPS,
     is_storage_access_id,
@@ -146,7 +148,7 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: `dangerous` -- an admin must explicitly approve the grant.
     "reputation.community.admin": "dangerous",
     #: Core-only reputation families mirrored from `core/bundle_capability_gate`
-    #: (the host refuses non-`waddles.core.` apps): own/admin ledger page, the
+    #: (the host refuses non-`penguintechinc.waddles.` apps): own/admin ledger page, the
     #: tenant aggregate + auto-ban policy, and MODERATION-class deltas (cap 200).
     "reputation.history.read": "normal",
     "reputation.tenant.read": "normal",
@@ -191,7 +193,7 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: returns raw PII (handle, display name) to a guest
     #: (`core/bundle_capability_gate`'s `connector.pii.read`). `dangerous`;
     #: global-approved and first-party-core-only: the executor refuses to link
-    #: it for a non-`waddles.core.` app_id, and a vendor namespace can never
+    #: it for a non-`penguintechinc.waddles.` app_id, and a vendor namespace can never
     #: carry a core app_id (`vendor_bundle_authz.enforce_vendor_namespace`).
     "connector.pii.read": "dangerous",
     "flags.read": "normal",
@@ -237,11 +239,12 @@ _PLATFORM_OP_RE = re.compile(
     r":(?P<platform>[a-z0-9_-]+)$"
 )
 # `tool.call:<target_app_id>:<tool>` -- mirrors Rust `permission.rs`
-# (`validate_tool_target` / `validate_tool_name`) and `bundle_manifest_v2`'s
-# `_APP_ID_RE` / `_TOOL_NAME_RE`. Matched with `.fullmatch` (no `$`, which
-# would accept a trailing newline); `:` can't appear in a segment so the split is unambiguous.
+# (`validate_tool_target` / `validate_tool_name`) and the one app-id grammar in
+# `bundle_app_id` (`APP_ID_PATTERN`: segments `[a-z0-9][a-z0-9-]*`, no `_`) / `_TOOL_NAME_RE`.
+# Matched with `.fullmatch` (no `$`, which would accept a trailing newline); `:` can't appear
+# in a segment so the split is unambiguous.
 _TOOL_CALL_RE = re.compile(
-    r"tool\.call:(?P<target>waddles(?:\.[a-z0-9][a-z0-9_-]*){3}):(?P<tool>[a-z][a-z0-9_.]{0,63})"
+    rf"tool\.call:(?P<target>{APP_ID_PATTERN})" r":(?P<tool>[a-z][a-z0-9_.]{0,63})"
 )
 _NET_HTTP_FQDN_RE = re.compile(r"^net\.http\.fqdn:(?P<host>.+)$")
 _NET_HTTP_PUBLIC_IP_RE = re.compile(r"^net\.http\.public-ip:(?P<ip>.+)$")
@@ -477,9 +480,7 @@ def is_dangerous(permission_id: str) -> bool:
     return resolve_risk(permission_id) == "dangerous"
 
 
-#: `waddles.core.*` -- the reserved first-party namespace pre-granted at
-#: catalog approval by `seed_core_bundles.py` (spec Sec3.6). Re-exported
-#: here (not re-derived) from `vendor_bundle_authz` to avoid two sources
-#: of truth for the same literal string; imported lazily to dodge any
-#: import cycle since `vendor_bundle_authz` does not import this module.
-CORE_NAMESPACE_PREFIX = "waddles.core."
+#: `penguintechinc.waddles.*` -- the reserved first-party namespace pre-granted at
+#: catalog approval by `seed_core_bundles.py` (spec Sec3.6). Re-exported from the one
+#: grammar module (`bundle_app_id`); detection is `bundle_app_id.is_core_namespace`.
+CORE_NAMESPACE_PREFIX = _CORE_NAMESPACE_PREFIX

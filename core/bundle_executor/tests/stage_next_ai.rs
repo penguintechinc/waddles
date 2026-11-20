@@ -21,7 +21,7 @@ use bundle_executor::manifest::{VerifiedManifest, WitWorld};
 use common::{run_one, test_config, StageAnswer};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/ai_fixture.wasm");
-const APP_ID: &str = "waddles.test.ai-fixture";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-ai-fixture";
 
 async fn run(payload_json: &str, answer: StageAnswer) -> (String, serde_json::Value, String) {
     run_one(

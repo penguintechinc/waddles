@@ -15,7 +15,7 @@ use crate::scope::{AppSchema, DbScope};
 
 pub(crate) type MockRow = BTreeMap<String, Value>;
 
-pub(crate) const APP_ID: &str = "waddles.bot.a";
+pub(crate) const APP_ID: &str = "penguintechinc.waddles.fixture-bot-a";
 pub(crate) const ROW_ID: &str = "11111111-1111-4111-8111-111111111111";
 pub(crate) const OTHER_ROW_ID: &str = "22222222-2222-4222-8222-222222222222";
 

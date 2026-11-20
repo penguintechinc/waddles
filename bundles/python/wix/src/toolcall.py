@@ -17,7 +17,7 @@ from waddle_sdk import community_kv, log, tool
 logger = log
 
 #: Service bundle owning the Discord tool definitions.
-DISCORD_SERVICE = "waddles.core.service.discord"
+DISCORD_SERVICE = "penguintechinc.waddles.discord"
 #: The WIT import the tool-invocation path needs (only in the `stage-next-tools` world).
 REQUIRED_IMPORT = "tool"
 MISSING_CAPABILITY_MSG = (

@@ -6,7 +6,7 @@
 //! every bundle `http.send` was refused `host_not_declared`. The active-set
 //! consumers now call [`ActiveEgressSnapshot::replace_all`] / `replace_scope` with the approved
 //! install summary's `egress` list; the secret-ref grants come from the
-//! PLATFORM table below (keyed by the reserved `waddles.core.*` app id) --
+//! PLATFORM table below (keyed by the reserved `penguintechinc.waddles.*` app id) --
 //! never from anything a bundle author can self-declare, so a third-party
 //! bundle can never name `spotify.oauth` and get a credential.
 
@@ -28,7 +28,7 @@ pub struct FirstPartyGrant {
 /// The platform grant table (reserved first-party namespace only).
 pub const FIRST_PARTY_GRANTS: &[FirstPartyGrant] = &[
     FirstPartyGrant {
-        app_id: "waddles.core.service.music-spotify",
+        app_id: "penguintechinc.waddles.music-spotify",
         refs: &[
             ("spotify.app", "app:spotify.app"),
             ("spotify.oauth", "connection:spotify"),
@@ -36,14 +36,14 @@ pub const FIRST_PARTY_GRANTS: &[FirstPartyGrant] = &[
         unfollowed_redirect_hosts: &[],
     },
     FirstPartyGrant {
-        app_id: "waddles.core.service.music-soundcloud",
+        app_id: "penguintechinc.waddles.music-soundcloud",
         // The community's own `soundcloud` connection holds client id/secret;
         // the host exchanges them for a token (cached per community).
         refs: &[("soundcloud.access_token", "cc:soundcloud")],
         unfollowed_redirect_hosts: &["api.soundcloud.com"],
     },
     FirstPartyGrant {
-        app_id: "waddles.core.service.music-youtube",
+        app_id: "penguintechinc.waddles.music-youtube",
         refs: &[
             // The community's own Google API key (`youtube_api` connection),
             // raw -- bundles inject it into a `?key` query slot.
@@ -53,7 +53,7 @@ pub const FIRST_PARTY_GRANTS: &[FirstPartyGrant] = &[
         unfollowed_redirect_hosts: &[],
     },
     FirstPartyGrant {
-        app_id: "waddles.core.service.wix",
+        app_id: "penguintechinc.waddles.wix",
         refs: &[
             // Wix auth = `Authorization: <api key>` + `wix-site-id: <site id>`;
             // both come from the scheme-6 credential (static-resolve scope).
@@ -256,7 +256,7 @@ mod tests {
         vec![(host.to_string(), vec!["GET".to_string()])]
     }
 
-    const SPOTIFY: &str = "waddles.core.service.music-spotify";
+    const SPOTIFY: &str = "penguintechinc.waddles.music-spotify";
 
     #[test]
     fn every_table_ref_has_a_parseable_source_and_a_wired_app_credential() {
@@ -381,13 +381,13 @@ mod tests {
             1,
             5,
             [(
-                "waddles.core.service.music-soundcloud".to_string(),
+                "penguintechinc.waddles.music-soundcloud".to_string(),
                 vec![],
                 None,
             )],
         );
         let r = s
-            .resolve_for(&sc(1, 5), "waddles.core.service.music-soundcloud")
+            .resolve_for(&sc(1, 5), "penguintechinc.waddles.music-soundcloud")
             .unwrap();
         assert!(r.unfollowed_redirect_hosts.contains("api.soundcloud.com"));
     }
