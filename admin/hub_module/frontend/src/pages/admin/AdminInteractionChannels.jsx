@@ -12,6 +12,7 @@ import {
   ChevronUpIcon,
 } from '@heroicons/react/24/outline';
 import { interactionApi, channelPermissionsApi, rolesApi, adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 const CHANNEL_TYPES = [
   { value: 'chat', label: 'Chat' },
@@ -548,6 +549,7 @@ export default function AdminInteractionChannels() {
   const [showCreate, setShowCreate] = useState(false);
   const [editChannel, setEditChannel] = useState(null);
   const [deleteChannel, setDeleteChannel] = useState(null);
+  const [gated, setGated] = useState(false);
   const [saving, setSaving] = useState(false);
   const [deleting, setDeleting] = useState(false);
 
@@ -571,6 +573,7 @@ export default function AdminInteractionChannels() {
         temp_duration_minutes: c.tempDurationMinutes ?? c.temp_duration_minutes ?? 60,
       })));
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       setError(err?.response?.data?.message ?? 'Failed to load channels.');
     } finally {
       setLoading(false);
@@ -649,6 +652,10 @@ export default function AdminInteractionChannels() {
     acc[t.value] = channels.filter((c) => c.type === t.value);
     return acc;
   }, {});
+
+  if (gated) {
+    return <UpgradeNotice feature="Interaction channels" />;
+  }
 
   return (
     <div>

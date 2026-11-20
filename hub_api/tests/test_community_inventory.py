@@ -603,14 +603,6 @@ class TestListCheckoutsAuditAndSummary:
             auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": 1},
         )
-        # `get_audit_log`'s raw SQL joins on `il.performed_by_user_id`, but the
-        # shared `ensure_community_tables()` test/prod binding names this
-        # column `user_id` -- irrelevant in production (migrate=False, the
-        # real Postgres table already has the correctly-named column;
-        # `performed_by_user_id` is never consulted through pydal's field
-        # mapping for raw executesql) but sqlite:memory's `migrate=True`
-        # table genuinely lacks it. Test-only ALTER TABLE, no source touched.
-        dal.executesql("ALTER TABLE inventory_log ADD COLUMN performed_by_user_id INTEGER")
         # add_stock via the stubbed _run_stock_fn doesn't write inventory_log
         # (that's the real stored function's job) -- insert a row directly so
         # the read path (get_audit_log) has something to filter/return.
@@ -665,12 +657,6 @@ class TestListCheckoutsAuditAndSummary:
         import blueprints.v1.community_inventory as inventory_bp_module
 
         dal, community_id = community_db
-        # Same test-only schema patch as `test_audit_log_with_filters` above
-        # -- `get_audit_log()`'s raw SQL joins on `il.performed_by_user_id`,
-        # a column `ensure_community_tables()`'s sqlite:memory test binding
-        # doesn't create (irrelevant in production; real Postgres already
-        # has it). Needed here too since `community_db` is function-scoped.
-        dal.executesql("ALTER TABLE inventory_log ADD COLUMN performed_by_user_id INTEGER")
         captured: dict[str, Any] = {}
         real_get_audit_log = inventory_bp_module.get_audit_log
 

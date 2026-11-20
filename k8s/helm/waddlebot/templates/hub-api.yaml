@@ -125,6 +125,7 @@ spec:
         # kms.enabled -- the platform-managed baseline needs none of it.
         {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        {{- include "waddlebot.posthog.licenseKeyEnv" (dict "root" $ "name" "POSTHOG_API_KEY") | nindent 8 }}
         {{- include "waddlebot.otel.env" (dict "root" $ "service" "hub-api") | nindent 8 }}
         {{- if .Values.hubApi.trustForwardedHost }}
         {{- range .Values.httproute.rules }}

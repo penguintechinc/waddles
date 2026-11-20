@@ -180,9 +180,18 @@ def overlay_push_scope(community_id: int) -> str:
     return f"{SCOPE_OVERLAY_PUSH}:{community_id}"
 
 
+#: Metered token-ledger DEBIT on behalf of a community member (svc-streaming's transcode
+#: admission). Community-bound: a credential minted for community 42 can never debit community 91.
+SCOPE_TOKEN_DEBIT = "token.billing:debit"  # noqa: S105  # nosec B105 -- scope name, not a secret
+
 #: Scopes whose tokens are community-bound.
 COMMUNITY_BOUND_SCOPES = frozenset(
-    {SCOPE_CONNECTIONS_RESOLVE, SCOPE_CONNECTIONS_RESOLVE_STATIC, SCOPE_OVERLAY_PUSH}
+    {
+        SCOPE_CONNECTIONS_RESOLVE,
+        SCOPE_CONNECTIONS_RESOLVE_STATIC,
+        SCOPE_OVERLAY_PUSH,
+        SCOPE_TOKEN_DEBIT,
+    }
 )
 
 #: The ONLY extra claims an issuer call may stamp, and both are integers (numeric ids only --

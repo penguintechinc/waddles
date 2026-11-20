@@ -165,6 +165,21 @@ pub struct CliConfig {
     #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
     pub hub_api_url: String,
 
+    /// hub-api's internal gRPC endpoint serving `ServiceAuthService.MintServiceToken`
+    /// (`https://host:port`; CA from `HUB_API_GRPC_CA_FILE`). Unset = no service credential: every
+    /// transcode-admission debit then fails loud (`credential_unavailable`) and the stream falls
+    /// back to passthrough -- see `crate::billing::token_ledger`.
+    #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT")]
+    pub service_jwt_token_endpoint: Option<String>,
+
+    /// Projected ServiceAccount token (audience-scoped to hub-api) used to bootstrap the machine JWT.
+    #[arg(
+        long,
+        env = "SERVICE_JWT_SA_TOKEN_PATH",
+        default_value = "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+    )]
+    pub service_jwt_sa_token_path: String,
+
     /// Tokens debited per transcode-admission attempt. Mirrors the Python
     /// alpha's `Config.transcode_token_cost`.
     #[arg(long, env = "TRANSCODE_TOKEN_COST", default_value_t = 5)]

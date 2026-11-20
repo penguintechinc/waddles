@@ -13,6 +13,7 @@ auto-discovery -- no edit to `routers/v1.py` needed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
 
 from flask_core.api_utils import auth_required
@@ -21,7 +22,12 @@ from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
-from services.community_common import api_error, community_in_tenant, get_current_user
+from services.community_common import (
+    api_error,
+    community_in_tenant,
+    feature_not_enabled,
+    get_current_user,
+)
 from services.community_inventory import (
     add_stock,
     checkin_item,
@@ -41,6 +47,8 @@ from services.community_inventory_authz import require_inventory_admin, require_
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.pagination import parse_limit
+
+logger = logging.getLogger(__name__)
 
 inventory_bp = Blueprint("v1_community_inventory", __name__, url_prefix="/api/v1/admin")
 
@@ -65,7 +73,7 @@ async def _guard(community_id: int, *, admin: bool) -> tuple[dict[str, object], 
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_INVENTORY, tenant=ctx.tenant_slug):
-        return api_error("Community inventory requires a Professional plan or higher", 402)
+        return feature_not_enabled("Community inventory requires a Professional plan or higher")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     dal = current_app.config["dal"]
@@ -76,6 +84,7 @@ async def _guard(community_id: int, *, admin: bool) -> tuple[dict[str, object], 
         else:
             require_inventory_member(dal, ctx, community_id=community_id, user_id=user_id)
     except ApiError as exc:
+        logger.debug("inventory guard denied community=%s status=%s", community_id, exc.status_code)
         return api_error(exc.message, exc.status_code)
     return None
 

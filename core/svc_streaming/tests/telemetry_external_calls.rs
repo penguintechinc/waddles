@@ -26,7 +26,7 @@ use otel_common::{wait_for, OtelSink};
 use tracing::Instrument as _;
 use tracing_opentelemetry::OpenTelemetrySpanExt as _;
 
-use svc_streaming::billing::token_ledger::TokenLedgerClient;
+use svc_streaming::billing::token_ledger::{ServiceBearer, TokenLedgerClient};
 use svc_streaming::config::{CliConfig, Config, Secret};
 use svc_streaming::egress::record::{register_metrics, RecordSink};
 use svc_streaming::egress::relay::RelaySink;
@@ -36,6 +36,16 @@ use svc_streaming::rtc::ingest_auth::{InternalIngestAuthClient, WhipTokenAuthori
 use svc_streaming::store::SecretRef;
 use svc_streaming::telemetry::stream::StreamMetrics;
 use uuid::Uuid;
+
+/// Fixed machine-JWT stand-in for the hub-api mint.
+struct FixedBearer;
+
+#[async_trait::async_trait]
+impl ServiceBearer for FixedBearer {
+    async fn bearer_for(&self, _community_id: i64) -> Result<std::sync::Arc<str>, String> {
+        Ok(std::sync::Arc::from("service-jwt"))
+    }
+}
 
 /// Spawns a one-route POST server returning `body`, recording every
 /// request's headers. Returns its address and the captured headers.
@@ -81,23 +91,18 @@ async fn token_ledger_debit_is_timed_and_propagates_the_callers_trace() {
     let sink = OtelSink::install();
     let metrics = StreamMetrics::with_meter(&sink.meter());
     let (addr, captured) = capture_server(
-        "/api/v1/marketplace/communities/{community_id}/tokens/debit",
+        "/api/v1/internal/communities/{community_id}/tokens/debit",
         serde_json::json!({"balance_after": 5}),
     )
     .await;
-    let client = TokenLedgerClient::new().with_stream_metrics(metrics);
+    let client = TokenLedgerClient::new()
+        .with_bearer_source(std::sync::Arc::new(FixedBearer))
+        .with_stream_metrics(metrics);
 
     let span = tracing::info_span!("test_transcode_admission");
     let trace_id = span.context().span().span_context().trace_id().to_string();
     let result = client
-        .debit_transcoding_tokens(
-            &format!("http://{addr}"),
-            "bearer-jwt",
-            7,
-            3,
-            "transcode",
-            "ref-1",
-        )
+        .debit_transcoding_tokens(&format!("http://{addr}"), 42, 7, 3, "transcode", "ref-1")
         .instrument(span)
         .await;
     assert!(result.ok, "debit succeeds against the mock: {result:?}");
@@ -118,14 +123,7 @@ async fn token_ledger_debit_is_timed_and_propagates_the_callers_trace() {
     // An unreachable ledger is a transport error: the call still resolves
     // (BLOCK-WITH-FALLBACK) but is timed under outcome=error.
     let down = client
-        .debit_transcoding_tokens(
-            "http://127.0.0.1:1",
-            "bearer-jwt",
-            7,
-            3,
-            "transcode",
-            "ref-2",
-        )
+        .debit_transcoding_tokens("http://127.0.0.1:1", 42, 7, 3, "transcode", "ref-2")
         .await;
     assert!(!down.ok);
     let (errors, _) = sink.histogram(

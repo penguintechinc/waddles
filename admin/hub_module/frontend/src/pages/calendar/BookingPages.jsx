@@ -8,6 +8,7 @@ import {
   ClipboardDocumentIcon,
 } from '@heroicons/react/24/outline';
 import { calendarApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_COLORS } from '../../theme/waddlebotTheme';
 
@@ -15,6 +16,7 @@ function BookingPages() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [gated, setGated] = useState(false);
   const [bookingPages, setBookingPages] = useState([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [editingPage, setEditingPage] = useState(null);
@@ -29,6 +31,7 @@ function BookingPages() {
       const response = await calendarApi.getBookingPages();
       setBookingPages(response.data.booking_pages || []);
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       setError('Failed to load booking pages');
     } finally {
       setLoading(false);
@@ -186,6 +189,10 @@ function BookingPages() {
       },
     ];
   }, [editingPage]);
+
+  if (gated) {
+    return <UpgradeNotice feature="Booking pages" />;
+  }
 
   if (loading) {
     return (

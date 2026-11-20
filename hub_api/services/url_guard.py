@@ -125,7 +125,7 @@ def validate_url(url: str) -> None:
     if parsed.scheme not in ALLOWED_SCHEMES:
         raise SSRFError(f"URL scheme must be http or https, got {parsed.scheme!r}")
     if not parsed.hostname:
-        raise SSRFError(f"URL has no host: {url!r}")
+        raise SSRFError("URL has no host")
     if is_private_host(parsed.hostname):
         raise SSRFError(f"URL host {parsed.hostname!r} resolves to a disallowed address")
 
@@ -154,7 +154,7 @@ async def guarded_get(
         if not location:
             return response
         current_url = urljoin(current_url, location)
-    raise SSRFError(f"too many redirects (> {_MAX_REDIRECTS}) starting from {url!r}")
+    raise SSRFError(f"too many redirects (> {_MAX_REDIRECTS})")
 
 
 #: Never treated as safe outbound targets regardless of scheme, even if a
