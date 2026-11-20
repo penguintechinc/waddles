@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from .community_common import ensure_community_tables
+from .sql_util import execute_positional
 
 _RELAY_URLS = {
     "discord": os.getenv("DISCORD_BOT_RELAY_URL", "http://discord-bot-service:8080/internal/relay"),
@@ -152,7 +153,8 @@ async def relay_message(
 ) -> None:
     """Fan a message out to every other active member of the source channel's mirror group(s)."""
     _ensure_relay_tables(dal)
-    groups = dal.executesql(
+    groups = execute_positional(
+        dal,
         """
         SELECT DISTINCT mg.id
         FROM mirror_group_members mgm
@@ -165,7 +167,8 @@ async def relay_message(
         return
     group_ids = [row[0] for row in groups]
 
-    targets = dal.executesql(
+    targets = execute_positional(
+        dal,
         """
         SELECT mgm.community_server_channel_id, cs.platform,
                csc.platform_channel_id, csc.platform_channel_name,
