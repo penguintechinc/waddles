@@ -86,6 +86,8 @@ jobs:
             core/bundle_host_credentials/**
             core/connector_e2e/**
             core/tool_invoke_e2e/**
+            core/*/Cargo.toml
+            core/*/Cargo.lock
             .github/workflows/rust-build-all.yml
 
   build:
