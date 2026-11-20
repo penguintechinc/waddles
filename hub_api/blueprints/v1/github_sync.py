@@ -273,6 +273,7 @@ async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, 
     try:
         data = await svc.get_ticket_sync_status(async_dal, dal, ticket_id=tid, community_id=guard)
     except ApiError as exc:
+        logger.debug("handled %s in github_sync: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return {"status": "success", "data": data}, 200
 
@@ -312,6 +313,7 @@ async def trigger_sync(
             community_id=guard,
         )
     except ApiError as exc:
+        logger.debug("handled %s in github_sync: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return _ok(
         {
