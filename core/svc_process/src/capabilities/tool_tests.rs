@@ -25,7 +25,7 @@ use super::super::tests::test_egress;
 use super::*;
 use crate::capabilities::CapabilityHandler;
 
-const APP: &str = "waddles.test.app.caller";
+const APP: &str = "penguintechinc.waddles.fixture-test-app-caller";
 const SVC: &str = "penguintechinc.waddles.economy-svc";
 const SVC2: &str = "penguintechinc.waddles.other-svc";
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -550,7 +550,7 @@ async fn e_depth_three_is_refused_and_depth_two_runs() {
         default_gate(),
         Arc::clone(&exec.registry),
         vec![
-            "waddles.x.y.z".to_string(),
+            "penguintechinc.waddles.fixture-x-y-z".to_string(),
             SVC2.to_string(),
             APP.to_string(),
         ],

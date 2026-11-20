@@ -66,8 +66,8 @@ mod tests {
         );
         // Same names => same kv scope (and so the same `bundlekv:` prefix) as the event path.
         let (t, c) = crate::bundle_admin::display_scope((9001, 3)).unwrap();
-        let admin = bundle_host_kv::KvScope::new(t, c, "waddles.x.y.z");
-        let event = bundle_host_kv::KvScope::new("acme", Some("main".to_owned()), "waddles.x.y.z");
+        let admin = bundle_host_kv::KvScope::new(t, c, "penguintechinc.waddles.fixture-x-y-z");
+        let event = bundle_host_kv::KvScope::new("acme", Some("main".to_owned()), "penguintechinc.waddles.fixture-x-y-z");
         assert_eq!(admin, event);
     }
 

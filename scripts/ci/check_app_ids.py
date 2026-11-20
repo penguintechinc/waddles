@@ -13,6 +13,7 @@ Parses app_id-bearing fields only (never free text, never PostHog flag keys such
 Each id must match ``^(penguintechinc\\.waddles|psychoboy\\.penguintwitchbot)\\.[a-z0-9-]+$`` and its
 name must contain no ``default``/``example``/``demo`` segment. Zero ids examined is a FAILURE.
 """
+
 from __future__ import annotations
 
 import re
@@ -20,26 +21,40 @@ import subprocess
 import sys
 from pathlib import Path
 
-ID_RE = re.compile(r"^(penguintechinc\.waddles|psychoboy\.penguintwitchbot)\.[a-z0-9-]+$")
+ID_RE = re.compile(
+    r"^(penguintechinc\.waddles|psychoboy\.penguintwitchbot)\.[a-z0-9-]+$"
+)
 BANNED_SEGMENTS = {"default", "example", "demo"}
 DOTTED_LITERAL = re.compile(r"""['"]([a-z0-9_]+(?:\.[a-z0-9_-]+)+)['"]""")
 INSERT_RE = re.compile(
-    r"INSERT\s+INTO\s+(?:app_catalog|app_tenant_availability)\s*\(([^)]*)\)\s*(VALUES|SELECT)\b", re.I
+    r"INSERT\s+INTO\s+(?:app_catalog|app_tenant_availability)\s*\(([^)]*)\)\s*(VALUES|SELECT)\b",
+    re.IGNORECASE,
 )
 SQL_LITERAL = re.compile(r"^'([^']*)'$")
-ALEMBIC_APP_ID = re.compile(r"""^\s*APP_ID\s*=\s*["']([^"']+)["']""", re.M)
-ALEMBIC_SEEDS = re.compile(r"^\s*[A-Z_]*APP_IDS\s*=\s*[(\[](.*?)[)\]]\s*$", re.M | re.S)
-YAML_APP_ID = re.compile(r"""^\s*(?:-\s*)?app_id:\s*["']?([^\s"'#]+)""", re.M)
-RUST_CONST = re.compile(r"""const\s+[A-Z0-9_]*APP_ID\s*:\s*&(?:'static\s+)?str\s*=\s*"([^"{}]*\.[^"{}]*)"\s*;""")
+ALEMBIC_APP_ID = re.compile(r"""^\s*APP_ID\s*=\s*["']([^"']+)["']""", re.MULTILINE)
+ALEMBIC_SEEDS = re.compile(r"^\s*[A-Z_]*APP_IDS\s*=\s*[(\[](.*?)[)\]]\s*$", re.MULTILINE | re.DOTALL)
+YAML_APP_ID = re.compile(r"""^\s*(?:-\s*)?app_id:\s*["']?([^\s"'#]+)""", re.MULTILINE)
+RUST_CONST = re.compile(
+    r"""const\s+[A-Z0-9_]*APP_ID\s*:\s*&(?:'static\s+)?str\s*=\s*"([^"{}]*\.[^"{}]*)"\s*;"""
+)
 TOOL_CALL = re.compile(r"""tool\.call:([a-z0-9][a-z0-9._-]*):""")
 
-SOURCES = ("sql_insert", "alembic_app_id", "catalog_yaml", "manifest", "rust_const", "tool_call_grant")
+SOURCES = (
+    "sql_insert",
+    "alembic_app_id",
+    "catalog_yaml",
+    "manifest",
+    "rust_const",
+    "tool_call_grant",
+)
 
 
 def _files(root: Path) -> list[Path]:
     """List tracked files (git ls-files), falling back to a directory walk outside a repo."""
     try:
-        out = subprocess.run(["git", "-C", str(root), "ls-files", "-z"], check=True, capture_output=True).stdout
+        out = subprocess.run(
+            ["git", "-C", str(root), "ls-files", "-z"], check=True, capture_output=True
+        ).stdout
         return [root / p for p in out.decode().split("\0") if p]
     except (subprocess.CalledProcessError, FileNotFoundError):
         return [p for p in root.rglob("*") if p.is_file() and ".git" not in p.parts]
@@ -77,9 +92,25 @@ def _split_top_level(s: str) -> list[str]:
 
 def _first_tuple(text: str, start: int) -> tuple[str, int]:
     """Return the body of the parenthesised tuple (or SELECT list) starting at ``start`` and its offset."""
-    i = text.find("(", start) if text[start:].lstrip().upper().startswith("(") or text[start:start + 1] == "(" else -1
+    i = (
+        text.find("(", start)
+        if text[start:].lstrip().upper().startswith("(")
+        or text[start : start + 1] == "("
+        else -1
+    )
     if i == -1:
-        end = min([j for j in (text.find(";", start), text.find('"""', start), text.find("FROM", start)) if j != -1] or [len(text)])
+        end = min(
+            [
+                j
+                for j in (
+                    text.find(";", start),
+                    text.find('"""', start),
+                    text.find("FROM", start),
+                )
+                if j != -1
+            ]
+            or [len(text)]
+        )
         return text[start:end], start
     depth, quote = 0, ""
     for j in range(i, len(text)):
@@ -94,14 +125,16 @@ def _first_tuple(text: str, start: int) -> tuple[str, int]:
         elif ch == ")":
             depth -= 1
             if depth == 0:
-                return text[i + 1:j], i + 1
-    return text[i + 1:], i + 1
+                return text[i + 1 : j], i + 1
+    return text[i + 1 :], i + 1
 
 
 def parse_file(path: Path, rel: str, text: str) -> list[tuple[str, int, str, str]]:
     """Return (source, line, id, relpath) for every app_id-bearing field in one file."""
     found: list[tuple[str, int, str, str]] = []
-    is_sql = rel.endswith(".sql") or (rel.startswith("alembic/versions/") and rel.endswith(".py"))
+    is_sql = rel.endswith(".sql") or (
+        rel.startswith("alembic/versions/") and rel.endswith(".py")
+    )
     if is_sql:
         for m in INSERT_RE.finditer(text):
             cols = [c.strip().lower() for c in m.group(1).split(",")]
@@ -112,18 +145,30 @@ def parse_file(path: Path, rel: str, text: str) -> list[tuple[str, int, str, str
             idx = cols.index("app_id")
             if idx < len(vals):
                 lit = SQL_LITERAL.match(vals[idx])
-                if lit and "{" not in lit.group(1):  # placeholders / bound params are covered by the alembic APP_ID parsers
+                if (
+                    lit and "{" not in lit.group(1)
+                ):  # placeholders / bound params are covered by the alembic APP_ID parsers
                     found.append(("sql_insert", _line(text, off), lit.group(1), rel))
     if rel.startswith("alembic/versions/") and rel.endswith(".py"):
         for m in ALEMBIC_APP_ID.finditer(text):
             found.append(("alembic_app_id", _line(text, m.start(1)), m.group(1), rel))
         for m in ALEMBIC_SEEDS.finditer(text):
             for lit in DOTTED_LITERAL.finditer(m.group(1)):
-                found.append(("alembic_app_id", _line(text, m.start(1) + lit.start()), lit.group(1), rel))
+                found.append(
+                    (
+                        "alembic_app_id",
+                        _line(text, m.start(1) + lit.start()),
+                        lit.group(1),
+                        rel,
+                    )
+                )
     if rel == "bundles/core-bundles.yaml":
         for m in YAML_APP_ID.finditer(text):
             found.append(("catalog_yaml", _line(text, m.start(1)), m.group(1), rel))
-    elif rel.startswith("bundles/") and path.name in ("bundle.yaml", "hub-manifest.yaml"):
+    elif rel.startswith("bundles/") and path.name in (
+        "bundle.yaml",
+        "hub-manifest.yaml",
+    ):
         for m in YAML_APP_ID.finditer(text):
             found.append(("manifest", _line(text, m.start(1)), m.group(1), rel))
     if rel.endswith(".rs"):
@@ -151,7 +196,9 @@ def scan(root: Path) -> tuple[list[tuple[str, int, str, str]], dict[str, int]]:
     bad: list[tuple[str, int, str, str]] = []
     for path in _files(root):
         rel = path.relative_to(root).as_posix()
-        if rel.startswith(("scripts/ci/check_app_ids.py", "scripts/ci/tests/test_check_app_ids.py")):
+        if rel.startswith(
+            ("scripts/ci/check_app_ids.py", "scripts/ci/tests/test_check_app_ids.py")
+        ):
             continue
         try:
             text = path.read_text(encoding="utf-8")
@@ -167,10 +214,17 @@ def scan(root: Path) -> tuple[list[tuple[str, int, str, str]], dict[str, int]]:
 
 def main(argv: list[str]) -> int:
     """CLI entry: exit 1 on any violation or a zero denominator in any source family."""
-    root = Path(argv[1]).resolve() if len(argv) > 1 else Path(__file__).resolve().parents[2]
+    root = (
+        Path(argv[1]).resolve()
+        if len(argv) > 1
+        else Path(__file__).resolve().parents[2]
+    )
     bad, denom = scan(root)
     total = sum(denom.values())
-    print(f"check_app_ids: examined={total} " + " ".join(f"{k}={v}" for k, v in denom.items()))
+    print(
+        f"check_app_ids: examined={total} "
+        + " ".join(f"{k}={v}" for k, v in denom.items())
+    )
     for rp, line, app_id, why in bad:
         print(f"  VIOLATION {rp}:{line}: {app_id!r} ({why})")
     empty = [k for k, v in denom.items() if v == 0]

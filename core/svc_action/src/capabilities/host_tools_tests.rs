@@ -36,7 +36,7 @@ mod twitch_manifest_tests;
 #[path = "host_tools_youtube_manifest_tests.rs"]
 mod youtube_manifest_tests;
 
-const APP: &str = "waddles.test.app.caller";
+const APP: &str = "penguintechinc.waddles.fixture-test-app-caller";
 const TWITCH_SVC: &str = "penguintechinc.waddles.twitch";
 const DISCORD_SVC: &str = super::super::event_sync::DISCORD_SERVICE_APP_ID;
 const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";

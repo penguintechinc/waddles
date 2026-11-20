@@ -240,3 +240,6 @@ waddles.test.role_sync	penguintechinc.waddles.fixture-test-role-sync	fixture	tes
 waddles.test.signed-app	penguintechinc.waddles.fixture-test-signed-app	fixture	test-fixture app_id (guard: Rust *_APP_ID const)
 waddles.test.signing	penguintechinc.waddles.fixture-test-signing	fixture	test-fixture app_id (guard: Rust *_APP_ID const)
 waddles.test.stage-v2-py	penguintechinc.waddles.fixture-test-stage-v2-py	fixture	test-fixture app_id (guard: Rust *_APP_ID const)
+waddles.test.app.caller	penguintechinc.waddles.fixture-test-app-caller	fixture	nested-call fixture (valid 3-seg id)
+waddles.x.y.z	penguintechinc.waddles.fixture-x-y-z	fixture	fixture id
+waddles.core.example.orph	penguintechinc.waddles.fixture-orph	fixture	source-group reconciler fixture

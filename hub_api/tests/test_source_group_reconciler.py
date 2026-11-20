@@ -414,7 +414,7 @@ async def test_binding_with_missing_community_is_counted_unresolvable(
             text(
                 "INSERT INTO app_source_bindings "
                 "(tenant_id, community_id, app_id, platform, source_id) "
-                "VALUES (:t, 999999, 'waddles.core.example.orph', 'discord', 'dg-x')"
+                "VALUES (:t, 999999, 'penguintechinc.waddles.fixture-orph', 'discord', 'dg-x')"
             ),
             {"t": tenant_id},
         )

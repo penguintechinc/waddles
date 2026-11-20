@@ -58,7 +58,7 @@ def test_idempotent():
 def test_all_real_mapping_rows_idempotent_and_no_example_or_demo():
     mapping = am.load_mapping(am.DEFAULT_MAPPING)
     rules = am.build_rules(mapping)
-    assert len(mapping) == 241  # 200 bundles + 19 extra pipeline/media + 22 test-fixture ids
+    assert len(mapping) == 244  # 200 bundles + 19 extra pipeline/media + 25 test-fixture ids
     for old, new in mapping.items():
         assert "example" not in new and "demo" not in new
         once = am.rewrite_text(f"{old} {am.sanitize_rust(old)}", rules)
