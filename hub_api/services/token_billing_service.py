@@ -452,17 +452,32 @@ DEFAULT_MAX_DEBIT_AMOUNT = 10_000
 MAX_IDEMPOTENCY_KEY_LEN = 128
 
 
+def _positive_int_env(name: str, default: int) -> int:
+    """Read a positive-integer env setting; bad values log and fall back to `default`.
+
+    The fallback keeps the safety bound in force (never disables it) but is never silent: the
+    operator's bad value is logged at WARNING so the misconfiguration is visible.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("token_billing.bad_env name=%s -- not an integer, using %d", name, default)
+        return default
+    if value <= 0:
+        logger.warning("token_billing.bad_env name=%s -- not positive, using %d", name, default)
+        return default
+    return value
+
+
 def max_debit_amount() -> int:
     """Return the configured per-debit ceiling (`TOKEN_DEBIT_MAX_AMOUNT`, default 10000).
 
-    Read per call so an operator override takes effect without a code change; a malformed or
-    non-positive value falls back to the default rather than disabling the bound.
+    Read per call so an operator override takes effect without a code change.
     """
-    try:
-        value = int(os.environ.get("TOKEN_DEBIT_MAX_AMOUNT", DEFAULT_MAX_DEBIT_AMOUNT))
-    except ValueError:
-        return DEFAULT_MAX_DEBIT_AMOUNT
-    return value if value > 0 else DEFAULT_MAX_DEBIT_AMOUNT
+    return _positive_int_env("TOKEN_DEBIT_MAX_AMOUNT", DEFAULT_MAX_DEBIT_AMOUNT)
 
 
 #: Default replay window (seconds) for an idempotency key. Override with
@@ -472,17 +487,8 @@ DEFAULT_IDEMPOTENCY_TTL_SECONDS = 600
 
 
 def idempotency_ttl_seconds() -> int:
-    """Return the replay window (`TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS`, default 600).
-
-    A malformed or non-positive value falls back to the default rather than disabling the bound.
-    """
-    try:
-        value = int(
-            os.environ.get("TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS", DEFAULT_IDEMPOTENCY_TTL_SECONDS)
-        )
-    except ValueError:
-        return DEFAULT_IDEMPOTENCY_TTL_SECONDS
-    return value if value > 0 else DEFAULT_IDEMPOTENCY_TTL_SECONDS
+    """Return the replay window (`TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS`, default 600)."""
+    return _positive_int_env("TOKEN_DEBIT_IDEMPOTENCY_TTL_SECONDS", DEFAULT_IDEMPOTENCY_TTL_SECONDS)
 
 
 def _scoped_idempotency_key(community_id: int, product_id: int, key: str | None) -> str | None:

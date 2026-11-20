@@ -114,11 +114,11 @@ mod tests {
     }
 
     #[test]
-    fn stop_ends_the_run_so_the_next_start_is_a_new_admission() {
+    fn stop_ends_the_actors_run_so_the_next_start_is_a_new_admission() {
         let (community, config, actor) = (9_101, 9_102, 9_103);
         let first = headerless_key(community, config, actor);
         assert_eq!(first, headerless_key(community, config, actor));
-        end_run_sessions(community, config);
+        end_run_session(community, config, actor);
         assert_ne!(first, headerless_key(community, config, actor));
     }
 
@@ -233,7 +233,7 @@ pub fn admission_idempotency_key(
 }
 
 /// The run-session id svc-streaming allocates the first time an actor starts a config and then
-/// reuses for every retry of that start until the run is stopped ([`end_run_sessions`]).
+/// reuses for every retry of that start until the run is started, stopped or refused ([`end_run_session`]).
 ///
 /// This is what makes a header-less retry produce the SAME debit key: the id is allocated once per
 /// run, not per request, so it is neither a timestamp nor re-rolled on retry. A stop followed by a
@@ -257,14 +257,6 @@ fn end_run_session(community_id: i32, config_id: i32, actor_user_id: i64) {
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .remove(&(community_id, config_id, actor_user_id));
-}
-
-/// Ends every actor's run session for a config (called on stop) so the next start is a new admission.
-fn end_run_sessions(community_id: i32, config_id: i32) {
-    RUN_SESSIONS
-        .lock()
-        .unwrap_or_else(|e| e.into_inner())
-        .retain(|(c, cfg, _), _| !(*c == community_id && *cfg == config_id));
 }
 
 /// TRANSCODE admission (BLOCK-WITH-FALLBACK, ported from the Python
@@ -435,7 +427,10 @@ pub async fn stop(
     let config = fetch_config(&db, community_id, config_id).await?;
     let id = pipeline_id_for_config(config.id);
     engine.stop(id).await.map_err(map_pipeline_error)?;
-    end_run_sessions(community_id, config.id);
+    // Retire only the stopping actor's session: other members' in-flight admissions are theirs.
+    if let Some(actor) = actor_user_id(&claims) {
+        end_run_session(community_id, config.id, actor);
+    }
     Ok(ApiSuccess::ok(PipelineStatusDto {
         id,
         state: "stopped".to_string(),

@@ -277,10 +277,6 @@ ingress:
           pathType: Prefix
           service: hub-api-v3
           port: 8060
-        - path: /api/v1/internal
-          pathType: Prefix
-          service: hub-api-v3
-          port: 8060
 
 
 
@@ -368,10 +364,6 @@ httproute:
       port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/signup-settings
-      service: "waddlebot-hub-api-v3"
-      port: 8060
-      timeoutSeconds: 3600
-    - path: /api/v1/internal
       service: "waddlebot-hub-api-v3"
       port: 8060
       timeoutSeconds: 3600

@@ -7,8 +7,8 @@ the only public front door for hub-api, and its proxy additionally 404s the inte
 */}}
 {{- range .Values.httproute.rules }}
 {{- $p := (.path | toString | lower | trimSuffix "/") }}
-{{- if hasPrefix "/api/v1/internal" $p }}{{ fail (printf "httproute rule path %q exposes hub-api internal routes" .path) }}{{ end }}
-{{- if and (contains "hub-api" (.service | toString)) (has $p (list "" "/api" "/api/v1")) }}{{ fail (printf "httproute rule path %q routes a prefix covering /api/v1/internal directly to hub-api" .path) }}{{ end }}
+{{- if regexMatch "^/api/v[0-9]+/internal" $p }}{{ fail (printf "httproute rule path %q exposes hub-api internal routes" .path) }}{{ end }}
+{{- if and (contains "hub-api" (.service | toString)) (regexMatch "^(/api(/v[0-9]+)?)?$" $p) }}{{ fail (printf "httproute rule path %q routes a prefix covering /api/v1/internal directly to hub-api" .path) }}{{ end }}
 {{- end }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute

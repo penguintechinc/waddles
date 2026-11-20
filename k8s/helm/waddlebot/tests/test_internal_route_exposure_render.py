@@ -59,7 +59,7 @@ def test_shipped_dal2alpha_routes_only_to_hub_webui() -> None:
 
 
 @pytest.mark.parametrize(
-    "path", ["/api/v1/internal", "/api/v1/internal/communities", "/API/V1/Internal/"]
+    "path", ["/api/v1/internal", "/api/v1/internal/communities", "/API/V1/Internal/", "/api/v2/internal/x", "/api/v10/internal"]
 )
 def test_httproute_rule_naming_internal_prefix_fails(path: str) -> None:
     """Any HTTPRoute rule under the internal prefix fails the render."""
@@ -68,7 +68,7 @@ def test_httproute_rule_naming_internal_prefix_fails(path: str) -> None:
     assert "exposes hub-api internal routes" in res.stderr
 
 
-@pytest.mark.parametrize("path", ["/", "/api", "/api/v1", "/api/v1/"])
+@pytest.mark.parametrize("path", ["/", "/api", "/api/v1", "/api/v1/", "/api/v2"])
 def test_httproute_covering_prefix_to_hub_api_fails(path: str) -> None:
     """A covering prefix sent straight to hub-api fails the render."""
     res = _render(
@@ -131,3 +131,21 @@ def test_ingress_to_hub_webui_root_still_renders() -> None:
     assert res.returncode == 0, res.stderr
     kinds = [d.get("kind") for d in yaml.safe_load_all(res.stdout) if d]
     assert "Ingress" in kinds
+
+
+@pytest.mark.parametrize("env", ["alpha", "beta", "gamma", "production", "local", "dal2alpha"])
+def test_every_environment_values_file_renders_with_public_routes_on(env: str) -> None:
+    """# regression: values-beta.yaml routed /api/v1/internal straight to hub-api.
+
+    With the HTTPRoute and Ingress forced on, each shipped values file must pass the render-time
+    guard (it fails on any path under /api/v{N}/internal or a covering prefix to hub-api).
+    """
+    argv = [
+        "helm", "template", "waddlebot", str(_CHART_DIR),
+        "-f", str(_CHART_DIR / f"values-{env}.yaml"), "--kube-version", "1.31.0",
+        "--set", "httproute.enabled=true", "--set", "ingress.enabled=true",
+    ]
+    res = subprocess.run(argv, capture_output=True, text=True, check=False)  # noqa: S603
+    assert res.returncode == 0, res.stderr
+    kinds = {d.get("kind") for d in yaml.safe_load_all(res.stdout) if d}
+    assert {"HTTPRoute", "Ingress"} <= kinds
