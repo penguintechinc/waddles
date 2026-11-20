@@ -664,3 +664,19 @@ scaffold-superpenguin-bundle:
 .PHONY: prune-worktrees
 prune-worktrees:
 	@bash scripts/ops/prune-agent-worktrees.sh $(ARGS)
+
+# ---- Post-cutover verification sweeps (alpha; read-only by default) ----------
+# api-sweep:    every hub-api OpenAPI route as admin; no mutations unless ARGS=--allow-mutations
+# bundle-sweep: every catalog bundle -> resolved/loaded/invoked/described + app_id pattern
+# old-id-scan:  leftover old app_id prefixes in DB/Valkey/S3/ConfigMaps/pod env (exit 1 if any)
+# Access defaults to kubectl port-forward (dal2alpha/waddlebot); override BASE_URL/HOST_HEADER.
+# Pre-cutover baselines: add ARGS=--allow-old-ids.  Docs: tests/e2e/api-sweep/README.md
+.PHONY: api-sweep bundle-sweep old-id-scan
+api-sweep:
+	@bash tests/e2e/api-sweep/run.sh $(ARGS)
+
+bundle-sweep:
+	@bash tests/e2e/bundle-sweep/run.sh $(ARGS)
+
+old-id-scan:
+	@bash tests/e2e/old-id-scan.sh
