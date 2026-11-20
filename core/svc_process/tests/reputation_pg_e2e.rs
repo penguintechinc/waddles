@@ -44,7 +44,7 @@ use docker_container::{start_container, DockerContainer};
 
 const SU_PW: &str = "postgres_test_superuser_pw";
 const REP_PW: &str = "waddles_bundle_reputation_test_pw";
-const APP_ID: &str = "waddles.core.test-reputation";
+const APP_ID: &str = "penguintechinc.waddles.test-reputation";
 const TENANT: i32 = 1;
 const COMMUNITY: i32 = 10;
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_store.sql");
@@ -180,7 +180,7 @@ async fn world_with_members(extra_members: usize) -> World {
          CREATE TABLE app_version_uploads (app_id TEXT, version TEXT, manifest_json JSONB);
          INSERT INTO tenants (id, slug) VALUES (1, 't1');
          INSERT INTO communities (id, tenant_id) VALUES (10, 1);
-         INSERT INTO app_catalog (app_id) VALUES ('waddles.core.test-reputation');",
+         INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.test-reputation');",
     )
     .await;
     exec(

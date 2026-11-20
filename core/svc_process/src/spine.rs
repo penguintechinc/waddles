@@ -2292,7 +2292,7 @@ mod tests {
             "NOGROUP".to_string(),
             Some(
                 "No such key 'waddles:t:default:c:_tenant:src:twitch:tw-x:events' or consumer \
-                 group 'waddles.core.example.ping' in XREADGROUP with GROUP option"
+                 group 'penguintechinc.waddles.ping' in XREADGROUP with GROUP option"
                     .to_string(),
             ),
         ));
@@ -4385,7 +4385,7 @@ mod tests {
         // Shared ingest-source-stream shape: the envelope's own app_id is
         // svc-ingest's generic stamped value, NOT the reading bundle's
         // group.
-        d.env.app_id = "waddles.core.ingest.default".to_string();
+        d.env.app_id = "penguintechinc.waddles.ingest-default".to_string();
         d.group = "waddles.bot.commands.default".to_string();
 
         let spine = FakeSpineOps::default();

@@ -345,9 +345,9 @@ mod tests {
             public_id: uuid::Uuid::nil(),
             tenant_id: 3,
             community_id: 7,
-            bundle_app_id: "waddles.core.dj".into(),
+            bundle_app_id: "penguintechinc.waddles.dj".into(),
             widget_id: widget.into(),
-            surface_id: "waddles.core.example.music.now_playing".into(),
+            surface_id: "penguintechinc.waddles.music.now_playing".into(),
             output_kind_code: kind,
             display_name: "Now Playing".into(),
             x_px: 10,
@@ -365,7 +365,7 @@ mod tests {
             id: 1,
             community_id: 7,
             tenant_id: 3,
-            app_id: "waddles.core.dj".into(),
+            app_id: "penguintechinc.waddles.dj".into(),
             enabled: Some(true),
         }
     }
@@ -375,10 +375,10 @@ mod tests {
             id: 1,
             tenant_id: 3,
             community_id: 7,
-            bundle_app_id: "waddles.core.dj".into(),
+            bundle_app_id: "penguintechinc.waddles.dj".into(),
             widget_id: "w".into(),
             output_kind_code: kind,
-            surface_id: Some("waddles.core.example.music.queue".into()),
+            surface_id: Some("penguintechinc.waddles.music.queue".into()),
             allow_standalone_output: standalone,
         }
     }
@@ -487,7 +487,7 @@ mod tests {
             .into_connection();
         assert_eq!(
             SeaOrmSceneStore::new(db)
-                .find_widget(7, "waddles.core.dj", "w")
+                .find_widget(7, "penguintechinc.waddles.dj", "w")
                 .await
                 .unwrap(),
             None
@@ -502,7 +502,7 @@ mod tests {
             .append_query_results([vec![registry(3, false)]])
             .into_connection();
         let b = SeaOrmSceneStore::new(db)
-            .find_widget(7, "waddles.core.dj", "w")
+            .find_widget(7, "penguintechinc.waddles.dj", "w")
             .await
             .unwrap()
             .unwrap();
@@ -510,7 +510,7 @@ mod tests {
         assert!(!b.allow_standalone_output);
         assert_eq!(
             b.surface_id.as_deref(),
-            Some("waddles.core.example.music.queue")
+            Some("penguintechinc.waddles.music.queue")
         );
 
         // Not in the registry, but visibly placed: a surface widget keeps its surface.
@@ -521,14 +521,14 @@ mod tests {
             .append_query_results([vec![component("w", 4, 1)]])
             .into_connection();
         let b = SeaOrmSceneStore::new(db)
-            .find_widget(7, "waddles.core.dj", "w")
+            .find_widget(7, "penguintechinc.waddles.dj", "w")
             .await
             .unwrap()
             .unwrap();
         assert_eq!(b.output_kind, WidgetOutputKind::Surface);
         assert_eq!(
             b.surface_id.as_deref(),
-            Some("waddles.core.example.music.now_playing")
+            Some("penguintechinc.waddles.music.now_playing")
         );
         assert!(b.allow_standalone_output);
 
@@ -540,7 +540,7 @@ mod tests {
             .append_query_results([vec![component("w", 1, 1)]])
             .into_connection();
         let b = SeaOrmSceneStore::new(db)
-            .find_widget(7, "waddles.core.dj", "w")
+            .find_widget(7, "penguintechinc.waddles.dj", "w")
             .await
             .unwrap()
             .unwrap();
@@ -557,7 +557,7 @@ mod tests {
             .into_connection();
         assert_eq!(
             SeaOrmSceneStore::new(db)
-                .find_widget(7, "waddles.core.dj", "ghost")
+                .find_widget(7, "penguintechinc.waddles.dj", "ghost")
                 .await
                 .unwrap(),
             None
@@ -573,7 +573,7 @@ mod tests {
             .into_connection();
         assert!(matches!(
             SeaOrmSceneStore::new(db)
-                .find_widget(7, "waddles.core.dj", "w")
+                .find_widget(7, "penguintechinc.waddles.dj", "w")
                 .await,
             Err(SceneError::BadCode {
                 column: "output_kind_code",
@@ -588,7 +588,7 @@ mod tests {
             .into_connection();
         assert!(matches!(
             SeaOrmSceneStore::new(db)
-                .find_widget(7, "waddles.core.dj", "w")
+                .find_widget(7, "penguintechinc.waddles.dj", "w")
                 .await,
             Err(SceneError::BadCode {
                 column: "output_kind_code",

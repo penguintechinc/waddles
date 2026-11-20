@@ -4015,7 +4015,7 @@ mod tests {
             community_id: 2,
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
-            app_id: "waddles.core.service.test".to_string(),
+            app_id: "penguintechinc.waddles.test".to_string(),
             platform: "twitch".to_string(),
             source_id: "chan".to_string(),
         };

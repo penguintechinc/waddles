@@ -69,7 +69,7 @@ async fn commands_are_unaffected_by_a_dead_otlp_collector() {
             let _ = stage::report_confirmed(
                 Kind::User,
                 Some(&ts),
-                "waddles.core.example.ping",
+                "penguintechinc.waddles.ping",
                 1,
                 1,
                 if i % 2 == 0 {

@@ -46,7 +46,7 @@
     }
   },
   "surfaces": {
-    "waddles.core.example.music.now_playing": {
+    "penguintechinc.waddles.music.now_playing": {
       "doc": "Music Station 'now playing' card (dj `PublicState.now_playing`). `now_playing: null` = nothing playing.",
       "replay": true,
       "max_payload_bytes": 4096,
@@ -61,7 +61,7 @@
         "additionalProperties": false
       }
     },
-    "waddles.core.example.music.queue": {
+    "penguintechinc.waddles.music.queue": {
       "doc": "Music Station 'up next' list (dj `PublicState.queue`), at most 50 tracks.",
       "replay": true,
       "max_payload_bytes": 16384,
@@ -126,7 +126,7 @@
         "additionalProperties": false
       }
     },
-    "waddles.core.app.stream-alerts.alerts": {
+    "penguintechinc.waddles.stream-alerts.alerts": {
       "doc": "Stream alert (follow/sub/cheer/raid/donation) published by the stream-alerts app. An EVENT: never replayed. Text only; no user names (counts and tiers only).",
       "replay": false,
       "max_payload_bytes": 1024,
@@ -144,7 +144,7 @@
         "additionalProperties": false
       }
     },
-    "waddles.core.app.galactic-avatars.stage_strip": {
+    "penguintechinc.waddles.galactic-avatars.stage_strip": {
       "doc": "Galactic avatars stage strip: anonymous faction avatars for recently active chatters (no names, no user references), at most 50. Last state replayed to late joiners.",
       "replay": true,
       "max_payload_bytes": 4096,

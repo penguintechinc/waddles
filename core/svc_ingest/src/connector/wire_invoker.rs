@@ -916,7 +916,7 @@ mod tests {
     use tokio::io::{duplex, DuplexStream};
 
     const PLATFORM: &str = "echo";
-    const APP_ID: &str = "waddles.core.example.echo";
+    const APP_ID: &str = "penguintechinc.waddles.echo";
     const DIGEST: &str = "sha256:abc";
 
     fn ctx() -> ConnectionCtx {
@@ -1595,7 +1595,7 @@ mod tests {
         }
     }
 
-    const TWITCH_APP: &str = "waddles.core.service.twitch";
+    const TWITCH_APP: &str = "penguintechinc.waddles.twitch";
 
     /// A link whose handler is the production allowlist (twitch connector ON).
     async fn handler_rig() -> (Arc<ExecutorLink>, FakeExecutor) {
@@ -1708,7 +1708,7 @@ mod tests {
             }
         });
         let (id, _) = exec.next_invoke().await;
-        exec.reply(903, flag_call("waddles.core.service.discord", id))
+        exec.reply(903, flag_call("penguintechinc.waddles.discord", id))
             .await;
         let e = host_result(&mut exec).await.error.expect("denied");
         assert_eq!(e.message, "unknown_connector");

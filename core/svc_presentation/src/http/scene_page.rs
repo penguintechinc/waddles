@@ -253,7 +253,7 @@ mod tests {
 
     #[test]
     fn id_grammar_rejects_separators_and_oversize() {
-        assert!(valid_id("waddles.core.dj"));
+        assert!(valid_id("penguintechinc.waddles.dj"));
         assert!(valid_id("now_playing-2"));
         for bad in [
             "",

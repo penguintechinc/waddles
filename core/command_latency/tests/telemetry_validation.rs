@@ -55,12 +55,12 @@ fn an_over_budget_command_emits_logs_metrics_histograms_and_spans() {
     }
     .merge_into_tracestate(None);
     tracing::subscriber::with_default(subscriber, || {
-        let span = tracing::info_span!("outbound.send", app_id = "waddles.core.example.ping");
+        let span = tracing::info_span!("outbound.send", app_id = "penguintechinc.waddles.ping");
         let _g = span.enter();
         let r = report_confirmed(
             Kind::User,
             Some(&ts),
-            "waddles.core.example.ping",
+            "penguintechinc.waddles.ping",
             7,
             9,
             Outcome::Ok,

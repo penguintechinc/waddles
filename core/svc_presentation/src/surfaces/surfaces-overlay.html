@@ -31,7 +31,7 @@
 </div>
 <script>
 /* Structured frames only: every server string goes into the DOM via textContent, never innerHTML. */
-var KNOWN = ['waddles.core.example.music.now_playing', 'waddles.core.example.music.queue', 'live.channels', 'clip.alert', 'alert', 'waddles.core.app.stream-alerts.alerts', 'waddles.core.app.galactic-avatars.stage_strip'];
+var KNOWN = ['penguintechinc.waddles.music.now_playing', 'penguintechinc.waddles.music.queue', 'live.channels', 'clip.alert', 'alert', 'penguintechinc.waddles.stream-alerts.alerts', 'penguintechinc.waddles.galactic-avatars.stage_strip'];
 function el(tag, cls, text) {
   var node = document.createElement(tag);
   if (cls) { node.className = cls; }
@@ -126,11 +126,11 @@ function renderStrip(p) {
   });
 }
 var RENDER = {
-  'waddles.core.example.music.now_playing': renderNow, 'waddles.core.example.music.queue': renderQueue,
+  'penguintechinc.waddles.music.now_playing': renderNow, 'penguintechinc.waddles.music.queue': renderQueue,
   'live.channels': renderLive,
   'clip.alert': renderClip, 'alert': renderAlert,
-  'waddles.core.app.stream-alerts.alerts': renderStreamAlert,
-  'waddles.core.app.galactic-avatars.stage_strip': renderStrip
+  'penguintechinc.waddles.stream-alerts.alerts': renderStreamAlert,
+  'penguintechinc.waddles.galactic-avatars.stage_strip': renderStrip
 };
 function onFrame(frame) {
   if (!frame || typeof frame.surface !== 'string' || !frame.payload) { return; }

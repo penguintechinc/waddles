@@ -27,8 +27,8 @@ use crate::capabilities::CapabilityHandler;
 use crate::usage::UsageBatcher;
 
 const APP: &str = "waddles.test.app.caller";
-const SVC: &str = "waddles.core.economy.svc";
-const SVC2: &str = "waddles.core.other.svc";
+const SVC: &str = "penguintechinc.waddles.economy-svc";
+const SVC2: &str = "penguintechinc.waddles.other-svc";
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
@@ -104,7 +104,7 @@ fn gate(grants: &[(&str, i64, &str, &str)]) -> Arc<CapabilityGate> {
     // The Discord SERVICE bundle itself holds `moderation.discord` (its manifest permission):
     // host-executed role/event ops require it of the service, not just `tool.call` of the caller.
     by_scope
-        .entry(("waddles.core.service.discord".to_string(), 44))
+        .entry(("penguintechinc.waddles.discord".to_string(), 44))
         .or_default()
         .insert(
             "moderation.discord".to_string(),

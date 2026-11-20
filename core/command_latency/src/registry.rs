@@ -279,9 +279,15 @@ mod tests {
         reg.replace_commands((0..MAX_COMMANDS + 50).map(|i| format!("c{i}")));
         assert_eq!(reg.command_count(), MAX_COMMANDS);
 
-        reg.replace_bundles([("waddles.core.ping", "Rust"), ("has space", "rust")]);
+        reg.replace_bundles([
+            ("penguintechinc.waddles.ping", "Rust"),
+            ("has space", "rust"),
+        ]);
         assert_eq!(reg.bundle_count(), 1);
-        assert_eq!(reg.bundle_label("waddles.core.ping"), "waddles.core.ping");
+        assert_eq!(
+            reg.bundle_label("penguintechinc.waddles.ping"),
+            "penguintechinc.waddles.ping"
+        );
         assert_eq!(reg.bundle_label("never-seen"), NO_BUNDLE);
         reg.replace_bundles((0..MAX_BUNDLES + 10).map(|i| (format!("app{i}"), "python")));
         assert_eq!(reg.bundle_count(), MAX_BUNDLES);
