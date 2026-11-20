@@ -49,6 +49,7 @@ from quart_schema import validate_request, validate_response
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon, bot_shoutout
 from services.bot_tables import bind_bot_tables, community_belongs_to_tenant
 from services.community_authz import resolve_caller_standing_sync
+from services.community_common import api_error
 from services.community_public_id import (
     lookup_public_ids,
     resolve_public_community_id,
@@ -122,7 +123,8 @@ async def _require_community(community_id: int) -> tuple[dict[str, Any], int] | 
     dal = _dal()
     ok = await _to_thread(community_belongs_to_tenant, dal, community_id, ctx.tenant_id)
     if not ok:
-        return _error("Community not found for this tenant", 403, "FORBIDDEN")
+        # 404, identical to `route_guards._guard`: a foreign-tenant id must not be an oracle.
+        return api_error("Community not found", status_code=404)
     return None
 
 
@@ -130,14 +132,19 @@ async def _require_community_admin_inline(
     community_id: int,
 ) -> tuple[dict[str, Any], int] | None:
     """403 unless the caller administers `community_id` (run after `_require_community`)."""
+    if not _caller_administers(community_id):
+        return _error("Community admin access required", 403, "FORBIDDEN")
+    return None
+
+
+def _caller_administers(community_id: int) -> bool:
+    """True when the caller administers `community_id` (DB-backed standing, never token scope)."""
     from quart import current_app
 
     standing = resolve_caller_standing_sync(
         request, current_app.config["dal"], community_id=community_id
     )
-    if not standing.is_admin:
-        return _error("Community admin access required", 403, "FORBIDDEN")
-    return None
+    return bool(standing.is_admin)
 
 
 async def _require_server(community_id: int, server_id: int) -> None:
@@ -763,9 +770,11 @@ async def _scope_allowed(community_id: int | None, vendor_id: int | None) -> boo
     if community_id is not None:
         ctx = get_tenant_context(request)
         assert ctx is not None  # nosec B101 - tenant_middleware already enforced this
+        # Tenant fence AND community admin: `bot.ai_knowledge:write` is a tenant-wide token scope,
+        # so on its own it would let a maintainer of another community drive this one's sources.
         return bool(
             await _to_thread(community_belongs_to_tenant, _dal(), community_id, ctx.tenant_id)
-        )
+        ) and _caller_administers(community_id)
     uid = _user_id()
     return vendor_id is not None and uid > 0 and vendor_id == uid
 
@@ -795,7 +804,9 @@ async def _require_query_scope(community_id: int | None) -> tuple[dict[str, Any]
     Without it a tenant admin could vector-search every community's knowledge chunks.
     """
     if community_id is not None:
-        return await _require_community(community_id)
+        return await _require_community(community_id) or await _require_community_admin_inline(
+            community_id
+        )
     if not await _caller_is_super_admin():
         return _error("communityId is required", 400, "BAD_REQUEST")
     return None

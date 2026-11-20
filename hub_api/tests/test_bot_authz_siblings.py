@@ -78,12 +78,43 @@ class TestSuggestionFeedbackAuthz:
         assert (await self._post(client, auth_headers, sid)).status_code == 200
         assert _fb(dal, sid) == "helpful"
 
-    async def test_own_community_ok(
-        self, client: Any, auth_headers: Any, dal: Any, community_id: int
+    @staticmethod
+    def _caller(dal: Any, community_id: int, role: str) -> dict[str, str]:
+        """Real seeded standing in `community_id` (no guard bypass): a token for that member."""
+        from types import SimpleNamespace
+
+        from services.community_common import ensure_community_tables
+        from services.global_identity import ensure_tables
+        from tests.conftest import make_token, seed_membership
+
+        ensure_tables(dal, migrate=True)
+        ensure_community_tables(dal, migrate=True)
+        seed_membership(SimpleNamespace(dal=dal), community_id=community_id, user_id=61, role=role)
+        return {"Authorization": f"Bearer {make_token(scope=WRITE, user_id='61')}"}
+
+    async def test_own_community_admin_ok(self, client: Any, dal: Any, community_id: int) -> None:
+        sid = _sug(dal, community_id)
+        headers = self._caller(dal, community_id, "community-admin")
+        r = await client.post(
+            f"/api/v1/admin/ai-knowledge/suggestions/{sid}/feedback",
+            headers=headers,
+            json={"feedback": "helpful"},
+        )
+        assert r.status_code == 200
+        assert _fb(dal, sid) == "helpful"
+
+    async def test_own_community_plain_member_404_and_unchanged(
+        self, client: Any, dal: Any, community_id: int
     ) -> None:
         sid = _sug(dal, community_id)
-        assert (await self._post(client, auth_headers, sid)).status_code == 200
-        assert _fb(dal, sid) == "helpful"
+        headers = self._caller(dal, community_id, "member")
+        r = await client.post(
+            f"/api/v1/admin/ai-knowledge/suggestions/{sid}/feedback",
+            headers=headers,
+            json={"feedback": "helpful"},
+        )
+        assert r.status_code == 404
+        assert _fb(dal, sid) is None
 
     def test_service_write_is_filtered_by_community(
         self, dal: Any, community_id: int, other_tenant_community_id: int
