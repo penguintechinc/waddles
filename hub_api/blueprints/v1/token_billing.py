@@ -141,6 +141,7 @@ class ServiceDebitRequest:
     reason: str
     actor_user_id: int
     ref: str | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -436,6 +437,7 @@ async def service_debit_tokens(
             amount=data.amount,
             reason=data.reason,
             ref=data.ref,
+            idempotency_key=data.idempotency_key,
         )
     except ApiError as exc:
         return _err(exc)

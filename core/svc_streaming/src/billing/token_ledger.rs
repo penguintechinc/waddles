@@ -141,6 +141,9 @@ struct DebitRequestBody<'a> {
     actor_user_id: i64,
     #[serde(rename = "ref")]
     reference: &'a str,
+    /// Stable per-admission replay key: hub-api debits once per key and returns the original
+    /// result on a retry.
+    idempotency_key: &'a str,
 }
 
 /// hub-api's internal (machine-JWT) debit path for one community.
@@ -225,14 +228,14 @@ impl TokenLedgerClient {
     /// `actor_user_id` is the member the admission is for (the stream starter's JWT `sub`);
     /// the request itself is authenticated with this service's own machine JWT.
     ///
-    /// `reference` should uniquely identify the admission attempt (e.g.
-    /// `format!("stream:{config_id}:{started_at}")`) -- hub-api's ledger
-    /// is not idempotency-keyed on this field (it's the
-    /// `credit_tokens`/`debit_tokens` audit `ref`, not an idempotency
-    /// key), so a genuine retry after a network timeout can double-debit;
-    /// callers must treat a retried `start()` as a new admission attempt
-    /// rather than relying on a dedup guarantee this client doesn't
-    /// provide.
+    /// `reference` is the audit label only. `idempotency_key` MUST be stable across retries of
+    /// the same admission (see `api::lifecycle::admission_idempotency_key`) and never contain a
+    /// timestamp: hub-api debits once per key and answers a replay with the ORIGINAL result, so
+    /// a network retry cannot double-charge.
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "flat wire-contract arguments of one debit call; a params struct adds no clarity"
+    )]
     pub async fn debit_transcoding_tokens(
         &self,
         hub_api_url: &str,
@@ -241,6 +244,7 @@ impl TokenLedgerClient {
         amount: i64,
         product_key: &str,
         reference: &str,
+        idempotency_key: &str,
     ) -> TokenDebitResult {
         let url = debit_url(hub_api_url, community_id);
         let body = DebitRequestBody {
@@ -249,6 +253,7 @@ impl TokenLedgerClient {
             reason: "svc_streaming_transcode_admission",
             actor_user_id,
             reference,
+            idempotency_key,
         };
 
         let Some(source) = self.bearer.as_ref() else {
@@ -417,7 +422,15 @@ mod tests {
 
     async fn debit(client: &TokenLedgerClient, base_url: &str) -> TokenDebitResult {
         client
-            .debit_transcoding_tokens(base_url, 42, 7, 5, "transcoding_minutes", "ref-1")
+            .debit_transcoding_tokens(
+                base_url,
+                42,
+                7,
+                5,
+                "transcoding_minutes",
+                "ref-1",
+                "stream:3:adm-1",
+            )
             .await
     }
 
@@ -450,6 +463,7 @@ mod tests {
         assert_eq!(captured.body["amount"], 5);
         assert_eq!(captured.body["reason"], "svc_streaming_transcode_admission");
         assert_eq!(captured.body["ref"], "ref-1");
+        assert_eq!(captured.body["idempotency_key"], "stream:3:adm-1");
     }
 
     #[tokio::test]

@@ -12,9 +12,9 @@
 //! JWT and a `streaming_configs.transcode_enabled` row at the same time.
 
 use axum::extract::{Path, State};
+use axum::http::HeaderMap;
 use axum::Extension;
 use sea_orm::DatabaseConnection;
-use time::OffsetDateTime;
 
 use crate::billing::token_ledger::TokenLedgerClient;
 use crate::db::entities::streaming_config;
@@ -54,6 +54,41 @@ fn map_pipeline_error(err: PipelineError) -> ApiError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn idempotency_key_is_stable_across_retries_and_timestamp_free() {
+        let first = admission_idempotency_key(7, 3, "adm-1");
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        let retry = admission_idempotency_key(7, 3, "adm-1");
+        assert_eq!(first, retry);
+        assert_eq!(first, "stream:7:3:adm-1");
+        assert_ne!(first, admission_idempotency_key(7, 3, "adm-2"));
+        assert_ne!(first, admission_idempotency_key(7, 4, "adm-1"));
+        assert_ne!(first, admission_idempotency_key(8, 3, "adm-1"));
+    }
+
+    #[test]
+    fn admission_id_reuses_client_header_and_rejects_unsafe_values() {
+        let mut headers = HeaderMap::new();
+        headers.insert(ADMISSION_ID_HEADER, "adm-42".parse().unwrap());
+        assert_eq!(admission_id_from_headers(&headers), "adm-42");
+        assert_eq!(admission_id_from_headers(&headers), "adm-42");
+
+        let long = "x".repeat(MAX_ADMISSION_ID_LEN + 1);
+        for bad in ["", "has space", "semi;colon", long.as_str()] {
+            let mut h = HeaderMap::new();
+            h.insert(ADMISSION_ID_HEADER, bad.parse().unwrap());
+            let id = admission_id_from_headers(&h);
+            assert_ne!(id, bad);
+            assert!(
+                uuid::Uuid::parse_str(&id).is_ok(),
+                "fell back to a fresh uuid"
+            );
+        }
+        let a = admission_id_from_headers(&HeaderMap::new());
+        let b = admission_id_from_headers(&HeaderMap::new());
+        assert_ne!(a, b, "header-less requests are distinct attempts");
+    }
 
     #[test]
     fn map_pipeline_error_covers_every_variant() {
@@ -137,6 +172,41 @@ fn actor_user_id(claims: &crate::http::auth::Claims) -> Option<i64> {
     claims.sub.parse::<i64>().ok().filter(|id| *id > 0)
 }
 
+/// Request header a client sets once per start attempt and reuses on every retry of it.
+pub const ADMISSION_ID_HEADER: &str = "idempotency-key";
+
+/// Longest admission id honoured; longer or non-token values are ignored (a fresh id is used).
+const MAX_ADMISSION_ID_LEN: usize = 64;
+
+/// Stable debit idempotency key for one admission: `stream:{community}:{config}:{admission_id}`.
+///
+/// Deterministic in its inputs and deliberately timestamp-free, so a retry of the same
+/// admission produces the same key and hub-api debits once. `admission_id` is the client's
+/// `Idempotency-Key` (identical on every retry of one start attempt) or, when absent, a fresh
+/// UUID per call -- a distinct attempt, which is the only safe reading of a header-less request.
+pub fn admission_idempotency_key(community_id: i32, config_id: i32, admission_id: &str) -> String {
+    format!("stream:{community_id}:{config_id}:{admission_id}")
+}
+
+/// Extracts the admission id from the request headers, falling back to a fresh UUID.
+///
+/// Only `[A-Za-z0-9._-]` up to [`MAX_ADMISSION_ID_LEN`] is accepted so the value is safe to embed
+/// in the key and log lines.
+fn admission_id_from_headers(headers: &HeaderMap) -> String {
+    headers
+        .get(ADMISSION_ID_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| {
+            !v.is_empty()
+                && v.len() <= MAX_ADMISSION_ID_LEN
+                && v.bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'))
+        })
+        .map(str::to_owned)
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string())
+}
+
 /// TRANSCODE admission (BLOCK-WITH-FALLBACK, ported from the Python
 /// alpha's `services/streaming_service.py::start_forwarding`): if
 /// `config.transcode_enabled` is false, no ledger call is made and this
@@ -148,6 +218,10 @@ fn actor_user_id(claims: &crate::http::auth::Claims) -> Option<i64> {
 /// resolves to `false` -- `start()` still succeeds and the stream still
 /// starts, just as a passthrough. Never returns an `Err`: a
 /// billing/entitlement check must never take down a live-stream start.
+#[allow(
+    clippy::too_many_arguments,
+    reason = "flat inputs of one admission decision, all resolved by the single caller"
+)]
 async fn resolve_transcode_admission(
     token_ledger: &TokenLedgerClient,
     hub_api_url: &str,
@@ -156,6 +230,7 @@ async fn resolve_transcode_admission(
     transcode_product_key: &str,
     community_id: i32,
     config: &streaming_config::Model,
+    admission_id: &str,
 ) -> bool {
     if !config.transcode_enabled {
         return false;
@@ -172,11 +247,8 @@ async fn resolve_transcode_admission(
         return false;
     };
 
-    let reference = format!(
-        "stream:{}:{}",
-        config.id,
-        crate::timestamp::to_rfc3339_offset(OffsetDateTime::now_utc())
-    );
+    let idempotency_key = admission_idempotency_key(community_id, config.id, admission_id);
+    let reference = format!("stream:{}", config.id);
     let result = token_ledger
         .debit_transcoding_tokens(
             hub_api_url,
@@ -185,6 +257,7 @@ async fn resolve_transcode_admission(
             transcode_token_cost,
             transcode_product_key,
             &reference,
+            &idempotency_key,
         )
         .await;
 
@@ -230,9 +303,11 @@ pub async fn start(
     State(state): State<AppState>,
     DbConn(db): DbConn,
     Extension(engine): Extension<SharedEngine>,
+    headers: HeaderMap,
 ) -> Result<ApiSuccess<PipelineStatusDto>, ApiError> {
     assert_tenant_owns_community(&db, &claims.tenant, community_id).await?;
     let config = fetch_config(&db, community_id, config_id).await?;
+    let admission_id = admission_id_from_headers(&headers);
     let transcode_applied = resolve_transcode_admission(
         &state.token_ledger,
         &state.config.cli.hub_api_url,
@@ -241,6 +316,7 @@ pub async fn start(
         &state.config.cli.transcode_product_key,
         community_id,
         &config,
+        &admission_id,
     )
     .await;
     let spec = build_pipeline_spec(
