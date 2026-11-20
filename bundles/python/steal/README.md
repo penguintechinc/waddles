@@ -1,7 +1,7 @@
 # steal (Python)
 
 `!steal @user` -- a risk/reward points steal over the shared community economy. First-party
-(`provider: builtin`, `app_id: waddles.core.example.steal`).
+(`provider: builtin`, `app_id: penguintechinc.waddles.steal`).
 
 > Attribution: inspired by PenguinTwitchBot by SuperPenguinTV (with permission) -- ideas/design
 > only, no code copied.

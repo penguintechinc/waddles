@@ -1,8 +1,8 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.hangman -- see bundles/python/first/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.hangman -- see bundles/python/first/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 schema_version: 2
-app_id: waddles.core.example.hangman
+app_id: penguintechinc.waddles.hangman
 name: Hangman Bundle (Python)
 version: 1.0.7
 feature: waddles.core.example

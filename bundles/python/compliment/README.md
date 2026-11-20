@@ -2,7 +2,7 @@
 
 `!compliment [@user]` -- a random, family-friendly compliment addressed to the caller or a named
 user, from a built-in pool of 14 plus the community's own custom entries. First-party
-(`provider: builtin`, `app_id: waddles.core.example.compliment`), kv-only, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.compliment`), kv-only, WASI component.
 Built-in lines are original to Waddles (no third-party text).
 
 | | |

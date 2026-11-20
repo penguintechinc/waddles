@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.fish
+app_id: penguintechinc.waddles.fish
 name: Fishing Game Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !fish (cast)/!fish list/!fish set cooldown <seconds>. See
 # src/app.py's own module docstring for full scope + the cross-community-leaderboard deferral.

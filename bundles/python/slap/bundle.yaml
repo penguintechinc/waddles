@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.slap
+app_id: penguintechinc.waddles.slap
 name: Slap Example Bundle (Python)
 # 1.0.2: activation-gated only -- removed the in-bundle waddles.command-slap feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
 version: 1.0.6

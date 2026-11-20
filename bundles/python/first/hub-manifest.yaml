@@ -1,8 +1,8 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.first -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.first -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 schema_version: 2
-app_id: waddles.core.example.first
+app_id: penguintechinc.waddles.first
 name: Daily First Claim Bundle (Python)
 version: 1.0.8
 feature: waddles.core.example

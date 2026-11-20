@@ -60,7 +60,7 @@ def _run_through(host: _FakeHost, text: str, **badges: Any) -> str | None:
     env = StageEnvelope(
         tenant="t",
         community="c1",
-        app_id="waddles.core.example.say",
+        app_id="penguintechinc.waddles.say",
         stage="action",
         event=out,
         ts="2026-10-21T00:00:00.000Z",

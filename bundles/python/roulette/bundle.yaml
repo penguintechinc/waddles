@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.roulette
+app_id: penguintechinc.waddles.roulette
 name: Russian Roulette Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !roulette (pull)/!roulette list/!roulette set cooldown
 # <seconds>. See src/app.py's own module docstring for full scope, the flavor-only-no-real-

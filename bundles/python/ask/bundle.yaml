@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.ask
+app_id: penguintechinc.waddles.ask
 name: Ask Bundle (Python, AI)
 # 1.0.0: `!ask` -- SFW-guarded AI Q&A via the ai.generate host capability (stage-next world).
 version: 1.0.3

@@ -2,7 +2,7 @@
 
 `!hug [target]` -- a lighthearted reply that wraps people in comically wholesome hugs.
 First-party, net-new Waddles flavor content (`provider: builtin`,
-`app_id: waddles.core.example.hug`); no third-party source, so no attribution to carry.
+`app_id: penguintechinc.waddles.hug`); no third-party source, so no attribution to carry.
 Structural twin of `bundles/python/highfive` and `bundles/python/wave`, modeled on
 `bundles/python/slap`/`eightball`.
 
@@ -82,5 +82,5 @@ pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=90
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.hug`, activation target
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.hug`, activation target
 `global`); dark until `waddles.command-hug` is turned on.

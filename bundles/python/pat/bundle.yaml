@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.pat
+app_id: penguintechinc.waddles.pat
 name: Pat Example Bundle (Python)
 version: 1.0.3
 feature: waddles.core.example

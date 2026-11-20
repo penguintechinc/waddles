@@ -1,4 +1,4 @@
-# ask (`waddles.core.example.ask`)
+# ask (`penguintechinc.waddles.ask`)
 
 `!ask <question>` -> a concise (<=2 sentence), SFW-guarded AI answer. Same AI-bundle pattern as
 `translate` (`ai.generate`, process stage only, `stage-next` world, host-picked model, one call per

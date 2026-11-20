@@ -1,7 +1,7 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.dailycounter.
+# hub-api install-pipeline manifest (schema_version 2) for penguintechinc.waddles.dailycounter.
 # 1.0.0: new utility-pack bundle -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.dailycounter
+app_id: penguintechinc.waddles.dailycounter
 name: Daily Counter Bundle (Python)
 version: 1.0.6
 feature: waddles.core.example

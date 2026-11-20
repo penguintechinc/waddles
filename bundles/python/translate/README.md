@@ -1,4 +1,4 @@
-# translate (`waddles.core.example.translate`)
+# translate (`penguintechinc.waddles.translate`)
 
 `!translate <target-language> <text>` -> an AI translation; the source language is auto-detected.
 Example: `!translate spanish good morning` -> `[spanish] buenos dias`.

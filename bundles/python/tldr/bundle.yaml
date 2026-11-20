@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.tldr
+app_id: penguintechinc.waddles.tldr
 name: TLDR Bundle (Python, AI)
 # 1.0.0: AI `!tldr` via the ai.generate host capability (stage-next world).
 version: 1.0.3

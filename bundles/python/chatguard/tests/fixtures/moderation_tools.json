@@ -1,6 +1,6 @@
 {
   "discord.moderation.ban": {
-    "app_id": "waddles.core.service.discord",
+    "app_id": "penguintechinc.waddles.discord",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -23,7 +23,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "discord.moderation.kick": {
-    "app_id": "waddles.core.service.discord",
+    "app_id": "penguintechinc.waddles.discord",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -41,7 +41,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "discord.moderation.timeout": {
-    "app_id": "waddles.core.service.discord",
+    "app_id": "penguintechinc.waddles.discord",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -65,7 +65,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "discord.moderation.unban": {
-    "app_id": "waddles.core.service.discord",
+    "app_id": "penguintechinc.waddles.discord",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -83,7 +83,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "discord.moderation.untimeout": {
-    "app_id": "waddles.core.service.discord",
+    "app_id": "penguintechinc.waddles.discord",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -101,7 +101,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "twitch.moderation.ban": {
-    "app_id": "waddles.core.service.twitch",
+    "app_id": "penguintechinc.waddles.twitch",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -123,7 +123,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "twitch.moderation.delete_message": {
-    "app_id": "waddles.core.service.twitch",
+    "app_id": "penguintechinc.waddles.twitch",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -141,7 +141,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "twitch.moderation.timeout": {
-    "app_id": "waddles.core.service.twitch",
+    "app_id": "penguintechinc.waddles.twitch",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -169,7 +169,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "twitch.moderation.unban": {
-    "app_id": "waddles.core.service.twitch",
+    "app_id": "penguintechinc.waddles.twitch",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -187,7 +187,7 @@
     "source": "platform bundle exported_tools (PR #1118 / #1124)"
   },
   "youtube.chat.ban": {
-    "app_id": "waddles.core.service.youtube",
+    "app_id": "penguintechinc.waddles.youtube",
     "input_schema": {
       "additionalProperties": false,
       "properties": {
@@ -210,7 +210,7 @@
     "source": "ASSUMED (S3a in flight, no published schema) -- re-verify when youtube tools merge"
   },
   "youtube.chat.unban": {
-    "app_id": "waddles.core.service.youtube",
+    "app_id": "penguintechinc.waddles.youtube",
     "input_schema": {
       "additionalProperties": false,
       "properties": {

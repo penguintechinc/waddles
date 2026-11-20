@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.queue
+app_id: penguintechinc.waddles.queue
 name: Viewer Queue Bundle (Python)
 # 1.0.0: initial kv-only viewer queue -- !vqueue (not !queue: music owns it) join/leave/(position)/list/next/clear. See
 # src/app.py's module docstring (feature/bundles-queue-timer).

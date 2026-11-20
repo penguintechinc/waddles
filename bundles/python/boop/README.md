@@ -1,7 +1,7 @@
 # boop (Python)
 
 `!boop [target]` -- a lighthearted, harmless flavor-text reply that boops someone on the nose.
-First-party (`provider: builtin`, `app_id: waddles.core.example.boop`), stateless, WASI
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.boop`), stateless, WASI
 component. Structural twin of `wave`; flavor bank written fresh for this bundle.
 
 | | |

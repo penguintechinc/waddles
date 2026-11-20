@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.duel
+app_id: penguintechinc.waddles.duel
 name: Duel Challenge Example Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !duel <user> (challenge)/!duel list/!duel set cooldown
 # <seconds>. See src/app.py's own module docstring for full scope.

@@ -1,5 +1,5 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.lurk -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.lurk -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
 # 1.0.0 is permanently retired -- fix/bump-command-bundles-1.0.1. The deployed wasm was
@@ -11,7 +11,7 @@
 # flags-enabled source. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
 # retirement comment (fix/csping-version-bump, #575).
 schema_version: 2
-app_id: waddles.core.example.lurk
+app_id: penguintechinc.waddles.lurk
 name: Lurk Toggle Example Bundle (Python)
 # 1.0.3 (feature/lurk-v1): stateful lurk/unlurk rewrite -- see bundle.yaml/src/app.py.
 # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key

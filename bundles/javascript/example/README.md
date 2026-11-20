@@ -1,6 +1,6 @@
 # example (JS/TS)
 
-`waddles.core.example.echo` -- the Tier-1 JS/TS **SDK conformance example**: `!echo <text>`
+`penguintechinc.waddles.echo` -- the Tier-1 JS/TS **SDK conformance example**: `!echo <text>`
 replies with the text plus an incrementing counter (`hello (echo #3)`). Behaviorally identical
 to the Python/Rust Tier-1 examples, authored against `@waddles/waddle-sdk-js`'s `defineBundle`
 API. **Not published, not installed, not a shipped command bundle.**

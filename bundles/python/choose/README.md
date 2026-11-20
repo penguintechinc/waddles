@@ -1,7 +1,7 @@
 # choose (Python)
 
 `!choose a | b | c` -- pick one of the caller's own options at random. First-party
-(`provider: builtin`, `app_id: waddles.core.example.choose`), stateless, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.choose`), stateless, WASI component.
 
 | | |
 |---|---|

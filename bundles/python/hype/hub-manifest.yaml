@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.hype
+app_id: penguintechinc.waddles.hype
 name: Hype Counter (Python)
 version: 1.0.6
 feature: waddles.core.example

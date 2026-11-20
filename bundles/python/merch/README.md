@@ -1,7 +1,7 @@
 # merch (Python)
 
 `!merch` -- show, set or clear this community's merch store link. First-party
-(`provider: builtin`, `app_id: waddles.core.example.merch`), kv-only, WASI component. A
+(`provider: builtin`, `app_id: penguintechinc.waddles.merch`), kv-only, WASI component. A
 community can alias another name with the existing `alias` bundle (one prefix per bundle).
 
 | | |

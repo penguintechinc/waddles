@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.quote
+app_id: penguintechinc.waddles.quote
 name: Quote Book Bundle (Python)
 # 1.0.0: strangler extraction of core/svc_process/builtin_handlers/social_quote_process.py's
 # `!quote` command into its own componentize-py bundle -- feature/bundle-quote.

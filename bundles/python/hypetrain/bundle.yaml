@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.hypetrain
+app_id: penguintechinc.waddles.hypetrain
 name: Hype Train Bundle (Python)
 version: 1.0.3
 feature: waddles.core.example

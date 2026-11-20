@@ -1,8 +1,8 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2, schema_version 2) for
-# waddles.core.example.wouldyourather -- see bundles/python/pyping/hub-manifest.yaml's header
+# penguintechinc.waddles.wouldyourather -- see bundles/python/pyping/hub-manifest.yaml's header
 # for why this is separate from `bundle.yaml`.
 schema_version: 2
-app_id: waddles.core.example.wouldyourather
+app_id: penguintechinc.waddles.wouldyourather
 name: Would You Rather Bundle (Python)
 version: 1.0.3
 feature: waddles.core.example

@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.wouldyourather
+app_id: penguintechinc.waddles.wouldyourather
 name: Would You Rather Bundle (Python)
 version: 1.0.3
 feature: waddles.core.example

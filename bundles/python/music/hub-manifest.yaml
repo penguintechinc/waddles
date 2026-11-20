@@ -1,9 +1,9 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.music -- see bundles/python/pyping/hub-manifest.yaml's own header
+# penguintechinc.waddles.music -- see bundles/python/pyping/hub-manifest.yaml's own header
 # for why this is a separate file from this bundle's `bundle.yaml` (a different consumer's
 # schema).
 schema_version: 2
-app_id: waddles.core.example.music
+app_id: penguintechinc.waddles.music
 name: Song Request Queue Bundle (Python)
 version: 1.1.0
 feature: waddles.core.example
@@ -38,15 +38,15 @@ stages:
     entry: "waddle:bundle/action-stage#dispatch"
   presentation:
     owned_surfaces:
-      - waddles.core.example.music.now_playing
-      - waddles.core.example.music.queue
+      - penguintechinc.waddles.music.now_playing
+      - penguintechinc.waddles.music.queue
     overlay_widgets:
       - widget_id: dj.music.album_now_playing
         display_name: "Now Playing (Album Cover)"
         description: "Overlay widget showing current song, artist, and album artwork"
         category: music
         output_kind: surface
-        surface_id: waddles.core.example.music.now_playing
+        surface_id: penguintechinc.waddles.music.now_playing
         default_x: 48
         default_y: 860
         default_width: 460
@@ -57,7 +57,7 @@ stages:
         description: "Overlay widget showing upcoming song requests from viewers"
         category: music
         output_kind: surface
-        surface_id: waddles.core.example.music.queue
+        surface_id: penguintechinc.waddles.music.queue
         default_x: 48
         default_y: 500
         default_width: 460
@@ -83,55 +83,55 @@ permissions:
     justification: "music replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"
     justification: "music replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
-  - id: "tool.call:waddles.core.service.music-requests:requests.list"
+  - id: "tool.call:penguintechinc.waddles.music-requests:requests.list"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: false
-  - id: "tool.call:waddles.core.service.music-requests:requests.advance_due"
+  - id: "tool.call:penguintechinc.waddles.music-requests:requests.advance_due"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: false
-  - id: "tool.call:waddles.core.service.music-requests:history.list"
+  - id: "tool.call:penguintechinc.waddles.music-requests:history.list"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: false
-  - id: "tool.call:waddles.core.service.music-requests:config.get"
+  - id: "tool.call:penguintechinc.waddles.music-requests:config.get"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: false
-  - id: "tool.call:waddles.core.service.music-requests:page.link"
+  - id: "tool.call:penguintechinc.waddles.music-requests:page.link"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: false
-  - id: "tool.call:waddles.core.service.music-requests:music.stats.top"
+  - id: "tool.call:penguintechinc.waddles.music-requests:music.stats.top"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: false
-  - id: "tool.call:waddles.core.service.music-requests:requests.add"
+  - id: "tool.call:penguintechinc.waddles.music-requests:requests.add"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.music-requests:requests.cancel_own"
+  - id: "tool.call:penguintechinc.waddles.music-requests:requests.cancel_own"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.music-requests:requests.import"
+  - id: "tool.call:penguintechinc.waddles.music-requests:requests.import"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.music-requests:requests.remove"
+  - id: "tool.call:penguintechinc.waddles.music-requests:requests.remove"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.music-requests:requests.advance"
+  - id: "tool.call:penguintechinc.waddles.music-requests:requests.advance"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.music-requests:config.set"
+  - id: "tool.call:penguintechinc.waddles.music-requests:config.set"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.music-requests:settings.set"
+  - id: "tool.call:penguintechinc.waddles.music-requests:settings.set"
     justification: "Delegate the song-request queue to the music-requests service"
     params:
       write: true
@@ -139,40 +139,40 @@ routes_to: []
 requested_tools:
   - tool: requests.list
     access: read
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: requests.advance_due
     access: read
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: history.list
     access: read
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: config.get
     access: read
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: page.link
     access: read
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: music.stats.top
     access: read
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: requests.add
     access: write
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: requests.cancel_own
     access: write
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: requests.import
     access: write
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: requests.remove
     access: write
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: requests.advance
     access: write
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: config.set
     access: write
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests
   - tool: settings.set
     access: write
-    target_app_id: waddles.core.service.music-requests
+    target_app_id: penguintechinc.waddles.music-requests

@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.rip
+app_id: penguintechinc.waddles.rip
 name: Respects Counter (Python)
 version: 1.0.6
 feature: waddles.core.example

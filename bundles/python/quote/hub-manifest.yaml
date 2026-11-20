@@ -1,5 +1,5 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.quote -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.quote -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
 # 1.0.0: strangler extraction of core/svc_process/builtin_handlers/social_quote_process.py's `!quote`
@@ -9,7 +9,7 @@
 # Ported off the retired `waddle_sdk.db` DAL-style facade onto the structured
 # insert/get/query/update/delete API -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.quote
+app_id: penguintechinc.waddles.quote
 name: Quote Book Bundle (Python)
 version: 1.0.8
 feature: waddles.core.example

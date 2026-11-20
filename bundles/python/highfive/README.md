@@ -1,7 +1,7 @@
 # highfive (Python)
 
 `!highfive [target]` -- a lighthearted reply that gives people high fives. First-party, net-new
-Waddles flavor content (`provider: builtin`, `app_id: waddles.core.example.highfive`); no
+Waddles flavor content (`provider: builtin`, `app_id: penguintechinc.waddles.highfive`); no
 third-party source, so no attribution to carry. Structural twin of `bundles/python/hug` and
 `bundles/python/wave`, modeled on `bundles/python/slap`/`eightball`.
 
@@ -81,5 +81,5 @@ pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=90
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.highfive`, activation target
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.highfive`, activation target
 `global`); dark until `waddles.command-highfive` is turned on.

@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.chat
+app_id: penguintechinc.waddles.chat
 name: Chat History Bundle (Python)
 # 1.0.0: initial port of core/svc_process/builtin_handlers/community_chat_process.py's two read-only
 # commands (chat-history, channels) into a WASM-component App Bundle -- feature/bundle-chat.

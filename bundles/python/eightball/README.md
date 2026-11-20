@@ -2,7 +2,7 @@
 
 `!8ball [question]` -- a random canned answer from a generic, non-trademarked 17-line bank
 (affirmative / non-committal / negative). First-party (`provider: builtin`,
-`app_id: waddles.core.example.eightball`), stateless, WASI component. The reference shape the
+`app_id: penguintechinc.waddles.eightball`), stateless, WASI component. The reference shape the
 other stateless command bundles (`boop`, `choose`, ...) are modeled on.
 
 | | |

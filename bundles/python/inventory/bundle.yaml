@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.inventory
+app_id: penguintechinc.waddles.inventory
 name: Inventory Bundle (Python)
 # 1.0.0: initial DB-backed v1 -- !inventory|!inv (own items)/!inv <user>/
 # !inv give <item> <user>/!inv add|remove <item> <user>. See src/app.py's own module docstring
