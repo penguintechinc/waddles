@@ -39,6 +39,7 @@ from services import access_token_service as svc
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.route_guards import community_admin_guard
 
 user_tokens_bp = Blueprint("v1_user_tokens", __name__, url_prefix="/api/v1/user/tokens")
 community_tokens_bp = Blueprint("v1_community_tokens", __name__, url_prefix="/api/v1/admin")
@@ -248,6 +249,7 @@ async def revoke_pat() -> tuple[dict[str, object], int]:
 @community_tokens_bp.route("/<cuuid:community_id>/tokens/scopes", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def community_list_scopes(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/tokens/scopes` -- catalog for the CAT scope picker."""
     if not _tenant_ok(community_id):
@@ -260,6 +262,7 @@ async def community_list_scopes(community_id: int) -> tuple[dict[str, object], i
 @community_tokens_bp.route("/<cuuid:community_id>/tokens/cats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def list_cats(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/tokens/cats`."""
     if not _tenant_ok(community_id):
@@ -273,6 +276,7 @@ async def list_cats(community_id: int) -> tuple[dict[str, object], int]:
 @community_tokens_bp.route("/<cuuid:community_id>/tokens/cats", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(CreateCatRequest)
 async def create_cat(data: CreateCatRequest, community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/tokens/cats`."""
@@ -300,6 +304,7 @@ async def create_cat(data: CreateCatRequest, community_id: int) -> tuple[dict[st
 @community_tokens_bp.route("/<cuuid:community_id>/tokens/cats/<int:token_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def revoke_cat(community_id: int, token_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/tokens/cats/<tokenId>`."""
     if not _tenant_ok(community_id):

@@ -49,6 +49,7 @@ in-scope fix for a byte-for-byte controller port.
 
 from __future__ import annotations
 
+import dataclasses
 import json
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -59,10 +60,15 @@ from flask_core.auth import verify_jwt_token
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, Response, request
+from quart import Blueprint, Response, current_app, request
 
 from services.event_calendar_proxy import EventCalendarProxyClient, UserContext
-from services.route_guards import community_member_guard
+from services.route_guards import (
+    community_admin_guard,
+    community_member_guard,
+    tenant_admin_guard,
+)
+from services.schema import bind_calendar_sync_tables
 
 #: Two-gate feature flags (license tier AND PostHog) for the Event module's
 #: two capabilities -- `libs/event_module/features.py`'s
@@ -130,6 +136,16 @@ class ProxyRoute:
     #: `True` = community MEMBER guard (tenant fence 404 + active non-banned member, else 403)
     #: layered under the scope check; for `:read` routes the viewer's `*:read` would admit anyone.
     member_guard: bool = False
+    #: `True` = tenant-admin guard, for a route with NO community in its URL whose body names the
+    #: target (`verify-ticket`): the community cannot be bound, so only a tenant admin may use it.
+    tenant_admin_guard: bool = False
+
+
+#: Identity fields a caller must never choose for an own-data (member) write: the acting user is
+#: always the verified token subject the proxy forwards in `X-User-Context`.
+_IDENTITY_BODY_KEYS: frozenset[str] = frozenset(
+    {"user_id", "platform_user_id", "username", "platform", "role", "hub_user_id"}
+)
 
 
 # calendarController.js -- /api/v1/calendar/* (user-facing)
@@ -227,9 +243,10 @@ _CALENDAR_ADMIN_ROUTES: tuple[ProxyRoute, ...] = (
     # RSVPs -- base auth only in Node (no requireCommunityAdmin)
     ProxyRoute("adm_rsvp_create", "/<community_id>/calendar/events/<event_id>/rsvp", "POST",
                "/api/v1/calendar/{community_id}/events/{event_id}/rsvp", SCOPE_WRITE,
-               has_body=True),
+               has_body=True, member_guard=True),
     ProxyRoute("adm_rsvp_cancel", "/<community_id>/calendar/events/<event_id>/rsvp", "DELETE",
-               "/api/v1/calendar/{community_id}/events/{event_id}/rsvp", SCOPE_WRITE),
+               "/api/v1/calendar/{community_id}/events/{event_id}/rsvp", SCOPE_WRITE,
+               member_guard=True),
     ProxyRoute("adm_attendees", "/<community_id>/calendar/events/<event_id>/attendees", "GET",
                "/api/v1/calendar/{community_id}/events/{event_id}/attendees", SCOPE_ADMIN),
     ProxyRoute("adm_rsvp_counts", "/<community_id>/calendar/events/<event_id>/rsvp-counts", "GET",
@@ -275,7 +292,8 @@ _CALENDAR_ADMIN_ROUTES: tuple[ProxyRoute, ...] = (
     # Check-in -- ticketController.js -> FEATURE_EVENT_TICKETING
     ProxyRoute("adm_verify_ticket", "/calendar/verify-ticket", "POST",
                "/api/v1/calendar/verify-ticket", SCOPE_WRITE,
-               has_body=True, attach_client_meta=True, feature_flag=FEATURE_EVENT_TICKETING),
+               has_body=True, attach_client_meta=True, feature_flag=FEATURE_EVENT_TICKETING,
+               tenant_admin_guard=True),
     ProxyRoute("adm_check_in", "/<community_id>/calendar/events/<event_id>/check-in", "POST",
                "/api/v1/calendar/{community_id}/events/{event_id}/check-in", SCOPE_ADMIN,
                has_body=True, attach_client_meta=True, feature_flag=FEATURE_EVENT_TICKETING),
@@ -367,10 +385,39 @@ async def _read_body(req: Any) -> dict[str, Any]:
     return data if isinstance(data, dict) else {}
 
 
+def _event_in_community(community_id: int, event_id: str) -> bool:
+    """True when `calendar_events.id == event_id` belongs to `community_id`.
+
+    The proxy forwards `event_id` opaquely and `calendar-interaction` owns the event tables, so
+    without this check a verified admin of community A could name community B's event id under
+    A's URL (IDOR). A non-numeric or unknown id is simply "not in this community".
+    """
+    if not event_id.isdigit():
+        return False
+    dal = current_app.config["dal"]
+    bind_calendar_sync_tables(dal)
+    row = (
+        dal(
+            (dal.calendar_events.id == int(event_id))
+            & (dal.calendar_events.community_id == community_id)
+        )
+        .select(dal.calendar_events.id)
+        .first()
+    )
+    return row is not None
+
+
 def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
     """Build one Quart view function from a `ProxyRoute` row."""
 
-    async def handler(**path_args: str) -> Any:
+    async def handler(**path_args: Any) -> Any:
+        community_id = path_args.get("community_id")
+        if (
+            isinstance(community_id, int)
+            and "event_id" in path_args
+            and not _event_in_community(community_id, str(path_args["event_id"]))
+        ):
+            return error_response("Event not found", status_code=404, error_code="NOT_FOUND")
         if route.feature_flag is not None:
             ctx = get_tenant_context(request)
             if ctx is None or not await feature_enabled(route.feature_flag, tenant=ctx.tenant_slug):
@@ -380,8 +427,17 @@ def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
                     error_code="FEATURE_NOT_ENABLED",
                 )
         user_context = _build_user_context(request)
+        if route.member_guard and user_context.role != "super_admin":
+            # A member-guarded route must not hand the upstream an unverified "admin" identity.
+            user_context = dataclasses.replace(user_context, role="member")
         query = _select_query(request, route.query_params)
         body: dict[str, Any] | None = await _read_body(request) if route.has_body else None
+        if body is not None and isinstance(community_id, int):
+            # The community is the verified URL value; a body-supplied one never reaches upstream.
+            if "community_id" in body:
+                body = {**body, "community_id": community_id}
+            if route.member_guard:
+                body = {k: v for k, v in body.items() if k not in _IDENTITY_BODY_KEYS}
         if route.attach_client_meta:
             body = {
                 **(body or {}),
@@ -423,6 +479,23 @@ def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
     return handler
 
 
+def _guard_kind(route: ProxyRoute) -> str | None:
+    """The guard a scoped route needs: `member`, `admin`, `tenant-admin` or None (own-data).
+
+    Every route whose URL names a community MUST resolve to a community guard; an unclassifiable
+    one raises at import so a new route can never ship with only a tenant-wide token scope.
+    """
+    if route.member_guard:
+        return "member"
+    if route.tenant_admin_guard:
+        return "tenant-admin"
+    if "<community_id>" in route.rule:
+        if route.scope == SCOPE_ADMIN:
+            return "admin"
+        raise RuntimeError(f"event route {route.name}: community route has no guard classification")
+    return None
+
+
 def _register(bp: Blueprint, routes: tuple[ProxyRoute, ...]) -> None:
     """Wire every `ProxyRoute` onto `bp`: tenant_middleware(outermost) -> require_scope -> handler.
 
@@ -440,8 +513,13 @@ def _register(bp: Blueprint, routes: tuple[ProxyRoute, ...]) -> None:
             # `Callable[..., Any]` -- already `Any`-typed at both ends
             # under `follow_imports = "skip"` (pyproject.toml), so no
             # ignore is needed or accepted (`warn_unused_ignores = true`).
-            if route.member_guard:
+            kind = _guard_kind(route)
+            if kind == "member":
                 view = community_member_guard(view)
+            elif kind == "admin":
+                view = community_admin_guard(view)
+            elif kind == "tenant-admin":
+                view = tenant_admin_guard(view)
             view = require_scope(route.scope)(view)
             view = tenant_middleware(view)
         # Client-facing community ids are public UUIDs: the app-level hook swaps the `cuuid`

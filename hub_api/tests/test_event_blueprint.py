@@ -33,6 +33,7 @@ back to 227 passed, 4 skipped, 0 failed.
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -52,6 +53,8 @@ from blueprints.v1.event import (
     event_calendar_bp,
 )
 from services.event_calendar_proxy import ProxyResult
+from services.global_identity import ensure_tables as ensure_global_tables
+from services.schema import bind_calendar_sync_tables
 from tests.community_ids import install_community_ids, public_id
 
 _PATH_FILL = {
@@ -157,9 +160,18 @@ _EXPECTED_SCOPES: dict[str, str | None] = {
 def app(tenant_db: Any) -> Quart:
     # Minimal communities table; ids 1..3 seeded so community 3 matches the numeric id the
     # downstream-path assertions expect (the cuuid hook swaps the public UUID back to it).
-    tenant_db.define_table("communities", Field("name"))
+    tenant_db.define_table("communities", Field("name"), Field("tenant_id", "integer"))
+    tenant_id = tenant_db(tenant_db.tenants.slug == "acme-corp").select().first().id
     for n in range(1, 4):
-        tenant_db.communities.insert(name=f"c{n}")
+        tenant_db.communities.insert(name=f"c{n}", tenant_id=tenant_id)
+    tenant_db.commit()
+    # Event 11 belongs to community 3: event-scoped proxy routes now fence the event id to the
+    # URL community (tests/test_authz_sweep_c.py proves the cross-community refusal).
+    bind_calendar_sync_tables(tenant_db, migrate=True)
+    ensure_global_tables(tenant_db, migrate=True)  # real `tenant_admins` for the tenant-admin guard
+    tenant_db.calendar_events.insert(
+        id=11, community_id=3, title="t", event_date=datetime(2030, 1, 1), status="scheduled"
+    )
     tenant_db.commit()
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
@@ -197,6 +209,15 @@ def proxy_stub(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     stub = AsyncMock(return_value=ProxyResult(ok=True, status_code=200, body={"ok": True}))
     monkeypatch.setattr(event_module._proxy_client, "request", stub)
     return stub
+
+
+@pytest.fixture(autouse=True)
+def _guards_bypassed(bypass_route_guards: Any) -> None:
+    """Bypass the community guards for these contract tests.
+
+    They exercise routing/body behaviour with a bare token; the real guards are proven (no
+    bypass) by `tests/test_authz_sweep_c.py`.
+    """
 
 
 @pytest.fixture(autouse=True)
