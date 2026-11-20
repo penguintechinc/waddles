@@ -29,8 +29,10 @@ const ROUTES_FILE = process.env.ROUTES_FILE || path.join(ROOT, 'admin/hub_module
 const OUT_DIR = process.env.OUT_DIR || '/tmp/playwright-waddles';
 const RESULTS_DIR = process.env.RESULTS_DIR || path.join(__dirname, 'results');
 const COMMUNITY_ID = process.env.COMMUNITY_ID || '15959481-f9f1-47ce-be48-d975a6832d08';
-const EMAIL = process.env.WEBUI_ADMIN_EMAIL;
-const PASSWORD = process.env.WEBUI_ADMIN_PASSWORD;
+// --user-role=user (or SWEEP_ROLE=user) sweeps with WEBUI_USER_EMAIL/WEBUI_USER_PASSWORD (a non-admin account that must already exist).
+const ROLE = (process.argv.find((a) => a.startsWith('--user-role=')) || '').split('=')[1] || process.env.SWEEP_ROLE || 'admin';
+const EMAIL = ROLE === 'user' ? process.env.WEBUI_USER_EMAIL : process.env.WEBUI_ADMIN_EMAIL;
+const PASSWORD = ROLE === 'user' ? process.env.WEBUI_USER_PASSWORD : process.env.WEBUI_ADMIN_PASSWORD;
 const NAV_CAP_MS = 20000;
 const DELAY_MS = parseInt(process.env.SWEEP_DELAY_MS || '500', 10);
 
@@ -110,28 +112,48 @@ function firstItems(body) {
   return [];
 }
 
-/** Resolves route params from the app's own API listings; unresolved params => route skipped. */
-async function discoverParams(page) {
+/** Resolves route params from the listing endpoints the webui itself calls; logs every attempt (url/status/count). */
+async function discoverParams(page, base) {
+  const log = [];
   const get = async (p) => {
-    try { const r = await page.request.get(p); return r.ok() ? await r.json() : null; } catch { return null; }
+    try {
+      const r = await page.request.get(base + p);
+      const body = r.ok() ? await r.json().catch(() => null) : null;
+      return { status: r.status(), body };
+    } catch (e) { console.log('discovery request error:', String(e.message).slice(0, 100)); return { status: 0, body: null }; }
   };
-  const pick = (body, keys) => {
-    const it = firstItems(body)[0];
-    if (!it) return null;
-    for (const k of keys) if (it[k] != null) return String(it[k]);
+  /** First candidate listing that yields an item with one of `keys`; records why it failed otherwise. */
+  const first = async (param, cands, keys) => {
+    for (const u of cands) {
+      const { status, body } = await get(u);
+      const items = firstItems(body);
+      const it = items[0];
+      let val = null;
+      if (it) for (const k of keys) if (it[k] != null) { val = String(it[k]); break; }
+      log.push({ param, url: u, status, count: items.length, value: val ? 'found' : null });
+      if (val) return val;
+    }
     return null;
   };
   const c = COMMUNITY_ID;
   const params = { communityId: c, id: c };
-  const first = async (cands, keys) => { for (const u of cands) { const v = pick(await get(u), keys); if (v) return v; } return null; };
-  params.eventId = await first([`/api/v1/admin/${c}/calendar/events`], ['id', 'uuid', 'event_id']);
-  params.channelId = await first([`/api/v1/communities/${c}/interaction-channels`, `/api/v1/admin/${c}/interaction-channels`], ['id', 'uuid', 'channel_id']);
-  params.ticketId = await first([`/api/v1/admin/${c}/support/tickets`], ['id', 'uuid', 'ticket_id']);
-  params.userId = await first([`/api/v1/admin/${c}/members`], ['user_id', 'userId', 'id', 'uuid']);
-  params.tenantSlug = await first(['/api/v1/superadmin/tenants'], ['slug', 'tenant_slug']);
-  params.slug = await first(['/api/v1/calendar/booking-pages'], ['slug']);
-  params.appId = await first([`/api/v1/communities/${c}/bundles`, `/api/v1/admin/${c}/bundles`], ['app_id', 'id']);
-  params.submissionId = await first(['/api/v1/marketplace/admin/marketplace/vendor-submissions'], ['id', 'uuid', 'submission_id']);
+  params.eventId = await first('eventId', [`/api/v1/admin/${c}/calendar/events`], ['id', 'uuid', 'event_id']);
+  params.channelId = await first('channelId', [`/api/v1/admin/${c}/interaction/channels`, `/api/v1/communities/${c}/interaction/channels`], ['id', 'uuid', 'channel_id']);
+  params.ticketId = await first('ticketId', [`/api/v1/admin/${c}/support/tickets`], ['id', 'uuid', 'ticket_id']);
+  params.userId = await first('userId', [`/api/v1/admin/${c}/members`], ['user_id', 'userId', 'public_id', 'id', 'uuid']);
+  // tenantSlug is not listed by any page: AuthContext takes it from /auth/me (the admin's own tenant).
+  const me = await get('/api/v1/auth/me');
+  const meStr = JSON.stringify(me.body || {});
+  const mm = meStr.match(/"(?:tenantSlug|tenant_slug)":"([^"]+)"/);
+  params.tenantSlug = mm ? mm[1] : null;
+  log.push({ param: 'tenantSlug', url: '/api/v1/auth/me', status: me.status, count: mm ? 1 : 0, value: mm ? 'found' : null });
+  if (!params.tenantSlug) params.tenantSlug = await first('tenantSlug', ['/api/v1/superadmin/tenants'], ['slug', 'tenant_slug']);
+  params.slug = await first('slug', ['/api/v1/calendar/booking-pages'], ['slug']);
+  params.appId = await first('appId', [`/api/v1/apps/community/${c}/activation`], ['app_id', 'appId', 'id']);
+  params.submissionId = await first('submissionId', ['/api/v1/marketplace/admin/marketplace/submissions', '/api/v1/marketplace/admin/marketplace/vendor-requests'], ['id', 'uuid', 'submission_id']);
+  params.source = null; // /admin/:communityId/marketplace/:source/:id only redirects to bundles; no listing exists
+  log.push({ param: 'source', url: '-', status: 0, count: 0, value: null, reason: 'redirect-only route, no listing endpoint' });
+  params.__log = log;
   return params;
 }
 
@@ -257,7 +279,7 @@ function toMarkdown(results, skipped, meta) {
 }
 
 (async () => {
-  if (!EMAIL || !PASSWORD) { console.error('WEBUI_ADMIN_EMAIL and WEBUI_ADMIN_PASSWORD must be set in env'); process.exit(2); }
+  if (!EMAIL || !PASSWORD) { console.error(`credentials for role '${ROLE}' must be set in env (WEBUI_${ROLE === 'user' ? 'USER' : 'ADMIN'}_EMAIL/_PASSWORD)`); process.exit(2); }
   fs.mkdirSync(OUT_DIR, { recursive: true });
   fs.mkdirSync(RESULTS_DIR, { recursive: true });
   let base = (process.env.BASE_URL || 'https://waddles-alpha.penguintech.cloud:8443').replace(/\/$/, '');
@@ -300,9 +322,10 @@ function toMarkdown(results, skipped, meta) {
     }
     const probe = await context.newPage();
     await probe.goto(base + '/dashboard', { waitUntil: 'networkidle' }).catch(() => {});
-    const params = await discoverParams(probe);
+    const params = await discoverParams(probe, base);
     await probe.close();
     fs.writeFileSync(path.join(RESULTS_DIR, 'params.json'), JSON.stringify(params, null, 2));
+    for (const l of params.__log) console.log(`param ${l.param}: ${l.url} -> ${l.status} items=${l.count} ${l.value ? 'RESOLVED' : 'UNRESOLVED' + (l.reason ? ' (' + l.reason + ')' : '')}`);
     // One persistent authed page: first route is a real full load, the rest navigate client-side.
     const shared = { page: null };
     const done = new Set(results.map((r) => r.route));
@@ -311,7 +334,7 @@ function toMarkdown(results, skipped, meta) {
       if (route === '/auth/callback') { skipped.push({ route, missing: ['oauth code/state (cannot be synthesised)'] }); continue; }
       const f = fillRoute(route, params);
       if (f.missing) { skipped.push({ route, missing: f.missing }); continue; }
-      const x = await visit(context, base, route, f.url, shared); x.session = 'admin'; results.push(x);
+      const x = await visit(context, base, route, f.url, shared); x.session = ROLE; results.push(x);
       if (!shared.page && process.env.FULL_RELOAD !== '1') { shared.page = await context.newPage(); await shared.page.goto(base + f.url, { waitUntil: 'networkidle' }).catch(() => {}); }
       process.stdout.write(`${x.fail ? 'FAIL' : x.knownOnly ? 'KNOWN' : 'ok  '} ${f.url}\n`);
     }

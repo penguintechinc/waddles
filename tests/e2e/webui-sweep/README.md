@@ -14,3 +14,13 @@ WEBUI_UPSTREAM=https://localhost:18080 API_UPSTREAM=https://localhost:18204 make
 ```
 
 Exit: 0 clean/known only, 1 failures, 2 setup error or zero routes visited.
+
+## Roles
+
+Default role is the bootstrap admin. If a non-admin account already exists (never created by this tool), run with
+`--user-role=user` (or `SWEEP_ROLE=user`) and `WEBUI_USER_EMAIL` / `WEBUI_USER_PASSWORD` in env. None exists on alpha today.
+
+## Param discovery
+
+Route params resolve from the listing endpoints the webui uses (see `discoverParams`); every attempt (url, status, item count)
+is logged and written to `results/params.json` under `__log`. Unresolved params skip their routes, with the reason in results.md.
