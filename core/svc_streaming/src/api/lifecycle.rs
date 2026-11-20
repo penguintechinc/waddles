@@ -125,6 +125,33 @@ mod tests {
         assert!(claim_run_start(community, config, actor, &run2));
     }
 
+    /// Eviction at capacity must not rewind epochs: an admission taken before the clear stays
+    /// stale (an old epoch-0 admission must not pass after the map is wiped).
+    #[test]
+    fn eviction_at_capacity_never_lets_an_old_admission_claim() {
+        let mut state = RunState::new(2);
+        let victim = (1, 1, 1);
+        let old = state.admission(victim);
+        assert_eq!(old.epoch, 0);
+        // Fill the epoch map to capacity with other actors' runs.
+        for actor in 10..12 {
+            let adm = state.admission((1, 1, actor));
+            assert!(state.claim((1, 1, actor), &adm));
+        }
+        // The next new key triggers eviction.
+        let other = state.admission((1, 1, 99));
+        assert!(state.claim((1, 1, 99), &other));
+        assert!(
+            !state.claim(victim, &old),
+            "a pre-eviction admission must be stale, not match the reset epoch"
+        );
+        // Re-admitting yields a fresh key under the raised floor, which claims normally.
+        let fresh = state.admission(victim);
+        assert!(fresh.epoch > old.epoch);
+        assert_ne!(fresh.id, old.id);
+        assert!(state.claim(victim, &fresh));
+    }
+
     #[test]
     fn concurrent_starts_of_one_run_claim_exactly_once() {
         let (community, config, actor) = (9_501, 9_502, 9_503);
@@ -279,15 +306,94 @@ struct Admission {
 }
 
 /// Process-wide run state, guarded by ONE lock so session lookup and epoch claim are atomic.
-#[derive(Default)]
 struct RunState {
+    /// Maximum tracked sessions/epochs before eviction.
+    capacity: usize,
     /// The admission svc-streaming allocated for the start in progress; reused by every retry.
     sessions: HashMap<RunKey, Admission>,
     /// Monotonic run generation per key, incremented on every successful start claim.
     epochs: HashMap<RunKey, u64>,
+    /// Epoch of every key absent from `epochs`. Raised past every evicted epoch whenever the map
+    /// is cleared at capacity, so an admission older than the eviction can never match again.
+    epoch_floor: u64,
 }
 
-static RUN_SESSIONS: LazyLock<Mutex<RunState>> = LazyLock::new(|| Mutex::new(RunState::default()));
+impl RunState {
+    fn new(capacity: usize) -> Self {
+        Self {
+            capacity,
+            sessions: HashMap::new(),
+            epochs: HashMap::new(),
+            epoch_floor: 0,
+        }
+    }
+
+    /// At capacity, and `key` not tracked: drop every epoch, raising the floor past all of them.
+    /// Evicting must never rewind a key to an epoch an old admission still holds: every
+    /// pre-eviction admission becomes stale (re-admitted under a new key -- at worst one extra
+    /// charge, never a free run).
+    fn evict_if_full(&mut self, key: &RunKey) {
+        if self.epochs.len() >= self.capacity && !self.epochs.contains_key(key) {
+            let highest = self.epochs.values().copied().max().unwrap_or(0);
+            self.epoch_floor = self.epoch_floor.max(highest) + 1;
+            self.epochs.clear();
+            self.sessions.clear();
+        }
+    }
+
+    fn current_epoch(&self, key: &RunKey) -> u64 {
+        self.epochs.get(key).copied().unwrap_or(self.epoch_floor)
+    }
+
+    /// See [`run_session_id`].
+    fn admission(&mut self, key: RunKey) -> Admission {
+        if self.sessions.len() >= self.capacity {
+            self.sessions.clear();
+        }
+        // Evict BEFORE allocating, so this admission is taken under the raised floor and its
+        // own claim does not immediately go stale (which would bill it twice).
+        self.evict_if_full(&key);
+        let epoch = self.current_epoch(&key);
+        // A session allocated under an older epoch (the epoch moved or was evicted since) is
+        // stale: replace it so the retry is admitted under the current run generation.
+        if let Some(existing) = self.sessions.get(&key) {
+            if existing.epoch == epoch {
+                return existing.clone();
+            }
+        }
+        let admission = Admission {
+            id: format!("{epoch}-{}", uuid::Uuid::new_v4()),
+            epoch,
+        };
+        self.sessions.insert(key, admission.clone());
+        admission
+    }
+
+    /// See [`claim_run_start`].
+    fn claim(&mut self, key: RunKey, admission: &Admission) -> bool {
+        self.evict_if_full(&key);
+        let current = self.current_epoch(&key);
+        if current != admission.epoch {
+            return false;
+        }
+        self.epochs.insert(key, current + 1);
+        self.sessions.remove(&key);
+        true
+    }
+
+    /// See [`release_run_start`].
+    fn release(&mut self, key: RunKey, admission: &Admission) {
+        if self.epochs.get(&key).copied() == Some(admission.epoch + 1) {
+            self.epochs.insert(key, admission.epoch);
+            self.sessions
+                .entry(key)
+                .or_insert_with(|| admission.clone());
+        }
+    }
+}
+
+static RUN_SESSIONS: LazyLock<Mutex<RunState>> =
+    LazyLock::new(|| Mutex::new(RunState::new(MAX_RUN_SESSIONS)));
 
 /// Stable debit idempotency key for one admission:
 /// `stream:{community}:{config}:{actor}:{admission_id}`.
@@ -317,19 +423,7 @@ pub fn admission_idempotency_key(
 /// a genuinely new run is billed again.
 fn run_session_id(community_id: i32, config_id: i32, actor_user_id: i64) -> Admission {
     let mut state = RUN_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if state.sessions.len() >= MAX_RUN_SESSIONS {
-        state.sessions.clear();
-    }
-    let key = (community_id, config_id, actor_user_id);
-    let epoch = state.epochs.get(&key).copied().unwrap_or(0);
-    state
-        .sessions
-        .entry(key)
-        .or_insert_with(|| Admission {
-            id: format!("{epoch}-{}", uuid::Uuid::new_v4()),
-            epoch,
-        })
-        .clone()
+    state.admission((community_id, config_id, actor_user_id))
 }
 
 /// Ends one actor's run session for a config -- when a stop arrives or hub-api refused to replay
@@ -354,33 +448,20 @@ fn claim_run_start(
     actor_user_id: i64,
     admission: &Admission,
 ) -> bool {
-    let key = (community_id, config_id, actor_user_id);
-    let mut state = RUN_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if state.epochs.len() >= MAX_RUN_SESSIONS {
-        state.epochs.clear();
-    }
-    let current = state.epochs.get(&key).copied().unwrap_or(0);
-    if current != admission.epoch {
-        return false;
-    }
-    state.epochs.insert(key, current + 1);
-    state.sessions.remove(&key);
-    true
+    RUN_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .claim((community_id, config_id, actor_user_id), admission)
 }
 
 /// Undoes a [`claim_run_start`] whose pipeline then failed to start, so the retry of that same
 /// start reuses the already-debited key (dedupes) instead of being charged again. No-op if
 /// anything else claimed in between.
 fn release_run_start(community_id: i32, config_id: i32, actor_user_id: i64, admission: &Admission) {
-    let key = (community_id, config_id, actor_user_id);
-    let mut state = RUN_SESSIONS.lock().unwrap_or_else(|e| e.into_inner());
-    if state.epochs.get(&key).copied() == Some(admission.epoch + 1) {
-        state.epochs.insert(key, admission.epoch);
-        state
-            .sessions
-            .entry(key)
-            .or_insert_with(|| admission.clone());
-    }
+    RUN_SESSIONS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .release((community_id, config_id, actor_user_id), admission);
 }
 
 /// TRANSCODE admission (BLOCK-WITH-FALLBACK, ported from the Python

@@ -23,6 +23,7 @@ from typing import Any
 
 from flask_core.tenancy import TenantContext
 
+from services import ban_suppression
 from services.community_authz import member_scopes_sync
 from services.community_reputation_service import _ensure_reputation_tables
 from services.errors import forbidden
@@ -48,15 +49,15 @@ def _is_tenant_admin(dal: Any, ctx: TenantContext, user_id: int) -> bool:
 def _identity_tokens(dal: Any, user_id: int, member: Any) -> set[str]:
     """Every identity token the soft-ban table may key this member on.
 
-    The authoritative source is `hub_users.uuid` (looked up by the validated caller's numeric id,
-    never by anything on the membership row); the member row's own `user_uuid` is added too, so
-    a ban keyed on either token applies. An empty set means identity is unresolvable.
+    The source is the canonical subject token set erasure/export already use
+    (`data_privacy_service.subject_uuids_of`: hub uuid, member `user_uuid`s incl. rows reached via
+    linked platform identities, and platform-identity pseudonyms), looked up by the validated
+    caller's numeric id and unioned with this member row's own `user_uuid`. An empty set means
+    identity is unresolvable.
     """
-    tokens: set[str] = set()
-    if "hub_users" in dal.tables and "uuid" in dal.hub_users.fields:
-        row = dal(dal.hub_users.id == user_id).select(dal.hub_users.uuid).first()
-        if row is not None and row.uuid:
-            tokens.add(str(row.uuid))
+    from services.data_privacy_service import subject_uuids_of  # noqa: PLC0415 - avoid import cycle
+
+    tokens: set[str] = set(subject_uuids_of(dal, user_id=user_id))
     member_uuid = getattr(member, "user_uuid", None)
     if member_uuid:
         tokens.add(str(member_uuid))
@@ -76,6 +77,18 @@ def _soft_banned(dal: Any, community_id: int, user_uuids: set[str]) -> bool:
             & bans.user_uuid.belongs(sorted(user_uuids))
             & ((bans.expires_at == None) | (bans.expires_at > now))  # noqa: E711 - pydal idiom
         ).count()
+    )
+
+
+def _floor_banned(dal: Any, ctx: TenantContext, user_uuids: set[str]) -> bool:
+    """True iff a tenant-level floor ban (enforced or queued) exists for any of the tokens.
+
+    Floor bans are keyed by tenant, not community, so they apply in every community of the tenant
+    regardless of the member row's role.
+    """
+    return any(
+        row.tenant_id == ctx.tenant_id and row.status in ban_suppression.FLOOR_BAN_ACTIVE_STATUSES
+        for row in ban_suppression.floor_ban_rows(dal, user_uuids)
     )
 
 
@@ -113,7 +126,7 @@ def require_inventory_member(
             user_id,
         )
         raise forbidden("Community membership required")
-    if _soft_banned(dal, community_id, tokens):
+    if _soft_banned(dal, community_id, tokens) or _floor_banned(dal, ctx, tokens):
         raise forbidden("Community membership required")
 
 

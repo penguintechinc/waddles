@@ -825,6 +825,67 @@ class TestMemberRoutesAuthorizeThroughTheCommunity:
             require_inventory_member(dal, ctx, community_id=cid, user_id=777)
         assert "unresolvable identity" in caplog.text
 
+    @pytest.mark.parametrize("keyed_on", ["pseudonym", "platform_keyed_member_row"])
+    async def test_soft_ban_keyed_on_other_identity_forms_is_403(
+        self, client: Any, auth_headers: Any, community_db: Any, keyed_on: str
+    ) -> None:
+        """regression: a bundle-written ban keyed on a pseudonym / linked-identity row denies."""
+        from services.schema import bind_erasure_reputation_tables
+
+        dal, cid = community_db
+        bind_erasure_reputation_tables(dal, migrate=True)
+        tenant_id = dal(dal.communities.id == cid).select().first().tenant_id
+        dal.hub_user_identities.insert(
+            hub_user_id=STRANGER, platform="discord", platform_user_id="p-123"
+        )
+        dal.community_members.insert(
+            community_id=cid, user_id=str(STRANGER), role="member", is_active=True
+        )
+        if keyed_on == "pseudonym":
+            token = "11111111-1111-4111-8111-111111111111"
+            dal.ephemeral_pseudonyms.insert(
+                pseudonym=token, tenant_id=tenant_id, platform="discord", platform_user_id="p-123"
+            )
+        else:
+            token = "22222222-2222-4222-8222-222222222222"
+            dal.community_members.insert(
+                community_id=cid,
+                user_id="",
+                platform="discord",
+                platform_user_id="p-123",
+                role="member",
+                is_active=True,
+                user_uuid=token,
+            )
+        dal.bundle_reputation_soft_bans.insert(
+            tenant_id=tenant_id, community_id=cid, user_uuid=token, reason_code=1, set_by="bundle"
+        )
+        dal.commit()
+        resp = await client.get(_url(dal, cid, "available"), headers=_hdr(auth_headers, STRANGER))
+        assert resp.status_code == 403
+
+    @pytest.mark.parametrize("status,expected", [(2, 403), (1, 403), (6, 200)])
+    async def test_tenant_floor_ban_denies_even_when_member_row_is_not_banned(
+        self, client: Any, auth_headers: Any, community_db: Any, status: int, expected: int
+    ) -> None:
+        """regression: a tenant-level floor ban applies in a community whose row isn't banned."""
+        from services import ban_suppression
+
+        dal, cid = community_db
+        ban_suppression._bind(dal)
+        tenant_id = dal(dal.communities.id == cid).select().first().tenant_id
+        hub_uuid = dal(dal.hub_users.id == MEMBER).select().first().uuid
+        dal.bundle_reputation_floor_bans.insert(
+            tenant_id=tenant_id,
+            community_id=cid + 100,  # banned elsewhere in the tenant
+            user_uuid=hub_uuid,
+            platform="discord",
+            status=status,
+        )
+        dal.commit()
+        resp = await client.get(_url(dal, cid, "available"), headers=_hdr(auth_headers, MEMBER))
+        assert resp.status_code == expected
+
     async def test_unbanned_member_without_member_uuid_is_allowed(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:

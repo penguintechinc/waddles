@@ -68,7 +68,7 @@ def table_catalog(dal: Any) -> dict[str, frozenset[str]]:
     sqlite (the unit-test dialect) walks `sqlite_master` + `PRAGMA table_info`.
     """
     catalog: dict[str, set[str]] = {}
-    if getattr(dal, "_dbname", "") == "sqlite":
+    if str(getattr(dal, "_dbname", "")).startswith("sqlite"):  # "sqlite" or "sqlite:memory"
         for (name,) in dal.executesql("SELECT name FROM sqlite_master WHERE type = 'table'"):
             safe = str(name).replace('"', "")
             for row in dal.executesql(f'PRAGMA table_info("{safe}")'):
