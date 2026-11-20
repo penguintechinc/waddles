@@ -24,11 +24,11 @@ permissions:
     justification: management replies via the relay host import (relay.push -> chat.send:discord)
   - id: chat.send:twitch
     justification: management replies and redemption chat messages via the relay host import (relay.push -> chat.send:twitch)
-  - id: tool.call:waddles.core.service.economy:points_view
+  - id: tool.call:penguintechinc.waddles.economy:points_view
     justification: Use the economy service points_view contract for the currency alias; the app owns only redemption policy
     params:
       write: false
-  - id: tool.call:waddles.core.service.economy:adjust_balance
+  - id: tool.call:penguintechinc.waddles.economy:adjust_balance
     justification: Use the economy service adjust_balance contract to credit award steps; the service owns caps and idempotency
     params:
       write: true
@@ -41,10 +41,10 @@ permissions:
 requested_tools:
   - tool: points_view
     access: read
-    target_app_id: waddles.core.service.economy
+    target_app_id: penguintechinc.waddles.economy
   - tool: adjust_balance
     access: write
-    target_app_id: waddles.core.service.economy
+    target_app_id: penguintechinc.waddles.economy
 overlay_origins:
   index.html: "PenguinTwitchBot/wwwroot/alerts.html (layout idea only; page rewritten for this bundle)"
   redeem.css: "PenguinTwitchBot/wwwroot/alerts.html (transparent-body/status-pill idea only; rules rewritten)"

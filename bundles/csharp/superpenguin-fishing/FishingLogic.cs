@@ -44,7 +44,7 @@ public sealed class FishingLogic : WaddleProcessStageNext
     internal const uint OutcomeTtlSeconds = 3600;
     internal const int MaxCasts = 10;
     internal const int MaxReplyLength = 450;
-    internal const string WidgetId = "waddles.integrations.superpenguin.fishing.catch";
+    internal const string WidgetId = "psychoboy.penguintwitchbot.fishing.catch";
     internal const int LifetimeBoardSize = 25;
 
     private static readonly string[] CommandNames =

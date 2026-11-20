@@ -1,8 +1,8 @@
 schema_version: 2
-app_id: waddles.integrations.superpenguin.top
+app_id: psychoboy.penguintwitchbot.top
 name: Top (SuperPenguinTV)
 version: 1.0.0
-feature: waddles.integrations.superpenguin
+feature: psychoboy.penguintwitchbot
 module: integrations
 provider: thirdparty
 language: csharp
@@ -70,12 +70,12 @@ permissions:
   justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:discord)
 - id: chat.send:twitch
   justification: replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)
-- id: tool.call:waddles.core.service.economy:points_leaders
+- id: tool.call:penguintechinc.waddles.economy:points_leaders
   justification: Use the economy service points_leaders contract; the app owns only command policy and
     formatting
   params:
     write: false
-- id: tool.call:waddles.core.service.reputation:leaderboard
+- id: tool.call:penguintechinc.waddles.reputation:leaderboard
   justification: Use the reputation service leaderboard contract; the app owns only command policy and
     formatting
   params:
@@ -84,7 +84,7 @@ routes_to: []
 requested_tools:
 - tool: points_leaders
   access: read
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 - tool: leaderboard
   access: read
-  target_app_id: waddles.core.service.reputation
+  target_app_id: penguintechinc.waddles.reputation

@@ -226,7 +226,7 @@ public sealed class World
     public EventHost HostFor(string actor, string messageId, string? community = "community-1")
     {
         Ledger.BeginEvent(messageId + "/" + actor, actor);
-        return new EventHost(new BundleContextInfo("tenant-1", community, "waddles.integrations.superpenguin.test", "waddles.integrations.superpenguin", "1.0.0", messageId, "{}"), this, actor);
+        return new EventHost(new BundleContextInfo("tenant-1", community, "psychoboy.penguintwitchbot.test", "psychoboy.penguintwitchbot", "1.0.0", messageId, "{}"), this, actor);
     }
 
     public static PlatformEventInfo Msg(string text, string platform = "twitch") =>
