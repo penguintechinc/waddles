@@ -821,6 +821,11 @@ async def create_knowledge_source(data: KnowledgeSourceCreateRequest) -> Any:
     try:
         source = await _to_thread(bot_ai_knowledge.add_knowledge_source, dal, payload)
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), exc.status, "BAD_REQUEST" if exc.status == 400 else "ERROR")
 
     if source.source_type != "manual":
@@ -863,6 +868,11 @@ async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id:
             bot_ai_knowledge.update_knowledge_source, _dal(), source_id, updates
         )
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), exc.status, "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST")
     return KnowledgeSourceResponse(success=True, source=(await _source_dtos([source]))[0])
 
@@ -878,6 +888,11 @@ async def delete_knowledge_source(source_id: int) -> Any:
     try:
         await _to_thread(bot_ai_knowledge.delete_knowledge_source, _dal(), source_id)
     except bot_ai_knowledge.KnowledgeServiceError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), exc.status, "NOT_FOUND")
     return SimpleSuccessResponse(success=True)
 
@@ -1179,6 +1194,11 @@ async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> An
             bot_rcon.create_server, _dal(), community_id, payload, added_by=_user_id()
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
     return ServerResponse(server=server), 201
 
@@ -1210,8 +1230,18 @@ async def update_rcon_server(data: ServerUpdateRequest, community_id: int, serve
     try:
         server = await _to_thread(bot_rcon.update_server, _dal(), community_id, server_id, payload)
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
     except bot_rcon.RconNotFoundError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 404, "NOT_FOUND")
     return ServerResponse(server=server)
 
@@ -1228,6 +1258,11 @@ async def delete_rcon_server(community_id: int, server_id: int) -> Any:
     try:
         await _to_thread(bot_rcon.delete_server, _dal(), community_id, server_id)
     except bot_rcon.RconNotFoundError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 404, "NOT_FOUND")
     return MessageResponse(message="Server deleted")
 
@@ -1248,6 +1283,11 @@ async def test_rcon_connection(
             _dal(), community_id, server_id, password=data.password
         )
     except bot_rcon.RconNotFoundError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 404, "NOT_FOUND")
 
 
@@ -1268,6 +1308,11 @@ async def execute_rcon_command(
             _dal(), community_id, server_id, command=data.command, user_id=_user_id()
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1291,6 +1336,11 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
             user_id=_user_id(),
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1315,6 +1365,11 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
             user_id=_user_id(),
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1345,6 +1400,11 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
             _dal(), community_id, server_id, target_user_id=data.user_id, channel_id=data.channel_id
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
@@ -1368,6 +1428,11 @@ async def send_rcon_message(data: SendMessageRequest, community_id: int, server_
             target_mode=data.target_mode,
         )
     except bot_rcon.RconValidationError as exc:
+        logger.warning(
+            "bot_request_rejected",
+            extra={"error_type": type(exc).__name__, "error_message": str(exc)},
+            exc_info=True,
+        )
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
