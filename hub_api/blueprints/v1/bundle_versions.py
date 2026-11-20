@@ -20,6 +20,7 @@ land.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import cast
 
@@ -34,6 +35,8 @@ from services import bundle_version_service as svc
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request
 from services.vendor_bundle_authz import authorize_onboarding_scope, enforce_vendor_namespace
+
+logger = logging.getLogger(__name__)
 
 bundle_versions_bp = Blueprint("v1_bundle_versions", __name__, url_prefix="/api/v1/apps")
 
@@ -208,6 +211,7 @@ def _authorize_version_read(app_id: str) -> ApiError | None:
         if not auth.is_admin:
             enforce_vendor_namespace(app_id=app_id, caller_id=get_current_user_id(request))
     except ApiError as exc:
+        logger.debug("handled %s in bundle_versions: %s", type(exc).__name__, exc.code)
         return exc
     return None
 

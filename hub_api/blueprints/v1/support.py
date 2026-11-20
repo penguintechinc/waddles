@@ -307,7 +307,7 @@ def _comment_dto(row: Any) -> CommentDTO:
 @support_admin_bp.route("/<cuuid:community_id>/support/categories", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 async def list_categories(community_id: int) -> tuple[dict[str, object], int]:
-    """`GET /api/v1/admin/<id>/support/categories` -- any active member of the community."""
+    """`GET /api/v1/admin/<id>/support/categories` -- active member or support admin."""
     denied = _member_gate(community_id, admin_scope_ok=True)
     if denied is not None:
         return denied
