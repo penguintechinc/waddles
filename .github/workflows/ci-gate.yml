@@ -118,7 +118,7 @@ jobs:
           stable_count=0
           prev_signature=""
 
-          merge_pages="${GITHUB_WORKSPACE}/scripts/ci/ci-gate-merge-pages.sh"
+          fetch_pages="${GITHUB_WORKSPACE}/scripts/ci/ci-gate-fetch.sh"
 
           # Normalize RAW_TARGET_REF ("refs/heads/main" or "main" or "") to a
           # bare branch name and decide strict-vs-advisory policy once,
@@ -145,16 +145,16 @@ jobs:
           for attempt in $(seq 1 "${MAX_POLLS}"); do
             # --paginate re-runs --jq once per page of up to 100 results, so
             # for >100 check-runs/statuses gh prints several JSON arrays back
-            # to back ("[..][..]"), not one valid document. ci-gate-merge-pages.sh
-            # slurps that stream and flattens it into a single array - see
-            # scripts/ci/tests/test_ci_gate_merge_pages.sh (regression: #515/#517).
-            runs_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" --paginate \
-              --jq '[.check_runs[] | select(.name != env.SELF_NAME and .name != env.IGNORE_CONTEXT) | {name: .name, status: .status, conclusion: .conclusion}]' \
-              | "${merge_pages}")
+            # to back ("[..][..]"), not one valid document. ci-gate-fetch.sh
+            # flattens that stream via ci-gate-merge-pages.sh (regression:
+            # #515/#517) AND retries transient 5xx/network errors (5 attempts,
+            # backoff + jitter), failing LOUDLY if the response is still not
+            # a JSON array - see scripts/ci/tests/test_ci_gate_fetch.sh.
+            runs_json=$("${fetch_pages}" "repos/${REPO}/commits/${HEAD_SHA}/check-runs?per_page=100" \
+              '[.check_runs[] | select(.name != env.SELF_NAME and .name != env.IGNORE_CONTEXT) | {name: .name, status: .status, conclusion: .conclusion}]')
 
-            statuses_json=$(gh api "repos/${REPO}/commits/${HEAD_SHA}/status?per_page=100" --paginate \
-              --jq '[.statuses[] | select(.context != env.IGNORE_CONTEXT) | {name: .context, status: (if .state == "pending" then "in_progress" else "completed" end), conclusion: (if .state == "success" then "success" elif (.state == "failure" or .state == "error") then "failure" else .state end)}]' \
-              | "${merge_pages}")
+            statuses_json=$("${fetch_pages}" "repos/${REPO}/commits/${HEAD_SHA}/status?per_page=100" \
+              '[.statuses[] | select(.context != env.IGNORE_CONTEXT) | {name: .context, status: (if .state == "pending" then "in_progress" else "completed" end), conclusion: (if .state == "success" then "success" elif (.state == "failure" or .state == "error") then "failure" else .state end)}]')
 
             combined_all=$(jq -n --argjson a "${runs_json}" --argjson b "${statuses_json}" '$a + $b')
             combined=$(python3 "${tier_py}" filter --tier "${tier}" <<<"${combined_all}")
