@@ -33,7 +33,12 @@ function VendorDashboard() {
       setDashboard(response.data);
       setError(null);
     } catch (err) {
-      setError(err.response?.data?.error?.message || 'Failed to load dashboard');
+      // 404 = the route exists but the caller has no seller row yet (not a path mismatch).
+      setError(
+        err.response?.status === 404
+          ? 'No vendor profile yet. Create one in Vendor Settings to see your dashboard.'
+          : err.response?.data?.error?.message || 'Failed to load dashboard',
+      );
       setDashboard({
         stats: {
           totalSubmissions: 0,

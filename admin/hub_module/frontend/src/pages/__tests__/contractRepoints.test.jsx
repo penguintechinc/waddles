@@ -68,7 +68,7 @@ describe('vendor pages hit /api/v1/marketplace/vendor/*', () => {
     vi.spyOn(AuthContext, 'useAuth').mockReturnValue({ user: { id: 1 } });
     stub({});
     mount(<VendorDashboard />);
-    expect(await screen.findByText('Failed to load dashboard')).toBeInTheDocument();
+    expect(await screen.findByText(/No vendor profile yet|Failed to load dashboard/)).toBeInTheDocument();
   });
 
   it('VendorModules -> GET modules', async () => {

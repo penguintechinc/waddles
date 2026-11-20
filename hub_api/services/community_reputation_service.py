@@ -744,7 +744,7 @@ async def list_soft_bans(
     _ensure_reputation_tables(dal)
     bans = dal.bundle_reputation_soft_bans
     members = dal.community_members
-    now = datetime.now(UTC).replace(tzinfo=None)
+    now = datetime.now(UTC)  # expires_at is TIMESTAMPTZ (alembic 0097): compare aware, never naive
     rows = await async_dal.select_async(
         dal(
             (bans.community_id == community_id)

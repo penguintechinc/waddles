@@ -723,6 +723,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_ACTION),
         (
             ("PUT", "/api/v1/admin/<cuuid:community_id>/settings"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkout"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkin"),
             ("DELETE", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/temp-password"),
             ("PUT", "/api/v1/admin/<cuuid:community_id>/modules/<int:module_id>/config"),

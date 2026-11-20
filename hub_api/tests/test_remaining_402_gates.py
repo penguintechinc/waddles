@@ -104,6 +104,48 @@ def entitlement_client(monkeypatch: pytest.MonkeyPatch) -> Any:
     return _install
 
 
+@pytest.fixture
+def community_db(community_db: Any) -> Any:
+    """Extend conftest's `community_db` with the real tables + rows the inventory guards read.
+
+    Builds the auth/membership/reputation tables (incl. `tenant_admins`) and seeds user 1 as an
+    active owner of the community, so the real per-community authz stack runs (nothing mocked).
+    """
+    from services.community_reputation_service import _ensure_reputation_tables
+
+    dal, community_id = community_db
+    # conftest's fixture binds `tenant_admins` metadata-only (migrate=False): materialise it.
+    dal.define_table(
+        "tenant_admins",
+        dal.Field("tenant_id", "integer", notnull=True),
+        dal.Field("user_id", "integer", notnull=True),
+        dal.Field("role", "string", length=50, default="tenant-admin"),
+        dal.Field("created_at", "datetime"),
+        migrate=True,
+        redefine=True,
+    )
+    _ensure_reputation_tables(dal, migrate=True)
+    if not dal(dal.hub_users.id == 1).count():
+        dal.hub_users.insert(username="user1")
+    owner_role = dal.community_roles.insert(
+        community_id=community_id,
+        name="community-owner",
+        is_system=True,
+        role_kind=1,
+        base_claims={"scopes": []},
+    )
+    dal.community_members.insert(
+        community_id=community_id,
+        user_id="1",
+        role="community-owner",
+        is_active=True,
+        user_uuid="uuid-owner",
+        community_role_id=owner_role,
+    )
+    dal.commit()
+    return dal, community_id
+
+
 def _app(bp: Any, dal: Any) -> Quart:
     app = Quart(__name__)
     QuartSchema(app)
