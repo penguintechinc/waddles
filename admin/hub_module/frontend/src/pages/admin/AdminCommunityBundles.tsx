@@ -127,7 +127,7 @@ export default function AdminCommunityBundles() {
       name: 'appId',
       type: 'text',
       label: 'App ID',
-      placeholder: 'waddles.core.example',
+      placeholder: 'penguintechinc.waddles.example',
       required: true,
     },
   ];
