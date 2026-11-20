@@ -510,19 +510,28 @@ async fn concurrent_new_keys_never_exceed_the_live_quota_in_real_valkey() {
         MAX_KEYS_PER_APP as i64
     );
 
-    // Free exactly 5 slots; of 20 racers exactly 5 get them.
+    // Free exactly 5 slots; of 20 racers exactly 5 get them. The two racing batches split the
+    // headroom nondeterministically (one batch can win every slot), so free whichever of the
+    // admitted keys are present -- from either batch -- rather than assuming `perm.*` got any.
     let mut freed = 0;
-    for i in 0..150 {
-        if freed == 5 {
-            break;
-        }
-        let key = format!("perm.{i}");
-        if index_score(&mut probe, &scope, &key).await.is_some() {
-            host.delete(&scope, 5_000 + i, &key).await.unwrap();
-            freed += 1;
+    'free: for prefix in ["perm.", "ttl."] {
+        for i in 0..150 {
+            if freed == 5 {
+                break 'free;
+            }
+            let key = format!("{prefix}{i}");
+            if index_score(&mut probe, &scope, &key).await.is_some() {
+                host.delete(&scope, 5_000 + freed, &key).await.unwrap();
+                freed += 1;
+            }
         }
     }
     assert_eq!(freed, 5);
+    assert_eq!(
+        live_keys_now(&mut probe, &scope).await,
+        MAX_KEYS_PER_APP as i64 - 5,
+        "the five deletes released exactly five live slots"
+    );
     let (admitted, rejected) = set_concurrently(&host, &scope, "late.", 20, 0, 10_000).await;
     assert_eq!((admitted, rejected), (5, 15));
 }
