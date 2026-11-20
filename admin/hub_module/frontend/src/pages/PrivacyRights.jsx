@@ -14,6 +14,7 @@ import { Link } from 'react-router-dom';
 import { ArrowLeftIcon } from '@heroicons/react/24/outline';
 
 import api from '../services/api';
+import { useAuth } from '../contexts/AuthContext';
 import { useCookieConsent } from '../hooks/useCookieConsent';
 import { userPrivacyRequestsApi } from '../services/userPrivacyRequestsApi';
 import {
@@ -30,7 +31,7 @@ const formatDate = (iso) => (iso ? new Date(iso).toLocaleDateString() : 'Not set
  * "Submit a privacy request" section: files a formal request through the tenant's request inbox
  * and lists the caller's own requests with status and due date.
  */
-function PrivacyRequestsSection() {
+function PrivacyRequestsSection({ isAuthenticated, authLoading }) {
   const [requestType, setRequestType] = useState('1');
   const [regime, setRegime] = useState('1');
   const [items, setItems] = useState(null);
@@ -48,9 +49,11 @@ function PrivacyRequestsSection() {
     }
   }, []);
 
+  // The list is the signed-in user's own data: an anonymous visitor would only get a 401 and trip
+  // the session-refresh flow, so fetch only once a session is known to exist.
   useEffect(() => {
-    load();
-  }, [load]);
+    if (isAuthenticated) load();
+  }, [isAuthenticated, load]);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -74,7 +77,17 @@ function PrivacyRequestsSection() {
       <p className="mt-1 text-sm text-fg-muted">
         File a formal request and track it here. We respond within the legal deadline for your region.
       </p>
-      {loadState === 'disabled' ? (
+      {authLoading ? (
+        <p role="status" className="mt-4 text-sm text-fg-muted">Loading…</p>
+      ) : !isAuthenticated ? (
+        <p className="mt-4 text-sm" data-testid="requests-signin">
+          <Link to="/login" state={{ returnTo: '/privacy-rights' }} className="text-gold-400 hover:text-gold-300">
+            Sign in
+          </Link>{' '}
+          to file a request and track its status. You can also submit a request without an account
+          using the privacy request link your community provides.
+        </p>
+      ) : loadState === 'disabled' ? (
         <p className="mt-4 text-sm" data-testid="requests-disabled">Formal privacy requests are not enabled for your community yet.</p>
       ) : (
         <>
@@ -123,6 +136,7 @@ function PrivacyRequestsSection() {
 
 export default function PrivacyRights() {
   const { consent, setDoNotSell, loading: consentLoading } = useCookieConsent();
+  const { isAuthenticated, loading: authLoading } = useAuth();
   const [busy, setBusy] = useState(null);
   const [notice, setNotice] = useState(null);
   const [problem, setProblem] = useState(null);
@@ -239,15 +253,24 @@ export default function PrivacyRights() {
             Downloads everything we hold about you as a JSON file you can keep or move to
             another service. Passwords, session tokens and security keys are never included.
           </p>
+          {!isAuthenticated && !authLoading ? (
+            <p className="mt-4 text-sm" data-testid="export-signin">
+              <Link to="/login" state={{ returnTo: '/privacy-rights' }} className="text-gold-400 hover:text-gold-300">
+                Sign in
+              </Link>{' '}
+              to download your data.
+            </p>
+          ) : (
           <button
             type="button"
             onClick={handleExport}
-            disabled={busy === 'export'}
+            disabled={busy === 'export' || authLoading}
             data-testid="export-data"
             className="mt-4 rounded bg-sky-600 px-4 py-2 font-medium text-white hover:bg-sky-500 focus:outline-none focus:ring-2 focus:ring-sky-400 disabled:opacity-50"
           >
             {busy === 'export' ? 'Preparing…' : 'Download my data'}
           </button>
+          )}
         </section>
 
         <section className="mt-6 rounded-lg border border-line bg-surface-raised p-5">
@@ -271,7 +294,7 @@ export default function PrivacyRights() {
           </button>
         </section>
 
-        <PrivacyRequestsSection />
+        <PrivacyRequestsSection isAuthenticated={isAuthenticated} authLoading={authLoading} />
 
         <section className="mt-6 rounded-lg border border-red-800 bg-surface-raised p-5">
           <h2 className="text-xl font-semibold text-red-400">Delete my data</h2>
@@ -283,7 +306,14 @@ export default function PrivacyRights() {
             to this — see the privacy policy.
           </p>
 
-          {!confirmingDelete ? (
+          {!isAuthenticated && !authLoading ? (
+            <p className="mt-4 text-sm" data-testid="delete-signin">
+              <Link to="/login" state={{ returnTo: '/privacy-rights' }} className="text-gold-400 hover:text-gold-300">
+                Sign in
+              </Link>{' '}
+              to delete your data.
+            </p>
+          ) : !confirmingDelete ? (
             <button
               type="button"
               onClick={() => setConfirmingDelete(true)}
