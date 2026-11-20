@@ -135,7 +135,7 @@ async def post_version(
 
     if not auth.is_admin:
         try:
-            enforce_vendor_namespace(app_id=app_id)
+            await enforce_vendor_namespace(install_dal, app_id=app_id, caller_id=caller_id)
         except ApiError as exc:
             return _err(exc)
         if source_file is not None:

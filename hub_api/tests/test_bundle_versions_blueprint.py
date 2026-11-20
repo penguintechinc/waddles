@@ -263,14 +263,27 @@ async def test_vendor_cannot_onboard_the_core_namespace(
     assert response.status_code == 403
 
 
-async def test_vendor_cannot_onboard_another_vendors_namespace(
+async def test_vendor_cannot_onboard_the_reserved_first_party_namespace(
     app: Quart, mock_component_pipeline: AsyncMock
 ) -> None:
-    token = make_user_token(user_id=42, scope="vendor:onboard")  # caller is vendor 42
+    token = make_user_token(user_id=42, scope="vendor:onboard")  # a vendor-scoped caller
     client = app.test_client()
     response = await client.post(
-        # ...but the URL targets vendor 99's namespace
-        "/api/v1/apps/acmecorp.widgets.other/versions",
+        # the URL targets the reserved first-party org namespace -- never a vendor-path id
+        "/api/v1/apps/penguintechinc.waddles.other/versions",
+        headers={"Authorization": f"Bearer {token}"},
+        files=_vendor_component_files(),
+    )
+    assert response.status_code == 403
+
+
+async def test_vendor_cannot_onboard_another_repo_under_the_reserved_org(
+    app: Quart, mock_component_pipeline: AsyncMock
+) -> None:
+    token = make_user_token(user_id=42, scope="vendor:onboard")
+    client = app.test_client()
+    response = await client.post(
+        "/api/v1/apps/penguintechinc.other.x/versions",
         headers={"Authorization": f"Bearer {token}"},
         files=_vendor_component_files(),
     )

@@ -8,11 +8,10 @@ role names. Two independent paths satisfy this endpoint:
     endpoint's original (pre-vendor-onboarding) behavior.
   - `vendor:onboard` scope (minted only when `hub_users.is_vendor`,
     see `services/auth_service.py::create_session_token`) -- restricted
-    to a well-formed third-party `app_id`. `penguintechinc.waddles.*`
-    (the reserved first-party namespace) and every other `penguintechinc`
-    org id are refused with 403, as are the admin-only third-party ports
-    (`psychoboy.penguintwitchbot.*`) -- never a silent narrowing or a 404 (no
-    ambiguity about why).
+    to a well-formed third-party `app_id` the caller owns. Reserved orgs
+    (`RESERVED_ORGS`: first-party, legacy `waddles`, platform-hosted `psychoboy`) and
+    any app_id first registered by a different publisher are refused with 403 --
+    never a silent narrowing or a 404 (no ambiguity about why).
 
 **Namespace shape.** Every `app_id` is `<github-org>.<repo>.<bundle-name>`
 (lowercase, three segments; `services/bundle_manifest_v2.py`'s
@@ -31,6 +30,7 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass
+from typing import Any
 
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import has_required_scopes
@@ -47,11 +47,11 @@ VENDOR_ONBOARD_SCOPE = "vendor:onboard"
 #: regardless of scope.
 CORE_NAMESPACE_PREFIX = "penguintechinc.waddles."
 
-#: The reserved org segment: no vendor-path app_id may use it for any repo.
-RESERVED_ORG = "penguintechinc"
-
-#: Third-party namespaces that only a platform admin may onboard into.
-ADMIN_ONLY_PREFIXES: tuple[str, ...] = ("psychoboy.penguintwitchbot.",)
+#: Org segments no vendor-path app_id may use, for any repo: `penguintechinc` is the
+#: first-party org, `waddles` blocks the legacy `waddles.<x>.<y>` shape (which still matches
+#: the 3-segment pattern), and `psychoboy` is the first-party-hosted SuperPenguinTV port
+#: namespace, seeded by us (`seed_core_bundles`, `requested_by` NULL) and platform-admin only.
+RESERVED_ORGS: frozenset[str] = frozenset({"penguintechinc", "waddles", "psychoboy"})
 
 _SEGMENT = r"[a-z0-9][a-z0-9_-]*"
 #: `<github-org>.<repo>.<bundle-name>` -- mirrors `bundle_manifest_v2._APP_ID_RE`.
@@ -122,21 +122,27 @@ def authorize_onboarding_scope(request: Request, *, app_id: str) -> OnboardingAu
     return OnboardingAuthorization(is_admin=False)
 
 
-def enforce_vendor_namespace(*, app_id: str) -> None:
-    """403s unless `app_id` is a well-formed, non-reserved third-party id.
+async def enforce_vendor_namespace(install_dal: Any, *, app_id: str, caller_id: int) -> None:
+    """403s unless `app_id` is a well-formed, non-reserved id this vendor may publish to.
 
-    Rejects: anything that is not `<github-org>.<repo>.<bundle-name>`; any id whose
-    org segment is the reserved `penguintechinc` (this covers
-    `penguintechinc.waddles.*` and `penguintechinc.<other-repo>.*` alike); and
-    the admin-only third-party ports (`psychoboy.penguintwitchbot.*`).
+    Rejects: anything that is not `<github-org>.<repo>.<bundle-name>`; any id whose org
+    segment is in `RESERVED_ORGS`; and (ownership lock) any `app_id` that already has an
+    upload row created by a different caller -- including `requested_by IS NULL`, the
+    system actor that seeded first-party and platform-hosted bundles. An app_id therefore
+    belongs to the vendor who first registered it. Verifying that the vendor really owns
+    the GitHub org is a separate follow-up (OAuth / vendor_orgs mapping).
     """
     reason: str | None = None
     if len(app_id) > _APP_ID_MAX_LEN or not _VENDOR_APP_ID_RE.fullmatch(app_id):
         reason = "app_id must be '<github-org>.<repo>.<bundle-name>' (lowercase)"
-    elif app_id.split(".", 1)[0] == RESERVED_ORG:
-        reason = f"the {RESERVED_ORG!r} org namespace is reserved for first-party bundles"
-    elif app_id.startswith(ADMIN_ONLY_PREFIXES):
-        reason = "this namespace may only be onboarded by a platform admin"
+    elif app_id.split(".", 1)[0] in RESERVED_ORGS:
+        reason = "this org namespace is reserved (first-party / platform-admin only)"
+    else:
+        rows = await install_dal(install_dal.app_version_uploads.app_id == app_id).select(
+            install_dal.app_version_uploads.requested_by
+        )
+        if any(row.requested_by != caller_id for row in rows):
+            reason = "this app_id is already registered by another publisher"
     if reason is not None:
         logger.warning(
             "bundle onboarding: app_id refused on the vendor path",

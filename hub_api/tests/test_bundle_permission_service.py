@@ -11,7 +11,7 @@ from services import bundle_permission_service as svc
 from services.bundle_manifest_v2 import parse_bundle_manifest_v2
 from services.errors import ApiError
 
-_APP_ID = "penguintechinc.waddles.music"
+_APP_ID = "acmecorp.widgets.music"
 _CORE_APP_ID = "penguintechinc.waddles.echo"
 _VERSION = "3.0.0"
 
