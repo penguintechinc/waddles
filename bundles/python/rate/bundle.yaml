@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.rate
+app_id: penguintechinc.waddles.rate
 name: Rate Bundle (Python)
 version: 1.0.3
 feature: waddles.core.example

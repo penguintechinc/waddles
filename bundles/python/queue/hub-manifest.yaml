@@ -1,11 +1,11 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.queue -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.queue -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
 # 1.0.0: initial kv-only viewer queue -- see this bundle's src/app.py module docstring
 # (feature/bundles-queue-timer).
 schema_version: 2
-app_id: waddles.core.example.queue
+app_id: penguintechinc.waddles.queue
 name: Viewer Queue Bundle (Python)
 version: 1.0.3
 feature: waddles.core.example

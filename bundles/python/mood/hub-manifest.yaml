@@ -1,7 +1,7 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.mood.
+# hub-api install-pipeline manifest (schema_version 2) for penguintechinc.waddles.mood.
 # 1.0.0: new fun-pack2 bundle -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.mood
+app_id: penguintechinc.waddles.mood
 name: Random Mood Bundle (Python)
 version: 1.0.5
 feature: waddles.core.example

@@ -1,8 +1,8 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.rank -- see bundles/python/pyping/hub-manifest.yaml's own header for
+# penguintechinc.waddles.rank -- see bundles/python/pyping/hub-manifest.yaml's own header for
 # why this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 schema_version: 2
-app_id: waddles.core.example.rank
+app_id: penguintechinc.waddles.rank
 name: Chat Rank/Level Bundle (Python)
 version: 1.0.8
 feature: waddles.core.example
@@ -54,7 +54,7 @@ permissions:
     justification: "rank replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
   - id: identity.resolve
     justification: "resolves the verified caller to its community user UUID for the !rep reputation lookup"
-  - id: "tool.call:waddles.core.service.reputation:rep"
+  - id: "tool.call:penguintechinc.waddles.reputation:rep"
     justification: "delegates the !rep read (score, tier, next tier) to the reputation service; read-only"
     params:
       write: false
@@ -62,4 +62,4 @@ routes_to: []
 requested_tools:
   - tool: rep
     access: read
-    target_app_id: waddles.core.service.reputation
+    target_app_id: penguintechinc.waddles.reputation

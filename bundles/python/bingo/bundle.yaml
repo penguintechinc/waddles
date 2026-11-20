@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.bingo
+app_id: penguintechinc.waddles.bingo
 name: Chat Bingo Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !bingo (card) / bingo (claim) / status / start / call / end. Cards are
 # derived from a per-round seed + the viewer's pseudonym, never stored. See src/app.py's module

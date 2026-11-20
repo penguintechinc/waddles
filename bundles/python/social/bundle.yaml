@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.social
+app_id: penguintechinc.waddles.social
 name: Social Interactions Example Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !hug/!highfive/!pat <user> (interact), !social stats. See
 # src/app.py's own module docstring for full scope.

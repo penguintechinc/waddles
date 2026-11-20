@@ -1,4 +1,4 @@
-# event bundle (`waddles.core.example.event`)
+# event bundle (`penguintechinc.waddles.event`)
 
 `!event create <name> <when>` / `list` / `view <id>` / `remove <id>` and `!rsvp <id> yes|no` -- light community events + RSVPs in kv. NOT the beta-trio event-sync feature (shares nothing with it).
 

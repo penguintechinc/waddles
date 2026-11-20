@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.commands
+app_id: penguintechinc.waddles.commands
 name: Commands Bundle (Python)
 # 1.0.0: initial -- `!commands` lists the curated catalog of first-party commands (activation-gated, no feature flags).
 version: 1.0.3

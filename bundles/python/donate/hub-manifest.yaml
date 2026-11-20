@@ -1,8 +1,8 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.donate -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.donate -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 schema_version: 2
-app_id: waddles.core.example.donate
+app_id: penguintechinc.waddles.donate
 name: Donate Bundle (Python)
 version: 1.0.5
 feature: waddles.core.example

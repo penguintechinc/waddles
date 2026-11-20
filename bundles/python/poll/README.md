@@ -2,7 +2,7 @@
 
 `!poll` -- community polls in chat: moderators create a poll with up to 10 options, anyone votes by
 number, moderators close it and the final results are posted. First-party (`provider: builtin`,
-`app_id: waddles.core.example.poll`, `author: PenguinTech/waddles`, Apache-2.0), **original Waddles
+`app_id: penguintechinc.waddles.poll`, `author: PenguinTech/waddles`, Apache-2.0), **original Waddles
 content**: a strangler extraction of the bot_process monolith's
 `core/svc_process/builtin_handlers/community_polls_process.py` -- not a third-party port, so no
 upstream attribution applies.

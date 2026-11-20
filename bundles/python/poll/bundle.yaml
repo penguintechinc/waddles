@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.poll
+app_id: penguintechinc.waddles.poll
 name: Community Polls Bundle (Python)
 # 1.0.0: extracted from the bot_process monolith (core/svc_process/builtin_handlers/
 # community_polls_process.py) onto waddle_sdk.command's standard grammar and

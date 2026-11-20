@@ -88,7 +88,7 @@ def _say(
     env = StageEnvelope(
         tenant="t",
         community=community,
-        app_id="waddles.core.example.event",
+        app_id="penguintechinc.waddles.event",
         stage="action",
         event=out,
         ts="2026-10-09T00:00:00.000Z",

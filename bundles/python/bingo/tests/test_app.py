@@ -823,7 +823,7 @@ def _envelope(event: PlatformEvent) -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
         community=COMMUNITY,
-        app_id="waddles.core.example.bingo",
+        app_id="penguintechinc.waddles.bingo",
         stage="action",
         event=event,
         ts="2026-10-22T00:00:00.000Z",
@@ -841,7 +841,7 @@ def test_manifests_and_pyproject_agree() -> None:
     version = re.escape(match.group(1))
     for text in (bundle, hub):
         assert re.search(rf"^version: {version}$", text, re.MULTILINE)
-        assert "app_id: waddles.core.example.bingo" in text
+        assert "app_id: penguintechinc.waddles.bingo" in text
         assert text.count('command_prefix: ["!bingo"]') == 2
     assert re.search(r'^  tested_with: "[0-9.]+"$', bundle, re.MULTILINE)
 

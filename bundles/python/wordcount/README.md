@@ -1,7 +1,7 @@
 # wordcount (Python)
 
 Counts how many messages and words each user has sent (per community) and reports them with
-`!wordcount [@user]`. First-party (`provider: builtin`, `app_id: waddles.core.example.wordcount`),
+`!wordcount [@user]`. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.wordcount`),
 `kv`-backed, WASI component.
 
 | | |

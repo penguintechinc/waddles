@@ -1,7 +1,7 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.commands -- see bundles/python/pyping/hub-manifest.yaml's own header.
+# penguintechinc.waddles.commands -- see bundles/python/pyping/hub-manifest.yaml's own header.
 schema_version: 2
-app_id: waddles.core.example.commands
+app_id: penguintechinc.waddles.commands
 name: Commands Bundle (Python)
 version: 1.0.3
 feature: waddles.core.example

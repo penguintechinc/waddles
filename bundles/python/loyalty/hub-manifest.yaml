@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.loyalty
+app_id: penguintechinc.waddles.loyalty
 name: Loyalty Points Bundle (Python)
 version: 1.0.9
 feature: waddles.core.example
@@ -63,23 +63,23 @@ permissions:
 - id: identity.resolve
   justification: Resolve the verified caller and host-issued mentions to community
     UUIDs
-- id: tool.call:waddles.core.service.economy:points_view
+- id: tool.call:penguintechinc.waddles.economy:points_view
   justification: Delegate points policy and money to the economy service
   params:
     write: false
-- id: tool.call:waddles.core.service.economy:points_leaders
+- id: tool.call:penguintechinc.waddles.economy:points_leaders
   justification: Delegate points policy and money to the economy service
   params:
     write: false
-- id: tool.call:waddles.core.service.economy:points_set
+- id: tool.call:penguintechinc.waddles.economy:points_set
   justification: Delegate points policy and money to the economy service
   params:
     write: true
-- id: tool.call:waddles.core.service.economy:points_adjust
+- id: tool.call:penguintechinc.waddles.economy:points_adjust
   justification: Delegate points policy and money to the economy service
   params:
     write: true
-- id: tool.call:waddles.core.service.economy:give
+- id: tool.call:penguintechinc.waddles.economy:give
   justification: Delegate points policy and money to the economy service
   params:
     write: true
@@ -87,16 +87,16 @@ routes_to: []
 requested_tools:
 - tool: points_view
   access: read
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 - tool: points_leaders
   access: read
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 - tool: points_set
   access: write
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 - tool: points_adjust
   access: write
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy
 - tool: give
   access: write
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy

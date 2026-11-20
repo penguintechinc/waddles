@@ -60,7 +60,7 @@ def _env(event: PlatformEvent) -> StageEnvelope:
     return StageEnvelope(
         tenant="t-1",
         community="comm-1",
-        app_id="waddles.core.example.fact",
+        app_id="penguintechinc.waddles.fact",
         stage="action",
         event=event,
         ts="2026-10-21T00:00:00.000Z",

@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.prediction
+app_id: penguintechinc.waddles.prediction
 name: Prediction Bundle (Python)
 # 1.0.0: initial -- !prediction open/lock/resolve/cancel + !predict <outcome> <points>/claim. Economy-SDK stakes, pari-mutuel claim payouts, activation-gated.
 version: 1.0.3

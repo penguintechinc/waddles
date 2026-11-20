@@ -87,7 +87,7 @@ def test_both_manifest_files_agree_on_identity_and_version() -> None:
     a, b = (_load(m) for m in MANIFESTS)
     for field in ("app_id", "version", "name", "feature", "module", "provider"):
         assert a[field] == b[field], field
-    assert a["app_id"] == "waddles.core.example.blackjack"
+    assert a["app_id"] == "penguintechinc.waddles.blackjack"
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS)

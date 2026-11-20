@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.rank
+app_id: penguintechinc.waddles.rank
 name: Chat Rank/Level Bundle (Python)
 # 1.0.0: initial DB-backed v1 -- !rank (own level+XP)/!rank <user>/!rank top/
 # !rank add|sub <amount> <user>. See src/app.py's own module docstring for the full
@@ -80,7 +80,7 @@ permissions:
     justification: "rank replies to the invoking user/channel via the relay host import (relay.push -> chat.send:twitch)"
   - id: identity.resolve
     justification: "resolves the verified caller to its community user UUID for the !rep reputation lookup"
-  - id: "tool.call:waddles.core.service.reputation:rep"
+  - id: "tool.call:penguintechinc.waddles.reputation:rep"
     justification: "delegates the !rep read (score, tier, next tier) to the reputation service; read-only"
     params:
       write: false
@@ -94,4 +94,4 @@ platform_compatibility:
 requested_tools:
   - tool: rep
     access: read
-    target_app_id: waddles.core.service.reputation
+    target_app_id: penguintechinc.waddles.reputation

@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.count
+app_id: penguintechinc.waddles.count
 name: Dynamic Counter Bundle (Python)
 # 1.0.0 retired -- fix/bump-command-bundles-1.0.1, see this bundle's hub-manifest.yaml for why.
 # 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters

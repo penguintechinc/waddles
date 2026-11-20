@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.wheel
+app_id: penguintechinc.waddles.wheel
 name: Spin-the-Wheel Picker Bundle (Python)
 # 1.0.3: PII-free kv-failure logs (op + exception class only, never host/blob text); strict boolean mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-wheel feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).

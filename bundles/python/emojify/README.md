@@ -1,4 +1,4 @@
-# emojify bundle (`waddles.core.example.emojify`)
+# emojify bundle (`penguintechinc.waddles.emojify`)
 
 `!emojify <text>` -> sprinkles a relevant emoji after matching words (keyword map, fallback sparkle). Python/WASM component modeled on `bundles/python/echo`.
 

@@ -1,7 +1,7 @@
 # duel (Python)
 
 `!duel <user>` -- a 1v1 challenge minigame. Community-scoped fun content, first-party
-(`provider: builtin`, `app_id: waddles.core.example.duel`). Net-new Waddles content -- not a
+(`provider: builtin`, `app_id: penguintechinc.waddles.duel`). Net-new Waddles content -- not a
 port of, or inspired by, any external project (contrast `bundles/python/fish`, which credits a
 specific inspiration in its own `bundle.yaml`).
 
@@ -135,6 +135,6 @@ logs (gh-674), kv key charset over every key touched (gh-631).
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.duel`). Related: a shared
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.duel`). Related: a shared
 economy/points capability across bundles is tracked in gh-714; duel deliberately has no wager
 or balance today.

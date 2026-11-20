@@ -1,7 +1,7 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.death.
+# hub-api install-pipeline manifest (schema_version 2) for penguintechinc.waddles.death.
 # 1.0.0: new fun-pack2 bundle -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.death
+app_id: penguintechinc.waddles.death
 name: Streamer Death Counter Bundle (Python)
 version: 1.0.6
 feature: waddles.core.example

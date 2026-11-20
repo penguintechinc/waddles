@@ -160,7 +160,7 @@ def _transform(host: _Host, event: PlatformEvent, community: str | None = COMMUN
 
     async def go() -> PlatformEvent | None:
         with bundle_context(
-            tenant="t", community=community, app_id="waddles.core.example.chatguard"
+            tenant="t", community=community, app_id="penguintechinc.waddles.chatguard"
         ):
             return await transform(event)
 
@@ -188,7 +188,7 @@ def _envelope(event: PlatformEvent, community: str | None = COMMUNITY) -> StageE
     return StageEnvelope(
         tenant="t",
         community=community,
-        app_id="waddles.core.example.chatguard",
+        app_id="penguintechinc.waddles.chatguard",
         stage="action",
         event=event,
         ts="2026-10-05T00:00:00.000Z",

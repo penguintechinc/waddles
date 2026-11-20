@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.memories
+app_id: penguintechinc.waddles.memories
 name: Memories Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !remember <text> / !memories [@user] / !forget <id|all>.
 # Per-user, self-managed, public read, 20-item cap. See src/app.py's module docstring.

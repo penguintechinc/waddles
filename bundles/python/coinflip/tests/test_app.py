@@ -178,7 +178,7 @@ def _sample_envelope(
     return StageEnvelope(
         tenant="tenant-1",
         community=community,
-        app_id="waddles.core.example.coinflip",
+        app_id="penguintechinc.waddles.coinflip",
         stage="action",
         event=PlatformEvent(
             platform=platform,
@@ -422,7 +422,7 @@ def test_dispatch_raises_when_channel_id_is_missing(fake_host: _FakeHost) -> Non
     envelope = StageEnvelope(
         tenant="tenant-1",
         community="comm-1",
-        app_id="waddles.core.example.coinflip",
+        app_id="penguintechinc.waddles.coinflip",
         stage="action",
         event=PlatformEvent(
             platform="twitch",
@@ -868,7 +868,7 @@ def _roundtrip(text: str, **role: bool) -> Any:
     envelope = StageEnvelope(
         tenant="tenant-1",
         community="comm-1",
-        app_id="waddles.core.example.coinflip",
+        app_id="penguintechinc.waddles.coinflip",
         stage="action",
         event=out,
         ts="2026-10-05T00:00:00.000Z",

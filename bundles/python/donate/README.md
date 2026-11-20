@@ -1,7 +1,7 @@
 # donate (Python)
 
 `!donate` -- show, set or clear this community's donation (tip) link. First-party
-(`provider: builtin`, `app_id: waddles.core.example.donate`), kv-only, WASI component. A
+(`provider: builtin`, `app_id: penguintechinc.waddles.donate`), kv-only, WASI component. A
 community that wants `!tip` aliases it with the existing `alias` bundle (one prefix per bundle).
 
 | | |

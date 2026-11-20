@@ -1,7 +1,7 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.example.lfg.
+# hub-api install-pipeline manifest (schema_version 2) for penguintechinc.waddles.lfg.
 # 1.0.0: v2 port, KV-backed -- see src/app.py's module docstring.
 schema_version: 2
-app_id: waddles.core.example.lfg
+app_id: penguintechinc.waddles.lfg
 name: Looking-For-Group Bundle (Python)
 version: 1.0.6
 feature: waddles.core.example
