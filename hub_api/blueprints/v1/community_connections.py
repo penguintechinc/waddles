@@ -241,6 +241,7 @@ async def list_connections(community_id: int) -> tuple[dict[str, Any], int]:
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.connections:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def authorize_connection(community_id: int, provider: str) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/communities/<id>/connections/<provider>/authorize`.
 
@@ -383,6 +384,7 @@ async def oauth_callback(provider: str) -> tuple[Response, int] | Response:
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.connections:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_connection(community_id: int, provider: str) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/connections/<provider>`."""
     ctx = get_tenant_context(request)
