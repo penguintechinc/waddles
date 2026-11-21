@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import UUID
 
 from flask_core.api_utils import error_response
 from flask_core.tenancy import get_tenant_context, tenant_middleware
@@ -38,11 +39,13 @@ from quart_schema import document_response, validate_request, validate_response
 
 from services import admin_service as svc
 from services import community_reputation_service as reputation_svc
+from services import floor_ban_lift
 from services.community_authz import guard_target_member, resolve_editor_scopes_async
 from services.current_user import get_optional_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError, forbidden
 from services.pagination import parse_limit
+from services.route_guards import tenant_admin_guard
 from services.scope_registry import (
     SCOPE_COMMANDS_MANAGE,
     SCOPE_MEMBERS_REMOVE,
@@ -783,6 +786,37 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
     if not cleared:
         return _err(ApiError("Member is not soft-banned", 404, "NOT_FOUND"))
     return jsonify_dto(MessageResponse(success=True, message="Soft ban cleared"))
+
+
+@admin_bp.route("/<cuuid:community_id>/reputation/floor-bans/<uuid:user_uuid>", methods=["DELETE"])
+@tenant_middleware  # type: ignore[misc]
+@tenant_admin_guard  # type: ignore[misc]
+@document_response(MessageResponse)
+async def delete_reputation_floor_ban(community_id: int, user_uuid: UUID) -> tuple[Any, int]:
+    """Lift a member's automated floor ban tenant-wide so they regain normal access (audited).
+
+    Tenant admins only: a floor ban denies in every community of the tenant.
+    """
+    async_dal, dal = _dal()
+    try:
+        ctx = get_tenant_context(request)
+        assert ctx is not None
+        await svc.authorize_floor_ban_lift(
+            async_dal, dal, request, community_id=community_id, ctx=ctx
+        )
+        await floor_ban_lift.lift_floor_bans(
+            async_dal,
+            dal,
+            tenant_id=ctx.tenant_id,
+            user_uuid=str(user_uuid),
+            actor_user_id=get_optional_current_user_id(request),
+        )
+    except ApiError as exc:
+        logger.warning(
+            "delete_reputation_floor_ban rejected: code=%s status=%s", exc.code, exc.status_code
+        )
+        return _err(exc)
+    return jsonify_dto(MessageResponse(success=True, message="Floor ban lifted"))
 
 
 @admin_bp.route("/<cuuid:community_id>/members/<int:user_id>", methods=["DELETE"])

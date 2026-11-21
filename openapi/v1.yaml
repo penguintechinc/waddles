@@ -12753,6 +12753,45 @@ paths:
             product policy).
       summary: Set the community's soft/hard ban floors + flags and at-risk threshold
         (400 if invalid).
+  /api/v1/admin/{community_id}/reputation/floor-bans/{user_uuid}:
+    delete:
+      description: '
+
+        Tenant admins only: a floor ban denies in every community of the tenant.'
+      operationId: delete_delete_reputation_floor_ban
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      - in: path
+        name: user_uuid
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for message endpoints.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MessageResponse
+                type: object
+          description: Response DTO for message endpoints.
+      summary: Lift a member's automated floor ban tenant-wide so they regain normal
+        access (audited).
   /api/v1/admin/{community_id}/reputation/history:
     get:
       description: ''

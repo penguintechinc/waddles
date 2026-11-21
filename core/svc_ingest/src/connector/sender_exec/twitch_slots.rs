@@ -23,6 +23,9 @@ use connection_resolver::SecretString;
 use serde::Deserialize;
 use serde_json::{Map, Value};
 
+use std::sync::Arc;
+
+use super::discord_duties::UserResolveError;
 use super::policy::APP_HANDLE_PREFIX;
 use super::subst::SlotValue;
 use super::{DutyCx, DutyHook, ExecError, SlotError, SlotRequest, SlotSource};
@@ -85,6 +88,20 @@ pub struct TwitchSlots<C: TwitchCredentialSource, A: TwitchAppSource = NoApp> {
     client: GuardedClient,
     users_url: String,
     app: A,
+    users: Option<Arc<dyn TwitchUserResolver>>,
+}
+
+/// Community-scoped detokenization of a user UUID to the raw Twitch user id (hub-api
+/// `ResolvePlatformUser`). The raw id exists only in the returned zeroizing value, inside this
+/// service, for the one send; it never rides the relay queue.
+pub trait TwitchUserResolver: Send + Sync {
+    /// The raw Twitch id of `user_uuid` within `(tenant_id, community_id)`.
+    fn resolve<'a>(
+        &'a self,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &'a str,
+    ) -> crate::commands_reconcile::BoxFut<'a, Result<SlotValue, UserResolveError>>;
 }
 
 impl<C: TwitchCredentialSource> TwitchSlots<C, NoApp> {
@@ -114,6 +131,7 @@ impl<C: TwitchCredentialSource> TwitchSlots<C, NoApp> {
             client,
             users_url,
             app: NoApp,
+            users: None,
         }
     }
 
@@ -126,7 +144,17 @@ impl<C: TwitchCredentialSource> TwitchSlots<C, NoApp> {
             client: self.client,
             users_url: self.users_url,
             app,
+            users: self.users,
         }
+    }
+}
+
+impl<C: TwitchCredentialSource, A: TwitchAppSource> TwitchSlots<C, A> {
+    /// Installs the user detokenizer used by host-originated moderation (`{user:<uuid>}`).
+    #[must_use]
+    pub fn with_user_resolver(mut self, users: Arc<dyn TwitchUserResolver>) -> Self {
+        self.users = Some(users);
+        self
     }
 }
 
@@ -213,6 +241,45 @@ pub(crate) fn map_cred(e: CredError) -> SlotError {
 }
 
 impl<C: TwitchCredentialSource, A: TwitchAppSource> SlotSource for TwitchSlots<C, A> {
+    async fn resolve_user(
+        &self,
+        platform: &str,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &str,
+    ) -> Result<SlotValue, SlotError> {
+        if platform != "twitch" {
+            return Err(SlotError::Refused("unsupported_platform"));
+        }
+        let users = self
+            .users
+            .as_ref()
+            .ok_or(SlotError::Refused("user_resolver_unconfigured"))?;
+        users
+            .resolve(tenant_id, community_id, user_uuid)
+            .await
+            .map_err(|e| match e {
+                UserResolveError::NotFound => SlotError::Refused("user_not_in_community"),
+                UserResolveError::Denied => SlotError::Refused("user_resolve_denied"),
+                _ => SlotError::Unavailable("user_resolve_unavailable"),
+            })
+    }
+
+    async fn bound_channel(
+        &self,
+        platform: &str,
+        community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        if platform != "twitch" {
+            return Err(SlotError::Refused("unsupported_platform"));
+        }
+        self.creds
+            .bound_channel(community_id)
+            .await
+            .map(|login| format!("#{login}"))
+            .map_err(map_cred)
+    }
+
     fn supports_app_credentials(&self, platform: &str) -> bool {
         platform == "twitch" && A::AVAILABLE
     }

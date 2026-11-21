@@ -508,6 +508,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             platform = %decl.platform, op = what, app_id = %scope.app_id,
             community_id = scope.community_id, "host platform tool confirmed"
         );
+        if what == "mod.unban" {
+            if let Some(u) = &wire.user_uuid {
+                self.sync_confirmed_unban(scope, &decl.platform, u).await;
+            }
+        }
         shape_result(decl, what, &ack)
     }
 

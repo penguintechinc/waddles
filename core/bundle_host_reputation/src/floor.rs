@@ -108,6 +108,8 @@ pub enum FloorBanStatus {
     Refused = 6,
     /// In flight under a lease.
     Dispatched = 7,
+    /// An admin reversed the ban (alembic 0137): terminal, never enforced or retried.
+    Lifted = 8,
 }
 
 impl FloorBanStatus {
@@ -122,6 +124,7 @@ impl FloorBanStatus {
             5 => Some(Self::RateLimited),
             6 => Some(Self::Refused),
             7 => Some(Self::Dispatched),
+            8 => Some(Self::Lifted),
             _ => None,
         }
     }
@@ -156,13 +159,13 @@ mod tests {
         assert_eq!(FloorEnqueue::from_sql(3, 9), Some(FloorEnqueue::Refused(9)));
         assert_eq!(FloorEnqueue::from_sql(4, 0), Some(FloorEnqueue::UserCapped));
         assert_eq!(FloorEnqueue::from_sql(5, 9), None);
-        for code in 1..=7 {
+        for code in 1..=8 {
             assert_eq!(
                 FloorBanStatus::from_code(code).map(|s| s as i16),
                 Some(code)
             );
         }
         assert_eq!(FloorBanStatus::from_code(0), None);
-        assert_eq!(FloorBanStatus::from_code(8), None);
+        assert_eq!(FloorBanStatus::from_code(9), None);
     }
 }

@@ -221,6 +221,58 @@ pub trait SlotSource: Send + Sync {
     fn supports_app_credentials(&self, _platform: &str) -> bool {
         false
     }
+
+    /// The canonical channel (`#login`) the community's verified binding owns, for a
+    /// host-originated moderation op that names no channel (the Twitch `channel:-` scope). It
+    /// is resolved from the binding alone, never from the queue entry. The default refuses.
+    async fn bound_channel(
+        &self,
+        _platform: &str,
+        _community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        Err(SlotError::Refused("bound_channel_unsupported"))
+    }
+
+    /// Detokenizes `user_uuid` to the raw platform user id for `(tenant_id, community_id)`
+    /// (host-originated moderation carries only the `{user:<uuid>}` placeholder on the wire).
+    /// The default refuses.
+    async fn resolve_user(
+        &self,
+        _platform: &str,
+        _tenant_id: i64,
+        _community_id: i64,
+        _user_uuid: &str,
+    ) -> Result<SlotValue, SlotError> {
+        Err(SlotError::Refused("user_resolver_unsupported"))
+    }
+}
+
+/// The canonical UUID inside a `{user:<uuid>}` placeholder; anything else (a raw platform id, a
+/// bare uuid, a malformed token) is `None` -- raw ids never enter the host-originated path.
+fn user_placeholder_uuid(raw: &str) -> Option<String> {
+    let inner = raw.strip_prefix("{user:")?.strip_suffix('}')?;
+    let b = inner.as_bytes();
+    let ok = b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        });
+    ok.then(|| inner.to_ascii_lowercase())
+}
+
+/// The wire spelling of a Twitch host-originated moderation scope: no channel is named; the
+/// channel is the community's bound one (the Twitch analogue of Discord's `guild:-`).
+pub const TWITCH_BOUND_CHANNEL_SCOPE: &str = "channel:-";
+
+/// `true` for a Twitch `mod.ban` / `mod.unban` carrying the [`TWITCH_BOUND_CHANNEL_SCOPE`]
+/// (and no channel of its own). Only these two ops may use it.
+fn is_twitch_bound_scope(platform: &str, action: &OutboundAction) -> bool {
+    platform == "twitch"
+        && matches!(
+            action,
+            OutboundAction::PolicyOp(PolicyOp { op, channel: None, origin_channel: Some(o), .. })
+                if matches!(*op, "mod.ban" | "mod.unban") && o == TWITCH_BOUND_CHANNEL_SCOPE
+        )
 }
 
 /// What a [`DutyHook::role_bulk`] decided.
@@ -455,6 +507,30 @@ pub struct ExecOutcome {
     /// The platform id a create-style op produced (the new Discord scheduled
     /// event's snowflake, parsed from the reply), else `None`.
     pub result_id: Option<String>,
+    /// `Some("already_banned" | "already_unbanned")` when Helix answered the exact
+    /// idempotent-state 400 for a Twitch ban/unban: the desired state already holds, so the op
+    /// counts as delivered. `None` for every ordinary success.
+    pub idempotent: Option<&'static str>,
+}
+
+/// Helix's exact 400 `message` for banning a user who is already banned.
+pub const HELIX_ALREADY_BANNED: &str = "The user specified in the user_id field is already banned.";
+/// Helix's exact 400 `message` for unbanning a user who is not banned.
+pub const HELIX_NOT_BANNED: &str = "The user in the user_id query parameter is not banned.";
+
+/// The idempotent outcome a Twitch `mod.ban` / `mod.unban` 400 body names, matched on Helix's
+/// exact `message` only; any other 400 (bad id, missing scope, rate shape) is a real failure.
+fn helix_idempotent_outcome(kind: &str, body: &[u8]) -> Option<&'static str> {
+    let msg = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get("message")?
+        .as_str()?
+        .to_owned();
+    match (kind, msg.as_str()) {
+        ("mod.ban", HELIX_ALREADY_BANNED) => Some("already_banned"),
+        ("mod.unban", HELIX_NOT_BANNED) => Some("already_unbanned"),
+        _ => None,
+    }
 }
 
 /// What to execute.
@@ -678,7 +754,7 @@ where
             .with_label_values(&[platform, kind])
             .observe(start.elapsed().as_secs_f64());
         let outcome = match &res {
-            Ok(_) => "ok",
+            Ok(o) => o.idempotent.unwrap_or("ok"),
             Err(e) => e.outcome(),
         };
         EXEC_TOTAL
@@ -778,7 +854,18 @@ where
             .slots
             .iter()
             .any(|s| s.origin == SlotOrigin::Stamp && kind.slots.contains(&s.name));
-        let pinned = pin_channel(req.platform, req.action, uses_stamp, kind.requires_pin)?;
+        let pinned = if is_twitch_bound_scope(req.platform, req.action) {
+            // No channel on the wire: the host takes it from the community's verified binding
+            // (hub-api binding list), then the slot resolver re-proves ownership below.
+            Some(
+                self.slots
+                    .bound_channel(req.platform, req.community_id)
+                    .await
+                    .map_err(ExecError::Slot)?,
+            )
+        } else {
+            pin_channel(req.platform, req.action, uses_stamp, kind.requires_pin)?
+        };
         let cx = DutyCx {
             platform: req.platform,
             action: req.action,
@@ -787,6 +874,35 @@ where
             client: &self.client,
         };
 
+        // Host-originated Twitch moderation names its target by `{user:<uuid>}` only: the raw id
+        // is resolved here, per send, scoped to the stamp's tenant + community, and lives only
+        // in the payload built for this one request (never queued, never logged).
+        let detok_action: Option<OutboundAction> =
+            if is_twitch_bound_scope(req.platform, req.action) {
+                let OutboundAction::PolicyOp(p) = req.action else {
+                    return Err(ExecError::BadAction);
+                };
+                let uuid = p
+                    .user_id
+                    .as_deref()
+                    .and_then(user_placeholder_uuid)
+                    .ok_or(ExecError::Slot(SlotError::Refused("user_not_tokenized")))?;
+                let (Some(tenant), Some(community)) =
+                    (p.tenant_id.filter(|t| *t > 0), req.community_id)
+                else {
+                    return Err(ExecError::Slot(SlotError::Refused("no_community_scope")));
+                };
+                let raw = self
+                    .slots
+                    .resolve_user(req.platform, tenant, community, &uuid)
+                    .await
+                    .map_err(ExecError::Slot)?;
+                let mut resolved = p.clone();
+                resolved.user_id = Some(raw.expose().to_owned());
+                Some(OutboundAction::PolicyOp(resolved))
+            } else {
+                None
+            };
         let payload_json = if kind.needs_duty {
             if !self.duties.claims(req.platform, kind_name) {
                 return Err(ExecError::HostDutyMissing);
@@ -794,7 +910,7 @@ where
             self.duties.gate(&cx).await?;
             self.duties.payload(&cx).await?
         } else {
-            default_payload(kind, req.action)?
+            default_payload(kind, detok_action.as_ref().unwrap_or(req.action))?
         };
         let action = SenderAction {
             kind: kind_name.to_string(),
@@ -913,7 +1029,8 @@ where
         drop((values, creds));
         subst::check_distinct_body_ints(&kind.distinct_body_ints, prepared.body.as_deref())
             .map_err(ExecError::Subst)?;
-        let outcome = self.send(prepared, kind.result).await?;
+        let idem_kind = (req.platform == "twitch").then_some(kind_name);
+        let outcome = self.send(prepared, kind.result, idem_kind).await?;
         if kind.needs_duty {
             self.duties.after_send(&cx, &outcome).await;
         }
@@ -925,7 +1042,12 @@ where
     /// resource's snowflake `id`; a reply without one is a failed op (the
     /// producer could never address the resource again) and is surfaced, not
     /// defaulted.
-    async fn send(&self, p: PreparedRequest, result: ResultMode) -> Result<ExecOutcome, ExecError> {
+    async fn send(
+        &self,
+        p: PreparedRequest,
+        result: ResultMode,
+        idem_kind: Option<&str>,
+    ) -> Result<ExecOutcome, ExecError> {
         let method = reqwest::Method::from_bytes(p.method.as_bytes())
             .map_err(|_| ExecError::Egress("method"))?;
         let headers: Vec<(String, String)> = p
@@ -951,6 +1073,22 @@ where
                 Ok(ExecOutcome {
                     status: resp.status,
                     result_id,
+                    idempotent: None,
+                })
+            }
+            400 if idem_kind
+                .and_then(|k| helix_idempotent_outcome(k, &resp.body))
+                .is_some() =>
+            {
+                let state = idem_kind.and_then(|k| helix_idempotent_outcome(k, &resp.body));
+                tracing::info!(
+                    outcome = state.unwrap_or_default(),
+                    "twitch moderation already in the desired state; counted as delivered"
+                );
+                Ok(ExecOutcome {
+                    status: resp.status,
+                    result_id: None,
+                    idempotent: state,
                 })
             }
             300..=399 => Err(ExecError::Redirect),

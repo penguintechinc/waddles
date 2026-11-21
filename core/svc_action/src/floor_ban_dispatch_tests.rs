@@ -22,6 +22,7 @@ fn row(id: i64) -> ClaimedFloorBan {
         platform: "discord".to_string(),
         attempt: 1,
         lease: Uuid::from_u128(u128::try_from(id).unwrap() + 1000),
+        action: ACTION_BAN,
     }
 }
 
@@ -470,5 +471,63 @@ async fn m2_flag_off_means_no_sweep_no_claim_no_send_and_the_rows_remain() {
         store.claim.lock().unwrap().len(),
         2,
         "the queued rows remain queued"
+    );
+}
+
+fn unban_row(id: i64) -> ClaimedFloorBan {
+    ClaimedFloorBan {
+        action: ACTION_UNBAN,
+        ..row(id)
+    }
+}
+
+#[tokio::test]
+async fn an_unban_row_is_delivered_as_an_unban_through_the_same_dispatch_path() {
+    let store = FakeStore::with_rows(vec![row(1), unban_row(2)]);
+    let sender = FakeSender::default();
+    let (h, m) = metrics();
+    let r = sweep_once(&store, &sender, &m).await;
+    assert_eq!((r.claimed, r.done), (2, 2));
+    let mut sent = sender.sent.lock().unwrap().clone();
+    sent.sort_by_key(|c| c.id);
+    assert_eq!(
+        sent.iter().map(|c| (c.id, c.unban)).collect::<Vec<_>>(),
+        vec![(1, false), (2, true)],
+        "exactly one command per row, the unban flagged as an unban"
+    );
+    assert_eq!(count(&h, "done"), 2.0);
+}
+
+#[tokio::test]
+async fn a_failing_unban_retries_with_backoff_then_dead_letters_loudly() {
+    let (h, m) = metrics();
+    let sender = FakeSender::default();
+    for _ in 0..2 {
+        sender.will(
+            9,
+            Err(FloorSendFailure {
+                error: FloorSendError::Retry("relay_unconfirmed".into()),
+                op_id: None,
+            }),
+        );
+    }
+    // Sweep 1: the failure is scheduled for a retry.
+    let store = FakeStore::with_rows(vec![unban_row(9)]);
+    let r = sweep_once(&store, &sender, &m).await;
+    assert_eq!((r.failed, r.dead), (1, 0));
+    assert_eq!(count(&h, "failed"), 1.0);
+    // Sweep 2 (attempts exhausted): the store reports DEAD -> the loud alert metric fires.
+    let store = FakeStore::with_rows(vec![unban_row(9)]);
+    store
+        .answer
+        .lock()
+        .unwrap()
+        .insert("failed", Completed::Dead);
+    let r = sweep_once(&store, &sender, &m).await;
+    assert_eq!((r.failed, r.dead), (0, 1));
+    assert_eq!(count(&h, "dead"), 1.0);
+    assert_eq!(
+        store.completions()[0].2,
+        Completion::Failed("relay_unconfirmed".into())
     );
 }
