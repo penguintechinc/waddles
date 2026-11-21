@@ -264,8 +264,9 @@ export const adminApi = {
   // Loyalty leaderboard
   getLoyaltyLeaderboard: (communityId, params) =>
     api.get(`/api/v1/admin/${communityId}/loyalty/leaderboard`, { params }),
-  adjustLoyaltyBalance: (communityId, userId, data) =>
-    api.put(`/api/v1/admin/${communityId}/loyalty/user/${userId}/balance`, data),
+  // `memberUuid` is the member's public UUID (leaderboard entry `user_uuid`), never a platform id.
+  adjustLoyaltyBalance: (communityId, memberUuid, data) =>
+    api.put(`/api/v1/admin/${communityId}/loyalty/user/${memberUuid}/balance`, data),
   wipeLoyaltyCurrency: (communityId) =>
     api.post(`/api/v1/admin/${communityId}/loyalty/wipe`),
   getLoyaltyStats: (communityId) =>
@@ -393,27 +394,7 @@ export const adminApi = {
 
   // Community calls (admin) moved to the typed `services/callsApi.ts` (UUID room ids, hands, mute).
 
-  // ===== Polls =====
-  getPolls: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/polls`),
-  getPoll: (communityId, pollId) =>
-    api.get(`/api/v1/admin/${communityId}/polls/${pollId}`),
-  createPoll: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/polls`, data),
-  deletePoll: (communityId, pollId) =>
-    api.delete(`/api/v1/admin/${communityId}/polls/${pollId}`),
-
-  // ===== Forms =====
-  getForms: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/forms`),
-  getForm: (communityId, formId) =>
-    api.get(`/api/v1/admin/${communityId}/forms/${formId}`),
-  createForm: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/forms`, data),
-  deleteForm: (communityId, formId) =>
-    api.delete(`/api/v1/admin/${communityId}/forms/${formId}`),
-  getFormSubmissions: (communityId, formId) =>
-    api.get(`/api/v1/admin/${communityId}/forms/${formId}/submissions`),
+  // Polls and forms are bundle apps now (installed via Bundle Apps); no hub-api routes.
 
   // ===== Support Tickets =====
   getSupportCategories: (communityId) =>

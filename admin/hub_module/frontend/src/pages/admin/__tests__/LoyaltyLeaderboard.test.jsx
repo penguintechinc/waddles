@@ -73,8 +73,8 @@ vi.mock('@penguintechinc/react-libs', () => ({
 }));
 
 const ENTRIES = [
-  { platform: 'twitch', platform_user_id: 'user_1', balance: 500 },
-  { platform: 'discord', platform_user_id: 'user_2', balance: 200 },
+  { platform: 'twitch', platform_user_id: 'user_1', balance: 500, user_uuid: '11111111-1111-4111-8111-111111111111' },
+  { platform: 'discord', platform_user_id: 'user_2', balance: 200, user_uuid: '22222222-2222-4222-8222-222222222222' },
 ];
 
 const STATS = { community_id: 42, total_users: 2, total_currency: 700, average_balance: 350 };
@@ -160,7 +160,7 @@ describe('LoyaltyLeaderboard', () => {
     });
 
     await waitFor(() =>
-      expect(adminApi.adjustLoyaltyBalance).toHaveBeenCalledWith('42', 'user_1', {
+      expect(adminApi.adjustLoyaltyBalance).toHaveBeenCalledWith('42', '11111111-1111-4111-8111-111111111111', {
         platform: 'twitch',
         delta: 100,
         note: undefined,

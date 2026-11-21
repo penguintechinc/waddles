@@ -33,7 +33,7 @@ boto3>=1.35.0,<2.0.0  # storage_service.py -- S3-compatible avatar storage only,
 # libs/flask_core/requirements.in's "HTTP Client (async)" -- listed
 # directly here too since hub-api's own app code imports it, per this
 # file's header comment). Same pin covers the Community module (M6,
-# services/community_engagement_proxy.py, community_loyalty.py,
+# services/community_loyalty.py,
 # community_relay.py) -- plain AsyncClient/RequestError usage, no
 # 0.28-specific API, so it stays on the range every other hub-api proxy
 # client already shares rather than introducing a second httpx range.

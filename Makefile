@@ -251,6 +251,15 @@ test-scripts:
 	@python3 -m pytest -q -p no:cacheprovider scripts/rename/tests
 	@python3 -m pytest -q -p no:cacheprovider scripts/ci/tests/test_check_app_ids.py
 	@$(MAKE) check-app-ids
+	@$(MAKE) test-demo
+
+# tests/demo (seed_demo_prelink against a real Postgres via docker) was never wired into CI, so a
+# stale test sat red on release unnoticed. Every test skips when docker is missing, so a run with
+# zero passed tests is a FAILURE, never a silent skip.
+.PHONY: test-demo
+test-demo:
+	@out=$$(python3 -m pytest -q -p no:cacheprovider tests/demo 2>&1) || { echo "$$out"; exit 1; }; \
+	echo "$$out" | tail -3; echo "$$out" | grep -Eq '[0-9]+ passed' || { echo "ERROR: tests/demo ran zero passing tests (docker unavailable?)" >&2; exit 1; }
 
 # Structural app_id guard: every bundle app_id (catalog SQL/alembic seeds, manifests, core-bundles.yaml,
 # Rust *_APP_ID consts, tool.call grants) must be <org>.<repo>.<name>; zero ids examined = FAIL.

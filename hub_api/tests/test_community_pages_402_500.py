@@ -18,8 +18,6 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.community_activity import activity_member_bp
 from blueprints.v1.community_announcements import announcements_bp
-from blueprints.v1.community_forms import forms_bp
-from blueprints.v1.community_polls import polls_bp
 from services.community_activity import get_message_leaderboard, get_watch_time_leaderboard
 from services.community_common import positional_sql
 from tests.community_ids import cpath, install_community_ids
@@ -89,20 +87,6 @@ def test_leaderboards_send_postgres_paramstyle_never_dollar(community_db: Any, f
 
 
 GATED = [
-    (
-        polls_bp,
-        "waddles.community.polls",
-        "community_polls",
-        "/api/v1/admin/{community_id}/polls",
-        "community.polls:read",
-    ),
-    (
-        forms_bp,
-        "waddles.community.forms",
-        "community_forms",
-        "/api/v1/admin/{community_id}/forms",
-        "community.forms:read",
-    ),
     (
         announcements_bp,
         "waddles.community.announcements",
