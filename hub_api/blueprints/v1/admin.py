@@ -30,6 +30,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
+from uuid import UUID
 
 from flask_core.api_utils import error_response
 from flask_core.tenancy import get_tenant_context, tenant_middleware
@@ -786,10 +787,10 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
     return jsonify_dto(MessageResponse(success=True, message="Soft ban cleared"))
 
 
-@admin_bp.route("/<cuuid:community_id>/reputation/floor-bans/<int:user_id>", methods=["DELETE"])
+@admin_bp.route("/<cuuid:community_id>/reputation/floor-bans/<uuid:user_uuid>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @document_response(MessageResponse)
-async def delete_reputation_floor_ban(community_id: int, user_id: int) -> tuple[Any, int]:
+async def delete_reputation_floor_ban(community_id: int, user_uuid: UUID) -> tuple[Any, int]:
     """Lift a member's automated floor ban tenant-wide so they regain normal access (audited).
 
     Tenant admins only: a floor ban denies in every community of the tenant.
@@ -805,7 +806,7 @@ async def delete_reputation_floor_ban(community_id: int, user_id: int) -> tuple[
             async_dal,
             dal,
             tenant_id=ctx.tenant_id,
-            user_id=user_id,
+            user_uuid=str(user_uuid),
             actor_user_id=get_optional_current_user_id(request),
         )
     except ApiError as exc:

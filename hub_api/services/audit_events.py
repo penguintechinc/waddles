@@ -521,7 +521,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     ),
     (
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_FLOOR_BAN_LIFTED),
-        (("DELETE", f"{_ADM}/reputation/floor-bans/<int:user_id>"),),
+        (("DELETE", f"{_ADM}/reputation/floor-bans/<uuid:user_uuid>"),),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_SET),

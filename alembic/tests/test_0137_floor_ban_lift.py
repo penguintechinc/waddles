@@ -178,41 +178,6 @@ class TestLift:
 
 @requires_docker
 class TestAfterLift:
-    def test_reenqueue_after_lift_is_enforced_again_and_forgets_the_lift(
-        self, pg_db: PgTestDatabase
-    ) -> None:
-        tid, cid = _setup(pg_db, "t-lift-reban")
-        user, admin = str(uuid.uuid4()), str(uuid.uuid4())
-        _q(
-            pg_db,
-            "INSERT INTO bundle_reputation_policy (tenant_id, community_id, hard_ban_enabled, "
-            "hard_ban_floor) VALUES (%s, %s, true, 400)",
-            (tid, cid),
-        )
-        _q(
-            pg_db,
-            "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance) "
-            "VALUES (%s, %s, %s, 300)",
-            (tid, cid, user),
-        )
-        enqueue = (
-            "SELECT r_state, r_id FROM reputation_floor_ban_enqueue("
-            "%s, %s, %s, %s::uuid, 1::smallint, 'rekey', 'discord')"
-        )
-        state, rid = _q(pg_db, enqueue, (tid, cid, cid, user))[0]
-        assert state == 0 and _status(pg_db, rid) == 1
-        assert _q(pg_db, _LIFT, (tid, [user], admin))[0][0] == 1
-        assert _status(pg_db, rid) == 8
-        # The same slot enqueued again (score still below the floor) is a live ban again.
-        state, rid2 = _q(pg_db, enqueue, (tid, cid, cid, user))[0]
-        assert (state, rid2) == (0, rid)
-        status, lifted_at, lifted_by = _q(
-            pg_db,
-            "SELECT status, lifted_at, lifted_by FROM bundle_reputation_floor_bans WHERE id = %s",
-            (rid,),
-        )[0]
-        assert (status, lifted_at, lifted_by) == (1, None, None)
-
     def test_claim_never_redispatches_a_lifted_row(self, pg_db: PgTestDatabase) -> None:
         tid, cid = _setup(pg_db, "t-lift-claim")
         user = str(uuid.uuid4())
@@ -264,3 +229,149 @@ class TestRoundTrip:
             pg_db,
             "SELECT to_regprocedure('reputation_floor_ban_lift(bigint, uuid[], uuid)')",
         )[0][0]
+
+
+_ENQUEUE = (
+    "SELECT r_state, r_id FROM reputation_floor_ban_enqueue("
+    "%s, %s, %s, %s::uuid, %s::smallint, %s, 'discord')"
+)
+
+
+def _denying(db: PgTestDatabase, tid: int, user: str) -> int:
+    """Rows that deny access (the `FLOOR_BAN_ACTIVE_STATUSES` set in hub_api)."""
+    return _q(
+        db,
+        "SELECT count(*) FROM bundle_reputation_floor_bans WHERE tenant_id = %s "
+        "AND user_uuid = %s::uuid AND status IN (1, 2, 3, 4, 5, 7)",
+        (tid, user),
+    )[0][0]
+
+
+def _community_floor(
+    db: PgTestDatabase, slug: str, balance: int
+) -> tuple[int, int, str]:
+    tid, cid = _setup(db, slug)
+    user = str(uuid.uuid4())
+    _q(
+        db,
+        "INSERT INTO bundle_reputation_policy (tenant_id, community_id, hard_ban_enabled, "
+        "hard_ban_floor) VALUES (%s, %s, true, 400)",
+        (tid, cid),
+    )
+    _q(
+        db,
+        "INSERT INTO bundle_reputation_scores (tenant_id, community_id, user_uuid, balance) "
+        "VALUES (%s, %s, %s, %s)",
+        (tid, cid, user, balance),
+    )
+    return tid, cid, user
+
+
+def _set_balance(db: PgTestDatabase, cid: int, user: str, balance: int) -> None:
+    _q(
+        db,
+        "UPDATE bundle_reputation_scores SET balance = %s WHERE community_id = %s "
+        "AND user_uuid = %s::uuid",
+        (balance, cid, user),
+    )
+
+
+@requires_docker
+class TestLiftIsStickyUntilANewCrossing:
+    def test_rerun_with_same_key_and_new_key_while_below_stay_lifted(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = _community_floor(pg_db, "t-sticky-rerun", 300)
+        state, rid = _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt1"))[0]
+        assert state == 0 and _denying(pg_db, tid, user) == 1
+        assert _q(pg_db, _LIFT, (tid, [user], str(uuid.uuid4())))[0][0] == 1
+        assert _denying(pg_db, tid, user) == 0
+        # The floor job reruns with the SAME key (redelivery): known, still lifted.
+        assert _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt1"))[0] == (1, rid)
+        assert _status(pg_db, rid) == 8
+        # ... and with a NEW event key while the user is STILL below the floor: refused.
+        state, rid2 = _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt2"))[0]
+        assert state == 3 and rid2 != rid
+        assert (
+            _q(
+                pg_db,
+                "SELECT last_error FROM bundle_reputation_floor_bans WHERE id=%s",
+                (rid2,),
+            )[0][0]
+            == "lift_sticky"
+        )
+        assert _denying(pg_db, tid, user) == 0, "access stays allowed"
+
+    def test_recover_then_fall_below_again_is_a_new_ban(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = _community_floor(pg_db, "t-sticky-recross", 300)
+        _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt1"))
+        _q(pg_db, _LIFT, (tid, [user], str(uuid.uuid4())))
+        assert _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt2"))[0][0] == 3
+        _set_balance(
+            pg_db, cid, user, 450
+        )  # recovers above the floor: marks the lift recovered
+        assert (
+            _q(
+                pg_db,
+                "SELECT count(*) FROM bundle_reputation_floor_bans WHERE tenant_id = %s "
+                "AND status = 8 AND recovered_at IS NOT NULL",
+                (tid,),
+            )[0][0]
+            == 1
+        )
+        _set_balance(pg_db, cid, user, 350)  # a genuinely NEW floor crossing
+        state, rid3 = _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt3"))[0]
+        assert state == 0 and _status(pg_db, rid3) == 1
+        assert _denying(pg_db, tid, user) == 1, "access denied again"
+
+    def test_lift_while_already_above_the_floor_allows_a_later_new_ban(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid, user = _community_floor(pg_db, "t-sticky-above", 300)
+        _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt1"))
+        _set_balance(pg_db, cid, user, 500)  # recovered before the admin lifts
+        _q(pg_db, _LIFT, (tid, [user], str(uuid.uuid4())))
+        assert _q(
+            pg_db,
+            "SELECT recovered_at IS NOT NULL FROM bundle_reputation_floor_bans WHERE tenant_id=%s",
+            (tid,),
+        )[0][0]
+        _set_balance(pg_db, cid, user, 300)
+        assert _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "evt2"))[0][0] == 0
+        assert _denying(pg_db, tid, user) == 1
+
+    def test_tenant_scope_is_sticky_until_the_tenant_score_recovers(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _setup(pg_db, "t-sticky-tenant")
+        user = str(uuid.uuid4())
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_tenant_policy (tenant_id, tenant_auto_ban_enabled, "
+            "tenant_auto_ban_floor) VALUES (%s, true, 400)",
+            (tid,),
+        )
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_tenant_scores (tenant_id, user_uuid, score) "
+            "VALUES (%s, %s, 350)",
+            (tid, user),
+        )
+        assert _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 2, "evt1"))[0][0] == 0
+        _q(pg_db, _LIFT, (tid, [user], str(uuid.uuid4())))
+        assert _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 2, "evt2"))[0][0] == 3
+        assert _denying(pg_db, tid, user) == 0
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_tenant_scores SET score = 600 WHERE tenant_id = %s",
+            (tid,),
+        )
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_tenant_scores SET score = 380 WHERE tenant_id = %s",
+            (tid,),
+        )
+        assert _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 2, "evt3"))[0][0] == 0
+        assert _denying(pg_db, tid, user) == 1

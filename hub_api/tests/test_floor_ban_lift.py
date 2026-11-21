@@ -10,6 +10,7 @@ ban tables.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any
@@ -173,7 +174,9 @@ def _allowed(db: Any, user: int = MEMBER) -> bool:
 
 
 def _url(db: Any, user: int = MEMBER) -> str:
-    return f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/floor-bans/{user}"
+    """The lift URL: community public id + the target's hub public UUID (never a numeric id)."""
+    uuid_ = db.dal(db.dal.hub_users.id == user).select().first().uuid
+    return f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/floor-bans/{uuid_}"
 
 
 def _h(user: int) -> dict[str, str]:
@@ -245,6 +248,24 @@ class TestFloorBanLift:
         assert (await client.delete(_url(db), headers=_h(caller))).status_code == 403
         assert not _allowed(db)
 
+    async def test_numeric_user_id_in_the_url_is_not_a_route(self, client: Any, db: Any) -> None:
+        """The numeric primary key never crosses the boundary: `/floor-bans/2` does not exist."""
+        base = f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/floor-bans"
+        assert (
+            await client.delete(f"{base}/{MEMBER}", headers=_h(TENANT_ADMIN))
+        ).status_code == 404
+
+    async def test_unknown_uuid_is_404_like_no_ban(self, client: Any, db: Any) -> None:
+        base = f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/floor-bans"
+        url = f"{base}/{uuid.uuid4()}"
+        assert (await client.delete(url, headers=_h(TENANT_ADMIN))).status_code == 404
+
+    def test_active_statuses_are_the_documented_deny_set(self) -> None:
+        from services import ban_suppression
+
+        assert ban_suppression.FLOOR_BAN_ACTIVE_STATUSES == (1, 2, 3, 4, 5, 7)
+        assert floor_ban_lift.FLOOR_BAN_LIFTED not in ban_suppression.FLOOR_BAN_ACTIVE_STATUSES
+
     async def test_unauthenticated_is_401(self, client: Any, db: Any) -> None:
         assert (await client.delete(_url(db))).status_code == 401
 
@@ -303,7 +324,7 @@ class TestSoftBanLiftAndExpiry:
 
 class TestAuditEvent:
     def test_lift_route_classifies_as_floor_ban_lifted(self) -> None:
-        rule = "/api/v1/admin/<cuuid:community_id>/reputation/floor-bans/<int:user_id>"
+        rule = "/api/v1/admin/<cuuid:community_id>/reputation/floor-bans/<uuid:user_uuid>"
         got = classify_request(
             RequestFacts(
                 method="DELETE",
@@ -320,7 +341,7 @@ class TestAuditEvent:
         assert got.outcome == AuditOutcome.SUCCESS
 
     def test_refused_lift_is_an_authz_event(self) -> None:
-        rule = "/api/v1/admin/<cuuid:community_id>/reputation/floor-bans/<int:user_id>"
+        rule = "/api/v1/admin/<cuuid:community_id>/reputation/floor-bans/<uuid:user_uuid>"
         got = classify_request(
             RequestFacts(
                 method="DELETE",

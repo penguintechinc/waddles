@@ -82,11 +82,14 @@ async def lift_floor_bans(
     dal: Any,
     *,
     tenant_id: int,
-    user_id: int,
+    user_uuid: str,
     actor_user_id: int | None,
     call: LiftCall | None = None,
 ) -> int:
-    """Lift the hub user's floor bans in the tenant (one transaction); 404 when none was in force.
+    """Lift the hub user's (public UUID) floor bans in the tenant; 404 when none was in force.
+
+    The UUID is resolved server-side to the hub user; an unknown user and a user with no ban in
+    this tenant are indistinguishable (both 404), so the route is no identity oracle.
 
     The audit event for the route is derived from the URL rule by `audit_events`; this adds the
     OTel counter and a value-free log line.
@@ -94,7 +97,11 @@ async def lift_floor_bans(
     actor = await _admin_actor(async_dal, dal, actor_user_id)
 
     def work() -> int:
-        tokens = subject_uuids_of(dal, user_id=user_id)
+        users = dal.hub_users
+        row = dal(users.uuid == user_uuid).select(users.id).first()
+        if row is None:
+            return 0
+        tokens = subject_uuids_of(dal, user_id=int(row.id))
         return lift_floor_bans_sync(
             dal, tenant_id=tenant_id, user_uuids=tokens, lifted_by=actor, call=call
         )

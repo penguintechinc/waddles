@@ -12642,7 +12642,7 @@ paths:
             product policy).
       summary: Set the community's soft/hard ban floors + flags and at-risk threshold
         (400 if invalid).
-  /api/v1/admin/{community_id}/reputation/floor-bans/{user_id}:
+  /api/v1/admin/{community_id}/reputation/floor-bans/{user_uuid}:
     delete:
       description: '
 
@@ -12656,10 +12656,10 @@ paths:
           format: uuid
           type: string
       - in: path
-        name: user_id
+        name: user_uuid
         required: true
         schema:
-          type: integer
+          type: string
       responses:
         '200':
           content:
