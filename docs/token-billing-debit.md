@@ -2,7 +2,7 @@
 
 ## Idempotent debits (retry guard, not a coupon)
 
-`POST /api/v1/internal/communities/{id}/tokens/debit` (machine JWT, `svc-streaming` only) accepts an
+`POST /api/v1/internal/communities/{public_uuid}/tokens/debit` (machine JWT, `svc-streaming` only) accepts an
 optional `idempotency_key` (1-128 chars). It identifies ONE admission attempt.
 
 - Stored on `token_transactions.idempotency_key` (scoped to community + product) with the

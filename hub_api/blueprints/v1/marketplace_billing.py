@@ -409,6 +409,7 @@ async def create_discount_code(data: CreateDiscountCodeRequest) -> tuple[dict[st
             description=data.description,
         )
     except ApiError as exc:
+        logger.debug("handled %s in discount create: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return {"success": True, "data": {"discountCode": dataclasses.asdict(dto)}}, 201
 
@@ -475,6 +476,7 @@ async def validate_discount_code(
     try:
         return svc.validate_discount_code(_dal(), data.code, _module_ref(data.moduleId))
     except ApiError as exc:
+        logger.debug("handled %s in discount validate: %s", type(exc).__name__, exc.code)
         return _err(exc)
 
 
@@ -571,6 +573,7 @@ async def subscribe_module(
     try:
         svc.subscribe_module(_dal(), community_id, module_id, user_id)
     except ApiError as exc:
+        logger.debug("handled %s in module subscribe: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return {
         "success": True,
