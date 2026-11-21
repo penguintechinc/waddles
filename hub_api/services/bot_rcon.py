@@ -48,6 +48,42 @@ async def _proxy(path: str, method: str = "GET", body: dict[str, Any] | None = N
     return response.json()
 
 
+#: Key tokens that mark connection details or credentials. The server-manager upstream is outside
+#: this repo, so its status/players payload is untrusted: members must never receive these.
+_SENSITIVE_KEY_TOKENS = frozenset(
+    {
+        "password", "passwd", "secret", "token", "credential", "credentials", "key", "apikey",
+        "host", "hostname", "ip", "port", "address", "url", "uri", "dsn",
+    }
+)  # fmt: skip
+
+
+def _key_is_sensitive(key: str) -> bool:
+    """True when any snake/camel-case token of `key` names a connection detail or credential."""
+    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
+    return any(
+        token in _SENSITIVE_KEY_TOKENS for token in re.split(r"[^A-Za-z0-9]+", spaced.lower())
+    )
+
+
+def shape_member_view(payload: Any) -> Any:
+    """Recursively drop host/port/address/credential keys from an upstream proxy response.
+
+    The member-facing RCON info routes pass the server-manager response through; this guarantees a
+    plain community member never sees a server's host, ports or secrets even if the upstream
+    starts returning them.
+    """
+    if isinstance(payload, dict):
+        return {
+            k: shape_member_view(v)
+            for k, v in payload.items()
+            if not (isinstance(k, str) and _key_is_sensitive(k))
+        }
+    if isinstance(payload, list):
+        return [shape_member_view(item) for item in payload]
+    return payload
+
+
 # ── DTOs ──────────────────────────────────────────────────────────────────
 
 
@@ -346,13 +382,17 @@ async def execute_command(
 
 
 async def get_server_status(dal: Any, community_id: int, server_id: int) -> Any:
-    """`GET .../rcon/info/:id/status`."""
-    return await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/status")
+    """`GET .../rcon/info/:id/status` (member-visible: connection details are stripped)."""
+    return shape_member_view(
+        await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/status")
+    )
 
 
 async def get_player_list(dal: Any, community_id: int, server_id: int) -> Any:
-    """`GET .../rcon/info/:id/players`."""
-    return await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/players")
+    """`GET .../rcon/info/:id/players` (member-visible: connection details are stripped)."""
+    return shape_member_view(
+        await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/players")
+    )
 
 
 async def kick_player(

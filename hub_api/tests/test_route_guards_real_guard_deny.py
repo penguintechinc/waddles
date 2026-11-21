@@ -22,21 +22,10 @@ from app import create_app
 from services.route_guards import GUARD_ADMIN, GUARD_MEMBER
 from tests.community_ids import cpath, install_community_ids
 from tests.conftest import make_user_token, seed_membership
-from tests.route_guard_walker import chain, guard_kind, is_inline_stamped
+from tests.route_guard_walker import guard_kind, is_inline_stamped, required_scopes
 from tests.test_app_factory import _test_config
 
 MEMBER_UID, OUTSIDER_UID = 52, 53
-
-
-def _required_scopes(view: Any) -> list[str]:
-    """Scopes passed to `require_scope(...)` in the view's wrapper chain."""
-    scopes: list[str] = []
-    for fn in chain(view):
-        code = getattr(fn, "__code__", None)
-        cells = getattr(fn, "__closure__", None)
-        if code is not None and cells and "required_scopes" in code.co_freevars:
-            scopes.extend(cells[code.co_freevars.index("required_scopes")].cell_contents)
-    return scopes
 
 
 def _discover_families() -> list[Any]:
@@ -59,7 +48,7 @@ def _discover_families() -> list[Any]:
                 bp_name,
                 method,
                 rule.rule,
-                _required_scopes(view),
+                required_scopes(view),
                 (kind, application.blueprints[bp_name]),
             )
     return [
