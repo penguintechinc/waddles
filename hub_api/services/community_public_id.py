@@ -78,7 +78,9 @@ class CommunityOpenAPIProvider(OpenAPIProvider):
     def build_path_parameter(self, name: str, converter: BaseConverter) -> dict[str, Any]:
         """Path parameter object; `cuuid` is a UUID string, everything else is stock."""
         parameter = super().build_path_parameter(name, converter)
-        if isinstance(converter, CommunityUuidConverter):
+        if isinstance(converter, CommunityUuidConverter) or getattr(
+            converter, "public_uuid", False
+        ):
             parameter["schema"] = {"type": "string", "format": "uuid"}
         return parameter
 
