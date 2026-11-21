@@ -35,6 +35,8 @@ _RAISING = (
     ("services.community_access", "require_community_member"),
     ("services.route_guards", "community_admin_guard"),
     ("services.route_guards", "community_member_guard"),
+    # DB-authoritative: a `tenant_admins` row of the request tenant (or a global admin), 403 else.
+    ("services.route_guards", "tenant_admin_guard"),
 )
 #: Primitives that RETURN the caller's standing instead of raising: the result must be consumed
 #: by a deny decision (`if not standing.is_admin: return ...`), never ignored.
