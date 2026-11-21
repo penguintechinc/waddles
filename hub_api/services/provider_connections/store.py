@@ -31,7 +31,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 from uuid import UUID
 
-from sqlalchemy import Table, delete, func, insert, select, update
+from sqlalchemy import Table, Uuid, delete, func, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncConnection
 
@@ -349,10 +349,7 @@ async def resolve_public_connection_id(
     """
     t = _tables(db)
     column = t.connections.c.public_id
-    try:
-        native = column.type.python_type is UUID
-    except NotImplementedError:
-        native = False
+    native = isinstance(column.type, Uuid)
     stmt = (
         select(t.connections.c.id)
         .select_from(t.grants.join(t.connections, t.connections.c.id == t.grants.c.connection_id))
