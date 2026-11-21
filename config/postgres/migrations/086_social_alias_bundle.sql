@@ -18,7 +18,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.alias-pipeline',
     '1.0.0',
     'social',
-    'waddles.social.alias',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,

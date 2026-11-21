@@ -567,7 +567,9 @@ class TestSearchSuggestScope:
         self, client: Any, auth_headers: Any, community_id: int
     ) -> None:
         r = await client.get(f"{BASE}?communityId={community_id}", headers=auth_headers(scope=READ))
-        assert r.status_code == 400
+        assert (
+            r.status_code == 404
+        )  # unresolvable id: same answer as a foreign community (no oracle)
 
 
 class TestVendorOwnedConfusedDeputy:

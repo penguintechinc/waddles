@@ -157,7 +157,7 @@ class TestUpgradeSeedsAppCatalog:
 
     def test_module_and_feature_follow_kick_app_id_namespace(self, upgrade_sql) -> None:
         assert "'bot'" in upgrade_sql
-        assert "'waddles.bot.kick'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
 
 
 class TestSeededStagesJsonIsValid:
