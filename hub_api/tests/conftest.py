@@ -2177,6 +2177,25 @@ def bundle_data_pg_conn(bundle_data_pg_url: str) -> Any:
 
 
 @pytest.fixture(autouse=True)
+def _fake_env_external_erasure(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swap the service's default `EnvExternalErasure` for a recording fake (returns {}).
+
+    Production fails loud without `VALKEY_KV_URL`; tests that run the default erasure path would
+    otherwise need a live kv Valkey. Only `services.data_privacy_service`'s binding is replaced, so
+    tests importing `services.erasure_external` directly are unaffected. Opt out with
+    `@pytest.mark.real_env_erasure`.
+    """
+    if request.node.get_closest_marker("real_env_erasure"):
+        return
+    from services import data_privacy_service
+    from tests.erasure_support import FakeExternal
+
+    monkeypatch.setattr(data_privacy_service, "EnvExternalErasure", FakeExternal)
+
+
+@pytest.fixture(autouse=True)
 def _uuid_community_response_guard(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
     """Opt-in guard against numeric community ids in JSON responses.
 
