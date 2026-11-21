@@ -37,7 +37,7 @@ spec:
       {{- end }}
       backendRefs:
         - name: {{ .service }}
-          port: {{ .port }}
+          port: {{ include "waddlebot.routeBackendPort" (dict "root" $ "route" .) }}
     {{- end }}
 {{- if include "waddlebot.transitTlsEnabled" . }}
 {{- /*
