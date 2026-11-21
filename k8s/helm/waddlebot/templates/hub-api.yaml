@@ -400,18 +400,8 @@ spec:
         # VALKEY_URL (regression: erasure scanned durable and silently erased nothing). Same
         # wiring as svc-action-rust: kv on -> <fullname>-valkey-kv; kv off -> the cache instance
         # that then holds bundle kv. The client never falls back to VALKEY_URL/REDIS_URL.
-        {{- $kvOn := eq (include "waddlebot.valkeyKvEnabled" .) "true" }}
-        {{- $tlsOn := eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
-        - name: VALKEY_KV_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}{{ ternary "-valkey-kv" "-secrets" $kvOn }}
-              key: {{ if $kvOn }}{{ ternary "VALKEY_KV_URL_TLS" "VALKEY_KV_URL" $tlsOn }}{{ else }}{{ ternary "VALKEY_URL_TLS" "REDIS_URL" $tlsOn }}{{ end }}
-        - name: VALKEY_KV_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}{{ ternary "-valkey-kv" "-secrets" $kvOn }}
-              key: {{ ternary "VALKEY_KV_PASSWORD" "REDIS_PASSWORD" $kvOn }}
+        # As its OWN ACL user (hub-api: SCAN/UNLINK/EXISTS/DECRBY/DEL on bundlekv data/count keys only).
+        {{- include "waddlebot.valkeyAcl.kvEnv" (dict "root" . "user" "hub-api") | nindent 8 }}
         # Per-environment env baseline (e.g. FLAG_<KEY> feature-flag fallbacks honoured by
         # flask_core when PostHog is unresolved). Free-tier flags only -- license flags are
         # never env-bypassable. Rendered last so an explicit entry here wins on collision.
