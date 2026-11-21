@@ -196,7 +196,6 @@ FAMILIES = {
     "bot": ("GET", "/api/v1/admin/{c}/shoutout/config"),
     "calls": ("GET", "/api/v1/admin/{c}/calls/rooms"),
     "overlay": ("GET", "/api/v1/admin/{c}/browser-sources"),
-    "event_proxy": ("GET", "/api/v1/admin/{c}/calendar/events"),
     "workflow": ("GET", "/api/v1/admin/{c}/workflows"),
 }
 
