@@ -190,10 +190,10 @@ async fn every_unready_dependency_is_a_retry_that_queues_nothing() {
 #[tokio::test]
 async fn a_platform_with_no_outbound_ban_path_is_closed_for_good() {
     let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
-    let mut twitch = cmd(UUID_B);
-    twitch.platform = "twitch".to_string();
+    let mut unsupported = cmd(UUID_B);
+    unsupported.platform = "youtube".to_string();
     assert_eq!(
-        failure(c.emit_floor_ban(&twitch).await),
+        failure(c.emit_floor_ban(&unsupported).await),
         FloorSendError::Permanent("platform_not_supported".into())
     );
     let mut bad_scope = cmd(UUID_B);
@@ -354,4 +354,108 @@ async fn without_an_installed_sync_a_confirmed_unban_changes_nothing() {
     let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
     c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
         .await;
+}
+
+fn twitch_caps(op: &str, queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
+    build(rig_for("twitch"), mod_tools("twitch", op), queue)
+        .with_discord_ack_timeout(std::time::Duration::from_millis(60))
+}
+
+fn twitch_cmd(user: &str, unban: bool) -> FloorBanCommand {
+    FloorBanCommand {
+        platform: "twitch".to_string(),
+        unban,
+        ..cmd(user)
+    }
+}
+
+#[tokio::test]
+async fn a_twitch_floor_ban_names_no_channel_and_carries_the_resolved_id_and_a_fixed_reason() {
+    let c = twitch_caps("mod.ban", FakeRelayQueue::with_live_drain());
+    let op_id = c
+        .emit_floor_ban(&twitch_cmd(UUID_B, false))
+        .await
+        .expect("confirmed");
+    let pushed = c.relay_queue.pushed.lock().unwrap().clone();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0].0, outbound_relay_queue_key("twitch"));
+    let env: Value = serde_json::from_str(&pushed[0].1).unwrap();
+    assert_eq!(env["op"], "mod.ban");
+    assert_eq!(env["platform"], "twitch");
+    // The channel is NEVER named by the producer: the consumer pins it from the DB binding.
+    assert!(env.get("channel").is_none(), "{env}");
+    assert_eq!(env["origin_channel"], "channel:-");
+    // PII: only the tokenized placeholder is queued and MAC-covered; svc-ingest detokenizes it
+    // per send. The resolved raw Twitch id never reaches the Valkey payload.
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(
+        !pushed[0].1.contains("999000111"),
+        "the raw platform id must never be queued"
+    );
+    let text = env["text"].as_str().expect("fixed reason text");
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap(),
+        serde_json::json!({"reason": "Waddles reputation floor"})
+    );
+    assert!(op_id.starts_with("fb-42-2-"), "{op_id}");
+    // The MAC binds the scope, the user id and the reason text.
+    let sig = env["pin_sig"].as_str().expect("signed");
+    let fields = PinFields {
+        platform: "twitch",
+        op: "mod.ban",
+        channel: "",
+        origin_channel: "channel:-",
+        message_id: "",
+        text,
+        user_id: &format!("{{user:{UUID_B}}}"),
+        op_id: &op_id,
+        exp_ms: env["exp_ms"].as_u64().unwrap(),
+        community_id: i64::from(COMMUNITY_ID),
+        tenant_id: i64::from(TENANT_ID),
+    };
+    assert_eq!(test_pin_keys().verify(&fields, sig), Ok(()));
+    let other_scope = PinFields {
+        origin_channel: "#someoneelse",
+        ..fields
+    };
+    assert!(test_pin_keys().verify(&other_scope, sig).is_err());
+}
+
+#[tokio::test]
+async fn a_twitch_unban_carries_no_text_and_does_not_need_the_discord_drain_flag() {
+    // Twitch has no readiness key: only the ack matters.
+    let mut queue = FakeRelayQueue::with_live_drain();
+    queue.ready = false;
+    let c = twitch_caps("mod.unban", queue);
+    let op_id = c
+        .emit_floor_ban(&twitch_cmd(UUID_B, true))
+        .await
+        .expect("confirmed");
+    let env = &c.relay_queue.envelopes()[0];
+    assert_eq!(env["op"], "mod.unban");
+    assert_eq!(env["origin_channel"], "channel:-");
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(!c.relay_queue.pushed.lock().unwrap()[0]
+        .1
+        .contains("999000111"));
+    assert!(env.get("text").is_none() && env.get("channel").is_none());
+    assert!(op_id.starts_with("fu-42-2-"), "{op_id}");
+}
+
+#[tokio::test]
+async fn a_twitch_ban_of_a_protected_target_is_closed_and_a_failed_ack_retries() {
+    let c = twitch_caps("mod.ban", FakeRelayQueue::with_live_drain());
+    assert_eq!(
+        failure(c.emit_floor_ban(&twitch_cmd(UUID_C, false)).await),
+        FloorSendError::Permanent("protected_target".into())
+    );
+    assert!(c.relay_queue.pushed.lock().unwrap().is_empty());
+    let c = twitch_caps(
+        "mod.ban",
+        FakeRelayQueue::with_drain_result(r#"{"ok":false,"code":"quota_exhausted"}"#),
+    );
+    assert_eq!(
+        failure(c.emit_floor_ban(&twitch_cmd(UUID_B, false)).await),
+        FloorSendError::Retry("quota_exhausted".into())
+    );
 }

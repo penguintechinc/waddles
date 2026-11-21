@@ -35,7 +35,16 @@ use super::{
 pub(crate) const FLOOR_LIFT_CORE_ALLOWLIST: &[&str] = &["penguintechinc.waddles.chatguard"];
 
 /// Platforms whose floor ban this stage can deliver (`svc_process` refuses the rest up front).
-pub(crate) const FLOOR_BAN_PLATFORMS: &[&str] = &["discord"];
+pub(crate) const FLOOR_BAN_PLATFORMS: &[&str] = &["discord", "twitch"];
+
+/// The reason text on a Twitch floor ban (Helix `reason`, shown to the broadcaster's moderators).
+/// A fixed string: no user, channel or free text ever rides it.
+pub(crate) const TWITCH_FLOOR_BAN_REASON: &str = "Waddles reputation floor";
+
+/// The Twitch wire scope of a host-originated moderation op: no channel is named; the consumer
+/// (svc_ingest) pins the channel from the community's verified binding (the Twitch analogue of
+/// Discord's `guild:-`). Never a bundle- or payload-supplied channel.
+pub(crate) const TWITCH_BOUND_CHANNEL_SCOPE: &str = "channel:-";
 
 /// One leased outbox row to deliver.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -281,9 +290,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             );
             return Err(FloorSendFailure::retry("scope_denied", None));
         }
-        self.require_discord_drain_ready(&scope, relay_op)
-            .await
-            .map_err(|e| FloorSendFailure::retry(&e.code, None))?;
+        if platform == "discord" {
+            self.require_discord_drain_ready(&scope, relay_op)
+                .await
+                .map_err(|e| FloorSendFailure::retry(&e.code, None))?;
+        }
         self.throttle_platform_op(&scope, platform, relay_op)
             .await
             .map_err(|e| FloorSendFailure::retry(&e.code, None))?;
@@ -310,10 +321,29 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             "platform": platform,
             "community_id": i64::from(cmd.community_id),
             "tenant_id": i64::from(cmd.tenant_id),
-            // A channel-less guild-scope op: the guild is pinned from the community's binding.
-            "origin_channel": "guild:-",
-            "user_id": format!("{{user:{uuid}}}"),
         });
+        if let Some(obj) = env.as_object_mut() {
+            if platform == "twitch" {
+                // The target is the tokenized `{user:<uuid>}` placeholder: svc-ingest
+                // detokenizes it per send (the raw Twitch id never enters the queue or the
+                // MAC input; the id resolved above served the protected-target check alone).
+                // The channel is NOT named: the consumer pins it from the community's binding.
+                obj.insert("origin_channel".into(), TWITCH_BOUND_CHANNEL_SCOPE.into());
+                obj.insert("user_id".into(), format!("{{user:{uuid}}}").into());
+                if !cmd.unban {
+                    obj.insert(
+                        "text".into(),
+                        serde_json::json!({ "reason": TWITCH_FLOOR_BAN_REASON })
+                            .to_string()
+                            .into(),
+                    );
+                }
+            } else {
+                // A channel-less guild-scope op: the guild is pinned from the community's binding.
+                obj.insert("origin_channel".into(), "guild:-".into());
+                obj.insert("user_id".into(), format!("{{user:{uuid}}}").into());
+            }
+        }
         stamp_handshake(&mut env, &op_id, exp_ms);
         // Signed AFTER the handshake so the MAC binds `exp_ms` and the op id.
         self.sign_envelope(&mut env)

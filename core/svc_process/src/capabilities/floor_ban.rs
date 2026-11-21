@@ -51,7 +51,7 @@ const FLOOR_BAN_CONCURRENCY: usize = 4;
 const SERVICE_PREFIX: &str = "penguintechinc.waddles.";
 /// Platforms whose floor ban the ACTION stage can deliver (`svc_action::floor_ban_dispatch`
 /// serves the same set). Anything else is refused loudly up front, never queued to die.
-pub(super) const FLOOR_BAN_PLATFORMS: &[&str] = &["discord"];
+pub(super) const FLOOR_BAN_PLATFORMS: &[&str] = &["discord", "twitch"];
 
 /// What one community's floor-ban enqueue came to.
 #[derive(Clone, Debug, PartialEq, Eq)]
