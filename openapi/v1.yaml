@@ -967,7 +967,7 @@ components:
           type: string
         sourceId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Sourceid
         sourceRef:
@@ -19850,7 +19850,9 @@ paths:
         Auth: community-bound machine JWT (`token.billing:debit`, `system` tenant,
         `community`
 
-        claim == `<id>`; see `machine_authenticated`) from the allow-listed `svc-streaming`
+        claim == the numeric id of the community whose public UUID is `<id>`; see
+
+        `machine_authenticated`) from the allow-listed `svc-streaming`
 
         identity. The acting member (`actor_user_id`) must hold an active membership
         row in this
@@ -19865,7 +19867,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -20258,7 +20261,8 @@ paths:
         name: community_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20273,7 +20277,8 @@ paths:
         name: module_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20323,7 +20328,8 @@ paths:
         name: submission_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20337,7 +20343,8 @@ paths:
         name: submission_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20397,7 +20404,8 @@ paths:
         name: submission_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20411,7 +20419,8 @@ paths:
         name: submission_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20425,7 +20434,8 @@ paths:
         name: submission_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20439,7 +20449,8 @@ paths:
         name: submission_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20453,7 +20464,8 @@ paths:
         name: submission_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20796,7 +20808,15 @@ paths:
       summary: '`GET /api/v1/marketplace/catalog/featured` -- top/featured modules.'
   /api/v1/marketplace/catalog/{source}/{source_id}:
     get:
-      description: ''
+      description: '
+
+        The UUID is resolved against the table backing `source` (core -> `hub_modules`,
+        marketplace ->
+
+        `marketplace_modules`); an unknown source, unknown UUID or a UUID of the other
+        source''s table
+
+        all give the same 404.'
       operationId: get_catalog_entry
       parameters:
       - in: path
@@ -20808,7 +20828,8 @@ paths:
         name: source_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -20828,7 +20849,7 @@ paths:
                 type: object
           description: Response DTO for `GET /api/v1/marketplace/catalog/<source>/<id>`.
       summary: '`GET /api/v1/marketplace/catalog/<source>/<id>` -- single catalog
-        entry detail.'
+        entry (`id` = public UUID).'
   /api/v1/marketplace/communities/{community_id}/subscriptions:
     get:
       description: ''
@@ -20861,8 +20882,9 @@ paths:
               description: Request DTO for `POST /communities/<id>/subscriptions`.
               properties:
                 moduleId:
+                  format: uuid
                   title: Moduleid
-                  type: integer
+                  type: string
               required:
               - moduleId
               title: SubscribeModuleRequest
@@ -20886,7 +20908,8 @@ paths:
         name: subscription_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -20905,7 +20928,8 @@ paths:
         name: subscription_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -21838,7 +21862,8 @@ paths:
                   title: Maxuses
                 moduleId:
                   anyOf:
-                  - type: integer
+                  - format: uuid
+                    type: string
                   - type: 'null'
                   default: null
                   title: Moduleid
@@ -21887,8 +21912,9 @@ paths:
                 caller).'
               properties:
                 codeId:
+                  format: uuid
                   title: Codeid
-                  type: integer
+                  type: string
                 communityId:
                   format: uuid
                   title: Communityid
@@ -21922,8 +21948,9 @@ paths:
                   title: Code
                   type: string
                 moduleId:
+                  format: uuid
                   title: Moduleid
-                  type: integer
+                  type: string
               required:
               - code
               - moduleId
@@ -21986,7 +22013,8 @@ paths:
         name: code_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -21999,7 +22027,8 @@ paths:
         name: code_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -22030,7 +22059,8 @@ paths:
         name: module_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -22067,7 +22097,8 @@ paths:
         name: module_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response

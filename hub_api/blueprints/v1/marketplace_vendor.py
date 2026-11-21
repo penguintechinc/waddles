@@ -40,11 +40,21 @@ from services import marketplace_vendor_service as vendor
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dal, reads_from_replica
 from services.errors import ApiError
+from services.marketplace_public_ids import body_id, global_target, marketplace_view_arg_hook
+from services.public_ids import UNKNOWN_ID, parse_public_id
 from services.schema import bind_marketplace_vendor_tables
 
 vendor_bp = Blueprint("v1_marketplace_vendor", __name__, url_prefix="/api/v1/marketplace/vendor")
 vendor_public_bp = Blueprint(
     "v1_marketplace_vendor_public", __name__, url_prefix="/api/v1/marketplace/public/vendor"
+)
+
+
+#: `<puuid:module_id>` -> `marketplace_modules`; ownership (`_owned_module_or_404`) is the fence.
+vendor_bp.before_request(
+    marketplace_view_arg_hook(
+        {"module_id": global_target("marketplace_modules")}, bind_marketplace_vendor_tables
+    )
 )
 
 
@@ -234,12 +244,13 @@ async def get_community_drilldown() -> tuple[dict[str, Any], int]:
     module_id_raw = request.args.get("moduleId")
     module_id = None
     if module_id_raw:
-        try:
-            module_id = int(module_id_raw)
-            if module_id <= 0:
-                raise ValueError
-        except ValueError:
+        # `moduleId` is the module's public UUID; malformed -> 400, unknown/foreign -> an id no
+        # row holds (the drill-down is already scoped to the caller's own modules).
+        if parse_public_id(module_id_raw) is None:
             return {"success": False, "error": "Invalid moduleId"}, 400
+        module_id = body_id(dal, "marketplace_modules", module_id_raw)
+        if module_id is None:
+            module_id = UNKNOWN_ID
     page = max(1, _int_query_arg("page", 1))
     limit = min(100, max(1, _int_query_arg("limit", 25)))
     sort_by = request.args.get("sortBy", "installed_at")
@@ -311,7 +322,7 @@ async def create_vendor_module() -> tuple[dict[str, Any], int]:
     return {"success": True, "module": module}, 201
 
 
-@vendor_bp.route("/modules/<int:module_id>", methods=["PUT"])
+@vendor_bp.route("/modules/<puuid:module_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 async def update_vendor_module(module_id: int) -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/marketplace/vendor/modules/<id>` -- IDOR-safe (own modules only)."""
@@ -325,7 +336,7 @@ async def update_vendor_module(module_id: int) -> tuple[dict[str, Any], int]:
     return {"success": True, **result}, 200
 
 
-@vendor_bp.route("/modules/<int:module_id>/submit", methods=["POST"])
+@vendor_bp.route("/modules/<puuid:module_id>/submit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 async def submit_module_for_review(
     module_id: int,

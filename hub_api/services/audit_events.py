@@ -644,8 +644,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("POST", f"{_P}/marketplace/vendor/request"),
             ("POST", f"{_P}/marketplace/vendor/modules"),
-            ("PUT", f"{_P}/marketplace/vendor/modules/<int:module_id>"),
-            ("POST", f"{_P}/marketplace/vendor/modules/<int:module_id>/submit"),
+            ("PUT", f"{_P}/marketplace/vendor/modules/<puuid:module_id>"),
+            ("POST", f"{_P}/marketplace/vendor/modules/<puuid:module_id>/submit"),
         ),
     ),
     (

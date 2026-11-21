@@ -39,8 +39,9 @@ from typing import Any
 
 from services.community_authz import member_scopes_sync
 from services.community_public_id import lookup_public_ids_sync
-from services.errors import bad_request, conflict, forbidden, not_found
+from services.errors import bad_request, conflict, not_found
 from services.global_identity import is_global_admin_sync
+from services.marketplace_public_ids import public_ids_for
 from services.schema import bind_marketplace_vendor_tables
 from services.scope_registry import SCOPE_BILLING_MANAGE
 
@@ -225,8 +226,10 @@ def cancel_premium_subscription(dal: Any, community_id: int, immediately: bool) 
 class ModuleSubscriptionDTO:
     """One row of `GET /communities/<id>/subscriptions`."""
 
-    id: int
-    moduleId: int
+    #: Public UUID of the installed module -- the handle `PUT/DELETE .../subscriptions/<id>` takes
+    #: (an installation is unique per community + module, so no separate row id crosses the API).
+    id: str
+    moduleId: str
     name: str
     displayName: str
     description: str | None
@@ -250,14 +253,15 @@ def list_community_subscriptions(dal: Any, community_id: int) -> list[ModuleSubs
         dal.hub_modules.ALL,
         orderby=(~dal.hub_modules.is_core, ~dal.hub_module_installations.installed_at),
     )
+    module_uuids = public_ids_for(dal, "hub_modules", [r.hub_modules.id for r in rows])
     result = []
     for row in rows:
         inst = row.hub_module_installations
         mod = row.hub_modules
         result.append(
             ModuleSubscriptionDTO(
-                id=inst.id,
-                moduleId=mod.id,
+                id=module_uuids[int(mod.id)],
+                moduleId=module_uuids[int(mod.id)],
                 name=mod.name,
                 displayName=mod.display_name or mod.name,
                 description=mod.description,
@@ -310,11 +314,15 @@ def subscribe_module(dal: Any, community_id: int, module_id: int, installed_by: 
     return int(new_id)
 
 
-def unsubscribe_module(dal: Any, community_id: int, subscription_id: int) -> None:
-    """Uninstall a module; raises `ApiError(404)`/`ApiError(400)` matching Node's checks."""
+def unsubscribe_module(dal: Any, community_id: int, module_id: int) -> None:
+    """Uninstall a module; raises `ApiError(404)`/`ApiError(400)` matching Node's checks.
+
+    `module_id` is the numeric id of the installed `hub_modules` row (the route resolved the
+    module's public UUID); an installation is unique per (community, module).
+    """
     row = (
         dal(
-            (dal.hub_module_installations.id == subscription_id)
+            (dal.hub_module_installations.module_id == module_id)
             & (dal.hub_module_installations.community_id == community_id)
             & (dal.hub_module_installations.module_id == dal.hub_modules.id)
         )
@@ -327,7 +335,7 @@ def unsubscribe_module(dal: Any, community_id: int, subscription_id: int) -> Non
         raise bad_request("Cannot unsubscribe from core modules")
 
     dal(
-        (dal.hub_module_installations.id == subscription_id)
+        (dal.hub_module_installations.module_id == module_id)
         & (dal.hub_module_installations.community_id == community_id)
     ).delete()
     dal.commit()
@@ -336,7 +344,7 @@ def unsubscribe_module(dal: Any, community_id: int, subscription_id: int) -> Non
 def update_module_subscription(
     dal: Any,
     community_id: int,
-    subscription_id: int,
+    module_id: int,
     *,
     config: dict[str, Any] | None,
     is_enabled: bool | None,
@@ -352,7 +360,7 @@ def update_module_subscription(
         updates["is_enabled"] = is_enabled
 
     affected = dal(
-        (dal.hub_module_installations.id == subscription_id)
+        (dal.hub_module_installations.module_id == module_id)
         & (dal.hub_module_installations.community_id == community_id)
     ).update(**updates)
     dal.commit()
@@ -369,10 +377,10 @@ def update_module_subscription(
 class DiscountCodeDTO:
     """Wire shape for a `vendor_discount_codes` row."""
 
-    id: int
+    id: str
     code: str
     vendorId: int
-    moduleId: int | None
+    moduleId: str | None
     discountType: str
     discountValue: float
     maxUses: int | None
@@ -385,13 +393,14 @@ class DiscountCodeDTO:
     updatedAt: str | None
 
 
-def _to_dto(row: Any) -> DiscountCodeDTO:
+def _to_dto(row: Any, module_uuids: dict[int, str]) -> DiscountCodeDTO:
+    """Wire DTO: the code's own and its module's public UUIDs (`module_uuids` maps numeric id)."""
     value = row.discount_value
     return DiscountCodeDTO(
-        id=row.id,
+        id=str(row.public_id),
         code=row.code,
         vendorId=row.vendor_id,
-        moduleId=row.module_id,
+        moduleId=module_uuids[int(row.module_id)] if row.module_id is not None else None,
         discountType=row.discount_type,
         discountValue=float(value) if isinstance(value, Decimal) else float(value or 0),
         maxUses=row.max_uses,
@@ -436,9 +445,25 @@ def list_vendor_discount_codes(
     rows = dal(query).select(
         orderby=~dal.vendor_discount_codes.created_at, limitby=((page - 1) * limit, page * limit)
     )
+    module_uuids = _module_uuids(dal, rows)
     return DiscountCodePageDTO(
-        discountCodes=[_to_dto(row) for row in rows], page=page, limit=limit, total=int(total)
+        discountCodes=[_to_dto(row, module_uuids) for row in rows],
+        page=page,
+        limit=limit,
+        total=int(total),
     )
+
+
+def _module_uuids(dal: Any, rows: Any) -> dict[int, str]:
+    """Public UUIDs of the (marketplace) modules the discount-code `rows` are scoped to."""
+    if "marketplace_modules" not in dal.tables:
+        bind_marketplace_vendor_tables(dal)
+    return public_ids_for(dal, "marketplace_modules", [r.module_id for r in rows])
+
+
+def _dto(dal: Any, row: Any) -> DiscountCodeDTO:
+    """`_to_dto` for ONE row (resolves its module's public UUID)."""
+    return _to_dto(row, _module_uuids(dal, [row]))
 
 
 def _validate_discount_fields(discount_type: str, discount_value: float) -> None:
@@ -498,7 +523,7 @@ def create_discount_code(
     )
     dal.commit()
     row = dal(dal.vendor_discount_codes.id == new_id).select().first()
-    return _to_dto(row)
+    return _dto(dal, row)
 
 
 def _owned_code(dal: Any, vendor_id: int, code_id: int) -> Any:
@@ -506,7 +531,8 @@ def _owned_code(dal: Any, vendor_id: int, code_id: int) -> Any:
     if row is None:
         raise not_found("Discount code not found")
     if row.vendor_id != vendor_id:
-        raise forbidden("You do not have permission to modify this discount code")
+        # Another vendor's code is indistinguishable from an unknown one: no existence oracle.
+        raise not_found("Discount code not found")
     return row
 
 
@@ -538,13 +564,13 @@ def update_discount_code(
     _validate_discount_fields(new_type, float(new_value))
 
     if not set_clauses:
-        return _to_dto(existing)
+        return _dto(dal, existing)
 
     set_clauses["updated_at"] = dt.datetime.utcnow()
     dal(dal.vendor_discount_codes.id == code_id).update(**set_clauses)
     dal.commit()
     row = dal(dal.vendor_discount_codes.id == code_id).select().first()
-    return _to_dto(row)
+    return _dto(dal, row)
 
 
 def delete_discount_code(dal: Any, vendor_id: int, code_id: int) -> DiscountCodeDTO:
@@ -555,7 +581,7 @@ def delete_discount_code(dal: Any, vendor_id: int, code_id: int) -> DiscountCode
     )
     dal.commit()
     row = dal(dal.vendor_discount_codes.id == code_id).select().first()
-    return _to_dto(row)
+    return _dto(dal, row)
 
 
 @dataclass(slots=True, frozen=True)
