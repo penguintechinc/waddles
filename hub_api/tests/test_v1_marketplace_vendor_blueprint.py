@@ -359,10 +359,32 @@ class TestVendorModulesListAndUpdate:
     async def test_update_nonexistent_module_is_404(self, client: Any, marketplace_db: Any) -> None:
         user_id = _seed_user(marketplace_db)
         headers = _headers(user_id)
-        response = await client.put(
-            "/api/v1/marketplace/vendor/modules/999", headers=headers, json={"description": "x"}
+        for module in ("00000000-0000-4000-8000-00000000dead", "999", "not-a-uuid"):
+            response = await client.put(
+                f"/api/v1/marketplace/vendor/modules/{module}",
+                headers=headers,
+                json={"description": "x"},
+            )
+            assert response.status_code == 404, module  # unknown UUID, numeric, malformed
+
+    async def test_module_and_submission_ids_are_uuids(
+        self, client: Any, marketplace_db: Any, monkeypatch: Any
+    ) -> None:
+        headers, module_id = await _setup_vendor_with_module(client, marketplace_db, monkeypatch)
+        uuid_re = r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$"
+        import re
+
+        assert re.match(uuid_re, module_id)
+        listed = (
+            await (
+                await client.get("/api/v1/marketplace/vendor/modules", headers=headers)
+            ).get_json()
+        )["modules"]
+        assert [m["id"] for m in listed] == [module_id]  # denominator: the one module
+        submit = await client.post(
+            f"/api/v1/marketplace/vendor/modules/{module_id}/submit", headers=headers, json={}
         )
-        assert response.status_code == 404
+        assert re.match(uuid_re, (await submit.get_json())["submissionId"])
 
     async def test_create_module_without_profile_is_403(
         self, client: Any, marketplace_db: Any, monkeypatch: Any

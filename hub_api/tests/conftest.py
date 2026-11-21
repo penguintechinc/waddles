@@ -1299,6 +1299,21 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
         logo_url="https://example.com/logo.png",
     )
 
+    # Catalog `marketplace` rows' `source_id`s (1..3) are `marketplace_modules.id`s: the catalog
+    # now emits each entry's public UUID, so the backing rows must exist.
+    from services.schema import bind_marketplace_vendor_tables
+
+    bind_marketplace_vendor_tables(dal, migrate=True)
+    for module_name in ("global-vendor-widget", "acme-private-widget", "other-private-widget"):
+        dal.marketplace_modules.insert(
+            name=module_name,
+            slug=module_name,
+            webhook_url="https://vendor.example/hook",
+            webhook_secret="fixture-secret",
+            status="approved",
+        )
+    dal.commit()
+
     published_id = dal.hub_modules.insert(
         name="published-module",
         display_name="Published Module",

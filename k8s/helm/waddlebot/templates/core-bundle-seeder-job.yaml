@@ -153,16 +153,7 @@ spec:
         # plaintext VALKEY_URL from envFrom's secretRef above and crashed at
         # valkey_admin_client.build_client() with "VALKEY_URL must use rediss://" (hub_api/
         # services/valkey_admin_client.py's SECURITY_TRANSPORT_TLS=true-by-default check).
-        - name: VALKEY_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_URL_TLS
-        - name: VALKEY_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_PASSWORD
+        {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "core-bundle-seeder" "url" "auth") | nindent 8 }}
         {{- end }}
         # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
         # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module

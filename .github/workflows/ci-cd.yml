@@ -120,10 +120,25 @@ jobs:
             -- curl -f http://router:8000/health
 
           echo ""
-          echo "Testing hub health endpoint..."
+          # hub-api port, scheme and liveness path are read from the deployed objects (chart
+          # source: pipeline.hubApi.port + transit TLS), never a literal that can drift.
+          HUB_SVC="waddlebot-hub-api-v3"
+          HUB_PORT="$(kubectl get svc "$HUB_SVC" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.ports[?(@.name=="http")].port}')"
+          HUB_SCHEME="$(kubectl get deploy "$HUB_SVC" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="hub-api")].livenessProbe.httpGet.scheme}' \
+            | tr '[:upper:]' '[:lower:]')"
+          HUB_PATH="$(kubectl get deploy "$HUB_SVC" -n "$NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="hub-api")].livenessProbe.httpGet.path}')"
+          if [ -z "$HUB_PORT" ] || [ -z "$HUB_SCHEME" ] || [ -z "$HUB_PATH" ]; then
+            echo "::error::could not resolve hub-api port/scheme/path from $HUB_SVC" >&2
+            exit 1
+          fi
+          echo "Testing hub-api health endpoint (${HUB_SCHEME}://${HUB_SVC}:${HUB_PORT}${HUB_PATH})..."
+          # -k: in-cluster liveness smoke against the internal-CA cert (same trust as kubelet probes).
           kubectl run curl-test-hub --image=curlimages/curl:latest --rm -i --restart=Never \
             --namespace="$NAMESPACE" \
-            -- curl -f http://hub:8060/api/health
+            -- curl -fsSk "${HUB_SCHEME}://${HUB_SVC}.${NAMESPACE}.svc.cluster.local:${HUB_PORT}${HUB_PATH}"
 
       - name: Deployment summary
         if: always()
@@ -151,7 +166,9 @@ jobs:
         env:
           DEPLOY_RESULT: ${{ needs.deploy-k8s.result }}
         run: |
-          echo "## CI/CD Summary" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Job | Status |" >> "$GITHUB_STEP_SUMMARY"
-          echo "|-----|--------|" >> "$GITHUB_STEP_SUMMARY"
-          echo "| Deploy to Kubernetes | ${DEPLOY_RESULT} |" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "## CI/CD Summary"
+            echo "| Job | Status |"
+            echo "|-----|--------|"
+            echo "| Deploy to Kubernetes | ${DEPLOY_RESULT} |"
+          } >> "$GITHUB_STEP_SUMMARY"

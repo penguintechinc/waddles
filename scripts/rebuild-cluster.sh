@@ -339,7 +339,7 @@ show_summary() {
     echo ""
     echo -e "${CYAN}Next Steps:${NC}"
     echo -e "  1. Start the hub module: ${BLUE}docker-compose -f docker-compose.yml up waddlebot-hub${NC}"
-    echo -e "  2. Access the hub: ${BLUE}http://localhost:8060${NC}"
+    echo -e "  2. Access the hub: ${BLUE}http://localhost:8080${NC}"
     echo -e "  3. Login with credentials above"
 
     echo ""

@@ -21,6 +21,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.marketplace_admin_review import admin_review_bp, internal_bp
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import make_user_token
 
 
@@ -28,6 +29,7 @@ from tests.conftest import make_user_token
 def app(marketplace_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, marketplace_db)
     quart_app.register_blueprint(admin_review_bp)
     quart_app.register_blueprint(internal_bp)
     quart_app.config["dal"] = marketplace_db
@@ -37,6 +39,19 @@ def app(marketplace_db: Any) -> Quart:
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
+
+
+def _uid(dal: Any, table: str, row_id: int) -> str:
+    """`public_id` of a seeded row (entity routes take it, never the numeric id)."""
+    row = dal(dal[table].id == row_id).select(dal[table].public_id).first()
+    assert row is not None and row.public_id
+    return str(row.public_id)
+
+
+def _admin_url(dal: Any, table: str, row_id: int, suffix: str = "") -> str:
+    """Admin review route addressed by the submission's public UUID."""
+    segment = "vendor-submissions" if table == "vendor_submissions" else "submissions"
+    return f"/api/v1/marketplace/admin/marketplace/{segment}/{_uid(dal, table, row_id)}{suffix}"
 
 
 def _seed_user(dal: Any, *, username: str = "admin", email: str = "admin@example.com") -> int:
@@ -138,7 +153,7 @@ class TestSelfApprovalDenied:
         marketplace_db.commit()
 
         response = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/submissions/{submission_id}/approve",
+            _admin_url(marketplace_db, "marketplace_submissions", submission_id, "/approve"),
             headers=_admin_headers(admin_id),
             json={},
         )
@@ -149,30 +164,54 @@ class TestSelfApprovalDenied:
 
 class TestInternalServiceAuth:
     async def test_get_commands_without_service_key_is_401(self, client: Any) -> None:
-        response = await client.get("/api/v1/internal/marketplace/commands/1")
+        response = await client.get(f"/api/v1/internal/marketplace/commands/{UNKNOWN_PUBLIC_ID}")
         assert response.status_code == 401
 
     async def test_get_commands_with_valid_service_key(
-        self, client: Any, service_key_headers: dict[str, str]
+        self, client: Any, marketplace_db: Any, service_key_headers: dict[str, str]
     ) -> None:
+        community_id = int(marketplace_db.communities.insert(name="cmd-community"))
+        marketplace_db.commit()
         response = await client.get(
-            "/api/v1/internal/marketplace/commands/1", headers=service_key_headers
+            f"/api/v1/internal/marketplace/commands/{public_id(marketplace_db, community_id)}",
+            headers=service_key_headers,
         )
         assert response.status_code == 200
         body = await response.get_json()
         assert body == {"success": True, "commands": []}
 
+    async def test_get_commands_numeric_or_unknown_community_is_not_served(
+        self, client: Any, service_key_headers: dict[str, str]
+    ) -> None:
+        numeric = await client.get(
+            "/api/v1/internal/marketplace/commands/1", headers=service_key_headers
+        )
+        assert numeric.status_code == 404
+        unknown = await client.get(
+            f"/api/v1/internal/marketplace/commands/{UNKNOWN_PUBLIC_ID}",
+            headers=service_key_headers,
+        )
+        assert (await unknown.get_json())["commands"] == []  # no oracle: same shape as empty
+
     async def test_execute_without_service_key_is_401(self, client: Any) -> None:
-        response = await client.post("/api/v1/internal/marketplace/execute/1", json={})
+        response = await client.post(
+            f"/api/v1/internal/marketplace/execute/{UNKNOWN_PUBLIC_ID}", json={}
+        )
         assert response.status_code == 401
 
     async def test_execute_unknown_module_is_404(
         self, client: Any, service_key_headers: dict[str, str]
     ) -> None:
         response = await client.post(
-            "/api/v1/internal/marketplace/execute/999", headers=service_key_headers, json={}
+            f"/api/v1/internal/marketplace/execute/{UNKNOWN_PUBLIC_ID}",
+            headers=service_key_headers,
+            json={},
         )
         assert response.status_code == 404
+        numeric = await client.post(
+            "/api/v1/internal/marketplace/execute/999", headers=service_key_headers, json={}
+        )
+        assert numeric.status_code == 404  # the numeric form no longer routes at all
 
 
 class TestVendorRequestsListAndReject:
@@ -270,7 +309,7 @@ class TestSubmissionsListAndReject:
         submission_id = await self._seed_submission(marketplace_db, submitter_id=vendor_id)
 
         response = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/submissions/{submission_id}/reject",
+            _admin_url(marketplace_db, "marketplace_submissions", submission_id, "/reject"),
             headers=_admin_headers(admin_id),
             json={"reason": "no thanks"},
         )
@@ -286,7 +325,7 @@ class TestSubmissionsListAndReject:
         submission_id = await self._seed_submission(marketplace_db, submitter_id=vendor_id)
 
         response = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/submissions/{submission_id}/approve",
+            _admin_url(marketplace_db, "marketplace_submissions", submission_id, "/approve"),
             headers=_admin_headers(admin_id),
             json={"notes": "looks good"},
         )
@@ -346,20 +385,20 @@ class TestVendorSubmissionsAdminPipeline:
         assert (await listing.get_json())["data"]["pagination"]["total"] == 1
 
         detail = await client.get(
-            f"/api/v1/marketplace/admin/marketplace/vendor-submissions/{submission_id}",
+            _admin_url(marketplace_db, "vendor_submissions", submission_id, ""),
             headers=_admin_headers(admin_id),
         )
         assert detail.status_code == 200
 
         approve = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/vendor-submissions/{submission_id}/approve",
+            _admin_url(marketplace_db, "vendor_submissions", submission_id, "/approve"),
             headers=_admin_headers(admin_id),
             json={"adminNotes": "great"},
         )
         assert approve.status_code == 200
 
         publish = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/vendor-submissions/{submission_id}/publish",
+            _admin_url(marketplace_db, "vendor_submissions", submission_id, "/publish"),
             headers=_admin_headers(admin_id),
         )
         assert publish.status_code == 200
@@ -369,7 +408,7 @@ class TestVendorSubmissionsAdminPipeline:
         admin_id = _seed_user(marketplace_db)
         submission_id = await self._seed_vendor_submission(marketplace_db)
         response = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/vendor-submissions/{submission_id}/reject",
+            _admin_url(marketplace_db, "vendor_submissions", submission_id, "/reject"),
             headers=_admin_headers(admin_id),
             json={},
         )
@@ -379,7 +418,7 @@ class TestVendorSubmissionsAdminPipeline:
         admin_id = _seed_user(marketplace_db)
         submission_id = await self._seed_vendor_submission(marketplace_db)
         response = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/vendor-submissions/{submission_id}/request-info",
+            _admin_url(marketplace_db, "vendor_submissions", submission_id, "/request-info"),
             headers=_admin_headers(admin_id),
             json={"message": "need more docs"},
         )
@@ -391,10 +430,95 @@ class TestVendorSubmissionsAdminPipeline:
         admin_id = _seed_user(marketplace_db)
         submission_id = await self._seed_vendor_submission(marketplace_db)  # status=pending
         response = await client.post(
-            f"/api/v1/marketplace/admin/marketplace/vendor-submissions/{submission_id}/publish",
+            _admin_url(marketplace_db, "vendor_submissions", submission_id, "/publish"),
             headers=_admin_headers(admin_id),
         )
         assert response.status_code == 400
+
+
+class TestSubmissionPublicUuids:
+    """Group C: submission ids cross the API as public UUIDs; foreign/unknown/numeric are 404."""
+
+    async def test_approve_uuid_resolves_and_listing_emits_uuid(
+        self, client: Any, marketplace_db: Any
+    ) -> None:
+        admin_id = _seed_user(marketplace_db)
+        vendor_id = _seed_user(marketplace_db, username="vu", email="vu@example.com")
+        module_id = marketplace_db.marketplace_modules.insert(
+            seller_id=1, name="M", slug="m", webhook_url="https://v.example/h", webhook_secret="s"
+        )
+        submission_id = marketplace_db.marketplace_submissions.insert(
+            module_id=module_id, submitted_by=vendor_id, status="pending"
+        )
+        marketplace_db.commit()
+        uuid_ = _uid(marketplace_db, "marketplace_submissions", submission_id)
+
+        listing = await client.get(
+            "/api/v1/marketplace/admin/marketplace/submissions", headers=_admin_headers(admin_id)
+        )
+        rows = (await listing.get_json())["submissions"]
+        assert [(r["id"], r["moduleId"]) for r in rows] == [
+            (uuid_, _uid(marketplace_db, "marketplace_modules", module_id))
+        ]  # denominator: the one seeded submission was examined
+        base = "/api/v1/marketplace/admin/marketplace/submissions"
+        approve = await client.post(
+            f"{base}/{uuid_}/approve", headers=_admin_headers(admin_id), json={}
+        )
+        assert approve.status_code == 200
+        assert marketplace_db.marketplace_submissions[submission_id].status == "approved"
+
+    async def test_unknown_malformed_numeric_and_cross_table_ids_are_404(
+        self, client: Any, marketplace_db: Any
+    ) -> None:
+        admin_id = _seed_user(marketplace_db)
+        vendor_sub = marketplace_db.vendor_submissions.insert(
+            submission_id="vs-x",
+            vendor_name="V",
+            vendor_email="v@example.com",
+            module_name="X",
+            webhook_url="https://v.example/h",
+            pricing_model="flat-rate",
+            payment_method="paypal",
+            status="pending",
+        )
+        marketplace_db.commit()
+        vendor_uuid = _uid(marketplace_db, "vendor_submissions", vendor_sub)
+        base = "/api/v1/marketplace/admin/marketplace"
+        for path in (
+            f"/submissions/{UNKNOWN_PUBLIC_ID}/approve",
+            "/submissions/1/approve",
+            "/submissions/not-a-uuid/approve",
+            f"/submissions/{vendor_uuid}/approve",  # a vendor_submissions UUID on the other table
+            f"/vendor-submissions/{UNKNOWN_PUBLIC_ID}",
+            "/vendor-submissions/1",
+        ):
+            method = client.get if path.startswith("/vendor-submissions/") else client.post
+            response = await method(f"{base}{path}", headers=_admin_headers(admin_id))
+            assert response.status_code == 404, path
+        assert marketplace_db.vendor_submissions[vendor_sub].status == "pending"
+
+    async def test_vendor_submission_detail_emits_uuid(
+        self, client: Any, marketplace_db: Any
+    ) -> None:
+        admin_id = _seed_user(marketplace_db)
+        sub = marketplace_db.vendor_submissions.insert(
+            submission_id="vs-d",
+            vendor_name="V",
+            vendor_email="v@example.com",
+            module_name="D",
+            webhook_url="https://v.example/h",
+            pricing_model="flat-rate",
+            payment_method="paypal",
+            status="pending",
+        )
+        marketplace_db.commit()
+        uuid_ = _uid(marketplace_db, "vendor_submissions", sub)
+        response = await client.get(
+            f"/api/v1/marketplace/admin/marketplace/vendor-submissions/{uuid_}",
+            headers=_admin_headers(admin_id),
+        )
+        assert response.status_code == 200
+        assert (await response.get_json())["submission"]["id"] == uuid_
 
 
 def test_bind_marketplace_vendor_tables_when_commands_already_defined(tmp_path: Any) -> None:
