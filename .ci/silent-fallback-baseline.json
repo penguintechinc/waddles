@@ -2088,7 +2088,7 @@
       "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/support.py",
       "line": 532,
-      "line_hash": "787d36df5a9a39f4"
+      "line_hash": "ad08991d249dbc62"
     },
     {
       "rule_id": "python-silent-except-return-default",

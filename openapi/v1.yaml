@@ -274,7 +274,7 @@ components:
           title: Created By Name
         id:
           title: Id
-          type: integer
+          type: string
         is_pinned:
           title: Is Pinned
           type: boolean
@@ -4266,7 +4266,7 @@ components:
       title: QueueItemDTO
       type: object
     RadioStationDTO:
-      description: Wire DTO for one community radio station.
+      description: Wire DTO for one community radio station; `id` is its public UUID.
       properties:
         communityId:
           title: Communityid
@@ -4293,7 +4293,7 @@ components:
           title: Genre
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           title: Isactive
           type: boolean
@@ -7919,7 +7919,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -7954,7 +7955,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -7988,7 +7990,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -8023,7 +8026,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -8058,7 +8062,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -8078,7 +8083,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -8098,7 +8104,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -8134,7 +8141,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -8169,7 +8177,8 @@ paths:
         name: announcement_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -9069,7 +9078,8 @@ paths:
         name: channel_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9088,7 +9098,8 @@ paths:
         name: channel_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9108,7 +9119,8 @@ paths:
         name: channel_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9127,7 +9139,8 @@ paths:
         name: channel_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9147,7 +9160,8 @@ paths:
         name: post_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9167,7 +9181,8 @@ paths:
         name: reply_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9218,7 +9233,8 @@ paths:
         name: role_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9237,7 +9253,8 @@ paths:
         name: role_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9362,7 +9379,8 @@ paths:
         name: item_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9381,7 +9399,8 @@ paths:
         name: item_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9401,7 +9420,8 @@ paths:
         name: item_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -9421,7 +9441,8 @@ paths:
         name: item_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -10429,7 +10450,8 @@ paths:
         name: station_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12898,7 +12920,8 @@ paths:
         name: category_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -12917,7 +12940,8 @@ paths:
         name: category_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -12991,7 +13015,8 @@ paths:
         name: ticket_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13014,7 +13039,8 @@ paths:
         name: ticket_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13078,7 +13104,7 @@ paths:
               properties:
                 category_id:
                   anyOf:
-                  - type: integer
+                  - type: string
                   - type: 'null'
                   default: null
                   title: Category Id
@@ -13151,7 +13177,8 @@ paths:
         name: ticket_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -13172,7 +13199,8 @@ paths:
         name: ticket_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13206,7 +13234,8 @@ paths:
         name: ticket_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13245,7 +13274,8 @@ paths:
         name: ticket_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -13278,7 +13308,8 @@ paths:
         name: ticket_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -18362,7 +18393,8 @@ paths:
         name: post_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -18382,7 +18414,8 @@ paths:
         name: channel_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -18401,7 +18434,8 @@ paths:
         name: channel_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -18421,12 +18455,14 @@ paths:
         name: channel_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: post_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
