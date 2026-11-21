@@ -30,11 +30,13 @@ pub const OP_HELLO: u8 = 10;
 /// Heartbeat ACK.
 pub const OP_HEARTBEAT_ACK: u8 = 11;
 
-/// `GUILDS | GUILD_MEMBERS | GUILD_MESSAGES | MESSAGE_CONTENT`. `GUILD_MEMBERS`
-/// (1 << 1) is a PRIVILEGED intent added for inbound role sync
+/// `GUILDS | GUILD_MEMBERS | GUILD_MODERATION | GUILD_MESSAGES | MESSAGE_CONTENT`.
+/// `GUILD_MEMBERS` (1 << 1) is a PRIVILEGED intent added for inbound role sync
 /// (`GUILD_MEMBER_UPDATE`): the "Server Members Intent" toggle MUST be on in the
 /// Discord developer portal, or the gateway closes with 4014 (parked).
-pub const DEFAULT_INTENTS: u64 = (1 << 0) | (1 << 1) | (1 << 9) | (1 << 15);
+/// `GUILD_MODERATION` (1 << 2) is NOT privileged; it delivers `GUILD_BAN_REMOVE`, which the
+/// host's gateway tap turns into a Waddles floor-ban lift (platform-originated unban sync).
+pub const DEFAULT_INTENTS: u64 = (1 << 0) | (1 << 1) | (1 << 2) | (1 << 9) | (1 << 15);
 
 /// Slot the host substitutes with the bot token. The host MUST pin the prefix
 /// [`TOKEN_PREFIX`] for it (WsConfig `slot_prefixes`); the slot is terminated by
@@ -247,7 +249,7 @@ mod tests {
         assert_eq!(text.matches(TOKEN_SLOT).count(), 1);
         let v: Value = serde_json::from_str(&text).unwrap();
         assert_eq!(v["op"], 2);
-        assert_eq!(v["d"]["intents"], 33283);
+        assert_eq!(v["d"]["intents"], 33287);
         assert_eq!(v["d"]["properties"]["os"], "linux");
     }
 

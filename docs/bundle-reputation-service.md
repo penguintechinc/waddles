@@ -121,6 +121,21 @@ re-join. A confirmed ban with no suppression code (no linked identity on that pl
   (statuses 1 queued, 3 retry, 4 dead, 5 rate limited, 7 in flight): they become lifted and are never sent. The calling app
   is mandatory (no default; the pre-source-app overload is dropped). NO unban is enqueued back (no echo); replays are no-ops.
   Both directions are sticky.
+- **Platform -> Waddles, Discord's own UI** (`GUILD_BAN_REMOVE`): an unban done in Discord lifts the Waddles floor ban
+  too, with no bundle involved. svc-ingest (which holds the gateway connection and has no database) taps the frame
+  (`core/svc_ingest/src/platform_unban.rs`; the connector requests the non-privileged `GUILD_MODERATION` intent for it),
+  resolves the guild to its ONE paired community via hub-api's scope resolver (unpaired / ambiguous / tenant-wide /
+  lookup failure -> ignored, counted `svc_ingest_platform_unban_total{outcome=ignored,reason}`), tokenizes the Discord user
+  id to the user UUID through hub-api's identity tokenizer (the raw id never leaves ingest), signs the event with the
+  `OUTBOUND_PIN_KEYS` ring under its own domain label and `LPUSH`es it to `waddles:platform-unban:discord:events`.
+  svc-action (`core/svc_action/src/platform_unban.rs`) `BRPOP`s it, verifies the MAC (tenant + community are MAC-bound),
+  freshness (5 min) and single use, then calls the same `reputation_floor_ban_lift_from_platform` as above with the fixed
+  source `system:discord-gateway` (counted on `waddles_floor_ban_dispatch_total{result=gateway_unban_*}`). Why a stream
+  and not a grant to svc-ingest: ingest has no database role by design and is the internet-facing stage; the list +
+  MAC keeps the lift function on svc-action alone. Bundles cannot inject the event: the executor has no Valkey access and
+  no key, and a MAC from any other purpose (outbound pins) does not verify. Same guards as above: scope-1 only (a
+  tenant-scope ban is NOT lifted), no echo, idempotent. Deploy prerequisite: svc-ingest's machine identity needs
+  `identity:ephemeral:mint` (the connector runtime's identity tokenizer already assumes it).
 - **Outbox namespaces**: ban and unban rows live in separate idempotency namespaces (`action` is part of the unique key;
   the `unban:` key prefix is reserved and rejected for bans by SQL and by the host). `reputation_floor_ban_lift` fails
   loudly (`unban_shortfall`, whole lift rolled back) if a delivered ban could not get its unban.

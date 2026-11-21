@@ -85,6 +85,7 @@ pub mod http;
 pub mod kv_sealing;
 pub mod metrics_facade;
 pub mod pin_sig;
+pub mod platform_unban;
 pub mod platform_user;
 pub mod retry;
 pub mod senders;
@@ -929,6 +930,7 @@ async fn build_stage_capabilities(
     }
     start_floor_ban_dispatcher(
         cli,
+        &spine_cfg,
         &db_password,
         flag_or_closed(&license, flags::REPUTATION_AUTO_BAN_FLAG),
         Arc::clone(&caps),
@@ -944,6 +946,7 @@ async fn build_stage_capabilities(
 /// queued bans then wait in the outbox (nothing is lost) until the next start.
 async fn start_floor_ban_dispatcher(
     cli: &config::CliConfig,
+    spine_cfg: &penguin_spine::SpineConfig,
     db_password: &config::Secret,
     flag: Arc<dyn flags::FeatureFlag>,
     caps: Arc<
@@ -967,10 +970,46 @@ async fn start_floor_ban_dispatcher(
     // The platform -> Waddles half of the ban-lift sync: a confirmed host `mod.unban` lifts the
     // matching Waddles floor ban over this same connection pool.
     caps.set_unban_sync(store.clone());
+    start_platform_unban_consumer(spine_cfg, store.clone()).await;
     let metrics = stage_metrics::stage_metrics();
     tokio::spawn(async move {
         floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, flag, shutdown_signal())
             .await;
+    });
+}
+
+/// Starts the platform-originated unban consumer ([`platform_unban`]): svc-ingest's signed
+/// Discord `GUILD_BAN_REMOVE` events lift the matching Waddles floor ban over the same pool.
+/// No usable signing ring or a Valkey failure is logged loudly and leaves it off (Discord-side
+/// unbans then do not lift Waddles bans until the next start); nothing runs unverified.
+async fn start_platform_unban_consumer(
+    spine_cfg: &penguin_spine::SpineConfig,
+    lift: Arc<floor_ban_dispatch::PgFloorBanStore>,
+) {
+    let Some(keys) = resolve_outbound_pin_keys() else {
+        tracing::error!(
+            "platform-unban consumer NOT started: OUTBOUND_PIN_KEYS unusable; Discord-native unbans will not lift Waddles bans"
+        );
+        return;
+    };
+    let (pop, seen) = match (
+        usage::connect(spine_cfg).await,
+        usage::connect(spine_cfg).await,
+    ) {
+        (Ok(pop), Ok(seen)) => (pop, seen),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(error = %e, "platform-unban consumer NOT started: valkey connection failed");
+            return;
+        }
+    };
+    let handler = Arc::new(platform_unban::PlatformUnban::new(
+        lift,
+        keys,
+        Arc::new(platform_unban::ValkeySeen::new(seen)),
+        stage_metrics::stage_metrics(),
+    ));
+    tokio::spawn(async move {
+        platform_unban::run_consumer(handler, pop, shutdown_signal()).await;
     });
 }
 
