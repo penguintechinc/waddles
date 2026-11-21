@@ -138,7 +138,7 @@ The v2.0.0 service layer includes 11 services total:
 
 - Initial module documentation package created
 - OVERVIEW.md, USAGE.md, API.md, ARCHITECTURE.md, CONFIGURATION.md, TESTING.md, TROUBLESHOOTING.md, RELEASE_NOTES.md all established from source code review
-- Documentation reflects v2.0.0 codebase state as found in `action/interactive/calendar_interaction_module/`
+- Documentation reflects v2.0.0 codebase state as found in action/interactive/calendar_interaction_module
 
 ---
 

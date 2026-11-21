@@ -38,7 +38,7 @@ The Identity Core Module is upstream of all user-facing modules, providing ident
 
 | Item | Value |
 |---|---|
-| Source | `core/identity_core_module/` |
+| Source | core/identity_core_module |
 | Language | Python 3.13 (Quart + gRPC) |
 | REST Port | 8050 |
 | gRPC Port | 50030 |

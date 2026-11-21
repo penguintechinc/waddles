@@ -90,6 +90,41 @@ jobs:
       - name: ci-gate fetch retry tests
         run: bash scripts/ci/tests/test_ci_gate_fetch.sh
 
+  # Doc-reference gate (`make check-docs`): every backticked repo path in docs/
+  # must exist. Budget is 0 (scripts/check-doc-refs.sh), so a new dead
+  # reference fails the PR. Calls the script directly -- the bare runner image
+  # has no `make`. Path-scoped on PRs; always runs on merge_group/dispatch.
+  # Proven able to fail by scripts/ci/tests/test_check_doc_refs.sh.
+  docs-refs-gate:
+    name: Doc references (check-docs)
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Detect docs / checker changes
+        if: github.event_name == 'pull_request'
+        uses: dorny/paths-filter@fbd0ab8f3e69293af611ebaee6363fc25e6d187d  # v4
+        id: docs
+        with:
+          filters: |
+            docs:
+              - 'docs/**'
+              - '**/*.md'
+              - 'scripts/check-doc-refs.sh'
+              - 'scripts/ci/tests/test_check_doc_refs.sh'
+
+      - name: Seeded-failure test (a planted dead link must fail the gate)
+        if: github.event_name != 'pull_request' || steps.docs.outputs.docs == 'true'
+        run: bash scripts/ci/tests/test_check_doc_refs.sh
+
+      - name: Doc reference gate
+        if: github.event_name != 'pull_request' || steps.docs.outputs.docs == 'true'
+        run: bash scripts/check-doc-refs.sh
+
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
     # bare dal2-alpha-ci image has no `make` (and sudo is blocked): stays on hosted ubuntu-latest until a custom runner image bakes it in

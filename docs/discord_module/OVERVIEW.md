@@ -9,7 +9,7 @@ The Discord module is a message receiver that bridges Discord servers to WaddleB
 - **Language**: Python 3.12
 - **Framework**: Quart (async HTTP) + py-cord (Discord bot library)
 - **Port**: 8003
-- **Container**: `trigger/receiver/discord_module/Dockerfile`
+- **Container**: trigger/receiver/discord_module/Dockerfile
 - **Environment Variables**: See [CONFIGURATION.md](CONFIGURATION.md)
 
 ## Architecture at a Glance

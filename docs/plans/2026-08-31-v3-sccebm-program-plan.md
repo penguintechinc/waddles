@@ -1,5 +1,7 @@
 # v3 SCCEBM — Master Program Plan & Phased Roadmap
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 **Date:** 2026-08-31
 **Status:** Authoritative program roadmap — the team executes from this. **Consolidates**, does
 not re-derive. Design rationale lives in the specs cited below; this doc sequences the work.
@@ -287,8 +289,8 @@ Standard bundle-oriented path (`.PLAN:391-399`):
 skeleton — it exists **only as k8s manifests** (`k8s/helm/waddlebot/templates/hub-api.yaml`,
 labeled "SKELETON PLACEHOLDER") pinned to the shared `pythonBaseImage` with `MODULE_NAME=hub-api`.
 There is **no `app.py`, no Dockerfile, no controller logic** — it was scaffolded to lock container
-topology only. The functional hub is STILL Node: `admin/hub_module/backend/src/controllers/`
-(**exactly 44 `*Controller.js`**) + `admin/marketplace_module/backend` (**11 controllers + 11
+topology only. The functional hub is STILL Node: admin/hub_module/backend/src/controllers
+(**exactly 44 `*Controller.js`**) + admin/marketplace_module/backend (**11 controllers + 11
 routes**). Node code is intact and working — nothing lost.
 
 **Directive (`.PLAN:366-375`):** convert ALL Node/Express backend to Python3/Quart. Only

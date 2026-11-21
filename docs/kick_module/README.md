@@ -1,6 +1,6 @@
 # Kick Module Documentation
 
-This directory contains comprehensive documentation for the Kick streaming platform integration module (`trigger/receiver/kick_module_flask/`). The Kick Module provides webhook event reception and real-time chat integration via Pusher WebSocket.
+This directory contains comprehensive documentation for the Kick streaming platform integration module (trigger/receiver/kick_module_flask). The Kick Module provides webhook event reception and real-time chat integration via Pusher WebSocket.
 
 ## Quick Navigation
 
@@ -223,7 +223,7 @@ See [ARCHITECTURE.md](ARCHITECTURE.md#performance-characteristics) for detailed 
 
 ## Development Workflow
 
-1. **Make changes** in `trigger/receiver/kick_module_flask/`
+1. **Make changes** in trigger/receiver/kick_module_flask
 2. **Run tests**: `pytest tests/ -v`
 3. **Check linting**: `flake8 src/`
 4. **Build Docker image**: `docker build -f trigger/receiver/kick_module_flask/Dockerfile -t kick-module:test .`
@@ -286,7 +286,7 @@ Before deploying to production:
 - **Language**: Python 3.12
 - **Framework**: Quart (async)
 - **Port**: 8007 (configurable)
-- **Path**: `trigger/receiver/kick_module_flask/`
+- **Path**: trigger/receiver/kick_module_flask
 - **Version**: v1.0.0
 - **License**: Limited AGPL-3.0 (see LICENSE.md in repo root)
 - **Maintainer**: Penguin Tech Inc

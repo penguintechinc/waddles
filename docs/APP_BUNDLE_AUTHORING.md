@@ -7,8 +7,8 @@ updating this doc first.
 
 > **Terminology — read first.** Everything this guide calls a "bundle" below is a
 > **built-in stage handler**: a plain Python module under
-> `core/svc_ingest/builtin_handlers/`, `core/svc_process/builtin_handlers/` or
-> `core/svc_action/builtin_handlers/` that the stage-runner imports **in-process** (the stored
+> core/svc_ingest/builtin_handlers, core/svc_process/builtin_handlers or
+> core/svc_action/builtin_handlers that the stage-runner imports **in-process** (the stored
 > entrypoint is `builtin_handlers.<module>:<function>`) and that ships with that service's
 > image. These are **not installable app bundles**. Installable (WASI component) app bundles
 > live under the top-level `bundles/` tree, are authored with `sdk/waddle-sdk/AUTHORING.md`
@@ -815,10 +815,10 @@ class TestTransform:
 
 ## 7. v2.x → v3 Porting Checklist
 
-1. **Find the v2 source.** Trigger/inbound logic: `trigger/receiver/` (platform gateway/webhook
+1. **Find the v2 source.** Trigger/inbound logic: trigger/receiver (platform gateway/webhook
    receivers). Business logic ("what happens on a command"): `action/interactive/
    <feature>_interaction_module/` (e.g. `shoutout_interaction_module/services/*.py`). Routing:
-   `processing/router_module/`. Outbound delivery: `action/pushing/<platform>_action_module/`
+   processing/router_module. Outbound delivery: `action/pushing/<platform>_action_module/`
    (e.g. `discord_action_module/services/discord_service.py`).
 2. **Read the closed GitHub issue** for the v2 feature spec (acceptance criteria, edge cases,
    any bug-fix history) — port behavior, not just code shape; regression-test anything a linked

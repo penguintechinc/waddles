@@ -57,7 +57,7 @@ Event management is community-scoped and platform-aware, supporting events origi
 
 | Item | Value |
 |---|---|
-| Source | `action/interactive/calendar_interaction_module/` |
+| Source | action/interactive/calendar_interaction_module |
 | Language | Python 3, async (Quart framework) |
 | Port | `8030` (default; overridden by `MODULE_PORT` env var) |
 | Module Version | `2.0.0` |
@@ -203,7 +203,7 @@ See [CONFIGURATION.md](CONFIGURATION.md) for all environment variable details an
 
 This module integrates with several other WaddleBot modules:
 
-- **Router Module** (`processing/router_module`) — Provides command routing; the calendar module's services are accessible via the router API at `ROUTER_API_URL`.
+- **Router Module** (processing/router_module) — Provides command routing; the calendar module's services are accessible via the router API at `ROUTER_API_URL`.
 - **Labels Core** (`labels-core-service:8025`) — Used for tag and label resolution on events; referenced via `LABELS_API_URL`.
 - **Admin Hub Frontend** (`admin/hub_module`) — Admin dashboard pages (`AdminCalendarTicketing.jsx`, `AdminCommunityCalls.jsx`) consume the calendar module's API for event management and community calendar configuration.
 

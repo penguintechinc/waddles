@@ -38,7 +38,7 @@ The module uses Quart (async Flask) to handle high throughput with minimal laten
 
 | Item | Value |
 |---|---|
-| Source | `processing/router_module/` |
+| Source | processing/router_module |
 | Language | Python 3.13 |
 | Framework | Quart (async Flask) |
 | Port | 8000 |
