@@ -1,5 +1,6 @@
 {{- if .Values.infrastructure.valkeyDurable.enabled }}
 {{- include "waddlebot.assertDurableTls" . }}
+{{- include "waddlebot.valkeyAcl.validate" . }}
 {{- $d := .Values.infrastructure.valkeyDurable }}
 {{- $tls := eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
 {{- $tlsPort := .Values.infrastructure.redis.tls.port }}
@@ -31,6 +32,12 @@ kind: StatefulSet
 metadata:
   name: {{ $name }}
   namespace: {{ .Values.namespace }}
+  {{- if .Values.infrastructure.valkeyAcl.legacyDefaultUser }}
+  annotations:
+    # Marker read by scripts/ci/check-valkey-acl-least-privilege.py: the legacy shared-password
+    # `default` user is a TRANSITIONAL exception (rollout step 2, docs/valkey-acl.md).
+    valkey.waddles/legacy-default-user: "true"
+  {{- end }}
   labels:
     app.kubernetes.io/name: {{ $name }}
     app.kubernetes.io/instance: {{ .Release.Name }}
@@ -119,20 +126,28 @@ spec:
         - |
           set -eu
           ORD="${HOSTNAME##*-}"
-          # ACL (security review, defense-in-depth): app clients authenticate with the
-          # password-only `default` user (every client -- Rust spine, redis-py -- sends AUTH <pw>),
-          # so the DEFAULT user is an ALLOW-list built from the verified client command set
-          # (AUTH/PING/CLIENT, X* streams, GET/SET/DEL/LPUSH/LTRIM/EXPIRE/GETDEL, EVAL, MULTI/EXEC):
-          # -@all first, then only the categories those use. `-@dangerous` last strips what
-          # @write/@keyspace drag in (FLUSHALL/FLUSHDB/SWAPDB/KEYS/MIGRATE) -- verified against the
-          # pinned image; no +@admin, no +config. `admin` (separate password, own Secret) is
+          # ACL (security finding: per-service users). Every app client authenticates as its OWN
+          # ACL user (infrastructure.valkeyAcl.users, templates/_valkey_acl.tpl) scoped to the key
+          # families it uses, with a -@all ... -@dangerous command allow-list (no FLUSHALL/KEYS/
+          # CONFIG/ACL). `default` is either the TRANSITIONAL legacy shared-password user
+          # (valkeyAcl.legacyDefaultUser=true, rollout step 2) or `reset` (off, no password, no keys,
+          # no commands: unauthenticated connections get NOAUTH). `probe` (own password, server-only
+          # Secret) may only PING -- liveness/readiness. `admin` (separate password, own Secret) is
           # full-access: replication (masteruser) + operator break-glass. Passwords are passed as
           # SHA-256 hashes (`#hex`), never cleartext in the ACL rules.
-          APP_HASH="$(printf %s "$VALKEY_PASSWORD" | sha256sum | cut -d' ' -f1)"
           ADMIN_HASH="$(printf %s "$VALKEY_ADMIN_PASSWORD" | sha256sum | cut -d' ' -f1)"
-          set -- valkey-server \
-            --dir /data/valkey \
-            --user default on "#$APP_HASH" '~*' '&*' -@all +@connection +@read +@write +@stream +@keyspace +@transaction +@scripting -@dangerous \
+          PROBE_HASH="$(printf %s "$VALKEY_PROBE_PASSWORD" | sha256sum | cut -d' ' -f1)"
+          set -- valkey-server --dir /data/valkey
+          {{- include "waddlebot.valkeyAcl.serverArgs" (dict "root" . "inst" "durable") | nindent 10 }}
+          {{- if .Values.infrastructure.valkeyAcl.legacyDefaultUser }}
+          # TRANSITIONAL (legacyDefaultUser=true): legacy shared-password `default` user, unchanged.
+          APP_HASH="$(printf %s "$VALKEY_PASSWORD" | sha256sum | cut -d' ' -f1)"
+          set -- "$@" --user default on "#$APP_HASH" '~*' '&*' -@all +@connection +@read +@write +@stream +@keyspace +@transaction +@scripting -@dangerous
+          {{- else }}
+          set -- "$@" --user default reset
+          {{- end }}
+          set -- "$@" \
+            --user probe reset on "#$PROBE_HASH" resetchannels -@all +ping \
             --user admin on "#$ADMIN_HASH" '~*' '&*' +@all \
             --masteruser admin \
             --masterauth "$VALKEY_ADMIN_PASSWORD" \
@@ -176,16 +191,24 @@ spec:
           protocol: TCP
         {{- end }}
         env:
+        {{- if .Values.infrastructure.valkeyAcl.legacyDefaultUser }}
         - name: VALKEY_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ $pwSecret }}
               key: VALKEY_DURABLE_PASSWORD
+        {{- end }}
         - name: VALKEY_ADMIN_PASSWORD
           valueFrom:
             secretKeyRef:
               name: {{ $adminSecret }}
               key: VALKEY_DURABLE_ADMIN_PASSWORD
+        - name: VALKEY_PROBE_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ $adminSecret }}
+              key: VALKEY_DURABLE_PROBE_PASSWORD
+        {{- include "waddlebot.valkeyAcl.serverEnv" (dict "root" . "inst" "durable") | nindent 8 }}
         volumeMounts:
         - name: data
           mountPath: /data
@@ -200,9 +223,9 @@ spec:
             {{- if $tls }}
               # Loopback probe inside the pod over TLS (plaintext listener is off); --insecure only
               # skips hostname/chain verification of the pod's own 127.0.0.1 connection.
-              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} --user probe --pass \"$VALKEY_PROBE_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
             {{- else }}
-              ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+              ["sh", "-c", "valkey-cli --user probe --pass \"$VALKEY_PROBE_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
             {{- end }}
           initialDelaySeconds: 30
           periodSeconds: 10
@@ -214,9 +237,9 @@ spec:
             {{- if $tls }}
               # Loopback probe inside the pod over TLS (plaintext listener is off); --insecure only
               # skips hostname/chain verification of the pod's own 127.0.0.1 connection.
-              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+              ["sh", "-c", "valkey-cli --tls --insecure -p {{ $tlsPort }} --user probe --pass \"$VALKEY_PROBE_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
             {{- else }}
-              ["sh", "-c", "valkey-cli -a \"$VALKEY_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
+              ["sh", "-c", "valkey-cli --user probe --pass \"$VALKEY_PROBE_PASSWORD\" --no-auth-warning ping | grep -q PONG"]
             {{- end }}
           initialDelaySeconds: 5
           periodSeconds: 10
