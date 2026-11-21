@@ -619,8 +619,11 @@ where
     // knows is verified with ITS secret and nothing else, and yields the tenant/community/
     // connection the delivery is bound to. A ledger outage degrades to the legacy resolver for
     // ordinary events; an unban is never honoured without a ledger entry.
+    // `channel.unban` is authorized from the CURRENT ledger row only (never a cached one), so a
+    // revoked, rotated or rebound subscription cannot authorize one within the cache TTL.
+    let is_unban = is_unban_notification(headers.message_type, body);
     let mut ledger_entry = match unban {
-        Some(u) => match u.ledger_entry(callback_key).await {
+        Some(u) => match u.ledger_entry(callback_key, is_unban).await {
             Ok(entry) => entry,
             Err(_) => {
                 tracing::warn!(
@@ -630,7 +633,7 @@ where
                 // An unban must never be decided without its ledger row, and a 2xx would stop
                 // Twitch redelivering it: peek the (still unauthenticated, read-only) type and
                 // answer 5xx. Ordinary events keep the legacy-resolver fallback.
-                if is_unban_notification(headers.message_type, body) {
+                if is_unban {
                     metrics.record_eventsub_verification("ledger_unavailable");
                     return Err(EventSubError::LedgerUnavailable);
                 }
@@ -656,9 +659,9 @@ where
         // A cached ledger secret may be stale after a rotation: evict it and re-read ONCE before
         // rejecting. The retry only ever uses the ledger's current secret for this same key.
         let mut recovered = false;
-        if let (Some(u), Some(_)) = (unban, &ledger_entry) {
+        if let (Some(u), Some(_), false) = (unban, &ledger_entry, is_unban) {
             u.invalidate_ledger(callback_key);
-            if let Ok(Some(fresh)) = u.ledger_entry(callback_key).await {
+            if let Ok(Some(fresh)) = u.ledger_entry(callback_key, false).await {
                 if verify_signature(
                     fresh.secret.expose(),
                     message_id,
@@ -1740,8 +1743,8 @@ mod tests {
     use crate::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
     use crate::platform_unban::{Signer, UnbanSink};
     use crate::twitch_unban::{
-        BanState, ConnectionOwner, LedgerEntry, LedgerError, OwnerError, SubscriptionLedger,
-        TwitchUnban,
+        BanState, BoundChannel, ConnectionOwner, LedgerEntry, LedgerError, OwnerError,
+        SubscriptionLedger, TwitchUnban,
     };
 
     const LEDGER_SECRET: &str = "ledger-secret-for-sub-7";
@@ -1770,17 +1773,20 @@ mod tests {
     /// Binding double: `(tenant, community, connection)` -> bound login.
     struct Bound(Vec<((i64, i64, i64), &'static str)>);
     impl ConnectionOwner for Bound {
-        fn bound_login<'a>(
+        fn bound_channel<'a>(
             &'a self,
             t: i64,
             c: i64,
             n: i64,
-        ) -> BoxFut<'a, Result<String, OwnerError>> {
+        ) -> BoxFut<'a, Result<BoundChannel, OwnerError>> {
             let r = self
                 .0
                 .iter()
                 .find(|(k, _)| *k == (t, c, n))
-                .map(|(_, l)| (*l).to_string())
+                .map(|(_, l)| BoundChannel {
+                    login: (*l).to_string(),
+                    channel_id: Some("141".to_string()),
+                })
                 .ok_or(OwnerError::NotFound);
             Box::pin(async move { r })
         }
@@ -2148,5 +2154,58 @@ mod tests {
         let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
         assert!(matches!(r, Err(EventSubError::VerificationFailed)), "{r:?}");
         assert_eq!(sink.0.lock().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn an_unban_is_never_authorized_by_a_cached_ledger_entry_after_revocation() {
+        struct Revocable(std::sync::Mutex<bool>);
+        impl SubscriptionLedger for Arc<Revocable> {
+            fn lookup<'a>(
+                &'a self,
+                _k: &'a str,
+            ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+                let live = *self.0.lock().unwrap();
+                Box::pin(async move {
+                    Ok(live.then(|| LedgerEntry {
+                        secret: connection_resolver::SecretString::new(LEDGER_SECRET.to_string()),
+                        tenant_id: 7,
+                        community_id: 9,
+                        connection_id: 33,
+                    }))
+                })
+            }
+        }
+        let inner = Arc::new(Revocable(std::sync::Mutex::new(true)));
+        let cache = Arc::new(crate::twitch_unban::CachedLedger::new(Arc::clone(&inner)));
+        // An ordinary lookup primes the 60s cache with the live row.
+        assert!(cache.lookup(UNBAN_KEY).await.unwrap().is_some());
+        let sink = Arc::new(Sink::default());
+        let u = TwitchUnban::new(
+            Arc::clone(&cache) as Arc<dyn SubscriptionLedger>,
+            Arc::new(Bound(vec![((7, 9, 33), "alice")])),
+            Arc::new(Bans(false)),
+            Arc::new(Tok),
+            Arc::clone(&sink) as Arc<dyn UnbanSink>,
+            Some(Signer::from_seed("k1", &[7u8; 32]).unwrap()),
+        );
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        // Still live: forwarded.
+        let sig = sign(LEDGER_SECRET, "m-r1", &ts, &body);
+        let h = headers("m-r1", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+        // Revoked at hub-api, well inside the TTL: the next unban is refused (not forwarded).
+        *inner.0.lock().unwrap() = false;
+        let sig = sign(LEDGER_SECRET, "m-r2", &ts, &body);
+        let h = headers("m-r2", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(!matches!(r, Err(EventSubError::LedgerUnavailable)), "{r:?}");
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            1,
+            "revoked subscription forwards nothing"
+        );
     }
 }

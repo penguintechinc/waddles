@@ -55,6 +55,8 @@ pub const EVENTS_LIST: &str = "waddles:platform-unban:twitch:events";
 pub const DOMAIN: &[u8] = b"waddles.platform-unban.twitch.v1";
 /// Fixed UUIDv5 namespace for event ids derived from EventSub message ids.
 pub const EVENT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x7a3e_5b1c_9d42_4f08_a6c1_2b8e_d4f7_3095);
+/// Binding metadata key holding the channel's numeric Helix user id (set by hub-api at bind time).
+pub const META_CHANNEL_ID: &str = "channel_id";
 /// Wire platform of the event.
 pub const PLATFORM: &str = "twitch";
 /// EventSub subscription type this module handles.
@@ -150,6 +152,16 @@ pub trait SubscriptionLedger: Send + Sync {
         &'a self,
         callback_key: &'a str,
     ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>>;
+
+    /// Reads the CURRENT ledger row, bypassing any cache (used for `channel.unban`, which must
+    /// never be authorized by a stale entry after a revoke/rotate/rebind). Defaults to
+    /// [`Self::lookup`] for uncached ledgers.
+    fn lookup_fresh<'a>(
+        &'a self,
+        callback_key: &'a str,
+    ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+        self.lookup(callback_key)
+    }
 
     /// Drops any cached answer for `callback_key` so the next lookup re-reads the source (called
     /// on an HMAC failure: the secret may have been rotated). A no-op for uncached ledgers.
@@ -257,6 +269,19 @@ impl<L: SubscriptionLedger> SubscriptionLedger for CachedLedger<L> {
                 return Ok(hit);
             }
             let found = self.inner.lookup(callback_key).await?;
+            self.store(callback_key, found.as_ref());
+            Ok(found)
+        })
+    }
+
+    fn lookup_fresh<'a>(
+        &'a self,
+        callback_key: &'a str,
+    ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+        Box::pin(async move {
+            let found = self.inner.lookup_fresh(callback_key).await?;
+            // Refresh the cache with what hub-api just said (ordinary events benefit, and a
+            // revoked row stops being served from memory).
             self.store(callback_key, found.as_ref());
             Ok(found)
         })
@@ -378,15 +403,27 @@ pub enum OwnerError {
     Unavailable,
 }
 
-/// The broadcaster login a tenant/community/connection is bound to (hub-api binding list).
+/// The channel a tenant/community/connection is bound to (hub-api binding list).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoundChannel {
+    /// Canonical (lowercase) channel login. MUTABLE (a rename changes it): used only to resolve
+    /// the community's credential, never to decide whether an event belongs to the channel.
+    pub login: String,
+    /// The numeric, immutable Helix user id hub-api resolved and stored when the binding was
+    /// created (`GET /users?login=` with the tenant's credential, failing loud). `None` for a
+    /// binding that predates it: the unban is then refused (fail closed).
+    pub channel_id: Option<String>,
+}
+
+/// The channel a tenant/community/connection is bound to (hub-api binding list).
 pub trait ConnectionOwner: Send + Sync {
-    /// The canonical (lowercase) channel login bound to the connection.
-    fn bound_login<'a>(
+    /// The bound channel of the connection.
+    fn bound_channel<'a>(
         &'a self,
         tenant_id: i64,
         community_id: i64,
         connection_id: i64,
-    ) -> BoxFut<'a, Result<String, OwnerError>>;
+    ) -> BoxFut<'a, Result<BoundChannel, OwnerError>>;
 }
 
 /// Production [`ConnectionOwner`] over the connection resolver's binding list.
@@ -403,12 +440,12 @@ impl<R: ConnectionResolve> ResolverOwner<R> {
 }
 
 impl<R: ConnectionResolve> ConnectionOwner for ResolverOwner<R> {
-    fn bound_login<'a>(
+    fn bound_channel<'a>(
         &'a self,
         tenant_id: i64,
         community_id: i64,
         connection_id: i64,
-    ) -> BoxFut<'a, Result<String, OwnerError>> {
+    ) -> BoxFut<'a, Result<BoundChannel, OwnerError>> {
         Box::pin(async move {
             let mut after = 0i64;
             for _ in 0..MAX_PAGES {
@@ -428,9 +465,15 @@ impl<R: ConnectionResolve> ConnectionOwner for ResolverOwner<R> {
                         if b.tenant_id != tenant_id {
                             return Err(OwnerError::TenantMismatch);
                         }
-                        return SessionSpec::from_summary(b)
+                        let login = SessionSpec::from_summary(b)
                             .map(|s| s.channel)
-                            .map_err(|_| OwnerError::NotFound);
+                            .map_err(|_| OwnerError::NotFound)?;
+                        let channel_id = b
+                            .metadata
+                            .get(META_CHANNEL_ID)
+                            .filter(|id| is_twitch_id(id))
+                            .cloned();
+                        return Ok(BoundChannel { login, channel_id });
                     }
                 }
                 match page.next_after {
@@ -723,8 +766,13 @@ impl TwitchUnban {
     pub async fn ledger_entry(
         &self,
         callback_key: &str,
+        fresh: bool,
     ) -> Result<Option<LedgerEntry>, LedgerError> {
-        self.ledger.lookup(callback_key).await
+        if fresh {
+            self.ledger.lookup_fresh(callback_key).await
+        } else {
+            self.ledger.lookup(callback_key).await
+        }
     }
 
     /// Evicts the cached ledger answer for `callback_key` (HMAC failure: the secret may have
@@ -757,13 +805,12 @@ impl TwitchUnban {
                 .and_then(serde_json::Value::as_str)
                 .map(str::to_owned)
         };
-        let (Some(sub_bcast), Some(ev_bcast), Some(user_id), Some(ev_login)) = (
+        let (Some(sub_bcast), Some(ev_bcast), Some(user_id)) = (
             subscription
                 .get("condition")
                 .and_then(|c| text(c, "broadcaster_user_id")),
             text(event, "broadcaster_user_id"),
             text(event, "user_id"),
-            text(event, "broadcaster_user_login"),
         ) else {
             return ignored("malformed", entry);
         };
@@ -778,7 +825,7 @@ impl TwitchUnban {
         // that is not ours is dropped here.
         let bound = match self
             .owner
-            .bound_login(entry.tenant_id, entry.community_id, entry.connection_id)
+            .bound_channel(entry.tenant_id, entry.community_id, entry.connection_id)
             .await
         {
             Ok(l) => l,
@@ -786,9 +833,15 @@ impl TwitchUnban {
             Err(OwnerError::TenantMismatch) => return ignored("tenant_mismatch", entry),
             Err(OwnerError::Unavailable) => return ignored("binding_unavailable", entry),
         };
-        if ev_login.to_ascii_lowercase() != bound {
+        // Identity is the immutable numeric id stored on the binding by hub-api, never the
+        // mutable login and never a payload value. A binding without it is refused outright.
+        let Some(bound_id) = bound.channel_id.as_deref() else {
+            return ignored("binding_id_missing", entry);
+        };
+        if ev_bcast != bound_id {
             return ignored("broadcaster_mismatch", entry);
         }
+        let bound = bound.login;
         let Some(observed_ms) = observed_ms_of(message_timestamp) else {
             return ignored("bad_timestamp", entry);
         };

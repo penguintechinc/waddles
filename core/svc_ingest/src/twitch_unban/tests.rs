@@ -37,10 +37,23 @@ impl SubscriptionLedger for NoLedger {
 }
 
 /// `(tenant, community, connection)` -> bound login.
-type OwnerRow = ((i64, i64, i64), Result<String, OwnerError>);
+type OwnerRow = ((i64, i64, i64), Result<BoundChannel, OwnerError>);
+
+/// A bound channel with its (optional) stored numeric id.
+fn bound(login: &str, id: Option<&str>) -> BoundChannel {
+    BoundChannel {
+        login: login.to_string(),
+        channel_id: id.map(str::to_string),
+    }
+}
 struct Owner(Vec<OwnerRow>);
 impl ConnectionOwner for Owner {
-    fn bound_login<'a>(&'a self, t: i64, c: i64, n: i64) -> BoxFut<'a, Result<String, OwnerError>> {
+    fn bound_channel<'a>(
+        &'a self,
+        t: i64,
+        c: i64,
+        n: i64,
+    ) -> BoxFut<'a, Result<BoundChannel, OwnerError>> {
         let r = self
             .0
             .iter()
@@ -145,7 +158,7 @@ fn rig(
 
 fn good_rig() -> Rig {
     rig(
-        vec![((7, 9, 33), Ok("alice".to_string()))],
+        vec![((7, 9, 33), Ok(bound("alice", Some("141"))))],
         Ok(false),
         Ok(UUID.to_string()),
         true,
@@ -326,7 +339,7 @@ async fn an_unknown_or_cross_tenant_binding_is_ignored_with_a_metric() {
 #[tokio::test]
 async fn a_rebanned_user_or_an_unreadable_state_is_dropped_never_lifted() {
     let r = rig(
-        vec![((7, 9, 33), Ok("alice".into()))],
+        vec![((7, 9, 33), Ok(bound("alice", Some("141"))))],
         Ok(true),
         Ok(UUID.into()),
         true,
@@ -344,7 +357,7 @@ async fn a_rebanned_user_or_an_unreadable_state_is_dropped_never_lifted() {
         Outcome::Ignored("rebanned")
     );
     let r = rig(
-        vec![((7, 9, 33), Ok("alice".into()))],
+        vec![((7, 9, 33), Ok(bound("alice", Some("141"))))],
         Err(()),
         Ok(UUID.into()),
         true,
@@ -412,7 +425,7 @@ async fn malformed_condition_timestamp_tokenizer_signer_and_sink_failures_all_fa
         (TokenizeError::Denied, "tokenize_refused"),
     ] {
         let r = rig(
-            vec![((7, 9, 33), Ok("alice".into()))],
+            vec![((7, 9, 33), Ok(bound("alice", Some("141"))))],
             Ok(false),
             Err(err),
             true,
@@ -425,7 +438,7 @@ async fn malformed_condition_timestamp_tokenizer_signer_and_sink_failures_all_fa
     }
     // no signing key, sink down
     let r = rig(
-        vec![((7, 9, 33), Ok("alice".into()))],
+        vec![((7, 9, 33), Ok(bound("alice", Some("141"))))],
         Ok(false),
         Ok(UUID.into()),
         false,
@@ -436,7 +449,7 @@ async fn malformed_condition_timestamp_tokenizer_signer_and_sink_failures_all_fa
         Outcome::Ignored("no_signing_key")
     );
     let r = rig(
-        vec![((7, 9, 33), Ok("alice".into()))],
+        vec![((7, 9, 33), Ok(bound("alice", Some("141"))))],
         Ok(false),
         Ok(UUID.into()),
         true,
@@ -717,5 +730,71 @@ async fn the_event_id_is_derived_from_the_message_id_so_a_redelivery_dedupes_dow
     assert_eq!(
         ids[0],
         Uuid::new_v5(&EVENT_ID_NAMESPACE, b"msg-same").to_string()
+    );
+}
+
+#[tokio::test]
+async fn identity_is_the_stored_numeric_id_a_renamed_channel_matches_a_mismatch_and_a_missing_id_do_not(
+) {
+    // Renamed: the binding's login is stale/different, the id is the same -> still lifts.
+    let r = rig(
+        vec![((7, 9, 33), Ok(bound("old_name", Some("141"))))],
+        Ok(false),
+        Ok(UUID.to_string()),
+        true,
+        false,
+    );
+    let out = run(
+        &r,
+        &entry(7, 9, 33),
+        &sub("141"),
+        &ev("141", "brand_new_name", "777"),
+        TS,
+    )
+    .await;
+    assert_eq!(out, Outcome::Forwarded);
+    // The credential/Helix lookup used the binding's login, not the payload's.
+    assert_eq!(r.bans.1.lock().unwrap()[0].1, "old_name");
+
+    // Same login, different id (recycled login / forged payload) -> refused, nothing queued.
+    let r = rig(
+        vec![((7, 9, 33), Ok(bound("alice", Some("141"))))],
+        Ok(false),
+        Ok(UUID.to_string()),
+        true,
+        false,
+    );
+    let out = run(
+        &r,
+        &entry(7, 9, 33),
+        &sub("999"),
+        &ev("999", "alice", "777"),
+        TS,
+    )
+    .await;
+    assert_eq!(out, Outcome::Ignored("broadcaster_mismatch"));
+    assert!(r.sink.pushed.lock().unwrap().is_empty());
+
+    // The binding has no stored id: refused (fail closed), never falling back to the login.
+    let r = rig(
+        vec![((7, 9, 33), Ok(bound("alice", None)))],
+        Ok(false),
+        Ok(UUID.to_string()),
+        true,
+        false,
+    );
+    let out = run(
+        &r,
+        &entry(7, 9, 33),
+        &sub("141"),
+        &ev("141", "alice", "777"),
+        TS,
+    )
+    .await;
+    assert_eq!(out, Outcome::Ignored("binding_id_missing"));
+    assert!(r.sink.pushed.lock().unwrap().is_empty());
+    assert!(
+        r.bans.1.lock().unwrap().is_empty(),
+        "no Helix call without an identity"
     );
 }
