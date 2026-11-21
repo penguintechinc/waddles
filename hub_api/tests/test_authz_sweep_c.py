@@ -91,8 +91,8 @@ def world(guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     ):
         dal[table].insert(id=a_id, event_id=EVENT_A)
         dal[table].insert(id=b_id, event_id=EVENT_B)
-    dal.calendar_tickets[7] = {"ticket_uuid": TICKET_UUID_A}
-    dal.calendar_tickets[17] = {"ticket_uuid": TICKET_UUID_B}
+    dal.calendar_tickets[7] = {"ticket_uuid": TICKET_UUID_A, "ticket_code": "code-a"}
+    dal.calendar_tickets[17] = {"ticket_uuid": TICKET_UUID_B, "ticket_code": "code-b"}
     dal.commit()
     db = SimpleNamespace(dal=dal)
     seed_membership(db, community_id=a, user_id=ADMIN_A, role="community-admin")
@@ -168,7 +168,7 @@ async def _call(
         url,
         method=method,
         headers={"Authorization": f"Bearer {token}"},
-        json=({} if body is None else body) if method not in ("GET", "DELETE") else None,
+        json=body if body is not None else ({} if method not in ("GET", "DELETE") else None),
     )
 
 
@@ -365,6 +365,73 @@ async def test_child_id_from_another_event_or_community_is_404(
     ok = await _call(world, method, base.replace("@@", own), ADMIN_A, scopes)
     assert ok.status_code != 404, f"{method} {rule}: own child must pass"
     world.proxy.assert_awaited_once()
+
+
+#: body/query field -> (own child in A's event, same-kind child of B's event)
+_REF_FIELD_VALUES = {
+    "ticket_id": ("7", "17"),
+    "ticket_uuid": (TICKET_UUID_A, TICKET_UUID_B),
+    "ticket_code": ("code-a", "code-b"),
+    "ticket_type_id": ("5", "15"),
+    "type_id": ("5", "15"),
+    "admin_id": ("8", "18"),
+}
+_BODY_ROUTES = {
+    (r.method, "/api/v1/admin" + r.rule.replace("<community_id>", "<cuuid:community_id>")): r
+    for r in ALL_ROUTES
+    if r.has_body and "<event_id>" in r.rule and r.scope is not None
+}
+_BODY_PARAMS = [
+    pytest.param(p, field, id=f"{p.id}|{field}")
+    for p in ROUTES
+    if p.values[:2] in _BODY_ROUTES
+    for field in _REF_FIELD_VALUES
+]
+
+
+def test_child_reference_fields_are_all_covered() -> None:
+    """The deny tests cover every field the proxy treats as a child reference."""
+    assert set(_REF_FIELD_VALUES) == set(event_module._CHILD_REF_FIELDS)
+    assert len(_BODY_ROUTES) >= 14 and len(_BODY_PARAMS) == len(_BODY_ROUTES) * len(
+        _REF_FIELD_VALUES
+    )
+
+
+@pytest.mark.parametrize(("route", "field"), _BODY_PARAMS)
+async def test_child_id_in_body_from_another_community_is_404(
+    world: Any, route: Any, field: str
+) -> None:
+    """IDOR via the body: B's ticket/type/admin reference on A's event is refused, not forwarded."""
+    method, rule, scopes, _kind = route.values
+    own, foreign = _REF_FIELD_VALUES[field]
+    url = _url(world, rule, world.a)
+    uid = MEMBER_A if _kind == "member" else ADMIN_A
+    refused = await _call(world, method, url, uid, scopes, {field: foreign})
+    assert refused.status_code == 404, f"{method} {rule} body.{field}"
+    world.proxy.assert_not_awaited()
+    allowed = await _call(world, method, url, uid, scopes, {field: own})
+    assert allowed.status_code != 404, f"{method} {rule} body.{field}: own reference must pass"
+
+
+@pytest.mark.parametrize("field", ["ticket_type_id"])
+async def test_child_id_in_query_from_another_community_is_404(world: Any, field: str) -> None:
+    rule = "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/tickets"
+    base = _url(world, rule, world.a)
+    own, foreign = _REF_FIELD_VALUES[field]
+    refused = await _call(world, "GET", f"{base}?{field}={foreign}", ADMIN_A, [SCOPE_ADMIN])
+    assert refused.status_code == 404
+    world.proxy.assert_not_awaited()
+    allowed = await _call(world, "GET", f"{base}?{field}={own}", ADMIN_A, [SCOPE_ADMIN])
+    assert allowed.status_code == 200
+
+
+async def test_non_scalar_child_reference_is_refused(world: Any) -> None:
+    rule = "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/check-in"
+    url = _url(world, rule, world.a)
+    for bad in ([17], {"id": 17}, True):
+        response = await _call(world, "POST", url, ADMIN_A, [SCOPE_ADMIN], {"ticket_id": bad})
+        assert response.status_code == 404, bad
+    world.proxy.assert_not_awaited()
 
 
 async def test_ticket_uuid_is_checked_against_the_event_too(world: Any) -> None:

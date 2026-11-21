@@ -140,6 +140,11 @@ class ProxyRoute:
     #: `True` = tenant-admin guard, for a route with NO community in its URL whose body names the
     #: target (`verify-ticket`): the community cannot be bound, so only a tenant admin may use it.
     tenant_admin_guard: bool = False
+    #: `(field, child kind)` body / query fields that reference a child row of the URL event and
+    #: must be verified against it before forwarding. `None` = every known reference field
+    #: (`_CHILD_REF_FIELDS`), so a route is fenced by default; `()` opts a route out explicitly.
+    child_body_keys: tuple[tuple[str, str], ...] | None = None
+    child_query_keys: tuple[tuple[str, str], ...] | None = None
 
 
 #: Identity fields a caller must never choose for an own-data (member) write: the acting user is
@@ -712,31 +717,65 @@ _UUID_RE = re.compile(
     r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
 )
 
-#: URL placeholder -> the legacy child table whose rows must belong to the URL's event.
+#: Child kind -> legacy table whose rows must belong to the URL's event.
 _CHILD_TABLES: dict[str, str] = {
-    "ticket_id": "calendar_tickets",
-    "type_id": "calendar_ticket_types",
-    "admin_id": "calendar_event_admins",
+    "ticket": "calendar_tickets",
+    "type": "calendar_ticket_types",
+    "admin": "calendar_event_admins",
+    "ticket_code": "calendar_tickets",
+}
+#: URL placeholder -> child kind.
+_PATH_CHILD_KINDS: dict[str, str] = {"ticket_id": "ticket", "type_id": "type", "admin_id": "admin"}
+#: Every body/query field that names a child row (field -> child kind). A route's
+#: `child_body_keys` / `child_query_keys` override this; unset means "all of these", so a new
+#: event route is fenced by default rather than by remembering to list its fields.
+_CHILD_REF_FIELDS: dict[str, str] = {
+    "ticket_id": "ticket",
+    "ticket_uuid": "ticket",
+    "ticket_code": "ticket_code",
+    "ticket_type_id": "type",
+    "type_id": "type",
+    "admin_id": "admin",
 }
 
 
-def _child_in_event(event_id: int, placeholder: str, child_id: str) -> bool:
-    """True when the child row `child_id` (ticket / ticket type / event admin) is on `event_id`.
+def _child_in_event(event_id: int, kind: str, child_id: str) -> bool:
+    """True when the child row `child_id` (ticket / type / event admin) is on `event_id`.
 
     The caller has already proven the event belongs to the URL community, so this closes the
-    chain community -> event -> child. A ticket may be addressed by numeric id or by its uuid;
-    anything unverifiable (malformed, unknown, other event's) is "not found".
+    chain community -> event -> child. A ticket may be addressed by numeric id, uuid or code;
+    anything unverifiable (malformed, unknown, another event's) is "not found".
     """
     dal = current_app.config["dal"]
     bind_calendar_child_tables(dal)
-    table = dal[_CHILD_TABLES[placeholder]]
-    if child_id.isdigit():
+    table = dal[_CHILD_TABLES[kind]]
+    if kind == "ticket_code":
+        match = table.ticket_code == child_id
+    elif child_id.isdigit():
         match = table.id == int(child_id)
-    elif placeholder == "ticket_id" and _UUID_RE.fullmatch(child_id):
+    elif kind == "ticket" and _UUID_RE.fullmatch(child_id):
         match = table.ticket_uuid == child_id.lower()
     else:
         return False
     return dal(match & (table.event_id == event_id)).select(table.id).first() is not None
+
+
+def _refs_in_event(event_id: int, source: Any, fields: dict[str, str]) -> bool:
+    """Check every child reference present in `source` (a body dict or query mapping)."""
+    for field, kind in fields.items():
+        value = source.get(field)
+        if value is None or value == "":
+            continue
+        if isinstance(value, bool) or not isinstance(value, str | int):
+            return False  # a list/dict/bool cannot be verified, so it is refused
+        if not _child_in_event(event_id, kind, str(value)):
+            return False
+    return True
+
+
+def _ref_fields(explicit: tuple[tuple[str, str], ...] | None) -> dict[str, str]:
+    """The child-reference fields to verify (explicit route override, else all known)."""
+    return dict(explicit) if explicit is not None else dict(_CHILD_REF_FIELDS)
 
 
 def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
@@ -750,9 +789,9 @@ def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
             and not _event_in_community(community_id, str(path_args["event_id"]))
         ):
             return error_response("Event not found", status_code=404, error_code="NOT_FOUND")
-        for placeholder in _CHILD_TABLES:
+        for placeholder, kind in _PATH_CHILD_KINDS.items():
             if placeholder in path_args and not _child_in_event(
-                int(path_args["event_id"]), placeholder, str(path_args[placeholder])
+                int(path_args["event_id"]), kind, str(path_args[placeholder])
             ):
                 return error_response("Resource not found", status_code=404, error_code="NOT_FOUND")
         if route.feature_flag is not None:
@@ -775,6 +814,15 @@ def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
                 body = {**body, "community_id": community_id}
             if route.member_guard:
                 body = {k: v for k, v in body.items() if k not in _IDENTITY_BODY_KEYS}
+        if "event_id" in path_args and isinstance(community_id, int):
+            # Child ids also ride in the query string and body: fence them to the URL event too.
+            event_id = int(path_args["event_id"])
+            query_ok = _refs_in_event(event_id, query, _ref_fields(route.child_query_keys))
+            body_ok = body is None or _refs_in_event(
+                event_id, body, _ref_fields(route.child_body_keys)
+            )
+            if not (query_ok and body_ok):
+                return error_response("Resource not found", status_code=404, error_code="NOT_FOUND")
         if route.attach_client_meta:
             body = {
                 **(body or {}),

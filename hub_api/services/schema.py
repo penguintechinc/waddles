@@ -3289,6 +3289,7 @@ def bind_calendar_child_tables(dal: Any, *, migrate: bool = False) -> None:
         "calendar_tickets",
         Field("event_id", "integer", notnull=True),
         Field("ticket_uuid", "string", length=36),
+        Field("ticket_code", "string", length=64),
         migrate=migrate,
     )
 
