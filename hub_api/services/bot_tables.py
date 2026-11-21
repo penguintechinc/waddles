@@ -36,6 +36,8 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
+from services.pg_array_types import PG_INT_ARRAY, PG_TEXT_ARRAY
+
 
 def bind_bot_tables(dal: Any) -> None:
     """Define every table the Bot module's ported services query, `migrate=False`."""
@@ -139,7 +141,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("min_reputation_to_join", "integer"),
         dal.Field("sync_interval_minutes", "integer", default=5),
         dal.Field("notify_on_action", "boolean", default=True),
-        dal.Field("exempt_roles", "list:string", default=[]),
+        dal.Field("exempt_roles", PG_TEXT_ARRAY, default=[]),
         dal.Field("sync_to_community", "boolean", default=False),
         dal.Field("last_enforced_at", "datetime"),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
@@ -184,7 +186,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("community_id", "integer"),
         dal.Field("suggestion_text", "text", notnull=True),
         dal.Field("confidence_score", "double", notnull=True),
-        dal.Field("cited_chunks", "list:integer", default=[]),
+        dal.Field("cited_chunks", PG_INT_ARRAY, default=[]),
         dal.Field("feedback", "string", length=20),
         dal.Field("is_auto_posted", "boolean", default=False),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
