@@ -980,7 +980,10 @@ class TestRoutes:
         )
         assert r.status_code == 403
         assert (
-            await c.delete(f"{url}/1", headers=auth_headers(scope="community.guild_pairing:read"))
+            await c.delete(
+                f"{url}/00000000-0000-4000-8000-000000000001",
+                headers=auth_headers(scope="community.guild_pairing:read"),
+            )
         ).status_code == 403
 
     async def test_create_list_delete_roundtrip(

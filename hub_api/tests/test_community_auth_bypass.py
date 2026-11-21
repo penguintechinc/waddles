@@ -120,7 +120,7 @@ def _community_routes(app: Quart) -> list[tuple[str, str]]:
         path = re.sub(r"<puuid:[^>]+>", "00000000-0000-4000-8000-00000000dead", path)
         path = path.replace("<uuid:user_uuid>", "33333333-3333-4333-8333-333333333333")
         # v1_community_tokens (support/access-token port group) -- CAT routes.
-        path = path.replace("<int:token_id>", "1")
+        path = path.replace("<puuid:token_id>", "00000000-0000-4000-8000-0000000000aa")
         for method in rule.methods or set():
             if method in {"HEAD", "OPTIONS"}:
                 continue

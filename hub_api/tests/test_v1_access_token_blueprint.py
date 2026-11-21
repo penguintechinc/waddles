@@ -25,6 +25,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.access_token import community_tokens_bp, user_tokens_bp
 from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
+from tests.entity_ids import pid
 
 # Handler-behaviour contract tests use a bare token; the real CAT guards are proven (no bypass)
 # by `tests/test_authz_sweep_c.py`.
@@ -319,6 +320,39 @@ class TestCatFlow:
             headers=auth_headers(scope="community.tokens:admin", user_id="99"),
         )
         assert response.status_code == 404
+
+    async def test_revoke_numeric_id_in_path_is_404(
+        self, client: Any, auth_headers: Any, support_token_db: Any
+    ) -> None:
+        """The `<puuid:>` converter rejects a numeric id: it no longer routes at all."""
+        dal, community_id = support_token_db
+        response = await client.delete(
+            f"/api/v1/admin/{public_id(dal, community_id)}/tokens/cats/1",
+            headers=auth_headers(scope="community.tokens:admin", user_id="99"),
+        )
+        assert response.status_code == 404
+
+    async def test_revoke_foreign_community_token_uuid_is_the_same_404_as_unknown(
+        self, client: Any, auth_headers: Any, support_token_db: Any
+    ) -> None:
+        """A token UUID that belongs to ANOTHER community is the same as an unknown one."""
+        dal, community_id = support_token_db
+        tenant_id = dal(dal.communities.id == community_id).select().first().tenant_id
+        other = dal.communities.insert(name="other-community", tenant_id=tenant_id)
+        foreign_token = dal.community_access_tokens.insert(
+            community_id=other, name="foreign", token_hash="h" * 64, scopes=["chat:read"]
+        )
+        dal.commit()
+        headers = auth_headers(scope="community.tokens:admin", user_id="99")
+        base = f"/api/v1/admin/{public_id(dal, community_id)}/tokens/cats"
+        foreign = await client.delete(
+            f"{base}/{pid(dal, 'community_access_tokens', foreign_token)}", headers=headers
+        )
+        unknown = await client.delete(f"{base}/{UNKNOWN_PUBLIC_ID}", headers=headers)
+        assert foreign.status_code == unknown.status_code == 404
+        assert await foreign.get_json() == await unknown.get_json()
+        row = dal(dal.community_access_tokens.id == foreign_token).select().first()
+        assert row.is_revoked is False  # the other community's token was never touched
 
     async def test_quota_enforced(
         self, client: Any, auth_headers: Any, support_token_db: Any
