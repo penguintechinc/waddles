@@ -107,7 +107,7 @@ def _envelope(
     return StageEnvelope(
         tenant="tenant-1",
         community=community,
-        app_id="waddles.core.example.trivia",
+        app_id="penguintechinc.waddles.trivia",
         stage="action",
         event=PlatformEvent(
             platform=platform,

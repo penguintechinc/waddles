@@ -21,7 +21,7 @@ use bundle_executor::engine::{build_engine, spawn_epoch_ticker, LinkerCache};
 use bundle_executor::manifest::{VerifiedManifest, WitWorld};
 use sha2::{Digest, Sha256};
 
-const APP: &str = "waddles.core.service.youtube";
+const APP: &str = "penguintechinc.waddles.youtube";
 
 fn wasm() -> Vec<u8> {
     let p = std::env::var("YOUTUBE_CONNECTOR_WASM")

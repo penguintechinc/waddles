@@ -97,7 +97,7 @@ def test_rerun_is_idempotent_and_deactivates_denied_bundles() -> None:
             mod.PING_APP_ID,
             "waddles.fun.loyalty",
             "waddles.fun.jackpot",
-            "waddles.core.service.economy",
+            "penguintechinc.waddles.economy",
             "waddles.fun.roll",
         ],
         community=True,
@@ -106,7 +106,7 @@ def test_rerun_is_idempotent_and_deactivates_denied_bundles() -> None:
     assert res.community_id == UUID_11 and not res.created and not res.ping_activated
     assert set(res.deactivated) == {"waddles.fun.loyalty", "waddles.fun.jackpot"}
     assert sorted(hub.active) == sorted(
-        [mod.PING_APP_ID, "waddles.core.service.economy", "waddles.fun.roll"]
+        [mod.PING_APP_ID, "penguintechinc.waddles.economy", "waddles.fun.roll"]
     )
     again = mod.seed(hub, GUILD, dry_run=False)
     assert again.deactivated == () and not any(m == "POST" for m, _ in hub.calls[-4:])
@@ -209,17 +209,17 @@ def test_service_bundles_are_never_deactivated_only_their_accrual_is_switched_of
     hub = FakeHub(
         active=[
             mod.PING_APP_ID,
-            "waddles.core.service.economy",
-            "waddles.core.service.reputation",
-            "waddles.core.app.reputation-accrual",
+            "penguintechinc.waddles.economy",
+            "penguintechinc.waddles.reputation",
+            "penguintechinc.waddles.reputation-accrual",
         ],
         community=True,
     )
     res = mod.seed(hub, GUILD, dry_run=False)
     # The accrual APP is a denied name and is deactivated; the SERVICE bundles stay activated.
-    assert "waddles.core.app.reputation-accrual" in res.deactivated
-    assert "waddles.core.service.economy" in hub.active
-    assert "waddles.core.service.reputation" in hub.active
+    assert "penguintechinc.waddles.reputation-accrual" in res.deactivated
+    assert "penguintechinc.waddles.economy" in hub.active
+    assert "penguintechinc.waddles.reputation" in hub.active
     assert not any(m == "DELETE" and "service" in p for m, p in hub.calls)
     assert len(res.accrual_off) == 3
 
@@ -235,7 +235,7 @@ def test_second_run_changes_nothing() -> None:
 
 def test_old_bundle_versions_without_the_switch_fail_loud() -> None:
     hub = FakeHub(community=True)
-    hub.no_schema.add("waddles.core.service.economy")
+    hub.no_schema.add("penguintechinc.waddles.economy")
     with pytest.raises(RuntimeError, match="community_config_schema"):
         mod.seed(hub, GUILD, dry_run=False)
 
@@ -256,7 +256,7 @@ def test_zero_accrual_bundles_examined_is_a_failure() -> None:
 
 def test_inactive_accrual_bundle_is_skipped_not_failed() -> None:
     hub = FakeHub(community=True)
-    hub.inactive_cfg.add("waddles.core.app.reputation-accrual")
+    hub.inactive_cfg.add("penguintechinc.waddles.reputation-accrual")
     res = mod.seed(hub, GUILD, dry_run=False)
     assert len(res.accrual_off) == 2
 

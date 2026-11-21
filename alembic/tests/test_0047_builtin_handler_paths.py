@@ -201,7 +201,7 @@ CREATE TABLE app_catalog (
 _ROWS: dict[str, dict | None] = {
     # Fully populated built-in app: ingest + process + action, with sibling keys that
     # must survive byte-for-byte.
-    "waddles.bot.twitch.default": {
+    "penguintechinc.waddles.twitch-pipeline": {
         "ingest": {
             "entrypoint": "bundles.twitch_ingest:normalize",
             "consumes": ["twitch.message"],
@@ -236,7 +236,7 @@ _ROWS: dict[str, dict | None] = {
 
 _EXPECTED_AFTER_UPGRADE = {
     **_ROWS,
-    "waddles.bot.twitch.default": {
+    "penguintechinc.waddles.twitch-pipeline": {
         "ingest": {
             "entrypoint": "builtin_handlers.twitch_ingest:normalize",
             "consumes": ["twitch.message"],

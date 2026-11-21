@@ -94,7 +94,7 @@ class TestNoSwallow:
                 actor_id=7,
                 action="app_installed_globally",
                 target_type="app_global_installs",
-                target_id="waddles.core.ping@1.0.0",
+                target_id="penguintechinc.waddles.ping@1.0.0",
             )
         text = "\n".join(r.getMessage() for r in caplog.records)
         assert "audit write FAILED" in text
@@ -138,7 +138,7 @@ class TestLegacyTrailUnchanged:
             actor_id=7,
             action="tenant_availability_enabled",
             target_type="bundle_tenant_availability",
-            target_id="1:waddles.core.ping",
+            target_id="1:penguintechinc.waddles.ping",
             details={"reason": "free text is fine in the legacy row"},
         )
         (row,) = await _legacy_rows(audit_dal)
@@ -157,7 +157,7 @@ class TestLegacyTrailUnchanged:
             actor_id=None,
             action="app_installed_globally",
             target_type="app_global_installs",
-            target_id="waddles.core.ping@1.0.0",
+            target_id="penguintechinc.waddles.ping@1.0.0",
             details={"tenant_id": 1},
         )
         (legacy,) = await _legacy_rows(audit_dal)
@@ -177,7 +177,7 @@ class TestChainBridge:
             actor_id=7,
             action="permissions_approved_globally",
             target_type="app_permission_requests",
-            target_id="waddles.core.ping@1.0.0",
+            target_id="penguintechinc.waddles.ping@1.0.0",
             details={"permission_ids": ["storage.kv", "net.http"], "tenant_id": 1},
         )
         (chain,) = await _chain_rows(audit_dal)

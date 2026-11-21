@@ -27,10 +27,10 @@ from tests.conftest import make_user_token, make_user_token_with_roles
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",
@@ -86,7 +86,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
 
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         artifact_digest="sha256:" + "a" * 64,
         language="python",
@@ -94,7 +94,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -106,10 +106,10 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         updated_at=now,
     )
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.music", updated_by=1
     )
 
     quart_app = Quart(__name__)
@@ -161,7 +161,7 @@ async def test_activate_requires_admin(app: Quart, install_dal: Any) -> None:
     response = await client.post(
         f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 403
 
@@ -173,13 +173,13 @@ async def test_activate_happy_path(app: Quart, install_dal: Any) -> None:
     response = await client.post(
         f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 201
     active = (
         await install_dal(
             (install_dal.app_active_versions.community_id == community_id)
-            & (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            & (install_dal.app_active_versions.app_id == "penguintechinc.waddles.music")
         ).select()
     ).first()
     assert active is not None
@@ -203,14 +203,14 @@ async def test_activate_without_availability_is_409(app: Quart, install_dal: Any
     community_id = await _seed_community(install_dal)
     await install_dal(
         (install_dal.bundle_tenant_availability.tenant_id == 1)
-        & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+        & (install_dal.bundle_tenant_availability.app_id == "penguintechinc.waddles.music")
     ).update(available=False)
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     client = app.test_client()
     response = await client.post(
         f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 409
 
@@ -221,7 +221,7 @@ async def test_activate_unknown_community_is_404(app: Quart) -> None:
     response = await client.post(
         f"/api/v1/apps/community/{UNKNOWN_PUBLIC_ID}/activation",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 404
 
@@ -231,7 +231,7 @@ async def test_deactivate_requires_admin(app: Quart, install_dal: Any) -> None:
     token = make_user_token(user_id=999, scope="")
     client = app.test_client()
     response = await client.delete(
-        f"/api/v1/apps/community/{cu(community_id)}/activation/waddles.socials.music.default",
+        f"/api/v1/apps/community/{cu(community_id)}/activation/penguintechinc.waddles.music",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -244,10 +244,10 @@ async def test_deactivate_happy_path(app: Quart, install_dal: Any) -> None:
     await client.post(
         f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {admin_token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     response = await client.delete(
-        f"/api/v1/apps/community/{cu(community_id)}/activation/waddles.socials.music.default",
+        f"/api/v1/apps/community/{cu(community_id)}/activation/penguintechinc.waddles.music",
         headers={"Authorization": f"Bearer {admin_token}"},
     )
     assert response.status_code == 200
@@ -264,7 +264,7 @@ async def test_list_happy_path_after_activation(app: Quart, install_dal: Any) ->
     await client.post(
         f"/api/v1/apps/community/{cu(community_id)}/activation",
         headers={"Authorization": f"Bearer {admin_token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     response = await client.get(
         f"/api/v1/apps/community/{cu(community_id)}/activation",
@@ -272,7 +272,7 @@ async def test_list_happy_path_after_activation(app: Quart, install_dal: Any) ->
     )
     assert response.status_code == 200
     body = await response.get_json()
-    assert body["bundles"][0]["appId"] == "waddles.socials.music.default"
+    assert body["bundles"][0]["appId"] == "penguintechinc.waddles.music"
 
 
 def _ping_manifest(app_id: str) -> dict[str, Any]:
@@ -308,7 +308,7 @@ async def test_activate_response_has_empty_warnings_by_default(
     """Exact response field set (security.md Output Validation) -- no extra fields leak."""
     from tests.test_bundle_activation_service import _install_and_make_available
 
-    app_id = "waddles.socials.solo.default"
+    app_id = "penguintechinc.waddles.solo"
     await _install_and_make_available(install_dal, manifest=_ping_manifest(app_id))
     community_id = await _seed_community(install_dal)
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
@@ -329,8 +329,8 @@ async def test_activate_conflict_warning_names_owner_and_is_still_201(
     """A conflicting `!ping` is surfaced as a warning with an exact field set; status stays 201."""
     from tests.test_bundle_activation_service import _install_and_make_available
 
-    app_a = "waddles.socials.alpha.default"
-    app_b = "waddles.socials.beta.default"
+    app_a = "penguintechinc.waddles.alpha"
+    app_b = "penguintechinc.waddles.beta"
     await _install_and_make_available(install_dal, manifest=_ping_manifest(app_a))
     await _install_and_make_available(install_dal, manifest=_ping_manifest(app_b))
     community_id = await _seed_community(install_dal)

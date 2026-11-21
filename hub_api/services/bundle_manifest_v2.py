@@ -35,6 +35,7 @@ from flask_core.bundle_attribution import (
 from flask_core.bundle_author import AuthorError, canonical_author
 
 from services.bundle_access_grants import is_access_grant_id
+from services.bundle_app_id import is_valid_app_id
 from services.bundle_permission_catalog import (
     NET_HTTP_IP_PREFIXES,
     NET_HTTP_PREFIXES,
@@ -56,9 +57,9 @@ from services.bundle_table_access import (
 
 logger = logging.getLogger(__name__)
 
-_SEGMENT = r"[a-z0-9][a-z0-9_-]*"
-_APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
-_FEATURE_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}$")
+#: `feature` is descriptive only (optional): dotted lowercase tokens, no relation to `app_id`.
+_FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$")
+_FEATURE_MAX_LEN = 128
 _SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
@@ -599,7 +600,7 @@ TOOL_REQUIRED_SCOPES = frozenset(
         "rooms:mute",
         "rooms:lock",
         "rooms:hands",
-        # waddles.core.service.music-requests (see `docs/music-requests-service.md`);
+        # penguintechinc.waddles.music-requests (see `docs/music-requests-service.md`);
         # mirrors the music entries in `core/bundle_tool_call::scopes_for_role`.
         "music:requests.read",
         "music:history.read",
@@ -829,7 +830,7 @@ def parse_requested_tools(raw_entries: Any, *, own_app_id: str) -> tuple[Request
         )
         target = entry.get("target_app_id")
         _require(
-            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            is_valid_app_id(target),
             "invalid_requested_tools",
             "requested tool target_app_id must be a valid app_id",
         )
@@ -1019,7 +1020,7 @@ def parse_admin_tools(raw_entries: Any, *, own_app_id: str) -> tuple[AdminTool, 
         )
         target = entry.get("target_app_id", own_app_id)
         _require(
-            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            is_valid_app_id(target),
             "invalid_admin_tools",
             f"admin tool {name!r}: target_app_id must be a valid app_id",
         )
@@ -1520,7 +1521,6 @@ def parse_bundle_manifest_v2(
         "app_id",
         "name",
         "version",
-        "feature",
         "module",
         "provider",
         "language",
@@ -1540,29 +1540,24 @@ def parse_bundle_manifest_v2(
         f"{raw['version']!r} is not valid SemVer 2.0.0",
     )
     _require(
-        bool(_APP_ID_RE.match(raw["app_id"])),
+        is_valid_app_id(raw["app_id"]),
         "not_namespaced",
         f"{raw['app_id']!r} is not a valid app_id",
     )
+    feature = raw.get("feature")
+    if feature is None:
+        feature = raw["app_id"].rsplit(".", 1)[0]
     _require(
-        bool(_FEATURE_RE.match(raw["feature"])),
+        isinstance(feature, str)
+        and len(feature) <= _FEATURE_MAX_LEN
+        and bool(_FEATURE_RE.match(feature)),
         "not_namespaced",
-        f"{raw['feature']!r} is not a valid feature id",
+        f"{feature!r} is not a valid feature id",
     )
     _require(
         raw["module"] in KNOWN_MODULES,
         "unknown_module",
         f"{raw['module']!r} is not a KNOWN_MODULES entry",
-    )
-    _require(
-        raw["feature"] == raw["app_id"].rsplit(".", 1)[0],
-        "feature_prefix_mismatch",
-        "feature must equal app_id minus its last segment",
-    )
-    _require(
-        raw["module"] == raw["feature"].split(".")[1],
-        "feature_prefix_mismatch",
-        "module must equal feature's second segment",
     )
     _require(
         raw["provider"] in {"builtin", "thirdparty"}, "invalid_provider", f"{raw['provider']!r}"
@@ -1825,7 +1820,7 @@ def parse_bundle_manifest_v2(
         app_id=raw["app_id"],
         name=raw["name"],
         version=raw["version"],
-        feature=raw["feature"],
+        feature=feature,
         module=raw["module"],
         provider=raw["provider"],
         language=raw["language"],

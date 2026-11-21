@@ -2,10 +2,9 @@
 # `kind: service` is accepted only via the trusted core-bundle seeder. exported_tools are identical to bundle.yaml.
 # Tables (data.schema) are community-scoped by the host; requester is a user_ref anonymized on erasure.
 schema_version: 2
-app_id: waddles.core.service.music-requests
+app_id: penguintechinc.waddles.music-requests
 name: Music Requests Service Bundle (Rust)
-version: 1.0.2
-feature: waddles.core.service
+version: 1.0.3
 module: core
 provider: builtin
 author: github:penguintechinc

@@ -25,7 +25,7 @@ MANIFEST_SCRIPT = CI_DIR / "check-bundle-manifest-permissions.py"
 
 V2_MANIFEST = """\
 schema_version: 2
-app_id: waddles.core.example.demo
+app_id: penguintechinc.waddles.example
 permissions:
 {permissions}
 routes_to: []

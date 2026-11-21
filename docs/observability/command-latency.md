@@ -199,13 +199,13 @@ Provide these four values (the only owner inputs):
    export WADDLES_ADMIN_TOKEN=...   # default-tenant admin JWT from env, never an argument; the script never prints it
    make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<guild snowflake>
    ```
-   It creates (or finds) the `latency-canary` community bound to the guild, activates `waddles.core.example.ping`,
+   It creates (or finds) the `latency-canary` community bound to the guild, activates `penguintechinc.waddles.ping`,
    and **switches accrual off for the community**: reputation and economy are SERVICE bundles activated
    tenant-wide, so a per-community deactivation cannot stop them. The supported per-community off switch is the
    bundle community config `accrual_enabled: false` (hub-api bundle-admin gateway `PUT
    /api/v1/apps/community/<community-uuid>/bundles/<app_id>/config`), read from `get-context().config_json` by the
-   `waddles.core.app.reputation-accrual` app (event-driven reputation accrual, `process` stage) and by the
-   `waddles.core.service.reputation` (`adjust`, `apply_moderation`) and `waddles.core.service.economy`
+   `penguintechinc.waddles.reputation-accrual` app (event-driven reputation accrual, `process` stage) and by the
+   `penguintechinc.waddles.reputation` (`adjust`, `apply_moderation`) and `penguintechinc.waddles.economy`
    (`adjust_balance` credits, `pay_pot`, `exchange`) service bundles, which refuse minting with `forbidden` in an
    opted-out community. Real communities are unchanged: ONLY an explicit `false` disables, absent/`{}`/unparseable
    keeps accrual ON. The seeder sets it on all three, reads each back, and fails if one is not confirmed `false`,

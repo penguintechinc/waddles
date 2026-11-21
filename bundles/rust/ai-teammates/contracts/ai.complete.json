@@ -1,6 +1,6 @@
 {
   "tool": "ai.complete",
-  "target": "waddles.core.service.ai",
+  "target": "penguintechinc.waddles.ai",
   "access": "read",
   "source": "bundles/contracts/ai-tools.v1.json (PR #1120)",
   "request": {

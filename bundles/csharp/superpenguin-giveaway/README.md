@@ -2,7 +2,7 @@
 
 Provably-fair ticket giveaway and keyed raffles, ported from [Psychoboy/PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot)
 (`Features/GiveawayFeature.cs`, `Features/GiveawayFairnessReport.cs`, `TicketGames/RaffleRuntimeService.cs`; MIT, used with permission,
-see `bundle.yaml` `notice`). App `waddles.integrations.superpenguin.giveaway`, author `github/psychoboy`, collection `superpenguintv`.
+see `bundle.yaml` `notice`). App `psychoboy.penguintwitchbot.giveaway`, author `github/psychoboy`, collection `superpenguintv`.
 It is an **app** bundle: it owns giveaway policy (eligibility, fairness, exclusions); the economy **service** owns the ledger.
 
 | | |

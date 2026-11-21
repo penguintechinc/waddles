@@ -1,7 +1,7 @@
 # insult (Python)
 
 `!insult [@user]` -- a playful insult, from a built-in static list of original, SFW, light-hearted lines.
-First-party (`provider: builtin`, `app_id: waddles.core.example.insult`), stateless, WASI component.
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.insult`), stateless, WASI component.
 
 | | |
 |---|---|

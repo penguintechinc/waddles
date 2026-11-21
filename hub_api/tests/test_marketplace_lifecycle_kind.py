@@ -39,9 +39,9 @@ def _manifest(app_id: str, **extra: Any) -> dict[str, Any]:
 @pytest.mark.asyncio
 async def test_install_persists_inferred_kind(lifecycle_db: Any) -> None:
     """A manifest without explicit `kind` stores the inferred value, queryable by kind."""
-    await install_bundle(lifecycle_db.dal, manifest_data=_manifest("waddles.bot.shoutout.kindtest"))
+    await install_bundle(lifecycle_db.dal, manifest_data=_manifest("acme.widgets.kindtest"))
     dal = lifecycle_db.dal
-    row = dal(dal.app_catalog.app_id == "waddles.bot.shoutout.kindtest").select().first()
+    row = dal(dal.app_catalog.app_id == "acme.widgets.kindtest").select().first()
     assert row.kind == "app"
     assert dal(dal.app_catalog.kind == "app").count() == 1
     assert dal(dal.app_catalog.kind == "service").count() == 0

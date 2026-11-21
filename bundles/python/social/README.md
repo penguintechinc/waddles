@@ -2,7 +2,7 @@
 
 `!hug`/`!highfive`/`!pat <user>` -- fun social interaction commands, plus `!social stats`.
 Community-scoped fun content, first-party (`provider: builtin`,
-`app_id: waddles.core.example.social`). **Inspired by** superpenguintv (Psychoboy)'s
+`app_id: penguintechinc.waddles.social`). **Inspired by** superpenguintv (Psychoboy)'s
 [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) "fun"/social command
 category -- not a literal port. No original source code or text is reused; the command set,
 flavor text, counters, and all dispatch logic are written fresh for this bundle. See
@@ -176,4 +176,4 @@ ruff check .
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.social`).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.social`).

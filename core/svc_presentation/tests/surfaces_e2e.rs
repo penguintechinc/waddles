@@ -32,7 +32,7 @@ use svc_presentation::scene::{SceneError, SceneStore, WidgetBinding};
 use svc_presentation::surfaces::hub::Recv;
 use svc_presentation::surfaces::widget_key;
 
-const APP: &str = "waddles.core.dj";
+const APP: &str = "penguintechinc.waddles.dj";
 
 // ---------------------------------------------------------------- fakes
 
@@ -137,8 +137,8 @@ async fn serve_grpc(state: AppState) -> String {
 
 fn policy() -> SurfacePolicy {
     SurfacePolicy::from_permissions([
-        "overlay.surface.waddles.core.example.music.now_playing",
-        "overlay.surface.waddles.core.example.music.queue",
+        "overlay.surface.penguintechinc.waddles.music.now_playing",
+        "overlay.surface.penguintechinc.waddles.music.queue",
         "overlay.surface.alert",
         "overlay.surface.clip.alert",
         "overlay.surface.nope",
@@ -160,7 +160,7 @@ async fn a_bundle_publish_travels_grpc_and_is_cached_and_isolated_by_community()
     host.publish(
         &policy(),
         42,
-        "waddles.core.example.music.now_playing",
+        "penguintechinc.waddles.music.now_playing",
         &body,
     )
     .await
@@ -168,13 +168,13 @@ async fn a_bundle_publish_travels_grpc_and_is_cached_and_isolated_by_community()
     let cached = state
         .surfaces
         .hub
-        .replay_for(42, "waddles.core.example.music.now_playing")
+        .replay_for(42, "penguintechinc.waddles.music.now_playing")
         .unwrap();
     assert_eq!(cached.payload["now_playing"]["title"], "T");
     assert!(state
         .surfaces
         .hub
-        .replay_for(43, "waddles.core.example.music.now_playing")
+        .replay_for(43, "penguintechinc.waddles.music.now_playing")
         .is_none());
 }
 
@@ -188,7 +188,7 @@ async fn a_token_scoped_to_another_community_is_denied_and_nothing_is_published(
         .publish(
             &policy(),
             42,
-            "waddles.core.example.music.now_playing",
+            "penguintechinc.waddles.music.now_playing",
             &body,
         )
         .await
@@ -260,7 +260,7 @@ async fn contract_refusals_map_to_the_stable_guest_codes_over_grpc() {
     // Over the surface's own cap (4096) but under the host's hard cap -> too_large.
     let big = json!({"now_playing": null, "updated_ms": 1, "pad": "x".repeat(5000)}).to_string();
     assert_eq!(
-        host.publish(&p, 42, "waddles.core.example.music.now_playing", &big)
+        host.publish(&p, 42, "penguintechinc.waddles.music.now_playing", &big)
             .await
             .unwrap_err()
             .code(),
@@ -464,7 +464,7 @@ async fn a_surface_widget_publishes_to_its_own_declared_surface_not_a_neighbours
         "now_playing",
         binding(
             WidgetOutputKind::Surface,
-            Some("waddles.core.example.music.now_playing"),
+            Some("penguintechinc.waddles.music.now_playing"),
             true,
         ),
     );
@@ -472,11 +472,11 @@ async fn a_surface_widget_publishes_to_its_own_declared_surface_not_a_neighbours
     let mut queue_sub = state
         .surfaces
         .hub
-        .subscribe(42, "waddles.core.example.music.queue");
+        .subscribe(42, "penguintechinc.waddles.music.queue");
     let mut own_sub = state
         .surfaces
         .hub
-        .subscribe(42, "waddles.core.example.music.now_playing");
+        .subscribe(42, "penguintechinc.waddles.music.now_playing");
 
     let (status, body) = send(
         router(state.clone()),
@@ -495,7 +495,7 @@ async fn a_surface_widget_publishes_to_its_own_declared_surface_not_a_neighbours
         tokio::time::timeout(Duration::from_millis(80), queue_sub.recv())
             .await
             .is_err(),
-        "a now_playing widget must not touch waddles.core.example.music.queue"
+        "a now_playing widget must not touch penguintechinc.waddles.music.queue"
     );
     // A payload that violates the surface schema is refused with locations only.
     let (status, body) = send(
@@ -767,7 +767,7 @@ async fn the_scene_layout_route_serves_the_canvas_for_every_resolution_code() {
                     "00000000-0000-0000-0000-000000000001",
                     "now_playing",
                     WidgetOutputKind::Surface,
-                    "waddles.core.example.music.now_playing",
+                    "penguintechinc.waddles.music.now_playing",
                 )],
             },
         );
@@ -877,7 +877,7 @@ async fn scene_live_replays_and_streams_only_this_scenes_widgets() {
                     "00000000-0000-0000-0000-000000000002",
                     "np",
                     WidgetOutputKind::Surface,
-                    "waddles.core.example.music.now_playing",
+                    "penguintechinc.waddles.music.now_playing",
                 ),
             ],
         },
@@ -913,13 +913,13 @@ async fn scene_live_replays_and_streams_only_this_scenes_widgets() {
         tokio::time::sleep(Duration::from_millis(150)).await;
         publisher.surfaces.hub.publish(
             42,
-            "waddles.core.example.music.now_playing",
+            "penguintechinc.waddles.music.now_playing",
             true,
             json!({"now_playing":null,"updated_ms":1}),
         );
         publisher.surfaces.hub.publish(
             42,
-            "waddles.core.example.music.queue",
+            "penguintechinc.waddles.music.queue",
             true,
             json!({"queue":[],"updated_ms":1}),
         );
@@ -928,13 +928,13 @@ async fn scene_live_replays_and_streams_only_this_scenes_widgets() {
     let rendered = serde_json::to_string(&events).unwrap();
     assert!(rendered.contains("replayed"), "{rendered}");
     assert!(
-        rendered.contains("waddles.core.example.music.now_playing"),
+        rendered.contains("penguintechinc.waddles.music.now_playing"),
         "{rendered}"
     );
     assert!(!rendered.contains("SECRET"), "{rendered}");
     assert!(!rendered.contains("OTHER"), "{rendered}");
     assert!(
-        !rendered.contains("waddles.core.example.music.queue"),
+        !rendered.contains("penguintechinc.waddles.music.queue"),
         "unplaced surface leaked: {rendered}"
     );
 }

@@ -1,4 +1,4 @@
-# reverse bundle (`waddles.core.example.reverse`)
+# reverse bundle (`penguintechinc.waddles.reverse`)
 
 `!reverse <text>` -> reverses the text (hello -> olleh). Python/WASM component modeled on `bundles/python/echo`.
 

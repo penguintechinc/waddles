@@ -141,7 +141,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
     );
     metrics.record_host_call("kv", "get", "ok", Duration::from_micros(300));
     metrics.record_tool_call(
-        "waddles.e2e.svc.one",
+        "penguintechinc.waddles.fixture-e2e-svc-one",
         "echo",
         "ok",
         Duration::from_micros(500),

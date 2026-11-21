@@ -17,13 +17,13 @@ _SCHEMA = {"type": "object", "properties": {"x": {"type": "string", "default": "
 
 #: (manifest file, app_id) of every bundle whose schema was moved off the dead legacy key.
 _MIGRATED = [
-    ("bundles/rust/calendar", "waddles.core.app.calendar"),
-    ("bundles/rust/ai-teammates", "waddles.core.example.ai-teammates"),
-    ("bundles/rust/game-servers", "waddles.core.example.game-servers"),
-    ("bundles/rust/rooms", "waddles.core.app.rooms"),
-    ("bundles/rust/twitch-clips", "waddles.core.example.twitch-clips"),
-    ("bundles/rust/live-now", "waddles.core.app.live-now"),
-    ("bundles/python/secret", "waddles.core.example.secret"),
+    ("bundles/rust/calendar", "penguintechinc.waddles.calendar"),
+    ("bundles/rust/ai-teammates", "penguintechinc.waddles.ai-teammates"),
+    ("bundles/rust/game-servers", "penguintechinc.waddles.game-servers"),
+    ("bundles/rust/rooms", "penguintechinc.waddles.rooms"),
+    ("bundles/rust/twitch-clips", "penguintechinc.waddles.twitch-clips"),
+    ("bundles/rust/live-now", "penguintechinc.waddles.live-now"),
+    ("bundles/python/secret", "penguintechinc.waddles.secret"),
 ]
 
 

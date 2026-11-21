@@ -64,7 +64,9 @@ def test_keys_match_the_executor_layout() -> None:
 def test_load_resolves_all_three_connectors(bundles: Path) -> None:
     got = svc.load_connector_artifacts(bundles / "core-bundles.yaml", bundles)
     assert [a.platform for a in got] == ["twitch", "discord", "youtube"]
-    assert {a.app_id for a in got} == {f"waddles.core.service.{p}" for p in svc.CONNECTOR_PLATFORMS}
+    assert {a.app_id for a in got} == {
+        f"penguintechinc.waddles.{p}" for p in svc.CONNECTOR_PLATFORMS
+    }
 
 
 @pytest.mark.parametrize("platforms", [("nope",), ()])
@@ -132,7 +134,10 @@ async def test_publish_signs_the_executor_payload_and_writes_both_objects(
     assert (platform, got_digest, data) == ("discord", digest, WASM)
     assert doc["approval_id"] == 0 and doc["key_id"] == "unit-key" and doc["algorithm"] == "ed25519"
     payload = build_signing_payload(
-        app_id="waddles.core.service.discord", version=doc["version"], digest=digest, approval_id=0
+        app_id="penguintechinc.waddles.discord",
+        version=doc["version"],
+        digest=digest,
+        approval_id=0,
     )
     key.public_key().verify(base64.b64decode(doc["signature"]), payload)  # raises if wrong
 

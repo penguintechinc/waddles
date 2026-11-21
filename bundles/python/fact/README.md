@@ -1,6 +1,6 @@
 # fact (Python)
 
-`!fact` -> a random fun trivia fact from a static built-in list. First-party (`provider: builtin`, `app_id: waddles.core.example.fact`), stateless
+`!fact` -> a random fun trivia fact from a static built-in list. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.fact`), stateless
 (no kv/db), WASI component. Static SFW lines original to Waddles; no AI, no external API.
 
 | | |

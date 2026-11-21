@@ -20,7 +20,7 @@ from services.bundle_manifest_v2 import PermissionDeclaration
 from services.errors import ApiError
 from services.marketplace_lifecycle_service import activate_bundle, make_available
 
-_APP_ID = "waddles.bot.shoutout.reconsent-test"
+_APP_ID = "acme.widgets.reconsent-test"
 _TENANT_ID = 1
 
 

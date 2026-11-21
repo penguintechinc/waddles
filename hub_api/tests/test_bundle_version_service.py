@@ -35,10 +35,10 @@ from services.errors import ApiError
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station Song Request",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -57,7 +57,7 @@ async def test_create_version_happy_path(install_dal: Any) -> None:
     row = await create_version(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         requested_by=1,
         manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
         source_bytes=b"fake-tarball",
@@ -73,7 +73,7 @@ async def test_create_version_happy_path(install_dal: Any) -> None:
 async def test_create_version_rejects_duplicate(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -86,7 +86,7 @@ async def test_create_version_rejects_duplicate(install_dal: Any) -> None:
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=b"x",
@@ -107,7 +107,7 @@ async def test_create_version_allows_reupload_when_every_prior_row_is_rejected(
 ) -> None:
     now = datetime.now(UTC)
     rejected_id = await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -122,7 +122,7 @@ async def test_create_version_allows_reupload_when_every_prior_row_is_rejected(
     row = await create_version(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         requested_by=2,
         manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
         source_bytes=b"fresh-tarball",
@@ -140,7 +140,7 @@ async def test_create_version_allows_reupload_when_every_prior_row_is_rejected(
     assert row.requested_by == 2
 
     all_rows = await install_dal(
-        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        (install_dal.app_version_uploads.app_id == "penguintechinc.waddles.music")
         & (install_dal.app_version_uploads.version == "3.0.1")
     ).select()
     assert len(all_rows) == 1  # never a second row for the same (app_id, version)
@@ -151,7 +151,7 @@ async def test_create_version_still_409s_with_one_non_rejected_prior_row(
 ) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -165,7 +165,7 @@ async def test_create_version_still_409s_with_one_non_rejected_prior_row(
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=b"x",
@@ -189,7 +189,7 @@ async def test_create_version_auto_abandons_a_stalled_addressing_row(
     monkeypatch.setenv(BUNDLE_UPLOAD_STALL_TIMEOUT_ENV, "60")
     stale_updated_at = datetime.now(UTC) - timedelta(seconds=120)
     stalled_id = await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -203,7 +203,7 @@ async def test_create_version_auto_abandons_a_stalled_addressing_row(
     row = await create_version(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         requested_by=2,
         manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
         source_bytes=b"fresh-tarball",
@@ -217,7 +217,7 @@ async def test_create_version_auto_abandons_a_stalled_addressing_row(
     assert row.status == STATUS_UPLOADED
 
     all_rows = await install_dal(
-        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        (install_dal.app_version_uploads.app_id == "penguintechinc.waddles.music")
         & (install_dal.app_version_uploads.version == "3.0.1")
     ).select()
     assert len(all_rows) == 1  # the stalled row was reused in place, never a second row
@@ -238,7 +238,7 @@ async def test_create_version_auto_abandons_despite_fresh_updated_at(
     long_ago = datetime.now(UTC) - timedelta(seconds=120)
     recently_touched = datetime.now(UTC) - timedelta(seconds=5)
     stalled_id = await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -257,7 +257,7 @@ async def test_create_version_auto_abandons_despite_fresh_updated_at(
     row = await create_version(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         requested_by=2,
         manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
         source_bytes=b"fresh-tarball",
@@ -271,7 +271,7 @@ async def test_create_version_auto_abandons_despite_fresh_updated_at(
     assert row.status == STATUS_UPLOADED
 
     all_rows = await install_dal(
-        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        (install_dal.app_version_uploads.app_id == "penguintechinc.waddles.music")
         & (install_dal.app_version_uploads.version == "3.0.1")
     ).select()
     assert len(all_rows) == 1  # the stalled row was reused in place, never a second row
@@ -283,7 +283,7 @@ async def test_create_version_still_409s_a_recent_non_terminal_row(
     monkeypatch.setenv(BUNDLE_UPLOAD_STALL_TIMEOUT_ENV, "900")
     recent = datetime.now(UTC) - timedelta(seconds=30)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -297,7 +297,7 @@ async def test_create_version_still_409s_a_recent_non_terminal_row(
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=b"x",
@@ -315,7 +315,7 @@ async def test_create_version_rejects_bad_manifest(install_dal: Any) -> None:
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=yaml.safe_dump(bad_manifest).encode(),
             source_bytes=b"x",
@@ -340,7 +340,7 @@ async def test_create_version_rejects_a_manifest_app_id_mismatching_the_url(
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.forums.default",  # URL says forums...
+            app_id="penguintechinc.waddles.forums",  # URL says forums...
             requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),  # ...manifest says music
             source_bytes=b"x",
@@ -358,7 +358,7 @@ async def test_create_version_rejects_an_oversize_manifest(install_dal: Any) -> 
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=b"x" * (1_048_576 + 1),
             source_bytes=b"x",
@@ -376,7 +376,7 @@ async def test_create_version_rejects_oversize_source(install_dal: Any) -> None:
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=b"x" * (16_777_216 + 1),
@@ -395,7 +395,7 @@ async def test_create_version_rejects_prebuilt_when_disallowed(install_dal: Any)
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=yaml.safe_dump(prebuilt_manifest).encode(),
             source_bytes=None,
@@ -413,7 +413,7 @@ async def test_create_version_rejects_missing_source_part(install_dal: Any) -> N
         await create_version(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=None,
@@ -428,14 +428,14 @@ async def test_create_version_rejects_missing_source_part(install_dal: Any) -> N
 
 async def test_get_version_not_found_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
-        await get_version(install_dal, app_id="waddles.x.y.default", version="1.0.0")
+        await get_version(install_dal, app_id="penguintechinc.waddles.y", version="1.0.0")
     assert exc.value.status_code == 404
 
 
 async def test_list_versions_returns_all_versions_for_app_id(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="1.0.0",
         tenant_id=1,
         artifact_kind="source",
@@ -445,7 +445,7 @@ async def test_list_versions_returns_all_versions_for_app_id(install_dal: Any) -
         updated_at=now,
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="2.0.0",
         tenant_id=1,
         artifact_kind="source",
@@ -454,7 +454,7 @@ async def test_list_versions_returns_all_versions_for_app_id(install_dal: Any) -
         created_at=now,
         updated_at=now,
     )
-    rows = await list_versions(install_dal, app_id="waddles.socials.music.default")
+    rows = await list_versions(install_dal, app_id="penguintechinc.waddles.music")
     assert {r.version for r in rows} == {"1.0.0", "2.0.0"}
 
 
@@ -480,7 +480,7 @@ def test_valid_transition_addressing_direct_to_published() -> None:
 async def test_advance_state_moves_a_row_forward(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="1.0.0",
         tenant_id=1,
         artifact_kind="source",
@@ -491,7 +491,7 @@ async def test_advance_state_moves_a_row_forward(install_dal: Any) -> None:
     )
     row = await advance_state(
         install_dal,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="1.0.0",
         target=STATUS_VALIDATING,
     )
@@ -501,7 +501,7 @@ async def test_advance_state_moves_a_row_forward(install_dal: Any) -> None:
 async def test_advance_state_refuses_an_illegal_transition(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="1.0.0",
         tenant_id=1,
         artifact_kind="source",
@@ -513,7 +513,7 @@ async def test_advance_state_refuses_an_illegal_transition(install_dal: Any) -> 
     with pytest.raises(ApiError) as exc:
         await advance_state(
             install_dal,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             version="1.0.0",
             target=STATUS_PUBLISHED,
         )
@@ -524,7 +524,10 @@ async def test_advance_state_refuses_an_illegal_transition(install_dal: Any) -> 
 async def test_advance_state_unknown_version_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await advance_state(
-            install_dal, app_id="waddles.x.y.default", version="9.9.9", target=STATUS_VALIDATING
+            install_dal,
+            app_id="penguintechinc.waddles.y",
+            version="9.9.9",
+            target=STATUS_VALIDATING,
         )
     assert exc.value.status_code == 404
 
@@ -785,3 +788,93 @@ async def test_process_prebuilt_component_is_idempotent_on_busygroup(
         valkey_client=fake_client,
     )
     assert row.status == STATUS_PUBLISHED  # never raised despite BUSYGROUP on every call
+
+
+_VENDOR_APP = "acme.widgets.mybundle"
+
+
+def _vendor_manifest(**over: Any) -> dict[str, Any]:
+    return {**_MANIFEST, "app_id": _VENDOR_APP, **over}
+
+
+async def _owner_rows(install_dal: Any, app_id: str) -> list[Any]:
+    return list(await install_dal(install_dal.app_id_owners.app_id == app_id).select())
+
+
+async def _upload(install_dal: Any, *, by: int | None, manifest: dict[str, Any], **kw: Any) -> Any:
+    args: dict[str, Any] = {
+        "tenant_id": 1,
+        "app_id": _VENDOR_APP,
+        "requested_by": by,
+        "manifest_bytes": yaml.safe_dump(manifest).encode(),
+        "source_bytes": b"x",
+        "component_bytes": None,
+        "known_custom_platforms": frozenset(),
+        "allow_wildcard_consumes": False,
+        "allow_prebuilt": True,
+    }
+    args.update(kw)
+    return await create_version(install_dal, **args)
+
+
+async def test_invalid_upload_leaves_no_claim_and_another_vendor_can_claim(
+    install_dal: Any,
+) -> None:
+    # bad manifest
+    with pytest.raises(ApiError):
+        await _upload(install_dal, by=1, manifest=_vendor_manifest(schema_version=1))
+    # missing source part
+    with pytest.raises(ApiError) as exc:
+        await _upload(install_dal, by=1, manifest=_vendor_manifest(), source_bytes=None)
+    assert exc.value.code == "missing_part"
+    assert await _owner_rows(install_dal, _VENDOR_APP) == []
+
+    row = await _upload(install_dal, by=2, manifest=_vendor_manifest())
+    assert row.status == STATUS_UPLOADED
+    owners = await _owner_rows(install_dal, _VENDOR_APP)
+    assert [o.owner_id for o in owners] == [2]
+
+
+async def test_failure_after_the_claim_releases_it(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    async def _boom(*_a: Any, **_k: Any) -> Any:
+        raise RuntimeError("insert failed")
+
+    monkeypatch.setattr(svc, "_write_upload", _boom)
+    with pytest.raises(RuntimeError):
+        await _upload(install_dal, by=1, manifest=_vendor_manifest())
+    assert await _owner_rows(install_dal, _VENDOR_APP) == []
+
+
+async def test_second_vendor_is_refused_after_a_successful_first_upload(
+    install_dal: Any,
+) -> None:
+    await _upload(install_dal, by=1, manifest=_vendor_manifest())
+    with pytest.raises(ApiError) as exc:
+        await _upload(install_dal, by=2, manifest=_vendor_manifest(version="3.0.2"))
+    assert exc.value.status_code == 403
+
+
+async def test_admin_upload_to_legacy_id_owner_is_the_earliest_uploader(
+    install_dal: Any,
+) -> None:
+    now = datetime.now(UTC)
+    for who, version, at in ((7, "1.0.0", now - timedelta(days=2)), (8, "1.0.1", now)):
+        await install_dal.app_version_uploads.async_insert(
+            app_id=_VENDOR_APP,
+            version=version,
+            tenant_id=1,
+            requested_by=who,
+            artifact_kind="source",
+            language="python",
+            status=STATUS_UPLOADED,
+            manifest_json={},
+            created_at=at,
+            updated_at=at,
+            status_changed_at=at,
+        )
+    await _upload(
+        install_dal, by=99, manifest=_vendor_manifest(version="2.0.0"), enforce_owner=False
+    )
+    assert [o.owner_id for o in await _owner_rows(install_dal, _VENDOR_APP)] == [7]

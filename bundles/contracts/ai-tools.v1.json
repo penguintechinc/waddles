@@ -1,7 +1,7 @@
 {
   "contract": "ai-tools",
   "version": 1,
-  "target_app_id": "waddles.core.service.ai",
+  "target_app_id": "penguintechinc.waddles.ai",
   "doc": "Authoritative schemas for the AI service bundle tools (producer: bundles/rust/ai). Consumers (ai-teammates, dj) MUST send only fields in input_schema (additionalProperties=false), stay within its bounds, and read only fields in output_schema.required. Purpose/model selection is host-side, never a tool argument.",
   "tools": {
     "ai.complete": {

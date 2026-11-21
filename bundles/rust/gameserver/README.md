@@ -1,4 +1,4 @@
-# waddles.core.service.gameserver
+# penguintechinc.waddles.gameserver
 
 Always-on `kind: service` bundle (Rust, `world stage-tools`) that owns game-server tooling:
 Source RCON + Minecraft RCON command execution and A2S / Minecraft server-list status.

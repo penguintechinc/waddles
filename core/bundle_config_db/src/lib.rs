@@ -599,7 +599,7 @@ mod tests {
     use hub_client::bundle_config::{StaticConfigSource, StaticReadPathGate};
 
     fn key() -> ConfigKey {
-        ConfigKey::new(1, 7, "waddles.core.app.calendar")
+        ConfigKey::new(1, 7, "penguintechinc.waddles.calendar")
     }
 
     fn source(json: &str) -> Arc<dyn ConfigSource> {
@@ -730,7 +730,7 @@ mod tests {
             Duration::from_millis(500),
         )
         .with_failure_backoff(Duration::from_secs(60));
-        let key = ConfigKey::new(1, 7, "waddles.core.app.calendar");
+        let key = ConfigKey::new(1, 7, "penguintechinc.waddles.calendar");
         let first = src.get(&key).await.unwrap_err();
         let second = src.batch_get(&[key]).await.unwrap_err();
         assert!(

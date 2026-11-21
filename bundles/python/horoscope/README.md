@@ -1,6 +1,6 @@
 # horoscope (Python)
 
-`!horoscope <sign>` -> a generic, clearly-for-fun horoscope for one of the 12 zodiac signs. First-party (`provider: builtin`, `app_id: waddles.core.example.horoscope`), stateless
+`!horoscope <sign>` -> a generic, clearly-for-fun horoscope for one of the 12 zodiac signs. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.horoscope`), stateless
 (no kv/db), WASI component. Static SFW lines original to Waddles; no AI, no external API.
 
 | | |

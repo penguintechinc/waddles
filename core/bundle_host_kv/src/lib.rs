@@ -999,7 +999,11 @@ mod tests {
     use backend::fake::FakeBackend;
 
     fn scope_a() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     fn scope_b_app() -> KvScope {
@@ -1007,7 +1011,11 @@ mod tests {
     }
 
     fn scope_other_tenant() -> KvScope {
-        KvScope::new("globex", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new(
+            "globex",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     /// A [`CapabilitySnapshot`] granting `storage.kv` to every `app_id`
@@ -1033,7 +1041,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_then_get_round_trips_the_value() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "counter", b"hello", 0).await.unwrap();
         let got = host.get(&scope, 2, "counter").await.unwrap();
@@ -1042,14 +1050,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_of_an_absent_key_is_none_not_an_error() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         assert_eq!(host.get(&scope, 1, "absent").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn delete_then_get_returns_none() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "counter", b"v", 0).await.unwrap();
         host.delete(&scope, 2, "counter").await.unwrap();
@@ -1058,14 +1066,14 @@ mod tests {
 
     #[tokio::test]
     async fn delete_of_an_absent_key_is_not_an_error() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.delete(&scope, 1, "never-existed").await.unwrap();
     }
 
     #[tokio::test]
     async fn increment_from_absent_starts_at_delta() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let v = host.increment(&scope, 1, "hits", 5, 0).await.unwrap();
         assert_eq!(v, 5);
@@ -1075,7 +1083,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_accepts_negative_deltas() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.increment(&scope, 1, "hits", 10, 0).await.unwrap();
         let v = host.increment(&scope, 2, "hits", -3, 0).await.unwrap();
@@ -1089,7 +1097,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_call_succeeds_when_the_app_declares_storage_kv() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         host.set(&scope_a(), 1, "k", b"v", 0).await.unwrap();
     }
 
@@ -1112,7 +1120,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_app_cannot_read_another_apps_key_in_the_same_community() {
-        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -1125,7 +1133,7 @@ mod tests {
 
     #[tokio::test]
     async fn one_app_cannot_delete_another_apps_key() {
-        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -1139,7 +1147,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_app_id_in_a_different_tenant_is_a_fully_separate_namespace() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         host.set(&scope_a(), 1, "secret", b"acme-value", 0)
             .await
             .unwrap();
@@ -1152,7 +1160,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_counters_are_isolated_per_app() {
-        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]);
         host.increment(&scope_a(), 1, "hits", 100, 0).await.unwrap();
         let b = host
             .increment(&scope_b_app(), 1, "hits", 1, 0)
@@ -1168,7 +1176,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_containing_a_colon_is_rejected_not_silently_namespaced_elsewhere() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
             .set(&scope_a(), 1, "waddles.bot.b:data:secret", b"x", 0)
             .await
@@ -1183,7 +1191,7 @@ mod tests {
         // it after `bundlekv:{tenant}:{community}:{app_id}:data:`, so it
         // could only ever shadow a key inside the caller's own namespace --
         // but the leading colon is rejected outright regardless.
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
             .set(
                 &scope_a(),
@@ -1199,7 +1207,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_oversized_key_is_rejected_as_too_large() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let long_key = "a".repeat(MAX_GUEST_KEY_LEN + 1);
         let err = host
             .set(&scope_a(), 1, &long_key, b"x", 0)
@@ -1215,7 +1223,7 @@ mod tests {
         let backend = FakeBackend::new();
         let scope = scope_a();
         backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP);
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
             .set(&scope, 1, "one-too-many", b"x", 0)
             .await
@@ -1227,7 +1235,7 @@ mod tests {
     async fn overwriting_an_existing_key_is_exempt_from_the_key_count_quota() {
         let backend = FakeBackend::new();
         let scope = scope_a();
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
         host.set(&scope, 1, "existing", b"v1", 0).await.unwrap();
         // Fill the app's index to its ceiling (the existing key counts
         // toward it): the quota is now full.
@@ -1248,7 +1256,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_value_over_the_size_quota_is_rejected_as_too_large() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let big = vec![0u8; MAX_VALUE_BYTES + 1];
         let err = host.set(&scope_a(), 1, "k", &big, 0).await.unwrap_err();
         assert_eq!(err, KvError::TooLarge((MAX_VALUE_BYTES + 1) as u64));
@@ -1256,7 +1264,7 @@ mod tests {
 
     #[tokio::test]
     async fn exceeding_the_per_invocation_op_rate_limit_is_rejected() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let call_id = 42;
         for _ in 0..MAX_OPS_PER_INVOKE {
@@ -1268,7 +1276,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_rate_limit_is_scoped_per_invocation_not_per_app() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         for _ in 0..MAX_OPS_PER_INVOKE {
             host.get(&scope, 1, "k").await.unwrap();
@@ -1301,7 +1309,7 @@ mod tests {
 
     #[tokio::test]
     async fn ttl_keys_that_lapse_stop_counting_against_the_quota() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         fill(&host, &scope, "cooldown.", MAX_KEYS_PER_APP, TTL_SECONDS).await;
         assert_eq!(host.backend.live_count(&scope.live_key()), MAX_KEYS_PER_APP);
@@ -1324,7 +1332,7 @@ mod tests {
     async fn the_app_can_cycle_far_more_ttl_keys_than_the_lifetime_ceiling() {
         // 3 full generations of ceiling-sized TTL keys -- 30k lifetime keys
         // through a 10k quota -- only works if lapsed keys free their slots.
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         for generation in 0..3u64 {
             fill(
@@ -1342,7 +1350,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_lapsed_keys_free_slots_permanent_keys_keep_theirs() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let permanent = 4_000;
         fill(&host, &scope, "perm.", permanent, 0).await;
@@ -1373,7 +1381,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_count_is_exact_across_set_expire_overwrite_and_delete() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let live = scope.live_key();
         let count = || host.backend.live_count(&live);
@@ -1412,7 +1420,7 @@ mod tests {
 
     #[tokio::test]
     async fn overwriting_a_ttl_key_refreshes_its_lifetime_without_double_counting() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let live = scope.live_key();
 
@@ -1437,7 +1445,7 @@ mod tests {
 
     #[tokio::test]
     async fn overwriting_with_ttl_zero_makes_the_key_permanent() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "k", b"v1", 10).await.unwrap();
         host.set(&scope, 2, "k", b"v2", 0).await.unwrap();
@@ -1452,7 +1460,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_ttl_keys_free_their_slot_and_restart_from_zero() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let live = scope.live_key();
 
@@ -1474,7 +1482,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_increment_leaves_the_live_index_untouched() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "text", b"not-a-number", 0)
             .await
@@ -1491,7 +1499,7 @@ mod tests {
         // Every key lapsed => the index is empty but must still exist (the
         // sentinel's job on real Valkey), so the next write does not
         // trigger a keyspace `SCAN` reconciliation.
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "cooldown", b"v", 5).await.unwrap();
         host.backend.advance(Duration::from_secs(6));
@@ -1503,7 +1511,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_the_last_key_does_not_make_the_index_look_evicted() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "only", b"v", 0).await.unwrap();
         host.delete(&scope, 2, "only").await.unwrap();
@@ -1517,7 +1525,7 @@ mod tests {
         let scope = scope_a();
         let headroom = 25u64;
         backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP - headroom);
-        let host = Arc::new(host_for(backend, &["waddles.bot.a"]));
+        let host = Arc::new(host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]));
 
         let mut tasks = Vec::new();
         for i in 0..200u64 {
@@ -1547,7 +1555,7 @@ mod tests {
         let scope = scope_a();
         // A brand-new app: the live index has never existed at all.
         backend.seed_unindexed(&scope.data_key("pre-existing"), b"v", None);
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
 
         // A brand-new key still succeeds -- reconciliation rebuilds the
         // index from the true live keys (1), well under quota.
@@ -1617,7 +1625,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_reconciles_a_missing_live_index_the_same_way() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         // No prior seeding at all -- the live index has never existed, the
         // "brand-new app" shape of the same reconciliation path.
@@ -1630,7 +1638,7 @@ mod tests {
         let backend = FakeBackend::new();
         let scope = scope_a();
         backend.hold_lock(&scope.reconcile_lock_key());
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
 
         let err = host.set(&scope, 1, "k", b"v", 0).await.unwrap_err();
         assert_eq!(err.code(), "reconciling");
@@ -1646,7 +1654,7 @@ mod tests {
         let backend = FakeBackend::new();
         let scope = scope_a();
         backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP);
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
             .set(&scope, 1, "one-too-many", b"x", 0)
             .await
@@ -1661,12 +1669,19 @@ mod v2_tests {
     use backend::fake::FakeBackend;
 
     fn scope() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     fn host() -> KvHost<FakeBackend> {
         let caps = Arc::new(CapabilitySnapshot::new());
-        caps.update("waddles.bot.a", [authorize::KV_PERMISSION_ID.to_string()]);
+        caps.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            [authorize::KV_PERMISSION_ID.to_string()],
+        );
         KvHost::new(FakeBackend::new(), caps)
     }
 
@@ -1769,14 +1784,22 @@ mod v2_tests {
         let h = host();
         let s = scope();
         h.set(&s, 1, "ev.1", b"x", 0).await.unwrap();
-        let other_comm = KvScope::new("acme", Some("other".to_string()), "waddles.bot.a");
+        let other_comm = KvScope::new(
+            "acme",
+            Some("other".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         assert!(h
             .list(&other_comm, 2, "", None, 10)
             .await
             .unwrap()
             .keys
             .is_empty());
-        let other_tenant = KvScope::new("globex", Some("main".to_string()), "waddles.bot.a");
+        let other_tenant = KvScope::new(
+            "globex",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         assert!(h
             .list(&other_tenant, 3, "", None, 10)
             .await
@@ -1891,7 +1914,10 @@ mod v2_tests {
             }
         }
         let caps = Arc::new(CapabilitySnapshot::new());
-        caps.update("waddles.bot.a", [authorize::KV_PERMISSION_ID.to_string()]);
+        caps.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            [authorize::KV_PERMISSION_ID.to_string()],
+        );
         let h = KvHost::new(V1Only, caps);
         let s = scope();
         assert!(
@@ -1949,7 +1975,11 @@ mod report_failure_tests {
 
     fn report(err: &KvError) -> Vec<(tracing::Level, String)> {
         let capture = Capture::default();
-        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         tracing::subscriber::with_default(capture.clone(), || {
             report_failure("process", "get", &scope, err);
         });
@@ -1988,7 +2018,7 @@ mod report_failure_tests {
             assert!(line.contains(needle), "{kind}: message missing from {line}");
             assert!(line.contains("stage=\"process\""), "{line}");
             assert!(
-                line.contains("waddles.bot.a") && line.contains("acme"),
+                line.contains("penguintechinc.waddles.fixture-bot-a") && line.contains("acme"),
                 "{line}"
             );
         }

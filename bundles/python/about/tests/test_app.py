@@ -115,7 +115,7 @@ def _envelope(
     return StageEnvelope(
         tenant="tenant-1",
         community=community,
-        app_id="waddles.core.example.about",
+        app_id="penguintechinc.waddles.about",
         stage="action",
         event=PlatformEvent(
             platform=platform,
@@ -451,7 +451,7 @@ def _roundtrip(text: str, **role: bool) -> Any:
     envelope = StageEnvelope(
         tenant="tenant-1",
         community="comm-1",
-        app_id="waddles.core.example.about",
+        app_id="penguintechinc.waddles.about",
         stage="action",
         event=out,
         ts="2026-10-07T00:00:00.000Z",

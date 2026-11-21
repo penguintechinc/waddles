@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.example.birthday
+app_id: penguintechinc.waddles.birthday
 name: Community Birthday Bundle (Python)
-version: 1.0.6
-feature: waddles.core.example
+version: 1.0.7
 module: core
 provider: builtin
 author: github:penguintechinc

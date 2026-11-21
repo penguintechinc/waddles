@@ -372,7 +372,7 @@ through `tool.invoke`, never a platform-specific host path.
 
 ## Discord service-bundle tools (host-mediated `tool.invoke`)
 
-The Discord service bundle (`waddles.core.service.discord`) **declares** these tools
+The Discord service bundle (`penguintechinc.waddles.discord`) **declares** these tools
 (`exported_tools`: names + JSON arg schemas). The **host** executes them -- the guest has no
 mutating egress -- through the existing binding-pinned outbound producers, so every pin
 (guild from the binding, credential, managed-role allowlist, `pin_sig`, `op_id` replay guard,
@@ -381,8 +381,8 @@ rate limit, drain confirmation) applies unchanged. One dispatch path: `svc_actio
 
 **Caller convention** (an APP bundle; app -> app is forbidden, app -> service only):
 
-* manifest `requested_tools`: `{target_app_id: waddles.core.service.discord, tool: <name>, access: write}`
-* grant: `tool.call:waddles.core.service.discord:<tool>` with params `{"write": true}` (dangerous, consent-ack)
+* manifest `requested_tools`: `{target_app_id: penguintechinc.waddles.discord, tool: <name>, access: write}`
+* grant: `tool.call:penguintechinc.waddles.discord:<tool>` with params `{"write": true}` (dangerous, consent-ack)
 * call `tool.invoke(target, tool, args, idempotency-key)`; write tools REQUIRE the key.
 * Result: `{"ok": true, ...}`; refusal codes are the standard `tool.invoke` set
   (`invalid_args`, `not_granted`, `forbidden`, `target_unavailable`, ...).

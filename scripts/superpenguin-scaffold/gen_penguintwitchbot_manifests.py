@@ -3,7 +3,7 @@
 
 One table (`BUNDLES`) drives all three files so the two manifests can never drift. The MIT notice is the upstream LICENSE
 verbatim (taken from bundles/csharp/superpenguin-first/LICENSE, itself a verbatim copy of Psychoboy/PenguinTwitchBot's).
-Usage: python3 scripts/superpenguin-scaffold/gen_manifests.py   (from the repo root; rewrites the three files per bundle)
+Usage: python3 scripts/superpenguin-scaffold/gen_penguintwitchbot_manifests.py   (from the repo root; rewrites the three files per bundle)
 """
 
 from __future__ import annotations
@@ -16,8 +16,8 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 CS = ROOT / "bundles" / "csharp"
-ECONOMY = "waddles.core.service.economy"
-REPUTATION = "waddles.core.service.reputation"
+ECONOMY = "penguintechinc.waddles.economy"
+REPUTATION = "penguintechinc.waddles.reputation"
 CHAT = [
     {
         "id": "chat.send:discord",
@@ -365,12 +365,13 @@ def build(
     )
     tools_req = [t["req"] for t in spec["tools"]]
     consumes = spec["consumes"]
+    # app_id format: <github-org>.<repo>.<bundle-name> (PenguinTwitchBot ports: psychoboy.penguintwitchbot.<name>).
     m: dict[str, Any] = {
         "schema_version": 2,
-        "app_id": f"waddles.integrations.superpenguin.{name}",
+        "app_id": f"psychoboy.penguintwitchbot.{name}",
         "name": f"{spec['title']} (SuperPenguinTV)",
         "version": "1.0.0",
-        "feature": "waddles.integrations.superpenguin",
+        "feature": "psychoboy.penguintwitchbot",
         "module": "integrations",
         "provider": "thirdparty",
         "language": "csharp",
@@ -451,7 +452,7 @@ def main() -> int:
     for name, spec in BUNDLES.items():
         d = CS / f"superpenguin-{name}"
         if not d.is_dir():
-            print(f"gen_manifests: missing {d}", file=sys.stderr)
+            print(f"gen_penguintwitchbot_manifests: missing {d}", file=sys.stderr)
             return 1
         for hub, fname in ((False, "bundle.yaml"), (True, "hub-manifest.yaml")):
             text = yaml.dump(
@@ -464,7 +465,7 @@ def main() -> int:
             )
             (d / fname).write_text(text)
         (d / "README.md").write_text(readme(name, spec))
-        print(f"gen_manifests: wrote {name} ({len(BUNDLES)} bundles total)")
+        print(f"gen_penguintwitchbot_manifests: wrote {name} ({len(BUNDLES)} bundles total)")
     return 0
 
 

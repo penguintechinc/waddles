@@ -1,6 +1,6 @@
 [project]
 name = "waddle-bundle-vibecheck"
-version = "1.0.3"
+version = "1.0.4"
 description = "`!vibecheck [@user]` -> a random fun 'vibe: X%' mood readout, optionally for a mentioned user. Static, SFW, stateless."
 requires-python = ">=3.13"
 dependencies = []

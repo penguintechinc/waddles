@@ -2,7 +2,7 @@
 
 `!countdown` -- one per-community countdown target. Set a time (ISO-8601 or relative like `3d2h`)
 and an optional label; bare `!countdown` reports time remaining (or how long ago it passed).
-First-party (`provider: builtin`, `app_id: waddles.core.example.countdown`), kv-only, WASI
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.countdown`), kv-only, WASI
 component. No scheduler: "remaining" is recomputed from the host clock on every report.
 
 | | |

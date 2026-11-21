@@ -1,5 +1,5 @@
 //! DJ APP bundle: an OPTIONAL AI DJ layer over the shared music request queue
-//! (`waddles.core.service.music-requests`): playlists, a deterministic song
+//! (`penguintechinc.waddles.music-requests`): playlists, a deterministic song
 //! policy and an AI judge. It owns no request queue and no request commands.
 //!
 //! Layout: `model`/`policy` (pure data + rules), `music`/`ai`/`requests` (typed

@@ -42,10 +42,10 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.community.announcements.default',
+    'penguintechinc.waddles.announcements-pipeline',
     '1.0.0',
     'community',
-    'waddles.community.announcements',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
@@ -75,7 +75,7 @@ ON CONFLICT (app_id) DO NOTHING;
 
 -- Activate for the 'global' tenant (all communities can use it)
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.community.announcements.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.announcements-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

@@ -1,4 +1,4 @@
-# Twitch platform connector (`waddles.core.service.twitch`)
+# Twitch platform connector (`penguintechinc.waddles.twitch`)
 
 P6b Task 1. A `kind: service` Rust WASM component on `world connector-tools`
 that moves Twitch specifics out of `core/svc_ingest/src/ingest/twitch*.rs`.

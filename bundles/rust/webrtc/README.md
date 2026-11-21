@@ -1,4 +1,4 @@
-# waddles.core.service.webrtc
+# penguintechinc.waddles.webrtc
 
 Always-on `kind: service` bundle (Rust, `world stage-tools-webrtc`) that is the single
 tool/policy surface over `svc-streaming`'s WebRTC rooms. The media path (ICE/DTLS/SRTP, SFU

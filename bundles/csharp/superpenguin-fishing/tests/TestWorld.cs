@@ -233,7 +233,7 @@ public sealed class World
     }
 
     public EventHost HostFor(string actor, string messageId, string? community = "community-1") =>
-        new(new BundleContextInfo("tenant-1", community, "waddles.integrations.superpenguin.fishing", "waddles.integrations.superpenguin", "1.0.0", messageId, "{}"), this, actor);
+        new(new BundleContextInfo("tenant-1", community, "psychoboy.penguintwitchbot.fishing", "psychoboy.penguintwitchbot", "1.0.0", messageId, "{}"), this, actor);
 
     public static PlatformEventInfo Msg(string text, string platform = "twitch") =>
         new(platform, "chat.message", "platform-actor", $"{{\"text\":\"{text}\",\"channel_id\":\"chan-1\"}}", "2026-11-07T00:00:00.000Z");

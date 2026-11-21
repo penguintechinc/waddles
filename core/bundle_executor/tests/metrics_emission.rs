@@ -30,7 +30,7 @@ use penguin_bundle_host::wire::{
 use sha2::{Digest, Sha256};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/hostile_fixture.wasm");
-const APP_ID: &str = "waddles.test.metrics-e2e";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-metrics-e2e";
 
 struct FixtureSource;
 

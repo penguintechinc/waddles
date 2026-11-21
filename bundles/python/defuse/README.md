@@ -1,7 +1,7 @@
 # defuse (Python)
 
 `!defuse [amount|all]` -- a solo wager game over the shared community economy. First-party
-(`provider: builtin`, `app_id: waddles.core.example.defuse`).
+(`provider: builtin`, `app_id: penguintechinc.waddles.defuse`).
 
 > Attribution: inspired by PenguinTwitchBot by SuperPenguinTV (with permission) -- ideas/design
 > only, no code copied.

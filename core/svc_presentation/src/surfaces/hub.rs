@@ -26,7 +26,7 @@ pub const CHANNEL_CAPACITY: usize = 32;
 /// One validated, sanitized surface frame as delivered to viewers.
 #[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct SurfaceFrame {
-    /// Surface id (`waddles.core.example.music.now_playing`).
+    /// Surface id (`penguintechinc.waddles.music.now_playing`).
     pub surface: String,
     /// Process-wide monotonically increasing publish sequence number.
     pub seq: u64,
@@ -259,23 +259,23 @@ mod tests {
         assert!(h.channels.is_poisoned());
         // Locking through the hub still works and does not panic.
         drop(h.lock_channels());
-        h.publish(1, "waddles.core.example.music.queue", false, json!({}));
+        h.publish(1, "penguintechinc.waddles.music.queue", false, json!({}));
     }
 
     #[tokio::test]
     async fn publish_reaches_only_the_same_community_and_surface() {
         let h = hub();
-        let mut a = h.subscribe(1, "waddles.core.example.music.queue");
-        let mut other_community = h.subscribe(2, "waddles.core.example.music.queue");
-        let mut other_surface = h.subscribe(1, "waddles.core.example.music.now_playing");
+        let mut a = h.subscribe(1, "penguintechinc.waddles.music.queue");
+        let mut other_community = h.subscribe(2, "penguintechinc.waddles.music.queue");
+        let mut other_surface = h.subscribe(1, "penguintechinc.waddles.music.now_playing");
         h.publish(
             1,
-            "waddles.core.example.music.queue",
+            "penguintechinc.waddles.music.queue",
             true,
             json!({"queue": []}),
         );
         match a.recv().await {
-            Some(Recv::Frame(f)) => assert_eq!(f.surface, "waddles.core.example.music.queue"),
+            Some(Recv::Frame(f)) => assert_eq!(f.surface, "penguintechinc.waddles.music.queue"),
             _ => panic!("expected frame"),
         }
         let none = tokio::time::timeout(Duration::from_millis(50), other_community.recv()).await;

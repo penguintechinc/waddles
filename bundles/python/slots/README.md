@@ -1,7 +1,7 @@
 # slots (Python)
 
 `!slots` -- a weighted-random, per-community slot-machine minigame. Community-scoped fun
-content, first-party (`provider: builtin`, `app_id: waddles.core.example.slots`). Net-new
+content, first-party (`provider: builtin`, `app_id: penguintechinc.waddles.slots`). Net-new
 Waddles content -- no inspiration source, no attribution/notice required (contrast
 `bundles/python/fish`, which credits superpenguintv (Psychoboy) for its catch-and-track
 concept).
@@ -157,4 +157,4 @@ table + payout invariants, cooldown bounds/TTL, corrupt-state healing, PII-free-
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.slots`).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.slots`).

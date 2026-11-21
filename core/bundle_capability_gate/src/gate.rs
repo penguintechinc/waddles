@@ -584,7 +584,7 @@ mod tests {
         HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("waddles.core.example_echo")
+            .app_id("penguintechinc.waddles.echo")
             .app_version(1)
             .tenant_tier(TenantTier::Free)
             .build()
@@ -680,9 +680,10 @@ mod tests {
 
         assert_eq!(
             call.resource,
-            ResolvedResource::KvKeyPrefix(
-                "waddles:app:7:3:waddles.core.example_echo:state".to_string()
-            )
+            ResolvedResource::KvKeyPrefix(format!(
+                "waddles:app:7:3:{}:state",
+                crate::resource::bundle_storage_key("penguintechinc.waddles.echo")
+            ))
         );
     }
 
@@ -731,7 +732,7 @@ mod tests {
         let other_tenant = HostInvokeScopeBuilder::new()
             .tenant_id(999)
             .community_id(3)
-            .app_id("waddles.core.example_echo")
+            .app_id("penguintechinc.waddles.echo")
             .app_version(1)
             .tenant_tier(TenantTier::Free)
             .build()
@@ -1439,7 +1440,7 @@ mod tests {
         let newer_key = GrantScopeKey {
             tenant_id: 7,
             community_id: 3,
-            app_id: "waddles.core.example_echo".to_string(),
+            app_id: "penguintechinc.waddles.echo".to_string(),
             app_version: 2,
         };
         loader.set(

@@ -34,7 +34,7 @@ HUB_PROXY = ROOT / "hub_api" / "services" / "calls_proxy.py"
 HUB_CALLS = ROOT / "hub_api" / "blueprints" / "v1" / "calls.py"
 TOKEN_RS = ROOT / "core" / "svc_streaming" / "src" / "rooms" / "token.rs"
 ROOMS_PROTO = ROOT / "proto" / "waddles" / "streaming" / "internal" / "v1" / "rooms.proto"
-SERVICE = "waddles.core.service.webrtc"
+SERVICE = "penguintechinc.waddles.webrtc"
 HAND_TOOLS = (
     "room.hand.raise",
     "room.hand.lower",
@@ -339,7 +339,7 @@ def test_rooms_fixture_sends_every_hand_tool_with_v1_and_uuid_participants() -> 
 
 def test_bundle_versions_agree_across_manifests_and_catalog() -> None:
     catalog = {e["app_id"]: e for e in yaml.safe_load((ROOT / "bundles" / "core-bundles.yaml").read_text())["bundles"]}
-    for app_id, d in ((SERVICE, WEBRTC), ("waddles.core.app.rooms", ROOMS)):
+    for app_id, d in ((SERVICE, WEBRTC), ("penguintechinc.waddles.rooms", ROOMS)):
         versions = {
             str(_manifest(d / "bundle.yaml")["version"]),
             str(_manifest(d / "hub-manifest.yaml")["version"]),

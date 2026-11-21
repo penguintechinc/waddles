@@ -292,10 +292,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-capability-gate"
+version = "0.1.0"
+dependencies = [
+ "metrics",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.20",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "bundle-executor"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bundle-capability-gate",
  "clap",
  "ed25519-dalek",
  "hmac",
@@ -1528,6 +1541,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "metrics"
+version = "0.24.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "89550ee9f79e88fef3119de263694973a8adb26c21d75322164fb8c493039fe2"
+dependencies = [
+ "portable-atomic",
+ "rapidhash",
+]
+
+[[package]]
 name = "mime"
 version = "0.3.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1732,7 +1755,7 @@ dependencies = [
 [[package]]
 name = "penguin-bundle-host"
 version = "0.6.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=96a5065f1d379ea0cfc7c7716c6eab628138330a#96a5065f1d379ea0cfc7c7716c6eab628138330a"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=dcfbadac813d7203e6f1764c363aee21ebd20c1c#dcfbadac813d7203e6f1764c363aee21ebd20c1c"
 dependencies = [
  "regex",
  "serde",
@@ -2040,6 +2063,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapidhash"
+version = "4.5.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5da7e78a036ce858e8d55b7e7dc8ba3a88b78350fd2155d3591bbd966b58589e"
+dependencies = [
+ "rustversion",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2280,7 +2312,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",
@@ -2346,6 +2378,12 @@ dependencies = [
  "ryu",
  "serde",
 ]
+
+[[package]]
+name = "sha1_smol"
+version = "1.0.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bbfa15b3dddfee50a0fff136974b3e1bde555604ba463834a7eb7deb6417705d"
 
 [[package]]
 name = "sha2"
@@ -2915,6 +2953,8 @@ checksum = "2ef6dac1e96601b4fb3acccccff2139741fcb757cb9a36089bf5be91cfb285ce"
 dependencies = [
  "getrandom 0.4.3",
  "js-sys",
+ "serde_core",
+ "sha1_smol",
  "wasm-bindgen",
 ]
 

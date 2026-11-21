@@ -3,7 +3,7 @@
 `libs/community_module/features.py` (`community.loyalty` Feature, flag
 `waddles.community.loyalty`, default App `waddles.community.loyalty.
 default`) and `libs/bot_module/features.py` (`bot.shoutout` Feature, flag
-`waddles.bot.shoutout`, default App `waddles.bot.shoutout.default`) both
+`waddles.bot.shoutout`, default App `penguintechinc.waddles.shoutout-pipeline`) both
 already declare their default App manifests -- but without a matching
 `app_catalog` row, svc_process/svc_action never subscribe to either
 app_id's own `:action` Valkey key and neither app's action stage is ever
@@ -26,8 +26,8 @@ Both action entrypoints share `moderation_enforce_action`'s /
 `social_music_action`'s reply shape: Discord Bot API
 (`https://discord.com/api/v10`) via a `bot_token_ref`-resolved token,
 reusing the same shared Discord bot connection/secret
-(`DISCORD_BOT_TOKEN`) already live for `waddles.bot.discord.default`/
-`waddles.social.music.default`/`waddles.community.moderation.default`'s
+(`DISCORD_BOT_TOKEN`) already live for `penguintechinc.waddles.discord-pipeline`/
+`penguintechinc.waddles.music-pipeline`/`penguintechinc.waddles.moderation-pipeline`'s
 own `global`-tenant rows (`bundles.twitch_shoutout_action:shoutout`
 itself only reaches this Discord path when the reply channel's platform
 resolves to non-Twitch -- see that bundle's own module docstring; its
@@ -57,8 +57,8 @@ down_revision = "0016_moderation_enforce_app"
 branch_labels = None
 depends_on = None
 
-LOYALTY_APP_ID = "waddles.community.loyalty.default"
-SHOUTOUT_APP_ID = "waddles.bot.shoutout.default"
+LOYALTY_APP_ID = "penguintechinc.waddles.loyalty-pipeline"
+SHOUTOUT_APP_ID = "penguintechinc.waddles.shoutout-pipeline"
 TENANT_SLUG = "global"
 BOT_TOKEN_REF = "DISCORD_BOT_TOKEN"
 
@@ -82,7 +82,7 @@ def upgrade() -> None:
             '{LOYALTY_APP_ID}',
             '1.0.0',
             'community',
-            'waddles.community.loyalty',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -119,7 +119,7 @@ def upgrade() -> None:
         """
     )
 
-    # `waddles.bot.shoutout.default` -- if a catalog row already exists
+    # `penguintechinc.waddles.shoutout-pipeline` -- if a catalog row already exists
     # for this app_id (none does live, verified above), this upsert folds
     # the action entrypoint into it rather than inserting a duplicate.
     op.execute(
@@ -132,7 +132,7 @@ def upgrade() -> None:
             '{SHOUTOUT_APP_ID}',
             '1.0.0',
             'bot',
-            'waddles.bot.shoutout',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,

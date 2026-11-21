@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 
 /// The only surface this bundle publishes to (namespaced under its app id).
-pub const SURFACE: &str = "waddles.core.app.galactic-avatars.stage_strip";
+pub const SURFACE: &str = "penguintechinc.waddles.galactic-avatars.stage_strip";
 /// kv key of the roster document (community-scoped by the host).
 pub const ROSTER_KEY: &str = "galactic.roster";
 

@@ -48,7 +48,7 @@ use crate::outbound_creds_youtube::{is_live_chat_id, META_LIVE_CHAT_ID};
 /// Platform slug.
 pub const PLATFORM: &str = "youtube";
 /// Connector bundle `app_id`.
-pub const APP_ID: &str = "waddles.core.service.youtube";
+pub const APP_ID: &str = "penguintechinc.waddles.youtube";
 /// Provider name as hub-api's binding list knows it.
 pub const PROVIDER: &str = "youtube";
 /// Capability the binding list is scoped to.

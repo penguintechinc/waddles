@@ -75,6 +75,7 @@ images:
       - admin/hub_module/webui-server/server.js
       - admin/hub_module/webui-server/proxy.js
       - admin/hub_module/webui-server/tls.js
+      - admin/hub_module/webui-server/internal-guard.js
 
   migrations:
     dockerfile: migrations/Dockerfile
@@ -125,6 +126,7 @@ images:
     groups: [ctx-root]
     inputs:
       - core/bundle_executor/**
+      - core/bundle_capability_gate/**
       - core/platform_keys/**
       - wit/**
 
@@ -275,6 +277,8 @@ ignore:
   - .claude/**
   - "**/*.md"
   - LICENSE
+  # Cross-language golden vectors: read only by `cargo test` / pytest, never COPYed into an image.
+  - testdata/**
   - CONTRIBUTORS
   - .FUTURE
   - .version

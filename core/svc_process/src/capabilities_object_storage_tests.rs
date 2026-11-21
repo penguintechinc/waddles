@@ -15,8 +15,8 @@ use bundle_host_storage::{MemoryBackend, TracingAuditSink};
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-store";
-const OTHER_APP: &str = "waddles.core.other-store";
+const APP_ID: &str = "penguintechinc.waddles.test-store";
+const OTHER_APP: &str = "penguintechinc.waddles.other-store";
 const VERSION: i64 = 1;
 const READ: &str = "storage.objects.read";
 const WRITE: &str = "storage.objects.write";
@@ -241,7 +241,11 @@ async fn own_key_never_resolves_into_another_bundles_prefix() {
 
 #[tokio::test]
 async fn cross_prefix_with_read_grant_reads_but_cannot_write() {
-    let (caps, host) = fixture(&["storage.read:waddles.core.other-store"], true, true);
+    let (caps, host) = fixture(
+        &["storage.read:penguintechinc.waddles.other-store"],
+        true,
+        true,
+    );
     seed_other(&host, "s.txt").await;
     // Granted but not tagged for us: hidden exactly like a missing object.
     assert_eq!(
@@ -355,7 +359,7 @@ async fn code_of_ok_or_err(caps: &StageCapabilities, op: &str, args: serde_json:
 #[tokio::test]
 async fn cross_prefix_grant_alone_does_not_replace_the_baseline_permission() {
     let (caps, host) = fixture_scoped(
-        &["storage.read:waddles.core.other-store"],
+        &["storage.read:penguintechinc.waddles.other-store"],
         true,
         true,
         TENANT_ID,

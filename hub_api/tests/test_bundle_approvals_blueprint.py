@@ -14,10 +14,10 @@ from tests.conftest import make_token, make_user_token
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",
@@ -35,7 +35,7 @@ _MANIFEST = {
 async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         artifact_digest="sha256:" + "a" * 64,
         language="python",
@@ -43,7 +43,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -59,7 +59,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     # (terminal) so the approve/permissions tests above have a
     # publishable row, this one is for the deny-happy-path test below.
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="1.0.0",
         tenant_id=1,
         artifact_kind="source",
@@ -83,7 +83,7 @@ async def test_get_permissions_requires_platform_admin(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -93,7 +93,7 @@ async def test_get_permissions_happy_path(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
@@ -105,7 +105,7 @@ async def test_approve_mismatched_hash_fails_closed(app: Quart) -> None:
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"permissionHash": "sha256:" + "0" * 64},
     )
@@ -118,7 +118,7 @@ async def test_approve_without_a_hash_succeeds_interactively(app: Quart) -> None
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"permissionHash": None},
     )
@@ -132,7 +132,7 @@ async def test_deny_happy_path(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/1.0.0/deny",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/1.0.0/deny",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "egress host not acceptable"},
     )
@@ -144,7 +144,7 @@ async def test_deny_on_a_published_version_is_409(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/deny",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/deny",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "late objection"},
     )
@@ -157,7 +157,7 @@ async def test_deny_requires_platform_admin(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/1.0.0/deny",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/1.0.0/deny",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "nope"},
     )
@@ -172,7 +172,7 @@ async def test_vendor_cannot_self_approve(app: Quart) -> None:
     token = make_user_token(user_id=42, scope="vendor:onboard")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"permissionHash": None},
     )
@@ -184,7 +184,7 @@ async def test_vendor_cannot_reject_either(app: Quart) -> None:
     token = make_user_token(user_id=42, scope="vendor:onboard")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/1.0.0/deny",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/1.0.0/deny",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "nope"},
     )
@@ -198,21 +198,21 @@ async def test_approve_installs_globally_but_does_not_activate(
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"permissionHash": None},
     )
     assert response.status_code == 200
     installed = (
         await install_dal(
-            (install_dal.app_global_installs.app_id == "waddles.socials.music.default")
+            (install_dal.app_global_installs.app_id == "penguintechinc.waddles.music")
             & (install_dal.app_global_installs.superseded_by == None)  # noqa: E711
         ).select()
     ).first()
     assert installed is not None
     assert installed.installed_by == 1
     active = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+        install_dal.app_active_versions.app_id == "penguintechinc.waddles.music"
     ).select()
     assert not active
 
@@ -221,7 +221,7 @@ async def test_uninstall_requires_platform_admin(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/uninstall",
+        "/api/v1/apps/penguintechinc.waddles.music/uninstall",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -231,18 +231,18 @@ async def test_uninstall_happy_path(app: Quart, install_dal: Any) -> None:
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"permissionHash": None},
     )
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/uninstall",
+        "/api/v1/apps/penguintechinc.waddles.music/uninstall",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
     installed = (
         await install_dal(
-            install_dal.app_global_installs.app_id == "waddles.socials.music.default"
+            install_dal.app_global_installs.app_id == "penguintechinc.waddles.music"
         ).select()
     ).first()
     assert installed.revoked_at is not None
@@ -252,7 +252,7 @@ async def test_list_installs_happy_path(app: Quart, install_dal: Any) -> None:
     token = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"permissionHash": None},
     )
@@ -261,4 +261,4 @@ async def test_list_installs_happy_path(app: Quart, install_dal: Any) -> None:
     )
     assert response.status_code == 200
     body = await response.get_json()
-    assert any(i["appId"] == "waddles.socials.music.default" for i in body["installs"])
+    assert any(i["appId"] == "penguintechinc.waddles.music" for i in body["installs"])

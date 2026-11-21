@@ -84,10 +84,10 @@ follows the same optionality — most bundles have no overlay and omit the direc
 
 | Field | Type | Today (file:line) | Status |
 |---|---|---|---|
-| `app_id` | str, `waddles.<module>.<feature>.<app>` | `app_manifest.py:104`, `_APP_ID_RE` line 57 | unchanged |
+| `app_id` | str, `<github-org>.<repo>.<bundle-name>` | `app_manifest.py:104`, `_APP_ID_RE` line 57 | unchanged |
 | `name` | str | `app_manifest.py:105` | unchanged |
 | `version` | SemVer str | `app_manifest.py:106`, `_SEMVER_RE` line 61-66 | unchanged |
-| `feature` | str, `waddles.<module>.<feature>`, must equal `app_id`'s prefix | `app_manifest.py:107`, checked line 169-175 | unchanged |
+| `feature` | removed — the owner is the first two segments of `app_id` | `app_manifest.py:107` | unchanged |
 | `module` | str, one of `KNOWN_MODULES` | `app_manifest.py:108`, set at line 35-47 | unchanged |
 | `provider` | `builtin` \| `thirdparty` | `app_manifest.py:109`, `KNOWN_PROVIDERS` line 53 | unchanged — **authorship** axis |
 | `is_default` | bool | `app_manifest.py:113` | unchanged |
@@ -286,7 +286,7 @@ Three tiers, narrowing global → tenant → community, with a hard **subset** i
 ```sql
 -- GLOBAL: installed
 CREATE TABLE app_catalog (
-    app_id                  TEXT PRIMARY KEY,          -- waddles.<module>.<feature>.<app>
+    app_id                  TEXT PRIMARY KEY,          -- <github-org>.<repo>.<bundle-name>
     manifest_version        TEXT NOT NULL,              -- bundle.yaml `version`
     module                  TEXT NOT NULL,
     feature                 TEXT NOT NULL,

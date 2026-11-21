@@ -2,7 +2,7 @@
 
 `!rps <rock|paper|scissors>` -- play one round of rock-paper-scissors against the bot.
 Community-scoped fun content, first-party (`provider: builtin`, `app_id:
-waddles.core.example.rps`). Net-new Waddles content -- not a port of, or inspired by, any
+penguintechinc.waddles.rps`). Net-new Waddles content -- not a port of, or inspired by, any
 external project (contrast `bundles/python/fish`, which credits a specific inspiration in its own
 `bundle.yaml`).
 
@@ -146,4 +146,4 @@ ruff check .
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.rps`).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.rps`).

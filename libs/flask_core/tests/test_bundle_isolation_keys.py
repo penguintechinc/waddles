@@ -21,7 +21,7 @@ from flask_core.stream_pipeline import (
 
 TENANT = "tenant-1"
 COMMUNITY = "community-1"
-APP_ID = "waddles.bot.giveaway.giveaway-classic"
+APP_ID = "penguintechinc.waddles.giveaway-classic"
 
 
 def test_bundle_stream_key_community_activation() -> None:
@@ -81,10 +81,10 @@ def test_bundle_consumer_group() -> None:
 
 
 def test_bundle_stream_key_preserves_dots_in_app_id() -> None:
-    """`app_id` is dot-delimited (e.g. `waddles.bot.shoutout.default`); dots
+    """`app_id` is dot-delimited (e.g. `penguintechinc.waddles.shoutout`); dots
     are valid Valkey key bytes so the id passes through intact, unescaped.
     """
-    dotted = "waddles.bot.shoutout.default"
+    dotted = "penguintechinc.waddles.shoutout"
     key = bundle_stream_key(TENANT, COMMUNITY, dotted, "ingest")
     assert f":app:{dotted}:ingest" in key
     assert key.count(dotted) == 1
@@ -96,7 +96,7 @@ def test_bundle_stream_key_preserves_dots_in_app_id() -> None:
         # differ only by community
         (COMMUNITY, APP_ID, "ingest", "community-2", APP_ID, "ingest"),
         # differ only by app_id
-        (COMMUNITY, APP_ID, "ingest", COMMUNITY, "waddles.bot.other.default", "ingest"),
+        (COMMUNITY, APP_ID, "ingest", COMMUNITY, "penguintechinc.waddles.other", "ingest"),
         # differ only by stage
         (COMMUNITY, APP_ID, "ingest", COMMUNITY, APP_ID, "process"),
         # community vs tenant-wide
@@ -118,7 +118,7 @@ def test_distinct_triples_yield_distinct_stream_keys(
 
 def test_distinct_app_ids_yield_distinct_consumer_groups() -> None:
     assert bundle_consumer_group(APP_ID, "ingest") != bundle_consumer_group(
-        "waddles.bot.other.default", "ingest"
+        "penguintechinc.waddles.other", "ingest"
     )
 
 

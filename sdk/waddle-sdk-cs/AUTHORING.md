@@ -64,7 +64,7 @@ afterward. Two reference bundles exist to copy from:
    generated test-host entry point is permanently 0%-covered and can sink
    the 90% floor on a tiny bundle even though it dilutes away on a larger
    one (`csping`'s own `coverlet.runsettings` hit exactly this).
-9. **`bundle.yaml`/`hub-manifest.yaml`** -- new `app_id`/`version`; if
+9. **`bundle.yaml`/`hub-manifest.yaml`** -- new `app_id` in the form `<github-org>.<repo>.<bundle-name>` (own samples: `penguintechinc.waddles.<name>`; PenguinTwitchBot ports: `psychoboy.penguintwitchbot.<name>`) and `version`; if
    porting a PenguinTwitchBot/SuperPenguin feature, use the exact
    `author`/`license`/`category`/`source_url`/`notice` block documented in
    `README.md` "Porting more PenguinTwitchBot (superpenguin) bundles" --

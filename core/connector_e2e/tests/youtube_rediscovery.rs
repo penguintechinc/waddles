@@ -46,7 +46,7 @@ use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/youtube_connector.wasm");
-const APP: &str = "waddles.core.service.youtube";
+const APP: &str = "penguintechinc.waddles.youtube";
 const CHAT_A: &str = "ChatA_ended-1";
 const CHAT_B: &str = "ChatB_live-2";
 const CHAT_DECOY: &str = "Decoy_other-3";

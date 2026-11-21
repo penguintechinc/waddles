@@ -1,6 +1,6 @@
 # affirmation (Python)
 
-`!affirmation` -> a random positive affirmation from a static built-in list. First-party (`provider: builtin`, `app_id: waddles.core.example.affirmation`), stateless
+`!affirmation` -> a random positive affirmation from a static built-in list. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.affirmation`), stateless
 (no kv/db), WASI component. Static SFW lines original to Waddles; no AI, no external API.
 
 | | |

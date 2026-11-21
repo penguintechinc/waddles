@@ -36,7 +36,7 @@ depends_on = None
 
 _HANDLE_RE = re.compile(r"[A-Za-z0-9](?:[A-Za-z0-9]|-(?=[A-Za-z0-9])){0,38}")
 _NAME_RE = re.compile(r"[^\W_]+(?:[ _.\-][^\W_]+)*")
-_ROLL_APP_ID = "waddles.integrations.superpenguin.roll"
+_ROLL_APP_ID = "psychoboy.penguintwitchbot.roll"
 
 
 def normalize_author(raw: str | None) -> str | None:

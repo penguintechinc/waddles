@@ -2,7 +2,7 @@
 
 Configurable spam / content filters that delete the offending message (Discord) and warn, plus a
 `permit` command for links. First-party (`provider: builtin`,
-`app_id: waddles.core.example.chatguard`).
+`app_id: penguintechinc.waddles.chatguard`).
 
 | Filter | Fires when | Default |
 |---|---|---|
@@ -97,7 +97,7 @@ Needs a `bundles/core-bundles.yaml` row with **`wit_world: stage-next`** (`ident
 stage-next-only; the build script fails on a `stage` row):
 
 ```yaml
-  - app_id: waddles.core.example.chatguard
+  - app_id: penguintechinc.waddles.chatguard
     version: "1.0.0"
     language: python
     wit_world: stage-next

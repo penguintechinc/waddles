@@ -1,8 +1,8 @@
-# waddles.core.example.game-servers
+# penguintechinc.waddles.game-servers
 
 App bundle (Rust, `world stage-next-tools`) giving communities game-server chat commands.
 Pure orchestration: it holds no address, no secret and no socket; every action is a tool call to
-the `waddles.core.service.gameserver` SERVICE bundle (app -> service only), which enforces
+the `penguintechinc.waddles.gameserver` SERVICE bundle (app -> service only), which enforces
 registration, allowlists, scope, rate limits and the audit log.
 
 ## Commands

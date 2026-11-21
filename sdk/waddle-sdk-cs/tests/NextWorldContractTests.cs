@@ -65,8 +65,8 @@ public class ToolClientTests
     public void the_idempotency_key_is_forwarded_for_writes()
     {
         var tools = new FakeToolClient();
-        tools.Handlers[("waddles.core.service.economy", "give")] = _ => Encoding.UTF8.GetBytes("{\"user\":\"u\",\"balance\":1,\"alias\":\"a\"}");
-        tools.Invoke("waddles.core.service.economy", "give", Encoding.UTF8.GetBytes("{}"), "evt-9");
+        tools.Handlers[("penguintechinc.waddles.economy", "give")] = _ => Encoding.UTF8.GetBytes("{\"user\":\"u\",\"balance\":1,\"alias\":\"a\"}");
+        tools.Invoke("penguintechinc.waddles.economy", "give", Encoding.UTF8.GetBytes("{}"), "evt-9");
         Assert.Equal("evt-9", tools.Calls[0].Key);
     }
 }

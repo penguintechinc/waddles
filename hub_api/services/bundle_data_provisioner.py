@@ -30,6 +30,7 @@ from typing import Any
 import psycopg2
 from sqlalchemy.engine import make_url
 
+from services.bundle_app_id import is_core_namespace
 from services.bundle_data_ddl import MigrationError
 from services.bundle_data_schema import TableDeclarationError
 from services.bundle_data_v2 import (
@@ -41,7 +42,6 @@ from services.bundle_data_v2 import (
     validate_schema_v2,
 )
 from services.errors import ApiError
-from services.vendor_bundle_authz import CORE_NAMESPACE_PREFIX
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +61,7 @@ def provider_for(app_id: str) -> str:
     Derived from the app id's reserved namespace, never from the manifest's own claim
     (a vendor cannot name itself ``builtin``).
     """
-    return "builtin" if app_id.startswith(CORE_NAMESPACE_PREFIX) else "thirdparty"
+    return "builtin" if is_core_namespace(app_id) else "thirdparty"
 
 
 def schema_from_manifest(manifest_json: Mapping[str, Any]) -> SchemaDeclV2 | None:

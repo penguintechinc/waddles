@@ -1,7 +1,7 @@
 # raffle (Python)
 
 `!raffle` (+ bare `!enter` alias) -- a per-community giveaway/raffle. Community-scoped
-fun/utility content, first-party (`provider: builtin`, `app_id: waddles.core.example.raffle`),
+fun/utility content, first-party (`provider: builtin`, `app_id: penguintechinc.waddles.raffle`),
 **original Waddles content** -- not a port, not inspired by any third-party bot (contrast
 `fish`/`music`, which credit superpenguintv (Psychoboy)'s `PenguinTwitchBot` for inspiration;
 `author`/`license` here follow `bundles/python/count`/`bundles/python/pyping`'s own

@@ -1,7 +1,7 @@
 # joke (Python)
 
 `!joke` -- a random family-friendly joke, plus a per-community custom joke pool that
-moderators manage. First-party (`provider: builtin`, `app_id: waddles.core.example.joke`); the
+moderators manage. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.joke`); the
 14 built-in jokes are original text written for Waddles, not copied from any third-party source,
 so there is no external attribution to carry. kv-only (`waddle_sdk.community_kv`) -- it
 deliberately does not depend on the `db` capability.
@@ -129,5 +129,5 @@ pytest --cov=app --cov-branch --cov-report=term-missing --cov-fail-under=90
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.joke`, activation target
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.joke`, activation target
 `global`); dark until `waddles.command-joke` is turned on.
