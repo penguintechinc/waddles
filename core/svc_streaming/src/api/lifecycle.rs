@@ -18,7 +18,7 @@ use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
 use crate::billing::token_ledger::{TokenLedgerClient, REASON_IDEMPOTENCY_CONFLICT};
-use crate::db::entities::streaming_config;
+use crate::db::entities::{community, streaming_config};
 use crate::error::ApiError;
 use crate::http::auth::AuthenticatedClaims;
 use crate::http::AppState;
@@ -480,6 +480,7 @@ fn release_run_start(community_id: i32, config_id: i32, actor_user_id: i64, admi
     reason = "flat inputs of one admission decision, all resolved by the single caller"
 )]
 async fn resolve_transcode_admission(
+    db: &DatabaseConnection,
     token_ledger: &TokenLedgerClient,
     hub_api_url: &str,
     actor_user_id: Option<i64>,
@@ -503,6 +504,30 @@ async fn resolve_transcode_admission(
         return (false, None);
     };
 
+    // hub-api addresses the community by its public UUID in the debit URL; the numeric id stays
+    // internal (and in the machine JWT's `community` claim). Without a UUID there is no route to
+    // call: loud, then the same passthrough degrade as every other "cannot admit" case.
+    let community_public_id = match community::public_id(db, community_id).await {
+        Ok(Some(public_id)) => public_id,
+        Ok(None) => {
+            tracing::error!(
+                community_id,
+                config_id = config.id,
+                "lifecycle: transcode admission cannot resolve the community's public id (no row / no public_id), falling back to passthrough"
+            );
+            return (false, None);
+        }
+        Err(err) => {
+            tracing::error!(
+                community_id,
+                config_id = config.id,
+                error = %err,
+                "lifecycle: transcode admission could not read the community's public id, falling back to passthrough"
+            );
+            return (false, None);
+        }
+    };
+
     let admission = run_session_id(community_id, config.id, actor_user_id);
     let idempotency_key =
         admission_idempotency_key(community_id, config.id, actor_user_id, &admission.id);
@@ -512,6 +537,7 @@ async fn resolve_transcode_admission(
             hub_api_url,
             actor_user_id,
             community_id,
+            &community_public_id,
             transcode_token_cost,
             transcode_product_key,
             &reference,
@@ -584,6 +610,7 @@ pub async fn start(
             }
         }
         let (transcode_applied, admission) = resolve_transcode_admission(
+            &db,
             &state.token_ledger,
             &state.config.cli.hub_api_url,
             actor,

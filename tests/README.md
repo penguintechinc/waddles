@@ -147,7 +147,7 @@ npm run test:ui             # Interactive UI
 ### Local Testing
 ```bash
 # API tests
-API_BASE_URL=http://localhost:8060
+API_BASE_URL=http://localhost:8204
 
 # Frontend tests
 BASE_URL=http://localhost:3000
@@ -231,7 +231,7 @@ Create `tests/e2e/<workflow>.spec.js` for complete user journeys
 - Verify database is healthy: `docker compose ps`
 
 ### API Tests Failing
-- Check API is accessible: `curl http://localhost:8060/api/v1/health`
+- Check API is accessible: `curl http://localhost:8204/healthz`
 - Verify a test admin exists and `HUB_TEST_EMAIL`/`HUB_TEST_PASS` (or
   `INITIAL_ADMIN_EMAIL`/`INITIAL_ADMIN_PASSWORD`) match it -- no default
   admin credential is created automatically (CWE-798 fix)

@@ -195,7 +195,9 @@ class TestCommunityDrilldown:
 
         result = analytics.get_community_drilldown(dal, 1, module_id=other_module_id)
         assert result["total"] == 1
-        assert result["rows"][0]["moduleId"] == other_module_id
+        assert result["rows"][0]["moduleId"] == str(
+            dal.marketplace_modules[other_module_id].public_id
+        )
 
     def test_no_seller_returns_empty(self, dal: Any) -> None:
         result = analytics.get_community_drilldown(dal, 999)

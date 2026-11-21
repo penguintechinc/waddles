@@ -6,8 +6,10 @@ export default defineConfig({
   server: {
     port: 3000,
     proxy: {
+      // hub-api (Quart) dev origin. Default port mirrors the chart's pipeline.hubApi.port
+      // (k8s/helm/waddlebot/tests/test_hub_api_port_drift.py fails on drift).
       '/api': {
-        target: 'http://localhost:8060',
+        target: process.env.HUB_API_URL || 'http://localhost:8204',
         changeOrigin: true,
       },
     },

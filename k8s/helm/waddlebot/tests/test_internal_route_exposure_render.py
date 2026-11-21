@@ -83,7 +83,7 @@ def test_httproute_specific_hub_api_prefix_still_renders() -> None:
     """A narrow public hub-api prefix (e.g. /api/v1/auth) is unaffected."""
     res = _render(
         "httproute.rules[0].path=/api/v1/auth", "httproute.rules[0].service=waddlebot-hub-api-v3",
-        "hubApi.trustForwardedHost=false",
+        "httproute.rules[0].port=8204", "hubApi.trustForwardedHost=false",
     )
     assert res.returncode == 0, res.stderr
     assert _routes(res.stdout)
@@ -112,7 +112,7 @@ def test_ingress_covering_prefix_to_hub_api_fails() -> None:
         "ingress.hosts[0].paths[0].path=/api",
         "ingress.hosts[0].paths[0].pathType=Prefix",
         "ingress.hosts[0].paths[0].service=hub-api-v3",
-        "ingress.hosts[0].paths[0].port=8060",
+        "ingress.hosts[0].paths[0].port=8204",
     )
     assert res.returncode != 0
     assert "covering /api/v1/internal directly to hub-api" in res.stderr

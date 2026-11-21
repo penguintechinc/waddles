@@ -61,6 +61,14 @@ from services.community_public_id import resolve_public_community_id, to_interna
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dal, reads_from_replica
 from services.errors import ApiError
+from services.marketplace_public_ids import (
+    body_id,
+    global_target,
+    marketplace_view_arg_hook,
+    public_id_for,
+)
+from services.public_ids import UNKNOWN_ID
+from services.schema import bind_marketplace_vendor_tables
 
 logger = logging.getLogger(__name__)
 
@@ -80,6 +88,24 @@ payments_bp = Blueprint(
 
 def _dal() -> Any:
     return current_app.config["dal"]
+
+
+#: `<puuid:...>` path params -> backing table. Both tables are globally addressed; vendor
+#: ownership (discount codes) and community admin (subscriptions) are enforced by the handlers.
+discount_bp.before_request(
+    marketplace_view_arg_hook({"code_id": global_target("vendor_discount_codes")})
+)
+subscriptions_bp.before_request(
+    marketplace_view_arg_hook({"subscription_id": global_target("hub_modules")})
+)
+
+
+def _module_ref(raw: uuid.UUID | str | None) -> int:
+    """Numeric `marketplace_modules` id for a body module UUID; `UNKNOWN_ID` when it owns none."""
+    dal = _dal()
+    bind_marketplace_vendor_tables(dal)
+    resolved = body_id(dal, "marketplace_modules", str(raw))
+    return UNKNOWN_ID if resolved is None else resolved
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -348,7 +374,8 @@ class CreateDiscountCodeRequest:
     code: str
     discountType: str
     discountValue: float
-    moduleId: int | None = None
+    #: Module public UUID (never the numeric id).
+    moduleId: uuid.UUID | None = None
     validFrom: str | None = None
     validUntil: str | None = None
     maxUses: int | None = None
@@ -365,6 +392,9 @@ async def create_discount_code(data: CreateDiscountCodeRequest) -> tuple[dict[st
     from datetime import datetime
 
     vendor_id = get_current_user_id(request)
+    module_id = _module_ref(data.moduleId) if data.moduleId is not None else None
+    if module_id == UNKNOWN_ID:
+        return api_error("Module not found", 404)
     try:
         dto = svc.create_discount_code(
             _dal(),
@@ -372,18 +402,19 @@ async def create_discount_code(data: CreateDiscountCodeRequest) -> tuple[dict[st
             code=data.code,
             discount_type=data.discountType,
             discount_value=data.discountValue,
-            module_id=data.moduleId,
+            module_id=module_id,
             valid_from=datetime.fromisoformat(data.validFrom) if data.validFrom else None,
             valid_until=datetime.fromisoformat(data.validUntil) if data.validUntil else None,
             max_uses=data.maxUses,
             description=data.description,
         )
     except ApiError as exc:
+        logger.debug("handled %s in discount create: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return {"success": True, "data": {"discountCode": dataclasses.asdict(dto)}}, 201
 
 
-@discount_bp.route("/<int:code_id>", methods=["PUT"])
+@discount_bp.route("/<puuid:code_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.discount:write")  # type: ignore[misc]
 async def update_discount_code(code_id: int) -> tuple[dict[str, object], int]:
@@ -392,6 +423,11 @@ async def update_discount_code(code_id: int) -> tuple[dict[str, object], int]:
 
     vendor_id = get_current_user_id(request)
     payload = await request.get_json(force=True, silent=True) or {}
+    if payload.get("moduleId") is not None:
+        module_id = _module_ref(payload["moduleId"])
+        if module_id == UNKNOWN_ID:
+            return api_error("Module not found", 404)
+        payload["moduleId"] = module_id
     if "discountValue" in payload:
         try:
             payload["discountValue"] = float(payload["discountValue"])
@@ -404,7 +440,7 @@ async def update_discount_code(code_id: int) -> tuple[dict[str, object], int]:
     return {"success": True, "data": {"discountCode": dataclasses.asdict(dto)}}, 200
 
 
-@discount_bp.route("/<int:code_id>", methods=["DELETE"])
+@discount_bp.route("/<puuid:code_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.discount:write")  # type: ignore[misc]
 async def delete_discount_code(code_id: int) -> tuple[dict[str, object], int]:
@@ -424,7 +460,8 @@ class ValidateDiscountCodeRequest:
     """Request DTO for `POST /vendor/discount-codes/validate`."""
 
     code: str
-    moduleId: int
+    #: Module public UUID (never the numeric id).
+    moduleId: uuid.UUID
 
 
 @discount_bp.route("/validate", methods=["POST"])
@@ -437,8 +474,9 @@ async def validate_discount_code(
 ) -> svc.DiscountValidationDTO | tuple[dict[str, object], int]:
     """`POST /vendor/discount-codes/validate` -- any authenticated caller (Node's `requireAuth`)."""
     try:
-        return svc.validate_discount_code(_dal(), data.code, data.moduleId)
+        return svc.validate_discount_code(_dal(), data.code, _module_ref(data.moduleId))
     except ApiError as exc:
+        logger.debug("handled %s in discount validate: %s", type(exc).__name__, exc.code)
         return _err(exc)
 
 
@@ -452,7 +490,8 @@ class RedeemDiscountCodeRequest:
     caller).
     """
 
-    codeId: int
+    #: Discount code public UUID (never the numeric id).
+    codeId: uuid.UUID
     #: Community public UUID (never the numeric id).
     communityId: uuid.UUID
     subscriptionId: int
@@ -468,8 +507,15 @@ async def redeem_discount_code(data: RedeemDiscountCodeRequest) -> tuple[dict[st
     denied = _require_community_admin(community_id)
     if denied is not None:
         return denied
+    code_id = body_id(_dal(), "vendor_discount_codes", str(data.codeId))
     try:
-        result = svc.redeem_discount_code(_dal(), data.codeId, community_id, data.subscriptionId)
+        # An unknown code resolves to the sentinel id: the service's existing "no longer valid".
+        result = svc.redeem_discount_code(
+            _dal(),
+            UNKNOWN_ID if code_id is None else code_id,
+            community_id,
+            data.subscriptionId,
+        )
     except ApiError as exc:
         logger.warning("discount redeem refused: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
@@ -505,7 +551,8 @@ async def list_subscriptions(community_id: int) -> tuple[dict[str, object], int]
 class SubscribeModuleRequest:
     """Request DTO for `POST /communities/<id>/subscriptions`."""
 
-    moduleId: int
+    #: Module public UUID (never the numeric id).
+    moduleId: uuid.UUID
 
 
 @subscriptions_bp.route("/<cuuid:community_id>/subscriptions", methods=["POST"])
@@ -520,19 +567,23 @@ async def subscribe_module(
     if denied is not None:
         return denied
     user_id = get_current_user_id(request)
+    module_id = body_id(_dal(), "hub_modules", str(data.moduleId))
+    if module_id is None:
+        return api_error("Module not found", 404)
     try:
-        new_id = svc.subscribe_module(_dal(), community_id, data.moduleId, user_id)
+        svc.subscribe_module(_dal(), community_id, module_id, user_id)
     except ApiError as exc:
+        logger.debug("handled %s in module subscribe: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return {
         "success": True,
         "message": "Module subscribed successfully",
-        "subscription": {"id": new_id},
+        "subscription": {"id": public_id_for(_dal(), "hub_modules", module_id)},
     }, 201
 
 
 @subscriptions_bp.route(
-    "/<cuuid:community_id>/subscriptions/<int:subscription_id>", methods=["PUT"]
+    "/<cuuid:community_id>/subscriptions/<puuid:subscription_id>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.subscription:write")  # type: ignore[misc]
@@ -558,7 +609,7 @@ async def update_subscription(
 
 
 @subscriptions_bp.route(
-    "/<cuuid:community_id>/subscriptions/<int:subscription_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/subscriptions/<puuid:subscription_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace.subscription:write")  # type: ignore[misc]

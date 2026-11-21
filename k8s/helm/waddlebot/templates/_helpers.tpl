@@ -1321,3 +1321,24 @@ loudly -- there is no silent fallback to a different exposure:
 {{- end -}}
 {{- dict "udpPort" $udp "iceTcpEnabled" $tcpOn "iceTcpPort" $tcp "serviceEnabled" (eq (toString $svc.enabled) "true") "serviceType" $type "nodePortUdp" (int $svc.nodePort.udp) "nodePortTcp" (int $svc.nodePort.tcp) | toJson -}}
 {{- end }}
+
+{{/*
+Backend port for one Ingress path / HTTPRoute rule. hub-api's port has exactly one source,
+`.Values.pipeline.hubApi.port` (its Service port and containerPort): a route to hub-api-v3 may
+omit `port` and inherits it, and a route that sets a DIFFERENT port fails the render, so a stale
+literal (e.g. the Node-era hub port) can never silently point a public route at a dead port.
+Other backends must set `port` explicitly. Usage: include "waddlebot.routeBackendPort" (dict "root" $ "route" .)
+*/}}
+{{- define "waddlebot.routeBackendPort" -}}
+{{- $r := .route -}}
+{{- $target := printf "%s %s" (($r.service | default "") | toString) (($r.rawService | default "") | toString) | trim -}}
+{{- if regexMatch "hub-api-v3$" $target -}}
+{{- $canon := .root.Values.pipeline.hubApi.port -}}
+{{- if and $r.port (ne (toString $r.port) (toString $canon)) -}}
+{{- fail (printf "route %q -> %s sets port %v but hub-api serves on pipeline.hubApi.port=%v; drop the port to inherit it" ($r.path | toString) $target $r.port $canon) -}}
+{{- end -}}
+{{- $canon -}}
+{{- else -}}
+{{- required (printf "route %q -> %s needs an explicit port" ($r.path | toString) $target) $r.port -}}
+{{- end -}}
+{{- end -}}
