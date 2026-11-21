@@ -433,7 +433,7 @@ async def _no_store(response: Response) -> Response:
 
 
 @connections_internal_bp.route(
-    "/communities/<int:community_id>/connections/<provider>/token", methods=["GET"]
+    "/communities/<cuuid:community_id>/connections/<provider>/token", methods=["GET"]
 )
 @_token_authenticated
 async def internal_get_token(community_id: int, provider: str) -> tuple[dict[str, Any], int]:

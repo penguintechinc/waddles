@@ -646,5 +646,46 @@ class TestRadioStations:
         assert remove_again.status_code == 404
 
 
+class TestRadioStationPublicUuid:
+    """`<puuid:station_id>`: UUID resolves; a foreign-community UUID and a numeric id are 404."""
+
+    async def test_uuid_resolves_foreign_and_numeric_404(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid
+
+        dal = streaming_db.dal
+        community_id = _seed_community(streaming_db)
+        other = _seed_community(streaming_db)
+        admin = TestMusicSettings()._admin_headers
+        headers = admin(streaming_db, community_id=community_id)
+        other_headers = admin(streaming_db, community_id=other)
+
+        added = await client.post(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/radio-stations", community_id),
+            headers=headers,
+            json={"name": "Lofi", "url": "https://8.8.8.8/lofi"},
+        )
+        station_uuid = assert_uuid((await added.get_json())["station"]["id"])
+        numeric_id = int(
+            dal(dal.community_radio_stations.public_id == station_uuid).select().first().id
+        )
+        tmpl = "/api/v1/admin/{community_id}/music/radio-stations/{station_id}"
+
+        foreign = await client.delete(
+            cpath(streaming_db, tmpl, other, station_id=station_uuid), headers=other_headers
+        )
+        numeric = await client.delete(
+            cpath(streaming_db, tmpl, community_id, station_id=numeric_id), headers=headers
+        )
+        assert (foreign.status_code, numeric.status_code) == (404, 404)
+        assert dal(dal.community_radio_stations.id == numeric_id).count() == 1
+
+        ok = await client.delete(
+            cpath(streaming_db, tmpl, community_id, station_id=station_uuid), headers=headers
+        )
+        assert ok.status_code == 200
+
+
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).
 UUID_COMMUNITY_RESPONSES = True

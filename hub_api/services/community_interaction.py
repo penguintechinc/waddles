@@ -19,6 +19,7 @@ from .community_common import ensure_community_tables, sql_bool
 from .community_public_id import lookup_public_ids_sync
 from .community_relay import relay_message
 from .errors import ApiError
+from .public_ids import Scope, lookup_public_ids, parse_public_id, resolve_public_id_sync
 from .scope_registry import (
     KIND_CUSTOM,
     KIND_FIXED,
@@ -89,7 +90,7 @@ def _public_id(dal: Any, community_id: int) -> str:
 def _channel_dto(row: Any, public_community_id: str) -> dict[str, Any]:
     """Channel wire dict; `community_id` is the community's PUBLIC UUID."""
     return {
-        "id": row.id,
+        "id": str(row.public_id),
         "community_id": public_community_id,
         "name": row.name,
         "description": row.description,
@@ -270,10 +271,11 @@ def delete_hub_channel(dal: Any, community_id: int, channel_id: int) -> bool:
 # ── Forum CRUD ───────────────────────────────────────────────────────────
 
 
-def _post_summary_dto(row: Any) -> dict[str, Any]:
+def _post_summary_dto(row: Any, channel_public_id: str) -> dict[str, Any]:
+    """Post wire dict; `id` and `hub_channel_id` are PUBLIC UUIDs (never the numeric ids)."""
     return {
-        "id": row.id,
-        "hub_channel_id": row.hub_channel_id,
+        "id": str(row.public_id),
+        "hub_channel_id": channel_public_id,
         "title": row.title,
         "body": row.body,
         "tags": row.tags or [],
@@ -307,7 +309,8 @@ def get_forum_posts(
         ),
         limitby=(offset, offset + limit),
     )
-    return [_post_summary_dto(r) for r in rows], total
+    channel_public_id = lookup_public_ids(dal, "hub_channels", [channel_id])[int(channel_id)]
+    return [_post_summary_dto(r, channel_public_id) for r in rows], total
 
 
 def get_forum_post(dal: Any, community_id: int, post_id: int) -> dict[str, Any] | None:
@@ -325,10 +328,12 @@ def get_forum_post(dal: Any, community_id: int, post_id: int) -> dict[str, Any] 
     replies = dal(dal.hub_forum_replies.post_id == post_id).select(
         orderby=dal.hub_forum_replies.created_at
     )
-    post = _post_summary_dto(row)
+    post = _post_summary_dto(
+        row, lookup_public_ids(dal, "hub_channels", [row.hub_channel_id])[int(row.hub_channel_id)]
+    )
     post["replies"] = [
         {
-            "id": r.id,
+            "id": str(r.public_id),
             "author_hub_user_id": r.author_hub_user_id,
             "author_platform": r.author_platform,
             "author_username": r.author_username,
@@ -395,7 +400,11 @@ async def create_forum_post(
             },
             message_type="forum_post",
         )
-    return {"id": row.id, "title": row.title, "created_at": _iso(row.created_at)}, None
+    return {
+        "id": str(row.public_id),
+        "title": row.title,
+        "created_at": _iso(row.created_at),
+    }, None
 
 
 async def create_forum_reply(
@@ -451,15 +460,21 @@ async def create_forum_reply(
             },
             message_type="forum_reply",
         )
-    return {"id": row.id, "content": row.content, "created_at": _iso(row.created_at)}, None
+    return {
+        "id": str(row.public_id),
+        "content": row.content,
+        "created_at": _iso(row.created_at),
+    }, None
 
 
 def moderate_forum_post(
     dal: Any, community_id: int, post_id: int, payload: dict[str, Any]
 ) -> str | None:
-    """Pin/lock/delete a post. Returns `None` on success, else an error string."""
+    """Pin/lock/delete a post. Returns `None` on success, else an error string (`__not_found__`)."""
     ensure_community_tables(dal)
     query = (dal.hub_forum_posts.id == post_id) & (dal.hub_forum_posts.community_id == community_id)
+    if dal(query).select(dal.hub_forum_posts.id, limitby=(0, 1)).first() is None:
+        return "__not_found__"  # unknown / foreign-community post: one indistinguishable 404
     if payload.get("delete"):
         dal(query).delete()
         dal.commit()
@@ -476,6 +491,26 @@ def moderate_forum_post(
     dal(query).update(**fields)
     dal.commit()
     return None
+
+
+def resolve_reply_public_id(dal: Any, raw: object, community_id: int) -> int | None:
+    """Numeric id of the reply with public UUID `raw` IF its post belongs to `community_id`.
+
+    `hub_forum_replies` has no community column, so scope goes through the parent post. Every miss
+    (malformed, unknown, foreign community) returns `None` -- one indistinguishable not-found.
+    """
+    canonical = parse_public_id(raw)
+    if canonical is None:
+        return None
+    ensure_community_tables(dal)
+    reply, post = dal.hub_forum_replies, dal.hub_forum_posts
+    query = (
+        (reply.public_id == canonical)
+        & (reply.post_id == post.id)
+        & (post.community_id == community_id)
+    )
+    row = dal(query).select(reply.id, limitby=(0, 1)).first()
+    return int(row.id) if row is not None else None
 
 
 def delete_forum_reply(dal: Any, community_id: int, reply_id: int) -> bool:
@@ -546,7 +581,7 @@ def _role_dto(row: Any, public_community_id: str) -> dict[str, Any]:
     kind = role_kind_of(row)
     scopes = sorted(effective_scopes(kind, claims.get("scopes", [])))
     return {
-        "id": row.id,
+        "id": str(row.public_id),
         "community_id": public_community_id,
         "name": row.name,
         "display_name": row.display_name,
@@ -744,7 +779,7 @@ def get_channel_permission_overrides(
         dal,
         """
         SELECT o.id, o.hub_channel_id, o.community_role_id, cr.name, cr.display_name,
-               o.grant_scopes, o.deny_scopes, o.scope, o.created_at
+               o.grant_scopes, o.deny_scopes, o.scope, o.created_at, cr.public_id
         FROM hub_channel_permission_overrides o
         JOIN community_roles cr ON cr.id = o.community_role_id
         WHERE o.hub_channel_id = $1
@@ -752,11 +787,12 @@ def get_channel_permission_overrides(
         """,
         placeholders=[channel_id],
     )
+    channel_public_id = lookup_public_ids(dal, "hub_channels", [channel_id])[int(channel_id)]
     return [
         {
             "id": r[0],
-            "hub_channel_id": r[1],
-            "community_role_id": r[2],
+            "hub_channel_id": channel_public_id,
+            "community_role_id": str(r[9]),
             "role_name": r[3],
             "role_display_name": r[4],
             "grant_scopes": r[5] or [],
@@ -810,11 +846,16 @@ def _validated_overrides(
     for override in overrides:
         if not isinstance(override, dict):
             raise ApiError("each override must be an object", 400, "BAD_REQUEST")
-        role_id = override.get("communityRoleId")
-        if not role_id:
+        raw_role_id = override.get("communityRoleId")
+        if not raw_role_id:
             continue
-        if isinstance(role_id, bool) or not isinstance(role_id, int):
-            raise ApiError("communityRoleId must be an integer", 400, "BAD_REQUEST")
+        # The client names the role by its public UUID; unknown/foreign/malformed/numeric all give
+        # the same 400 (the role must belong to THIS community).
+        role_id = resolve_public_id_sync(
+            dal, "community_roles", raw_role_id, scope=Scope(community_id=community_id)
+        )
+        if role_id is None:
+            raise ApiError("Role not found in this community", 400, "BAD_REQUEST")
         role = (
             dal(
                 (dal.community_roles.id == role_id)

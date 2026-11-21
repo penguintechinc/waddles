@@ -64,7 +64,6 @@ CONNECTION_FIELDS = {
     "kind",
     "metadata",
     "provider",
-    "publicId",
     "resourceType",
     "shared",
     "status",

@@ -122,7 +122,10 @@ class TestEnvTokens:
 class TestFetchCommunityTokens:
     async def test_full_response_maps_every_field(self, monkeypatch: pytest.MonkeyPatch) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
-            assert request.url.path == "/api/v1/internal/communities/42/connections/youtube/token"
+            assert (
+                request.url.path
+                == "/api/v1/internal/communities/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/connections/youtube/token"
+            )
             return httpx.Response(
                 200,
                 json={
@@ -134,7 +137,12 @@ class TestFetchCommunityTokens:
             )
 
         _patch_client(monkeypatch, handler)
-        result = await fetch_community_tokens(42, "youtube", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            42,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
 
         assert result == CommunityTokens(
             access_token="at-abc",
@@ -160,7 +168,12 @@ class TestFetchCommunityTokens:
                 },
             ),
         )
-        result = await fetch_community_tokens(3, "youtube", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            3,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is not None and result.access_token == "at-env"
         assert result.scopes == ["s"]
 
@@ -173,7 +186,12 @@ class TestFetchCommunityTokens:
             )
 
         _patch_client(monkeypatch, handler)
-        result = await fetch_community_tokens(7, "kick", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            7,
+            "kick",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
 
         assert result == CommunityTokens(
             access_token="at-only",
@@ -185,7 +203,12 @@ class TestFetchCommunityTokens:
 
     async def test_404_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_client(monkeypatch, lambda r: httpx.Response(404))
-        result = await fetch_community_tokens(1, "twitch", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            1,
+            "twitch",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is None
 
     async def test_502_refresh_failed_returns_none_and_warns(
@@ -193,13 +216,23 @@ class TestFetchCommunityTokens:
     ) -> None:
         _patch_client(monkeypatch, lambda r: httpx.Response(502, json={"error": "refresh_failed"}))
         with caplog.at_level("WARNING", logger="waddle_transports.community_credentials"):
-            result = await fetch_community_tokens(1, "twitch", hub_api_url="https://hub.internal")
+            result = await fetch_community_tokens(
+                1,
+                "twitch",
+                community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                hub_api_url="https://hub.internal",
+            )
         assert result is None
         assert any("fetch_rejected" in r.message and "502" in r.message for r in caplog.records)
 
     async def test_503_feature_off_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_client(monkeypatch, lambda r: httpx.Response(503))
-        result = await fetch_community_tokens(1, "slack", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            1,
+            "slack",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is None
 
     async def test_network_error_returns_none_and_warns(
@@ -210,7 +243,12 @@ class TestFetchCommunityTokens:
 
         _patch_client(monkeypatch, handler)
         with caplog.at_level("WARNING", logger="waddle_transports.community_credentials"):
-            result = await fetch_community_tokens(1, "discord", hub_api_url="https://hub.internal")
+            result = await fetch_community_tokens(
+                1,
+                "discord",
+                community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                hub_api_url="https://hub.internal",
+            )
         assert result is None
         assert any("fetch_unreachable" in r.message for r in caplog.records)
 
@@ -219,7 +257,12 @@ class TestFetchCommunityTokens:
             raise httpx.ReadTimeout("timed out", request=request)
 
         _patch_client(monkeypatch, handler)
-        result = await fetch_community_tokens(1, "discord", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            1,
+            "discord",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is None
 
     async def test_malformed_json_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -227,17 +270,32 @@ class TestFetchCommunityTokens:
             return httpx.Response(200, content=b"not json")
 
         _patch_client(monkeypatch, handler)
-        result = await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            1,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is None
 
     async def test_non_dict_json_body_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_client(monkeypatch, lambda r: httpx.Response(200, json=["nope"]))
-        result = await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            1,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is None
 
     async def test_missing_access_token_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _patch_client(monkeypatch, lambda r: httpx.Response(200, json={"refresh_token": "rt"}))
-        result = await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            1,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is None
 
     async def test_malformed_expires_at_degrades_to_none(
@@ -247,7 +305,12 @@ class TestFetchCommunityTokens:
             monkeypatch,
             lambda r: httpx.Response(200, json={"access_token": "at", "expires_at": "not-a-date"}),
         )
-        result = await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
+        result = await fetch_community_tokens(
+            1,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert result is not None
         assert result.expires_at is None
 
@@ -262,7 +325,12 @@ class TestFetchCommunityTokens:
             return httpx.Response(200, json={"access_token": "at"})
 
         _patch_client(monkeypatch, handler)
-        await fetch_community_tokens(9, "youtube", hub_api_url="https://hub.internal")
+        await fetch_community_tokens(
+            9,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert len(seen) == 1
         assert seen[0].headers["Authorization"] == f"Bearer {_MINT_JWT}"
         assert "X-Service-Key" not in seen[0].headers
@@ -271,8 +339,18 @@ class TestFetchCommunityTokens:
         self, monkeypatch: pytest.MonkeyPatch, _mint: _FakeMint, _sa_token: Any
     ) -> None:
         _patch_client(monkeypatch, lambda r: httpx.Response(200, json={"access_token": "at"}))
-        await fetch_community_tokens(42, "youtube", hub_api_url="https://hub.internal")
-        await fetch_community_tokens(42, "youtube", hub_api_url="https://hub.internal")
+        await fetch_community_tokens(
+            42,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
+        await fetch_community_tokens(
+            42,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert len(_mint.calls) == 1  # second call reuses the cached community JWT
         assert _mint.calls[0] == {
             "endpoint": "https://hub-grpc.internal:50204",
@@ -288,7 +366,12 @@ class TestFetchCommunityTokens:
         seen: list[httpx.Request] = []
         _patch_client(monkeypatch, lambda r: seen.append(r) or httpx.Response(200, json={}))
         with caplog.at_level("WARNING", logger="waddle_transports.community_credentials"):
-            result = await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
+            result = await fetch_community_tokens(
+                1,
+                "youtube",
+                community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                hub_api_url="https://hub.internal",
+            )
         assert result is None and seen == [] and _mint.calls == []
         assert any("mint_no_endpoint" in r.message for r in caplog.records)
 
@@ -312,7 +395,12 @@ class TestFetchCommunityTokens:
         seen: list[httpx.Request] = []
         _patch_client(monkeypatch, lambda r: seen.append(r) or httpx.Response(200, json={}))
         with caplog.at_level("WARNING", logger="waddle_transports.community_credentials"):
-            result = await fetch_community_tokens(1, "youtube", hub_api_url="https://hub.internal")
+            result = await fetch_community_tokens(
+                1,
+                "youtube",
+                community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+                hub_api_url="https://hub.internal",
+            )
         assert result is None
         assert seen == []
         assert any("mint_failed" in r.message and reason in r.message for r in caplog.records)
@@ -321,7 +409,12 @@ class TestFetchCommunityTokens:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         _patch_client(monkeypatch, lambda r: httpx.Response(401))
-        await fetch_community_tokens(5, "youtube", hub_api_url="https://hub.internal")
+        await fetch_community_tokens(
+            5,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://hub.internal",
+        )
         assert 5 not in community_credentials._jwt_cache
 
     async def test_uses_explicit_hub_api_url_over_env(
@@ -335,7 +428,12 @@ class TestFetchCommunityTokens:
             return httpx.Response(200, json={"access_token": "at"})
 
         _patch_client(monkeypatch, handler)
-        await fetch_community_tokens(1, "youtube", hub_api_url="https://explicit.internal")
+        await fetch_community_tokens(
+            1,
+            "youtube",
+            community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+            hub_api_url="https://explicit.internal",
+        )
         assert captured["host"] == "explicit.internal"
 
     async def test_falls_back_to_hub_api_internal_url_env(
@@ -350,7 +448,9 @@ class TestFetchCommunityTokens:
             return httpx.Response(200, json={"access_token": "at"})
 
         _patch_client(monkeypatch, handler)
-        await fetch_community_tokens(1, "youtube")
+        await fetch_community_tokens(
+            1, "youtube", community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
         assert captured["host"] == "internal-env.example"
 
     async def test_falls_back_to_hub_api_url_env_when_internal_unset(
@@ -365,7 +465,9 @@ class TestFetchCommunityTokens:
             return httpx.Response(200, json={"access_token": "at"})
 
         _patch_client(monkeypatch, handler)
-        await fetch_community_tokens(1, "youtube")
+        await fetch_community_tokens(
+            1, "youtube", community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
         assert captured["host"] == "public-env.example"
 
     async def test_falls_back_to_builtin_default_when_no_env_set(
@@ -380,7 +482,9 @@ class TestFetchCommunityTokens:
             return httpx.Response(200, json={"access_token": "at"})
 
         _patch_client(monkeypatch, handler)
-        await fetch_community_tokens(1, "youtube")
+        await fetch_community_tokens(
+            1, "youtube", community_public_id="aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+        )
         assert captured["host"] == "hub-api"
 
 

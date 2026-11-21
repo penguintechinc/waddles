@@ -102,6 +102,34 @@ def _feature_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(inventory_module, "feature_enabled", AsyncMock(return_value=True))
 
 
+def _join_other(dal: Any, other: int, *, admin: bool) -> None:
+    """Make users 1 (member) and 2 (admin) active in `other` so only SCOPE can reject them."""
+    role = dal.community_roles.insert(
+        community_id=other,
+        name="community-owner",
+        is_system=True,
+        role_kind=1,
+        base_claims={"scopes": []},
+    )
+    for uid, kind, role_id in (("1", "member", None), ("2", "community-owner", role)):
+        if kind == "community-owner" and not admin:
+            continue
+        dal.community_members.insert(
+            community_id=other,
+            user_id=uid,
+            role=kind,
+            is_active=True,
+            user_uuid=f"uuid-other-{uid}",
+            community_role_id=role_id,
+        )
+    dal.commit()
+
+
+def _nid(dal: Any, public_uuid: str) -> int:
+    """Numeric `inventory_items.id` behind a response's public UUID (for direct DB asserts)."""
+    return int(dal(dal.inventory_items.public_id == public_uuid).select().first().id)
+
+
 async def _post_json(
     client: Any, path: str, headers: dict[str, str], payload: dict[str, Any]
 ) -> Any:
@@ -142,10 +170,26 @@ class TestUnknownCommunity404Sweep:
         "method,path_suffix,scope",
         [
             ("POST", "inventory/items", "community.inventory:write"),
-            ("PUT", "inventory/items/1", "community.inventory:write"),
-            ("DELETE", "inventory/items/1", "community.inventory:write"),
-            ("POST", "inventory/items/1/stock/add", "community.inventory:write"),
-            ("POST", "inventory/items/1/stock/remove", "community.inventory:write"),
+            (
+                "PUT",
+                "inventory/items/00000000-0000-4000-8000-00000000dead",
+                "community.inventory:write",
+            ),
+            (
+                "DELETE",
+                "inventory/items/00000000-0000-4000-8000-00000000dead",
+                "community.inventory:write",
+            ),
+            (
+                "POST",
+                "inventory/items/00000000-0000-4000-8000-00000000dead/stock/add",
+                "community.inventory:write",
+            ),
+            (
+                "POST",
+                "inventory/items/00000000-0000-4000-8000-00000000dead/stock/remove",
+                "community.inventory:write",
+            ),
             ("GET", "inventory/checkouts", "community.inventory:read"),
             ("GET", "inventory/summary", "community.inventory:read"),
             ("GET", "inventory/log", "community.inventory:read"),
@@ -279,7 +323,7 @@ class TestCheckoutCheckin:
         checkout = (await checkout_resp.get_json())["checkout"]
         assert checkout["status"] == "active"
         assert dal(dal.inventory_checkouts.id == checkout["id"]).count() == 1
-        assert dal.inventory_items[item_id].available_quantity == 1
+        assert dal.inventory_items[_nid(dal, item_id)].available_quantity == 1
 
         my_items_resp = await client.get(
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/my-items",
@@ -295,7 +339,7 @@ class TestCheckoutCheckin:
         )
         assert checkin_resp.status_code == 200
         assert (await checkin_resp.get_json())["checkout"]["status"] == "returned"
-        assert dal.inventory_items[item_id].available_quantity == 2
+        assert dal.inventory_items[_nid(dal, item_id)].available_quantity == 2
 
     async def test_checkout_insufficient_quantity_is_409(
         self, client: Any, auth_headers: Any, community_db: Any
@@ -337,7 +381,7 @@ class TestCheckoutCheckin:
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
-            {"item_id": 1, "quantity": "not-a-number"},
+            {"item_id": "00000000-0000-4000-8000-00000000dead", "quantity": "not-a-number"},
         )
         assert response.status_code == 400
 
@@ -349,7 +393,7 @@ class TestCheckoutCheckin:
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/checkout",
             auth_headers(scope="community.inventory:use", user_id="1"),
-            {"item_id": 9999, "quantity": 1},
+            {"item_id": "00000000-0000-4000-8000-00000000dead", "quantity": 1},
         )
         assert response.status_code == 404
 
@@ -466,7 +510,8 @@ class TestStockAdjustments:
         _, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{public_id(community_db[0], community_id)}/inventory/items/1/stock/add",
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}"
+            f"/inventory/items/{UNKNOWN_PUBLIC_ID}/stock/add",
             auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": -1},
         )
@@ -502,7 +547,7 @@ class TestStockAdjustments:
         response = await _post_json(
             client,
             f"/api/v1/admin/{public_id(community_db[0], community_id)}"
-            f"/inventory/items/1/stock/remove",
+            f"/inventory/items/00000000-0000-4000-8000-00000000dead/stock/remove",
             auth_headers(scope="community.inventory:write", user_id="2"),
             {"quantity": 0},
         )
@@ -607,7 +652,10 @@ class TestListCheckoutsAuditAndSummary:
         # (that's the real stored function's job) -- insert a row directly so
         # the read path (get_audit_log) has something to filter/return.
         dal.inventory_log.insert(
-            item_id=item_id, community_id=community_id, action="add_stock", quantity_change=1
+            item_id=_nid(dal, item_id),
+            community_id=community_id,
+            action="add_stock",
+            quantity_change=1,
         )
         dal.commit()
 
@@ -701,10 +749,12 @@ class TestAvailableItems:
         """
         dal, community_id = community_db
         real_executesql = dal.executesql
+        seeded = dal.inventory_items.insert(community_id=community_id, name="Drone", quantity=1)
+        dal.commit()
 
         def fake_executesql(sql: str, placeholders: Any = None, **kwargs: Any) -> list[Any]:
             if "search_inventory_items" in sql:
-                return [(1, "Drone", "desc", "gear", "electronics", 1, 1, 0)]
+                return [(seeded, "Drone", "desc", "gear", "electronics", 1, 1, 0)]
             return real_executesql(sql, placeholders=placeholders, **kwargs)
 
         monkeypatch.setattr(dal, "executesql", fake_executesql)
@@ -733,7 +783,7 @@ def _hdr(auth_headers: Any, user_id: int, tenant: str = "acme-corp") -> dict[str
 
 MEMBER_ROUTES = [
     ("GET", "available", None),
-    ("POST", "checkout", {"item_id": 1, "quantity": 1}),
+    ("POST", "checkout", {"item_id": "00000000-0000-4000-8000-00000000dead", "quantity": 1}),
     ("GET", "my-items", None),
 ]
 ADMIN_READ_ROUTES = [("GET", "items"), ("GET", "checkouts"), ("GET", "summary"), ("GET", "log")]
@@ -1077,10 +1127,10 @@ class TestCheckinQuantityValidation:
 
 WRITE_ROUTES = [
     ("POST", "items", {"name": "X", "quantity": 1}),
-    ("PUT", "items/1", {"name": "Y"}),
-    ("DELETE", "items/1", None),
-    ("POST", "items/1/stock/add", {"quantity": 1}),
-    ("POST", "items/1/stock/remove", {"quantity": 1}),
+    ("PUT", "items/00000000-0000-4000-8000-00000000dead", {"name": "Y"}),
+    ("DELETE", "items/00000000-0000-4000-8000-00000000dead", None),
+    ("POST", "items/00000000-0000-4000-8000-00000000dead/stock/add", {"quantity": 1}),
+    ("POST", "items/00000000-0000-4000-8000-00000000dead/stock/remove", {"quantity": 1}),
 ]
 
 
@@ -1158,3 +1208,76 @@ class TestSoftBanExpiryBoundary:
             _url(dal, cid, "available"), headers=_hdr(auth_headers, SOFT_BANNED)
         )
         assert resp.status_code == status
+
+
+class TestInventoryItemPublicUuid:
+    """`<puuid:item_id>`: UUID resolves; foreign-community UUID and a numeric id are 404."""
+
+    async def test_uuid_resolves_foreign_and_numeric_404(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid, second_community
+
+        dal, community_id = community_db
+        other = second_community(dal, community_id)
+        _join_other(dal, other, admin=True)
+        base = f"/api/v1/admin/{public_id(dal, community_id)}/inventory/items"
+        write = auth_headers(scope="community.inventory:write", user_id="2")
+        created = await _post_json(client, base, write, {"name": "Cam", "quantity": 2})
+        item_uuid = assert_uuid((await created.get_json())["item"]["id"])
+
+        ok = await client.open(
+            f"{base}/{item_uuid}",
+            method="PUT",
+            headers={**write, "Content-Type": "application/json"},
+            data=json_module.dumps({"name": "Cam2"}),
+        )
+        assert ok.status_code == 200
+        assert (await ok.get_json())["item"]["id"] == item_uuid
+
+        foreign_base = f"/api/v1/admin/{public_id(dal, other)}/inventory/items"
+        numeric_id = _nid(dal, item_uuid)
+        codes = []
+        for path in (f"{foreign_base}/{item_uuid}", f"{base}/{numeric_id}"):
+            resp = await client.open(path, method="DELETE", headers=write)
+            codes.append(resp.status_code)
+        assert codes == [404, 404]
+        assert dal(dal.inventory_items.id == numeric_id).count() == 1
+
+    async def test_checkout_body_takes_uuid_and_foreign_or_numeric_is_404(
+        self, client: Any, auth_headers: Any, community_db: Any, monkeypatch: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid, second_community
+
+        def _fake_stock_fn(dal: Any, fn: str, item_id: int, qty: int, *rest: Any) -> Any:
+            return True, None
+
+        monkeypatch.setattr(inventory_svc, "_run_stock_fn", _fake_stock_fn)
+        dal, community_id = community_db
+        other = second_community(dal, community_id)
+        _join_other(dal, other, admin=True)
+        pid = public_id(dal, community_id)
+        created = await _post_json(
+            client,
+            f"/api/v1/admin/{pid}/inventory/items",
+            auth_headers(scope="community.inventory:write", user_id="2"),
+            {"name": "Mic", "quantity": 3},
+        )
+        item_uuid = (await created.get_json())["item"]["id"]
+        use = auth_headers(scope="community.inventory:use", user_id="1")
+        checkout_url = f"/api/v1/admin/{pid}/inventory/checkout"
+
+        ok = await _post_json(client, checkout_url, use, {"item_id": item_uuid, "quantity": 1})
+        assert ok.status_code == 201
+        assert assert_uuid((await ok.get_json())["checkout"]["item_id"]) == item_uuid
+
+        foreign = await _post_json(
+            client,
+            f"/api/v1/admin/{public_id(dal, other)}/inventory/checkout",
+            use,
+            {"item_id": item_uuid, "quantity": 1},
+        )
+        numeric = await _post_json(
+            client, checkout_url, use, {"item_id": _nid(dal, item_uuid), "quantity": 1}
+        )
+        assert (foreign.status_code, numeric.status_code) == (404, 404)

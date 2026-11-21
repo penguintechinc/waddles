@@ -27,6 +27,7 @@ from tests.provider_connections.support import (
     STATIC_URL,
     create_static,
     grant_to,
+    numeric_connection_id,
     raw_rows,
     set_column,
 )
@@ -615,7 +616,10 @@ class TestTwitchBindingMetadata:
         assert resolved.status_code == 409
         assert (await resolved.get_json())["reason"] == "metadata_incomplete"
         lines = [r.getMessage() for r in caplog.records if "binding_incomplete" in r.getMessage()]
-        assert lines and all(f"connection_id={conn}" in line and missing in line for line in lines)
+        numeric = await numeric_connection_id(pc_db, conn)
+        assert lines and all(
+            f"connection_id={numeric}" in line and missing in line for line in lines
+        )
         # never a value
         assert not any(CHANNEL_LOGIN in line or BOT.login in line for line in lines)
 

@@ -187,8 +187,8 @@ impl Live {
         }
     }
 
-    /// Creates a Twitch binding through the REAL admin API; returns the connection id.
-    async fn create_binding(&self, which: usize) -> i64 {
+    /// Creates a Twitch binding through the REAL admin API; returns the connection's public UUID.
+    async fn create_binding(&self, which: usize) -> String {
         let (access, refresh) = &self.bot_tokens[which];
         let resp = self
             .http
@@ -210,11 +210,14 @@ impl Live {
         assert_eq!(status, 201, "admin create twitch binding failed: {text}");
         let body: Value = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("create body not JSON ({e}): {text}"));
-        body["connection"]["id"].as_i64().expect("connection id")
+        body["connection"]["id"]
+            .as_str()
+            .expect("connection public id")
+            .to_string()
     }
 
     /// Deletes a binding through the REAL admin API.
-    async fn delete_binding(&self, connection: i64) {
+    async fn delete_binding(&self, connection: &str) {
         let resp = self
             .http
             .delete(format!(
@@ -380,7 +383,7 @@ async fn live_hub_binding_created_via_api_starts_a_session_within_one_interval()
     live.report("create");
     // The hub DB is shared by every test in this run: remove this binding so the next test
     // starts from an empty desired set.
-    live.delete_binding(conn).await;
+    live.delete_binding(&conn).await;
     stop.send(()).expect("stop manager");
     task.await.expect("manager task");
 }
@@ -401,7 +404,7 @@ async fn live_hub_binding_deleted_via_api_stops_the_session() {
     .await;
     assert_eq!(live.server.live_conn_count(), 1);
 
-    live.delete_binding(conn).await;
+    live.delete_binding(&conn).await;
     let elapsed = within("socket closed after API delete", limit, || {
         live.server.live_conn_count() == 0
     })

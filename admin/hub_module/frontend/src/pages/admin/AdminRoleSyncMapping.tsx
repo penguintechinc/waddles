@@ -89,7 +89,7 @@ export default function AdminRoleSyncMapping() {
     }
   }, [installResult, installReason, communityId, queryClient]);
 
-  const [selectedPairingId, setSelectedPairingId] = useState<number | null>(null);
+  const [selectedPairingId, setSelectedPairingId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<RoleSyncBinding | null>(null);
 
@@ -114,14 +114,14 @@ export default function AdminRoleSyncMapping() {
     isLoading: bindingsLoading,
     error: bindingsError,
   } = useQuery({
-    queryKey: roleSyncKeys.bindings(communityId, activePairingId ?? -1),
-    queryFn: () => roleSyncApi.listBindings(communityId, activePairingId as number),
+    queryKey: roleSyncKeys.bindings(communityId, activePairingId ?? ''),
+    queryFn: () => roleSyncApi.listBindings(communityId, activePairingId as string),
     enabled: pageEnabled && hasValidCommunity && activePairingId !== null,
   });
 
   const createMutation = useMutation({
     mutationFn: (payload: CreateRoleSyncBindingPayload) =>
-      roleSyncApi.createBinding(communityId, activePairingId as number, payload),
+      roleSyncApi.createBinding(communityId, activePairingId as string, payload),
     onSuccess: (binding) => {
       console.debug('[RoleSyncMapping] CreateBinding', {
         communityId,
@@ -129,7 +129,7 @@ export default function AdminRoleSyncMapping() {
         syncScope: binding.sync_scope,
       });
       void queryClient.invalidateQueries({
-        queryKey: roleSyncKeys.bindings(communityId, activePairingId as number),
+        queryKey: roleSyncKeys.bindings(communityId, activePairingId as string),
       });
       setCreateOpen(false);
     },
@@ -144,7 +144,7 @@ export default function AdminRoleSyncMapping() {
 
   const toggleMutation = useMutation({
     mutationFn: (enabled: boolean) =>
-      roleSyncApi.updatePairing(communityId, activePairingId as number, { sync_enabled: enabled }),
+      roleSyncApi.updatePairing(communityId, activePairingId as string, { sync_enabled: enabled }),
     onMutate: async (enabled) => {
       const key = roleSyncKeys.pairings(communityId);
       await queryClient.cancelQueries({ queryKey: key });
@@ -171,7 +171,7 @@ export default function AdminRoleSyncMapping() {
 
   const deleteMutation = useMutation({
     mutationFn: (binding: RoleSyncBinding) =>
-      roleSyncApi.deleteBinding(communityId, activePairingId as number, binding.id),
+      roleSyncApi.deleteBinding(communityId, activePairingId as string, binding.id),
     onSuccess: (_result, binding) => {
       console.debug('[RoleSyncMapping] DeleteBinding', {
         communityId,
@@ -179,7 +179,7 @@ export default function AdminRoleSyncMapping() {
         bindingId: binding.id,
       });
       void queryClient.invalidateQueries({
-        queryKey: roleSyncKeys.bindings(communityId, activePairingId as number),
+        queryKey: roleSyncKeys.bindings(communityId, activePairingId as string),
       });
       setDeleteTarget(null);
     },
@@ -330,7 +330,7 @@ export default function AdminRoleSyncMapping() {
           <select
             id="pairing-select"
             value={activePairingId ?? ''}
-            onChange={(e) => setSelectedPairingId(Number(e.target.value))}
+            onChange={(e) => setSelectedPairingId(e.target.value)}
             className="rounded border border-line-strong bg-surface-raised px-3 py-2 text-fg focus:outline-none focus:ring-2 focus:ring-sky-500"
           >
             {pairings?.map((pairing) => (
