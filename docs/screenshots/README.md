@@ -15,14 +15,14 @@ committed). Never hand-update a subset.
 export POSTGRES_PASSWORD=...  ADMIN_EMAIL=...  ADMIN_PASSWORD=...
 make seed-mock-data            # SEED_ARGS=--docker to exec into a postgres container
 # 3. Capture
-export BASE_URL=http://localhost:8060        # default; point at any hub-webui
+export BASE_URL=http://localhost:8080        # default; point at any hub-webui
 export SCREENSHOT_EMAIL="$ADMIN_EMAIL" SCREENSHOT_PASSWORD="$ADMIN_PASSWORD"
 make screenshots
 ```
 
 | Env | Default | Purpose |
 |---|---|---|
-| `BASE_URL` | `http://localhost:8060` | hub-webui to capture |
+| `BASE_URL` | `http://localhost:8080` | hub-webui to capture |
 | `SCREENSHOT_EMAIL` / `SCREENSHOT_PASSWORD` | `ADMIN_EMAIL` / `ADMIN_PASSWORD` | login (never hardcoded) |
 | `COMMUNITY_ID` / `TENANT_SLUG` | `9001` / `default` | seeded community and tenant |
 | `OUT_DIR` | `docs/screenshots` | output (files overwritten by page name) |

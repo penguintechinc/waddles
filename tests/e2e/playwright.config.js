@@ -10,7 +10,7 @@
  *
  * Against beta via kubectl port-forward (bypasses Cloudflare WAF):
  *   # Forward hub service to local port 3001
- *   kubectl port-forward svc/hub 3001:8060 -n waddlebot --context dal2-beta &
+ *   kubectl port-forward svc/waddlebot-hub-webui-v3 3001:8080 -n waddlebot --context dal2-beta &
  *   BASE_URL=http://localhost:3001 npx playwright test
  *
  * NOTE: Playwright cannot bypass Cloudflare using the ALB Host-header trick

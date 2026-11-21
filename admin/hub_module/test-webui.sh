@@ -11,7 +11,7 @@ YELLOW='\033[1;33m'
 NC='\033[0m'
 
 # Configuration
-BASE_URL="${HUB_URL:-http://localhost:8060}"
+BASE_URL="${HUB_URL:-http://localhost:8080}"
 TIMEOUT=10
 
 # Counters
