@@ -28,6 +28,17 @@ def app(community_db: Any) -> Quart:
     return quart_app
 
 
+@pytest.fixture(autouse=True)
+def _engagement_rows(community_db: Any) -> Any:
+    """Forms 7 and 9 belong to the fixture community; form 8 to a DIFFERENT community."""
+    dal, community_id = community_db
+    other = dal.communities.insert(name="other-community", tenant_id=1)
+    dal.community_forms.insert(id=7, community_id=community_id)
+    dal.community_forms.insert(id=9, community_id=community_id)
+    dal.community_forms.insert(id=8, community_id=other)
+    dal.commit()
+
+
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
@@ -167,6 +178,40 @@ class TestProxyPassthrough:
         )
         assert response.status_code == 200
         assert (await response.get_json())["message"] == "Form deleted"
+
+
+class TestFormOwnership:
+    """regression: a numeric form id from another community must 404 BEFORE the proxy runs."""
+
+    @pytest.mark.parametrize(
+        ("method", "suffix", "scope"),
+        [
+            ("GET", "", "community.forms:read"),
+            ("DELETE", "", "community.forms:write"),
+            ("GET", "/submissions", "community.forms:read"),
+        ],
+    )
+    async def test_foreign_form_is_404_and_never_proxied(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_db: Any,
+        monkeypatch: Any,
+        method: str,
+        suffix: str,
+        scope: str,
+    ) -> None:
+        _, community_id = community_db
+        proxied = AsyncMock(return_value=({"success": True}, 200))
+        for name in ("get_form", "delete_form", "get_form_submissions"):
+            monkeypatch.setattr(proxy, name, proxied)
+        response = await client.open(
+            f"/api/v1/admin/{public_id(community_db[0], community_id)}/forms/8{suffix}",
+            method=method,
+            headers=auth_headers(scope=scope),
+        )
+        assert response.status_code == 404
+        proxied.assert_not_called()
 
 
 pytestmark = pytest.mark.usefixtures("bypass_route_guards")

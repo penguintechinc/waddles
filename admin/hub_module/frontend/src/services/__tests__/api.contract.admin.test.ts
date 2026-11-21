@@ -78,7 +78,7 @@ const ADMINAPI_ROWS: readonly ContractRow[] = [
   ['getLoyaltyConfig(communityId)', 'GET /api/v1/admin/{communityId}/loyalty/config'],
   ['updateLoyaltyConfig(communityId, data)', 'PUT /api/v1/admin/{communityId}/loyalty/config', { body: '@data' }],
   ['getLoyaltyLeaderboard(communityId, params)', 'GET /api/v1/admin/{communityId}/loyalty/leaderboard'],
-  ['adjustLoyaltyBalance(communityId, userId, data)', 'PUT /api/v1/admin/{communityId}/loyalty/user/{userId}/balance', { body: '@data' }],
+  ['adjustLoyaltyBalance(communityId, memberUuid, data)', 'PUT /api/v1/admin/{communityId}/loyalty/user/{memberUuid}/balance', { body: '@data' }],
   ['wipeLoyaltyCurrency(communityId)', 'POST /api/v1/admin/{communityId}/loyalty/wipe'],
   ['getLoyaltyStats(communityId)', 'GET /api/v1/admin/{communityId}/loyalty/stats'],
   ['getAnnouncements(communityId, params)', 'GET /api/v1/admin/{communityId}/announcements'],

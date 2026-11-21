@@ -32,6 +32,16 @@ def app(community_db: Any) -> Quart:
     return quart_app
 
 
+@pytest.fixture(autouse=True)
+def _engagement_rows(community_db: Any) -> Any:
+    """Poll 5 belongs to the fixture community; poll 6 to a DIFFERENT community."""
+    dal, community_id = community_db
+    other = dal.communities.insert(name="other-community", tenant_id=1)
+    dal.community_polls.insert(id=5, community_id=community_id)
+    dal.community_polls.insert(id=6, community_id=other)
+    dal.commit()
+
+
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
@@ -163,6 +173,37 @@ class TestProxyPassthrough:
         )
         assert response.status_code == 200
         assert (await response.get_json())["message"] == "Poll deleted"
+
+
+class TestPollOwnership:
+    """regression: a numeric poll id from another community must 404 BEFORE the proxy runs."""
+
+    @pytest.mark.parametrize("method", ["GET", "DELETE"])
+    async def test_foreign_poll_is_404_and_never_proxied(
+        self, client: Any, auth_headers: Any, community_db: Any, monkeypatch: Any, method: str
+    ) -> None:
+        dal, community_id = community_db
+        proxied = AsyncMock(return_value=({"success": True}, 200))
+        monkeypatch.setattr(proxy, "get_poll", proxied)
+        monkeypatch.setattr(proxy, "delete_poll", proxied)
+        scope = "community.polls:read" if method == "GET" else "community.polls:write"
+        response = await client.open(
+            cpath(dal, "/api/v1/admin/{community_id}/polls/6", community_id),
+            method=method,
+            headers=auth_headers(scope=scope),
+        )
+        assert response.status_code == 404
+        proxied.assert_not_called()
+
+    async def test_unknown_poll_is_404(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        dal, community_id = community_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/polls/9999", community_id),
+            headers=auth_headers(scope="community.polls:read"),
+        )
+        assert response.status_code == 404
 
 
 pytestmark = pytest.mark.usefixtures("bypass_route_guards")

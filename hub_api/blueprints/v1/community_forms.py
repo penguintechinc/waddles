@@ -52,6 +52,8 @@ async def get_form(community_id: int, form_id: int) -> tuple[dict[str, object], 
     assert ctx is not None  # nosec B101
     if not community_in_tenant(current_app.config["dal"], community_id, ctx):
         return {"success": False, "error": "Community not found"}, 404
+    if not proxy.form_in_community(current_app.config["dal"], community_id, form_id):
+        return {"success": False, "error": "Form not found"}, 404
     return await proxy.get_form(community_id, form_id, request.headers.get("Authorization"))
 
 
@@ -79,6 +81,8 @@ async def delete_form(community_id: int, form_id: int) -> tuple[dict[str, object
     assert ctx is not None  # nosec B101
     if not community_in_tenant(current_app.config["dal"], community_id, ctx):
         return {"success": False, "error": "Community not found"}, 404
+    if not proxy.form_in_community(current_app.config["dal"], community_id, form_id):
+        return {"success": False, "error": "Form not found"}, 404
     return await proxy.delete_form(community_id, form_id, request.headers.get("Authorization"))
 
 
@@ -92,6 +96,8 @@ async def form_submissions(community_id: int, form_id: int) -> tuple[dict[str, o
     assert ctx is not None  # nosec B101
     if not community_in_tenant(current_app.config["dal"], community_id, ctx):
         return {"success": False, "error": "Community not found"}, 404
+    if not proxy.form_in_community(current_app.config["dal"], community_id, form_id):
+        return {"success": False, "error": "Form not found"}, 404
     return await proxy.get_form_submissions(
         community_id, form_id, request.headers.get("Authorization")
     )

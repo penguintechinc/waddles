@@ -52,6 +52,8 @@ async def get_poll(community_id: int, poll_id: int) -> tuple[dict[str, object], 
     assert ctx is not None  # nosec B101
     if not community_in_tenant(current_app.config["dal"], community_id, ctx):
         return {"success": False, "error": "Community not found"}, 404
+    if not proxy.poll_in_community(current_app.config["dal"], community_id, poll_id):
+        return {"success": False, "error": "Poll not found"}, 404
     return await proxy.get_poll(community_id, poll_id, request.headers.get("Authorization"))
 
 
@@ -79,6 +81,8 @@ async def delete_poll(community_id: int, poll_id: int) -> tuple[dict[str, object
     assert ctx is not None  # nosec B101
     if not community_in_tenant(current_app.config["dal"], community_id, ctx):
         return {"success": False, "error": "Community not found"}, 404
+    if not proxy.poll_in_community(current_app.config["dal"], community_id, poll_id):
+        return {"success": False, "error": "Poll not found"}, 404
     return await proxy.delete_poll(community_id, poll_id, request.headers.get("Authorization"))
 
 

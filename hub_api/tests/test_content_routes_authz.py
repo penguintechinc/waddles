@@ -143,7 +143,7 @@ def _fill(rule: str) -> str:
         .replace("<int:poll_id>", "1")
         .replace("<int:form_id>", "1")
         .replace("<event_type>", "raffle_start")
-        .replace("<platform_user_id>", "someone")
+        .replace("<uuid:user_uuid>", "33333333-3333-4333-8333-333333333333")
     )
 
 
@@ -272,6 +272,9 @@ async def test_poll_and_form_proxies_bind_the_url_community(
     """The community forwarded upstream is the URL's, not the body's `community_id`."""
     from services import community_engagement_proxy as proxy
 
+    worlds.dal.community_polls.insert(id=7, community_id=worlds.a)
+    worlds.dal.community_forms.insert(id=7, community_id=worlds.a)
+    worlds.dal.commit()
     create = AsyncMock(return_value=({"success": True}, 201))
     delete = AsyncMock(return_value=({"success": True}, 200))
     monkeypatch.setattr(proxy, f"create_{which[:-1]}", create)

@@ -133,6 +133,48 @@ async def upload_community_asset(
     return f"{_public_base_url()}/{key}"
 
 
+async def put_private_object(key: str, data: bytes, content_type: str) -> None:
+    """Write `data` at `key` in the assets bucket under the SSE baseline (never public-read).
+
+    For per-community private assets (raffle sounds) that are served only through a
+    membership-guarded hub-api route, never via `_public_base_url()`.
+    """
+    sse = await get_object_storage_sse().put_params()
+
+    def _put() -> None:
+        _client().put_object(Bucket=_bucket(), Key=key, Body=data, ContentType=content_type, **sse)
+
+    await asyncio.to_thread(_put)
+
+
+async def get_private_object(key: str) -> bytes | None:
+    """Read the object at `key` from the assets bucket; `None` when it does not exist."""
+
+    def _get() -> bytes | None:
+        client = _client()
+        try:
+            resp = client.get_object(Bucket=_bucket(), Key=key)
+        except Exception as exc:  # noqa: BLE001 -- botocore raises ClientError, not a typed 404
+            if "NoSuchKey" in str(exc) or "404" in str(exc):
+                logger.debug("private object not found: %s", describe_exc(exc))
+                return None
+            log_exc_safe(logger, logging.ERROR, "private object read failed", exc)
+            raise
+        body: bytes = resp["Body"].read()
+        return body
+
+    return await asyncio.to_thread(_get)
+
+
+async def delete_private_object(key: str) -> None:
+    """Delete the object at `key` from the assets bucket (S3 treats a missing key as success)."""
+
+    def _delete() -> None:
+        _client().delete_object(Bucket=_bucket(), Key=key)
+
+    await asyncio.to_thread(_delete)
+
+
 def bundle_component_key(app_id: str, version: str, sha256_hex: str) -> str:
     """`bundles/{app_id}/{version}/{sha256}.wasm` -- the bucket layout every consumer expects.
 

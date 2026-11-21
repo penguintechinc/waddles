@@ -264,8 +264,9 @@ export const adminApi = {
   // Loyalty leaderboard
   getLoyaltyLeaderboard: (communityId, params) =>
     api.get(`/api/v1/admin/${communityId}/loyalty/leaderboard`, { params }),
-  adjustLoyaltyBalance: (communityId, userId, data) =>
-    api.put(`/api/v1/admin/${communityId}/loyalty/user/${userId}/balance`, data),
+  // `memberUuid` is the member's public UUID (leaderboard entry `user_uuid`), never a platform id.
+  adjustLoyaltyBalance: (communityId, memberUuid, data) =>
+    api.put(`/api/v1/admin/${communityId}/loyalty/user/${memberUuid}/balance`, data),
   wipeLoyaltyCurrency: (communityId) =>
     api.post(`/api/v1/admin/${communityId}/loyalty/wipe`),
   getLoyaltyStats: (communityId) =>

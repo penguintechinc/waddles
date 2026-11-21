@@ -20,8 +20,36 @@ from typing import Any
 
 import httpx
 
+from services.schema import bind_engagement_ownership_tables
+
 _ENGAGEMENT_URL = os.getenv("ENGAGEMENT_MODULE_URL", "http://core-engagement:8091")
 _TIMEOUT_SECONDS = 10.0
+
+
+def poll_in_community(dal: Any, community_id: int, poll_id: int) -> bool:
+    """True iff poll `poll_id` belongs to `community_id` (local check, before any proxying)."""
+    bind_engagement_ownership_tables(dal)
+    return (
+        dal(
+            (dal.community_polls.id == poll_id) & (dal.community_polls.community_id == community_id)
+        )
+        .select(dal.community_polls.id)
+        .first()
+        is not None
+    )
+
+
+def form_in_community(dal: Any, community_id: int, form_id: int) -> bool:
+    """True iff form `form_id` belongs to `community_id` (local check, before any proxying)."""
+    bind_engagement_ownership_tables(dal)
+    return (
+        dal(
+            (dal.community_forms.id == form_id) & (dal.community_forms.community_id == community_id)
+        )
+        .select(dal.community_forms.id)
+        .first()
+        is not None
+    )
 
 
 async def _forward(

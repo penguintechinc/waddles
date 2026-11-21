@@ -48,6 +48,7 @@ def seeded(community_db: Any) -> Any:
     dal(dal.community_members.user_id == str(BANNED_UID)).update(is_active=False)
     other = dal.tenants.insert(slug=OTHER_TENANT_SLUG, is_active=True)
     foreign = dal.communities.insert(name="foreign", tenant_id=other)
+    dal.community_forms.insert(id=1, community_id=community_id)  # the proxy owns-check target
     dal.commit()
     return dal, community_id, foreign
 
