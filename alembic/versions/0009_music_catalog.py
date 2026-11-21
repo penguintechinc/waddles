@@ -44,7 +44,7 @@ def upgrade() -> None:
             '{APP_ID}',
             '1.0.0',
             'social',
-            'waddles.social.music',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,

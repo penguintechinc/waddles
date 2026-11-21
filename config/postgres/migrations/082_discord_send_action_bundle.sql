@@ -29,7 +29,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.discord-pipeline',
     '1.0.0',
     'bot',
-    'waddles.bot.discord',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
