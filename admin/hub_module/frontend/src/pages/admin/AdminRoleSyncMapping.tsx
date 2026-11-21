@@ -6,6 +6,7 @@ import { FormModalBuilder } from '../../components/FormModal';
 import PairingStatusCard from '../../components/roleSync/PairingStatusCard';
 import BindingTable from '../../components/roleSync/BindingTable';
 import AddDiscordServerPanel from '../../components/roleSync/AddDiscordServerPanel';
+import EventDiscordSyncToggle from '../../components/calendar/EventDiscordSyncToggle';
 import MirrorRolesSection from '../../components/roleSync/MirrorRolesSection';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
@@ -294,6 +295,12 @@ export default function AdminRoleSyncMapping() {
       )}
 
       {canManage && hasValidCommunity && <AddDiscordServerPanel communityId={communityId} canManage={canManage} />}
+
+      {canManage && hasValidCommunity && (
+        <div className="mb-4">
+          <EventDiscordSyncToggle communityId={communityId} />
+        </div>
+      )}
 
       {pairingsLoading && (
         <p role="status" className="text-fg-muted">

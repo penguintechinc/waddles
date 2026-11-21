@@ -162,7 +162,6 @@
 - Admin calendar event management: CRUD, approval/rejection, RSVPs, attendees
 - New admin page: Calendar Events with create/edit modal, status badges, approve/reject actions
 - Routes registered at `/api/v1/calendar/*` (user) and `/api/v1/admin/:communityId/calendar/*` (admin)
-- Shared proxy utility extracted to `utils/calendarProxy.js`
 
 #### Support Community Type + Ticket System
 - New `support` community type for help desks and customer support
