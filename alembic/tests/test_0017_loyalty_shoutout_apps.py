@@ -156,9 +156,9 @@ class TestUpgradeSeedsAppCatalog:
 
     def test_module_and_feature_follow_each_app_ids_namespace(self, upgrade_sql) -> None:
         assert "'community'" in upgrade_sql
-        assert "'waddles.community.loyalty'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
         assert "'bot'" in upgrade_sql
-        assert "'waddles.bot.shoutout'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
 
 
 class TestSeededStagesJsonIsValid:

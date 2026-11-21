@@ -41,7 +41,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.echo-pipeline',
     '1.0.0',
     'core',
-    'waddles.core.demo',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     TRUE,

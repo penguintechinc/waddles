@@ -46,7 +46,7 @@ def upgrade() -> None:
             '{APP_ID}',
             '1.0.0',
             'community',
-            'waddles.community.forums',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             TRUE,
