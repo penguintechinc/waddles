@@ -35,6 +35,7 @@ user_id_from_JWT)` instead.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Any, cast
@@ -49,8 +50,26 @@ from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+from services.public_ids import (
+    PublicIdTarget,
+    build_view_arg_translator,
+    lookup_public_ids,
+)
 
 join_request_bp = Blueprint("v1_join_request", __name__, url_prefix="/api/v1")
+
+# `<puuid:request_id>` -> numeric before the handler, scoped to the URL community.
+join_request_bp.before_request(
+    build_view_arg_translator({"request_id": PublicIdTarget("community_join_requests")})
+)
+
+
+async def _request_uuids(ids: list[int]) -> dict[int, str]:
+    """ONE batched numeric -> public UUID lookup for response DTOs (fails loud on a gap)."""
+    _, dal = _dal()
+    return await asyncio.to_thread(lookup_public_ids, dal, "community_join_requests", ids)
+
+
 logger = logging.getLogger(__name__)
 
 
@@ -77,7 +96,7 @@ class SubmitJoinRequestBody:
 class SubmittedJoinRequestDTO:
     """Response sub-DTO -- snake_case, matches Node's raw `RETURNING` shape verbatim."""
 
-    id: int
+    id: str
     status: str
     created_at: str
 
@@ -94,7 +113,7 @@ class SubmitJoinRequestResponse:
 class MyJoinRequestDTO:
     """Response sub-DTO -- snake_case, matches Node's raw SELECT shape verbatim."""
 
-    id: int
+    id: str
     status: str
     message: str | None
     created_at: str
@@ -113,7 +132,7 @@ class MyJoinRequestResponse:
 class JoinRequestListItemDTO:
     """Response sub-DTO -- mixed casing preserved byte-for-byte (see module docstring)."""
 
-    id: int
+    id: str
     status: str
     message: str | None
     created_at: str
@@ -178,7 +197,9 @@ async def submit_request(community_id: int, data: SubmitJoinRequestBody) -> tupl
         SubmitJoinRequestResponse(
             success=True,
             request=SubmittedJoinRequestDTO(
-                id=submitted.id, status=submitted.status, created_at=submitted.created_at
+                id=(await _request_uuids([submitted.id]))[submitted.id],
+                status=submitted.status,
+                created_at=submitted.created_at,
             ),
         ),
         status=201,
@@ -198,7 +219,7 @@ async def get_my_request(community_id: int) -> MyJoinRequestResponse:
     return MyJoinRequestResponse(
         success=True,
         request=MyJoinRequestDTO(
-            id=found.id,
+            id=(await _request_uuids([found.id]))[found.id],
             status=found.status,
             message=found.message,
             created_at=found.created_at,
@@ -238,11 +259,12 @@ async def list_requests(
 
     page = max(1, page)
     limit = min(50, max(1, limit))
+    uuids = await _request_uuids([i.id for i in items])
     return ListJoinRequestsResponse(
         success=True,
         requests=[
             JoinRequestListItemDTO(
-                id=i.id,
+                id=uuids[i.id],
                 status=i.status,
                 message=i.message,
                 created_at=i.created_at,
@@ -263,7 +285,7 @@ async def list_requests(
 
 
 @join_request_bp.route(
-    "/admin/<cuuid:community_id>/join-requests/<int:request_id>/approve", methods=["PUT"]
+    "/admin/<cuuid:community_id>/join-requests/<puuid:request_id>/approve", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
@@ -287,7 +309,7 @@ async def approve_request(
 
 
 @join_request_bp.route(
-    "/admin/<cuuid:community_id>/join-requests/<int:request_id>/reject", methods=["PUT"]
+    "/admin/<cuuid:community_id>/join-requests/<puuid:request_id>/reject", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)

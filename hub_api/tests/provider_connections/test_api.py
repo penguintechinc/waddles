@@ -22,12 +22,14 @@ from tests.provider_connections.conftest import (
     admin_headers,
 )
 from tests.provider_connections.fake_twitch import FakeAccount, FakeTwitch
-from tests.provider_connections.support import raw_rows, set_column
+from tests.provider_connections.support import numeric_connection_id, raw_rows, set_column
 from tests.sso.conftest import Entitlements
+
+#: A well-formed public UUID no connection owns (a numeric id no longer routes at all).
+UNKNOWN_CONN = "00000000-0000-4000-8000-000000000001"
 
 ADMIN_FIELDS = {
     "id",
-    "publicId",
     "kind",
     "provider",
     "resourceType",
@@ -117,7 +119,7 @@ class TestAuthChain:
     async def test_unauthenticated(self, client: Any, pc_db: Any) -> None:
         for method in ("get", "post", "patch", "delete"):
             response = await getattr(client, method)(
-                _base(pc_db) + ("/1" if method in ("patch", "delete") else "")
+                _base(pc_db) + (f"/{UNKNOWN_CONN}" if method in ("patch", "delete") else "")
             )
             assert response.status_code == 401, method
 
@@ -243,11 +245,15 @@ class TestFeatureGates:
         assert (
             await client.post(_base(pc_db), headers=headers, data=_body(bot_tokens))
         ).status_code == 402
-        assert (await client.get(_base(pc_db) + "/1", headers=headers)).status_code == 402
         assert (
-            await client.patch(_base(pc_db) + "/1", headers=headers, data="{}")
+            await client.get(_base(pc_db) + f"/{UNKNOWN_CONN}", headers=headers)
         ).status_code == 402
-        assert (await client.delete(_base(pc_db) + "/1", headers=headers)).status_code == 402
+        assert (
+            await client.patch(_base(pc_db) + f"/{UNKNOWN_CONN}", headers=headers, data="{}")
+        ).status_code == 402
+        assert (
+            await client.delete(_base(pc_db) + f"/{UNKNOWN_CONN}", headers=headers)
+        ).status_code == 402
         assert await raw_rows(pc_db, "platform_connections") == []
 
     async def test_the_free_tier_is_denied_even_with_the_flag_on(
@@ -488,7 +494,11 @@ class TestCrudOverHttp:
         from tests.provider_connections.support import grant_to
 
         cid = (await (await _create(client, pc_db, bot_tokens)).get_json())["connection"]["id"]
-        await grant_to(pc_db, community_id=pc_db.seed.second_community_id, connection_id=cid)
+        await grant_to(
+            pc_db,
+            community_id=pc_db.seed.second_community_id,
+            connection_id=await numeric_connection_id(pc_db, cid),
+        )
         got = await (
             await client.get(f"{_base(pc_db)}/{cid}", headers=admin_headers(pc_db))
         ).get_json()
@@ -591,7 +601,7 @@ class TestInternalApi:
             "secretVersion",
         }
         assert (item["connectionId"], item["communityId"], item["resourceId"]) == (
-            cid,
+            await numeric_connection_id(pc_db, cid),
             pc_db.seed.community_id,
             CHANNEL_ID,
         )
@@ -900,7 +910,7 @@ class TestStaticConnectionsApi:
         assert conn["hasRefreshToken"] is False and conn["usable"] is True
         assert conn["capabilities"] == ["dispatch"]
         assert set(conn["metadata"]) == {"url", "secret_scheme", "capabilities"}
-        assert conn["publicId"] == (await raw_rows(pc_db, "platform_connections"))[0]["public_id"]
+        assert conn["id"] == (await raw_rows(pc_db, "platform_connections"))[0]["public_id"]
         listed = await static_client.get(_base(pc_db), headers=admin_headers(pc_db))
         got = await static_client.get(f"{_base(pc_db)}/{conn['id']}", headers=admin_headers(pc_db))
         for response in (listed, got):

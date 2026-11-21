@@ -169,6 +169,8 @@ convention = "google"
 # `block_anonymization`) from `tests/test_data_privacy_erasure.py`; a pytest fixture used as a
 # test parameter is, to ruff, a redefinition of the imported name.
 "tests/test_ban_suppression.py" = ["F811"]
+# Bot `<puuid:>` suite re-imports `tests/test_bot_blueprint.py`'s fixtures; same F811 rationale.
+"tests/test_bot_uuid_path_ids.py" = ["F811"]
 # Calls (RTC) suites import the shared in-process RoomsService fixtures (`fake`, `app`,
 # `client`) from `tests/test_calls_support.py`; same F811 rationale as the entry above.
 "tests/test_calls_*.py" = ["F811"]

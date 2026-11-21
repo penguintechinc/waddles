@@ -102,7 +102,7 @@ describe('CommunityPublicPage join', () => {
     mockApiGet((url) => (url === '/api/v1/7/join-requests/mine' ? mine(null) : unexpectedUrl(url)));
     const post = vi
       .spyOn(apiClient, 'post')
-      .mockResolvedValue(ok({ success: true, request: { id: 3, status: 'pending', created_at: '2026-10-21T00:00:00Z' } }, 201));
+      .mockResolvedValue(ok({ success: true, request: { id: 'req-3', status: 'pending', created_at: '2026-10-21T00:00:00Z' } }, 201));
     renderPage();
 
     fireEvent.click(await screen.findByTestId('join-button'));
@@ -134,7 +134,7 @@ describe('CommunityPublicPage join', () => {
     ['rejected', 'Request Again', /declined/i, false],
   ])('reflects an existing %s request', async (status, label, note, disabled) => {
     profile.get.mockResolvedValue(community('approval'));
-    mockApiGet(() => mine({ id: 3, status, message: null, created_at: '2026-10-20T00:00:00Z', reviewed_at: null }));
+    mockApiGet(() => mine({ id: 'req-3', status, message: null, created_at: '2026-10-20T00:00:00Z', reviewed_at: null }));
     renderPage();
     const button = await screen.findByRole('button', { name: label });
     expect(button).toHaveProperty('disabled', disabled);
@@ -143,7 +143,7 @@ describe('CommunityPublicPage join', () => {
 
   it('offers the dashboard once a request was approved', async () => {
     profile.get.mockResolvedValue(community('approval'));
-    mockApiGet(() => mine({ id: 3, status: 'approved', message: null, created_at: '2026-10-20T00:00:00Z', reviewed_at: '2026-10-21T00:00:00Z' }));
+    mockApiGet(() => mine({ id: 'req-3', status: 'approved', message: null, created_at: '2026-10-20T00:00:00Z', reviewed_at: '2026-10-21T00:00:00Z' }));
     renderPage();
     const link = await screen.findByTestId('open-dashboard');
     expect(link).toHaveAttribute('href', '/dashboard/community/7');

@@ -29,6 +29,7 @@ import blueprints.v1.community_connections as connections_module
 from grpc_internal.server import build_interceptor_chain
 from grpc_internal.service_auth_servicer import ServiceAuthServicer
 from services.community_connections import DecryptedTokens
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 SERVICE_ID = spiffe_id("alpha", "svc-action")
 
@@ -55,9 +56,9 @@ async def live_hub(
         identities={SERVICE_ID: identity},
     )
     app = Quart(__name__)
-    app.register_blueprint(connections_module.connections_internal_bp)
     app.config["dal"] = dal
-    app.config["async_dal"] = dal
+    install_community_ids(app, dal)
+    app.register_blueprint(connections_module.connections_internal_bp)
     app.config["SERVICE_JWT_ISSUER"] = issuer
     app.config["SERVICE_JWT_VERIFIER"] = issuer.as_verifier()
     seen: list[dict[str, str]] = []
@@ -118,19 +119,20 @@ async def live_hub(
 
 
 async def test_waddle_transports_client_sends_bearer_not_service_key(
-    live_hub: tuple[str, int, list[dict[str, str]]],
+    live_hub: tuple[str, int, list[dict[str, str]]], community_db: Any
 ) -> None:
     """Real mint + real fetch: the resource call is Bearer-authenticated, never X-Service-Key."""
     base_url, community_id, seen = live_hub
 
+    cuuid = public_id(community_db[0], community_id)
     tokens = await community_credentials.fetch_community_tokens(
-        community_id, "youtube", hub_api_url=base_url
+        community_id, "youtube", community_public_id=cuuid, hub_api_url=base_url
     )
 
     assert tokens is not None and tokens.access_token == "AT_LIVE"
     paths = [r["path"] for r in seen]
     # The mint is gRPC now: the only HTTP request is the resource call itself.
-    assert paths == [f"/api/v1/internal/communities/{community_id}/connections/youtube/token"]
+    assert paths == [f"/api/v1/internal/communities/{cuuid}/connections/youtube/token"]
     resource = seen[0]
     assert resource["authorization"].startswith("Bearer ")
     assert "x-service-key" not in resource
@@ -138,19 +140,22 @@ async def test_waddle_transports_client_sends_bearer_not_service_key(
 
 
 async def test_client_token_is_refused_for_another_community(
-    live_hub: tuple[str, int, list[dict[str, str]]],
+    live_hub: tuple[str, int, list[dict[str, str]]], community_db: Any
 ) -> None:
     """The JWT the client minted for community A is useless against community B (403 -> None)."""
     base_url, community_id, seen = live_hub
     assert await community_credentials.fetch_community_tokens(
-        community_id, "youtube", hub_api_url=base_url
+        community_id,
+        "youtube",
+        community_public_id=public_id(community_db[0], community_id),
+        hub_api_url=base_url,
     )
     import httpx
 
     minted = community_credentials._jwt_cache[community_id][1]
     async with httpx.AsyncClient() as client:
         other = await client.get(
-            f"{base_url}/api/v1/internal/communities/{community_id + 1}/connections/youtube/token",
+            f"{base_url}/api/v1/internal/communities/{UNKNOWN_PUBLIC_ID}/connections/youtube/token",
             headers={"Authorization": f"Bearer {minted}"},
         )
     assert other.status_code == 403

@@ -49,11 +49,18 @@ from services.community_interaction import (
     get_hub_channels,
     internal_relay_incoming,
     moderate_forum_post,
+    resolve_reply_public_id,
     update_channel_permission_overrides,
     update_community_role,
     update_hub_channel,
 )
 from services.errors import ApiError, forbidden
+from services.public_ids import (
+    UNKNOWN_ID,
+    PublicId,
+    PublicIdTarget,
+    build_view_arg_translator,
+)
 from services.route_guards import community_member_guard
 from services.scope_registry import (
     SCOPE_CHANNELS_MANAGE,
@@ -74,6 +81,44 @@ interaction_member_bp = Blueprint(
 interaction_internal_bp = Blueprint(
     "v1_community_interaction_internal", __name__, url_prefix="/api/v1/internal"
 )
+
+#: `<puuid:...>` -> numeric ids inside the URL community (unknown/foreign/malformed -> the
+#: handler's existing 404). Replies have no community column, so `reply_id` resolves via its post.
+interaction_admin_bp.before_request(
+    build_view_arg_translator(
+        {
+            "channel_id": PublicIdTarget("hub_channels"),
+            "post_id": PublicIdTarget("hub_forum_posts"),
+            "role_id": PublicIdTarget("community_roles"),
+        }
+    )
+)
+interaction_member_bp.before_request(
+    build_view_arg_translator(
+        {
+            "channel_id": PublicIdTarget("hub_channels"),
+            "post_id": PublicIdTarget("hub_forum_posts"),
+        }
+    )
+)
+
+
+@interaction_admin_bp.before_request
+async def _translate_reply_arg() -> None:
+    """Swap a `<puuid:reply_id>` view arg for the numeric id (scoped through the parent post)."""
+    view_args = request.view_args
+    raw = view_args.get("reply_id") if view_args else None
+    if view_args is None or not isinstance(raw, PublicId):
+        return None
+    community_id = view_args.get("community_id")
+    resolved = (
+        resolve_reply_public_id(current_app.config["dal"], str(raw), community_id)
+        if isinstance(community_id, int) and community_id > 0
+        else None
+    )
+    view_args["reply_id"] = UNKNOWN_ID if resolved is None else resolved
+    return None
+
 
 #: Two-gate Feature flags -- `libs/community_module/features.py`. Channel/
 #: role/permission-override CRUD (this file's "Admin: hub channels"/"Admin:
@@ -155,7 +200,7 @@ async def admin_create_channel(community_id: int) -> tuple[dict[str, object], in
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/channels/<int:channel_id>", methods=["PUT"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
@@ -171,7 +216,7 @@ async def admin_update_channel(community_id: int, channel_id: int) -> tuple[dict
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/channels/<int:channel_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
@@ -185,7 +230,7 @@ async def admin_delete_channel(community_id: int, channel_id: int) -> tuple[dict
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/forum/posts/<int:post_id>", methods=["PUT"]
+    "/<cuuid:community_id>/interaction/forum/posts/<puuid:post_id>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_community_scope(SCOPE_FORUMS_MANAGE)  # type: ignore[misc]
@@ -195,13 +240,15 @@ async def admin_moderate_post(community_id: int, post_id: int) -> tuple[dict[str
         return api_error("Community not found", status_code=404)
     payload = await request.get_json(force=True, silent=True) or {}
     err = moderate_forum_post(current_app.config["dal"], community_id, post_id, payload)
+    if err == "__not_found__":
+        return {"success": False, "error": "Post not found"}, 404
     if err:
         return {"success": False, "error": err}, 400
     return {"success": True, "message": "Post moderated"}, 200
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/forum/replies/<int:reply_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/interaction/forum/replies/<puuid:reply_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_community_scope(SCOPE_FORUMS_MANAGE)  # type: ignore[misc]
@@ -265,7 +312,7 @@ async def admin_create_role(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/roles/<int:role_id>", methods=["PUT"]
+    "/<cuuid:community_id>/interaction/roles/<puuid:role_id>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
@@ -287,7 +334,7 @@ async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, 
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/roles/<int:role_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/interaction/roles/<puuid:role_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 async def admin_delete_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
@@ -324,7 +371,7 @@ async def admin_list_scopes(community_id: int) -> tuple[dict[str, object], int]:
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/channels/<int:channel_id>/permissions", methods=["GET"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>/permissions", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
@@ -341,7 +388,7 @@ async def admin_get_overrides(community_id: int, channel_id: int) -> tuple[dict[
 
 
 @interaction_admin_bp.route(
-    "/<cuuid:community_id>/interaction/channels/<int:channel_id>/permissions", methods=["PUT"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>/permissions", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
@@ -416,7 +463,7 @@ async def member_create_channel(community_id: int) -> tuple[dict[str, object], i
 
 
 @interaction_member_bp.route(
-    "/<cuuid:community_id>/interact/forum/<int:channel_id>/posts", methods=["GET"]
+    "/<cuuid:community_id>/interact/forum/<puuid:channel_id>/posts", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
@@ -442,7 +489,7 @@ async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[s
 
 
 @interaction_member_bp.route(
-    "/<cuuid:community_id>/interact/forum/<int:channel_id>/posts/<int:post_id>", methods=["GET"]
+    "/<cuuid:community_id>/interact/forum/<puuid:channel_id>/posts/<puuid:post_id>", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
@@ -460,7 +507,7 @@ async def member_forum_post(
 
 
 @interaction_member_bp.route(
-    "/<cuuid:community_id>/interact/forum/<int:channel_id>/posts", methods=["POST"]
+    "/<cuuid:community_id>/interact/forum/<puuid:channel_id>/posts", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]
@@ -484,7 +531,7 @@ async def member_create_forum_post(
 
 
 @interaction_member_bp.route(
-    "/<cuuid:community_id>/interact/forum/posts/<int:post_id>/replies", methods=["POST"]
+    "/<cuuid:community_id>/interact/forum/posts/<puuid:post_id>/replies", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]

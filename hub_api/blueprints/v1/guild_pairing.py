@@ -50,11 +50,31 @@ from services.community_common import community_in_tenant
 from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, conflict, not_found, payment_required
+from services.public_ids import (
+    UNKNOWN_ID,
+    PublicId,
+    PublicIdTarget,
+    build_view_arg_translator,
+    lookup_public_ids,
+)
 from services.route_guards import community_admin_guard
 
 logger = logging.getLogger(__name__)
 
 guild_pairing_bp = Blueprint("v1_guild_pairing", __name__, url_prefix="/api/v1")
+
+# `<puuid:...>` path ids -> numeric before the handler, scoped to the URL community (the app-level
+# `cuuid` hook already ran). Unknown / foreign / malformed all become `UNKNOWN_ID` and hit the
+# handlers' existing not-found answers. Bindings have no community column, so `binding_id` is
+# resolved inside its (already community-scoped) pairing by `_translate_binding_id`.
+guild_pairing_bp.before_request(
+    build_view_arg_translator(
+        {
+            "pairing_id": PublicIdTarget("guild_tenant_pairings"),
+            "mapping_id": PublicIdTarget("discord_role_mirror_mappings"),
+        }
+    )
+)
 
 #: Two-gate feature flag -- this port's `waddles.<module>.<feature>` convention
 #: (`waddles.community.connections`, `waddles.community.activity`, ...).
@@ -67,11 +87,64 @@ FEATURE_GUILD_PAIRING = "waddles.community.guild_pairing"
 # ---------------------------------------------------------------------------
 
 
+async def _translate_binding_id() -> None:
+    """`before_request`: resolve `<puuid:binding_id>` WITHIN the already-translated pairing."""
+    view_args = request.view_args
+    raw = view_args.get("binding_id") if view_args else None
+    if not isinstance(raw, PublicId):
+        return None
+    pairing_id = view_args.get("pairing_id") if view_args else None
+    resolved = UNKNOWN_ID
+    if isinstance(pairing_id, int) and pairing_id > 0:
+        dal = _dal()
+        pairing_svc.bind_guild_pairing_tables(dal)
+        tbl = dal.community_role_sync_bindings
+        row = (
+            dal((tbl.public_id == str(raw)) & (tbl.pairing_id == pairing_id))
+            .select(tbl.id, limitby=(0, 1))
+            .first()
+        )
+        resolved = int(row.id) if row is not None else UNKNOWN_ID
+    if view_args is not None:
+        view_args["binding_id"] = resolved
+    return None
+
+
+guild_pairing_bp.before_request(_translate_binding_id)
+
+
+@dataclass(slots=True, frozen=True)
+class RoleSyncBindingDTO:
+    """Wire shape of one role-sync binding: `id` and `pairing_id` are PUBLIC UUIDs."""
+
+    id: str
+    pairing_id: str
+    sync_scope: str
+    subscriber_tier: int | None
+    community_role: str | None
+    discord_role_id: str
+    created_at: str | None
+    updated_at: str | None
+
+
+def _binding_dtos(bindings: list[pairing_svc.RoleSyncBinding]) -> list[RoleSyncBindingDTO]:
+    """Swap numeric binding/pairing ids for UUIDs with two batched lookups (fails loud)."""
+    bind_ids = lookup_public_ids(_dal(), "community_role_sync_bindings", [b.id for b in bindings])
+    pair_ids = lookup_public_ids(_dal(), "guild_tenant_pairings", [b.pairing_id for b in bindings])
+    out: list[RoleSyncBindingDTO] = []
+    for b in bindings:
+        values = {f.name: getattr(b, f.name) for f in dataclasses.fields(b)}
+        values["id"] = bind_ids[b.id]
+        values["pairing_id"] = pair_ids[b.pairing_id]
+        out.append(RoleSyncBindingDTO(**values))
+    return out
+
+
 @dataclass(slots=True, frozen=True)
 class GuildPairingDTO:
-    """Wire shape of one pairing: `community_id` is the community's PUBLIC UUID."""
+    """Wire shape of one pairing: `id`/`community_id` are PUBLIC UUIDs."""
 
-    id: int
+    id: str
     community_id: str
     discord_guild_id: str
     direction: str
@@ -85,9 +158,10 @@ class GuildPairingDTO:
 
 
 def _pairing_dto(pairing: pairing_svc.GuildPairing, public_community_id: str) -> GuildPairingDTO:
-    """Map a service pairing to its wire DTO, swapping the numeric community id for the UUID."""
+    """Map a service pairing to its wire DTO, swapping the numeric ids for their UUIDs."""
     values = {f.name: getattr(pairing, f.name) for f in dataclasses.fields(pairing)}
     values["community_id"] = public_community_id
+    values["id"] = lookup_public_ids(_dal(), "guild_tenant_pairings", [pairing.id])[pairing.id]
     return GuildPairingDTO(**values)
 
 
@@ -112,7 +186,7 @@ class RoleSyncBindingResponse:
     """Single-binding response envelope."""
 
     success: bool
-    binding: pairing_svc.RoleSyncBinding
+    binding: RoleSyncBindingDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -120,7 +194,7 @@ class RoleSyncBindingListResponse:
     """List-of-bindings response envelope."""
 
     success: bool
-    bindings: list[pairing_svc.RoleSyncBinding]
+    bindings: list[RoleSyncBindingDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -133,9 +207,9 @@ class DiscordGuildRolesResponse:
 
 @dataclass(slots=True, frozen=True)
 class RoleMirrorMappingDTO:
-    """Wire shape of one mirror mapping: `community_id` is the community's PUBLIC UUID."""
+    """Wire shape of one mirror mapping: `id`/`community_id` are PUBLIC UUIDs."""
 
-    id: int
+    id: str
     community_id: str
     source_guild_id: str
     source_role_id: str
@@ -155,6 +229,9 @@ def _mapping_dto(
     """Map a service mapping to its wire DTO, swapping the numeric community id for the UUID."""
     values = {f.name: getattr(mapping, f.name) for f in dataclasses.fields(mapping)}
     values["community_id"] = public_community_id
+    values["id"] = lookup_public_ids(_dal(), "discord_role_mirror_mappings", [mapping.id])[
+        mapping.id
+    ]
     return RoleMirrorMappingDTO(**values)
 
 
@@ -369,7 +446,7 @@ async def start_server_install(
 
 
 @guild_pairing_bp.route(
-    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>", methods=["PATCH"]
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>", methods=["PATCH"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
@@ -410,7 +487,7 @@ async def update_pairing(
 
 
 @guild_pairing_bp.route(
-    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>", methods=["DELETE"]
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
@@ -433,7 +510,7 @@ async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
 
 
 @guild_pairing_bp.route(
-    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>/role-bindings",
     methods=["GET"],
 )
 @tenant_middleware  # type: ignore[misc]
@@ -452,11 +529,11 @@ async def list_bindings(
         bindings = pairing_svc.list_bindings(_dal(), community_id, pairing_id)
     except ApiError as exc:
         return _err(exc)
-    return RoleSyncBindingListResponse(success=True, bindings=bindings)
+    return RoleSyncBindingListResponse(success=True, bindings=_binding_dtos(bindings))
 
 
 @guild_pairing_bp.route(
-    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>/role-bindings",
     methods=["POST"],
 )
 @tenant_middleware  # type: ignore[misc]
@@ -488,11 +565,11 @@ async def create_binding(
     except ApiError as exc:
         logger.warning("create_binding rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return RoleSyncBindingResponse(success=True, binding=binding), 201
+    return RoleSyncBindingResponse(success=True, binding=_binding_dtos([binding])[0]), 201
 
 
 @guild_pairing_bp.route(
-    "/communities/<cuuid:community_id>/guild-pairings/<int:pairing_id>/role-bindings/<int:binding_id>",
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>/role-bindings/<puuid:binding_id>",
     methods=["DELETE"],
 )
 @tenant_middleware  # type: ignore[misc]
@@ -603,7 +680,7 @@ async def create_role_mirror(
 
 
 @guild_pairing_bp.route(
-    "/communities/<cuuid:community_id>/discord/role-mirrors/<int:mapping_id>", methods=["DELETE"]
+    "/communities/<cuuid:community_id>/discord/role-mirrors/<puuid:mapping_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]

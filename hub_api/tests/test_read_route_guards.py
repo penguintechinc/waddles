@@ -165,7 +165,7 @@ ENFORCEMENT_EVIDENCE: dict[str, tuple[str, int, str]] = {
     ),
     "admin interaction/roles": (
         "blueprints/v1/community_interaction.py",
-        235,
+        282,
         "resolve_editor_scopes",
     ),
     "admin reputation/": ("services/admin_service.py", 356, "require_community_admin"),

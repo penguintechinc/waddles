@@ -41,7 +41,14 @@ from tests.route_guard_walker import guard_kind, required_scopes
 
 MAINTAINER_A, MEMBER_B, ADMIN_B = 71, 72, 73
 BLUEPRINTS = (connections_bp, interaction_member_bp, support_admin_bp, support_member_bp)
-_CHILD_SEGMENTS = ("<int:ticket_id>", "<int:category_id>", "<int:post_id>", "<int:channel_id>")
+_CHILD_SEGMENTS = (
+    "<puuid:ticket_id>",
+    "<puuid:category_id>",
+    "<puuid:post_id>",
+    "<puuid:channel_id>",
+)
+#: Valid-shape UUID that matches no seeded row (ids the route never resolves to a real entity).
+UNKNOWN_UUID = "00000000-0000-4000-8000-00000000dead"
 
 _BODIES: dict[str, dict[str, Any]] = {
     "POST support/categories": {"name": "c"},
@@ -116,6 +123,8 @@ def world(support_token_db: Any) -> SimpleNamespace:
         dal.hub_forum_posts.insert(hub_channel_id=channel, community_id=a, title="a", body="a")
     )
     dal.commit()
+    channel_uuid = str(dal.hub_channels[channel].public_id)
+    post_uuid = str(dal.hub_forum_posts[post].public_id)
     category = svc.create_category(
         dal, a, name="a-cat", description=None, sort_order=None, form_fields=[]
     )
@@ -142,10 +151,10 @@ def world(support_token_db: Any) -> SimpleNamespace:
         dal=dal,
         a=a,
         b=b,
-        channel=channel,
-        post=post,
-        category=int(category.id),
-        ticket=int(ticket.id),
+        channel=channel_uuid,
+        post=post_uuid,
+        category=str(category.public_id),
+        ticket=str(ticket.public_id),
     )
 
 
@@ -154,8 +163,8 @@ def _url(w: SimpleNamespace, rule: str, community_id: int) -> str:
     values = {
         "channel_id": w.channel,
         "post_id": w.post,
-        "reply_id": 1,
-        "role_id": 1,
+        "reply_id": UNKNOWN_UUID,
+        "role_id": UNKNOWN_UUID,
         "category_id": w.category,
         "ticket_id": w.ticket,
     }
@@ -163,7 +172,7 @@ def _url(w: SimpleNamespace, rule: str, community_id: int) -> str:
         "<provider>", "twitch"
     )
     for name, value in values.items():
-        url = url.replace(f"<int:{name}>", str(value))
+        url = url.replace(f"<puuid:{name}>", str(value))
     return url
 
 

@@ -25,6 +25,7 @@ from datetime import datetime
 from typing import Any
 
 from .community_common import ensure_community_tables
+from .public_ids import lookup_public_ids
 from .sql_util import execute_positional
 
 
@@ -36,7 +37,7 @@ def _iso(value: Any) -> str | None:
 class InventoryItem:
     """One `inventory_items` row."""
 
-    id: int
+    id: str
     name: str
     description: str | None
     item_type: str | None
@@ -50,7 +51,7 @@ class InventoryItem:
 
 def _item_dto(row: Any) -> InventoryItem:
     return InventoryItem(
-        id=row.id,
+        id=str(row.public_id),
         name=row.name,
         description=row.description,
         item_type=row.item_type,
@@ -205,7 +206,7 @@ class Checkout:
     """One `inventory_checkouts` row, optionally joined with item/user display fields."""
 
     id: int
-    item_id: int
+    item_id: str
     user_id: int
     quantity: int
     due_date: str | None
@@ -223,7 +224,8 @@ def list_all_checkouts(dal: Any, community_id: int, status: str | None) -> list[
     ensure_community_tables(dal)
     sql = """
         SELECT ic.id, ic.item_id, ic.user_id, ic.quantity, ic.due_at, ic.status, ic.notes,
-               ic.checked_out_at, ic.returned_at, ii.name, ii.category, hu.display_name
+               ic.checked_out_at, ic.returned_at, ii.name, ii.category, hu.display_name,
+               ii.public_id
         FROM inventory_checkouts ic
         JOIN inventory_items ii ON ic.item_id = ii.id
         JOIN hub_users hu ON ic.user_id = hu.id
@@ -239,7 +241,7 @@ def list_all_checkouts(dal: Any, community_id: int, status: str | None) -> list[
     return [
         Checkout(
             id=r[0],
-            item_id=r[1],
+            item_id=str(r[12]),
             user_id=r[2],
             quantity=r[3],
             due_date=_iso(r[4]),
@@ -291,7 +293,7 @@ class LogEntry:
     """One `inventory_log` audit row."""
 
     id: int
-    item_id: int | None
+    item_id: str | None
     action: str
     quantity_change: int | None
     notes: dict[str, Any] | None
@@ -307,7 +309,7 @@ def get_audit_log(
     ensure_community_tables(dal)
     sql = """
         SELECT il.id, il.item_id, il.action, il.quantity_change, il.details, il.created_at,
-               ii.name, hu.display_name
+               ii.name, hu.display_name, ii.public_id
         FROM inventory_log il
         JOIN inventory_items ii ON il.item_id = ii.id
         LEFT JOIN hub_users hu ON il.user_id = hu.id
@@ -327,7 +329,7 @@ def get_audit_log(
     return [
         LogEntry(
             id=r[0],
-            item_id=r[1],
+            item_id=str(r[8]),
             action=r[2],
             quantity_change=r[3],
             notes=r[4],
@@ -346,9 +348,10 @@ def list_available(dal: Any, community_id: int, search: str | None) -> list[Inve
         rows = execute_positional(
             dal, "SELECT * FROM search_inventory_items($1, $2)", placeholders=[community_id, search]
         )
+        public_ids = lookup_public_ids(dal, "inventory_items", [r[0] for r in rows])
         return [
             InventoryItem(
-                id=r[0],
+                id=public_ids[int(r[0])],
                 name=r[1],
                 description=r[2],
                 item_type=r[3],
@@ -414,7 +417,7 @@ def checkout_item(
     return (
         Checkout(
             id=row.id,
-            item_id=row.item_id,
+            item_id=str(item.public_id),
             user_id=row.user_id,
             quantity=row.quantity,
             due_date=_iso(row.due_at),
@@ -474,7 +477,9 @@ def checkin_item(
     return (
         Checkout(
             id=result.id,
-            item_id=result.item_id,
+            item_id=lookup_public_ids(dal, "inventory_items", [result.item_id])[
+                int(result.item_id)
+            ],
             user_id=result.user_id,
             quantity=result.quantity,
             due_date=_iso(result.due_at),
@@ -494,7 +499,7 @@ def get_my_checkouts(dal: Any, community_id: int, user_id: int) -> list[Checkout
         dal,
         """
         SELECT ic.id, ic.item_id, ic.quantity, ic.due_at, ic.status, ic.notes, ic.checked_out_at,
-               ii.name, ii.category
+               ii.name, ii.category, ii.public_id
         FROM inventory_checkouts ic
         JOIN inventory_items ii ON ic.item_id = ii.id
         WHERE ii.community_id = $1 AND ic.user_id = $2 AND ic.status = 'active'
@@ -505,7 +510,7 @@ def get_my_checkouts(dal: Any, community_id: int, user_id: int) -> list[Checkout
     return [
         Checkout(
             id=r[0],
-            item_id=r[1],
+            item_id=str(r[9]),
             user_id=user_id,
             quantity=r[2],
             due_date=_iso(r[3]),
