@@ -3,12 +3,37 @@
 --
 -- 1. `reputation_floor_ban_lift_from_platform` gains `p_observed_ms` (epoch ms the platform event was
 --    OBSERVED). A platform unban lifts only bans that already EXISTED when it happened
---    (`created_at <= observed`): a stale/late event never lifts a NEWER ban (a re-ban after the unban).
+--    (`COALESCE(armed_at, created_at) <= observed`): a stale/late event never lifts a NEWER ban (a re-ban after the unban).
 --    `p_source_app` stays mandatory. The 5-arg overload is dropped (no stale overload).
 -- 2. `reputation_floor_ban_lift_from_platform_guild` lifts for EVERY community of ONE tenant that is
 --    linked to a platform guild (approved `community_servers` links, else the legacy
 --    `communities.platform_server_id`, the same pool rule as hub-api's scope resolution). A guild
 --    claimed by more than one tenant lifts NOTHING (fail closed); it never crosses tenants.
+
+-- `armed_at`: when this ban row last (re)entered an active status. A row can be RE-ARMED by the
+-- enqueue `ON CONFLICT DO UPDATE` paths (refused/kill-switch/sticky status 6 back to queued/rate-limited)
+-- while keeping its original `created_at`, so the observed-time bound must use `armed_at`.
+-- A BEFORE trigger sets it on every such transition (whatever statement caused it), so no enqueue
+-- branch can forget to. Existing rows are backfilled from `created_at`.
+ALTER TABLE bundle_reputation_floor_bans ADD COLUMN IF NOT EXISTS armed_at TIMESTAMPTZ;
+UPDATE bundle_reputation_floor_bans SET armed_at = created_at WHERE armed_at IS NULL;
+ALTER TABLE bundle_reputation_floor_bans ALTER COLUMN armed_at SET DEFAULT NOW();
+ALTER TABLE bundle_reputation_floor_bans ALTER COLUMN armed_at SET NOT NULL;
+
+CREATE OR REPLACE FUNCTION reputation_floor_ban_set_armed_at() RETURNS trigger
+LANGUAGE plpgsql SET search_path = public, pg_temp
+AS $ta$
+BEGIN
+    IF NEW.status IN (1, 5) AND OLD.status = 6 THEN
+        NEW.armed_at := NOW();
+    END IF;
+    RETURN NEW;
+END
+$ta$;
+DROP TRIGGER IF EXISTS trg_bundle_reputation_floor_bans_armed_at ON bundle_reputation_floor_bans;
+CREATE TRIGGER trg_bundle_reputation_floor_bans_armed_at
+    BEFORE UPDATE OF status ON bundle_reputation_floor_bans
+    FOR EACH ROW EXECUTE FUNCTION reputation_floor_ban_set_armed_at();
 
 DROP FUNCTION IF EXISTS reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid, text);
 
@@ -47,7 +72,7 @@ BEGIN
      WHERE b.tenant_id = p_tenant AND b.community_id = p_community AND b.user_uuid = p_user_uuid
        AND b.platform = p_platform AND b.action = 1 AND b.scope = 1
        AND b.status IN (1, 2, 3, 4, 5, 7)
-       AND b.created_at <= to_timestamp(p_observed_ms / 1000.0);
+       AND COALESCE(b.armed_at, b.created_at) <= to_timestamp(p_observed_ms / 1000.0);
     GET DIAGNOSTICS v_lifted = ROW_COUNT;
     -- The soft-ban clear is PLATFORM-scoped: only when THIS call lifted a ban row of this platform
     -- for this user, and only a floor-set soft ban (reason 1) -- never a manual (reason 2) one.

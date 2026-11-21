@@ -986,9 +986,9 @@ async fn start_platform_unban_consumer(
     spine_cfg: &penguin_spine::SpineConfig,
     lift: Arc<floor_ban_dispatch::PgFloorBanStore>,
 ) {
-    let Some(keys) = resolve_outbound_pin_keys() else {
+    let Some(keys) = resolve_platform_unban_keys() else {
         tracing::error!(
-            "platform-unban consumer NOT started: OUTBOUND_PIN_KEYS unusable; Discord-native unbans will not lift Waddles bans"
+            "platform-unban consumer NOT started: PLATFORM_UNBAN_PUBLIC_KEYS unusable; Discord-native unbans will not lift Waddles bans"
         );
         return;
     };
@@ -1148,6 +1148,25 @@ fn resolve_event_sync_request_keys() -> Option<pin_sig::PinKeys> {
         Ok(keys) => Some(keys),
         Err(err) => {
             tracing::error!(error = %err, "EVENT_SYNC_REQUEST_KEYS unusable; discord event-sync consumer disabled");
+            None
+        }
+    }
+}
+
+/// Loads the verify-only platform-unban ring from `PLATFORM_UNBAN_PUBLIC_KEYS`
+/// (`{"<kid>":"<base64 32-byte Ed25519 public key>"}`); logs (no key material) and returns
+/// `None` when unset or unusable. This stage never holds the signing half.
+fn resolve_platform_unban_keys() -> Option<platform_unban::VerifyKeys> {
+    let Ok(raw) = std::env::var("PLATFORM_UNBAN_PUBLIC_KEYS") else {
+        tracing::warn!(
+            "PLATFORM_UNBAN_PUBLIC_KEYS not set; discord-native unban consumer disabled"
+        );
+        return None;
+    };
+    match platform_unban::VerifyKeys::parse(&raw) {
+        Ok(keys) => Some(keys),
+        Err(reason) => {
+            tracing::error!(reason, "PLATFORM_UNBAN_PUBLIC_KEYS unusable");
             None
         }
     }

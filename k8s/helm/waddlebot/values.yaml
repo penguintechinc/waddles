@@ -3405,6 +3405,16 @@ autoProvisionedKeys:
     publicKeyConfigMapName: ""  # default: "<fullname>-executor-precompile-signing-public"
     keyId: "precompile-1"
     externalSecret: false
+  # Discord-native unban sync -- DEDICATED Ed25519 keypair signing platform-unban events
+  # (core/svc_ingest/src/platform_unban.rs). Private half (PLATFORM_UNBAN_PRIVATE_KEY, base64
+  # 32-byte seed) is mounted ONLY into svc-ingest (the signer); the public half
+  # (PLATFORM_UNBAN_PUBLIC_KEYS JSON) is published to publicKeyConfigMapName for svc-action, which
+  # therefore can only VERIFY and can never mint an unban event. Create-if-absent like the others.
+  platformUnban:
+    secretName: ""  # default: "<fullname>-platform-unban-signing" when empty
+    publicKeyConfigMapName: ""  # default: "<fullname>-platform-unban-signing-public"
+    keyId: "unban-1"
+    externalSecret: false
   # PR #438 -- per-service ES256 (ECDSA P-256) machine-JWT signing key.
   # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName
   # (hub-api only, the sole issuer). Public half: published to

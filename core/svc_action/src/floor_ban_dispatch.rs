@@ -169,7 +169,9 @@ pub trait FloorBanStore: Send + Sync {
 /// are lifted (tenant-scope bans lift only through the tenant-admin path), the soft-ban clear
 /// is platform-scoped, and `source_app` (the calling bundle) is recorded on the ban + ledger.
 pub trait UnbanSync: Send + Sync {
-    /// Returns `(floor bans lifted, soft bans cleared)`.
+    /// Lifts in ONE community. `observed_ms` (epoch ms) is when the platform unban happened: only
+    /// bans armed at or before it are lifted, so a stale event never lifts a NEWER ban. Returns
+    /// `(floor bans lifted, soft bans cleared)`.
     fn lift_from_platform<'a>(
         &'a self,
         tenant_id: i32,
@@ -177,7 +179,21 @@ pub trait UnbanSync: Send + Sync {
         platform: &'a str,
         user: Uuid,
         source_app: &'a str,
+        observed_ms: i64,
     ) -> StoreFuture<'a, (i32, i32)>;
+
+    /// Lifts in EVERY community of `tenant_id` linked to platform guild `guild_id` (never another
+    /// tenant's; nothing when the guild is claimed across tenants). Returns
+    /// `(communities visited, floor bans lifted, soft bans cleared)`.
+    fn lift_guild_from_platform<'a>(
+        &'a self,
+        tenant_id: i32,
+        platform: &'a str,
+        guild_id: &'a str,
+        user: Uuid,
+        source_app: &'a str,
+        observed_ms: i64,
+    ) -> StoreFuture<'a, (i32, i32, i32)>;
 }
 
 /// Emits one leased row's outbound command and waits for the sender's confirmation.
@@ -540,19 +556,21 @@ impl UnbanSync for PgFloorBanStore {
         platform: &'a str,
         user: Uuid,
         source_app: &'a str,
+        observed_ms: i64,
     ) -> StoreFuture<'a, (i32, i32)> {
         Box::pin(async move {
             let rows = self
                 .conn
                 .query_all_raw(stmt(
                     "SELECT r_lifted, r_soft_cleared FROM \
-                     reputation_floor_ban_lift_from_platform($1::bigint, $2::bigint, $3::text, $4::uuid, $5::text)",
+                     reputation_floor_ban_lift_from_platform($1::bigint, $2::bigint, $3::text, $4::uuid, $5::text, $6::bigint)",
                     vec![
                         Value::BigInt(Some(i64::from(tenant_id))),
                         Value::BigInt(Some(i64::from(community_id))),
                         Value::String(Some(platform.to_string())),
                         Value::Uuid(Some(user)),
                         Value::String(Some(source_app.to_string())),
+                        Value::BigInt(Some(observed_ms)),
                     ],
                 ))
                 .await
@@ -562,6 +580,44 @@ impl UnbanSync for PgFloorBanStore {
             })?;
             let err = |e: sea_orm::DbErr| e.to_string();
             Ok((
+                row.try_get("", "r_lifted").map_err(err)?,
+                row.try_get("", "r_soft_cleared").map_err(err)?,
+            ))
+        })
+    }
+
+    fn lift_guild_from_platform<'a>(
+        &'a self,
+        tenant_id: i32,
+        platform: &'a str,
+        guild_id: &'a str,
+        user: Uuid,
+        source_app: &'a str,
+        observed_ms: i64,
+    ) -> StoreFuture<'a, (i32, i32, i32)> {
+        Box::pin(async move {
+            let rows = self
+                .conn
+                .query_all_raw(stmt(
+                    "SELECT r_communities, r_lifted, r_soft_cleared FROM \
+                     reputation_floor_ban_lift_from_platform_guild($1::bigint, $2::text, $3::text, $4::uuid, $5::text, $6::bigint)",
+                    vec![
+                        Value::BigInt(Some(i64::from(tenant_id))),
+                        Value::String(Some(platform.to_string())),
+                        Value::String(Some(guild_id.to_string())),
+                        Value::Uuid(Some(user)),
+                        Value::String(Some(source_app.to_string())),
+                        Value::BigInt(Some(observed_ms)),
+                    ],
+                ))
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = rows.first().ok_or_else(|| {
+                "reputation_floor_ban_lift_from_platform_guild returned no row".to_string()
+            })?;
+            let err = |e: sea_orm::DbErr| e.to_string();
+            Ok((
+                row.try_get("", "r_communities").map_err(err)?,
                 row.try_get("", "r_lifted").map_err(err)?,
                 row.try_get("", "r_soft_cleared").map_err(err)?,
             ))

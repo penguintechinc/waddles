@@ -1,13 +1,14 @@
 //! Real-path proof of the Discord-native unban sync on the action side: a signed
 //! `GUILD_BAN_REMOVE` event on a REAL Valkey list, consumed by the REAL `run_consumer`, lifts the
 //! floor ban in a REAL Postgres running the exact shipped SQL (the files alembic 0050/0071/0097/
-//! 0114/0137/0138 execute), through the real `PgFloorBanStore` connected as the least-privilege
-//! `waddles_svc_action` role (so the EXECUTE grant is exercised, not bypassed).
+//! 0114/0137/0138/0140 execute), through the real `PgFloorBanStore` connected as the
+//! least-privilege `waddles_svc_action` role (so the EXECUTE grant is exercised, not bypassed).
 //!
-//! Asserts: the community-scope ban goes to status 8 with the fixed gateway identity recorded and
-//! lift origin = platform; NO outbox unban row is created (no echo); a tenant-scope ban is NOT
-//! lifted; an event for a community outside the tenant lifts nothing; a forged entry (wrong key)
-//! and a replay change nothing.
+//! Asserts: the community-scope bans of EVERY community of the tenant linked to the guild go to
+//! status 8 with the fixed gateway identity recorded and lift origin = platform; NO outbox unban
+//! row is created (no echo); a tenant-scope ban is NOT lifted; a ban created AFTER the observed
+//! time (a re-ban) stays; an event for another tenant's guild lifts nothing and never crosses
+//! tenants; a forged entry (wrong key) and a replay change nothing.
 //!
 //! Requires Docker (the `docker` CLI, `core/test_support`).
 
@@ -16,12 +17,13 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use ring::signature::{Ed25519KeyPair, KeyPair};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection, Statement};
 use svc_action::floor_ban_dispatch::PgFloorBanStore;
-use svc_action::pin_sig::{PinFields, PinKeys};
 use svc_action::platform_unban::{
-    run_consumer, PlatformUnban, ValkeySeen, EVENTS_LIST, MAC_NO_ORIGIN, MAC_OP, MAC_PLATFORM,
-    SOURCE_APP,
+    run_consumer, signing_bytes, PlatformUnban, ValkeySeen, VerifyKeys, EVENTS_LIST, SOURCE_APP,
 };
 use uuid::Uuid;
 #[allow(dead_code)]
@@ -41,9 +43,21 @@ const FLOOR_BAN_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_
 const LIFT_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_floor_ban_lift.sql");
 const SYNC_DDL: &str =
     include_str!("../../../scripts/db/bundle_reputation_floor_ban_platform_sync.sql");
+const GUILD_DDL: &str =
+    include_str!("../../../scripts/db/bundle_reputation_floor_ban_platform_unban_guild.sql");
 
-fn keys() -> PinKeys {
-    PinKeys::parse("k1:00112233445566778899aabbccddeeff", Some("k1")).unwrap()
+fn pair(seed: u8) -> Ed25519KeyPair {
+    Ed25519KeyPair::from_seed_unchecked(&[seed; 32]).unwrap()
+}
+
+fn now_ms() -> u64 {
+    u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap()
 }
 
 async fn exec(c: &DatabaseConnection, sql: &str) {
@@ -85,6 +99,7 @@ async fn postgres() -> DockerContainer {
 }
 
 /// Builds the schema from the shipped SQL; returns (superuser conn, `waddles_svc_action` conn).
+/// Tenant 1 owns communities 10 and 11 (both linked to `GUILD`) and 12 (unlinked); tenant 2 owns 20.
 async fn database(c: &DockerContainer) -> (DatabaseConnection, DatabaseConnection) {
     let (host, port) = (c.host(), c.port());
     let su = Database::connect(format!(
@@ -96,7 +111,13 @@ async fn database(c: &DockerContainer) -> (DatabaseConnection, DatabaseConnectio
         &su,
         "CREATE TABLE tenants (id SERIAL PRIMARY KEY, slug TEXT);
          CREATE TABLE communities (id SERIAL PRIMARY KEY, tenant_id INTEGER REFERENCES tenants(id),
-             is_active BOOLEAN DEFAULT true, deleted_at TIMESTAMP);
+             is_active BOOLEAN DEFAULT true, deleted_at TIMESTAMP,
+             platform VARCHAR(50), platform_server_id VARCHAR(255));
+         CREATE TABLE community_servers (
+             id SERIAL PRIMARY KEY,
+             community_id INTEGER NOT NULL REFERENCES communities(id) ON DELETE CASCADE,
+             platform VARCHAR(50) NOT NULL, platform_server_id VARCHAR(255) NOT NULL,
+             status VARCHAR(50) DEFAULT 'pending', is_primary BOOLEAN DEFAULT false);
          CREATE TABLE community_members (
              id SERIAL PRIMARY KEY,
              community_id INTEGER REFERENCES communities(id) ON DELETE CASCADE,
@@ -118,7 +139,10 @@ async fn database(c: &DockerContainer) -> (DatabaseConnection, DatabaseConnectio
          CREATE TABLE app_global_installs (app_id TEXT, version TEXT, superseded_by BIGINT, revoked_at TIMESTAMPTZ);
          CREATE TABLE app_version_uploads (app_id TEXT, version TEXT, manifest_json JSONB);
          INSERT INTO tenants (id, slug) VALUES (1, 't1'), (2, 't2');
-         INSERT INTO communities (id, tenant_id) VALUES (10, 1), (20, 2);",
+         INSERT INTO communities (id, tenant_id) VALUES (10, 1), (11, 1), (12, 1), (20, 2);
+         INSERT INTO community_servers (community_id, platform, platform_server_id, status)
+             VALUES (10, 'discord', '111111111111111111', 'approved'),
+                    (11, 'discord', '111111111111111111', 'approved');",
     )
     .await;
     exec(
@@ -137,6 +161,7 @@ async fn database(c: &DockerContainer) -> (DatabaseConnection, DatabaseConnectio
         FLOOR_BAN_DDL,
         LIFT_DDL,
         SYNC_DDL,
+        GUILD_DDL,
     ] {
         exec(&su, ddl).await;
     }
@@ -151,64 +176,73 @@ async fn database(c: &DockerContainer) -> (DatabaseConnection, DatabaseConnectio
 /// Inserts a ban row in force (status 2 = delivered) and returns its user.
 async fn ban(su: &DatabaseConnection, tenant: i32, community: i32, scope: i32) -> Uuid {
     let user = Uuid::new_v4();
+    ban_for(su, tenant, community, scope, user).await;
+    user
+}
+
+async fn ban_for(su: &DatabaseConnection, tenant: i32, community: i32, scope: i32, user: Uuid) {
     exec(
         su,
         &format!(
             "INSERT INTO bundle_reputation_floor_bans
                  (tenant_id, community_id, origin_community_id, user_uuid, scope, idempotency_key,
                   reason, platform, status, completed_at)
-             VALUES ({tenant}, {community}, {community}, '{user}', {scope}, 'evt-{user}',
-                     'community_hard_floor', 'discord', 2, NOW())"
+             VALUES ({tenant}, {community}, {community}, '{user}', {scope},
+                     'evt-{community}-{scope}-{}', 'community_hard_floor', 'discord', 2, NOW())",
+            Uuid::new_v4().simple()
         ),
     )
     .await;
-    user
 }
 
-/// The wire event exactly as svc-ingest signs it.
-fn event(k: &PinKeys, tenant: i64, community: i64, user: Uuid) -> String {
+/// The wire event exactly as svc-ingest signs it (`observed_ms` as given).
+fn event(
+    kp: &Ed25519KeyPair,
+    tenant: i64,
+    connection: i64,
+    user: Uuid,
+    observed_ms: u64,
+) -> String {
     let (event_id, user) = (Uuid::new_v4().to_string(), user.to_string());
-    let exp = u64::try_from(
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis(),
-    )
-    .unwrap()
-        + 60_000;
-    let f = PinFields {
-        platform: MAC_PLATFORM,
-        op: MAC_OP,
-        channel: GUILD,
-        origin_channel: MAC_NO_ORIGIN,
-        message_id: "",
-        text: "",
-        user_id: &user,
-        op_id: &event_id,
-        exp_ms: exp,
-        community_id: community,
-        tenant_id: tenant,
-    };
-    let sig = k.sign(&f).unwrap();
-    serde_json::json!({"v":1,"event_id":event_id,"tenant_id":tenant,"community_id":community,
-        "platform":"discord","guild_id":GUILD,"user_uuid":user,"exp_ms":exp,"sig":sig})
+    let exp = observed_ms + 120_000;
+    let msg = signing_bytes(
+        &event_id,
+        tenant,
+        connection,
+        "discord",
+        GUILD,
+        &user,
+        observed_ms,
+        exp,
+    );
+    let sig = B64.encode(kp.sign(&msg).as_ref());
+    serde_json::json!({"v":1,"event_id":event_id,"tenant_id":tenant,"connection_id":connection,
+        "platform":"discord","guild_id":GUILD,"user_uuid":user,"observed_ms":observed_ms,
+        "exp_ms":exp,"kid":"k1","sig":sig})
     .to_string()
 }
 
-async fn status(su: &DatabaseConnection, user: Uuid, scope: i32) -> i64 {
+async fn status(su: &DatabaseConnection, user: Uuid, community: i32, scope: i32) -> i64 {
     scalar(
         su,
         &format!(
             "SELECT status::bigint FROM bundle_reputation_floor_bans
-             WHERE user_uuid = '{user}' AND scope = {scope} AND action = 1"
+             WHERE user_uuid = '{user}' AND community_id = {community} AND scope = {scope}
+               AND action = 1"
         ),
     )
     .await
 }
 
-async fn wait_for_status(su: &DatabaseConnection, user: Uuid, scope: i32, want: i64) {
+async fn wait_for_status(
+    su: &DatabaseConnection,
+    user: Uuid,
+    community: i32,
+    scope: i32,
+    want: i64,
+) {
     for _ in 0..80 {
-        if status(su, user, scope).await == want {
+        if status(su, user, community, scope).await == want {
             return;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -231,9 +265,14 @@ async fn a_discord_native_unban_lifts_the_floor_ban_without_echo() {
     let url = format!("redis://{}:{}/", valkey.host(), valkey.port());
     let client = redis::Client::open(url).unwrap();
     let push = client.get_connection_manager().await.unwrap();
+    let keys = VerifyKeys::parse(&format!(
+        "{{\"k1\":\"{}\"}}",
+        B64.encode(pair(7).public_key().as_ref())
+    ))
+    .unwrap();
     let handler = Arc::new(PlatformUnban::new(
         Arc::new(PgFloorBanStore::new(action)),
-        keys(),
+        keys,
         Arc::new(ValkeySeen::new(
             client.get_connection_manager().await.unwrap(),
         )),
@@ -259,16 +298,32 @@ async fn a_discord_native_unban_lifts_the_floor_ban_without_echo() {
         }
     };
 
-    // Community-scope ban -> lifted (status 8), source recorded, platform origin, NO unban row.
-    let banned = ban(&su, 1, 10, 1).await;
-    lpush(event(&keys(), 1, 10, banned)).await;
-    wait_for_status(&su, banned, 1, 8).await;
+    // Same user banned in BOTH communities of tenant 1 linked to the guild, plus an unlinked one.
+    let banned = Uuid::new_v4();
+    for community in [10, 11, 12] {
+        ban_for(&su, 1, community, 1, banned).await;
+    }
+    // A tenant-scope ban in a linked community: a platform unban never lifts it (scope-1 only).
+    ban_for(&su, 1, 10, 2, banned).await;
+    lpush(event(&pair(7), 1, 31, banned, now_ms() + 1_000)).await;
+    wait_for_status(&su, banned, 10, 1, 8).await;
+    wait_for_status(&su, banned, 11, 1, 8).await;
+    assert_eq!(
+        status(&su, banned, 12, 1).await,
+        2,
+        "unlinked community lifted"
+    );
+    assert_eq!(
+        status(&su, banned, 10, 2).await,
+        2,
+        "tenant-scope ban lifted"
+    );
     assert_eq!(
         text(
             &su,
             &format!(
                 "SELECT lift_source_app FROM bundle_reputation_floor_bans
-                 WHERE user_uuid = '{banned}' AND action = 1"
+                 WHERE user_uuid = '{banned}' AND community_id = 11 AND scope = 1 AND action = 1"
             )
         )
         .await,
@@ -279,7 +334,7 @@ async fn a_discord_native_unban_lifts_the_floor_ban_without_echo() {
             &su,
             &format!(
                 "SELECT lift_origin::bigint FROM bundle_reputation_floor_bans
-                 WHERE user_uuid = '{banned}' AND action = 1"
+                 WHERE user_uuid = '{banned}' AND community_id = 10 AND scope = 1 AND action = 1"
             )
         )
         .await,
@@ -296,56 +351,60 @@ async fn a_discord_native_unban_lifts_the_floor_ban_without_echo() {
         "a platform-originated lift must not enqueue an unban (echo)"
     );
 
-    // Tenant-scope ban: a platform unban never lifts it (scope-1 only).
-    let tenant_banned = ban(&su, 1, 10, 2).await;
-    // Forged: right shape, signed by a key the writer does not hold.
-    let wrong = PinKeys::parse("k1:ffeeddccbbaa99887766554433221100", Some("k1")).unwrap();
+    // Stale event: observed BEFORE the (re-)ban was armed -> the newer ban stays.
+    let reban = ban(&su, 1, 10, 1).await;
+    lpush(event(
+        &pair(7),
+        1,
+        31,
+        reban,
+        now_ms().saturating_sub(60_000),
+    ))
+    .await;
+    // Forged: right shape, signed by a key whose public half this stage does not hold.
     let forged_target = ban(&su, 1, 10, 1).await;
-    // Community 20 belongs to tenant 2: an event naming tenant 1 + community 20 lifts nothing.
+    lpush(event(&pair(9), 1, 31, forged_target, now_ms() + 1_000)).await;
+    // Another tenant's id on this guild: the SQL finds no community of tenant 2 linked to it.
     let cross = ban(&su, 2, 20, 1).await;
-    lpush(event(&keys(), 1, 10, tenant_banned)).await;
-    lpush(event(&wrong, 1, 10, forged_target)).await;
-    lpush(event(&keys(), 1, 20, cross)).await;
+    lpush(event(&pair(7), 2, 31, cross, now_ms() + 1_000)).await;
     // A final valid event proves the consumer drained everything before it (FIFO list).
     let marker = ban(&su, 1, 10, 1).await;
-    lpush(event(&keys(), 1, 10, marker)).await;
-    wait_for_status(&su, marker, 1, 8).await;
+    lpush(event(&pair(7), 1, 31, marker, now_ms() + 1_000)).await;
+    wait_for_status(&su, marker, 10, 1, 8).await;
     assert_eq!(
-        status(&su, tenant_banned, 2).await,
+        status(&su, reban, 10, 1).await,
         2,
-        "tenant-scope ban lifted"
+        "a stale event lifted a newer ban"
     );
     assert_eq!(
-        status(&su, forged_target, 1).await,
+        status(&su, forged_target, 10, 1).await,
         2,
         "forged event lifted a ban"
     );
     assert_eq!(
-        status(&su, cross, 1).await,
+        status(&su, cross, 20, 1).await,
         2,
         "cross-tenant event lifted a ban"
     );
 
-    // Replay of the first (valid, single-use) event: re-ban the same user and replay -> stays.
-    let replay = event(&keys(), 1, 10, forged_target);
+    // Replay of a valid single-use event: lifts once, then a re-ban survives the replay.
+    let again = Uuid::new_v4();
+    ban_for(&su, 1, 10, 1, again).await;
+    let replay = event(&pair(7), 1, 31, again, now_ms() + 1_000);
     lpush(replay.clone()).await;
-    wait_for_status(&su, forged_target, 1, 8).await;
+    wait_for_status(&su, again, 10, 1, 8).await;
     exec(
         &su,
         &format!(
             "UPDATE bundle_reputation_floor_bans SET status = 2, lifted_at = NULL
-             WHERE user_uuid = '{forged_target}' AND action = 1"
+             WHERE user_uuid = '{again}' AND action = 1"
         ),
     )
     .await;
     lpush(replay).await;
-    lpush(event(&keys(), 1, 10, Uuid::new_v4())).await;
+    lpush(event(&pair(7), 1, 31, Uuid::new_v4(), now_ms() + 1_000)).await;
     tokio::time::sleep(Duration::from_millis(1500)).await;
-    assert_eq!(
-        status(&su, forged_target, 1).await,
-        2,
-        "replay lifted again"
-    );
+    assert_eq!(status(&su, again, 10, 1).await, 2, "replay lifted again");
 
     let _ = stop_tx.send(());
     consumer.await.unwrap();

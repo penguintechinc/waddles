@@ -5,7 +5,7 @@ newer ban), and a Discord-native unban lifts every community of ONE tenant linke
 and functions live in `scripts/db/bundle_reputation_floor_ban_platform_unban_guild.sql`.
 
 Revision ID: 0140_floor_ban_unban_observed
-Revises: 0138_floor_ban_platform_sync
+Revises: 0139_floor_ban_rearm_policy
 Create Date: 2026-11-21
 """
 
@@ -16,7 +16,7 @@ from pathlib import Path
 from alembic import op
 
 revision = "0140_floor_ban_unban_observed"
-down_revision = "0138_floor_ban_platform_sync"
+down_revision = "0139_floor_ban_rearm_policy"
 branch_labels = None
 depends_on = None
 
@@ -32,6 +32,12 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop the new functions and restore the 0138 5-arg lift (re-applies the idempotent 0138 SQL)."""
+    op.execute(
+        "DROP TRIGGER IF EXISTS trg_bundle_reputation_floor_bans_armed_at "
+        "ON bundle_reputation_floor_bans"
+    )
+    op.execute("DROP FUNCTION IF EXISTS reputation_floor_ban_set_armed_at()")
+    op.execute("ALTER TABLE bundle_reputation_floor_bans DROP COLUMN IF EXISTS armed_at")
     op.execute(
         "DROP FUNCTION IF EXISTS "
         "reputation_floor_ban_lift_from_platform_guild(bigint, text, text, uuid, text, bigint)"

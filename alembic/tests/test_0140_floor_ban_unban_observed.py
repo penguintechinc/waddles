@@ -44,11 +44,11 @@ def _load():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_id_fits_varchar32_and_chains_after_0138(self) -> None:
+    def test_id_fits_varchar32_and_chains_after_0139(self) -> None:
         m = _load()
         assert m.revision == "0140_floor_ban_unban_observed"
         assert len(m.revision) <= 32
-        assert m.down_revision == "0138_floor_ban_platform_sync"
+        assert m.down_revision == "0139_floor_ban_rearm_policy"
 
     def test_single_head(self) -> None:
         cfg = Config(str(_ROOT / "alembic.ini"))
@@ -176,6 +176,69 @@ class TestObservedTimeBound:
         assert _status(pg_db, old) == 8, "the ban that existed at T is lifted"
         assert _status(pg_db, new) == 2, "the ban created after T must stay"
 
+    def test_a_rearmed_row_is_not_lifted_by_an_unban_observed_before_the_rearm(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        """Ban, refuse, re-arm through the enqueue ON CONFLICT path at T+5s; unban observed T+2s."""
+        tid = _tenant(pg_db, "t-obs-rearm")
+        cid = _community(pg_db, tid, "c-obs-rearm")
+        user = str(uuid.uuid4())
+        key = f"k-{uuid.uuid4().hex[:12]}"
+        insert = (
+            "INSERT INTO bundle_reputation_floor_bans (tenant_id, community_id, "
+            "origin_community_id, user_uuid, scope, idempotency_key, reason, platform, status) "
+            "VALUES (%s, %s, %s, %s, 1, %s, 'community_hard_floor', 'discord', %s) "
+            "ON CONFLICT (tenant_id, community_id, user_uuid, scope, action, idempotency_key) "
+            "DO UPDATE SET status = EXCLUDED.status RETURNING id"
+        )
+        rid = _q(pg_db, insert, (tid, cid, tid, user, key, 6))[0][0]
+        t0 = int(_q(pg_db, "SELECT (extract(epoch FROM NOW()) * 1000)::bigint")[0][0])
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET created_at = to_timestamp(%s / 1000.0 - 10), "
+            "armed_at = to_timestamp(%s / 1000.0 - 10) WHERE id = %s",
+            (t0, t0, rid),
+        )
+        # Re-arm at T+5s via the same ON CONFLICT statement the enqueue function uses.
+        assert _q(pg_db, insert, (tid, cid, tid, user, key, 1))[0][0] == rid
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET armed_at = to_timestamp(%s / 1000.0 + 5) "
+            "WHERE id = %s",
+            (t0, rid),
+        )
+        armed_before = _q(
+            pg_db, "SELECT armed_at FROM bundle_reputation_floor_bans WHERE id = %s", (rid,)
+        )[0][0]
+        assert armed_before is not None
+        lifted = _q(
+            pg_db,
+            "SELECT r_lifted FROM reputation_floor_ban_lift_from_platform("
+            "%s, %s, 'discord', %s::uuid, %s, %s)",
+            (tid, cid, user, _SRC, t0 + 2000),
+        )[0][0]
+        assert lifted == 0, "an unban observed at T+2s must not lift the ban re-armed at T+5s"
+        assert _status(pg_db, rid) == 1
+
+    def test_the_trigger_stamps_armed_at_on_a_real_rearm(self, pg_db: PgTestDatabase) -> None:
+        tid = _tenant(pg_db, "t-obs-trig")
+        cid = _community(pg_db, tid, "c-obs-trig")
+        rid = _ban(pg_db, tid, cid, str(uuid.uuid4()), status=6)
+        _q(
+            pg_db,
+            "UPDATE bundle_reputation_floor_bans SET armed_at = NOW() - interval '1 hour' "
+            "WHERE id = %s",
+            (rid,),
+        )
+        _q(pg_db, "UPDATE bundle_reputation_floor_bans SET status = 1 WHERE id = %s", (rid,))
+        age = _q(
+            pg_db,
+            "SELECT extract(epoch FROM NOW() - armed_at) FROM bundle_reputation_floor_bans "
+            "WHERE id = %s",
+            (rid,),
+        )[0][0]
+        assert float(age) < 30, "re-arming from status 6 must stamp armed_at = now()"
+
     def test_observed_time_and_source_app_are_mandatory(self, pg_db: PgTestDatabase) -> None:
         tid = _tenant(pg_db, "t-obs-2")
         cid = _community(pg_db, tid, "c-obs-2")
@@ -271,7 +334,7 @@ class TestRoundTrip:
     def test_downgrade_restores_the_five_arg_lift_then_reupgrades(
         self, pg_db: PgTestDatabase
     ) -> None:
-        alembic_cli("downgrade", "0138_floor_ban_platform_sync", dsn=pg_db.dsn)
+        alembic_cli("downgrade", "0139_floor_ban_rearm_policy", dsn=pg_db.dsn)
         found = _q(
             pg_db,
             "SELECT count(*) FROM pg_proc WHERE proname = "
