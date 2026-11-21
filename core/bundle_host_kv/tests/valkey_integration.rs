@@ -238,10 +238,13 @@ async fn cross_app_isolation_holds_against_real_valkey() {
     let (_container, url) = start().await;
     let host = KvHost::new(
         connect(&url).await,
-        granting(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]),
+        granting(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]),
     );
     let app_a = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let app_b = scope("acme", Some("main"), "waddles.bot.b");
+    let app_b = scope("acme", Some("main"), "penguintechinc.waddles.bot-b");
 
     host.set(&app_a, 1, "secret", b"a-only", 0).await.unwrap();
     assert_eq!(host.get(&app_b, 1, "secret").await.unwrap(), None);
@@ -1326,10 +1329,13 @@ async fn v2_list_is_sorted_prefix_scoped_paginated_and_isolated_in_real_valkey()
     let (_container, url) = start().await;
     let host = KvHost::new(
         connect(&url).await,
-        granting(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]),
+        granting(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]),
     );
     let a = scope("acme", Some("main"), "penguintechinc.waddles.fixture-bot-a");
-    let b = scope("acme", Some("main"), "waddles.bot.b");
+    let b = scope("acme", Some("main"), "penguintechinc.waddles.bot-b");
     let other_comm = scope(
         "acme",
         Some("other"),

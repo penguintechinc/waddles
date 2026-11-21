@@ -1,0 +1,337 @@
+"""Community write/admin authorization, sweep C: guild pairing and access tokens.
+
+These routes were authorized only by a TENANT-WIDE token scope (`community.guild_pairing:write`,
+`community.tokens:admin`, ...) plus a tenant fence, so a
+maintainer of community A held every scope needed to pair a Discord guild to, mint a credential
+for community B in the same tenant. Each route now carries `community_admin_guard`. Every test below runs the REAL guards (no `bypass_route_guards`, no patched standing)
+against seeded `community_members` rows, and fails when the guard is removed.
+
+The ingest-sources routes (inline guard, `mark_guarded`) are proven in
+`tests/test_read_route_inline_guards.py`, keyed in its `INLINE_GUARD_DENY_TESTS` registry.
+The event/calendar proxy surface was deleted (calendar is a bundle), so it has no tests here.
+"""
+
+from __future__ import annotations
+
+# ruff: noqa: E501
+import json
+from types import SimpleNamespace
+from typing import Any
+from unittest.mock import AsyncMock
+
+import pytest
+from quart import Quart
+from quart_schema import QuartSchema
+
+from blueprints.v1.access_token import community_tokens_bp
+from blueprints.v1.guild_pairing import guild_pairing_bp
+from services import access_token_service as token_svc
+from services import discord_role_mirror as mirror_svc
+from services import guild_pairing as pairing_svc
+from services.community_common import ensure_community_tables
+from services.global_identity import ensure_tables as ensure_global_tables
+from services.schema import bind_support_token_tables
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
+from tests.conftest import make_user_token, seed_membership
+from tests.route_guard_walker import guard_kind, iter_routes, required_scopes
+
+#: 71 administers A only (the "maintainer of A"), 72 is a plain member of B, 73 a plain member of
+#: A, 74 administers B, 75 belongs to no community, 76 is a tenant admin.
+ADMIN_A, MEMBER_B, MEMBER_A, ADMIN_B, OUTSIDER, TENANT_ADMIN = 71, 72, 73, 74, 75, 76
+DENIED = (403, 404)
+
+
+@pytest.fixture
+def world(guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
+    """Quart app over the real schema: communities A, B, a foreign-tenant one, seeded members."""
+    dal, a, tenant_id, global_tenant_id = guild_pairing_db
+    ensure_community_tables(dal, migrate=True)
+    ensure_global_tables(dal, migrate=True)
+    bind_support_token_tables(dal, migrate=True)
+    b = int(dal.communities.insert(name="b", tenant_id=tenant_id))
+    foreign = int(dal.communities.insert(name="foreign", tenant_id=global_tenant_id))
+    dal.permission_scopes.insert(
+        scope_key="chat:read", display_name="Read chat", description="d", category="chat"
+    )
+    dal.commit()
+    db = SimpleNamespace(dal=dal)
+    seed_membership(db, community_id=a, user_id=ADMIN_A, role="community-admin")
+    seed_membership(db, community_id=b, user_id=MEMBER_B, role="member")
+    seed_membership(db, community_id=a, user_id=MEMBER_A, role="member")
+    seed_membership(db, community_id=b, user_id=ADMIN_B, role="community-admin")
+
+    app = Quart(__name__)
+    QuartSchema(app)
+    app.config["dal"] = dal
+    install_community_ids(app, dal)
+    for bp in (guild_pairing_bp, community_tokens_bp):
+        app.register_blueprint(bp)
+    # Flag stub only: the guards under test are the real ones.
+    import blueprints.v1.guild_pairing as gp_module
+
+    monkeypatch.setattr(gp_module, "feature_enabled", AsyncMock(return_value=True))
+    return SimpleNamespace(app=app, dal=dal, a=a, b=b, foreign=foreign)
+
+
+# --------------------------------------------------------------------------------------------
+# Route discovery (every community route of the three blueprints, a denominator, a registry)
+# --------------------------------------------------------------------------------------------
+
+_CHILD_IDS = {
+    "<int:pairing_id>": "1",
+    "<int:binding_id>": "1",
+    "<int:mapping_id>": "1",
+    "<int:token_id>": "1",
+}
+
+
+def _community_routes() -> list[Any]:
+    """`pytest.param(method, rule, scopes, kind)` for every community-scoped route examined."""
+    probe = Quart(__name__)
+    for bp in (guild_pairing_bp, community_tokens_bp):
+        probe.register_blueprint(bp)
+    params: list[Any] = []
+    for method, rule, view in iter_routes(probe):
+        if "<cuuid:community_id>" not in rule:
+            continue
+        params.append(
+            pytest.param(
+                method, rule, required_scopes(view), guard_kind(view), id=f"{method} {rule}"
+            )
+        )
+    return sorted(params, key=lambda p: p.id or "")
+
+
+ROUTES = _community_routes()
+
+
+def _url(world: Any, rule: str, community_id: int) -> str:
+    """Concrete URL: the community's public UUID plus placeholder child ids."""
+    filled = rule
+    for token, value in _CHILD_IDS.items():
+        filled = filled.replace(token, value)
+    return cpath(world.dal, filled.replace("<cuuid:community_id>", "{community_id}"), community_id)
+
+
+async def _call(
+    world: Any, method: str, url: str, uid: int, scopes: list[str], body: Any = None
+) -> Any:
+    token = make_user_token(user_id=uid, scope=" ".join(["*:read", *scopes]))
+    return await world.app.test_client().open(
+        url,
+        method=method,
+        headers={"Authorization": f"Bearer {token}"},
+        json=body if body is not None else ({} if method not in ("GET", "DELETE") else None),
+    )
+
+
+def test_route_discovery_has_a_denominator() -> None:
+    """A discovery pointed at the wrong place would parametrize nothing and pass vacuously."""
+    guild = [p for p in ROUTES if "guild-pairings" in p.id or "/discord/" in p.id]
+    tokens = [p for p in ROUTES if "/tokens/" in p.id]
+    assert (len(guild), len(tokens)) == (12, 4), (len(guild), len(tokens))
+    unguarded = [p.id for p in ROUTES if p.values[3] not in ("admin", "member")]
+    assert unguarded == [], f"community routes with no community guard: {unguarded}"
+
+
+#: `(METHOD, rule)` -> the keyed test proving the real guard refuses the maintainer of A on B.
+#: Every route of the two blueprints must be keyed; a new route without one fails the meta test.
+SWEEP_C_DENY_TESTS: dict[tuple[str, str], Any] = {}
+
+
+async def test_maintainer_of_a_is_refused_on_b(
+    world: Any, method: str, rule: str, scopes: list[str], kind: str
+) -> None:
+    """Maintainer of A holding the route's exact scopes is refused on community B."""
+    response = await _call(world, method, _url(world, rule, world.b), ADMIN_A, scopes)
+    assert response.status_code == 403, f"{method} {rule} -> {response.status_code}"
+
+
+test_maintainer_of_a_is_refused_on_b = pytest.mark.parametrize(
+    ("method", "rule", "scopes", "kind"), ROUTES
+)(test_maintainer_of_a_is_refused_on_b)  # type: ignore[assignment]
+SWEEP_C_DENY_TESTS.update(
+    {(p.values[0], p.values[1]): test_maintainer_of_a_is_refused_on_b for p in ROUTES}
+)
+
+
+def test_every_route_has_a_keyed_deny_test() -> None:
+    live = {(p.values[0], p.values[1]) for p in ROUTES}
+    assert live == set(SWEEP_C_DENY_TESTS), live ^ set(SWEEP_C_DENY_TESTS)
+    assert all(
+        callable(fn) and fn.__name__.startswith("test_") for fn in SWEEP_C_DENY_TESTS.values()
+    )
+
+
+@pytest.mark.parametrize(("method", "rule", "scopes", "kind"), ROUTES)
+async def test_plain_member_is_refused_on_admin_routes(
+    world: Any, method: str, rule: str, scopes: list[str], kind: str
+) -> None:
+    if kind == "member":
+        pytest.skip("member-facing route: a member is allowed by design")
+    response = await _call(world, method, _url(world, rule, world.b), MEMBER_B, scopes)
+    assert response.status_code == 403, f"{method} {rule} -> {response.status_code}"
+
+
+@pytest.mark.parametrize(("method", "rule", "scopes", "kind"), ROUTES)
+async def test_non_member_is_refused_everywhere(
+    world: Any, method: str, rule: str, scopes: list[str], kind: str
+) -> None:
+    """A signed-in user with no standing in the community gets nothing (member routes too)."""
+    response = await _call(world, method, _url(world, rule, world.a), OUTSIDER, scopes)
+    assert response.status_code == 403, f"{method} {rule} -> {response.status_code}"
+
+
+@pytest.mark.parametrize(("method", "rule", "scopes", "kind"), ROUTES)
+async def test_foreign_and_unknown_community_are_one_404(
+    world: Any, method: str, rule: str, scopes: list[str], kind: str
+) -> None:
+    """Another tenant's community and a non-existent one are indistinguishable 404s."""
+    foreign = await _call(world, method, _url(world, rule, world.foreign), ADMIN_A, scopes)
+    unknown_url = _url(world, rule, world.a).replace(
+        public_id(world.dal, world.a), UNKNOWN_PUBLIC_ID
+    )
+    unknown = await _call(world, method, unknown_url, ADMIN_A, scopes)
+    assert (foreign.status_code, unknown.status_code) == (404, 404), rule
+    assert (await foreign.get_json())["error"]["message"] == "Community not found"
+    assert (await unknown.get_json())["error"]["message"] == "Community not found"
+
+
+# --------------------------------------------------------------------------------------------
+# Admin routes: a community admin is allowed on their own community (guard is not a blanket deny)
+# --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("method", "rule"),
+    [
+        ("GET", "/api/v1/communities/<cuuid:community_id>/guild-pairings"),
+        ("GET", "/api/v1/admin/<cuuid:community_id>/tokens/cats"),
+        ("GET", "/api/v1/admin/<cuuid:community_id>/tokens/scopes"),
+    ],
+)
+async def test_community_admin_is_allowed_in_own_community(
+    world: Any, method: str, rule: str
+) -> None:
+    scopes = next(p.values[2] for p in ROUTES if p.values[:2] == (method, rule))
+    response = await _call(world, method, _url(world, rule, world.a), ADMIN_A, scopes)
+    assert response.status_code == 200, f"{method} {rule} -> {response.status_code}"
+
+
+# --------------------------------------------------------------------------------------------
+# Guild pairing: child ids are scoped to the URL community
+# --------------------------------------------------------------------------------------------
+
+
+def _b_pairing(world: Any) -> int:
+    pairing = pairing_svc.create_pairing(
+        world.dal,
+        world.b,
+        discord_guild_id="222222222222222222",
+        direction="bidirectional",
+        role_name_prefix="[B]",
+        ownership_verified=True,
+        actor_user_id=ADMIN_B,
+    )
+    return int(pairing.id)
+
+
+async def test_pairing_id_from_another_community_is_404_and_untouched(world: Any) -> None:
+    pairing_id = _b_pairing(world)
+    base = cpath(
+        world.dal, f"/api/v1/communities/{{community_id}}/guild-pairings/{pairing_id}", world.a
+    )
+    scopes = ["community.guild_pairing:write"]
+    patched = await _call(world, "PATCH", base, ADMIN_A, scopes, {"sync_enabled": True})
+    deleted = await _call(world, "DELETE", base, ADMIN_A, scopes)
+    bindings = await _call(
+        world, "GET", base + "/role-bindings", ADMIN_A, ["community.guild_pairing:read"]
+    )
+    created = await _call(
+        world,
+        "POST",
+        base + "/role-bindings",
+        ADMIN_A,
+        scopes,
+        {"sync_scope": "moderator", "discord_role_id": "1"},
+    )
+    assert [r.status_code for r in (patched, deleted, bindings, created)] == [404] * 4
+    survivor = pairing_svc.get_pairing(world.dal, world.b, pairing_id)
+    assert survivor is not None and survivor.sync_enabled is False
+
+
+async def test_binding_and_mirror_ids_from_another_community_are_404(world: Any) -> None:
+    pairing_id = _b_pairing(world)
+    scopes = ["community.guild_pairing:write"]
+    binding_url = cpath(
+        world.dal,
+        f"/api/v1/communities/{{community_id}}/guild-pairings/{pairing_id}/role-bindings/1",
+        world.a,
+    )
+    assert (await _call(world, "DELETE", binding_url, ADMIN_A, scopes)).status_code == 404
+    mirror_svc.list_mappings(world.dal, world.b)  # binds the table
+    mapping_id = int(
+        world.dal.discord_role_mirror_mappings.insert(
+            community_id=world.b,
+            source_guild_id="1",
+            source_role_id="2",
+            target_guild_id="3",
+            target_role_id="4",
+        )
+    )
+    world.dal.commit()
+    mirror_url = cpath(
+        world.dal,
+        f"/api/v1/communities/{{community_id}}/discord/role-mirrors/{mapping_id}",
+        world.a,
+    )
+    assert (await _call(world, "DELETE", mirror_url, ADMIN_A, scopes)).status_code == 404
+    assert mirror_svc.list_mappings(world.dal, world.b), "B's mapping must survive A's attempt"
+
+
+# --------------------------------------------------------------------------------------------
+# Access tokens: scoped child ids, credentials never re-disclosed
+# --------------------------------------------------------------------------------------------
+
+_CAT_SCOPES = ["community.tokens:admin"]
+
+
+async def test_token_id_from_another_community_is_404_and_not_revoked(world: Any) -> None:
+    token_svc.create_cat(
+        world.dal,
+        world.b,
+        created_by_user_id=ADMIN_B,
+        name="b-cat",
+        scopes=["chat:read"],
+        expires_at=None,
+    )
+    row = world.dal(world.dal.community_access_tokens.community_id == world.b).select().first()
+    url = cpath(world.dal, f"/api/v1/admin/{{community_id}}/tokens/cats/{row.id}", world.a)
+    response = await _call(world, "DELETE", url, ADMIN_A, _CAT_SCOPES)
+    assert response.status_code == 404
+    world.dal.commit()
+    assert not world.dal.community_access_tokens[row.id].is_revoked
+
+
+async def test_credential_is_returned_once_and_never_listed(world: Any) -> None:
+    create_url = cpath(world.dal, "/api/v1/admin/{community_id}/tokens/cats", world.a)
+    created = await _call(
+        world, "POST", create_url, ADMIN_A, _CAT_SCOPES, {"name": "ci", "scopes": ["chat:read"]}
+    )
+    assert created.status_code == 201
+    secret = (await created.get_json())["token"]
+    assert secret.startswith("wdl_c_")
+    listed = await _call(world, "GET", create_url, ADMIN_A, _CAT_SCOPES)
+    text = json.dumps(await listed.get_json())
+    assert secret not in text and "token_hash" not in text and '"token"' not in text
+    stored = world.dal(world.dal.community_access_tokens.community_id == world.a).select().first()
+    assert secret not in (stored.token_hash or ""), "only a hash may be stored"
+
+
+async def test_maintainer_of_a_cannot_mint_a_credential_for_b(world: Any) -> None:
+    create_url = cpath(world.dal, "/api/v1/admin/{community_id}/tokens/cats", world.b)
+    response = await _call(
+        world, "POST", create_url, ADMIN_A, _CAT_SCOPES, {"name": "evil", "scopes": ["chat:read"]}
+    )
+    assert response.status_code == 403
+    assert world.dal(world.dal.community_access_tokens.community_id == world.b).count() == 0

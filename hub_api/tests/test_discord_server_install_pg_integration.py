@@ -150,6 +150,8 @@ def community_id(adal: AsyncDAL) -> int:
         "VALUES ('acme-corp', 'Acme', false, true) RETURNING id",
     )
     pg.q(dal, "INSERT INTO hub_users (id, username) VALUES (1, 'admin1')")
+    # The pairing routes now require community-admin standing; a tenant admin is admin-equivalent.
+    pg.q(dal, "INSERT INTO tenant_admins (user_id, tenant_id) VALUES (1, %s)", [tid])
     pg.q(
         dal,
         "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "

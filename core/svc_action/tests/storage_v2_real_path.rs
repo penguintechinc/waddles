@@ -45,7 +45,7 @@ const VALKEY_IMAGE: &str = "valkey/valkey:8.1.10-alpine";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const RUNTIME_PASSWORD: &str = "waddles_bundle_runtime_test_pw";
 const RUNTIME_ROLE: &str = "waddles_bundle_runtime";
-const APP: &str = "waddles.cal.test";
+const APP: &str = "penguintechinc.waddles.cal-test";
 
 /// The relay queue is not exercised here; every method fails loudly if reached.
 struct UnusedQueue;

@@ -45,7 +45,7 @@ from quart_schema import validate_request
 
 from config import HubAPIConfig
 from services import community_access, overlay_scene_service, overlay_service
-from services.community_public_id import lookup_public_id
+from services.community_public_id import UNKNOWN_COMMUNITY_ID, lookup_public_id
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
@@ -115,6 +115,10 @@ async def _require_admin(community_id: int) -> int:
 
 async def _require_admin_or_404(community_id: int) -> int:
     """`_require_admin`, but a refusal reads as 404 so a foreign community's id is not an oracle."""
+    if community_id == UNKNOWN_COMMUNITY_ID:
+        # Well-formed UUID, no such community: a global admin would pass `_require_admin` and
+        # then hit the overlay-token FK (500). Unknown is a plain 404.
+        raise not_found("Community not found")
     try:
         return await _require_admin(community_id)
     except ApiError as exc:

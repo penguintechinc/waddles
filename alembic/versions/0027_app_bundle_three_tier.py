@@ -14,7 +14,7 @@ migration 069) -- this migration brings the newer WASM-component pipeline
      `app_global_installs` -- one row per (app_id, version) install event,
      `superseded_by`-chained the same way `app_install_approvals` already
      is. Vendor bundles require a human `platform:admin`; first-party
-     `waddles.core.*` bundles use `install_source='system:core-seeder'`
+     `penguintechinc.waddles.*` bundles use `install_source='system:core-seeder'`
      with `installed_by=NULL` (mirrors `app_install_approvals.
      approval_source`, migration 0026). NO tenant/community activation
      happens here anymore.

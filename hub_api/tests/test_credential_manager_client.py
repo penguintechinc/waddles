@@ -84,6 +84,7 @@ async def test_unset_url_is_a_loud_503_with_no_plaintext_default(
     with pytest.raises(ApiError) as exc:
         await cmc.test_bot_connection("twitch", bearer_token="SECRET-BEARER")
     assert exc.value.status_code == 503 and exc.value.code == cmc.UNAVAILABLE_CODE
+    assert "not configured" in exc.value.message and "untrusted" not in exc.value.message
 
 
 async def test_bad_url_never_sends_the_bearer(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -1,6 +1,6 @@
 """`app_install_approvals.approval_source` -- distinguishes a human approval from a SYSTEM one.
 
-Core-bundle-seeder milestone: first-party `waddles.core.*` bundles must
+Core-bundle-seeder milestone: first-party `penguintechinc.waddles.*` bundles must
 activate at deploy time under the platform's SYSTEM identity, with NO
 human global-admin approval step (global-admin approval stays reserved
 for third-party vendor bundles, per `services/vendor_bundle_authz.py`'s
@@ -64,7 +64,7 @@ def upgrade() -> None:
     op.execute(
         "COMMENT ON COLUMN app_install_approvals.approval_source IS "
         "'human (default, global-admin approved) or system:core-seeder "
-        "(first-party waddles.core.* bundle, seeded at deploy time, no human approval)'"
+        "(first-party penguintechinc.waddles.* bundle, seeded at deploy time, no human approval)'"
     )
 
 

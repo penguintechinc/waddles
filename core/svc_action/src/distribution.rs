@@ -89,14 +89,14 @@ mod tests {
     #[test]
     fn bundle_catalog_get_returns_none_before_any_update() {
         let catalog = BundleCatalog::new();
-        assert!(catalog.get("waddles.a.b.c").is_none());
+        assert!(catalog.get("penguintechinc.waddles.a-b-c").is_none());
     }
 
     #[test]
     fn bundle_catalog_update_then_get_round_trips() {
         let catalog = BundleCatalog::new();
         let row = BundleRow {
-            app_id: "waddles.a.b.c".to_string(),
+            app_id: "penguintechinc.waddles.a-b-c".to_string(),
             version: "1.0.0".to_string(),
             artifact_digest: Some("sha256:00".to_string()),
             component_key: "k".to_string(),
@@ -107,14 +107,14 @@ mod tests {
             granted_secret_refs: HashMap::new(),
         };
         catalog.update(vec![row.clone()]);
-        assert_eq!(catalog.get("waddles.a.b.c"), Some(row));
+        assert_eq!(catalog.get("penguintechinc.waddles.a-b-c"), Some(row));
     }
 
     #[test]
     fn bundle_catalog_update_replaces_the_row_for_the_same_app_id() {
         let catalog = BundleCatalog::new();
         let mut row = BundleRow {
-            app_id: "waddles.a.b.c".to_string(),
+            app_id: "penguintechinc.waddles.a-b-c".to_string(),
             version: "1.0.0".to_string(),
             artifact_digest: Some("sha256:00".to_string()),
             component_key: "k".to_string(),
@@ -128,7 +128,10 @@ mod tests {
         row.artifact_digest = Some("sha256:11".to_string());
         catalog.update(vec![row.clone()]);
         assert_eq!(
-            catalog.get("waddles.a.b.c").unwrap().artifact_digest,
+            catalog
+                .get("penguintechinc.waddles.a-b-c")
+                .unwrap()
+                .artifact_digest,
             Some("sha256:11".to_string())
         );
     }

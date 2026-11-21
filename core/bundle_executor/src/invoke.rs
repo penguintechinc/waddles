@@ -2680,11 +2680,11 @@ mod tests {
             .on_load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 digest: format!("sha256:{}", "0".repeat(64)),
-                component_key: "bundles/waddles.test.app/1/x.wasm".to_string(),
-                sidecar_key: "bundles/waddles.test.app/1/x.json".to_string(),
+                component_key: "bundles/penguintechinc.waddles.test-app/1/x.wasm".to_string(),
+                sidecar_key: "bundles/penguintechinc.waddles.test-app/1/x.json".to_string(),
                 capabilities: vec![],
                 limits: penguin_bundle_host::wire::LoadLimits {
                     timeout_ms: 2000,
@@ -2844,7 +2844,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         let loaded = executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds against the real fixture");
         assert_eq!(loaded.digest, fixture_digest());
@@ -2857,7 +2857,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2868,7 +2868,7 @@ mod tests {
             .on_unload(UnloadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 digest: format!("sha256:{}", "1".repeat(64)),
             })
             .await;
@@ -2884,7 +2884,7 @@ mod tests {
             .on_unload(UnloadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 digest: fixture_digest(),
             })
             .await
@@ -2933,7 +2933,7 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2942,7 +2942,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: format!("sha256:{}", "1".repeat(64)),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({}),
@@ -2979,10 +2979,10 @@ mod tests {
         // supplied "second digest") using an artificial second entry
         // inserted directly -- the wire-level `on_load` always compiles the
         // one fixture; the registry-identity property under test is that a
-        // SECOND, DIFFERENT digest for `waddles.test.app` occupies its own
+        // SECOND, DIFFERENT digest for `penguintechinc.waddles.test-app` occupies its own
         // slot rather than overwriting the first `on_load`'s entry.
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("first scope's load succeeds");
         assert_eq!(executor.bundles.read().await.len(), 1);
@@ -2999,11 +2999,11 @@ mod tests {
                 .expect("first scope's bundle is registered")
                 .test_parts();
             let mut scopes = HashSet::with_capacity(1);
-            scopes.insert((2, 0, "waddles.test.app".to_string()));
+            scopes.insert((2, 0, "penguintechinc.waddles.test-app".to_string()));
             bundles.insert(
                 other_digest.clone(),
                 LoadedBundle {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     request: first.0,
                     slots: first.1,
                     memory_limit_mb: 64,
@@ -3083,9 +3083,21 @@ mod tests {
         )?;
 
         let (a, b, c) = tokio::join!(
-            executor.on_load(fixture_load_body_scoped("waddles.test.app", 1, 0)),
-            executor.on_load(fixture_load_body_scoped("waddles.test.app", 2, 0)),
-            executor.on_load(fixture_load_body_scoped("waddles.test.app", 3, 0)),
+            executor.on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0
+            )),
+            executor.on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0
+            )),
+            executor.on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                3,
+                0
+            )),
         );
         a.expect("scope 1's load succeeds");
         b.expect("scope 2's load succeeds");
@@ -3120,11 +3132,19 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A's load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B's load of the identical digest succeeds");
 
@@ -3142,10 +3162,10 @@ mod tests {
         );
         assert!(resident
             .scopes
-            .contains(&(1, 0, "waddles.test.app".to_string())));
+            .contains(&(1, 0, "penguintechinc.waddles.test-app".to_string())));
         assert!(resident
             .scopes
-            .contains(&(2, 0, "waddles.test.app".to_string())));
+            .contains(&(2, 0, "penguintechinc.waddles.test-app".to_string())));
         Ok(())
     }
 
@@ -3157,18 +3177,26 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
 
         // Scope A goes away first.
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 1,
                 0,
                 &fixture_digest(),
@@ -3186,7 +3214,12 @@ mod tests {
 
         // An invoke from scope B must still succeed against the resident
         // component -- proves this isn't just a bookkeeping artifact.
-        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        let still_invokable = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await;
         assert!(
             still_invokable.is_ok(),
             "scope B's invoke must still succeed while its digest is still referenced: {still_invokable:?}"
@@ -3195,7 +3228,7 @@ mod tests {
         // Scope B goes away second -- now the digest actually unloads.
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 2,
                 0,
                 &fixture_digest(),
@@ -3225,11 +3258,19 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
 
@@ -3238,7 +3279,7 @@ mod tests {
         for attempt in 0..2 {
             executor
                 .on_unload(fixture_unload_body(
-                    "waddles.test.app",
+                    "penguintechinc.waddles.test-app",
                     1,
                     0,
                     &fixture_digest(),
@@ -3255,7 +3296,12 @@ mod tests {
                 .contains_key(&fixture_digest()),
             "scope B's reference must survive scope A's duplicate unload"
         );
-        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        let still_invokable = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await;
         assert!(
             still_invokable.is_ok(),
             "scope B must still be able to invoke after scope A's duplicate unload: {still_invokable:?}"
@@ -3276,14 +3322,18 @@ mod tests {
     async fn unload_for_a_scope_that_never_loaded_has_no_effect() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
 
         // Scope (99, 0) never loaded anything.
         let result = executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 99,
                 0,
                 &fixture_digest(),
@@ -3301,7 +3351,12 @@ mod tests {
                 .contains_key(&fixture_digest()),
             "the real scope A must be completely unaffected"
         );
-        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        let still_invokable = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await;
         assert!(
             still_invokable.is_ok(),
             "scope A must still invoke: {still_invokable:?}"
@@ -3321,17 +3376,25 @@ mod tests {
     async fn unload_from_both_referencing_scopes_evicts_the_digest() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
 
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 1,
                 0,
                 &fixture_digest(),
@@ -3340,7 +3403,7 @@ mod tests {
             .expect("scope A unload succeeds");
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 2,
                 0,
                 &fixture_digest(),
@@ -3386,7 +3449,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -3398,7 +3461,7 @@ mod tests {
             std::time::Duration::from_secs(10),
             executor.on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3447,7 +3510,7 @@ mod tests {
             .on_unload(UnloadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 digest: format!("sha256:{}", "3".repeat(64)),
             })
             .await;
@@ -3465,7 +3528,7 @@ mod tests {
     async fn on_invoke_reports_a_malformed_transform_payload() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -3474,7 +3537,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     // Not a valid `PlatformEvent` shape at all.
@@ -3500,7 +3563,7 @@ mod tests {
     async fn on_invoke_reports_a_malformed_dispatch_payload() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -3509,7 +3572,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Dispatch,
                     payload: serde_json::json!({"not": "the right shape"}),
@@ -3548,7 +3611,7 @@ mod tests {
             .on_load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.memory-hog".to_string(),
+                app_id: "penguintechinc.waddles.test-memory-hog".to_string(),
                 version: "1".to_string(),
                 digest: fixture_digest(),
                 component_key: "k".to_string(),
@@ -3570,7 +3633,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.memory-hog".to_string(),
+                    app_id: "penguintechinc.waddles.test-memory-hog".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3716,7 +3779,7 @@ mod tests {
             .on_load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.fuel-hog".to_string(),
+                app_id: "penguintechinc.waddles.test-fuel-hog".to_string(),
                 version: "1".to_string(),
                 digest: fixture_digest(),
                 component_key: "k".to_string(),
@@ -3735,7 +3798,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.fuel-hog".to_string(),
+                    app_id: "penguintechinc.waddles.test-fuel-hog".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3771,7 +3834,7 @@ mod tests {
         // against a connection whose reply receiver is discarded and stays
         // cheap enough to fit this test's deliberately tiny fuel budget.
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("a fresh bundle still loads after another bundle's fuel trap");
         let (tx2, _rx2) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
@@ -3779,7 +3842,7 @@ mod tests {
         let ok = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3811,7 +3874,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -3826,7 +3889,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3878,7 +3941,7 @@ mod tests {
                     timeout_ms: 5000,
                     memory_mb: 256,
                 },
-                ..fixture_load_body("waddles.test.app")
+                ..fixture_load_body("penguintechinc.waddles.test-app")
             })
             .await
             .expect("load succeeds");
@@ -3899,7 +3962,7 @@ mod tests {
         executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3955,15 +4018,19 @@ mod tests {
     {
         let executor = Executor::new(&limited_config(2, 4, 150), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let held = hold_global_calls(&executor, 2);
 
         let started = Instant::now();
-        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect_err("N+1th invoke must not run while all slots are busy");
+        let err = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect_err("N+1th invoke must not run while all slots are busy");
         assert_eq!(err.code, ErrorCode::ExecutorDeadline);
         assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
         assert!(
@@ -3974,9 +4041,13 @@ mod tests {
 
         // Freeing a slot lets the next invoke through.
         drop(held);
-        invoke_noop(&executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect("invoke runs once a slot is free");
+        invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect("invoke runs once a slot is free");
         Ok(())
     }
 
@@ -3987,14 +4058,19 @@ mod tests {
     {
         let executor = Arc::new(Executor::new(&limited_config(1, 4, 5_000), FixtureSource)?);
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let held = hold_global_calls(&executor, 1);
         let waiter = {
             let executor = Arc::clone(&executor);
             tokio::spawn(async move {
-                invoke_noop(&*executor, "waddles.test.app", &fixture_digest()).await
+                invoke_noop(
+                    &*executor,
+                    "penguintechinc.waddles.test-app",
+                    &fixture_digest(),
+                )
+                .await
             })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -4014,7 +4090,7 @@ mod tests {
     async fn per_bundle_instance_cap_is_enforced_independently() -> Result<(), ExecutorError> {
         let executor = Executor::new(&limited_config(32, 1, 100), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let slots = {
@@ -4022,9 +4098,13 @@ mod tests {
             Arc::clone(&bundles.get(&fixture_digest()).expect("resident").slots)
         };
         let _held = slots.try_acquire_owned().expect("the one bundle slot");
-        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect_err("bundle at its instance cap must reject");
+        let err = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect_err("bundle at its instance cap must reject");
         assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
         assert!(executor.call_limiter.available_permits() == 32);
         Ok(())
@@ -4036,7 +4116,7 @@ mod tests {
     async fn drain_waits_for_in_flight_work_and_refuses_new_invokes() -> Result<(), ExecutorError> {
         let executor = Arc::new(Executor::new(&limited_config(2, 4, 100), FixtureSource)?);
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let held = hold_global_calls(&executor, 1);
@@ -4051,12 +4131,16 @@ mod tests {
             "drain must wait for the in-flight call"
         );
 
-        let err = invoke_noop(&*executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect_err("new invokes are refused while draining");
+        let err = invoke_noop(
+            &*executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect_err("new invokes are refused while draining");
         assert_eq!(err.code, ErrorCode::ShuttingDown);
         let err = executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect_err("new loads are refused while draining");
         assert_eq!(err.code, ErrorCode::ShuttingDown);
@@ -4101,7 +4185,7 @@ mod tests {
             }
         };
         tokio::select! {
-            loaded = executor.on_load(fixture_load_body("waddles.test.app")) => {
+            loaded = executor.on_load(fixture_load_body("penguintechinc.waddles.test-app")) => {
                 loaded.expect("load");
             }
             _ = ticker => unreachable!("the ticker never completes"),
@@ -4324,11 +4408,19 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
         assert_eq!(executor.bundles.read().await.len(), 1);
@@ -4344,7 +4436,11 @@ mod tests {
         // proves `compiling`'s in-flight tracker was cleared too, not left
         // pointing at a stale resolved cell from before the wipe.
         let reloaded = executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await;
         assert!(
             reloaded.is_ok(),
@@ -4363,14 +4459,14 @@ mod tests {
     async fn unload_after_disconnect_fails_closed_as_unknown() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
         executor.on_disconnect().await;
 
         let result = executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 1,
                 0,
                 &fixture_digest(),
@@ -4400,7 +4496,7 @@ mod tests {
     async fn measure_fuel_overhead() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.bench.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.bench-app"))
             .await
             .expect("load succeeds");
         const N: u32 = 2000;
@@ -4411,7 +4507,7 @@ mod tests {
             executor
                 .on_invoke(
                     InvokeBody {
-                        app_id: "waddles.bench.app".to_string(),
+                        app_id: "penguintechinc.waddles.bench-app".to_string(),
                         digest: fixture_digest(),
                         export: ExportKind::Transform,
                         payload: serde_json::json!({
@@ -4503,7 +4599,7 @@ mod tests {
         async fn a_cold_load_records_every_phase_and_the_resident_gauge() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.load"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-load"))
                 .await
                 .expect("load succeeds");
 
@@ -4512,7 +4608,7 @@ mod tests {
                     h.count(
                         "waddles_executor_load_seconds",
                         &[
-                            ("app_id", "waddles.mx.load"),
+                            ("app_id", "penguintechinc.waddles.mx-load"),
                             ("phase", phase),
                             ("result", "ok")
                         ]
@@ -4543,11 +4639,19 @@ mod tests {
         async fn a_second_scope_on_a_resident_digest_is_counted_without_redoing_the_phases() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.shared", 1, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-shared",
+                    1,
+                    0,
+                ))
                 .await
                 .expect("first load");
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.shared", 2, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-shared",
+                    2,
+                    0,
+                ))
                 .await
                 .expect("second scope, same digest");
 
@@ -4585,30 +4689,58 @@ mod tests {
             let (h, executor) = executor_with(FixtureSource);
             let digest = fixture_digest();
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.unload", 1, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-unload",
+                    1,
+                    0,
+                ))
                 .await
                 .expect("load a");
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.unload", 2, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-unload",
+                    2,
+                    0,
+                ))
                 .await
                 .expect("load b");
 
             // A scope that never referenced the digest: orphaned, no effect.
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 9, 9, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    9,
+                    9,
+                    &digest,
+                ))
                 .await
                 .expect("orphaned unload is a no-op, not an error");
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 1, 0, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    1,
+                    0,
+                    &digest,
+                ))
                 .await
                 .expect("unload a");
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    2,
+                    0,
+                    &digest,
+                ))
                 .await
                 .expect("unload b (last)");
             // Now fully evicted: another unload names an unknown digest.
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    2,
+                    0,
+                    &digest,
+                ))
                 .await
                 .expect_err("unknown digest fails closed");
 
@@ -4641,7 +4773,7 @@ mod tests {
         #[tokio::test]
         async fn a_digest_mismatch_records_a_failed_verify_and_no_compile() {
             let (h, executor) = executor_with(FixtureSource);
-            let mut body = fixture_load_body("waddles.mx.mismatch");
+            let mut body = fixture_load_body("penguintechinc.waddles.mx-mismatch");
             body.digest = format!("sha256:{}", "0".repeat(64));
             executor
                 .on_load(body)
@@ -4674,7 +4806,7 @@ mod tests {
         async fn a_failed_fetch_records_a_failed_fetch_phase_and_load_failed() {
             let (h, executor) = executor_with(UnimplementedBucketSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.fetchfail"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-fetchfail"))
                 .await
                 .expect_err("the unimplemented bucket source fails closed");
             assert_eq!(
@@ -4699,12 +4831,12 @@ mod tests {
         async fn a_successful_invoke_records_instantiate_guest_and_total_and_clears_the_gauge() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.invoke"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-invoke"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.invoke",
+                "penguintechinc.waddles.mx-invoke",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4716,7 +4848,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.invoke"),
+                        ("app_id", "penguintechinc.waddles.mx-invoke"),
                         ("export", "transform"),
                         ("result", "ok")
                     ]
@@ -4726,14 +4858,17 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_instantiate_seconds",
-                    &[("app_id", "waddles.mx.invoke")]
+                    &[("app_id", "penguintechinc.waddles.mx-invoke")]
                 ),
                 1.0
             );
             assert_eq!(
                 h.count(
                     "waddles_executor_guest_seconds",
-                    &[("app_id", "waddles.mx.invoke"), ("export", "transform")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-invoke"),
+                        ("export", "transform")
+                    ]
                 ),
                 1.0
             );
@@ -4760,7 +4895,7 @@ mod tests {
             // Nothing loaded: the digest lookup fails closed before any guest runs.
             invoke_event(
                 &executor,
-                "waddles.mx.unknown",
+                "penguintechinc.waddles.mx-unknown",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4771,7 +4906,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.unknown"),
+                        ("app_id", "penguintechinc.waddles.mx-unknown"),
                         ("result", "unknown_bundle")
                     ]
                 ),
@@ -4814,12 +4949,12 @@ mod tests {
         async fn warm_pool_misses_first_then_hits_and_refills() {
             let (h, executor) = executor_with_config(FixtureSource, warm_config(2));
             executor
-                .on_load(fixture_load_body("waddles.mx.warm"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-warm"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.warm",
+                "penguintechinc.waddles.mx-warm",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4834,7 +4969,7 @@ mod tests {
 
             invoke_event(
                 &executor,
-                "waddles.mx.warm",
+                "penguintechinc.waddles.mx-warm",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4853,7 +4988,7 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_instantiate_seconds",
-                    &[("app_id", "waddles.mx.warm")]
+                    &[("app_id", "penguintechinc.waddles.mx-warm")]
                 ),
                 2.0
             );
@@ -4871,12 +5006,12 @@ mod tests {
         async fn a_taken_warm_guest_is_never_returned_to_the_pool() {
             let (_h, executor) = executor_with_config(FixtureSource, warm_config(2));
             executor
-                .on_load(fixture_load_body("waddles.mx.once"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-once"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.once",
+                "penguintechinc.waddles.mx-once",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4900,16 +5035,24 @@ mod tests {
         async fn two_tenants_sharing_a_digest_each_consume_their_own_warm_guest() {
             let (h, executor) = executor_with_config(FixtureSource, warm_config(2));
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.ta", 1, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-ta",
+                    1,
+                    0,
+                ))
                 .await
                 .expect("load tenant A");
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.tb", 2, 7))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-tb",
+                    2,
+                    7,
+                ))
                 .await
                 .expect("load tenant B");
             invoke_event(
                 &executor,
-                "waddles.mx.ta",
+                "penguintechinc.waddles.mx-ta",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4921,7 +5064,7 @@ mod tests {
             assert_eq!(before, 2);
             invoke_event(
                 &executor,
-                "waddles.mx.ta",
+                "penguintechinc.waddles.mx-ta",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4930,7 +5073,7 @@ mod tests {
             .expect("tenant A warm");
             invoke_event(
                 &executor,
-                "waddles.mx.tb",
+                "penguintechinc.waddles.mx-tb",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4948,7 +5091,7 @@ mod tests {
             let stranger = executor
                 .on_invoke(
                     InvokeBody {
-                        app_id: "waddles.mx.stranger".to_string(),
+                        app_id: "penguintechinc.waddles.mx-stranger".to_string(),
                         digest: format!("sha256:{}", "e".repeat(64)),
                         export: ExportKind::Transform,
                         payload: event("noop"),
@@ -4967,12 +5110,12 @@ mod tests {
         async fn unloading_the_last_scope_evicts_the_warm_pool() {
             let (_h, executor) = executor_with_config(FixtureSource, warm_config(2));
             executor
-                .on_load(fixture_load_body("waddles.mx.evict"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-evict"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.evict",
+                "penguintechinc.waddles.mx-evict",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -4982,7 +5125,7 @@ mod tests {
             wait_warm_ready(&executor, 2).await;
             executor
                 .on_unload(fixture_unload_body(
-                    "waddles.mx.evict",
+                    "penguintechinc.waddles.mx-evict",
                     1,
                     0,
                     &fixture_digest(),
@@ -5002,13 +5145,13 @@ mod tests {
             let (h, executor) = executor_with_config(FixtureSource, cfg);
             assert!(!executor.runtime.warm.enabled());
             executor
-                .on_load(fixture_load_body("waddles.mx.off"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-off"))
                 .await
                 .expect("load");
             for _ in 0..2 {
                 invoke_event(
                     &executor,
-                    "waddles.mx.off",
+                    "penguintechinc.waddles.mx-off",
                     ExportKind::Transform,
                     event("noop"),
                     1000,
@@ -5021,7 +5164,7 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_instantiate_seconds",
-                    &[("app_id", "waddles.mx.off")]
+                    &[("app_id", "penguintechinc.waddles.mx-off")]
                 ),
                 2.0
             );
@@ -5040,12 +5183,12 @@ mod tests {
             cfg.executor_fuel_limit_transform = u64::MAX;
             let (h, executor) = executor_with_config(FixtureSource, cfg);
             executor
-                .on_load(fixture_load_body("waddles.mx.busy"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-busy"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.busy",
+                "penguintechinc.waddles.mx-busy",
                 ExportKind::Transform,
                 event("busy-loop"),
                 200,
@@ -5056,7 +5199,10 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.busy"), ("limit", "timeout")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-busy"),
+                        ("limit", "timeout")
+                    ]
                 ),
                 1.0
             );
@@ -5064,7 +5210,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.busy"),
+                        ("app_id", "penguintechinc.waddles.mx-busy"),
                         ("result", "executor_deadline")
                     ]
                 ),
@@ -5074,7 +5220,7 @@ mod tests {
             let guest = h
                 .last(
                     "waddles_executor_guest_seconds",
-                    &[("app_id", "waddles.mx.busy")],
+                    &[("app_id", "penguintechinc.waddles.mx-busy")],
                 )
                 .expect("guest time recorded even when trapped");
             // The epoch deadline is enforced at `EPOCH_TICK` (50 ms) granularity
@@ -5099,12 +5245,12 @@ mod tests {
             cfg.executor_fuel_limit_transform = 5_000_000;
             let (h, executor) = executor_with_config(FixtureSource, cfg);
             executor
-                .on_load(fixture_load_body("waddles.mx.fuelhog"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-fuelhog"))
                 .await
                 .expect("load");
             let err = invoke_event(
                 &executor,
-                "waddles.mx.fuelhog",
+                "penguintechinc.waddles.mx-fuelhog",
                 ExportKind::Transform,
                 event("busy-loop"),
                 10_000,
@@ -5116,14 +5262,20 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.fuelhog"), ("limit", "fuel")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-fuelhog"),
+                        ("limit", "fuel")
+                    ]
                 ),
                 1.0
             );
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.fuelhog"), ("limit", "timeout")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-fuelhog"),
+                        ("limit", "timeout")
+                    ]
                 ),
                 0.0
             );
@@ -5131,7 +5283,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.fuelhog"),
+                        ("app_id", "penguintechinc.waddles.mx-fuelhog"),
                         ("result", "fuel_exhausted")
                     ]
                 ),
@@ -5143,7 +5295,7 @@ mod tests {
         async fn a_memory_hog_records_a_memory_trip() {
             crate::init_test_tracing();
             let (h, executor) = executor_with(FixtureSource);
-            let mut body = fixture_load_body("waddles.mx.hog");
+            let mut body = fixture_load_body("penguintechinc.waddles.mx-hog");
             body.limits = penguin_bundle_host::wire::LoadLimits {
                 timeout_ms: 10_000,
                 memory_mb: 8,
@@ -5151,7 +5303,7 @@ mod tests {
             executor.on_load(body).await.expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.hog",
+                "penguintechinc.waddles.mx-hog",
                 ExportKind::Transform,
                 event("memory-hog"),
                 10_000,
@@ -5161,7 +5313,10 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.hog"), ("limit", "memory")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-hog"),
+                        ("limit", "memory")
+                    ]
                 ),
                 1.0
             );
@@ -5171,12 +5326,12 @@ mod tests {
         async fn a_malformed_dispatch_payload_is_labeled_by_export_and_code() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.dispatch"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-dispatch"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.dispatch",
+                "penguintechinc.waddles.mx-dispatch",
                 ExportKind::Dispatch,
                 serde_json::json!({"not": "an envelope"}),
                 1000,
@@ -5187,7 +5342,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.dispatch"),
+                        ("app_id", "penguintechinc.waddles.mx-dispatch"),
                         ("export", "dispatch"),
                         ("result", "malformed_frame")
                     ]
@@ -5200,7 +5355,7 @@ mod tests {
         async fn a_disconnect_wipes_the_registry_and_zeroes_the_gauge() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.disconnect"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-disconnect"))
                 .await
                 .expect("load");
             assert_eq!(
@@ -5568,7 +5723,7 @@ mod tests {
                 tasks.push(tokio::spawn(async move {
                     tokio::time::sleep(Duration::from_millis((i % 40) * 4)).await;
                     exec.on_load(fixture_load_body_scoped(
-                        "waddles.test.app",
+                        "penguintechinc.waddles.test-app",
                         i32::try_from(i).unwrap_or(0) + 1,
                         0,
                     ))

@@ -10,6 +10,11 @@
 # JIT-compiles from the signed source and counts executor_precompile_fallback_total (loud, never
 # silent).
 #
+# It INSERTs into bundle_precompile_requests, a table only present once db-migrate has run and hub-api
+# has validated the schema, so it starts behind the shared wait-for-hub-api init container like every
+# other non-hub-api workload (scripts/check_wait_for_hub_api.py). Its egress to hub-api's /ready is the
+# enqueue-only CNP in executor-precompile-security.yaml.
+#
 # The name carries the Helm revision so each upgrade creates a fresh Job (Job pod templates are
 # immutable) and Helm prunes the previous revision's Job. The smoke step finds it by the
 # waddlebot.io/helm-revision label and requires it to complete.
@@ -46,6 +51,8 @@ spec:
         fsGroup: 10001
         seccompProfile:
           type: RuntimeDefault
+      initContainers:
+      {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: enqueue
         image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.hubApi.imageTag) }}"

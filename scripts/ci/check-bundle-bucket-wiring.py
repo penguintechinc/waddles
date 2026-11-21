@@ -48,7 +48,9 @@ def main() -> int:
     configmap_bucket: str | None = None
     configmap_name: str | None = None
     hub_api_configmap_refs: set[str] = set()
-    executor_bucket: str | None = None
+    #: workload name -> its BUNDLE_BUCKET_NAME (None when unset). The executor runs as one
+    #: StatefulSet per language partition (-native, -script), every one must agree.
+    executor_buckets: dict[str, str | None] = {}
     seaweedfs_command: str | None = None
     objects_examined = 0
 
@@ -62,7 +64,7 @@ def main() -> int:
             configmap_bucket = doc["data"]["BUNDLE_BUCKET_NAME"]
             configmap_name = meta.get("name")
 
-        if kind != "Deployment":
+        if kind not in {"Deployment", "StatefulSet"}:
             continue
         component = labels.get("app.kubernetes.io/component", "")
         containers = (
@@ -75,7 +77,9 @@ def main() -> int:
 
         if component == "svc-bundles-executor":
             objects_examined += 1
-            executor_bucket = _env_value(containers, "BUNDLE_BUCKET_NAME")
+            executor_buckets[meta.get("name", "<unknown>")] = _env_value(
+                containers, "BUNDLE_BUCKET_NAME"
+            )
 
         if meta.get("name", "").endswith("seaweedfs") or labels.get(
             "app.kubernetes.io/name"
@@ -88,7 +92,8 @@ def main() -> int:
 
     print(
         f"Examined {objects_examined} relevant object(s) "
-        f"(ConfigMap, hub-api Deployment, svc-bundles-executor Deployment, seaweedfs Deployment)."
+        f"(ConfigMap, hub-api Deployment, {len(executor_buckets)} svc-bundles-executor "
+        f"workload(s), seaweedfs Deployment)."
     )
     if objects_examined == 0:
         print(
@@ -106,13 +111,16 @@ def main() -> int:
             f"hub-api Deployment's envFrom does not reference ConfigMap {configmap_name!r} "
             f"(found: {sorted(hub_api_configmap_refs)!r}) -- it would never see BUNDLE_BUCKET_NAME"
         )
-    if not executor_bucket:
-        errors.append("svc-bundles-executor Deployment has no BUNDLE_BUCKET_NAME env var")
-    if configmap_bucket and executor_bucket and configmap_bucket != executor_bucket:
-        errors.append(
-            f"hub-api's ConfigMap BUNDLE_BUCKET_NAME={configmap_bucket!r} != "
-            f"svc-bundles-executor BUNDLE_BUCKET_NAME={executor_bucket!r}"
-        )
+    if not executor_buckets:
+        errors.append("no svc-bundles-executor Deployment/StatefulSet found")
+    for name, bucket in sorted(executor_buckets.items()):
+        if not bucket:
+            errors.append(f"{name} has no BUNDLE_BUCKET_NAME env var")
+        elif configmap_bucket and configmap_bucket != bucket:
+            errors.append(
+                f"hub-api's ConfigMap BUNDLE_BUCKET_NAME={configmap_bucket!r} != "
+                f"{name} BUNDLE_BUCKET_NAME={bucket!r}"
+            )
     if seaweedfs_command is None:
         errors.append("could not find the seaweedfs Deployment's hub-api identity block")
     elif configmap_bucket:
@@ -131,7 +139,8 @@ def main() -> int:
         return 1
 
     print(
-        f"PASS: hub-api (via ConfigMap {configmap_name!r}) and svc-bundles-executor both target "
+        f"PASS: hub-api (via ConfigMap {configmap_name!r}) and every svc-bundles-executor workload "
+        f"({', '.join(sorted(executor_buckets))}) target "
         f"BUNDLE_BUCKET_NAME={configmap_bucket!r}, hub-api identity has Read/Write/List on it."
     )
     return 0

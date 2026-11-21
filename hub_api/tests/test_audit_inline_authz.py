@@ -42,6 +42,7 @@ from services.audit_service import AuditService
 from tests.audit_support import USER_UUID
 from tests.conftest import make_token
 from tests.test_app_factory import _test_config
+from tests.user_ids import uid
 
 #: A fixture value asserted to NEVER appear in an audit event.
 SECRET = "sk-LIVE-4f9a1c0de5-SUPERSECRET"  # noqa: S105  # nosec B105
@@ -54,9 +55,10 @@ _INLINE_PARAMS = sorted(INLINE_AUTHZ_ROUTES.items())
 
 
 def _concrete(rule: str) -> str:
-    """Concrete path for a rule: `cuuid`/`uuid` become UUIDs, every other converter `1`."""
+    """Concrete path: cuuid/uuid -> UUIDs, uuuid -> user 1's UUID, any other converter `1`."""
     rule = rule.replace("<cuuid:community_id>", "00000000-0000-4000-8000-000000000001")
     rule = rule.replace("<uuid:user_uuid>", "00000000-0000-4000-8000-000000000002")
+    rule = rule.replace("<uuuid:user_id>", uid(1))
     return re.sub(r"<[^>]+>", "1", rule)
 
 

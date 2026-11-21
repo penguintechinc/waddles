@@ -447,7 +447,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
 
     // --- 6. Cross-bundle isolation: bundle Y's table never exposes bundle X's row ---
     let other_schema = other_app_core_schema();
-    let bundle_y_scope = DbScope::new(TENANT_A, COMMUNITY_MAIN, "waddles.bot.other");
+    let bundle_y_scope = DbScope::new(TENANT_A, COMMUNITY_MAIN, "penguintechinc.waddles.bot-other");
     let cross_bundle = backend
         .get(&other_schema, &bundle_y_scope, &inserted.row_id)
         .await;
@@ -775,7 +775,11 @@ async fn typed_columns_round_trip_against_real_postgres() {
             .expect("runtime role connects"),
     );
     let schema = typed_core_schema();
-    let scope = DbScope::new(TYPED_TENANT, COMMUNITY_MAIN, "waddles.bot.typed");
+    let scope = DbScope::new(
+        TYPED_TENANT,
+        COMMUNITY_MAIN,
+        "penguintechinc.waddles.bot-typed",
+    );
 
     // --- 1. insert: every typed column, incl. user_ref and a non-UTC offset ---
     let user_ref = "3f2b8c1e-7a4d-4e0b-9c55-1d2e3f4a5b6c";
@@ -975,7 +979,11 @@ async fn typed_columns_round_trip_against_real_postgres() {
     );
 
     // --- 6. query: typed columns decode, and ORDER BY sorts the stored type ---
-    let q_scope = DbScope::new(TYPED_TENANT + 1, TENANT_WIDE, "waddles.bot.typed");
+    let q_scope = DbScope::new(
+        TYPED_TENANT + 1,
+        TENANT_WIDE,
+        "penguintechinc.waddles.bot-typed",
+    );
     // Insert order differs from chronological order; the middle row is only
     // earliest once its -05:00 offset is applied (2026-01-01T04:00:00Z).
     let instants = [
@@ -1501,7 +1509,7 @@ async fn numeric_columns_round_trip_against_real_postgres() {
             .expect("runtime role connects"),
     );
     let schema = money_schema();
-    let scope = DbScope::new(120, COMMUNITY_MAIN, "waddles.bot.money");
+    let scope = DbScope::new(120, COMMUNITY_MAIN, "penguintechinc.waddles.bot-money");
 
     // --- 1. insert: decimal text, integer and NULL; exact text back ---
     let row = backend
@@ -1582,7 +1590,7 @@ async fn numeric_columns_round_trip_against_real_postgres() {
     }
 
     // --- 4. ORDER BY sorts by numeric value, not by the text projection ---
-    let q_scope = DbScope::new(121, TENANT_WIDE, "waddles.bot.money");
+    let q_scope = DbScope::new(121, TENANT_WIDE, "penguintechinc.waddles.bot-money");
     let mut ids = Vec::new();
     for amount in ["100.00", "9.50", "10.25"] {
         ids.push(

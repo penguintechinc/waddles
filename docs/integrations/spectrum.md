@@ -50,7 +50,7 @@ A configured source with no token logs a WARN and nothing starts. It never silen
 
 ## Events produced
 
-Org-sync changes are fanned out under the `spectrum.org` consume tag (messages stay on `spectrum.message`) to the default app `waddles.bot.spectrum.default`, and normalized to `PlatformEvent`s:
+Org-sync changes are fanned out under the `spectrum.org` consume tag (messages stay on `spectrum.message`) to the default app `penguintechinc.waddles.bot-spectrum`, and normalized to `PlatformEvent`s:
 
 | `event_type` | When | Notable `payload` fields |
 |--------------|------|--------------------------|

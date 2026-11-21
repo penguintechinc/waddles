@@ -112,7 +112,7 @@ The `spotify_interaction_module` at code version `2.0.0` provides:
 | `action/interactive/spotify_interaction_module/services/__init__.py` | Services package init |
 | `action/interactive/spotify_interaction_module/services/oauth_service.py` | `SpotifyOAuthService` full implementation |
 | `action/interactive/spotify_interaction_module/requirements.txt` | quart, hypercorn, aiohttp, httpx, python-dotenv, pytest stack |
-| `action/interactive/spotify_interaction_module/Dockerfile` | Python 3.12-slim build, non-root `waddlebot` user, 4 workers |
+| action/interactive/spotify_interaction_module/Dockerfile | Python 3.12-slim build, non-root `waddlebot` user, 4 workers |
 | `action/interactive/spotify_interaction_module/test-api.sh` | Bash API test suite with 6 test cases |
 
 ### Dependencies Introduced

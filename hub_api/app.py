@@ -82,6 +82,7 @@ from services.schema import (
 from services.session_cookie import bearer_token_from_cookie
 from services.source_group_reconciler import run_reconcile_loop
 from services.tenant_key_provisioning import run_startup_provisioning
+from services.user_public_id import install_user_public_ids
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,8 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     # Community path ids are public UUIDs (`<cuuid:community_id>`); translated to the internal
     # numeric id after rate limiting, before any blueprint/auth hook runs.
     install_community_public_ids(app)
+    # User path ids are hub-user public UUIDs (`<uuuid:user_id>`), translated the same way.
+    install_user_public_ids(app)
 
     app.register_blueprint(create_health_blueprint(cfg.module_name, cfg.module_version))
     app.register_blueprint(create_mcp_blueprint())

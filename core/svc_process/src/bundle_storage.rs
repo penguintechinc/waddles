@@ -760,7 +760,7 @@ mod tests {
         use std::sync::atomic::{AtomicBool, Ordering};
         use zeroize::Zeroizing;
 
-        const APP: &str = "waddles.harness.wiring";
+        const APP: &str = "penguintechinc.waddles.harness-wiring";
         const PLAIN: &[u8] = b"tenant confidential clip metadata";
         const CUTOFF: u64 = 2_000_000_000;
 

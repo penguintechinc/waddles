@@ -16,19 +16,26 @@ Parses app_id-bearing fields only (never free text, never PostHog flag keys such
 Each id must match ``^(penguintechinc\\.waddles|psychoboy\\.penguintwitchbot)\\.[a-z0-9-]+$`` and its
 name must contain no ``default``/``example``/``demo`` segment. Zero ids examined is a FAILURE.
 
-Second pass (``sweep``): ANY tracked text file -- test fixtures included -- may not mention an
-old-style id (``waddles.<ns>.<name>``, regex in ``OLD_ID_RE``). The structural parsers above only
-read app_id-bearing fields in specific file kinds, which is how old ids in ``alembic/tests`` fixtures
-slipped through. Excluded: this guard's own pattern, ``scripts/rename/`` (the old->new mapping),
-and the platform PostHog flag keys ``waddles.core.rust-data-plane`` / ``waddles.core.disable-*``.
-Pre-existing debt lives in ``scripts/ci/old_id_baseline.json`` (per-file match counts, many are
-flag keys / proto packages / hostnames); a file may never exceed its baseline count and a file with
-no baseline entry has a budget of zero.
+Second pass (``sweep``, ZERO tolerance -- no baseline): ANY tracked text file -- test fixtures,
+docs and webui included -- may not mention an old-style id (``waddles.<ns>.<name>...``, regex
+``OLD_ID_RE``) unless the token is on the explicit non-app_id exclusion list below. The exclusions
+are the only other things that legitimately start ``waddles.``:
+
+* (B) PostHog / license flag keys: ``waddles.<module>.<feature>`` (exactly two segments after
+  ``waddles``, in a known flag module) and the named platform flags (``waddles.core.rust-data-plane``,
+  ``waddles.core.disable-*`` ...). An old app_id always carried a third segment or a ``.default``
+  suffix, so those never match an exclusion;
+* (C) protobuf packages / gRPC service names (``waddles.hub.internal.v1`` ...), crypto domain strings;
+* (D) hostnames / domains (``waddles.penguintech.cloud`` ...);
+* (E) metric, span-attribute and logger names (``waddles.ai.*``, ``waddles.audit.*``, ``waddles.slo.*`` ...).
+
+Skipped paths: this guard + its tests, ``scripts/rename/`` (the retired old->new table) and the two
+live-data leftover scanners (``tests/e2e/api-sweep/api_sweep.py``, ``tests/e2e/old-id-scan.sh``),
+whose whole job is to carry the old prefixes they hunt for in a running cluster.
 """
 
 from __future__ import annotations
 
-import json
 import re
 import subprocess
 import sys
@@ -57,16 +64,46 @@ TOOL_CALL = re.compile(r"""tool\.call:([a-z0-9][a-z0-9._-]*):""")
 OLD_ID_RE = re.compile(
     r"(?<![a-z0-9.-])" + "waddles" + r"\.(?:core|integrations|social|[a-z]+)\.[a-z][a-z0-9_.-]*"
 )
-FLAG_KEY_RE = re.compile(
-    r"^" + "waddles" + r"\.core\.(?:rust-data-plane$|disable-)"
+_W = "waddles"  # concatenated so this file never matches its own pattern
+# (C) protobuf packages / gRPC service names / crypto domain-separation strings.
+_CAT_C = _W + r"\.(?:(?:hub|streaming|presentation)\.internal\.v1(?:\.\w+)?|audit\.chain\.v1|binding\.v3)"
+# (D) hostnames / domains.
+_CAT_D = (
+    _W + r"\.(?:penguintech\.(?:io|cloud)(?:\.attacker\.com)?|penguincloud\.io|example\.com"
+    r"|localhost\.local|yourdomain\.com|app\.evil\.com|app\.attacker\.example)"
+)
+# (E) metric / span-attribute / logger names.
+_CAT_E = (
+    _W + r"\.(?:ai\.(?:guard|provider|tool_call)\.[a-z_]+|ai\.routing|audit\.[a-z_]+|slo\.[a-z-]+"
+    r"|telemetry\.[a-z_.]+|revocation\.[a-z]+|auth\.me\.tier_lookup_failed|ingest\.interaction"
+    r"|superadmin\.tier_override_failed)"
+)
+# (B) named PostHog / license flag keys.
+_CAT_B_NAMED = (
+    _W + r"\.(?:ai\.tools(?:\.[a-z_]+)?|ai\.(?:byok|premium_models)"
+    r"|core\.(?:rust-data-plane|disable-[a-z0-9-]*|overlay-captions|overlay-image-upload|db-bundle-config"
+    r"|egress-via-dispatcher|bundle-egress|generic-intake|prebuilt-bundles|wasm-bundles|outbound-destinations"
+    r"|twitch-dynamic-outbound|twitch-websocket-devtest|spine-at-least-once|tenant-envelope-encryption"
+    r"|demo|test)"
+    r"|integrations\.(?:provider_connections|static_connections|waddleai)"
+    r"|never\.seen(?:\.2)?)"
+)
+# (B) ``waddles.<module>.<feature>`` flag keys: exactly two segments in a known flag module.
+FLAG_MODULES = (
+    "webui|analytics|marketing|tenancy|compliance|auth|calendar|tenant|customers|widgets|superadmin"
+    "|community|social|socials|streaming|bot|music|event|ai"
+)
+_CAT_B_FLAG = _W + r"\.(?:" + FLAG_MODULES + r")\.[a-z][a-z0-9_-]*"
+EXCLUDED_TOKEN_RE = re.compile(
+    "^(?:" + "|".join((_CAT_B_NAMED, _CAT_B_FLAG, _CAT_C, _CAT_D, _CAT_E)) + ")$"
 )
 SWEEP_SKIP_PREFIXES = (
     "scripts/ci/check_app_ids.py",
     "scripts/ci/tests/test_check_app_ids.py",
-    "scripts/ci/old_id_baseline.json",
     "scripts/rename/",
+    "tests/e2e/api-sweep/api_sweep.py",
+    "tests/e2e/old-id-scan.sh",
 )
-BASELINE_REL = "scripts/ci/old_id_baseline.json"
 
 SOURCES = (
     "sql_insert",
@@ -273,46 +310,19 @@ def sweep(root: Path) -> dict[str, list[tuple[int, str]]]:
             continue
         for m in OLD_ID_RE.finditer(text):
             tok = m.group(0).rstrip(".")
-            if FLAG_KEY_RE.match(tok):
+            if EXCLUDED_TOKEN_RE.match(tok):
                 continue
             hits.setdefault(rel, []).append((_line(text, m.start()), tok))
     return hits
 
 
-def load_baseline(root: Path) -> dict[str, int]:
-    """Read the per-file pre-existing match budget (empty when absent)."""
-    f = root / BASELINE_REL
-    return json.loads(f.read_text()) if f.is_file() else {}
-
-
-def sweep_violations(
-    hits: dict[str, list[tuple[int, str]]], baseline: dict[str, int]
-) -> list[tuple[str, int, str]]:
-    """Hits beyond each file's baseline budget (budget 0 for unlisted files)."""
-    out: list[tuple[str, int, str]] = []
-    for rel, items in hits.items():
-        budget = baseline.get(rel, 0)
-        if len(items) > budget:
-            out.extend((rel, ln, tok) for ln, tok in items[budget:])
-    return out
-
-
 def main(argv: list[str]) -> int:
     """CLI entry: exit 1 on any violation or a zero denominator in any source family."""
-    write_baseline = "--write-baseline" in argv
-    argv = [a for a in argv if a != "--write-baseline"]
     root = (
         Path(argv[1]).resolve()
         if len(argv) > 1
         else Path(__file__).resolve().parents[2]
     )
-    if write_baseline:
-        hits = sweep(root)
-        (root / BASELINE_REL).write_text(
-            json.dumps({k: len(v) for k, v in sorted(hits.items())}, indent=1) + "\n"
-        )
-        print(f"baseline written: files={len(hits)} matches={sum(map(len, hits.values()))}")
-        return 0
     bad, denom = scan(root)
     total = sum(denom.values())
     print(
@@ -323,10 +333,10 @@ def main(argv: list[str]) -> int:
         print(f"  VIOLATION {rp}:{line}: {app_id!r} ({why})")
     hits = sweep(root)
     swept = len(_files(root))
-    over = sweep_violations(hits, load_baseline(root))
+    over = [(rp, ln, tok) for rp, items in sorted(hits.items()) for ln, tok in items]
     print(
         f"check_app_ids: sweep files_examined={swept} files_with_old_ids={len(hits)} "
-        f"matches={sum(map(len, hits.values()))} over_baseline={len(over)}"
+        f"old_id_hits={len(over)}"
     )
     for rp, line, tok in over:
         print(f"  OLD-ID {rp}:{line}: {tok!r} (old-style app_id; use penguintechinc.waddles.<name>)")
@@ -334,7 +344,7 @@ def main(argv: list[str]) -> int:
         print("check_app_ids: FAIL sweep examined zero files")
         return 1
     if over:
-        print(f"check_app_ids: FAIL {len(over)} old-id mention(s) beyond baseline")
+        print(f"check_app_ids: FAIL {len(over)} old-id mention(s)")
         return 1
     empty = [k for k, v in denom.items() if v == 0]
     if empty:

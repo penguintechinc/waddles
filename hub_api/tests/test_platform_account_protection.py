@@ -21,6 +21,7 @@ from services.errors import ApiError
 from services.global_identity import grant_global_admin_sync, is_global_admin_sync
 from services.platform_account import PLATFORM_ACCOUNT_CODE
 from tests.conftest import TENANT_SLUG, make_user_token, seed_super_admin
+from tests.user_ids import row_uuid, uid
 
 BOOTSTRAP_ID = 1
 
@@ -102,7 +103,7 @@ def _assert_denied(audit: _FakeAudit, operation: str) -> None:
 async def test_delete_is_refused_and_audited(client: Any, auth_db: Any, audit: _FakeAudit) -> None:
     person = _world(auth_db)
     response = await client.delete(
-        f"/api/v1/superadmin/users/{BOOTSTRAP_ID}", headers=_headers(person)
+        f"/api/v1/superadmin/users/{uid(BOOTSTRAP_ID)}", headers=_headers(person)
     )
     assert response.status_code == 403
     assert (await response.get_json())["error"]["code"] == PLATFORM_ACCOUNT_CODE
@@ -116,7 +117,7 @@ async def test_deactivate_is_refused_and_audited(
 ) -> None:
     person = _world(auth_db)
     response = await client.put(
-        f"/api/v1/superadmin/users/{BOOTSTRAP_ID}",
+        f"/api/v1/superadmin/users/{uid(BOOTSTRAP_ID)}",
         headers=_headers(person),
         json={"isActive": False},
     )
@@ -131,7 +132,7 @@ async def test_demote_is_refused_even_with_other_admins(
 ) -> None:
     person = _world(auth_db)
     response = await client.post(
-        f"/api/v1/superadmin/users/{BOOTSTRAP_ID}/super-admin-role",
+        f"/api/v1/superadmin/users/{uid(BOOTSTRAP_ID)}/super-admin-role",
         headers=_headers(person),
         json={"grant": False},
     )
@@ -184,20 +185,20 @@ async def test_person_admins_are_unaffected(client: Any, auth_db: Any, audit: _F
     """Demote, deactivate and delete still work for person accounts (bootstrap is the caller)."""
     person = _world(auth_db)
     demoted = await client.post(
-        f"/api/v1/superadmin/users/{person}/super-admin-role",
+        f"/api/v1/superadmin/users/{uid(person)}/super-admin-role",
         headers=_headers(BOOTSTRAP_ID),
         json={"grant": False},
     )
     assert demoted.status_code == 200
     assert is_global_admin_sync(auth_db.dal, person) is False
     deactivated = await client.put(
-        f"/api/v1/superadmin/users/{person}",
+        f"/api/v1/superadmin/users/{uid(person)}",
         headers=_headers(BOOTSTRAP_ID),
         json={"isActive": False},
     )
     assert deactivated.status_code == 200
     deleted = await client.delete(
-        f"/api/v1/superadmin/users/{person}", headers=_headers(BOOTSTRAP_ID)
+        f"/api/v1/superadmin/users/{uid(person)}", headers=_headers(BOOTSTRAP_ID)
     )
     assert deleted.status_code == 200
     assert all(e.details.get("reason") != "platform_account" for e in audit.events)
@@ -208,13 +209,13 @@ async def test_user_dto_flags_only_the_platform_account(client: Any, auth_db: An
     person = _world(auth_db)
     response = await client.get("/api/v1/superadmin/users", headers=_headers(person))
     flags = {u["id"]: u["isPlatformAccount"] for u in (await response.get_json())["users"]}
-    assert flags == {BOOTSTRAP_ID: True, person: False}
+    assert flags == {row_uuid(auth_db, BOOTSTRAP_ID): True, row_uuid(auth_db, person): False}
 
 
 async def test_last_admin_guard_still_protects_person_accounts(client: Any, auth_db: Any) -> None:
     """A person who is the last admin (no bootstrap flag) is still 409-protected."""
     seed_super_admin(auth_db, user_id=1)  # not bootstrap
     response = await client.put(
-        "/api/v1/superadmin/users/1", headers=_headers(1), json={"isActive": False}
+        f"/api/v1/superadmin/users/{uid(1)}", headers=_headers(1), json={"isActive": False}
     )
     assert response.status_code == 409

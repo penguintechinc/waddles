@@ -47,8 +47,8 @@
 - Command processor already enforced `is_enabled` check per command (confirmed working)
 - `AdminModules.jsx` (existing) correctly greys out core module toggles
 
-#### Platform Extensibility — `libs/platform_receiver`
-- New shared library `libs/platform_receiver/` installable via `pip install`
+#### Platform Extensibility — libs/platform_receiver
+- New shared library libs/platform_receiver installable via `pip install`
 - `PlatformReceiverBase` abstract class: implement `start()`/`stop()`, call `dispatch(build_chat_event(...))` — router integration is automatic
 - Standardised event schema: `build_chat_event`, `build_slash_event`, `build_stream_event`
 - Shared response utilities: `split_for_chat`, `get_response_content`, `format_error`
@@ -162,7 +162,6 @@
 - Admin calendar event management: CRUD, approval/rejection, RSVPs, attendees
 - New admin page: Calendar Events with create/edit modal, status badges, approve/reject actions
 - Routes registered at `/api/v1/calendar/*` (user) and `/api/v1/admin/:communityId/calendar/*` (admin)
-- Shared proxy utility extracted to `utils/calendarProxy.js`
 
 #### Support Community Type + Ticket System
 - New `support` community type for help desks and customer support

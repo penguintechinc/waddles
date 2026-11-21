@@ -1,5 +1,7 @@
 # Calendar app bundle (Rust) + Discord scheduled-event sync
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Status: DRAFT spec (2026-11-07), docs only. Supersedes the legacy `calendar_interaction_module` + hub-api event-sync engine.
 
 ## 1. Principles (locked)
@@ -134,7 +136,7 @@ Recommend **merge into calendar, retire `bundles/python/event`**: same domain (e
 | Area | Remove |
 |---|---|
 | hub-api | `blueprints/v1/event_discord_sync.py`, `services/event_discord_sync_service.py`, `services/event_sync_connector_client.py`, tests, flags, `guild_tenant_pairings.event_sync_enabled` |
-| Legacy | `action/interactive/calendar_interaction_module/` (OAuth/booking/tournaments need disposition, Q6) |
+| Legacy | action/interactive/calendar_interaction_module (OAuth/booking/tournaments need disposition, Q6) |
 | Core | `core/svc_action/src/capabilities/event_sync.rs` + registration |
 | Helm | CronJob, request secret, values |
 | Webui | `AdminCalendarEvents.jsx` + route |
