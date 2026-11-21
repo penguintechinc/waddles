@@ -3,7 +3,7 @@
 //! TRANSCODE admission (design spec: "checks entitlement before starting a
 //! job") debits `transcode_token_cost` tokens of `transcode_product_key`
 //! (both `CliConfig` fields, see `crate::config`) via hub-api's real
-//! `POST /api/v1/marketplace/communities/<id>/tokens/debit` endpoint --
+//! `POST /api/v1/marketplace/communities/<public-uuid>/tokens/debit` endpoint --
 //! this service holds no ledger DB grant of its own (single-writer, per
 //! hub-api's own `token_billing_service` docstring), so an HTTP call is
 //! the only way tokens are ever decremented. Ported from the Python
@@ -11,7 +11,7 @@
 //! same BLOCK-WITH-FALLBACK semantics (see [`TokenDebitResult`]).
 //!
 //! Auth model (service identity, never user impersonation): the debit goes to
-//! hub-api's INTERNAL route (`POST /api/v1/internal/communities/{id}/tokens/debit`)
+//! hub-api's INTERNAL route (`POST /api/v1/internal/communities/{public_uuid}/tokens/debit`)
 //! authenticated with THIS service's own community-bound machine JWT (scope
 //! `token.billing:debit`, minted via hub-api's `ServiceAuthService` with the pod's
 //! projected ServiceAccount token -- [`service_auth::BoundMachineJwtClient`], the same
@@ -150,8 +150,12 @@ struct DebitRequestBody<'a> {
 }
 
 /// hub-api's internal (machine-JWT) debit path for one community.
-fn debit_url(hub_api_url: &str, community_id: i32) -> String {
-    format!("{hub_api_url}/api/v1/internal/communities/{community_id}/tokens/debit")
+///
+/// The path carries the community's PUBLIC UUID (`communities.public_id`), never its numeric id:
+/// hub-api rejects a numeric community segment outright. The numeric id still rides in the
+/// machine JWT's `community` claim, which hub-api checks against the id the UUID resolves to.
+fn debit_url(hub_api_url: &str, community_public_id: &str) -> String {
+    format!("{hub_api_url}/api/v1/internal/communities/{community_public_id}/tokens/debit")
 }
 
 #[derive(Debug, Deserialize)]
@@ -244,12 +248,13 @@ impl TokenLedgerClient {
         hub_api_url: &str,
         actor_user_id: i64,
         community_id: i32,
+        community_public_id: &str,
         amount: i64,
         product_key: &str,
         reference: &str,
         idempotency_key: &str,
     ) -> TokenDebitResult {
-        let url = debit_url(hub_api_url, community_id);
+        let url = debit_url(hub_api_url, community_public_id);
         let body = DebitRequestBody {
             product_key,
             amount,
@@ -358,6 +363,9 @@ mod tests {
     use axum::routing::post;
     use axum::{Json, Router};
     use std::sync::Mutex;
+
+    /// The community's public UUID the debit URL must carry (the numeric id is `7` below).
+    const TEST_COMMUNITY_UUID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
     use std::time::Duration as StdDuration;
 
     /// What the mock hub-api saw: request path, `Authorization` header, JSON body.
@@ -377,7 +385,7 @@ mod tests {
         let app = Router::new().route(
             "/api/v1/internal/communities/{community_id}/tokens/debit",
             post(
-                move |axum::extract::Path(community_id): axum::extract::Path<i32>,
+                move |axum::extract::Path(community_id): axum::extract::Path<String>,
                       headers: HeaderMap,
                       axum::Json(received): axum::Json<serde_json::Value>| {
                     let sink = sink.clone();
@@ -437,6 +445,7 @@ mod tests {
                 base_url,
                 42,
                 7,
+                TEST_COMMUNITY_UUID,
                 5,
                 "transcoding_minutes",
                 "ref-1",
@@ -448,8 +457,8 @@ mod tests {
     #[test]
     fn debit_url_targets_the_internal_machine_route() {
         assert_eq!(
-            debit_url("https://hub-api:8204", 7),
-            "https://hub-api:8204/api/v1/internal/communities/7/tokens/debit"
+            debit_url("https://hub-api:8204", TEST_COMMUNITY_UUID),
+            "https://hub-api:8204/api/v1/internal/communities/6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f/tokens/debit"
         );
     }
 
@@ -466,7 +475,10 @@ mod tests {
         assert!(result.ok);
         assert_eq!(result.balance_after, Some(55));
         let captured = seen.lock().unwrap().pop().expect("one request");
-        assert_eq!(captured.path, "/api/v1/internal/communities/7/tokens/debit");
+        assert_eq!(
+            captured.path,
+            "/api/v1/internal/communities/6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f/tokens/debit"
+        );
         // The SERVICE's community-bound credential, never a forwarded member token.
         assert_eq!(captured.authorization.as_deref(), Some("Bearer svc-jwt-c7"));
         assert_eq!(captured.body["actor_user_id"], 42);

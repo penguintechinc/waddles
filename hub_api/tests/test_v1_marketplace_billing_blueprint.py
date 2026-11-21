@@ -101,6 +101,19 @@ def _pid(client: Any, community_id: int) -> str:
     return public_id(client.app.config["dal"], community_id)
 
 
+def _code_url(dal: Any, code_id: int) -> str:
+    """Discount-code route addressed by the code's public UUID."""
+    row_uuid = _row_uuid(dal, "vendor_discount_codes", code_id)
+    return f"/api/v1/marketplace/vendor/discount-codes/{row_uuid}"
+
+
+def _row_uuid(dal: Any, table: str, row_id: int) -> str:
+    """`public_id` of a seeded row (entity routes take it, never the numeric id)."""
+    row = dal(dal[table].id == row_id).select(dal[table].public_id).first()
+    assert row is not None and row.public_id
+    return str(row.public_id)
+
+
 def _make_admin_user(dal: Any, *, super_admin: bool = True) -> int:
     fields = {"username": "admin", "email": "admin@example.com"}
     if super_admin:
@@ -296,17 +309,18 @@ class TestDiscountCodeOwnershipIDOR:
         dal.commit()
 
         response = await client.put(
-            f"/api/v1/marketplace/vendor/discount-codes/{code_id}",
+            _code_url(dal, code_id),
             headers=user_auth_headers(user_id=attacker_id, scope="marketplace.discount:write"),
             json={"description": "hijacked"},
         )
-        assert response.status_code == 403
+        # Another vendor's code is indistinguishable from an unknown one (404, never 403).
+        assert response.status_code == 404
 
         response_delete = await client.delete(
-            f"/api/v1/marketplace/vendor/discount-codes/{code_id}",
+            _code_url(dal, code_id),
             headers=user_auth_headers(user_id=attacker_id, scope="marketplace.discount:write"),
         )
-        assert response_delete.status_code == 403
+        assert response_delete.status_code == 404
 
 
 class TestDiscountCodeRedeemPriceTrust:
@@ -346,7 +360,7 @@ class TestDiscountCodeRedeemPriceTrust:
             },
             data=_json.dumps(
                 {
-                    "codeId": code_id,
+                    "codeId": _row_uuid(dal, "vendor_discount_codes", code_id),
                     "communityId": public_id(dal, community_id),
                     "subscriptionId": 1,
                 }
