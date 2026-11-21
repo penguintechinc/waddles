@@ -14,6 +14,7 @@ import ipaddress
 import logging
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -60,11 +61,32 @@ _HOST_PORT_RE = re.compile(r"(?<![\w.\-])[\w\-]+(?:\.[\w\-]+)*:\d{2,5}(?!\d)")
 _IPV6_RE = re.compile(r"[0-9a-f:.]*:[0-9a-f:.]*:[0-9a-f:.]*", re.IGNORECASE)
 
 
-def _looks_like_connection_detail(value: str) -> bool:
-    """True when `value` embeds a URL, IP address or `host:port` string."""
-    if _URL_RE.search(value) or _IPV4_RE.search(value) or _HOST_PORT_RE.search(value):
+#: Bare FQDN: >=2 dot-separated labels whose last label is alphabetic (so `v1.2.3` is not one).
+_FQDN_RE = re.compile(r"(?<![\w-])(?:[\w](?:[\w-]*[\w])?\.)+[^\W\d_]{2,}(?![\w-])")
+_DOT_LOOKALIKES = str.maketrans({"\u3002": ".", "\uff61": ".", "\u2024": ".", "\u2e3c": "."})
+
+
+def _normalize(value: str) -> str:
+    """NFKC-fold, map dot look-alikes, drop invisible format chars (zero-width etc.), casefold."""
+    folded = unicodedata.normalize("NFKC", value).translate(_DOT_LOOKALIKES)
+    return "".join(ch for ch in folded if unicodedata.category(ch) != "Cf").casefold()
+
+
+def _looks_like_connection_detail(value: str, host: str | None = None) -> bool:
+    """True when normalized `value` embeds the configured host, a URL, IP, FQDN or `host:port`."""
+    text = _normalize(value)
+    if host:
+        needle = _normalize(host).strip()
+        if needle and needle in text:
+            return True
+    if (
+        _URL_RE.search(text)
+        or _IPV4_RE.search(text)
+        or _HOST_PORT_RE.search(text)
+        or _FQDN_RE.search(text)
+    ):
         return True
-    for token in _IPV6_RE.findall(value):
+    for token in _IPV6_RE.findall(text):
         try:
             ipaddress.IPv6Address(token.strip("[]"))
         except ValueError:
@@ -120,12 +142,16 @@ def _first(src: dict[str, Any], *keys: str) -> Any:
     return None
 
 
-def _clean_str(field_name: str, value: Any) -> str | None:
-    """Return `value` if a plain string free of connection details, else None (PII-free warning)."""
+def _clean_str(field_name: str, value: Any, host: str | None) -> str | None:
+    """Return NFKC-normalized free text, or None when it is not a string or leaks connection info.
+
+    A value that equals/contains the configured server host, or looks like a URL, IP, FQDN or
+    `host:port`, is dropped with a PII-free warning (field name only, never the value).
+    """
     if not isinstance(value, str):
         return None
-    text = value.strip()[:128]
-    if _looks_like_connection_detail(text):
+    text = unicodedata.normalize("NFKC", value).strip()[:128]
+    if _looks_like_connection_detail(text, host):
         logger.warning("rcon member view: redacted connection-like value in field %s", field_name)
         return None
     return text or None
@@ -145,12 +171,14 @@ def _clean_number(value: Any) -> float | None:
     return float(value) if 0 <= value < 2**31 else None
 
 
-def shape_member_status(payload: Any) -> MemberStatusResponse:
+def shape_member_status(
+    payload: Any, *, server_name: str | None, game: str | None, host: str | None
+) -> MemberStatusResponse:
     """Build the member status response ONLY from allowlisted, type-checked fields.
 
-    The server-manager upstream is outside this repo, so its payload is untrusted. Unknown keys
-    (any spelling of host/ip/port/credential, nested objects) are dropped by construction, and
-    string values that look like an IP, URL or `host:port` are redacted.
+    The upstream is untrusted. `server_name` and `game` come from the admin-configured DB row,
+    never from upstream. Remaining free text (map, version) is normalized and redacted if it
+    contains the configured `host`, a URL, IP, FQDN or `host:port`. Unknown keys are dropped.
     """
     top = payload if isinstance(payload, dict) else {}
     nested = top.get("status")
@@ -160,24 +188,24 @@ def shape_member_status(payload: Any) -> MemberStatusResponse:
         success=top.get("success") is True,
         status=MemberServerStatus(
             online=online if isinstance(online, bool) else None,
-            server_name=_clean_str("server_name", _first(src, "server_name", "name")),
+            server_name=server_name,
             players_online=_clean_int(_first(src, "players_online", "clients_online", "players")),
             max_players=_clean_int(_first(src, "max_players")),
-            map=_clean_str("map", _first(src, "map")),
-            game=_clean_str("game", _first(src, "game")),
-            version=_clean_str("version", _first(src, "version")),
+            map=_clean_str("map", _first(src, "map"), host),
+            game=game,
+            version=_clean_str("version", _first(src, "version"), host),
         ),
     )
 
 
-def shape_member_players(payload: Any) -> MemberPlayersResponse:
+def shape_member_players(payload: Any, *, host: str | None = None) -> MemberPlayersResponse:
     """Build the member player list ONLY from allowlisted, type-checked per-player fields."""
     top = payload if isinstance(payload, dict) else {}
     raw = _first(top, "players", "clients", "users")
     rows = raw if isinstance(raw, list) else []
     players = [
         MemberPlayer(
-            name=_clean_str("player.name", _first(row, "name", "nickname")),
+            name=_clean_str("player.name", _first(row, "name", "nickname"), host),
             score=_clean_number(_first(row, "score")),
             ping=_clean_int(_first(row, "ping")),
             duration=_clean_number(_first(row, "duration")),
@@ -487,15 +515,21 @@ async def execute_command(
 
 async def get_server_status(dal: Any, community_id: int, server_id: int) -> MemberStatusResponse:
     """`GET .../rcon/info/:id/status` (member-visible: allowlist DTO only)."""
+    row = get_active_server(dal, community_id, server_id)
     return shape_member_status(
-        await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/status")
+        await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/status"),
+        server_name=row.display_name,
+        game=row.game_name,
+        host=row.host,
     )
 
 
 async def get_player_list(dal: Any, community_id: int, server_id: int) -> MemberPlayersResponse:
     """`GET .../rcon/info/:id/players` (member-visible: allowlist DTO only)."""
+    row = get_active_server(dal, community_id, server_id)
     return shape_member_players(
-        await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/players")
+        await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/players"),
+        host=row.host,
     )
 
 

@@ -1300,7 +1300,7 @@ class TestRconLiveCommandProxy:
         assert set(status["status"]) == {
             "online", "server_name", "players_online", "max_players", "map", "game", "version",
         }  # fmt: skip
-        assert status["status"]["server_name"] is None
+        assert status["status"]["server_name"] == "S1"  # DB display_name, not upstream
         assert status["status"]["players_online"] == 2
         assert set(players) == {"success", "players"}
         assert set(players["players"][0]) == {"name", "score", "ping", "duration"}
