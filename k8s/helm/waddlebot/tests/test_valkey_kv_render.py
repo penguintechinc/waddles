@@ -118,12 +118,15 @@ def test_kv_stateful_exception_marker():
 def test_kv_acl_allow_list_probe_works_no_dangerous():
     """+config|get must come AFTER -@dangerous (CONFIG GET is @dangerous); nothing broader is
     granted."""
+    # The bundle `kv` host (svc-process) authenticates as its OWN ACL user, rendered from
+    # infrastructure.valkeyAcl.kvBaseCommands; `default` is `reset` (test_valkey_acl_render.py).
     cmd = _cmd(_docs("values-alpha.yaml"))
-    line = [ln for ln in cmd.splitlines() if "--user default" in ln]
+    assert "--user default reset" in cmd
+    line = [ln for ln in cmd.splitlines() if "--user svc-process reset on" in ln]
     assert len(line) == 1
     rules = [
         r.strip("'\"")
-        for r in line[0].split("--user default on", 1)[1].split()
+        for r in line[0].split("--user svc-process reset on", 1)[1].split()
         if r.strip("'\"")[:1] in "+-"
     ]
     assert rules[0] == "-@all", rules
