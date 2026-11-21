@@ -109,6 +109,7 @@ async def get_route(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse, 201)
 async def create_route(community_id: int) -> tuple[AnnouncementResponse | dict[str, object], int]:
     """`POST /api/v1/admin/<id>/announcements`."""
@@ -135,6 +136,7 @@ async def create_route(community_id: int) -> tuple[AnnouncementResponse | dict[s
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def update_route(
     community_id: int, announcement_id: int
@@ -188,6 +190,7 @@ def _mutate(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def delete_route(
     community_id: int, announcement_id: int
@@ -202,6 +205,7 @@ async def delete_route(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def publish_route(
     community_id: int, announcement_id: int
@@ -216,6 +220,7 @@ async def publish_route(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def pin_route(
     community_id: int, announcement_id: int
@@ -230,6 +235,7 @@ async def pin_route(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def unpin_route(
     community_id: int, announcement_id: int
@@ -244,6 +250,7 @@ async def unpin_route(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def archive_route(
     community_id: int, announcement_id: int
@@ -258,6 +265,7 @@ async def archive_route(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def broadcast_route(community_id: int, announcement_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/announcements/<announcementId>/broadcast`."""
     if not _tenant_ok(community_id):

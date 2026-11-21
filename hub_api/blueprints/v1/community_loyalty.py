@@ -154,6 +154,7 @@ async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
 @loyalty_bp.route("/<cuuid:community_id>/loyalty/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/admin/<id>/loyalty/config` -- partial update, unset fields left unchanged."""
     if not _tenant_ok(community_id):
@@ -217,6 +218,7 @@ async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
 @loyalty_bp.route("/<cuuid:community_id>/loyalty/user/<platform_user_id>/balance", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/admin/<id>/loyalty/user/<platformUserId>/balance` -- admin add/remove points.
 
@@ -263,6 +265,7 @@ async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict
 @loyalty_bp.route("/<cuuid:community_id>/loyalty/wipe", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/admin/<id>/loyalty/wipe` -- zero every balance in the community."""
     if not _tenant_ok(community_id):
