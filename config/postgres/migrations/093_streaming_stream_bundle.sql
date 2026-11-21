@@ -33,7 +33,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.stream-pipeline',
     '1.0.0',
     'streaming',
-    'waddles.streaming.stream',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,

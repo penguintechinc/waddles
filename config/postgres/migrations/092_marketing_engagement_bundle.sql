@@ -36,7 +36,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.engagement-pipeline',
     '1.0.0',
     'marketing',
-    'waddles.marketing.engagement',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,

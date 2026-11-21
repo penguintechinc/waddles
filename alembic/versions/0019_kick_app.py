@@ -72,7 +72,7 @@ def upgrade() -> None:
             '{KICK_APP_ID}',
             '1.0.0',
             'bot',
-            'waddles.bot.kick',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,

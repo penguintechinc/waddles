@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import asdict
+from typing import Any
 
 from flask_core.api_utils import auth_required
 from flask_core.authz import require_scope
@@ -64,30 +65,54 @@ def _tenant_ok(community_id: int) -> bool:
     return community_in_tenant(current_app.config["dal"], community_id, ctx)
 
 
-async def _guard(community_id: int, *, admin: bool) -> tuple[dict[str, object], int] | None:
-    """Feature flag (402) -> tenant<->community (404) -> per-community authz (403).
-
-    Returns the error response, or `None` when the caller may proceed. `admin=True` requires
-    community-admin authority; `admin=False` requires active, unbanned membership. Never relies
-    on the session-wide `*:read` wildcard.
-    """
+async def _precheck(community_id: int) -> tuple[Any, tuple[dict[str, object], int] | None]:
+    """Feature flag (402) -> tenant<->community (404). Returns `(ctx, denial_or_None)`."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_INVENTORY, tenant=ctx.tenant_slug):
-        return feature_not_enabled("Community inventory requires a Professional plan or higher")
+        return ctx, feature_not_enabled(
+            "Community inventory requires a Professional plan or higher"
+        )
     if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+        return ctx, api_error("Community not found", status_code=404)
+    return ctx, None
+
+
+async def _guard_admin(community_id: int) -> tuple[dict[str, object], int] | None:
+    """Precheck, then 403 unless the caller administers THIS community (never via `*:read`)."""
+    ctx, denied = await _precheck(community_id)
+    if denied:
+        return denied
     dal = current_app.config["dal"]
     try:
-        user_id = get_current_user_id(request)
-        if admin:
-            require_inventory_admin(dal, ctx, community_id=community_id, user_id=user_id)
-        else:
-            require_inventory_member(dal, ctx, community_id=community_id, user_id=user_id)
+        require_inventory_admin(
+            dal, ctx, community_id=community_id, user_id=get_current_user_id(request)
+        )
     except ApiError as exc:
         logger.debug("inventory guard denied community=%s status=%s", community_id, exc.status_code)
         return api_error(exc.message, exc.status_code)
     return None
+
+
+async def _guard_member(community_id: int) -> tuple[dict[str, object], int] | None:
+    """Precheck, then 403 unless the caller is an active, unbanned member of THIS community."""
+    ctx, denied = await _precheck(community_id)
+    if denied:
+        return denied
+    dal = current_app.config["dal"]
+    try:
+        require_inventory_member(
+            dal, ctx, community_id=community_id, user_id=get_current_user_id(request)
+        )
+    except ApiError as exc:
+        logger.debug("inventory guard denied community=%s status=%s", community_id, exc.status_code)
+        return api_error(exc.message, exc.status_code)
+    return None
+
+
+async def _guard(community_id: int, *, admin: bool) -> tuple[dict[str, object], int] | None:
+    """Admin or member guard by flag; stamped admin routes call `_guard_admin` directly."""
+    return await (_guard_admin(community_id) if admin else _guard_member(community_id))
 
 
 # ── Admin routes ──────────────────────────────────────────────────────────
@@ -99,7 +124,7 @@ async def _guard(community_id: int, *, admin: bool) -> tuple[dict[str, object], 
 @mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/items`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     items = list_items(current_app.config["dal"], community_id)
@@ -111,7 +136,7 @@ async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     payload = await request.get_json(force=True, silent=True) or {}
@@ -127,7 +152,7 @@ async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/inventory/items/<itemId>`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     payload = await request.get_json(force=True, silent=True) or {}
@@ -142,7 +167,7 @@ async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/inventory/items/<itemId>`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     if not delete_item(current_app.config["dal"], community_id, item_id):
@@ -158,7 +183,7 @@ async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
 @auth_required  # type: ignore[misc]
 async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/add`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     payload = await request.get_json(force=True, silent=True) or {}
@@ -191,7 +216,7 @@ async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, ob
 @auth_required  # type: ignore[misc]
 async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/remove`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     payload = await request.get_json(force=True, silent=True) or {}
@@ -222,7 +247,7 @@ async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str,
 @mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/checkouts`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     checkouts = list_all_checkouts(
@@ -237,7 +262,7 @@ async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], in
 @mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/summary`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     return {"summary": asdict(get_summary(current_app.config["dal"], community_id))}, 200
@@ -249,7 +274,7 @@ async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
 @mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/log`."""
-    denied = await _guard(community_id, admin=True)
+    denied = await _guard_admin(community_id)
     if denied:
         return denied
     item_id = request.args.get("item_id", type=int)

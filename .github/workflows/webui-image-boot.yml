@@ -1,0 +1,49 @@
+name: hub-webui Image Boot Check
+
+# Builds the hub-webui image and RUNS it, failing if the Node server does not
+# come up. Guards against Dockerfile COPY drift (a new local module imported by
+# server.js but never copied -> ERR_MODULE_NOT_FOUND crash-loop at deploy).
+# containers.yml build-pr does not run on pull_request events, so this is the
+# PR-time gate. PR image builds stay on GitHub-hosted runners (untrusted code).
+on:
+  pull_request:
+    paths:
+      - 'admin/hub_module/Dockerfile.webui'
+      - 'admin/hub_module/webui-server/**'
+      - 'admin/hub_module/frontend/**'
+      - 'scripts/ci/container-smoke.sh'
+      - '.github/workflows/webui-image-boot.yml'
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+concurrency:
+  group: webui-image-boot-${{ github.event.merge_group.head_sha || github.head_ref || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  webui-boot:
+    name: Build and boot hub-webui
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@4d04d5d9486b7bd6fa91e7baf45bbb4f8b9deedd  # v4
+
+      - name: Build hub-webui image (local load, no push)
+        uses: docker/build-push-action@bcafcacb16a39f128d818304e6c9c0c18556b85f  # v7
+        with:
+          context: .
+          file: admin/hub_module/Dockerfile.webui
+          push: false
+          load: true
+          tags: hub-webui:boot-check
+
+      - name: Boot image and assert /health (fails on crash or missing module)
+        run: scripts/ci/container-smoke.sh hub-webui hub-webui:boot-check 8080
