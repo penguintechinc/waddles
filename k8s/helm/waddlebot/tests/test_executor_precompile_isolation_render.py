@@ -144,7 +144,8 @@ class TestPrecompileIsolation:
                     ref = e.get("valueFrom", {}).get("secretKeyRef")
                     if ref:
                         assert ref["key"], f"{kind}/{name} {e['name']}"
-        assert examined == 5, f"examined {examined} containers"
+        # export, compile, sign, ack (CronJob) + wait-for-hub-api, enqueue (enqueue Job)
+        assert examined == 6, f"examined {examined} containers"
 
     def test_dedicated_service_account_without_token(self, values: str) -> None:
         docs = _render(values)

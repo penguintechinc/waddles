@@ -12,7 +12,7 @@ vi.mock('../../../services/api', () => ({
   bundleAdminApi: { listInstalled: vi.fn(), disableService: vi.fn(), enableService: vi.fn() },
 }));
 
-const SVC = 'waddles.integrations.tools.svc';
+const SVC = 'penguintechinc.waddles.integrations-tools-svc';
 const row = (status) => ({
   appId: SVC,
   name: 'Tools',
@@ -71,7 +71,7 @@ describe('SuperAdminServiceBundles', () => {
             error: {
               code: 'has_dependents',
               message: 'requested',
-              details: { dependents: [{ appId: 'waddles.socials.music.default', kind: 'app', version: '2.0.0' }] },
+              details: { dependents: [{ appId: 'penguintechinc.waddles.socials-music', kind: 'app', version: '2.0.0' }] },
             },
           },
         },
@@ -80,7 +80,7 @@ describe('SuperAdminServiceBundles', () => {
     render(<SuperAdminServiceBundles />);
     fireEvent.click(await screen.findByTestId(`service-disable-${SVC}`));
     expect(await screen.findByTestId('service-dependent')).toHaveTextContent(
-      'waddles.socials.music.default',
+      'penguintechinc.waddles.socials-music',
     );
     fireEvent.click(screen.getByTestId('service-disable-force'));
     await waitFor(() => expect(bundleAdminApi.disableService).toHaveBeenLastCalledWith(SVC, true));

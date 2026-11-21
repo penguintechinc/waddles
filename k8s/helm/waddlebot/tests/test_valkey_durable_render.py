@@ -167,6 +167,8 @@ def test_tls_on_disables_plaintext_listener_and_url():
         for d in docs
         if d["kind"] == "Secret"
         and "VALKEY_DURABLE_PASSWORD" in (d.get("stringData") or {})
+        # per-service ACL user Secrets (test_valkey_acl_render.py) also carry this key name
+        and "-valkey-user-" not in d["metadata"]["name"]
     ]
     assert len(sec) == 1
     keys = sec[0]["stringData"]
@@ -229,7 +231,11 @@ def test_admin_password_isolated_from_workloads():
     ]
     assert len(admin) == 1, "admin password must live in exactly one dedicated Secret"
     assert admin[0]["metadata"]["name"].endswith("-valkey-durable-admin")
-    assert len(admin[0]["stringData"]) == 1
+    # admin + the PING-only `probe` user's password (server-only, test_valkey_acl_render.py)
+    assert set(admin[0]["stringData"]) == {
+        "VALKEY_DURABLE_ADMIN_PASSWORD",
+        "VALKEY_DURABLE_PROBE_PASSWORD",
+    }
     for d in docs:
         if d["kind"] == "Secret" and d is not admin[0]:
             # shared envFrom'd Secret may only carry the key BLANKED (overwrites the leaked legacy

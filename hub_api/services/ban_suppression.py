@@ -308,7 +308,7 @@ FLOOR_BAN_TABLE: Final = "bundle_reputation_floor_bans"
 #: `bundle_reputation_floor_bans.status` values for which a ban is enforced or WILL be:
 #: 1 queued, 2 done (sender-confirmed), 3 failed-retrying, 4 dead (undelivered, alerting),
 #: 5 rate limited, 7 dispatched. Not restrictions: 6 (refused: the floor was never breached, no
-#: ban sent) and 8 (LIFTED: an admin reversed the ban, alembic 0137 -- the user regains normal
+#: ban sent) and 8 (LIFTED: an admin reversed the ban, alembic 0139 -- the user regains normal
 #: access exactly as if never banned). Erasure must capture these BEFORE it touches the rows so the
 #: suppression code gets written and a queued/active ban is never silently forgotten.
 FLOOR_BAN_ACTIVE_STATUSES: Final = (1, 2, 3, 4, 5, 7)
@@ -339,7 +339,7 @@ def floor_ban_rows(dal: Any, user_uuids: Collection[str]) -> list[FloorBanRow]:
         return []
     _bind(dal)
     table = dal[FLOOR_BAN_TABLE]
-    # `action` 2 rows are UNBAN deliveries (alembic 0138): they restore access and never deny.
+    # `action` 2 rows are UNBAN deliveries (alembic 0140): they restore access and never deny.
     rows = dal((table.user_uuid.belongs(tokens)) & (table.action == 1)).select(
         table.tenant_id, table.platform, table.user_uuid, table.status
     )

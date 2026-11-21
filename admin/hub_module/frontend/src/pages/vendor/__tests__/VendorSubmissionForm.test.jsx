@@ -70,7 +70,7 @@ describe('VendorSubmissionForm', () => {
 
   it.each([
     ['penguintechinc.waddles.mine', /reserved/],
-    ['waddles.core.mine', /reserved/],
+    ['penguintechinc.waddles.mine', /reserved/],
     ['psychoboy.penguintwitchbot.mine', /reserved/],
     ['Acme.widgets.mine', /three lowercase segments/],
     ['acme.mine', /three lowercase segments/],

@@ -1805,12 +1805,6 @@
     {
       "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/platform.py",
-      "line": 433,
-      "line_hash": "27c3745cf1a69a97"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/platform.py",
       "line": 450,
       "line_hash": "e56478c434a8be56"
     },
@@ -2392,12 +2386,6 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/services/community_engagement_proxy.py",
-      "line": 38,
-      "line_hash": "95347ef4fa0e0c1d"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
       "path": "hub_api/services/community_profile_service.py",
       "line": 45,
       "line_hash": "6466095e65475dce"
@@ -2437,12 +2425,6 @@
       "path": "hub_api/services/data_privacy_service.py",
       "line": 437,
       "line_hash": "a4987afa8cc12232"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/services/event_calendar_proxy.py",
-      "line": 123,
-      "line_hash": "3d78e09561c756bf"
     },
     {
       "rule_id": "python-bare-except-pass",

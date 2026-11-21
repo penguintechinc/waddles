@@ -1,5 +1,7 @@
 # hub-api: Node/Express → Python3/Quart Migration Plan
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 **Date:** 2026-08-31 · **Status:** PLANNING (no implementation) · **Branch:** `feature/v3-hubapi-migration-plan`
 **Cross-ref:** master program plan `docs/plans/2026-08-31-v3-sccebm-program-plan.md` (parallel), SCBM design `docs/plans/2026-08-26-v3-scbm-apps-design.md`, App Bundle SDK `docs/plans/2026-08-31-app-bundle-sdk-design.md`
 
@@ -11,7 +13,7 @@ Port the **entire Node/Express hub backend** to **Python3/Quart inside `hub-api`
 
 | Scope | Detail |
 |---|---|
-| **Source (port FROM)** | `admin/hub_module/backend/src` — 44 controllers (23,643 LOC), 32 routes (2,729), 10 services (3,956), 5 middleware (1,329), 2 Socket.io handlers · `admin/marketplace_module/backend/src` — 11 controllers (2,344), 14 services (4,821). **≈39K LOC Node backend.** |
+| **Source (port FROM)** | admin/hub_module/backend/src — 44 controllers (23,643 LOC), 32 routes (2,729), 10 services (3,956), 5 middleware (1,329), 2 Socket.io handlers · admin/marketplace_module/backend/src — 11 controllers (2,344), 14 services (4,821). **≈39K LOC Node backend.** |
 | **Target** | `hub-api` Python skeleton — today a placeholder (`k8s/helm/waddlebot/templates/hub-api.yaml`: `pythonBaseImage`, `MODULE_NAME=hub-api`, no Dockerfile/CI image, no app code). Port the real hub logic in. |
 | **Stack** | Quart + hypercorn + pydal + `flask_core` (already on `release/v3.0.X`) — the port foundation exists. |
 | **Contract (MUST preserve)** | `admin/hub_module/frontend/src/services/api.js` (1,054 LOC, 26 exported API groups, axios `baseURL` env, all paths `/api/v1/...`, refresh at `/api/v1/auth/refresh`). hub-webui React consumes this JSON API unchanged. **This file is the contract source of truth.** |
@@ -154,7 +156,7 @@ Each phase, per group: port controllers → Quart blueprints · port services �
 
 ## 5. Websocket + Middleware Porting
 
-### Websocket (2 handlers — `admin/hub_module/backend/src/websocket/`)
+### Websocket (2 handlers — admin/hub_module/backend/src/websocket)
 
 | Node | Detail | Quart port |
 |---|---|---|
@@ -163,7 +165,7 @@ Each phase, per group: port controllers → Quart blueprints · port services �
 
 **Decision:** the frontend uses `socket.io-client`, so the wire protocol is Socket.io, **not** raw WebSocket. Quart's native `@app.websocket` would break the client contract. **Use `python-socketio` in ASGI mode** (mount on the same hypercorn app) to keep `socket.io-client` working unchanged. Quart-native WS only if the frontend is migrated to raw WS (contract break — out of scope). `connectSrc ws:/wss:` CSP already present (`index.js:824`).
 
-### Middleware (5 — `admin/hub_module/backend/src/middleware/`)
+### Middleware (5 — admin/hub_module/backend/src/middleware)
 
 | Node | Quart equivalent |
 |---|---|

@@ -331,7 +331,7 @@ mod tests {
         let load = LoadBody {
             tenant_id: 1,
             community_id: 0,
-            app_id: "waddles.test.app".to_string(),
+            app_id: "penguintechinc.waddles.test-app".to_string(),
             version: "1".to_string(),
             digest: D1.to_string(),
             component_key: "k".to_string(),
@@ -349,7 +349,7 @@ mod tests {
         let unload = UnloadBody {
             tenant_id: 1,
             community_id: 0,
-            app_id: "waddles.test.app".to_string(),
+            app_id: "penguintechinc.waddles.test-app".to_string(),
             digest: D1.to_string(),
         };
         assert_eq!(

@@ -96,7 +96,8 @@ async def adal(pg_db: PgTestDatabase) -> AsyncIterator[AsyncDAL]:
         "session_token TEXT NOT NULL, user_id INTEGER, platform VARCHAR(50), "
         "platform_user_id VARCHAR(255), platform_username VARCHAR(255), avatar_url TEXT, "
         "is_active BOOLEAN DEFAULT true, expires_at TIMESTAMP, revoked_at TIMESTAMP, "
-        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP)"
+        "created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP, "
+        "public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE)"
     )
     await async_dal.executesql_async(
         "CREATE TABLE IF NOT EXISTS hub_oauth_states (id SERIAL PRIMARY KEY, "

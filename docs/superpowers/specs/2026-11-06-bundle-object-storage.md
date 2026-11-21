@@ -74,7 +74,7 @@ Host-side Rust API (`core/bundle_host_storage`): `StorageHost::{put,get,head,lis
 
 ```yaml
 storage_access:
-  - prefix_owner: waddles.harness.media      # another bundle's app_id; never self
+  - prefix_owner: penguintechinc.waddles.harness-media      # another bundle's app_id; never self
     ops: [read, list]                        # subset of read|list|write|delete
     reason: "Fetch generated clips"          # 1-280 chars, mandatory
 ```

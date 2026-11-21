@@ -22,11 +22,13 @@ from services import user_management_service as svc
 from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
-from services.pagination import parse_limit
+from services.pagination import parse_limit, parse_page
+from services.user_public_id import use_user_public_ids
 
 user_management_bp = Blueprint(
     "v1_superadmin_users", __name__, url_prefix="/api/v1/superadmin/users"
 )
+use_user_public_ids(user_management_bp)
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +50,7 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
 class UserDTO:
     """User DTO."""
 
-    id: int
+    id: str  # hub_users.uuid -- the public id; the numeric PK never leaves the API
     email: str | None
     username: str | None
     avatarUrl: str | None = None
@@ -235,7 +237,7 @@ def _iso(value: Any) -> str | None:
 def _row_dto(row: Any, *, is_super_admin: bool) -> UserDTO:
     """Build the user DTO; `isSuperAdmin` is derived from system-tenant admin status."""
     return UserDTO(
-        id=row.id,
+        id=str(row.uuid),
         email=row.email,
         username=row.username,
         avatarUrl=getattr(row, "avatar_url", None),
@@ -258,10 +260,14 @@ def _row_dto(row: Any, *, is_super_admin: bool) -> UserDTO:
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(ListUsersResponse)
-async def list_users() -> ListUsersResponse:
+async def list_users() -> ListUsersResponse | tuple[dict[str, object], int]:
     """List users."""
     async_dal, dal = _dal()
-    page = int(request.args.get("page", "1"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     role = request.args.get("role")
@@ -281,7 +287,7 @@ async def list_users() -> ListUsersResponse:
     )
 
 
-@user_management_bp.route("/<int:user_id>", methods=["GET"])
+@user_management_bp.route("/<uuuid:user_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(UserResponse)
@@ -346,7 +352,7 @@ async def create_user(data: CreateUserRequest) -> tuple[Any, int]:
     )
 
 
-@user_management_bp.route("/<int:user_id>", methods=["PUT"])
+@user_management_bp.route("/<uuuid:user_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_request(UpdateUserRequest)
@@ -373,7 +379,7 @@ async def update_user(data: UpdateUserRequest, user_id: int) -> tuple[Any, int]:
     )
 
 
-@user_management_bp.route("/<int:user_id>", methods=["DELETE"])
+@user_management_bp.route("/<uuuid:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -388,7 +394,7 @@ async def delete_user(user_id: int) -> MessageResponse | tuple[dict[str, object]
     return MessageResponse(success=True, message="User deleted")
 
 
-@user_management_bp.route("/<int:user_id>/super-admin-role", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/super-admin-role", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_request(GrantRequest)
@@ -423,7 +429,7 @@ async def assign_super_admin_role(
     return MessageResponse(success=True, message=message)
 
 
-@user_management_bp.route("/<int:user_id>/vendor-role", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/vendor-role", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_request(GrantRequest)
@@ -446,7 +452,7 @@ async def assign_vendor_role(
     return MessageResponse(success=True, message=message)
 
 
-@user_management_bp.route("/<int:user_id>/verify-email", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/verify-email", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_request(VerifiedRequest)
@@ -467,7 +473,7 @@ async def set_email_verification(
     return MessageResponse(success=True, message=message)
 
 
-@user_management_bp.route("/<int:user_id>/password-reset", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/password-reset", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(PasswordResetResponse)
@@ -490,7 +496,7 @@ async def generate_password_reset(
     )
 
 
-@user_management_bp.route("/<int:user_id>/sessions", methods=["GET"])
+@user_management_bp.route("/<uuuid:user_id>/sessions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(SessionsResponse)
@@ -519,7 +525,7 @@ async def list_user_sessions(user_id: int) -> SessionsResponse | tuple[dict[str,
     )
 
 
-@user_management_bp.route("/<int:user_id>/revoke-sessions", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/revoke-sessions", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(RevokeSessionsResponse)
@@ -542,7 +548,7 @@ async def revoke_user_sessions(
     )
 
 
-@user_management_bp.route("/<int:user_id>/sessions/<int:session_id>/revoke", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/sessions/<int:session_id>/revoke", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(RevokeSessionsResponse)
@@ -567,7 +573,7 @@ async def revoke_user_session(
     )
 
 
-@user_management_bp.route("/<int:user_id>/analytics-consumer-role", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/analytics-consumer-role", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_request(AnalyticsConsumerRequest)
@@ -592,7 +598,7 @@ async def assign_analytics_consumer_role(
     )
 
 
-@user_management_bp.route("/<int:user_id>/deletion-request", methods=["GET"])
+@user_management_bp.route("/<uuuid:user_id>/deletion-request", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(DeletionRequestResponse)

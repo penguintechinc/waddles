@@ -87,6 +87,11 @@ def prepare_database(db: PgTestDatabase) -> None:
             "ALTER TABLE community_roles "
             "ADD COLUMN IF NOT EXISTS role_kind SMALLINT NOT NULL DEFAULT 0"
         )
+        # entity_public_ids skips on the minimal bootstrap too; add the column it owns here.
+        cur.execute(
+            "ALTER TABLE community_roles "
+            "ADD COLUMN IF NOT EXISTS public_id UUID NOT NULL DEFAULT gen_random_uuid()"
+        )
         for table in _TOPUP_TABLES:
             for field in dal[table]:
                 if field.name == "id":

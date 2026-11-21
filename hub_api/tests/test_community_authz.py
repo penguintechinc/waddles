@@ -20,9 +20,7 @@ context) are similarly unreachable through the normal route path once
 `tenant_middleware` has already run (it 401s on exactly those same
 conditions first) -- same "defensive, second independent decode" shape
 `services.current_user`'s own docstring describes. Tested directly here
-against a minimal request-like stand-in, mirroring how
-`tests/test_event_calendar_proxy.py` unit-tests `event_calendar_proxy.py`
-below the blueprint layer.
+against a minimal request-like stand-in, below the blueprint layer.
 
 Security hotfix (cross-tenant IDOR, tenant-admin bypass): both
 `require_community_admin`'s tenant-admin bypass AND

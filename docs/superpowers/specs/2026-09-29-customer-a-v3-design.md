@@ -2,7 +2,7 @@
 
 **Status:** Draft — objectives need owner confirmation before implementation starts.
 **Date:** 2026-09-29
-**Scope:** New app bundles (`waddles.core.customera.*`, `waddles.core.starcitizen.*`), cross-server role management (#497), event sync (#96), plus the hub-api/data-plane pieces they depend on.
+**Scope:** New app bundles (`penguintechinc.waddles.customera.*`, `penguintechinc.waddles.starcitizen.*`), cross-server role management (#497), event sync (#96), plus the hub-api/data-plane pieces they depend on.
 **Driver:** 2026-09-29 release-plan review — customer-A (2nd-biggest customer) has never received any features, v2 included. Per owner scope notes on #484/#485/#486/#497/#96 (all 2026-09-29): **this is a greenfield v3 build against customer-A's objectives, not a parity port.** There is no legacy behavior to preserve; acceptance criteria in the issues themselves are placeholders pending this spec.
 **Builds on (read, reconciled, not re-litigated):** `docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md` (#419, MERGED — permission catalog, capability gate, `storage.tables` schema derivation), `docs/superpowers/specs/2026-09-28-bundle-db-capability-and-schemas.md` (#415/#430/#498 — one-table-per-bundle DDL), `docs/superpowers/specs/2026-09-28-connector-bundles.md` (#444 — `waddle:connector@1.0.0` WIT world, `connector.receive:<platform>`/`connector.send:<platform>`/`connector.pii.read`, `waddles_connector_pii_reader` RO role), `docs/reference/bundle-network-permissions.md` (#466 — three-family egress risk model), `docs/superpowers/specs/2026-09-28-v3.0-python-removal-plan.md` (wave/slice format this doc follows).
 **Review:** Gemini second-opinion pass (critical perspective) against this doc's own draft and the platform's PII/capability-gate/connector invariants. Findings folded in: removed a raw Odoo-partner-id column that leaked PII into bundle storage (§2.2, since superseded — see Update below), corrected the Spectrum connector's transport model to match #444's host-owns-all-sockets design instead of requesting `net.http.fqdn` on a receiver-only bundle (§2.3), eliminated a duplicate event-data table between the read-only bundle and the §4.1 canonical events table (§2.1), clarified where RSI-handle tokenization actually happens relative to connector `on-frame` delivery (§5.1), made bulk role-op rate limiting host-enforced instead of bundle-trusted (§3.4), added a tag re-injection loop-prevention rule (§4.2), and split Discord E2E into mocked-PR-gate + nightly-live-scheduled-job to avoid the fork-PR-secret and shared-test-guild-concurrency problems (§7).
@@ -50,15 +50,15 @@
 
 ## 2. Bundle decomposition
 
-**Naming decision:** the issues as filed use `waddles.community.customera.*` / `waddles.integrations.spectrum` (implying `app_community` schema per #419 §1.4's derivation rule: `app_core` only if the app_id starts with `waddles.core.`). **This spec renames all three to the `waddles.core.*` namespace** — this is first-party PenguinTech engineering work built for a named customer, not a community-contributed or vendor bundle, so it belongs in `app_core` alongside the platform's own seeded bundles (`hub_api/cli/seed_core_bundles.py`'s system-actor pattern, #419 §1.4/§3.6). **ASSUMPTION — confirm with owner:** the issues will need their `app_id`/flag references updated to match (#484/#485/#486 bodies currently say `waddles.community.*`/`waddles.integrations.*`).
+**Naming decision:** the issues as filed used app ids outside the platform namespace (implying the `app_community` schema per #419 §1.4's derivation rule: `app_core` only for platform-namespace app ids). **This spec puts all three in the `penguintechinc.waddles.*` namespace** — this is first-party PenguinTech engineering work built for a named customer, not a community-contributed or vendor bundle, so it belongs in `app_core` alongside the platform's own seeded bundles (`hub_api/cli/seed_core_bundles.py`'s system-actor pattern, #419 §1.4/§3.6). **ASSUMPTION — confirm with owner:** the issues will need their `app_id`/flag references updated to match (#484/#485/#486 bodies currently use the earlier ids).
 
 | Bundle | app_id | Schema (derived, #419 §1.4) |
 |---|---|---|
-| customer-A read-only | `waddles.core.customera.readonly` | `app_core.waddles_core_customera_readonly` |
-| customer-A full | `waddles.core.customera.full` | `app_core.waddles_core_customera_full` |
-| Star Citizen Spectrum connector | `waddles.core.starcitizen.spectrum` | connector — no per-app table; org/roster mapping table below lives in `app_core.waddles_core_starcitizen_spectrum` |
+| customer-A read-only | `penguintechinc.waddles.customera-readonly` | `app_core.penguintechinc_waddles_customera_readonly` |
+| customer-A full | `penguintechinc.waddles.customera-full` | `app_core.penguintechinc_waddles_customera_full` |
+| Star Citizen Spectrum connector | `penguintechinc.waddles.starcitizen-spectrum` | connector — no per-app table; org/roster mapping table below lives in `app_core.waddles_core_starcitizen_spectrum` |
 
-### 2.1 `waddles.core.customera.readonly` (#484)
+### 2.1 `penguintechinc.waddles.customera-readonly` (#484)
 
 | Aspect | Detail |
 |---|---|
@@ -70,7 +70,7 @@
 | Flags | `waddles.bundle-customera-readonly` (default OFF) |
 | License tier | **ASSUMPTION:** Free — core read-only community-info surfacing, no gated capability per `critical-rules.md`'s tier table |
 
-### 2.2 `waddles.core.customera.full` (#485, folds in #95 — Wix, replaces Odoo)
+### 2.2 `penguintechinc.waddles.customera-full` (#485, folds in #95 — Wix, replaces Odoo)
 
 **Owner decision 2026-09-29: no Odoo. customer-A replaced Odoo with Wix.** #95's scope (Wix platform integration) is what this bundle actually needs; #15/#485's original Odoo/ERP framing is dropped entirely — there is no Odoo design anywhere in this spec.
 
@@ -86,7 +86,7 @@
 
 **Auth:** a scoped Wix OAuth app (preferred) or a scoped Wix API key, held **server-side only**, in the platform-credentials Secret (the same broker as every other connection credential, `docs/superpowers/specs/2026-09-28-connections-credentials-design.md`) — **never embedded in a bundle**, matching `client.md`'s "never call third-party APIs directly from client" and this platform's existing credential-broker pattern (§2.3's RSI session token, §5.2's former Odoo key). Per Wix's own auth model (`dev.wix.com/docs/overview/auth-permissions`), the app/key is granted only the scopes it uses (Members read, Events read, Pricing Plans read) — never broad "manage site" scope. Scopes are declared at app setup and granted by the customer-A site owner at install (OAuth) or configured at key creation (API key) — resolved by open question 2.
 
-**Inbound (Wix → WaddleBot):** Wix delivers platform events as **webhooks** — a JWT-encoded payload (`eventType`, `instanceId`, `data`, `identity`) per `dev.wix.com/docs/api-reference/articles/work-with-wix-apis/platform/about-the-structure-of-webhooks`. This lands as a **new webhook `Transport` family member** on the ingest path, per #444 §2's existing Webhook row (Twitch EventSub / Slack Events API / generic `/hooks/v1/{id}`): **signature verification happens host-side, on the raw request bytes, before any JSON parse and before any connector bundle is invoked** — identical ordering to EventSub/Slack, using Wix's own JWT-signature verification (the webhook JWT is signed by Wix, verified against Wix's public key/the app's webhook secret, per the same article). **Replay protection is part of the same pre-parse verification step, not a later check:** the JWT's own `iat`/`exp` claims are validated against an explicit replay window (exact window TBD against Wix's current webhook documentation at implementation time, matching the discipline #444 §2 already applies to EventSub's 10-minute and Slack's 5-minute windows) before the payload is handed to the connector at all — a signature-valid-but-expired/replayed webhook is rejected at the same host boundary, never passed through on signature validity alone (second Gemini review finding). A `waddles.core.starcitizen.spectrum`-style connector receiver (`waddle:connector@1.0.0`, `receiver` interface only for this bundle's inbound path) normalizes `member`/`event`/`pricing-plan` webhook payloads into `normalized-event`s; the bundle's own `member_ref`/tokenization step (§5.2) runs inside `on-frame`, before anything reaches process-stage.
+**Inbound (Wix → WaddleBot):** Wix delivers platform events as **webhooks** — a JWT-encoded payload (`eventType`, `instanceId`, `data`, `identity`) per `dev.wix.com/docs/api-reference/articles/work-with-wix-apis/platform/about-the-structure-of-webhooks`. This lands as a **new webhook `Transport` family member** on the ingest path, per #444 §2's existing Webhook row (Twitch EventSub / Slack Events API / generic `/hooks/v1/{id}`): **signature verification happens host-side, on the raw request bytes, before any JSON parse and before any connector bundle is invoked** — identical ordering to EventSub/Slack, using Wix's own JWT-signature verification (the webhook JWT is signed by Wix, verified against Wix's public key/the app's webhook secret, per the same article). **Replay protection is part of the same pre-parse verification step, not a later check:** the JWT's own `iat`/`exp` claims are validated against an explicit replay window (exact window TBD against Wix's current webhook documentation at implementation time, matching the discipline #444 §2 already applies to EventSub's 10-minute and Slack's 5-minute windows) before the payload is handed to the connector at all — a signature-valid-but-expired/replayed webhook is rejected at the same host boundary, never passed through on signature validity alone (second Gemini review finding). A `penguintechinc.waddles.starcitizen-spectrum`-style connector receiver (`waddle:connector@1.0.0`, `receiver` interface only for this bundle's inbound path) normalizes `member`/`event`/`pricing-plan` webhook payloads into `normalized-event`s; the bundle's own `member_ref`/tokenization step (§5.2) runs inside `on-frame`, before anything reaches process-stage.
 
 **Outbound (WaddleBot → Wix, where needed at all):** any outbound Wix REST call (e.g. looking up a member's current plan) goes through the **egress proxy**, with an explicit `net.http.fqdn:<customer-a-wix-site-host or www.wixapis.com>` grant — exact host(s) TBD pending open question 2 (a Wix Headless/REST integration typically calls `www.wixapis.com` with the site's `instanceId`, not a customer-specific host, so the egress grant is likely a fixed PenguinTech-side allowlist entry rather than a per-customer FQDN — confirmed once the OAuth app is stood up).
 
@@ -103,7 +103,7 @@
 | Flags | `waddles.bundle-customera-full` (default OFF) |
 | License tier | **ASSUMPTION:** Professional — full read/write plus an external platform (Wix) integration exceeds the Free tier's "core product" scope per `critical-rules.md` |
 
-### 2.3 `waddles.core.starcitizen.spectrum` (#486, re-specs #101)
+### 2.3 `penguintechinc.waddles.starcitizen-spectrum` (#486, re-specs #101)
 
 | Aspect | Detail |
 |---|---|
@@ -412,7 +412,7 @@ Cross-cutting: db/gate-ready work in §3/§4 can start in parallel with the abov
 
 | Slice | Work | Depends on |
 |---|---|---|
-| A1 | `waddles.core.customera.readonly` manifest + table DDL + poll loop against the confirmed source (open question 1) | #430/#498, #459/#465 |
+| A1 | `penguintechinc.waddles.customera-readonly` manifest + table DDL + poll loop against the confirmed source (open question 1) | #430/#498, #459/#465 |
 | A2 | Role mapping table (§3.1) + `managed_roles` ownership registry (§3.0) + hub-api CRUD, no sync yet | #430/#498 |
 | A3 | Event canonical table + tag parse/inject shared library (no platform wiring yet) | #430/#498 |
 | A4 | hub-api multi-tenant guild pairing table + N:M community/tenant binding + deterministic routing (#500, rescoped) | #430/#498 |

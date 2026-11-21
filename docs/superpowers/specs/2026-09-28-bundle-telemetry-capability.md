@@ -13,7 +13,7 @@
 - `docs/superpowers/specs/2026-09-28-tenant-envelope-encryption-design.md` — per-tenant DEK/AAD pattern this spec reuses verbatim for encrypting a tenant's OTLP auth headers, no second KMS integration.
 - `docs/superpowers/specs/2026-09-28-connections-credentials-design.md` — SSRF-guard precedent (webhook/JWKS receivers) this spec reuses for tenant OTLP endpoint validation.
 - Sizing target, shared with the above two specs: ~300 tenants, ~20,000 communities, ~10,000 channels.
-- `hub_api/blueprints/v1/marketplace_lifecycle.py` — the three real scope gates this spec's read endpoints reuse: `require_scope("platform:admin")`, `require_scope("tenant:admin")` + tenant match, `authorize_community(..., admin=True|False)`. `services/vendor_bundle_authz.py` — `vendor:onboard` scope + `waddles.integrations.vendor-{id}.*` namespace enforcement, reused for vendor status visibility (§6).
+- `hub_api/blueprints/v1/marketplace_lifecycle.py` — the three real scope gates this spec's read endpoints reuse: `require_scope("platform:admin")`, `require_scope("tenant:admin")` + tenant match, `authorize_community(..., admin=True|False)`. `services/vendor_bundle_authz.py` — `vendor:onboard` scope + `penguintechinc.waddles.vendor-{id}-*` namespace enforcement, reused for vendor status visibility (§6).
 
 **Gemini PR-review conditions (PASS-WITH-CONDITIONS on #421) — folded in as normative requirements:**
 
@@ -239,7 +239,7 @@ Both are `normal` risk (contained to the bundle's own declared, capped surface �
 | **Global (`platform:admin`)** | Everything — every tenant, every community, every bundle | `require_scope("platform:admin")`, no additional filter |
 | **Tenant admin (`tenant:admin`)** | All bundle logs/metrics across their own tenant | `require_scope("tenant:admin")` + tenant-match (existing `_tenant_id`/`require_matching_tenant` pattern) — query filtered `WHERE tenant_id = ctx.tenant_id`, never a client-supplied tenant id |
 | **Community admin** | Logs/metrics of bundles activated in *their* community only | `authorize_community(request, dal, community_id=..., admin=True)` (existing pattern) — query filtered `WHERE community_id = :community_id AND community_in_tenant(community_id, ctx)` before any row is read |
-| **Vendor (`vendor:onboard`)** | **No logs, no metrics.** Only which communities/tenants have the vendor's bundle **activated and running** — opaque/display-safe identifiers only | `require_scope("vendor:onboard")` + `enforce_vendor_namespace(app_id)` restricting to `waddles.integrations.vendor-{caller_id}.*` (existing pattern) — never another vendor's `app_id` |
+| **Vendor (`vendor:onboard`)** | **No logs, no metrics.** Only which communities/tenants have the vendor's bundle **activated and running** — opaque/display-safe identifiers only | `require_scope("vendor:onboard")` + `enforce_vendor_namespace(app_id)` restricting to `penguintechinc.waddles.vendor-{caller_id}-*` (existing pattern) — never another vendor's `app_id` |
 
 **"Running," defined:** `app_activations` row exists (activated) **and** at least one successful invoke or health signal within a rolling window (default 15 min, config-tunable) — an activation alone is not "running"; a bundle that's activated but has thrown nothing but errors, or hasn't been invoked, is not "running" either unless a health/heartbeat signal substitutes. The vendor status endpoint returns `{tenant_id (opaque), community_id (opaque), last_seen_at, status: running|activated_idle}` — never a tenant/community display name, never log/metric content.
 

@@ -65,10 +65,10 @@ class TestTriggersFirePerOp:
 
     def test_app_versions_insert(self, conn: psycopg2.extensions.connection) -> None:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.t.insert')")
+            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.t-insert')")
             cur.execute(
                 "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                "VALUES ('waddles.t.insert', '1.0.0', 'rust', 'prebuilt') RETURNING id"
+                "VALUES ('penguintechinc.waddles.t-insert', '1.0.0', 'rust', 'prebuilt') RETURNING id"
             )
             version_id = cur.fetchone()[0]
             cur.execute(
@@ -82,27 +82,27 @@ class TestTriggersFirePerOp:
         self, conn: psycopg2.extensions.connection
     ) -> None:
         with conn.cursor() as cur:
-            tenant_id, version_id = _seed_app_and_tenant(cur, "waddles.t.aav", "aav-tenant")
+            tenant_id, version_id = _seed_app_and_tenant(cur, "penguintechinc.waddles.t-aav", "aav-tenant")
             cur.execute(
                 "INSERT INTO app_active_versions (app_id, tenant_id, community_id, version_id) "
                 "VALUES (%s, %s, 0, %s)",
-                ("waddles.t.aav", tenant_id, version_id),
+                ("penguintechinc.waddles.t-aav", tenant_id, version_id),
             )
             cur.execute(
                 "UPDATE app_active_versions SET version_id = %s "
                 "WHERE app_id = %s AND tenant_id = %s",
-                (version_id, "waddles.t.aav", tenant_id),
+                (version_id, "penguintechinc.waddles.t-aav", tenant_id),
             )
             cur.execute(
                 "DELETE FROM app_active_versions WHERE app_id = %s AND tenant_id = %s",
-                ("waddles.t.aav", tenant_id),
+                ("penguintechinc.waddles.t-aav", tenant_id),
             )
             cur.execute(
                 "SELECT entity, entity_id, tenant_id, community_id, op "
                 "FROM bundle_active_set_changes WHERE entity = 'app_active_versions' ORDER BY seq"
             )
             rows = cur.fetchall()
-        expected_entity_id = f"waddles.t.aav:{tenant_id}:0"
+        expected_entity_id = f"penguintechinc.waddles.t-aav:{tenant_id}:0"
         assert rows == [
             ("app_active_versions", expected_entity_id, tenant_id, 0, "INSERT"),
             ("app_active_versions", expected_entity_id, tenant_id, 0, "UPDATE"),
@@ -135,10 +135,10 @@ class TestSafeSeqExactVisibility:
     ) -> None:
         # Committed baseline row -- must always be visible to the horizon.
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.t.committed')")
+            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.t-committed')")
             cur.execute(
                 "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                "VALUES ('waddles.t.committed', '1.0.0', 'rust', 'prebuilt')"
+                "VALUES ('penguintechinc.waddles.t-committed', '1.0.0', 'rust', 'prebuilt')"
             )
 
         # A second, real, separately-committed connection opens a transaction,
@@ -150,10 +150,10 @@ class TestSafeSeqExactVisibility:
         in_flight.autocommit = False
         try:
             with in_flight.cursor() as cur:
-                cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.t.inflight')")
+                cur.execute("INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.t-inflight')")
                 cur.execute(
                     "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                    "VALUES ('waddles.t.inflight', '1.0.0', 'rust', 'prebuilt') RETURNING id"
+                    "VALUES ('penguintechinc.waddles.t-inflight', '1.0.0', 'rust', 'prebuilt') RETURNING id"
                 )
                 in_flight_version_id = cur.fetchone()[0]
                 # Deliberately not committed yet -- under read-committed
@@ -226,10 +226,10 @@ class TestSecurityDefinerSearchPath:
         # setting.
         with conn.cursor() as cur:
             cur.execute("SET search_path = pg_temp, public")
-            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.t.searchpath')")
+            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.t-searchpath')")
             cur.execute(
                 "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                "VALUES ('waddles.t.searchpath', '1.0.0', 'rust', 'prebuilt') RETURNING id"
+                "VALUES ('penguintechinc.waddles.t-searchpath', '1.0.0', 'rust', 'prebuilt') RETURNING id"
             )
             version_id = cur.fetchone()[0]
             cur.execute(
@@ -248,20 +248,20 @@ class TestRetention:
         self, conn: psycopg2.extensions.connection
     ) -> None:
         with conn.cursor() as cur:
-            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.t.retention')")
+            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.t-retention')")
             cur.execute(
                 "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                "VALUES ('waddles.t.retention', '1.0.0', 'rust', 'prebuilt')"
+                "VALUES ('penguintechinc.waddles.t-retention', '1.0.0', 'rust', 'prebuilt')"
             )
             # Backdate it past the default 48h retention window.
             cur.execute(
                 "UPDATE bundle_active_set_changes SET changed_at = now() - interval '72 hours' "
-                "WHERE entity_id = (SELECT id::TEXT FROM app_versions WHERE app_id = 'waddles.t.retention')"
+                "WHERE entity_id = (SELECT id::TEXT FROM app_versions WHERE app_id = 'penguintechinc.waddles.t-retention')"
             )
-            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.t.fresh')")
+            cur.execute("INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.t-fresh')")
             cur.execute(
                 "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                "VALUES ('waddles.t.fresh', '1.0.0', 'rust', 'prebuilt')"
+                "VALUES ('penguintechinc.waddles.t-fresh', '1.0.0', 'rust', 'prebuilt')"
             )
 
             cur.execute(
@@ -278,7 +278,7 @@ class TestRetention:
         assert len(pruned) == 1
         old_id_row = None
         with conn.cursor() as cur:
-            cur.execute("SELECT id FROM app_versions WHERE app_id = 'waddles.t.fresh'")
+            cur.execute("SELECT id FROM app_versions WHERE app_id = 'penguintechinc.waddles.t-fresh'")
             old_id_row = cur.fetchone()
         assert str(old_id_row[0]) in remaining_entity_ids
 

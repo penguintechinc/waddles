@@ -103,7 +103,10 @@ fn target(app: &str, interval_s: u64) -> BundleScheduleTarget {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_replicas_publish_exactly_one_verified_reconcile_event_per_slot() {
-    let app = format!("waddles.test.sched.{}", uuid::Uuid::new_v4().simple());
+    let app = format!(
+        "penguintechinc.waddles.test-sched-{}",
+        uuid::Uuid::new_v4().simple()
+    );
     let t = target(&app, 30);
     let rec = Recorder::default();
     let (a, b) = (runner("replica-a", &rec), runner("replica-b", &rec));
@@ -146,11 +149,17 @@ async fn distinct_bundles_and_communities_are_independent_slots() {
     let rec = Recorder::default();
     let a = runner("replica-a", &rec);
     let t1 = target(
-        &format!("waddles.test.sched.{}", uuid::Uuid::new_v4().simple()),
+        &format!(
+            "penguintechinc.waddles.test-sched-{}",
+            uuid::Uuid::new_v4().simple()
+        ),
         30,
     );
     let t2 = target(
-        &format!("waddles.test.sched.{}", uuid::Uuid::new_v4().simple()),
+        &format!(
+            "penguintechinc.waddles.test-sched-{}",
+            uuid::Uuid::new_v4().simple()
+        ),
         30,
     );
     assert_eq!(a.tick(&t1).await, TickOutcome::Fired);

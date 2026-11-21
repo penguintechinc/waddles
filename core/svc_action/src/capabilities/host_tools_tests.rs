@@ -1588,7 +1588,7 @@ async fn host_ops_run_only_from_the_registered_platform_service_bundle() {
         decl(json!({"platform": "twitch", "op": "mod.ban", "user": "user", "required": ["user"]}));
     let mut plan = plan_for("twitch.moderation.ban", json!({"user": UUID_A}));
     for target in [
-        "waddles.bot.other",
+        "penguintechinc.waddles.bot-other",
         DISCORD_SVC,
         "penguintechinc.waddles.youtube",
     ] {

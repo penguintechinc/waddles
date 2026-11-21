@@ -1007,7 +1007,11 @@ mod tests {
     }
 
     fn scope_b_app() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.b")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.bot-b",
+        )
     }
 
     fn scope_other_tenant() -> KvScope {
@@ -1111,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn kv_call_is_denied_for_an_app_id_the_snapshot_has_never_seen() {
         // Granting a *different* app_id must not accidentally grant this one.
-        let host = host(&["waddles.bot.other"]);
+        let host = host(&["penguintechinc.waddles.bot-other"]);
         let err = host.get(&scope_a(), 1, "k").await.unwrap_err();
         assert_eq!(err.code(), "not_granted");
     }
@@ -1120,7 +1124,10 @@ mod tests {
 
     #[tokio::test]
     async fn one_app_cannot_read_another_apps_key_in_the_same_community() {
-        let host = host(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]);
+        let host = host(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -1133,7 +1140,10 @@ mod tests {
 
     #[tokio::test]
     async fn one_app_cannot_delete_another_apps_key() {
-        let host = host(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]);
+        let host = host(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -1160,7 +1170,10 @@ mod tests {
 
     #[tokio::test]
     async fn increment_counters_are_isolated_per_app() {
-        let host = host(&["penguintechinc.waddles.fixture-bot-a", "waddles.bot.b"]);
+        let host = host(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]);
         host.increment(&scope_a(), 1, "hits", 100, 0).await.unwrap();
         let b = host
             .increment(&scope_b_app(), 1, "hits", 1, 0)
@@ -1178,7 +1191,13 @@ mod tests {
     async fn a_key_containing_a_colon_is_rejected_not_silently_namespaced_elsewhere() {
         let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
-            .set(&scope_a(), 1, "waddles.bot.b:data:secret", b"x", 0)
+            .set(
+                &scope_a(),
+                1,
+                "penguintechinc.waddles.bot-b:data:secret",
+                b"x",
+                0,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code(), "invalid_key");
@@ -1196,7 +1215,7 @@ mod tests {
             .set(
                 &scope_a(),
                 1,
-                "bundlekv:acme:main:waddles.bot.b:data:secret",
+                "bundlekv:acme:main:penguintechinc.waddles.bot-b:data:secret",
                 b"x",
                 0,
             )

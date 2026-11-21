@@ -1,5 +1,7 @@
 # Spec: ArgoCD GitOps Deploy (replace GHA `helm upgrade`)
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Status: DRAFT 2026-11-07 — design only, no implementation. Chart versions marked "to verify" must be re-checked at implementation time.
 
 ## Locked decisions
@@ -50,7 +52,7 @@ Status: DRAFT 2026-11-07 — design only, no implementation. Chart versions mark
 
 ### admin (`penguintechinc/admin`) — generic only
 
-Follows existing `k8s/arc-runners/` pattern (wrapper chart, vendored `charts/*.tgz`, `Chart.lock`, `alpha.yml`, README).
+Follows existing k8s/arc-runners pattern (wrapper chart, vendored `charts/*.tgz`, `Chart.lock`, `alpha.yml`, README).
 
 | Path | Purpose |
 |---|---|
@@ -65,7 +67,7 @@ Follows existing `k8s/arc-runners/` pattern (wrapper chart, vendored `charts/*.t
 | `k8s/argocd-image-updater/Chart.yaml` + `Chart.lock` | Wrapper, dep `argocd-image-updater` pinned |
 | `k8s/argocd-image-updater/values.yaml`, `alpha.yml` | Registry `ghcr`, creds ref, log level |
 | `k8s/argocd-image-updater/SETUP.md` | Creds wiring (Secret created by operator, never in git) |
-| (removed) `k8s/argocd-root/` | No shared app-of-apps; replaced by per-product files above |
+| (removed) k8s/argocd-root | No shared app-of-apps; replaced by per-product files above |
 
 Discovery contract: each product's root Application sources its own repo path `deploy/argocd/<cluster>/` (`directory.recurse: false`). Onboarding a product = one new file in admin; nothing shared is edited, so one bad product manifest cannot break discovery for others.
 
@@ -290,8 +292,8 @@ Rollback:
 | # | Repo | PR | Depends on | Safe because |
 |---|---|---|---|---|
 | 1 | waddles | chart: sync-wave annotations, migrations hook -> Sync wave -5, `Prune=false` on stateful/Secret, verify PostSync Job (flag OFF default) | — | Annotations inert under helm; flag off |
-| 2 | admin | `k8s/argocd/` wrapper chart + SETUP.md + CNP + AppProject | — | Nothing applied until operator runs install |
-| 3 | admin | `k8s/argocd-image-updater/` wrapper + SETUP.md | 2 | Same |
+| 2 | admin | k8s/argocd wrapper chart + SETUP.md + CNP + AppProject | — | Nothing applied until operator runs install |
+| 3 | admin | k8s/argocd-image-updater wrapper + SETUP.md | 2 | Same |
 | 4 | admin | `k8s/argocd/dal2alpha/products/waddles.yaml` (AppProject + root App + ns/quota) + products README | 2 | Applied manually by operator; per-product, one file |
 | 5 | waddles | `deploy/argocd/dal2alpha/waddlebot-app.yaml` (manual sync, IU annotations present but IU disabled) + `docs/deploy/argocd-alpha.md` | 1,4 | Not applied by CI |
 | 6 | waddles | CI: sentinel `alpha-release` push step (if option 1) | — | Additive |

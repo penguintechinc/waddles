@@ -23,9 +23,9 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-# Seeded 2026-08-29 by measuring the tree at HEAD. Lower as phases land; never
-# raise it.
-DOC_REF_BUDGET="${DOC_REF_BUDGET:-21}"
+# Seeded 2026-08-29 at 21; ratcheted to 0 on 2026-11-21. Never raise it; a new
+# dead reference fails the gate.
+DOC_REF_BUDGET="${DOC_REF_BUDGET:-0}"
 
 count_only=0
 [ "${1:-}" = "--count" ] && count_only=1

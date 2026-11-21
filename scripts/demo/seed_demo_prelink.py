@@ -311,6 +311,12 @@ def verify_binding(cur: Any, cfg: DemoConfig, hub_user_id: int) -> None:
 
 def upsert_pairing(cur: Any, cfg: DemoConfig) -> int:
     """Upsert the guild pairing with role sync + event sync enabled; return its id."""
+    # A guild belongs to exactly one tenant (alembic 0137): claim it for the community's tenant.
+    cur.execute(
+        "INSERT INTO discord_guild_tenants (discord_guild_id, tenant_id) "
+        "SELECT %s, tenant_id FROM communities WHERE id = %s ON CONFLICT DO NOTHING",
+        (cfg.guild_id, cfg.community_id),
+    )
     cur.execute(
         "INSERT INTO guild_tenant_pairings (community_id, discord_guild_id, direction, "
         "sync_enabled, event_sync_enabled, role_name_prefix) VALUES (%s, %s, %s, TRUE, TRUE, %s) "

@@ -31,7 +31,7 @@ The Labels Core Module enables communities to create, assign, and manage labels 
 
 | Item | Value |
 |---|---|
-| Source | `core/labels_core_module/` |
+| Source | core/labels_core_module |
 | Language | Python |
 | Port | 8023 |
 | Maintained by | Penguin Tech Inc |

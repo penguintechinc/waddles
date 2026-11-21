@@ -1,5 +1,7 @@
 # Design: route hub-api through SECURITY DEFINER functions for `platform_integrations`
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Issue: #969 (NOT #893/#894). Status: IMPLEMENTED (see "Implementation notes" at the end).
 Decision (coordinator): keep `waddles_hub_api` DENIED the table (H-3); EXECUTE on functions only.
 
@@ -22,7 +24,7 @@ Only two hub-api modules touch the table at runtime. The other `grep` hits are c
 | 10 | `services/erasure_registry.py:427,475` | none at runtime | declarations only (`review()` gap: user_oauth rows not erasable by hub-api today) | n/a | follow-up |
 | 11 | `scripts/reseal_connections.py:109-120` | R+W raw SQL | tokens | YES | out of scope: admin script, confirm it uses owner creds, not `waddles_hub_api` |
 
-Not hub-api runtime: `core/credential_manager_module` (role `mod_credential_manager`, policy exists).
+Not hub-api runtime: core/credential_manager_module (role `mod_credential_manager`, policy exists).
 
 Crypto is app-side: AES-256-GCM with `CREDENTIAL_ENCRYPTION_KEY` + per-row AAD in hub-api. SQL functions
 only ever move ciphertext. They never decrypt and never need the key.
@@ -129,7 +131,7 @@ Tests (all `# regression: gh-969`; Postgres via `alembic/tests/pg_docker.py`, th
 3. `credential_access_log` insert from a definer function: accepted for the audit trail?
 
 ## Implementation notes (as built)
-- Q1 (Group C): option 1 -- `POST /api/v1/credentials/<platform>/test` in `core/credential_manager_module`;
+- Q1 (Group C): option 1 -- `POST /api/v1/credentials/<platform>/test` in core/credential_manager_module;
   hub-api forwards the caller's bearer and returns a loud 503 `CREDENTIAL_MANAGER_UNAVAILABLE` when it is
   unreachable (not deployed on alpha today). No bot-secret function exists.
 - Q2: `client_secret`/`client_id` are NOT needed by refresh (`get_decrypted_tokens` and
