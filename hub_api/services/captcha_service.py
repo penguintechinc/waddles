@@ -8,7 +8,8 @@ Providers (env, never hardcoded, never logged):
 | `recaptcha`             | `DSAR_CAPTCHA_SITE_KEY`, `DSAR_CAPTCHA_SECRET` | Google        |
 | `altcha`                | `DSAR_ALTCHA_HMAC_KEY` (>= 32 chars)           | none (local)  |
 
-Fail-closed contract: no/unknown provider -> `CaptchaUnavailable` (route returns 503); an outbound
+Fail-closed contract: unset provider defaults to `altcha`; a configured provider missing its key,
+or an unknown provider -> logged ERROR + `CaptchaUnavailable` (route returns 503); an outbound
 verify that times out, errors, returns non-200 or non-JSON -> `CaptchaUnavailable`; only an explicit
 provider `success: true` (altcha: a valid signature + solved proof-of-work + unexpired + unused
 challenge) passes. `DSAR_CAPTCHA_TIMEOUT_SECONDS` (default 5) bounds every outbound call.
@@ -41,6 +42,7 @@ PROVIDER_TURNSTILE = "turnstile"
 PROVIDER_RECAPTCHA = "recaptcha"
 PROVIDER_ALTCHA = "altcha"
 PROVIDERS = (PROVIDER_TURNSTILE, PROVIDER_RECAPTCHA, PROVIDER_ALTCHA)
+DEFAULT_PROVIDER = PROVIDER_ALTCHA
 
 _VERIFY_URLS = {
     PROVIDER_TURNSTILE: "https://challenges.cloudflare.com/turnstile/v0/siteverify",
@@ -70,17 +72,34 @@ class CaptchaRejected(Exception):
 
 
 def provider() -> str | None:
-    """The configured provider name, or `None` when unset/unknown/incompletely configured."""
-    name = os.environ.get("DSAR_CAPTCHA_PROVIDER", "").strip().lower()
+    """The effective provider name, or `None` when it is configured but unusable (logged LOUDLY).
+
+    An unset `DSAR_CAPTCHA_PROVIDER` defaults to self-hosted `altcha` (its HMAC key is an internal,
+    chart-generated secret). Third-party providers are opt-in and need operator-supplied keys. A
+    configured provider with a missing/short key or an unknown name is never silently bypassed: it
+    logs an ERROR naming the missing setting (never a value) and the caller answers 503.
+    """
+    name = os.environ.get("DSAR_CAPTCHA_PROVIDER", "").strip().lower() or DEFAULT_PROVIDER
     if name in (PROVIDER_TURNSTILE, PROVIDER_RECAPTCHA):
-        if os.environ.get("DSAR_CAPTCHA_SECRET") and os.environ.get("DSAR_CAPTCHA_SITE_KEY"):
+        missing = [
+            k for k in ("DSAR_CAPTCHA_SECRET", "DSAR_CAPTCHA_SITE_KEY") if not os.environ.get(k)
+        ]
+        if not missing:
             return name
+        logger.error(
+            "dsar.captcha_misconfigured",
+            extra={"provider": name, "missing": ",".join(missing)},
+        )
         return None
-    if (
-        name == PROVIDER_ALTCHA
-        and len(os.environ.get("DSAR_ALTCHA_HMAC_KEY", "")) >= _ALTCHA_KEY_MIN
-    ):
-        return name
+    if name == PROVIDER_ALTCHA:
+        if len(os.environ.get("DSAR_ALTCHA_HMAC_KEY", "")) >= _ALTCHA_KEY_MIN:
+            return name
+        logger.error(
+            "dsar.captcha_misconfigured",
+            extra={"provider": name, "missing": "DSAR_ALTCHA_HMAC_KEY(>=32 chars)"},
+        )
+        return None
+    logger.error("dsar.captcha_unknown_provider", extra={"provider": name[:32]})
     return None
 
 
@@ -88,7 +107,9 @@ def public_config() -> dict[str, str | None]:
     """What the browser may know: provider, public site key, altcha URL (raises if off)."""
     name = provider()
     if name is None:
-        raise CaptchaUnavailable("captcha provider not configured")
+        raise CaptchaUnavailable(
+            "captcha provider configured but its key/secret is missing or invalid"
+        )
     if name == PROVIDER_ALTCHA:
         return {"provider": name, "siteKey": None, "challengeUrl": ALTCHA_CHALLENGE_PATH}
     return {"provider": name, "siteKey": os.environ["DSAR_CAPTCHA_SITE_KEY"], "challengeUrl": None}
@@ -253,7 +274,9 @@ async def verify(token: str | None, *, remote_ip: str | None, replay_guard: Repl
     if name is None:
         telemetry.captcha_failures.add(1, {"provider": "none", "reason": "unconfigured"})
         logger.error("dsar.captcha_unconfigured")
-        raise CaptchaUnavailable("captcha provider not configured")
+        raise CaptchaUnavailable(
+            "captcha provider configured but its key/secret is missing or invalid"
+        )
     if not token or len(token) > _MAX_TOKEN_CHARS or not token.isprintable():
         telemetry.captcha_failures.add(1, {"provider": name, "reason": "missing"})
         raise CaptchaRejected("captcha token missing or malformed")

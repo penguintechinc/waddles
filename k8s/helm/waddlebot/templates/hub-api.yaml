@@ -349,19 +349,14 @@ spec:
             secretKeyRef:
               name: {{ .Values.autoProvisionedKeys.dsarFingerprint.secretName }}
               key: {{ .Values.autoProvisionedKeys.dsarFingerprint.secretKey }}
-        # Captcha verification secrets for the PUBLIC DSAR form (operator-supplied Secret
-        # `waddlebot-dsar-captcha`; absent => the form fails closed with 503).
+        # Third-party captcha secret (turnstile/recaptcha) for the PUBLIC DSAR form: opt-in,
+        # operator-supplied Secret `waddlebot-dsar-captcha`. The default provider (altcha) needs
+        # none: its HMAC key DSAR_ALTCHA_HMAC_KEY is chart-generated into waddlebot-secrets (envFrom).
         - name: DSAR_CAPTCHA_SECRET
           valueFrom:
             secretKeyRef:
               name: waddlebot-dsar-captcha
               key: DSAR_CAPTCHA_SECRET
-              optional: true
-        - name: DSAR_ALTCHA_HMAC_KEY
-          valueFrom:
-            secretKeyRef:
-              name: waddlebot-dsar-captcha
-              key: DSAR_ALTCHA_HMAC_KEY
               optional: true
         # DSAR verification-mail SMTP credentials (operator-supplied Secret; see values.yaml
         # config.dsarSmtp). Optional: unauthenticated relays need neither key. Never auto-generated,

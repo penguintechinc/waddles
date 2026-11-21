@@ -29,6 +29,7 @@ from blueprints.v1.platform import platform_bp
 from services.global_identity import SYSTEM_TENANT_SLUG
 from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 
 @pytest.fixture
@@ -50,9 +51,7 @@ def client(app: Quart) -> Any:
     return app.test_client()
 
 
-def _admin_headers(
-    *, user_id: int = 1, tenant: str = SYSTEM_TENANT_SLUG
-) -> dict[str, str]:
+def _admin_headers(*, user_id: int = 1, tenant: str = SYSTEM_TENANT_SLUG) -> dict[str, str]:
     # global:admin bundle -- SCOPE_BUNDLES["global"]["admin"] includes the
     # `*:admin` wildcard, which flask_core.authz._scope_covers's own rule
     # (resource `*` + exact action match) satisfies `platform:admin`.
@@ -144,7 +143,7 @@ class TestUsers:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["pagination"]["total"] == 1
-        assert body["users"][0]["userId"] == "42"
+        assert body["users"][0]["userId"] == uid(42)
 
     async def test_list_users_search_and_platform_filters(
         self, client: Any, platform_db: Any
@@ -171,7 +170,7 @@ class TestUsers:
             query_string={"search": "Alice"},
         )
         body = await by_search.get_json()
-        assert [u["userId"] for u in body["users"]] == ["1"]
+        assert [u["userId"] for u in body["users"]] == [uid(1)]
 
         by_platform = await client.get(
             "/api/v1/platform/users",
@@ -179,20 +178,20 @@ class TestUsers:
             query_string={"platform": "discord"},
         )
         body2 = await by_platform.get_json()
-        assert [u["userId"] for u in body2["users"]] == ["2"]
+        assert [u["userId"] for u in body2["users"]] == [uid(2)]
 
     async def test_get_user_not_found_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/platform/users/9999", headers=_admin_headers())
+        response = await client.get(f"/api/v1/platform/users/{uid(9999)}", headers=_admin_headers())
         assert response.status_code == 404
 
     async def test_get_user_found_with_memberships(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         _seed_member(platform_db, community_id=community_id, user_id="7")
 
-        response = await client.get("/api/v1/platform/users/7", headers=_admin_headers())
+        response = await client.get(f"/api/v1/platform/users/{uid(7)}", headers=_admin_headers())
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["user"]["userId"] == "7"
+        assert body["user"]["userId"] == uid(7)
         assert body["user"]["isPlatformAdmin"] is False
         assert len(body["user"]["memberships"]) == 1
 
@@ -201,7 +200,7 @@ class TestUsers:
     ) -> None:
         _seed_hub_user(platform_db, 7)
         response = await client.put(
-            "/api/v1/platform/users/7/role",
+            f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
             json={"role": "platform-admin"},
         )
@@ -223,7 +222,9 @@ class TestUsers:
     ) -> None:
         _seed_hub_user(platform_db, 7)
         response = await client.put(
-            "/api/v1/platform/users/7/role", headers=_admin_headers(), json={"role": "bogus"}
+            f"/api/v1/platform/users/{uid(7)}/role",
+            headers=_admin_headers(),
+            json={"role": "bogus"},
         )
         assert response.status_code == 400
 
@@ -234,7 +235,7 @@ class TestUsers:
         """Empty body / null / empty role is 400 -- never a silent no-op 200."""
         _seed_hub_user(platform_db, 7)
         response = await client.put(
-            "/api/v1/platform/users/7/role", headers=_admin_headers(), json=body
+            f"/api/v1/platform/users/{uid(7)}/role", headers=_admin_headers(), json=body
         )
         assert response.status_code == 400
         rows = await platform_db.select_async(
@@ -246,7 +247,7 @@ class TestUsers:
         self, client: Any, platform_db: Any
     ) -> None:
         response = await client.put(
-            "/api/v1/platform/users/9999/role",
+            f"/api/v1/platform/users/{uid(9999)}/role",
             headers=_admin_headers(),
             json={"role": "support"},
         )
@@ -262,7 +263,9 @@ class TestUsers:
         """Demotion goes through `guard_platform_account` like every other path."""
         _seed_hub_user(platform_db, 3, bootstrap=True)
         response = await client.put(
-            "/api/v1/platform/users/3/role", headers=_admin_headers(), json={"role": "support"}
+            f"/api/v1/platform/users/{uid(3)}/role",
+            headers=_admin_headers(),
+            json={"role": "support"},
         )
         assert response.status_code == 403
         body = await response.get_json()
@@ -274,13 +277,13 @@ class TestUsers:
         """Second grant call hits the UPDATE-existing-row branch, not the INSERT branch."""
         _seed_hub_user(platform_db, 7)
         first = await client.put(
-            "/api/v1/platform/users/7/role",
+            f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
             json={"role": "support"},
         )
         assert first.status_code == 200
         second = await client.put(
-            "/api/v1/platform/users/7/role",
+            f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
             json={"role": "platform-admin"},
         )
@@ -297,7 +300,7 @@ class TestUsers:
         _seed_member(platform_db, community_id=community_id, user_id="7")
 
         response = await client.delete(
-            "/api/v1/platform/users/7", headers=_admin_headers(), json={"reason": "spam"}
+            f"/api/v1/platform/users/{uid(7)}", headers=_admin_headers(), json={"reason": "spam"}
         )
         assert response.status_code == 200
         rows = await platform_db.select_async(
@@ -307,7 +310,7 @@ class TestUsers:
 
     async def test_deactivate_unknown_user_is_404(self, client: Any) -> None:
         response = await client.delete(
-            "/api/v1/platform/users/9999", headers=_admin_headers(), json={"reason": "spam"}
+            f"/api/v1/platform/users/{uid(9999)}", headers=_admin_headers(), json={"reason": "spam"}
         )
         assert response.status_code == 404
 
@@ -319,8 +322,8 @@ class TestSystemTenantGuard:
         ("method", "path", "body"),
         [
             ("GET", "/api/v1/platform/users", None),
-            ("PUT", "/api/v1/platform/users/7/role", {"role": "support"}),
-            ("DELETE", "/api/v1/platform/users/7", {"reason": "x"}),
+            ("PUT", f"/api/v1/platform/users/{uid(7)}/role", {"role": "support"}),
+            ("DELETE", f"/api/v1/platform/users/{uid(7)}", {"reason": "x"}),
             ("GET", "/api/v1/platform/stats", None),
         ],
     )
@@ -496,11 +499,36 @@ class TestSystem:
         by_user = await client.get(
             "/api/v1/platform/audit-log",
             headers=_admin_headers(),
-            query_string={"userId": "8"},
+            query_string={"userId": uid(8)},
         )
         body2 = await by_user.get_json()
         assert len(body2["entries"]) == 1
-        assert body2["entries"][0]["userId"] == 8
+        assert body2["entries"][0]["userId"] == uid(8)
+
+    async def test_audit_log_rejects_numeric_or_malformed_user_id(self, client: Any) -> None:
+        for bad in ("8", "abc", "00000000-0000"):
+            response = await client.get(
+                "/api/v1/platform/audit-log",
+                headers=_admin_headers(),
+                query_string={"userId": bad},
+            )
+            assert response.status_code == 400, bad
+
+    async def test_audit_log_unknown_user_uuid_matches_nothing(self, client: Any) -> None:
+        response = await client.get(
+            "/api/v1/platform/audit-log",
+            headers=_admin_headers(),
+            query_string={"userId": uid(424242)},
+        )
+        assert response.status_code == 200
+        assert (await response.get_json())["entries"] == []
+
+    @pytest.mark.parametrize("path", ["/users", "/communities", "/audit-log"])
+    async def test_non_integer_page_is_400_not_500(self, client: Any, path: str) -> None:
+        response = await client.get(
+            f"/api/v1/platform{path}", headers=_admin_headers(), query_string={"page": "abc"}
+        )
+        assert response.status_code == 400
 
     async def test_stats(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)

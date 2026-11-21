@@ -47,8 +47,8 @@
 - Command processor already enforced `is_enabled` check per command (confirmed working)
 - `AdminModules.jsx` (existing) correctly greys out core module toggles
 
-#### Platform Extensibility — `libs/platform_receiver`
-- New shared library `libs/platform_receiver/` installable via `pip install`
+#### Platform Extensibility — libs/platform_receiver
+- New shared library libs/platform_receiver installable via `pip install`
 - `PlatformReceiverBase` abstract class: implement `start()`/`stop()`, call `dispatch(build_chat_event(...))` — router integration is automatic
 - Standardised event schema: `build_chat_event`, `build_slash_event`, `build_stream_event`
 - Shared response utilities: `split_for_chat`, `get_response_content`, `format_error`

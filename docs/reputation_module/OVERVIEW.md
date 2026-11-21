@@ -34,7 +34,7 @@ The Reputation Module maintains a comprehensive reputation scoring system for co
 
 | Item | Value |
 |---|---|
-| Source | `core/reputation_module/` |
+| Source | core/reputation_module |
 | Language | Python |
 | Port | 8021 (REST) |
 | gRPC Port | 50021 |

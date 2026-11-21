@@ -44,6 +44,11 @@ class TestEventValidation:
         source["method"] = "mutated-after-the-fact"
         assert event.details["method"] == "PUT"
 
+    def test_wildcard_scope_names_are_auditable(self) -> None:
+        """regression: DSAR 500 AUDIT_UNAVAILABLE -- the `*:read` self-service scope was refused."""
+        details = validate_details({"required_scopes": ["*:read", "tenant:admin"]})
+        assert details["required_scopes"] == ["*:read", "tenant:admin"]
+
     @pytest.mark.parametrize(
         "bad_value",
         [
@@ -274,7 +279,7 @@ class TestClassifyRequest:
 
     def test_semantic_route_overrides_the_generic_action(self) -> None:
         result = classify_request(
-            _facts(method="DELETE", rule="/api/v1/tenant/<tenant_slug>/admins/<int:user_id>")
+            _facts(method="DELETE", rule="/api/v1/tenant/<tenant_slug>/admins/<uuuid:user_id>")
         )
         assert result is not None
         assert (result.category, result.action) == (

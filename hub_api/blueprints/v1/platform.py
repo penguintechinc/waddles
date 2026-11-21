@@ -55,12 +55,19 @@ from services.current_user import get_current_user_id
 from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
-from services.pagination import parse_limit
+from services.pagination import parse_limit, parse_page
 from services.system_tenant_guard import require_system_tenant
+from services.user_public_id import (
+    lookup_user_id,
+    lookup_user_public_ids,
+    parse_public_user_id,
+    public_id_for,
+    use_user_public_ids,
+)
 
 logger = logging.getLogger(__name__)
-
 platform_bp = Blueprint("v1_platform", __name__, url_prefix="/api/v1/platform")
+use_user_public_ids(platform_bp)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -99,7 +106,7 @@ class PaginationDTO:
 class PlatformUserDTO:
     """Platform user DTO (list row)."""
 
-    userId: str
+    userId: str | None
     displayName: str | None
     platform: str | None
     platformUserId: str | None
@@ -132,7 +139,7 @@ class CommunityMembershipDTO:
 class PlatformUserDetailDTO:
     """Platform user detail DTO."""
 
-    userId: str
+    userId: str | None
     displayName: str | None
     platform: str | None
     platformUserId: str | None
@@ -264,7 +271,7 @@ class AuditEntryDTO:
     """Audit log entry DTO."""
 
     id: int
-    userId: int | None
+    userId: str | None
     action: str
     targetType: str | None
     targetId: str | None
@@ -337,10 +344,14 @@ class PlatformStatsResponse:
 @require_scope("platform:admin")  # type: ignore[misc]
 @require_system_tenant  # type: ignore[misc]
 @validate_response(ListUsersResponse)
-async def list_users() -> ListUsersResponse:
+async def list_users() -> ListUsersResponse | tuple[dict[str, object], int]:
     """List users."""
     async_dal, dal = _dal()
-    page = int(request.args.get("page", "1"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     platform = request.args.get("platform")
@@ -348,11 +359,12 @@ async def list_users() -> ListUsersResponse:
     rows, total, total_pages = await svc.list_users(
         async_dal, dal, page=page, limit=limit, search=search, platform=platform
     )
+    user_uuids = await lookup_user_public_ids(r.user_id for r in rows)
     return ListUsersResponse(
         success=True,
         users=[
             PlatformUserDTO(
-                userId=r.user_id,
+                userId=public_id_for(user_uuids, r.user_id),
                 displayName=r.display_name,
                 platform=r.platform,
                 platformUserId=r.platform_user_id,
@@ -367,7 +379,7 @@ async def list_users() -> ListUsersResponse:
     )
 
 
-@platform_bp.route("/users/<int:user_id>", methods=["GET"])
+@platform_bp.route("/users/<uuuid:user_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @require_system_tenant  # type: ignore[misc]
@@ -388,7 +400,9 @@ async def get_user(user_id: int) -> tuple[Any, int]:
         GetUserResponse(
             success=True,
             user=PlatformUserDetailDTO(
-                userId=str(result["user_id"]),
+                userId=public_id_for(
+                    await lookup_user_public_ids([result["user_id"]]), result["user_id"]
+                ),
                 displayName=result["display_name"],
                 platform=result["platform"],
                 platformUserId=result["platform_user_id"],
@@ -414,7 +428,7 @@ async def get_user(user_id: int) -> tuple[Any, int]:
     )
 
 
-@platform_bp.route("/users/<int:user_id>/role", methods=["PUT"])
+@platform_bp.route("/users/<uuuid:user_id>/role", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @require_system_tenant  # type: ignore[misc]
@@ -444,7 +458,7 @@ async def update_user_role(
     return MessageResponse(success=True, message="User role updated")
 
 
-@platform_bp.route("/users/<int:user_id>", methods=["DELETE"])
+@platform_bp.route("/users/<uuuid:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @require_system_tenant  # type: ignore[misc]
@@ -475,10 +489,14 @@ async def deactivate_user(
 @require_scope("platform:admin")  # type: ignore[misc]
 @require_system_tenant  # type: ignore[misc]
 @validate_response(ListCommunitiesResponse)
-async def list_communities() -> ListCommunitiesResponse:
+async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object], int]:
     """List communities."""
     async_dal, dal = _dal()
-    page = int(request.args.get("page", "1"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     is_active = request.args.get("isActive", "true") != "false"
@@ -626,24 +644,36 @@ async def get_system_health() -> tuple[SystemHealthResponse, int]:
 @require_system_tenant  # type: ignore[misc]
 @validate_response(AuditLogResponse)
 @reads_from_replica("platform.get_audit_log")
-async def get_audit_log() -> AuditLogResponse:
+async def get_audit_log() -> AuditLogResponse | tuple[dict[str, object], int]:
     """Get audit log (append-only listing: scope-gated, no DB authz, replica lag is fine)."""
     async_dal, dal = get_read_dals()
-    page = int(request.args.get("page", "1"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=50)
     action = request.args.get("action")
     user_id_param = request.args.get("userId")
-    user_id = int(user_id_param) if user_id_param else None
+    user_id: int | None = None
+    if user_id_param:
+        user_public_id = parse_public_user_id(user_id_param)
+        if user_public_id is None:
+            return _err(ApiError("Invalid userId", 400, "BAD_REQUEST"))
+        user_id = await lookup_user_id(user_public_id)
 
     rows, total, total_pages = await svc.get_audit_log(
         async_dal, dal, page=page, limit=limit, action=action, user_id=user_id
+    )
+    actor_uuids = await lookup_user_public_ids(
+        (r.user_id for r in rows), async_dal=async_dal, dal=dal
     )
     return AuditLogResponse(
         success=True,
         entries=[
             AuditEntryDTO(
                 id=r.id,
-                userId=r.user_id,
+                userId=public_id_for(actor_uuids, r.user_id),
                 action=r.action,
                 targetType=r.target_type,
                 targetId=r.target_id,
