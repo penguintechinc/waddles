@@ -103,6 +103,18 @@ pub fn app_id_slug(raw: &str) -> String {
     out
 }
 
+/// Builds the `app_id` stamped on an ingest-published envelope:
+/// `penguintechinc.waddles.ingest-<platform>-<source>`, the `<org>.<repo>.<name>` shape
+/// `penguin_spine` requires (name segment limited to `[a-z0-9-]`, so `_` maps to `-`).
+#[must_use]
+pub fn ingest_app_id(platform: &str, source_id: &str) -> String {
+    format!(
+        "penguintechinc.waddles.ingest-{}-{}",
+        app_id_slug(platform).replace('_', "-"),
+        app_id_slug(source_id).replace('_', "-")
+    )
+}
+
 /// Errors [`publish_event`] can return: either the binding-MAC computation
 /// failed (a misconfigured keyring/kid -- a startup-time invariant that
 /// should never actually trip once [`crate::config`] validates the
@@ -697,11 +709,7 @@ async fn publish_resolved_inner<A: EventAppender, M: SpineMetrics + ?Sized, D: D
         community: scope.community.clone(),
         tenant_id: resolved.as_ref().map(|r| r.tenant_id),
         community_id: resolved.as_ref().map(|r| r.community_id),
-        app_id: format!(
-            "penguintechinc.waddles.ingest-{}-{}",
-            app_id_slug(&platform).replace('_', "-"),
-            app_id_slug(source_id).replace('_', "-")
-        ),
+        app_id: ingest_app_id(&platform, source_id),
         // "process", NOT "ingest": `StageEnvelope.stage` names the stage
         // that will read/consume this entry off the stream and therefore
         // owns its DLQ routing -- the same forward-looking convention this
@@ -900,7 +908,10 @@ mod tests {
         );
         assert_eq!(env.schema_version, LEGACY_ENVELOPE_SCHEMA_VERSION);
         assert_eq!(env.stage, "process");
-        assert_eq!(env.app_id, "penguintechinc.waddles.ingest-twitch-tw-channela");
+        assert_eq!(
+            env.app_id,
+            "penguintechinc.waddles.ingest-twitch-tw-channela"
+        );
         assert_eq!(env.target_app_id, None);
         assert_eq!(env.tenant, "acme");
         assert_eq!(env.community.as_deref(), Some("main"));
@@ -910,6 +921,13 @@ mod tests {
             "event_id must be a UUID"
         );
         assert_eq!(env.session_id, None);
+        // Spine's own deserializer enforces the app_id grammar: the published envelope must round-trip.
+        let mut wire_env = env.clone();
+        wire_env.workstream_id = Uuid::new_v4().to_string(); // fixture "ws-1" is not a UUID
+        let wire = serde_json::to_string(&wire_env).expect("serialize envelope");
+        let back: StageEnvelope =
+            serde_json::from_str(&wire).expect("spine accepts the ingest app_id");
+        assert_eq!(back.app_id, env.app_id);
         let trace = env
             .trace
             .as_ref()
@@ -1188,7 +1206,10 @@ mod tests {
         .await
         .unwrap();
         let app_id = &appender.calls.lock().unwrap()[0].1.app_id;
-        assert_eq!(app_id, "penguintechinc.waddles.ingest-custom-github-acme-github");
+        assert_eq!(
+            app_id,
+            "penguintechinc.waddles.ingest-custom-github-acme-github"
+        );
         assert!(app_id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));
@@ -1842,5 +1863,24 @@ mod tests {
         let mut neg = ok.clone();
         neg.tenant_id = 0;
         assert!(assert_scope_consistent(&neg, &ok.spine_scope()).is_err());
+    }
+
+    #[test]
+    fn ingest_app_id_is_always_a_spine_valid_three_segment_id() {
+        for (platform, source) in [
+            ("twitch", "tw-channelA"),
+            ("custom_github", "Acme_GitHub.1"),
+            ("x", "_-9"),
+        ] {
+            let id = ingest_app_id(platform, source);
+            let parts: Vec<&str> = id.split('.').collect();
+            assert_eq!(parts.len(), 3, "{id}");
+            assert!(
+                parts.iter().all(|p| !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')),
+                "{id}"
+            );
+        }
     }
 }
