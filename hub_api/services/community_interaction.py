@@ -350,6 +350,16 @@ async def create_forum_post(
     if not title:
         return None, "Title is required"
 
+    # The channel id comes from the URL: it must belong to THIS community, or a member of
+    # community A could post into (and relay through) community B's channel.
+    owned = (
+        dal((dal.hub_channels.id == channel_id) & (dal.hub_channels.community_id == community_id))
+        .select(dal.hub_channels.id)
+        .first()
+    )
+    if owned is None:
+        return None, "__not_found__"
+
     post_id = dal.hub_forum_posts.insert(
         hub_channel_id=channel_id,
         community_id=community_id,

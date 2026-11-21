@@ -397,6 +397,7 @@ async def member_list_channels(community_id: int) -> tuple[dict[str, object], in
 @interaction_member_bp.route("/<cuuid:community_id>/interact/channels", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def member_create_channel(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/community/<id>/interact/channels` -- gated by `channel_creation_policy`."""
@@ -463,6 +464,7 @@ async def member_forum_post(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def member_create_forum_post(
     community_id: int, channel_id: int
@@ -474,6 +476,8 @@ async def member_create_forum_post(
     dto, err = await create_forum_post(
         current_app.config["dal"], community_id, channel_id, payload, get_current_user(request)
     )
+    if err == "__not_found__":
+        return {"success": False, "error": "Channel not found"}, 404
     if err:
         return {"success": False, "error": err}, 400
     return {"success": True, "post": dto}, 201
@@ -484,6 +488,7 @@ async def member_create_forum_post(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def member_create_forum_reply(
     community_id: int, post_id: int
