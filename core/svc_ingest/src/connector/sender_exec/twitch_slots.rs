@@ -213,6 +213,21 @@ pub(crate) fn map_cred(e: CredError) -> SlotError {
 }
 
 impl<C: TwitchCredentialSource, A: TwitchAppSource> SlotSource for TwitchSlots<C, A> {
+    async fn bound_channel(
+        &self,
+        platform: &str,
+        community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        if platform != "twitch" {
+            return Err(SlotError::Refused("unsupported_platform"));
+        }
+        self.creds
+            .bound_channel(community_id)
+            .await
+            .map(|login| format!("#{login}"))
+            .map_err(map_cred)
+    }
+
     fn supports_app_credentials(&self, platform: &str) -> bool {
         platform == "twitch" && A::AVAILABLE
     }

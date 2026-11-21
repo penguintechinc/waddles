@@ -69,6 +69,8 @@ pub(crate) struct MapSlots {
     pub(crate) map: HashMap<String, String>,
     pub(crate) err: Option<SlotError>,
     pub(crate) seen: Arc<Mutex<Vec<SeenReq>>>,
+    /// The channel the community's verified binding owns (`SlotSource::bound_channel`).
+    pub(crate) bound: Option<String>,
 }
 
 impl MapSlots {
@@ -92,6 +94,16 @@ impl MapSlots {
 }
 
 impl SlotSource for MapSlots {
+    async fn bound_channel(
+        &self,
+        _platform: &str,
+        _community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        self.bound
+            .clone()
+            .ok_or(SlotError::Refused("no_connection"))
+    }
+
     async fn resolve(
         &self,
         req: &SlotRequest<'_>,
@@ -1488,4 +1500,115 @@ async fn a_malformed_header_credential_is_refused_and_never_sent() {
         assert_eq!(e, ExecError::Subst(SubstError::ShapeInvalid), "{bad:?}");
         assert!(sent(&r).await.is_empty());
     }
+}
+
+fn kv_pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+        .collect()
+}
+
+fn twitch_ban_tpl(unban: bool) -> RequestTpl {
+    let url = "https://api.twitch.tv/helix/moderation/bans?broadcaster_id={{TWITCH_BROADCASTER_ID}}&moderator_id={{TWITCH_SENDER_ID}}";
+    RequestTpl {
+        method: if unban { "DELETE" } else { "POST" }.into(),
+        url: if unban {
+            format!("{url}&user_id=999")
+        } else {
+            url.to_string()
+        },
+        headers: kv_pairs(&[
+            ("Authorization", "Bearer {{TWITCH_TOKEN}}"),
+            ("Client-Id", "{{TWITCH_CLIENT_ID}}"),
+            ("Content-Type", "application/json"),
+        ]),
+        body: (!unban).then(|| {
+            serde_json::json!({"data": {"user_id": "999", "reason": "Waddles reputation floor"}})
+                .to_string()
+                .into_bytes()
+        }),
+        secret_refs: kv_pairs(&[
+            ("{{TWITCH_TOKEN}}", "token"),
+            ("{{TWITCH_CLIENT_ID}}", "client_id"),
+            ("{{TWITCH_BROADCASTER_ID}}", "broadcaster_id"),
+            ("{{TWITCH_SENDER_ID}}", "sender_id"),
+        ]),
+    }
+}
+
+fn bound_scope_op(op: &'static str, channel: Option<&str>, origin: &str) -> OutboundAction {
+    OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
+        op,
+        channel: channel.map(str::to_string),
+        text: (op == "mod.ban").then(|| r#"{"reason":"Waddles reputation floor"}"#.to_string()),
+        message_id: None,
+        user_id: Some("999".to_string()),
+        origin_channel: Some(origin.to_string()),
+        tenant_id: Some(1),
+    })
+}
+
+/// A floor ban / lift names no channel: the host pins the community's DB-bound channel and the
+/// slot resolver is asked to prove ownership of THAT channel only.
+#[tokio::test]
+async fn twitch_bound_scope_ban_and_unban_pin_the_channel_from_the_binding() {
+    for (op, unban) in [("mod.ban", false), ("mod.unban", true)] {
+        let mut slots = MapSlots::twitch();
+        slots.bound = Some("#bound_chan".to_string());
+        let r = rig(PlatformPolicy::twitch(), twitch_ban_tpl(unban), slots, true).await;
+        let a = bound_scope_op(op, None, "channel:-");
+        let out = r.exec.execute(&req("twitch", &a, Some(7))).await.unwrap();
+        assert_eq!(out.status, 200, "{op}");
+        let got = sent(&r).await;
+        assert_eq!(got.len(), 1, "{op}");
+        assert_eq!(
+            got[0].method.as_str(),
+            if unban { "DELETE" } else { "POST" }
+        );
+        let q: HashMap<_, _> = got[0].url.query_pairs().into_owned().collect();
+        assert_eq!(
+            (q["broadcaster_id"].as_str(), q["moderator_id"].as_str()),
+            ("111", "222")
+        );
+        // The resolver was asked about the binding's channel, not anything from the payload.
+        let seen = r.slots.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].1.as_deref(), Some("#bound_chan"), "{op}");
+    }
+}
+
+/// regression: a payload-named channel can never ride the bound scope, and the bound scope is
+/// refused for any other op (the channel must come from the DB binding, never the wire).
+#[tokio::test]
+async fn twitch_bound_scope_ignores_no_payload_channel_and_is_ban_ops_only() {
+    // No binding -> refused loudly, nothing sent.
+    let r = rig(
+        PlatformPolicy::twitch(),
+        twitch_ban_tpl(false),
+        MapSlots::twitch(),
+        true,
+    )
+    .await;
+    let a = bound_scope_op("mod.ban", None, "channel:-");
+    let e = r
+        .exec
+        .execute(&req("twitch", &a, Some(7)))
+        .await
+        .unwrap_err();
+    assert_eq!(e, ExecError::Slot(SlotError::Refused("no_connection")));
+    assert!(sent(&r).await.is_empty());
+    // A payload channel next to the scope is not the bound scope: the ordinary pin refuses it.
+    let mut slots = MapSlots::twitch();
+    slots.bound = Some("#bound_chan".to_string());
+    let r = rig(PlatformPolicy::twitch(), twitch_ban_tpl(false), slots, true).await;
+    let a = bound_scope_op("mod.ban", Some("#evil"), "channel:-");
+    assert!(matches!(
+        r.exec.execute(&req("twitch", &a, Some(7))).await,
+        Err(ExecError::Pin(_))
+    ));
+    assert!(sent(&r).await.is_empty());
+    assert!(r.slots.seen.lock().unwrap().is_empty());
+    // Other ops never get the bound scope.
+    let a = bound_scope_op("mod.timeout", None, "channel:-");
+    assert!(r.exec.execute(&req("twitch", &a, Some(7))).await.is_err());
+    assert!(sent(&r).await.is_empty());
 }

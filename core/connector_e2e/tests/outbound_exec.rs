@@ -97,6 +97,15 @@ impl TwitchCredentialSource for TwCreds {
             oauth_token: SecretString::new(TW_TOKEN.to_string()),
         })
     }
+
+    /// The hub-api binding view: this community's verified channel is `#chan`.
+    async fn bound_channel(&self, community_id: Option<i64>) -> Result<String, CredError> {
+        if community_id == Some(COMMUNITY) {
+            Ok("chan".to_string())
+        } else {
+            Err(CredError::NoBinding)
+        }
+    }
 }
 
 const TW_APP_TOKEN: &str = "TW-APP-TOKEN-SECRET";
@@ -1661,5 +1670,87 @@ async fn youtube_moderation_flows_through_the_real_connector_with_host_enforced_
         "only owned ids may reach YouTube"
     );
     assert_eq!(examined, 10, "denominator: ops exercised");
+    stop(tx, h).await;
+}
+
+/// Floor ban / lift real path: the producer's signed `channel:-` command names NO channel; the
+/// host pins `#chan` from the community's verified binding, the REAL connector builds the Helix
+/// request, and the ban (with the fixed reason) and the unban both reach the wire.
+#[tokio::test(flavor = "multi_thread")]
+async fn twitch_floor_ban_and_lift_pin_the_channel_from_the_binding_and_reach_helix() {
+    let rig = rig(true).await;
+    mock_twitch(&rig.tw).await;
+    Mock::given(method("POST"))
+        .and(path("/helix/moderation/bans"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{}]})))
+        .mount(&rig.tw)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/helix/moderation/bans"))
+        .respond_with(ResponseTemplate::new(204))
+        .mount(&rig.tw)
+        .await;
+    let (tx, h) = drain(&rig, "twitch");
+
+    let reason = json!({"reason": "Waddles reputation floor"}).to_string();
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry("twitch", "mod.ban", "", "channel:-", &reason, "999", TENANT),
+    )
+    .await;
+    let posts = wait_for(&rig.tw, "POST", 1).await;
+    let ban: Vec<_> = posts
+        .iter()
+        .filter(|r| r.url.path() == "/helix/moderation/bans")
+        .collect();
+    assert_eq!(ban.len(), 1);
+    let q: HashMap<_, _> = ban[0].url.query_pairs().into_owned().collect();
+    assert_eq!(
+        q["broadcaster_id"], "111",
+        "broadcaster of the BOUND channel"
+    );
+    assert_eq!(q["moderator_id"], "222");
+    assert_eq!(
+        header(ban[0], "authorization"),
+        format!("Bearer {TW_TOKEN}")
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&ban[0].body).unwrap(),
+        json!({"data": {"user_id": "999", "reason": "Waddles reputation floor"}})
+    );
+
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry("twitch", "mod.unban", "", "channel:-", "", "999", TENANT),
+    )
+    .await;
+    let dels = wait_for(&rig.tw, "DELETE", 1).await;
+    let q: HashMap<_, _> = dels[0].url.query_pairs().into_owned().collect();
+    assert_eq!(
+        (
+            q["broadcaster_id"].as_str(),
+            q["moderator_id"].as_str(),
+            q["user_id"].as_str()
+        ),
+        ("111", "222", "999")
+    );
+
+    // The bound scope is never honoured for another op: nothing more reaches the wire.
+    let before = rig.tw.received_requests().await.unwrap().len();
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry(
+            "twitch",
+            "mod.timeout",
+            "",
+            "channel:-",
+            &json!({"duration": 60}).to_string(),
+            "999",
+            TENANT,
+        ),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(rig.tw.received_requests().await.unwrap().len(), before);
     stop(tx, h).await;
 }

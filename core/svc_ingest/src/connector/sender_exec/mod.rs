@@ -221,6 +221,32 @@ pub trait SlotSource: Send + Sync {
     fn supports_app_credentials(&self, _platform: &str) -> bool {
         false
     }
+
+    /// The canonical channel (`#login`) the community's verified binding owns, for a
+    /// host-originated moderation op that names no channel (the Twitch `channel:-` scope). It
+    /// is resolved from the binding alone, never from the queue entry. The default refuses.
+    async fn bound_channel(
+        &self,
+        _platform: &str,
+        _community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        Err(SlotError::Refused("bound_channel_unsupported"))
+    }
+}
+
+/// The wire spelling of a Twitch host-originated moderation scope: no channel is named; the
+/// channel is the community's bound one (the Twitch analogue of Discord's `guild:-`).
+pub const TWITCH_BOUND_CHANNEL_SCOPE: &str = "channel:-";
+
+/// `true` for a Twitch `mod.ban` / `mod.unban` carrying the [`TWITCH_BOUND_CHANNEL_SCOPE`]
+/// (and no channel of its own). Only these two ops may use it.
+fn is_twitch_bound_scope(platform: &str, action: &OutboundAction) -> bool {
+    platform == "twitch"
+        && matches!(
+            action,
+            OutboundAction::PolicyOp(PolicyOp { op, channel: None, origin_channel: Some(o), .. })
+                if matches!(*op, "mod.ban" | "mod.unban") && o == TWITCH_BOUND_CHANNEL_SCOPE
+        )
 }
 
 /// What a [`DutyHook::role_bulk`] decided.
@@ -778,7 +804,18 @@ where
             .slots
             .iter()
             .any(|s| s.origin == SlotOrigin::Stamp && kind.slots.contains(&s.name));
-        let pinned = pin_channel(req.platform, req.action, uses_stamp, kind.requires_pin)?;
+        let pinned = if is_twitch_bound_scope(req.platform, req.action) {
+            // No channel on the wire: the host takes it from the community's verified binding
+            // (hub-api binding list), then the slot resolver re-proves ownership below.
+            Some(
+                self.slots
+                    .bound_channel(req.platform, req.community_id)
+                    .await
+                    .map_err(ExecError::Slot)?,
+            )
+        } else {
+            pin_channel(req.platform, req.action, uses_stamp, kind.requires_pin)?
+        };
         let cx = DutyCx {
             platform: req.platform,
             action: req.action,

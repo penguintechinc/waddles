@@ -104,6 +104,17 @@ where
         }
     }
 
+    async fn bound_channel(
+        &self,
+        platform: &str,
+        community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        match platform {
+            "twitch" => self.twitch.bound_channel(platform, community_id).await,
+            _ => Err(SlotError::Refused(UNKNOWN_PLATFORM)),
+        }
+    }
+
     /// Delegates to the platform's own source; an unknown platform never supports app
     /// credentials.
     fn supports_app_credentials(&self, platform: &str) -> bool {
