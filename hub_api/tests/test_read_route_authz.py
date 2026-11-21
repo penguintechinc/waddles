@@ -175,10 +175,19 @@ class TestEventReadRoutes:
 
     @pytest.fixture
     def event_app(self, seeded: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
+        from datetime import datetime
+
         import blueprints.v1.event as event_module
         from services.event_calendar_proxy import ProxyResult
+        from services.schema import bind_calendar_sync_tables
 
         dal = seeded[0]
+        # Event 11 belongs to the seeded community: event routes fence the id to the URL community.
+        bind_calendar_sync_tables(dal, migrate=True)
+        dal.calendar_events.insert(
+            id=11, community_id=seeded[1], title="t", event_date=datetime(2030, 1, 1), status="x"
+        )
+        dal.commit()
         quart_app = Quart(__name__)
         QuartSchema(quart_app)
         quart_app.config["dal"] = dal
