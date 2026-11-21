@@ -206,7 +206,7 @@ async fn a_platform_with_no_outbound_ban_path_is_closed_for_good() {
 }
 
 /// `(tenant, community, platform, user, calling app)` of one platform-originated lift.
-type LiftCall = (i32, i32, String, uuid::Uuid, String);
+type LiftCall = (i32, i32, String, uuid::Uuid, String, i64);
 
 /// Records every platform-originated lift the hook asks for.
 #[derive(Default)]
@@ -223,6 +223,7 @@ impl crate::floor_ban_dispatch::UnbanSync for FakeUnbanSync {
         platform: &'a str,
         user: uuid::Uuid,
         source_app: &'a str,
+        observed_ms: i64,
     ) -> crate::floor_ban_dispatch::StoreFuture<'a, (i32, i32)> {
         Box::pin(async move {
             self.calls.lock().unwrap().push((
@@ -231,6 +232,7 @@ impl crate::floor_ban_dispatch::UnbanSync for FakeUnbanSync {
                 platform.to_string(),
                 user,
                 source_app.to_string(),
+                observed_ms,
             ));
             if self.fail {
                 Err("db down".to_string())
@@ -238,6 +240,18 @@ impl crate::floor_ban_dispatch::UnbanSync for FakeUnbanSync {
                 Ok((1, 0))
             }
         })
+    }
+
+    fn lift_guild_from_platform<'a>(
+        &'a self,
+        _tenant_id: i32,
+        _platform: &'a str,
+        _guild_id: &'a str,
+        _user: uuid::Uuid,
+        _source_app: &'a str,
+        _observed_ms: i64,
+    ) -> crate::floor_ban_dispatch::StoreFuture<'a, (i32, i32, i32)> {
+        Box::pin(async { Err("not used by the confirmed-unban hook".to_string()) })
     }
 }
 
@@ -279,18 +293,27 @@ async fn an_allowlisted_core_bundles_confirmed_unban_lifts_only_its_own_tenant_a
     let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
     let sync = std::sync::Arc::new(FakeUnbanSync::default());
     c.set_unban_sync(sync.clone());
+    let before = i64::try_from(super::super::now_epoch_ms()).unwrap();
     c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
         .await;
+    let after = i64::try_from(super::super::now_epoch_ms()).unwrap();
+    let calls = sync.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    let (t, cm, p, u, app, observed) = calls[0].clone();
     assert_eq!(
-        sync.calls.lock().unwrap().clone(),
-        vec![(
+        (t, cm, p, u, app),
+        (
             TENANT_ID,
             COMMUNITY_ID,
             "discord".to_string(),
             UUID_B.parse().unwrap(),
             CHATGUARD.to_string()
-        )],
+        ),
         "tenant and community come from the invoke scope, the calling app is recorded"
+    );
+    assert!(
+        (before..=after).contains(&observed),
+        "observed_ms is the server-side confirmation time, not caller-supplied"
     );
     assert!(
         c.relay_queue.pushed.lock().unwrap().is_empty(),

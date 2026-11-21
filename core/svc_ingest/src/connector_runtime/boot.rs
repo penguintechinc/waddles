@@ -973,7 +973,12 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
                 Arc::clone(&scope),
                 Arc::clone(&tokenizer),
                 Arc::new(crate::platform_unban::ValkeySink::new(lease_conn.clone())),
-                crate::platform_unban::signing_keys_from_env(),
+                crate::platform_unban::Signer::from_env(),
+                Arc::new(crate::platform_unban::RestBanCheck::new(
+                    crate::outbound_creds_discord::ResolverDiscordCredentials::new(SharedResolver(
+                        Arc::clone(&resolver),
+                    )),
+                )),
             )))
         } else {
             None
