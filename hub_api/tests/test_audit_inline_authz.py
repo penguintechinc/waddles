@@ -55,8 +55,9 @@ _INLINE_PARAMS = sorted(INLINE_AUTHZ_ROUTES.items())
 
 
 def _concrete(rule: str) -> str:
-    """Concrete path: `cuuid` -> a UUID, `uuuid` -> user 1's UUID, every other converter `1`."""
+    """Concrete path: `cuuid`/`puuid` -> UUIDs, `uuuid` -> user 1 UUID, others `1`."""
     rule = rule.replace("<cuuid:community_id>", "00000000-0000-4000-8000-000000000001")
+    rule = re.sub(r"<puuid:[^>]+>", "00000000-0000-4000-8000-000000000002", rule)
     rule = rule.replace("<uuuid:user_id>", uid(1))
     return re.sub(r"<[^>]+>", "1", rule)
 

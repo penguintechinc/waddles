@@ -42,7 +42,7 @@ function CommunityInteraction() {
 
   // Resolve active channel
   const activeChannel = channelId
-    ? channels.find(c => c.id === parseInt(channelId, 10))
+    ? channels.find(c => String(c.id) === String(channelId))
     : channels[0] || null;
 
   const handleSelectChannel = (ch) => {

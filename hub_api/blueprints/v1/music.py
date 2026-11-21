@@ -41,12 +41,18 @@ from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request, payment_required
 from services.music_service import MusicProviderDTO, MusicSettingsDTO, RadioStationDTO
 from services.pagination import parse_limit
+from services.public_ids import PublicIdTarget, build_view_arg_translator
 from services.schema import bind_streaming_tables
 from services.scope_registry import SCOPE_MUSIC_STATION
 
 logger = logging.getLogger(__name__)
 
 music_bp = Blueprint("v1_music", __name__, url_prefix="/api/v1/admin")
+
+#: `<puuid:station_id>` -> numeric id inside the URL community (unknown/foreign/malformed -> 404).
+music_bp.before_request(
+    build_view_arg_translator({"station_id": PublicIdTarget("community_radio_stations")})
+)
 
 #: Two-gate Feature flag -- `libs/streaming_module/features.py`'s
 #: `streaming.music_station` Feature contract, free tier.
@@ -392,7 +398,7 @@ async def add_radio_station(data: AddRadioStationRequest, community_id: int) -> 
     return jsonify_dto(RadioStationResponse(success=True, station=station), 201)
 
 
-@music_bp.route("/<cuuid:community_id>/music/radio-stations/<int:station_id>", methods=["DELETE"])
+@music_bp.route("/<cuuid:community_id>/music/radio-stations/<puuid:station_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_radio_station(
