@@ -33,7 +33,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.waddleai',
     '1.0.0',
     'integrations',
-    'waddles.integrations.waddleai',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,

@@ -35,7 +35,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.quote-pipeline',
     '1.0.0',
     'social',
-    'waddles.social.quote',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,

@@ -41,7 +41,7 @@ def _seed(root: Path) -> None:
     _write(
         root,
         "config/postgres/migrations/001.sql",
-        f"INSERT INTO app_catalog (app_id, feature) VALUES ('{GOOD}', 'waddles.community.polls');\n",
+        f"INSERT INTO app_catalog (app_id, feature) VALUES ('{GOOD}', 'penguintechinc.waddles');\n",
     )
 
 
@@ -58,7 +58,7 @@ def test_seeded_tree_passes_and_posthog_flag_is_not_an_app_id(tmp_path):
     assert bad == []
     assert denom == {
         s: 1 for s in guard.SOURCES
-    }  # feature flag 'waddles.community.polls' not examined
+    }  # PostHog flag keys are not examined; only the seeded feature column is
 
 
 def test_each_source_family_fails_on_one_injected_bad_id(tmp_path):
@@ -164,3 +164,16 @@ def test_real_repo_sweep_is_within_baseline():
     """The checked-in tree has no old-id mention beyond scripts/ci/old_id_baseline.json."""
     assert guard.sweep_violations(guard.sweep(ROOT), guard.load_baseline(ROOT)) == []
     assert not any(r.startswith("alembic/tests/test_0033") for r in guard.sweep(ROOT))
+
+def test_planted_old_style_seed_feature_fails(tmp_path):
+    """A seeded app_catalog.feature of the old waddles.<category>.<name> shape must fail the guard."""
+    _seed(tmp_path)
+    old_feature = OLD + "demo"
+    _write(
+        tmp_path,
+        "config/postgres/migrations/002.sql",
+        f"INSERT INTO app_catalog (app_id, feature) VALUES ('{GOOD}', '{old_feature}');\n",
+    )
+    bad, _ = guard.scan(tmp_path)
+    assert any(v[2] == old_feature and "feature" in v[3] for v in bad), bad
+    assert guard.main(["x", str(tmp_path)]) == 1

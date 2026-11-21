@@ -51,7 +51,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.polls-pipeline',
     '1.0.0',
     'community',
-    'waddles.community.polls',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
