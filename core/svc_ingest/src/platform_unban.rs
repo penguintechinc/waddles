@@ -408,12 +408,17 @@ impl Timelines {
             replay_floor_ms: None,
         });
         match kind {
-            FrameKind::Hello => t.replay_floor_ms = Some(t.last_seen_ms),
+            // A HELLO mid-replay (nested reconnect) keeps the ORIGINAL floor.
+            FrameKind::Hello => t.replay_floor_ms = t.replay_floor_ms.or(Some(t.last_seen_ms)),
             FrameKind::ReplayDone => t.replay_floor_ms = None,
             FrameKind::Other => {}
         }
         let observed = t.replay_floor_ms.unwrap_or(now);
-        t.last_seen_ms = now;
+        // Only live frames move `last_seen`: replayed frames carry old events, and advancing on
+        // them would raise a later reconnect's floor past events never actually seen live.
+        if t.replay_floor_ms.is_none() {
+            t.last_seen_ms = now;
+        }
         observed
     }
 }
@@ -900,6 +905,22 @@ mod tests {
         assert_eq!(tl.on_frame(1, FrameKind::Other, 95_000), 95_000);
         // Connections are independent.
         assert_eq!(tl.on_frame(2, FrameKind::Other, 96_000), 96_000);
+    }
+
+    #[test]
+    fn a_nested_reconnect_mid_replay_keeps_the_original_floor() {
+        let tl = Timelines::new(100);
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 2_000), 2_000);
+        assert_eq!(tl.on_frame(1, FrameKind::Hello, 90_000), 2_000);
+        // Frames during the replay do not move last_seen.
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 90_100), 2_000);
+        // A second HELLO before RESUMED/READY must not raise the floor to 90_100.
+        assert_eq!(tl.on_frame(1, FrameKind::Hello, 91_000), 2_000);
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 91_010), 2_000);
+        assert_eq!(tl.on_frame(1, FrameKind::ReplayDone, 91_020), 91_020);
+        // After the replay closes, live frames move last_seen again.
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 95_000), 95_000);
+        assert_eq!(tl.on_frame(1, FrameKind::Hello, 99_000), 95_000);
     }
 
     #[test]
