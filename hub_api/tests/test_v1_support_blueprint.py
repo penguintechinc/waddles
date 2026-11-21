@@ -13,6 +13,7 @@ data) and post a comment onto it (201). Reverted, both green again.
 from __future__ import annotations
 
 import json as json_module
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -21,6 +22,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.support import support_admin_bp, support_member_bp
 from tests.community_ids import cpath, install_community_ids
+from tests.conftest import seed_membership
 
 ADMIN_SCOPE = "community.support:admin"
 
@@ -50,12 +52,23 @@ def _seed_membership(dal: Any, community_id: int, user_id: int, *, active: bool 
     dal.commit()
 
 
+#: Administers the seeded community (real `community-admin` role row): the admin routes check
+#: per-community standing, never just the tenant-wide `community.support:admin` token scope.
+SUPPORT_ADMIN_UID = 77
+
+
 @pytest.fixture(autouse=True)
 def _seeded_members(support_token_db: Any) -> None:
-    """Users 1 and 2 are active members of the seeded community; 99 is deliberately not."""
+    """Users 1 and 2 are active members, 77 is the community admin; 99 is deliberately not."""
     dal, community_id = support_token_db
     _seed_membership(dal, community_id, 1)
     _seed_membership(dal, community_id, 2)
+    seed_membership(
+        SimpleNamespace(dal=dal),
+        community_id=community_id,
+        user_id=SUPPORT_ADMIN_UID,
+        role="community-admin",
+    )
 
 
 async def _post_json(
@@ -236,9 +249,10 @@ class TestMemberGate:
         assert response.status_code == 403
         assert dal(dal.support_tickets).count() == 0
 
-    async def test_support_admin_non_member_can_read_categories_but_not_submit(
+    async def test_tenant_wide_admin_scope_without_standing_is_refused(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
+        """`community.support:admin` is tenant-wide: it must not open another community's desk."""
         dal, community_id = support_token_db
         headers = user_auth_headers(user_id=99, scope="community.support:admin")
         read = await client.get(
@@ -251,7 +265,17 @@ class TestMemberGate:
             headers,
             {"subject": "x"},
         )
-        assert (read.status_code, submit.status_code) == (200, 403)
+        assert (read.status_code, submit.status_code) == (403, 403)
+
+    async def test_community_admin_can_read_categories(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        read = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=user_auth_headers(user_id=SUPPORT_ADMIN_UID, scope=ADMIN_SCOPE),
+        )
+        assert read.status_code == 200
 
     async def test_member_gets_2xx(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
@@ -307,7 +331,7 @@ class TestCategoryCrud:
         self, client: Any, auth_headers: Any, support_token_db: Any
     ) -> None:
         dal, community_id = support_token_db
-        headers = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        headers = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
         create = await _post_json(
             client,
             cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
@@ -372,7 +396,7 @@ class TestCategoryCrud:
         response = await _post_json(
             client,
             cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
-            auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
             {"name": "  "},
         )
         assert response.status_code == 400
@@ -383,7 +407,7 @@ class TestTicketAdminTriage:
         self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
         dal, community_id = support_token_db
-        admin = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
         reporter = user_auth_headers(user_id=1)
 
         submit = await _post_json(
@@ -508,7 +532,7 @@ class TestTicketAdminTriage:
                 community_id,
                 ticket_id=ticket_id,
             ),
-            auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
             {"status": "not-a-status"},
         )
         assert response.status_code == 400
@@ -532,7 +556,7 @@ class TestTicketAdminTriage:
                 community_id,
                 ticket_id=ticket_id,
             ),
-            auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
             {"priority": "urgent"},  # Node route-layer drift value -- rejected by controller enum
         )
         assert response.status_code == 400
@@ -543,7 +567,7 @@ class TestTicketAdminTriage:
         dal, community_id = support_token_db
         response = await client.get(
             cpath(dal, "/api/v1/admin/{community_id}/support/tickets/9999", community_id),
-            headers=auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            headers=auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
         )
         assert response.status_code == 404
 
@@ -673,7 +697,7 @@ class TestMemberOwnership:
     ) -> None:
         dal, community_id = support_token_db
         owner = user_auth_headers(user_id=1)
-        admin = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
         submit = await _post_json(
             client,
             cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
@@ -711,7 +735,7 @@ class TestStats:
     ) -> None:
         dal, community_id = support_token_db
         reporter = user_auth_headers(user_id=1)
-        admin = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
 
         open_ticket = await _post_json(
             client,

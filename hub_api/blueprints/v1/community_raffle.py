@@ -69,6 +69,7 @@ async def list_route(community_id: int) -> tuple[dict[str, object], int]:
 @raffle_bp.route("/<cuuid:community_id>/raffle-customization/<event_type>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def upsert_route(community_id: int, event_type: str) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/raffle-customization/<eventType>`."""
     if not _tenant_ok(community_id):
@@ -89,6 +90,7 @@ async def upsert_route(community_id: int, event_type: str) -> tuple[dict[str, ob
 @raffle_bp.route("/<cuuid:community_id>/raffle-customization/<event_type>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_route(community_id: int, event_type: str) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/raffle-customization/<eventType>`."""
     if not _tenant_ok(community_id):
@@ -102,6 +104,7 @@ async def delete_route(community_id: int, event_type: str) -> tuple[dict[str, ob
 @raffle_bp.route("/<cuuid:community_id>/raffle-customization/<event_type>/upload", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.raffle:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def upload_route(community_id: int, event_type: str) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/raffle-customization/<eventType>/upload` -- max 2MB, mp3/ogg/wav."""
     if not _tenant_ok(community_id):
