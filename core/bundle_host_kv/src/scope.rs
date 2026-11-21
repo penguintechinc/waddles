@@ -253,7 +253,11 @@ mod tests {
             Some("main".to_string()),
             "penguintechinc.waddles.fixture-bot-a",
         );
-        let b = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.bot-b");
+        let b = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.bot-b",
+        );
         assert_ne!(a.data_key("counter"), b.data_key("counter"));
         assert!(!b.data_key("counter").starts_with(&a.app_prefix()));
     }

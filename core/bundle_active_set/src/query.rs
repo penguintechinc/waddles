@@ -929,7 +929,10 @@ mod tests {
         );
         assert_eq!(
             result.excluded,
-            vec![("penguintechinc.waddles.test-app".to_string(), ExclusionReason::NoApproval)]
+            vec![(
+                "penguintechinc.waddles.test-app".to_string(),
+                ExclusionReason::NoApproval
+            )]
         );
         Ok(())
     }
@@ -1071,8 +1074,12 @@ mod tests {
                 version: "1".to_string(),
                 artifact_digest: Some(digest),
                 scan_status: "scanned".to_string(),
-                component_key: Some("bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string()),
-                sidecar_key: Some("bundles/penguintechinc.waddles.test-app/1/real.json".to_string()),
+                component_key: Some(
+                    "bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string(),
+                ),
+                sidecar_key: Some(
+                    "bundles/penguintechinc.waddles.test-app/1/real.json".to_string(),
+                ),
                 artifact_signature: Some("c2lnbmF0dXJl".to_string()),
                 artifact_signature_key_id: Some("platform-2026-09".to_string()),
                 artifact_signed_approval_id: Some(42),
@@ -1124,8 +1131,12 @@ mod tests {
                 version: "1".to_string(),
                 artifact_digest: Some(digest),
                 scan_status: "scanned".to_string(),
-                component_key: Some("bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string()),
-                sidecar_key: Some("bundles/penguintechinc.waddles.test-app/1/real.json".to_string()),
+                component_key: Some(
+                    "bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string(),
+                ),
+                sidecar_key: Some(
+                    "bundles/penguintechinc.waddles.test-app/1/real.json".to_string(),
+                ),
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,

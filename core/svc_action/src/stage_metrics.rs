@@ -953,9 +953,21 @@ mod tests {
     #[test]
     fn record_stage_emits_a_second_scaled_histogram_with_stage_app_and_result() {
         let (h, m) = fresh();
-        m.record_stage("penguintechinc.waddles.test-a", "success", Duration::from_millis(40));
-        m.record_stage("penguintechinc.waddles.test-a", "success", Duration::from_millis(60));
-        m.record_stage("penguintechinc.waddles.test-a", "dead_lettered", Duration::from_millis(5));
+        m.record_stage(
+            "penguintechinc.waddles.test-a",
+            "success",
+            Duration::from_millis(40),
+        );
+        m.record_stage(
+            "penguintechinc.waddles.test-a",
+            "success",
+            Duration::from_millis(60),
+        );
+        m.record_stage(
+            "penguintechinc.waddles.test-a",
+            "dead_lettered",
+            Duration::from_millis(5),
+        );
 
         let filter = [
             ("stage", "action"),
@@ -1048,7 +1060,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_call_seconds",
-                &[("app_id", "penguintechinc.waddles.test-b"), ("result", "executor_error")]
+                &[
+                    ("app_id", "penguintechinc.waddles.test-b"),
+                    ("result", "executor_error")
+                ]
             ),
             1.0
         );
@@ -1078,14 +1093,24 @@ mod tests {
     #[test]
     fn record_bundle_load_labels_phase_and_result() {
         let (h, m) = fresh();
-        m.record_bundle_load("penguintechinc.waddles.test-c", "load", "ok", Duration::from_millis(900));
+        m.record_bundle_load(
+            "penguintechinc.waddles.test-c",
+            "load",
+            "ok",
+            Duration::from_millis(900),
+        );
         m.record_bundle_load(
             "penguintechinc.waddles.test-c",
             "precompile",
             "ok",
             Duration::from_millis(850),
         );
-        m.record_bundle_load("penguintechinc.waddles.test-c", "load", "error", Duration::from_millis(10));
+        m.record_bundle_load(
+            "penguintechinc.waddles.test-c",
+            "load",
+            "error",
+            Duration::from_millis(10),
+        );
         for (phase, result, want) in [
             ("load", "ok", 1.0),
             ("precompile", "ok", 1.0),
@@ -1128,7 +1153,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_sandbox_trip_total",
-                &[("app_id", "penguintechinc.waddles.test-d"), ("limit", "timeout")]
+                &[
+                    ("app_id", "penguintechinc.waddles.test-d"),
+                    ("limit", "timeout")
+                ]
             ),
             2.0
         );
@@ -1151,8 +1179,16 @@ mod tests {
             "waddles:t:acme:c:main:app:x:action",
             Some(12),
         );
-        m.group_lag("penguintechinc.waddles.test-e", "waddles:t:acme:c:main:app:x:action", None);
-        m.group_pending("penguintechinc.waddles.test-e", "waddles:t:acme:c:main:app:x:action", 3);
+        m.group_lag(
+            "penguintechinc.waddles.test-e",
+            "waddles:t:acme:c:main:app:x:action",
+            None,
+        );
+        m.group_pending(
+            "penguintechinc.waddles.test-e",
+            "waddles:t:acme:c:main:app:x:action",
+            3,
+        );
         m.insecure_transport("valkey", "tls", true);
         m.tenant_boundary_violation("action", "mac_mismatch");
 
@@ -1174,7 +1210,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_consumer_skipped_total",
-                &[("app_id", "penguintechinc.waddles.test-e"), ("reason", "route_denied")]
+                &[
+                    ("app_id", "penguintechinc.waddles.test-e"),
+                    ("reason", "route_denied")
+                ]
             ),
             1.0
         );
@@ -1191,7 +1230,10 @@ mod tests {
             .expect("queue depth must be exported");
         assert_eq!((depth.value, depth.sum), (1.0, 12.0));
         let pending = h
-            .last("waddles_group_pending", &[("app_id", "penguintechinc.waddles.test-e")])
+            .last(
+                "waddles_group_pending",
+                &[("app_id", "penguintechinc.waddles.test-e")],
+            )
             .expect("group pending must be exported");
         assert_eq!((pending.value, pending.sum), (1.0, 3.0));
         let insecure = h
@@ -1421,7 +1463,11 @@ mod tests {
     fn record_attempts_emits_a_count_histogram_by_result() {
         let (h, m) = fresh();
         m.record_attempts("penguintechinc.waddles.test-attempts", "success", 1);
-        m.record_attempts("penguintechinc.waddles.test-attempts", "retryable_failure", 4);
+        m.record_attempts(
+            "penguintechinc.waddles.test-attempts",
+            "retryable_failure",
+            4,
+        );
         let point = h
             .last(
                 "waddles_action_dispatch_attempts",

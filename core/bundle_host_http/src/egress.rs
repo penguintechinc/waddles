@@ -3187,7 +3187,11 @@ mod tests {
     /// (spec §8.2) actually increments on a denial.
     #[tokio::test]
     async fn undeclared_host_denial_is_counted_in_the_metric() {
-        let guard = guard_with("penguintechinc.waddles.a-b-c", vec![], FakeTransport::default());
+        let guard = guard_with(
+            "penguintechinc.waddles.a-b-c",
+            vec![],
+            FakeTransport::default(),
+        );
         let _ = guard
             .send(
                 "penguintechinc.waddles.a-b-c",
@@ -3784,7 +3788,11 @@ mod tests {
 
     #[tokio::test]
     async fn validate_dial_denies_an_undeclared_host() {
-        let guard = guard_with("penguintechinc.waddles.a-b-c", vec![], FakeTransport::default());
+        let guard = guard_with(
+            "penguintechinc.waddles.a-b-c",
+            vec![],
+            FakeTransport::default(),
+        );
         let err = guard
             .validate_dial("penguintechinc.waddles.a-b-c", "evil.example.com:443")
             .await
@@ -3921,7 +3929,9 @@ mod tests {
             .iter()
             .find(|(k, _)| k == PROXY_ASSERTION_HEADER)
             .expect("assertion header present");
-        assert!(header.1.starts_with("penguintechinc.waddles.a-b-c|discord.com|"));
+        assert!(header
+            .1
+            .starts_with("penguintechinc.waddles.a-b-c|discord.com|"));
     }
 
     // PKCS8-DER-encoded ECDSA P-256 test keypair (fixed, test-only) -- same
@@ -4525,7 +4535,10 @@ mod tests {
             .send("penguintechinc.waddles.a-b-c", &args)
             .await
             .expect("first call within burst succeeds");
-        let err = guard.send("penguintechinc.waddles.a-b-c", &args).await.unwrap_err();
+        let err = guard
+            .send("penguintechinc.waddles.a-b-c", &args)
+            .await
+            .unwrap_err();
         assert_eq!(err.code, "rate_limited");
     }
 
@@ -4870,9 +4883,16 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_args_are_rejected_as_invalid_args() {
-        let guard = guard_with("penguintechinc.waddles.a-b-c", vec![], FakeTransport::default());
+        let guard = guard_with(
+            "penguintechinc.waddles.a-b-c",
+            vec![],
+            FakeTransport::default(),
+        );
         let err = guard
-            .send("penguintechinc.waddles.a-b-c", &serde_json::json!({"not": "a request"}))
+            .send(
+                "penguintechinc.waddles.a-b-c",
+                &serde_json::json!({"not": "a request"}),
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");

@@ -820,7 +820,11 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn state_with(bridge: Arc<HostBridge>) -> ExecState {
-        ExecState::new(Some(bridge), "penguintechinc.waddles.test-app".to_string(), 1)
+        ExecState::new(
+            Some(bridge),
+            "penguintechinc.waddles.test-app".to_string(),
+            1,
+        )
     }
 
     #[tokio::test]

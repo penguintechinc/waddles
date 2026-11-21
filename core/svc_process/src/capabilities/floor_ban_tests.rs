@@ -428,7 +428,10 @@ async fn only_the_core_reputation_service_hop_chain_is_eligible() {
             vec![LOGIC, "penguintechinc.waddles.acme-service-reputation"],
         ),
         (REP, vec![REP]),
-        (REP, vec![LOGIC, "penguintechinc.waddles.acme-app-relay", REP]),
+        (
+            REP,
+            vec![LOGIC, "penguintechinc.waddles.acme-app-relay", REP],
+        ),
     ];
     for (app_id, chain) in cases {
         let w = world(app_id, chain, &[3], &[3], true, true).await;
@@ -752,7 +755,11 @@ fn only_a_floor_ban_on_the_matching_core_service_is_a_claim() {
         req(DISCORD, "discord.moderation.kick", "tenant_floor"),
         req("penguintechinc.waddles.twitch", BAN, "tenant_floor"),
         req(DISCORD, "moderation.ban", "tenant_floor"),
-        req("penguintechinc.waddles.acme-service-discord", BAN, "tenant_floor"),
+        req(
+            "penguintechinc.waddles.acme-service-discord",
+            BAN,
+            "tenant_floor",
+        ),
     ] {
         assert_eq!(detect_claim(&bad), None, "{bad:?}");
     }

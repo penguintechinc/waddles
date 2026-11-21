@@ -80,7 +80,10 @@ async fn audit_rows_land_in_postgres_and_role_is_insert_only() {
         StorageHost::with_rate_limit(backend, Arc::new(PgAuditSink::new(role_db.clone())), 1000);
 
     let owner = scope(OWNER, &[]);
-    let consumer = scope(CONSUMER, &["storage.read:penguintechinc.waddles.harness-media"]);
+    let consumer = scope(
+        CONSUMER,
+        &["storage.read:penguintechinc.waddles.harness-media"],
+    );
     h.put(
         &owner,
         None,

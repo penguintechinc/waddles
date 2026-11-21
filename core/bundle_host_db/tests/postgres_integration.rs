@@ -775,7 +775,11 @@ async fn typed_columns_round_trip_against_real_postgres() {
             .expect("runtime role connects"),
     );
     let schema = typed_core_schema();
-    let scope = DbScope::new(TYPED_TENANT, COMMUNITY_MAIN, "penguintechinc.waddles.bot-typed");
+    let scope = DbScope::new(
+        TYPED_TENANT,
+        COMMUNITY_MAIN,
+        "penguintechinc.waddles.bot-typed",
+    );
 
     // --- 1. insert: every typed column, incl. user_ref and a non-UTC offset ---
     let user_ref = "3f2b8c1e-7a4d-4e0b-9c55-1d2e3f4a5b6c";
@@ -975,7 +979,11 @@ async fn typed_columns_round_trip_against_real_postgres() {
     );
 
     // --- 6. query: typed columns decode, and ORDER BY sorts the stored type ---
-    let q_scope = DbScope::new(TYPED_TENANT + 1, TENANT_WIDE, "penguintechinc.waddles.bot-typed");
+    let q_scope = DbScope::new(
+        TYPED_TENANT + 1,
+        TENANT_WIDE,
+        "penguintechinc.waddles.bot-typed",
+    );
     // Insert order differs from chronological order; the middle row is only
     // earliest once its -05:00 offset is applied (2026-01-01T04:00:00Z).
     let instants = [

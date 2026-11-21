@@ -5488,7 +5488,8 @@ mod tests {
 
         #[tokio::test]
         async fn every_stream_is_sampled_each_interval_until_the_guard_drops() {
-            let (source, calls, _fail) = scripted(vec![stat("penguintechinc.waddles.mx-sampler-v1", 0)]);
+            let (source, calls, _fail) =
+                scripted(vec![stat("penguintechinc.waddles.mx-sampler-v1", 0)]);
             let streams = vec!["stream-a".to_string(), "stream-b".to_string()];
             let guard = spawn_group_backlog_sampler(source, streams, 20, 5_000)
                 .expect("a sampler is spawned for a non-zero interval");

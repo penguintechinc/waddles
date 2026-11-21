@@ -370,8 +370,8 @@ mod tests {
     /// assertion fast and independent of the wasm fixture.
     #[test]
     fn with_memory_limit_mb_denies_growth_past_the_cap() {
-        let mut state =
-            ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1).with_memory_limit_mb(1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1)
+            .with_memory_limit_mb(1);
         let one_mib = 1024 * 1024;
         assert!(!state.memory_cap_hit(), "no growth has been denied yet");
         assert!(state

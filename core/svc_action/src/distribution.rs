@@ -128,7 +128,10 @@ mod tests {
         row.artifact_digest = Some("sha256:11".to_string());
         catalog.update(vec![row.clone()]);
         assert_eq!(
-            catalog.get("penguintechinc.waddles.a-b-c").unwrap().artifact_digest,
+            catalog
+                .get("penguintechinc.waddles.a-b-c")
+                .unwrap()
+                .artifact_digest,
             Some("sha256:11".to_string())
         );
     }

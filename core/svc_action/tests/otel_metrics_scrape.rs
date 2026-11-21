@@ -132,7 +132,11 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
     );
 
     // Drive every instrument through its real recording API.
-    metrics.record_stage("penguintechinc.waddles.scrape-test", "success", Duration::from_millis(40));
+    metrics.record_stage(
+        "penguintechinc.waddles.scrape-test",
+        "success",
+        Duration::from_millis(40),
+    );
     metrics.record_executor_call(
         "penguintechinc.waddles.scrape-test",
         "dispatch",
@@ -146,7 +150,12 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
         "ok",
         Duration::from_micros(500),
     );
-    metrics.record_bundle_load("penguintechinc.waddles.scrape-test", "load", "ok", Duration::from_secs(1));
+    metrics.record_bundle_load(
+        "penguintechinc.waddles.scrape-test",
+        "load",
+        "ok",
+        Duration::from_secs(1),
+    );
     metrics.record_attempts("penguintechinc.waddles.scrape-test", "success", 1);
     metrics.record_batch(7);
     metrics.record_sandbox_trip("penguintechinc.waddles.scrape-test", "timeout");
@@ -273,7 +282,10 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
         sample(
             &text,
             "waddles_sandbox_trip_total{",
-            &["limit=\"timeout\"", "app_id=\"penguintechinc.waddles.scrape-test\""]
+            &[
+                "limit=\"timeout\"",
+                "app_id=\"penguintechinc.waddles.scrape-test\""
+            ]
         ),
         Some(1.0)
     );

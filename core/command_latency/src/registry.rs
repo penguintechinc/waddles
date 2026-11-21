@@ -310,7 +310,10 @@ mod tests {
         )
         .await
         .expect("a prefixed miss wakes the refresher");
-        assert_eq!(reg.bundle_label("penguintechinc.waddles.new-app"), NO_BUNDLE);
+        assert_eq!(
+            reg.bundle_label("penguintechinc.waddles.new-app"),
+            NO_BUNDLE
+        );
         tokio::time::timeout(
             std::time::Duration::from_millis(200),
             reg.miss_signal().notified(),

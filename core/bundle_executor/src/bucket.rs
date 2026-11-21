@@ -971,7 +971,11 @@ mod tests {
         });
 
         let config = test_bucket_config(&format!("http://{addr}"));
-        let fetched = get_object(&config, "bundles/penguintechinc.waddles.test-app/1/abc.wasm").await?;
+        let fetched = get_object(
+            &config,
+            "bundles/penguintechinc.waddles.test-app/1/abc.wasm",
+        )
+        .await?;
         assert_eq!(fetched, body);
 
         server.await?;

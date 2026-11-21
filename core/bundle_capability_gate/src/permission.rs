@@ -1694,7 +1694,10 @@ mod tests {
         let id = PermissionId::parse("storage.read:penguintechinc.waddles.harness-media").unwrap();
         assert_eq!(id.family(), PermissionFamily::StorageRead);
         assert_eq!(id.risk(), Risk::Dangerous);
-        assert_eq!(id.canonical_id(), "storage.read:penguintechinc.waddles.harness-media");
+        assert_eq!(
+            id.canonical_id(),
+            "storage.read:penguintechinc.waddles.harness-media"
+        );
         for op in ["list", "write", "delete"] {
             let raw = format!("storage.{op}:a.b.c");
             assert_eq!(PermissionId::parse(&raw).unwrap().canonical_id(), raw);

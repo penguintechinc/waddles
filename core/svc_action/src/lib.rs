@@ -2387,7 +2387,11 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         // SAFETY: serialized by ENV_LOCK.
         unsafe { std::env::remove_var("ENVELOPE_BINDING_KEYS") };
-        let cli = CliConfig::parse_from(["svc-action", "--action-app-id", "penguintechinc.waddles.a-b-c"]);
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--action-app-id",
+            "penguintechinc.waddles.a-b-c",
+        ]);
         let config = Config {
             cli,
             db_password: Secret::new("test-password"),
@@ -2789,7 +2793,10 @@ mod tests {
             load_body.component_key,
             "bundles/penguintechinc.waddles.a-b-c/2.0.0/aa.wasm"
         );
-        assert_eq!(load_body.sidecar_key, "bundles/penguintechinc.waddles.a-b-c/2.0.0/aa.json");
+        assert_eq!(
+            load_body.sidecar_key,
+            "bundles/penguintechinc.waddles.a-b-c/2.0.0/aa.json"
+        );
     }
 
     /// `env_bundle_loader_loop` must terminate promptly once `shutdown`

@@ -50,11 +50,17 @@ async fn unresolved_zero_scope_is_refused_on_every_op() {
         assert!(is_invalid(h.delete(&s, None, "k.mp4").await), "delete");
         assert!(is_invalid(h.list(&s, None, "", None, 10).await), "list");
         assert!(
-            is_invalid(h.tag_add(&s, None, "k.mp4", "penguintechinc.waddles.app-clips").await),
+            is_invalid(
+                h.tag_add(&s, None, "k.mp4", "penguintechinc.waddles.app-clips")
+                    .await
+            ),
             "tag_add"
         );
         assert!(
-            is_invalid(h.tag_remove(&s, None, "k.mp4", "penguintechinc.waddles.app-clips").await),
+            is_invalid(
+                h.tag_remove(&s, None, "k.mp4", "penguintechinc.waddles.app-clips")
+                    .await
+            ),
             "tag_remove"
         );
     }

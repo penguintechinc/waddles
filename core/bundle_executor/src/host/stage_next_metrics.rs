@@ -593,7 +593,8 @@ mod tests {
     #[tokio::test]
     async fn the_wit_host_impl_stamps_the_invocations_app_id() {
         use crate::engine::stage_next_world::waddle::bundle::metrics::Host;
-        let mut state = ExecState::new(None, "penguintechinc.waddles.test-host-impl".to_string(), 1);
+        let mut state =
+            ExecState::new(None, "penguintechinc.waddles.test-host-impl".to_string(), 1);
         state
             .counter_add("host_impl_total".into(), 2, vec![l("outcome", "ok")])
             .await

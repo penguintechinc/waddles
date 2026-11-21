@@ -927,10 +927,30 @@ mod tests {
     #[test]
     fn load_phases_and_outcomes_are_recorded_with_second_scaled_buckets() {
         let (h, m) = fresh();
-        m.record_load_phase("penguintechinc.waddles.t-a", "fetch", "ok", Duration::from_millis(120));
-        m.record_load_phase("penguintechinc.waddles.t-a", "verify", "ok", Duration::from_millis(5));
-        m.record_load_phase("penguintechinc.waddles.t-a", "precompile", "error", Duration::from_secs(3));
-        m.record_load_phase("penguintechinc.waddles.t-a", "total", "ok", Duration::from_secs(4));
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "fetch",
+            "ok",
+            Duration::from_millis(120),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "verify",
+            "ok",
+            Duration::from_millis(5),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "precompile",
+            "error",
+            Duration::from_secs(3),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "total",
+            "ok",
+            Duration::from_secs(4),
+        );
         m.record_load("ok");
         m.record_load("already_resident");
         m.record_load("already_resident");
@@ -1009,7 +1029,11 @@ mod tests {
             Duration::from_millis(500),
         );
         m.record_instantiate("penguintechinc.waddles.t-b", Duration::from_micros(80));
-        m.record_guest("penguintechinc.waddles.t-b", "transform", Duration::from_micros(200));
+        m.record_guest(
+            "penguintechinc.waddles.t-b",
+            "transform",
+            Duration::from_micros(200),
+        );
 
         assert_eq!(
             h.count(
@@ -1032,7 +1056,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_sandbox_trip_total",
-                &[("app_id", "penguintechinc.waddles.t-b"), ("limit", "timeout")]
+                &[
+                    ("app_id", "penguintechinc.waddles.t-b"),
+                    ("limit", "timeout")
+                ]
             ),
             1.0
         );
@@ -1052,7 +1079,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_guest_seconds",
-                &[("app_id", "penguintechinc.waddles.t-b"), ("export", "transform")]
+                &[
+                    ("app_id", "penguintechinc.waddles.t-b"),
+                    ("export", "transform")
+                ]
             ),
             1.0
         );
