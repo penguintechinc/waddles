@@ -38,6 +38,7 @@ flagged here as a natural follow-up, not silently invented.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
@@ -56,6 +57,8 @@ from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
 from services.system_tenant_guard import require_system_tenant
+
+logger = logging.getLogger(__name__)
 
 platform_bp = Blueprint("v1_platform", __name__, url_prefix="/api/v1/platform")
 
@@ -431,6 +434,12 @@ async def update_user_role(
             actor_id=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.info(
+            "platform.update_user_role.refused type=%s status=%s code=%s",
+            type(exc).__name__,
+            exc.status_code,
+            exc.code,
+        )
         return _err(exc)
     return MessageResponse(success=True, message="User role updated")
 

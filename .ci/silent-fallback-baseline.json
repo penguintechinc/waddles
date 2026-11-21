@@ -1805,12 +1805,6 @@
     {
       "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/platform.py",
-      "line": 433,
-      "line_hash": "ccfda66ff6ae18a5"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/platform.py",
       "line": 450,
       "line_hash": "e56478c434a8be56"
     },
