@@ -1269,6 +1269,125 @@ class TestRconLiveCommandProxy:
         )
         assert response.status_code == 200
 
+    async def test_member_routes_return_exact_allowlisted_field_set(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        community_uuid: str,
+        monkeypatch: Any,
+    ) -> None:
+        stuffed = {
+            "success": True,
+            "status": {
+                "online": True, "server_name": "1.2.3.4:27015", "players": 2, "map": "m",
+                "serverIp": "10.0.0.1", "connect_str": "10.0.0.1:1", "rcon_password": "pw",
+                "host": "h", "conn": {"addr": "10.0.0.2:2"},
+            },
+            "players": [{"name": "bob", "ping": 5, "ip": "10.0.0.3", "addr": {"ip": "10.0.0.4"}}],
+        }  # fmt: skip
+
+        async def fake_proxy(path: str, method: str = "GET", body: Any = None) -> Any:
+            return stuffed
+
+        monkeypatch.setattr(bot_rcon, "_proxy", fake_proxy)
+        base = f"/api/v1/admin/{community_uuid}/rcon/info/{seeded_server_id}"
+        headers = auth_headers(scope="bot.server_manager:read")
+        status = await (await client.get(f"{base}/status", headers=headers)).get_json()
+        players = await (await client.get(f"{base}/players", headers=headers)).get_json()
+        assert set(status) == {"success", "status"}
+        assert set(status["status"]) == {
+            "online", "server_name", "players_online", "max_players", "map", "game", "version",
+        }  # fmt: skip
+        assert status["status"]["server_name"] == "S1"  # DB display_name, not upstream
+        assert status["status"]["players_online"] == 2
+        assert set(players) == {"success", "players"}
+        assert set(players["players"][0]) == {"name", "score", "ping", "duration"}
+        assert players["players"][0]["name"] == "bob"
+        blob = str(status) + str(players)
+        for leaked in ("10.0.0", "rcon_password", "pw", "connect_str", "serverIp", "conn"):
+            assert leaked not in blob
+
+
+class TestRconMemberVisibility:
+    """Member status/players honour `visibility`; hidden servers 404 for non-admins."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_proxy(self, monkeypatch: Any) -> None:
+        async def fake_proxy(path: str, method: str = "GET", body: Any = None) -> Any:
+            return {"success": True, "status": {"online": True}, "players": [{"name": "bob"}]}
+
+        monkeypatch.setattr(bot_rcon, "_proxy", fake_proxy)
+
+    @staticmethod
+    def _seed(dal: Any, community_id: int, visibility: str) -> int:
+        sid: int = dal.server_status_configs.insert(
+            community_id=community_id,
+            display_name=f"S-{visibility}",
+            game_name="g",
+            host="1.2.3.9",
+            visibility=visibility,
+        )
+        dal.commit()
+        return sid
+
+    @pytest.mark.parametrize("leaf", ["status", "players"])
+    @pytest.mark.parametrize(
+        ("visibility", "member_status", "admin_status"),
+        [
+            ("admin_only", 404, 200),
+            ("members", 200, 200),
+            ("registered", 200, 200),
+        ],
+    )
+    async def test_visibility_matrix(
+        self,
+        client: Any,
+        auth_headers: Any,
+        dal: Any,
+        community_id: int,
+        community_uuid: str,
+        monkeypatch: Any,
+        leaf: str,
+        visibility: str,
+        member_status: int,
+        admin_status: int,
+    ) -> None:
+        sid = self._seed(dal, community_id, visibility)
+        url = f"/api/v1/admin/{community_uuid}/rcon/info/{sid}/{leaf}"
+        headers = auth_headers(scope="bot.server_manager:read")
+        monkeypatch.setattr(bot_blueprint, "_caller_administers", lambda _c: False)
+        assert (await client.get(url, headers=headers)).status_code == member_status
+        monkeypatch.setattr(bot_blueprint, "_caller_administers", lambda _c: True)
+        assert (await client.get(url, headers=headers)).status_code == admin_status
+
+    async def test_hidden_server_404_body_matches_missing_id(
+        self,
+        client: Any,
+        auth_headers: Any,
+        dal: Any,
+        community_id: int,
+        community_uuid: str,
+        monkeypatch: Any,
+    ) -> None:
+        monkeypatch.setattr(bot_blueprint, "_caller_administers", lambda _c: False)
+        hidden = self._seed(dal, community_id, "admin_only")
+        headers = auth_headers(scope="bot.server_manager:read")
+        base = f"/api/v1/admin/{community_uuid}/rcon/info"
+        a = await client.get(f"{base}/{hidden}/status", headers=headers)
+        b = await client.get(f"{base}/999999/status", headers=headers)
+        assert a.status_code == b.status_code == 404
+        assert await a.get_json() == await b.get_json()
+
+    def test_member_visible_set_is_shared_with_listing(self, dal: Any, community_id: int) -> None:
+        for visibility in ("admin_only", "members", "registered"):
+            self._seed(dal, community_id, visibility)
+        listed = {s.id for s in bot_rcon.list_servers(dal, community_id, is_admin=False)}
+        for sid in listed:
+            assert bot_rcon.get_active_server(dal, community_id, sid, member_only=True)
+        assert bot_rcon.MEMBER_VISIBLE_VISIBILITIES == ("members", "registered")
+
 
 class TestRconCommandLogAndMemberInfo:
     async def test_command_log_empty(

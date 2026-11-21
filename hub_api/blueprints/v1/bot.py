@@ -159,6 +159,22 @@ async def _require_server(community_id: int, server_id: int) -> None:
         raise ApiError(str(exc), 404, "NOT_FOUND") from exc
 
 
+async def _require_member_server(community_id: int, server_id: int) -> Any:
+    """Row for a member-facing `<server_id>` route; hidden servers 404 for non-admins.
+
+    Admins (DB-backed standing) may read any active server of the community; everyone else only
+    those in `bot_rcon.MEMBER_VISIBLE_VISIBILITIES` -- the same set `list_servers` uses. A hidden
+    server returns the identical 404 as a missing id. DB lookups run via `_to_thread`.
+    """
+    is_admin = await _to_thread(_caller_administers, community_id)
+    try:
+        return await _to_thread(
+            bot_rcon.get_active_server, _dal(), community_id, server_id, member_only=not is_admin
+        )
+    except bot_rcon.RconNotFoundError as exc:
+        raise ApiError(str(exc), 404, "NOT_FOUND") from exc
+
+
 @bot_bp.errorhandler(ApiError)
 async def _handle_api_error(exc: ApiError) -> tuple[dict[str, Any], int]:
     """Convert a raised `ApiError` into the Bot JSON error shape, logging type + message."""
@@ -1611,26 +1627,28 @@ async def list_rcon_info(community_id: int) -> Any:
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]
+@validate_response(bot_rcon.MemberStatusResponse)
 async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
-    """`api.js` `rconApi.getServerStatus` -- proxy passthrough, see module docstring."""
+    """`api.js` `rconApi.getServerStatus` -- member allowlist DTO, never a passthrough."""
     denied = await _require_community(community_id)
     if denied:
         return denied
-    await _require_server(community_id, server_id)
-    return await bot_rcon.get_server_status(_dal(), community_id, server_id)
+    row = await _require_member_server(community_id, server_id)
+    return await bot_rcon.get_server_status(_dal(), community_id, server_id, row=row)
 
 
 @bot_bp.route("/<cuuid:community_id>/rcon/info/<int:server_id>/players", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]
+@validate_response(bot_rcon.MemberPlayersResponse)
 async def get_rcon_player_list(community_id: int, server_id: int) -> Any:
-    """`api.js` `rconApi.getPlayerList` -- proxy passthrough, see module docstring."""
+    """`api.js` `rconApi.getPlayerList` -- member allowlist DTO, never a passthrough."""
     denied = await _require_community(community_id)
     if denied:
         return denied
-    await _require_server(community_id, server_id)
-    return await bot_rcon.get_player_list(_dal(), community_id, server_id)
+    row = await _require_member_server(community_id, server_id)
+    return await bot_rcon.get_player_list(_dal(), community_id, server_id, row=row)
 
 
 BLUEPRINTS: list[Blueprint] = [bot_bp]
