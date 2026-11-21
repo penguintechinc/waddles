@@ -261,44 +261,13 @@ spec:
         # does NOT parse credentials back out of VALKEY_URL. No VALKEY_CA_FILE override:
         # the mounted CA lands at SpineConfig's own default path
         # (/etc/waddles/ca/valkey-ca.crt).
-        - name: VALKEY_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_URL_TLS
-        - name: VALKEY_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_PASSWORD
+        {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "svc-process" "url" "plain") | nindent 8 }}
         # bundle-kv rides its OWN dedicated noeviction kv Valkey (valkey-kv): quota counters are
         # integrity-critical (eviction = quota bypass) and must not share the delivery (durable)
         # instance. Credential-free URL + password via secretKeyRef from the dedicated
         # <fullname>-valkey-kv Secret (not the shared envFrom'd one). Kv disabled (local) falls
         # back to the cache instance. Rust builds the kv conn from these.
-        {{- if eq (include "waddlebot.valkeyKvEnabled" .) "true" }}
-        - name: VALKEY_KV_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-valkey-kv
-              key: VALKEY_KV_URL_TLS
-        - name: VALKEY_KV_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-valkey-kv
-              key: VALKEY_KV_PASSWORD
-        {{- else }}
-        - name: VALKEY_KV_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
-        - name: VALKEY_KV_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
-        {{- end }}
+        {{- include "waddlebot.valkeyAcl.kvEnv" (dict "root" . "user" "svc-process") | nindent 8 }}
         {{- end }}
         # fix/alpha-deploy-executor-and-failfast -- the legacy single-app selection env
         # below (PROCESS_APP_ID, PROCESS_INGEST_*, PROCESS_BUNDLE_*) now renders ONLY
