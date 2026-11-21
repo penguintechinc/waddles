@@ -2386,12 +2386,6 @@
     },
     {
       "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/services/community_engagement_proxy.py",
-      "line": 38,
-      "line_hash": "95347ef4fa0e0c1d"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
       "path": "hub_api/services/community_profile_service.py",
       "line": 45,
       "line_hash": "6466095e65475dce"

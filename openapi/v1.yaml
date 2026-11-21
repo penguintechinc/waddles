@@ -9023,94 +9023,6 @@ paths:
                 type: object
           description: Response DTO for connected-platforms.
       summary: Get connected platforms aggregate for a community.
-  /api/v1/admin/{community_id}/forms:
-    get:
-      description: ''
-      operationId: get_list_forms
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/forms`.'
-    post:
-      description: ''
-      operationId: post_create_form
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/admin/<id>/forms`.'
-  /api/v1/admin/{community_id}/forms/{form_id}:
-    delete:
-      description: ''
-      operationId: delete_delete_form
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: form_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`DELETE /api/v1/admin/<id>/forms/<formId>`.'
-    get:
-      description: ''
-      operationId: get_get_form
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: form_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/forms/<formId>`.'
-  /api/v1/admin/{community_id}/forms/{form_id}/submissions:
-    get:
-      description: ''
-      operationId: get_form_submissions
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: form_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/forms/<formId>/submissions`.'
   /api/v1/admin/{community_id}/interaction/channels:
     get:
       description: ''
@@ -9820,21 +9732,23 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/admin/<id>/loyalty/stats`.'
-  /api/v1/admin/{community_id}/loyalty/user/{platform_user_id}/balance:
+  /api/v1/admin/{community_id}/loyalty/user/{user_uuid}/balance:
     put:
       description: '
 
-        `platform_user_id` replaces the pre-MVP `<int:user_id>` (hub identity)
+        The path carries the member''s PUBLIC UUID (`community_members.user_uuid`),
+        never a raw
 
-        path segment: `loyalty_balances` is keyed by `(community_id, platform,
+        platform handle. It is resolved server-side to the `(platform, platform_user_id)`
+        row WITHIN
 
-        platform_user_id)`, not a `hub_users.id` -- see
+        this community: `loyalty_balances` is keyed by `(community_id, platform, platform_user_id)`.
 
-        `services/schema.py::bind_loyalty_tables()`. `platform` is required in
+        `platform` is required in the body (one UUID can span linked platform accounts);
+        an unknown
 
-        the body since one path segment can''t disambiguate it; `delta` may be
-
-        negative (removal).'
+        or foreign member (or one without that platform) is a 404. `delta` may be
+        negative.'
       operationId: put_adjust_balance
       parameters:
       - in: path
@@ -9844,15 +9758,15 @@ paths:
           format: uuid
           type: string
       - in: path
-        name: platform_user_id
+        name: user_uuid
         required: true
         schema:
           type: string
       responses:
         default:
           description: Undocumented response
-      summary: '`PUT /api/v1/admin/<id>/loyalty/user/<platformUserId>/balance` --
-        admin add/remove points.'
+      summary: '`PUT /api/v1/admin/<id>/loyalty/user/<memberUuid>/balance` -- admin
+        add/remove points.'
   /api/v1/admin/{community_id}/loyalty/wipe:
     post:
       description: ''
@@ -10978,74 +10892,6 @@ paths:
           description: Undocumented response
       summary: List widgets the community may place (enabled bundles + registered
         widgets).
-  /api/v1/admin/{community_id}/polls:
-    get:
-      description: ''
-      operationId: get_list_polls
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/polls`.'
-    post:
-      description: ''
-      operationId: post_create_poll
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/admin/<id>/polls`.'
-  /api/v1/admin/{community_id}/polls/{poll_id}:
-    delete:
-      description: ''
-      operationId: delete_delete_poll
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: poll_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`DELETE /api/v1/admin/<id>/polls/<pollId>`.'
-    get:
-      description: ''
-      operationId: get_get_poll
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: poll_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/polls/<pollId>`.'
   /api/v1/admin/{community_id}/profile:
     put:
       description: ''
@@ -11166,6 +11012,33 @@ paths:
         default:
           description: Undocumented response
       summary: '`PUT /api/v1/admin/<id>/raffle-customization/<eventType>`.'
+  /api/v1/admin/{community_id}/raffle-customization/{event_type}/sound:
+    get:
+      description: '
+
+        Replaces the old public `/uploads/raffle-sounds/...` path: bytes come from
+        the object store
+
+        through hub-api, so only an active member of THIS community (tenant-checked)
+        can fetch them.'
+      operationId: get_sound_route
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      - in: path
+        name: event_type
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`GET /api/v1/admin/<id>/raffle-customization/<eventType>/sound` --
+        stream the stored sound.'
   /api/v1/admin/{community_id}/raffle-customization/{event_type}/upload:
     post:
       description: ''
