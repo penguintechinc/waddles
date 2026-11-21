@@ -129,6 +129,35 @@ impl TwitchAppSource for TwApp {
     }
 }
 
+/// hub-api tokenization double for Twitch floor bans: the one known uuid is the raw id `999`.
+struct TwUsers;
+impl svc_ingest::connector::sender_exec::twitch_slots::TwitchUserResolver for TwUsers {
+    fn resolve<'a>(
+        &'a self,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        SlotValue,
+                        svc_ingest::connector::sender_exec::discord_duties::UserResolveError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if (tenant_id, community_id, user_uuid) == (TENANT, COMMUNITY, USER_UUID) {
+                Ok(SlotValue::new("999".to_string()))
+            } else {
+                Err(svc_ingest::connector::sender_exec::discord_duties::UserResolveError::NotFound)
+            }
+        })
+    }
+}
+
 /// hub-api secret-route double.
 struct HookSecrets;
 impl EventSubSecretSource for HookSecrets {
@@ -398,7 +427,8 @@ async fn rig(flag: bool) -> Rig {
             guard(),
             format!("{}/helix/users", tw.uri()),
         )
-        .with_app_source(TwApp),
+        .with_app_source(TwApp)
+        .with_user_resolver(Arc::new(TwUsers)),
         DiscordSlots::with_endpoint(DcCreds, guard(), format!("{}/api/v10", dc.uri())),
         YoutubeSlots::new(YtCreds),
         KickSlots::new(KkCreds),
@@ -1695,7 +1725,15 @@ async fn twitch_floor_ban_and_lift_pin_the_channel_from_the_binding_and_reach_he
     let reason = json!({"reason": "Waddles reputation floor"}).to_string();
     push(
         TWITCH_OUTBOUND_QUEUE_KEY,
-        &entry("twitch", "mod.ban", "", "channel:-", &reason, "999", TENANT),
+        &entry(
+            "twitch",
+            "mod.ban",
+            "",
+            "channel:-",
+            &reason,
+            &format!("{{user:{USER_UUID}}}"),
+            TENANT,
+        ),
     )
     .await;
     let posts = wait_for(&rig.tw, "POST", 1).await;
@@ -1721,7 +1759,15 @@ async fn twitch_floor_ban_and_lift_pin_the_channel_from_the_binding_and_reach_he
 
     push(
         TWITCH_OUTBOUND_QUEUE_KEY,
-        &entry("twitch", "mod.unban", "", "channel:-", "", "999", TENANT),
+        &entry(
+            "twitch",
+            "mod.unban",
+            "",
+            "channel:-",
+            "",
+            &format!("{{user:{USER_UUID}}}"),
+            TENANT,
+        ),
     )
     .await;
     let dels = wait_for(&rig.tw, "DELETE", 1).await;
@@ -1745,7 +1791,7 @@ async fn twitch_floor_ban_and_lift_pin_the_channel_from_the_binding_and_reach_he
             "",
             "channel:-",
             &json!({"duration": 60}).to_string(),
-            "999",
+            &format!("{{user:{USER_UUID}}}"),
             TENANT,
         ),
     )

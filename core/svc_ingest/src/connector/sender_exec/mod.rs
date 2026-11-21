@@ -232,6 +232,32 @@ pub trait SlotSource: Send + Sync {
     ) -> Result<String, SlotError> {
         Err(SlotError::Refused("bound_channel_unsupported"))
     }
+
+    /// Detokenizes `user_uuid` to the raw platform user id for `(tenant_id, community_id)`
+    /// (host-originated moderation carries only the `{user:<uuid>}` placeholder on the wire).
+    /// The default refuses.
+    async fn resolve_user(
+        &self,
+        _platform: &str,
+        _tenant_id: i64,
+        _community_id: i64,
+        _user_uuid: &str,
+    ) -> Result<SlotValue, SlotError> {
+        Err(SlotError::Refused("user_resolver_unsupported"))
+    }
+}
+
+/// The canonical UUID inside a `{user:<uuid>}` placeholder; anything else (a raw platform id, a
+/// bare uuid, a malformed token) is `None` -- raw ids never enter the host-originated path.
+fn user_placeholder_uuid(raw: &str) -> Option<String> {
+    let inner = raw.strip_prefix("{user:")?.strip_suffix('}')?;
+    let b = inner.as_bytes();
+    let ok = b.len() == 36
+        && b.iter().enumerate().all(|(i, c)| match i {
+            8 | 13 | 18 | 23 => *c == b'-',
+            _ => c.is_ascii_hexdigit(),
+        });
+    ok.then(|| inner.to_ascii_lowercase())
 }
 
 /// The wire spelling of a Twitch host-originated moderation scope: no channel is named; the
@@ -848,6 +874,35 @@ where
             client: &self.client,
         };
 
+        // Host-originated Twitch moderation names its target by `{user:<uuid>}` only: the raw id
+        // is resolved here, per send, scoped to the stamp's tenant + community, and lives only
+        // in the payload built for this one request (never queued, never logged).
+        let detok_action: Option<OutboundAction> =
+            if is_twitch_bound_scope(req.platform, req.action) {
+                let OutboundAction::PolicyOp(p) = req.action else {
+                    return Err(ExecError::BadAction);
+                };
+                let uuid = p
+                    .user_id
+                    .as_deref()
+                    .and_then(user_placeholder_uuid)
+                    .ok_or(ExecError::Slot(SlotError::Refused("user_not_tokenized")))?;
+                let (Some(tenant), Some(community)) =
+                    (p.tenant_id.filter(|t| *t > 0), req.community_id)
+                else {
+                    return Err(ExecError::Slot(SlotError::Refused("no_community_scope")));
+                };
+                let raw = self
+                    .slots
+                    .resolve_user(req.platform, tenant, community, &uuid)
+                    .await
+                    .map_err(ExecError::Slot)?;
+                let mut resolved = p.clone();
+                resolved.user_id = Some(raw.expose().to_owned());
+                Some(OutboundAction::PolicyOp(resolved))
+            } else {
+                None
+            };
         let payload_json = if kind.needs_duty {
             if !self.duties.claims(req.platform, kind_name) {
                 return Err(ExecError::HostDutyMissing);
@@ -855,7 +910,7 @@ where
             self.duties.gate(&cx).await?;
             self.duties.payload(&cx).await?
         } else {
-            default_payload(kind, req.action)?
+            default_payload(kind, detok_action.as_ref().unwrap_or(req.action))?
         };
         let action = SenderAction {
             kind: kind_name.to_string(),
