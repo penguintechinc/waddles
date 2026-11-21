@@ -72,6 +72,8 @@ def _converter_sample(name: str, converter: type) -> str:
 def _concrete(rule: str) -> str:
     """Concrete path built from the live converter registry, so new converters need no edit."""
     converters = QuartMap.default_converters
+    # The floor-ban lift route (#1488) addresses the seeded floor-banned member by UUID.
+    rule = rule.replace("<uuid:user_uuid>", "00000000-0000-4000-8000-000000000002")
 
     def _fill(match: re.Match[str]) -> str:
         conv = match.group(1)
