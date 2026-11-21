@@ -253,7 +253,7 @@ SessionRules {
 }
 ```
 
-Intents / sharding (documented, deliberately not built): the connector sends `GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT` = 33281
+Intents / sharding (documented, deliberately not built): the connector sends `GUILDS | GUILD_MEMBERS | GUILD_MODERATION | GUILD_MESSAGES | MESSAGE_CONTENT` = 33287
 in IDENTIFY exactly like the hardcoded gateway (`bundles/rust/discord/README.md` parity table); no `shard` field is sent (single
 shard, Discord's default), so `shard_id % max_concurrency` identify buckets and `session_start_limit` are host-only
 fleet concerns that stay with the IDENTIFY budget. Multi-shard operation would need a per-shard host config (one `WsConfig`

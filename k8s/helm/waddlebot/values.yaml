@@ -3326,6 +3326,11 @@ serviceJwt:
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES). Granted to this identity alone.
         - "identity:platform-user:resolve"
+        # Connector runtime identity tokenizer (core/svc_ingest/src/connector/host_calls.rs
+        # HubIdentityTokenizer): mints the tenant-scoped user UUID for a platform user id --
+        # connector identity.lookup and the Discord-native unban sync (platform_unban.rs).
+        # Granted to svc-process too; hub-api authorizes by scope.
+        - "identity:ephemeral:mint"
         # feature/bundle-host-scheduling -- scheduled bundle reconcile: svc-ingest polls
         # BundleScheduleService.ListBundleSchedules over internal gRPC (hub_api/grpc_internal/bundle_schedule_servicer.py) for the
         # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api
