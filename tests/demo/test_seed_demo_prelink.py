@@ -50,7 +50,8 @@ CREATE TABLE hub_user_identities (
     UNIQUE(hub_user_id, platform), UNIQUE(platform, platform_user_id));
 CREATE TABLE community_roles (
     id SERIAL PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id),
-    name VARCHAR(50) NOT NULL, UNIQUE(community_id, name));
+    name VARCHAR(50) NOT NULL, public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    UNIQUE(community_id, name));
 CREATE TABLE community_members (
     id SERIAL PRIMARY KEY, community_id INTEGER REFERENCES communities(id),
     user_id VARCHAR(255), platform VARCHAR(50), platform_user_id VARCHAR(255),
@@ -85,6 +86,7 @@ CREATE TABLE guild_tenant_pairings (
     sync_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     event_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     role_name_prefix VARCHAR(50) NOT NULL,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (community_id, discord_guild_id));
 CREATE TABLE community_role_sync_bindings (
@@ -96,6 +98,7 @@ CREATE TABLE community_role_sync_bindings (
     community_role VARCHAR(20)
         CHECK (community_role IS NULL OR community_role IN
                ('community-admin','moderator','vip','member')),
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE UNIQUE INDEX uq_role_sync_binding_community_role
     ON community_role_sync_bindings (pairing_id, discord_role_id)

@@ -71,12 +71,18 @@ def test_tables_and_columns_exist(db: PgTestDatabase) -> None:
             cur.execute(
                 "SELECT table_name, count(*) FROM information_schema.columns "
                 "WHERE table_name IN ('discord_role_mirror_mappings', 'discord_role_mirror_grants') "
+                "AND column_name <> 'public_id' "  # 0138_entity_public_ids adds it; checked below
                 "GROUP BY table_name ORDER BY table_name"
             )
             assert cur.fetchall() == [
                 ("discord_role_mirror_grants", 5),
                 ("discord_role_mirror_mappings", 12),
             ]
+            cur.execute(
+                "SELECT column_name FROM information_schema.columns "
+                "WHERE table_name = 'discord_role_mirror_mappings' AND column_name = 'public_id'"
+            )
+            assert cur.fetchall() == [("public_id",)]  # 0138_entity_public_ids
     finally:
         conn.close()
 
