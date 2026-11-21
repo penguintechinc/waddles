@@ -385,8 +385,13 @@ async fn a_twitch_floor_ban_names_no_channel_and_carries_the_resolved_id_and_a_f
     // The channel is NEVER named by the producer: the consumer pins it from the DB binding.
     assert!(env.get("channel").is_none(), "{env}");
     assert_eq!(env["origin_channel"], "channel:-");
-    // Helix addresses the user by numeric id, carried only inside the signed envelope.
-    assert_eq!(env["user_id"], "999000111");
+    // PII: only the tokenized placeholder is queued and MAC-covered; svc-ingest detokenizes it
+    // per send. The resolved raw Twitch id never reaches the Valkey payload.
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(
+        !pushed[0].1.contains("999000111"),
+        "the raw platform id must never be queued"
+    );
     let text = env["text"].as_str().expect("fixed reason text");
     assert_eq!(
         serde_json::from_str::<Value>(text).unwrap(),
@@ -402,7 +407,7 @@ async fn a_twitch_floor_ban_names_no_channel_and_carries_the_resolved_id_and_a_f
         origin_channel: "channel:-",
         message_id: "",
         text,
-        user_id: "999000111",
+        user_id: &format!("{{user:{UUID_B}}}"),
         op_id: &op_id,
         exp_ms: env["exp_ms"].as_u64().unwrap(),
         community_id: i64::from(COMMUNITY_ID),
@@ -429,7 +434,10 @@ async fn a_twitch_unban_carries_no_text_and_does_not_need_the_discord_drain_flag
     let env = &c.relay_queue.envelopes()[0];
     assert_eq!(env["op"], "mod.unban");
     assert_eq!(env["origin_channel"], "channel:-");
-    assert_eq!(env["user_id"], "999000111");
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(!c.relay_queue.pushed.lock().unwrap()[0]
+        .1
+        .contains("999000111"));
     assert!(env.get("text").is_none() && env.get("channel").is_none());
     assert!(op_id.starts_with("fu-42-2-"), "{op_id}");
 }

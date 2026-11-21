@@ -27,7 +27,7 @@ use crate::connector::sender_exec::app_credentials::PlatformAppCredentials;
 use crate::connector::sender_exec::discord_duties::DiscordDuties;
 use crate::connector::sender_exec::discord_slots::DiscordSlots;
 use crate::connector::sender_exec::kick_slots::KickSlots;
-use crate::connector::sender_exec::twitch_slots::TwitchSlots;
+use crate::connector::sender_exec::twitch_slots::{TwitchSlots, TwitchUserResolver};
 use crate::connector::sender_exec::youtube_duties::{self, WithYoutube, YoutubeDuties};
 use crate::connector::sender_exec::youtube_slots::YoutubeSlots;
 use crate::connector::sender_exec::{
@@ -433,11 +433,13 @@ pub fn build_with_link(
     let link = shared_link
         .unwrap_or_else(|| Arc::new(ExecutorLink::new().with_enabled_flags(CONNECTOR_FLAGS)));
     let builder = WireTemplateBuilder::new(Arc::clone(&link), Arc::new(registry(cfg)?));
+    let users = Arc::new(users);
     let slots = PlatformSlotRouter::new(
         TwitchSlots::new(
             ResolverTwitchCredentials::new(resolver(cli)?),
             cfg.twitch_client_id.clone(),
-        ),
+        )
+        .with_user_resolver(Arc::clone(&users) as Arc<dyn TwitchUserResolver>),
         DiscordSlots::new(ResolverDiscordCredentials::new(resolver(cli)?)),
         YoutubeSlots::new(ResolverYoutubeCredentials::new(resolver(cli)?)),
         KickSlots::new(ResolverKickCredentials::new(resolver(cli)?)),
@@ -446,7 +448,6 @@ pub fn build_with_link(
         PlatformAppCredentials::from_env()
             .map_err(|e| anyhow::anyhow!("app credentials unavailable: {e}"))?,
     );
-    let users = Arc::new(users);
     let duties = WithYoutube::new(
         DiscordDuties::new(
             ResolverDiscordCredentials::new(resolver(cli)?),

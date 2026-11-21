@@ -71,6 +71,8 @@ pub(crate) struct MapSlots {
     pub(crate) seen: Arc<Mutex<Vec<SeenReq>>>,
     /// The channel the community's verified binding owns (`SlotSource::bound_channel`).
     pub(crate) bound: Option<String>,
+    /// uuid -> raw platform id for `SlotSource::resolve_user`.
+    pub(crate) users: HashMap<String, String>,
 }
 
 impl MapSlots {
@@ -94,6 +96,19 @@ impl MapSlots {
 }
 
 impl SlotSource for MapSlots {
+    async fn resolve_user(
+        &self,
+        _platform: &str,
+        _tenant_id: i64,
+        _community_id: i64,
+        user_uuid: &str,
+    ) -> Result<SlotValue, SlotError> {
+        self.users
+            .get(user_uuid)
+            .map(|raw| SlotValue::new(raw.clone()))
+            .ok_or(SlotError::Refused("user_not_in_community"))
+    }
+
     async fn bound_channel(
         &self,
         _platform: &str,
@@ -1536,13 +1551,22 @@ fn twitch_ban_tpl(unban: bool) -> RequestTpl {
     }
 }
 
+const BAN_UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+fn ban_slots() -> MapSlots {
+    let mut slots = MapSlots::twitch();
+    slots.bound = Some("#bound_chan".to_string());
+    slots.users.insert(BAN_UUID.to_string(), "999".to_string());
+    slots
+}
+
 fn bound_scope_op(op: &'static str, channel: Option<&str>, origin: &str) -> OutboundAction {
     OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
         op,
         channel: channel.map(str::to_string),
         text: (op == "mod.ban").then(|| r#"{"reason":"Waddles reputation floor"}"#.to_string()),
         message_id: None,
-        user_id: Some("999".to_string()),
+        user_id: Some(format!("{{user:{BAN_UUID}}}")),
         origin_channel: Some(origin.to_string()),
         tenant_id: Some(1),
     })
@@ -1553,9 +1577,13 @@ fn bound_scope_op(op: &'static str, channel: Option<&str>, origin: &str) -> Outb
 #[tokio::test]
 async fn twitch_bound_scope_ban_and_unban_pin_the_channel_from_the_binding() {
     for (op, unban) in [("mod.ban", false), ("mod.unban", true)] {
-        let mut slots = MapSlots::twitch();
-        slots.bound = Some("#bound_chan".to_string());
-        let r = rig(PlatformPolicy::twitch(), twitch_ban_tpl(unban), slots, true).await;
+        let r = rig(
+            PlatformPolicy::twitch(),
+            twitch_ban_tpl(unban),
+            ban_slots(),
+            true,
+        )
+        .await;
         let a = bound_scope_op(op, None, "channel:-");
         let out = r.exec.execute(&req("twitch", &a, Some(7))).await.unwrap();
         assert_eq!(out.status, 200, "{op}");
@@ -1597,9 +1625,13 @@ async fn twitch_bound_scope_ignores_no_payload_channel_and_is_ban_ops_only() {
     assert_eq!(e, ExecError::Slot(SlotError::Refused("no_connection")));
     assert!(sent(&r).await.is_empty());
     // A payload channel next to the scope is not the bound scope: the ordinary pin refuses it.
-    let mut slots = MapSlots::twitch();
-    slots.bound = Some("#bound_chan".to_string());
-    let r = rig(PlatformPolicy::twitch(), twitch_ban_tpl(false), slots, true).await;
+    let r = rig(
+        PlatformPolicy::twitch(),
+        twitch_ban_tpl(false),
+        ban_slots(),
+        true,
+    )
+    .await;
     let a = bound_scope_op("mod.ban", Some("#evil"), "channel:-");
     assert!(matches!(
         r.exec.execute(&req("twitch", &a, Some(7))).await,
@@ -1630,8 +1662,7 @@ async fn helix_400(message: &str) -> MockServer {
 async fn twitch_ban_and_unban_idempotent_400s_are_delivered_and_other_400s_fail() {
     use super::{HELIX_ALREADY_BANNED, HELIX_NOT_BANNED};
     let run = |unban: bool, msg: &'static str| async move {
-        let mut slots = MapSlots::twitch();
-        slots.bound = Some("#bound_chan".to_string());
+        let slots = ban_slots();
         let server = helix_400(msg).await;
         let r = rig_on(
             server,
@@ -1679,4 +1710,52 @@ async fn twitch_ban_and_unban_idempotent_400s_are_delivered_and_other_400s_fail(
         run(true, HELIX_ALREADY_BANNED).await.unwrap_err(),
         ExecError::Upstream(400)
     );
+}
+
+/// PII: the bound scope carries ONLY `{user:<uuid>}`; the raw id is resolved per send and is
+/// what reaches the connector payload. A raw id, a bare uuid or an unknown uuid is refused
+/// before anything is built or sent.
+#[tokio::test]
+async fn twitch_bound_scope_detokenizes_the_user_and_refuses_raw_or_unknown_ids() {
+    let r = rig(
+        PlatformPolicy::twitch(),
+        twitch_ban_tpl(false),
+        ban_slots(),
+        true,
+    )
+    .await;
+    let a = bound_scope_op("mod.ban", None, "channel:-");
+    r.exec.execute(&req("twitch", &a, Some(7))).await.unwrap();
+    let payload = r.builder.calls.lock().unwrap()[0].payload_json.clone();
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(v["user_id"], "999", "the connector gets the resolved id");
+
+    for bad in [
+        "999".to_string(),
+        BAN_UUID.to_string(),
+        "{user:not-a-uuid}".to_string(),
+        "{user:00000000-0000-4000-8000-000000000000}".to_string(),
+    ] {
+        let a = OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
+            op: "mod.unban",
+            channel: None,
+            text: None,
+            message_id: None,
+            user_id: Some(bad.clone()),
+            origin_channel: Some("channel:-".to_string()),
+            tenant_id: Some(1),
+        });
+        let r = rig(
+            PlatformPolicy::twitch(),
+            twitch_ban_tpl(true),
+            ban_slots(),
+            true,
+        )
+        .await;
+        assert!(
+            r.exec.execute(&req("twitch", &a, Some(7))).await.is_err(),
+            "{bad}"
+        );
+        assert!(sent(&r).await.is_empty(), "{bad}");
+    }
 }

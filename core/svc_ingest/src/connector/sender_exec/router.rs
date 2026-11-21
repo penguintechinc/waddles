@@ -104,6 +104,23 @@ where
         }
     }
 
+    async fn resolve_user(
+        &self,
+        platform: &str,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &str,
+    ) -> Result<SlotValue, SlotError> {
+        match platform {
+            "twitch" => {
+                self.twitch
+                    .resolve_user(platform, tenant_id, community_id, user_uuid)
+                    .await
+            }
+            _ => Err(SlotError::Refused(UNKNOWN_PLATFORM)),
+        }
+    }
+
     async fn bound_channel(
         &self,
         platform: &str,

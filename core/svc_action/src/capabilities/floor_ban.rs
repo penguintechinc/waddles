@@ -324,11 +324,12 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         });
         if let Some(obj) = env.as_object_mut() {
             if platform == "twitch" {
-                // Helix addresses the target by numeric id (resolved host-side above, carried
-                // only inside the MAC-signed envelope, never logged); the channel is NOT named:
-                // the consumer pins it from the community's verified binding.
+                // The target is the tokenized `{user:<uuid>}` placeholder: svc-ingest
+                // detokenizes it per send (the raw Twitch id never enters the queue or the
+                // MAC input; the id resolved above served the protected-target check alone).
+                // The channel is NOT named: the consumer pins it from the community's binding.
                 obj.insert("origin_channel".into(), TWITCH_BOUND_CHANNEL_SCOPE.into());
-                obj.insert("user_id".into(), platform_id.clone().into());
+                obj.insert("user_id".into(), format!("{{user:{uuid}}}").into());
                 if !cmd.unban {
                     obj.insert(
                         "text".into(),
