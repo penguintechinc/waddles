@@ -36,7 +36,7 @@ async fn action_dispatch_log_roundtrips_timestamptz() {
         &db,
         7,
         Some(3),
-        "waddles.test.app".to_string(),
+        "penguintechinc.waddles.test-app".to_string(),
         "webhook".to_string(),
         "success".to_string(),
         1,

@@ -8,11 +8,9 @@ handler forwards a GET request to the standalone `analytics-core` service
 axios wrapper, then relays (or lightly reshapes -- see
 `services/analytics_service.py::platform_overview`) its JSON response
 back. This module is the 1:1 async port of `admin/hub_module/backend/src/
-services/analyticsService.js`, following the same shape as
-`services/event_calendar_proxy.py`'s `EventCalendarProxyClient` (the
-Event module's own proxy-to-a-standalone-service port).
+services/analyticsService.js`, an opaque
+proxy-to-a-standalone-service client.
 
-Unlike `EventCalendarProxyClient` (one opaque `X-User-Context` JSON blob),
 `analytics-core` expects two flat headers per its own `blueprints/
 user_bp.py` module docstring ("Expects X-Caller-User-ID, X-Caller-Role,
 X-Service-Key headers from hub"), matching `analyticsService.js::
@@ -22,8 +20,7 @@ docstring ("Requires X-Service-Key header ... No PII in responses").
 
 Because there is no owned data model here (the response shape is
 whatever `analytics-core` returns, not a hub-api ORM row),
-`ProxyResult.body` is intentionally `Any` -- same rationale as
-`event_calendar_proxy.py`'s own module docstring: security.md's Output
+`ProxyResult.body` is intentionally `Any` -- security.md's Output
 Validation rule guards against over-serializing an OWNED row, not an
 opaque reverse-proxy body that was never hub-api's row to begin with.
 """

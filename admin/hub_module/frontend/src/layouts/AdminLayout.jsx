@@ -30,7 +30,6 @@ import {
   CommandLineIcon,
   SpeakerWaveIcon,
   LanguageIcon,
-  CalendarDaysIcon,
   TicketIcon,
   HashtagIcon,
   AdjustmentsHorizontalIcon,
@@ -88,7 +87,6 @@ function AdminLayout() {
             { to: `/admin/${communityId}/forms`, icon: DocumentTextIcon, label: 'Forms' },
             { to: `/admin/${communityId}/shoutouts`, icon: SpeakerWaveIcon, label: 'Shoutouts' },
             { to: `/admin/${communityId}/leaderboard`, icon: TrophyIcon, label: 'Leaderboards' },
-            { to: `/admin/${communityId}/calendar/events`, icon: CalendarDaysIcon, label: 'Calendar Events' },
           ],
         },
         {

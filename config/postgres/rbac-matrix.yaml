@@ -44,6 +44,7 @@ tables:
   - tenant_platform_credentials
   - guild_tenant_pairings
   - calendar_event_discord_syncs
+  - discord_guild_tenants
   - community_role_sync_bindings
   - tenant_platform_apps
   - platform_connections
@@ -678,6 +679,32 @@ grants:
   - role: migration_runner
     table: calendar_event_discord_syncs
     privileges: [SELECT, INSERT, UPDATE, DELETE]
+
+  # hub_api is the sole writer: a guild's single owning tenant (0137); claims are INSERT/DELETE only.
+  - role: hub_api
+    table: discord_guild_tenants
+    privileges: [SELECT, INSERT, DELETE]
+  - role: waddles_publisher
+    table: discord_guild_tenants
+    privileges: []
+  - role: svc_ingest
+    table: discord_guild_tenants
+    privileges: []
+  - role: svc_process
+    table: discord_guild_tenants
+    privileges: []
+  - role: svc_action
+    table: discord_guild_tenants
+    privileges: []
+  - role: svc_streaming
+    table: discord_guild_tenants
+    privileges: []
+  - role: webui
+    table: discord_guild_tenants
+    privileges: []
+  - role: migration_runner
+    table: discord_guild_tenants
+    privileges: [SELECT, INSERT, DELETE]
 
   # Three-layer platform-connection model (migration
   # 0035_connection_model_layers). hub_api is the sole writer -- same

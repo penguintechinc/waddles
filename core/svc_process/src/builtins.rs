@@ -337,7 +337,7 @@ mod tests {
         let mut payload = serde_json::Map::new();
         payload.insert(
             PROCESS_TARGET_APP_ID_KEY.to_string(),
-            serde_json::json!("waddles.other.app.default"),
+            serde_json::json!("penguintechinc.waddles.other-app"),
         );
         let decision = resolve_cross_app_route(&mut payload, "acme", &HashMap::new());
         assert_eq!(

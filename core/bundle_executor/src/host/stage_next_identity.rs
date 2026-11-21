@@ -256,7 +256,7 @@ mod tests {
     async fn an_oversized_or_empty_mention_token_is_refused_before_any_host_call() {
         // No bridge at all: if the call were attempted it would surface as a
         // `backend` ConnectionUnavailable, so `Invalid` proves it never was.
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         assert!(matches!(
             identity::Host::resolve_mention(&mut state, String::new()).await,
             Err(identity::Error::Invalid(_))

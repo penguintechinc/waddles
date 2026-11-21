@@ -57,7 +57,7 @@ code change in both `hub_api/services/bundle_table_access.py` and
 
 `platform.table.*` is `dangerous`. It is NEVER auto-granted -- not by the
 `system:core-seeder` path either. The core seeder today blanket-pre-grants every
-permission a `waddles.core.*` manifest declares (including `connector.pii.read`);
+permission a `penguintechinc.waddles.*` manifest declares (including `connector.pii.read`);
 that behaviour is left untouched for existing ids and NOT extended: the seeder
 (`seed_core_permission_requests` / `record_permission_requests` system path) filters
 out `platform.table.*` ids, so a core bundle's table access stays unapproved until a

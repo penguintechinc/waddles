@@ -1024,7 +1024,7 @@ async def user(self, info) -> User:
 
 Enhance the existing calendar module with platform synchronization, recurring events (RRULE), multi-channel reminder system, and iCal export.
 
-**Current State**: Basic event CRUD exists (`action/interactive/calendar_interaction_module/`)
+**Current State**: Event CRUD lives in the calendar app bundle (`bundles/rust/calendar`); the old calendar_interaction_module was removed
 **Estimated Effort**: 3-4 weeks
 
 ### Feature 1: Platform Sync (Discord, Twitch, Slack)
@@ -1037,7 +1037,7 @@ Enhance the existing calendar module with platform synchronization, recurring ev
 - Update/delete Discord event when Waddles event changes
 
 ```python
-# calendar_interaction_module/services/platform_sync/discord_sync.py
+# <calendar bundle>/services/platform_sync/discord_sync.py
 import discord
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -1146,7 +1146,7 @@ class DiscordEventSync:
 - Display upcoming streams in Waddles calendar
 
 ```python
-# calendar_interaction_module/services/platform_sync/twitch_sync.py
+# <calendar bundle>/services/platform_sync/twitch_sync.py
 import httpx
 from datetime import datetime
 from typing import Optional, Dict, Any
@@ -1224,7 +1224,7 @@ class TwitchScheduleSync:
 - Schedule Slack reminders (1 hour, 15 min before event)
 
 ```python
-# calendar_interaction_module/services/platform_sync/slack_sync.py
+# <calendar bundle>/services/platform_sync/slack_sync.py
 from slack_sdk.web.async_client import AsyncWebClient
 from datetime import datetime, timedelta
 
@@ -1324,7 +1324,7 @@ class SlackEventSync:
 **RFC 5545 (iCalendar) Recurrence Rules**: Industry standard for recurring events
 
 ```python
-# calendar_interaction_module/services/recurring_events.py
+# <calendar bundle>/services/recurring_events.py
 from dateutil.rrule import rrule, DAILY, WEEKLY, MONTHLY, YEARLY
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
@@ -1508,7 +1508,7 @@ ALTER TABLE calendar_events ADD COLUMN IF NOT EXISTS parent_event_id INTEGER REF
 - User preferences (opt-in/opt-out per platform)
 
 ```python
-# calendar_interaction_module/services/reminder_service.py
+# <calendar bundle>/services/reminder_service.py
 from datetime import datetime, timedelta
 from typing import List, Dict, Any
 import asyncio
@@ -1695,12 +1695,12 @@ CREATE TABLE user_notification_prefs (
 
 **Cron Job** (check every minute for pending reminders):
 ```bash
-# calendar_interaction_module/jobs/send_reminders.sh
+# <calendar bundle>/jobs/send_reminders.sh
 */1 * * * * python /app/jobs/check_reminders.py
 ```
 
 ```python
-# calendar_interaction_module/jobs/check_reminders.py
+# <calendar bundle>/jobs/check_reminders.py
 """
 Cron job to check and send pending reminders.
 Run every minute.
@@ -1739,7 +1739,7 @@ if __name__ == '__main__':
 - Subscribe to live calendar feed (webcal://)
 
 ```python
-# calendar_interaction_module/services/ical_service.py
+# <calendar bundle>/services/ical_service.py
 from icalendar import Calendar, Event as ICalEvent, vDatetime
 from datetime import datetime
 from typing import List, Dict, Any
@@ -1847,7 +1847,7 @@ class ICalExportService:
             raise
 ```
 
-**API Endpoint** (add to `calendar_interaction_module/app.py`):
+**API Endpoint** (add to `<calendar bundle>/app.py`):
 ```python
 @app.route('/api/calendar/ical/<int:community_id>', methods=['GET'])
 async def get_ical_feed(community_id: int):
@@ -1899,7 +1899,7 @@ function CalendarSubscribe({ communityId }) {
 ### Dependencies
 
 ```txt
-# Add to calendar_interaction_module/requirements.txt
+# Add to <calendar bundle>/requirements.txt
 python-dateutil==2.8.2        # RRULE parsing
 icalendar==5.0.11             # iCal export
 py-cord==2.5.0                # Discord API (if not already)

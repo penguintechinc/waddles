@@ -36,11 +36,6 @@ const PrivacyRights = lazy(() => import('./pages/PrivacyRights'));
 const PublicPrivacyRequest = lazy(() => import('./pages/privacy/PublicPrivacyRequest'));
 const PublicPrivacyVerify = lazy(() => import('./pages/privacy/PublicPrivacyVerify'));
 
-// Calendar pages
-const CalendarSettings = lazy(() => import('./pages/calendar/CalendarSettings'));
-const BookingPages = lazy(() => import('./pages/calendar/BookingPages'));
-const MyBookings = lazy(() => import('./pages/calendar/MyBookings'));
-const BookingPagePublic = lazy(() => import('./pages/calendar/BookingPagePublic'));
 
 // Dashboard pages
 const DashboardHome = lazy(() => import('./pages/dashboard/DashboardHome'));
@@ -96,10 +91,6 @@ const AdminMusicSettings = lazy(() => import('./pages/admin/AdminMusicSettings')
 const AdminMusicProviders = lazy(() => import('./pages/admin/AdminMusicProviders'));
 const AdminRadioStations = lazy(() => import('./pages/admin/AdminRadioStations'));
 const AdminVendorReview = lazy(() => import('./pages/admin/AdminVendorReview'));
-const AdminCalendarEvents = lazy(() => import('./pages/admin/AdminCalendarEvents'));
-const AdminCalendarTicketing = lazy(() => import('./pages/admin/AdminCalendarTicketing'));
-const AdminCalendarScanner = lazy(() => import('./pages/admin/AdminCalendarScanner'));
-const AdminCalendarAttendance = lazy(() => import('./pages/admin/AdminCalendarAttendance'));
 const AdminLiveStreams = lazy(() => import('./pages/admin/AdminLiveStreams'));
 const AdminCommunityCalls = lazy(() => import('./pages/admin/AdminCommunityCalls'));
 const TownHall = lazy(() => import('./pages/community/TownHall'));
@@ -295,7 +286,6 @@ function App() {
         <Route path="/privacy-rights" element={<PrivacyRights />} />
 
         {/* Public booking page (no auth required) */}
-        <Route path="/book/:slug" element={<BookingPagePublic />} />
 
         {/* Public song-queue page (no auth required) -- linked from chat via !sq */}
         <Route path="/c/:communityId/music/queue" element={<MusicQueueRedirect />} />
@@ -343,10 +333,6 @@ function App() {
         {/* My Analytics */}
         <Route path="/dashboard/my-analytics" element={<MyAnalytics />} />
 
-        {/* Calendar routes (authenticated) */}
-        <Route path="/calendar/settings" element={<CalendarSettings />} />
-        <Route path="/calendar/booking-pages" element={<BookingPages />} />
-        <Route path="/calendar/my-bookings" element={<MyBookings />} />
 
         {/* Vendor dashboard routes (authenticated vendors) */}
         <Route path="/vendor/dashboard" element={<VendorDashboard />} />
@@ -413,10 +399,6 @@ function App() {
         <Route path="/admin/:communityId/music/settings" element={<AdminMusicSettings />} />
         <Route path="/admin/:communityId/music/providers" element={<AdminMusicProviders />} />
         <Route path="/admin/:communityId/music/radio" element={<AdminRadioStations />} />
-        <Route path="/admin/:communityId/calendar/events" element={<AdminCalendarEvents />} />
-        <Route path="/admin/:communityId/calendar/events/:eventId/tickets" element={<AdminCalendarTicketing />} />
-        <Route path="/admin/:communityId/calendar/events/:eventId/scanner" element={<AdminCalendarScanner />} />
-        <Route path="/admin/:communityId/calendar/events/:eventId/attendance" element={<AdminCalendarAttendance />} />
         <Route path="/admin/:communityId/live-streaming" element={<AdminLiveStreams />} />
         <Route path="/admin/:communityId/calls" element={<AdminCommunityCalls />} />
         <Route path="/admin/:communityId/polls" element={<AdminPolls />} />

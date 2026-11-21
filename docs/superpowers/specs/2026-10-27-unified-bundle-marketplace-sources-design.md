@@ -16,7 +16,7 @@ Why now: install today is one-bundle-at-a-time (`POST /bundles`, `bundle_version
 |---|---|---|
 | API-first source CRUD (`platform:admin`), CLI + webui inherit | A public/hosted marketplace storefront or ratings | Any silent install or silent update from an external source |
 | Both build models: prebuilt and sandboxed | Per-tenant private sources (global-admin only, v1) | A second install pipeline beside the existing one |
-| Scheduled auto-update, human re-gated | Signing with source/publisher keys at runtime (executor trusts platform keys only) | Letting a source shadow `waddles.core.*` or another source |
+| Scheduled auto-update, human re-gated | Signing with source/publisher keys at runtime (executor trusts platform keys only) | Letting a source shadow `penguintechinc.waddles.*` or another source |
 | First-party folded into the same mechanism | Rewriting the executor's signature verification | In-cluster builds with network egress or privileged pods |
 
 ## 3. Constraints (from the code)
@@ -27,8 +27,8 @@ Why now: install today is one-bundle-at-a-time (`POST /bundles`, `bundle_version
 | Platform signs at approval; private key env-only | `hub_api/services/bundle_signing_service.py:48,107,173` |
 | Signing payload binds `app_id, version, digest, approval_id` | `bundle_signing_service.py:78` |
 | `app_id` shape `<github-org>.<repo>.<bundle-name>`; the owner is the first segment (`<github-org>`) | `bundle_manifest_v2.py:42,432-447` |
-| `waddles.core.` reserved; seeder-only via `_guard_core_namespace` | `vendor_bundle_authz.py:56`, `seed_core_bundles.py:420` |
-| Third-party namespace precedent: `waddles.integrations.vendor-{id}.{app}` (no regex widening) | `vendor_bundle_authz.py:59` |
+| `penguintechinc.waddles.` reserved; seeder-only via `_guard_core_namespace` | `vendor_bundle_authz.py:56`, `seed_core_bundles.py:420` |
+| Third-party namespace precedent: `penguintechinc.waddles.vendor-{id}-{app}` (no regex widening) | `vendor_bundle_authz.py:59` |
 | Version FSM UPLOADED..PUBLISHED/REJECTED; prebuilt publishes straight to PUBLISHED, "staged != approved" | `bundle_version_service.py:73-95,455-517` |
 | Global install is human-gated, does NOT activate; SYSTEM `install_source` only for the seeder | `bundle_approval_service.py:444` |
 | Global-admin scope `platform:admin` | `marketplace_lifecycle.py:427`, `bundle_approvals.py:133` |
@@ -133,7 +133,7 @@ Both converge (and both are mandatory-human-approved for externals); the single 
 | `SYSTEM_ACTOR` auto-install (`:113`) | Preserved, built-in only; assertion in the install path: `install_source=SYSTEM` requires `is_builtin` |
 | `reconcile_removed_core_bundles` (`:1063`) | Scoped by `source_id = builtin`; extendable to external sources as "deactivate on source removal" (never auto-delete human-approved rows) |
 
-Migration is additive: the built-in row + `source_id` backfill (NULL->builtin for `waddles.core.*`). No behavior change for existing alpha/beta deploys; the seeder keeps working throughout. Doing the refactor to *literally* call the shared scanner (rather than just alias) is left to the builder, behind the kill-switch flag.
+Migration is additive: the built-in row + `source_id` backfill (NULL->builtin for `penguintechinc.waddles.*`). No behavior change for existing alpha/beta deploys; the seeder keeps working throughout. Doing the refactor to *literally* call the shared scanner (rather than just alias) is left to the builder, behind the kill-switch flag.
 
 ### 4.7 Supply chain and security
 
@@ -143,7 +143,7 @@ Migration is additive: the built-in row + `source_id` backfill (NULL->builtin fo
 | SSRF / egress | https-only, `url_guard` + resolved-IP pinning for git; sandbox Job has no egress |
 | Zip-bomb / oversize | clone, file-count, depth, per-file, and artifact caps; timeouts |
 | Pin-to-SHA | only SHA is built/installed; `ref` is a hint; tag/branch moves never auto-trusted |
-| Namespace isolation | `waddles.integrations.src-{id}.*` for externals; `core.*` builtin-only; hard guard shared with install path |
+| Namespace isolation | `penguintechinc.waddles.src-{id}-*` for externals; `core.*` builtin-only; hard guard shared with install path |
 | Tenant/blast radius | external bundles need human global approve, then tenant admin `make_available`, then community activation (unchanged 3-tier) |
 | Capability gate | WASM capability gate (`core/bundle_capability_gate`) + approver sees permission summary; external bundles never get auto-granted permissions (the seeder's `_grant_core_bundle_permissions` is builtin-only) |
 | Secrets | builder has no secrets; git creds (private repos) are out of scope v1 |
@@ -190,7 +190,7 @@ Layering: `marketplace_source` **supplies bundles** (git repo + `bundles/`); a *
 | 1 | License tier | RESOLVED | Prebuilt external = Professional; sandbox build = Enterprise; built-in never gated |
 | 2 | Prebuilt trust | RESOLVED | Pinned publisher key required per source; signature verified before approval, on top of human approval; platform still re-signs |
 | 3 | Private repos | RESOLVED | No credentials in v1; public https only |
-| 4 | Namespace | RESOLVED | `waddles.integrations.src-{id}.{app}`; `_APP_ID_RE` not widened; platform assigns the scoped segment |
+| 4 | Namespace | RESOLVED | `penguintechinc.waddles.src-{id}-{app}`; `_APP_ID_RE` not widened; platform assigns the scoped segment |
 | 5 | Git egress | RESOLVED | Through egress-proxy with allowlist; `url_guard` pre-check only |
 | 6 | Vendored deps | RESOLVED | Required for sandbox builds; no mirror in v1 |
 | 7 | Update cadence/approval | RESOLVED | Periodic re-scan + admin notification; every update needs human approval in v1. Exact cadence value left to builder |

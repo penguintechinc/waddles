@@ -24,7 +24,7 @@ from services.bundle_manifest_v2 import (
     parse_bundle_manifest_v2,
 )
 
-_APP_ID = "waddles.core.ping.default"
+_APP_ID = "penguintechinc.waddles.ping"
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
@@ -48,7 +48,7 @@ def _manifest(
         app_id=_APP_ID,
         name="Ping",
         version="1.0.0",
-        feature="waddles.core.ping",
+        feature="penguintechinc.waddles.ping",
         module="core",
         provider="builtin",
         language="python",

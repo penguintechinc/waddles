@@ -21,7 +21,7 @@ from tests.erasure_support import FakeRedis, FakeS3
 U1 = "11111111-1111-4111-8111-111111111111"
 U2 = "22222222-2222-4222-8222-222222222222"
 OTHER = "99999999-9999-4999-8999-999999999999"
-PREFIX = "bundlekv:acme:main:waddles.bot.counter"
+PREFIX = "bundlekv:acme:main:penguintechinc.waddles.bot-counter"
 
 
 def _data(key: str) -> str:

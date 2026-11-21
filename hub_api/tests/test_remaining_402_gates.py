@@ -65,7 +65,6 @@ SWEPT_FLAGS = [
     "waddles.streaming.overlays",
     "waddles.streaming.overlay-builder",
     "waddles.streaming.rtc",
-    "waddles.event.calendar",
     "waddles.community.chat",
     "waddles.community.interactions",
     "waddles.community.loyalty",
