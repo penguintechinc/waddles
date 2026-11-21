@@ -964,6 +964,9 @@ async fn start_floor_ban_dispatcher(
         }
     };
     let store = Arc::new(floor_ban_dispatch::PgFloorBanStore::new(conn));
+    // The platform -> Waddles half of the ban-lift sync: a confirmed host `mod.unban` lifts the
+    // matching Waddles floor ban over this same connection pool.
+    caps.set_unban_sync(store.clone());
     let metrics = stage_metrics::stage_metrics();
     tokio::spawn(async move {
         floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, flag, shutdown_signal())
