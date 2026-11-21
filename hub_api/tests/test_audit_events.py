@@ -44,6 +44,11 @@ class TestEventValidation:
         source["method"] = "mutated-after-the-fact"
         assert event.details["method"] == "PUT"
 
+    def test_wildcard_scope_names_are_auditable(self) -> None:
+        """regression: DSAR 500 AUDIT_UNAVAILABLE -- the `*:read` self-service scope was refused."""
+        details = validate_details({"required_scopes": ["*:read", "tenant:admin"]})
+        assert details["required_scopes"] == ["*:read", "tenant:admin"]
+
     @pytest.mark.parametrize(
         "bad_value",
         [

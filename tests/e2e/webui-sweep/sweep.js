@@ -28,7 +28,8 @@ const ROOT = path.resolve(__dirname, '../../..');
 const ROUTES_FILE = process.env.ROUTES_FILE || path.join(ROOT, 'admin/hub_module/frontend/src/App.jsx');
 const OUT_DIR = process.env.OUT_DIR || '/tmp/playwright-waddles';
 const RESULTS_DIR = process.env.RESULTS_DIR || path.join(__dirname, 'results');
-const COMMUNITY_ID = process.env.COMMUNITY_ID || '15959481-f9f1-47ce-be48-d975a6832d08';
+// Empty -> discovered from GET /api/v1/public/communities in main() (a hard-coded id goes stale on an alpha wipe).
+let COMMUNITY_ID = process.env.COMMUNITY_ID || '';
 // --user-role=user (or SWEEP_ROLE=user) sweeps with WEBUI_USER_EMAIL/WEBUI_USER_PASSWORD (a non-admin account that must already exist).
 const ROLE = (process.argv.find((a) => a.startsWith('--user-role=')) || '').split('=')[1] || process.env.SWEEP_ROLE || 'admin';
 const EMAIL = ROLE === 'user' ? process.env.WEBUI_USER_EMAIL : process.env.WEBUI_ADMIN_EMAIL;
@@ -296,6 +297,12 @@ function toMarkdown(results, skipped, meta) {
   const browser = await launchBrowser(args);
   const context = await browser.newContext({ ignoreHTTPSErrors: true });
   await context.addInitScript(CONSENT_INIT);
+  if (!COMMUNITY_ID) {
+    const r = await context.request.get(`${base}/api/v1/public/communities`).catch(() => null);
+    const body = r && r.ok() ? await r.json().catch(() => null) : null;
+    COMMUNITY_ID = String((firstItems(body)[0] || {}).id || '');
+    if (!COMMUNITY_ID) { console.error('COMMUNITY_ID unset and no community discoverable from /api/v1/public/communities'); process.exit(2); }
+  }
   const filter = process.env.ROUTE_FILTER ? new RegExp(process.env.ROUTE_FILTER) : null;
   let routes = enumerateRoutes(ROUTES_FILE);
   if (filter) routes = routes.filter((r) => filter.test(r));

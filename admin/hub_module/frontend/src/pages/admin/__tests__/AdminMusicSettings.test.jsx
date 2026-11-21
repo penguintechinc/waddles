@@ -86,4 +86,11 @@ describe('AdminMusicSettings', () => {
     fireEvent.click(screen.getAllByText('Save Settings')[0]);
     await screen.findByText('nope');
   });
+
+  it('renders the UpgradeNotice upsell (not an error banner) on a 402', async () => {
+    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 402, data: {} } });
+    mount();
+    expect(await screen.findByTestId('upgrade-notice')).toBeTruthy();
+    expect(screen.queryByText('Failed to load music settings')).toBeNull();
+  });
 });

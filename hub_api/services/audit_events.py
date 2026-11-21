@@ -32,7 +32,7 @@ PLATFORM_CHAIN_ID: Final[str] = "platform"
 _ACTION_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_.]{1,99}$")
 _DETAIL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 #: Identifier-shaped strings only: no spaces, no ``@`` (so no e-mail address), no quotes.
-_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:/<>=\-]{1,128}$")
+_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:/<>=*\-]{1,128}$")
 _TARGET_TYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_.]{0,49}$")
 
 MAX_DETAIL_KEYS: Final[int] = 16
@@ -217,7 +217,7 @@ def _check_token(label: str, value: str) -> str:
     if _TOKEN_RE.match(value) or _VERSIONED_REF_RE.match(value):
         return value
     raise AuditValidationError(
-        f"{label} must be identifier-shaped ([A-Za-z0-9_.:/<>=-], 1-128 chars, or "
+        f"{label} must be identifier-shaped ([A-Za-z0-9_.:/<>=*-], 1-128 chars, or "
         "name@version); free text and e-mail-shaped values are not auditable"
     )
 

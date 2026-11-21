@@ -209,6 +209,18 @@ async def _run_atomic[T](async_dal: Any, dal: Any, fn: Callable[[], T]) -> T:
     return await asyncio.get_running_loop().run_in_executor(async_dal.executor, _job)
 
 
+_RETURNING_RE = re.compile(r"\s*RETURNING\s+[^;]*?\s*;?\s*$", re.IGNORECASE)
+
+
+def _strip_returning(insert_sql: str) -> str:
+    """Drop pydal's trailing `RETURNING "id"` (and `;`) so `ON CONFLICT` can follow the VALUES.
+
+    The Postgres adapter's `Table._insert` appends `RETURNING "id"`; appending `ON CONFLICT`
+    after it is a syntax error (the alpha browser-sources / overlay 500).
+    """
+    return _RETURNING_RE.sub("", insert_sql).rstrip("; \n")
+
+
 def _upsert_credentials(
     dal: Any,
     *,
@@ -242,7 +254,8 @@ def _upsert_credentials(
         rotated_at=rotated_at,
         created_at=now,
         updated_at=now,
-    ).rstrip("; \n")
+    )
+    insert_sql = _strip_returning(insert_sql)
     if not overwrite:
         dal.executesql(f'{insert_sql} ON CONFLICT ("community_id") DO NOTHING')  # noqa: S608
         return
