@@ -67,7 +67,7 @@ def main() -> int:
     base = os.environ.get("BASE_URL", "")
     email = os.environ.get("HUB_TEST_EMAIL", "")
     pw = os.environ.get("HUB_TEST_PASS") or os.environ.get("INITIAL_ADMIN_PASSWORD", "")
-    community = os.environ.get("COMMUNITY_ID", "15959481-f9f1-47ce-be48-d975a6832d08")
+    community = os.environ.get("COMMUNITY_ID", "")  # empty -> discovered after login (never a stale hard-coded id)
     if not (base and email and pw):
         print("FAIL: BASE_URL, HUB_TEST_EMAIL, HUB_TEST_PASS must be set (use run.sh)", file=sys.stderr)
         return 2
@@ -91,6 +91,17 @@ def main() -> int:
         print(f"FAIL: admin login HTTP {st}", file=sys.stderr)
         return 2
 
+    if not community:
+        # A hard-coded id goes stale when alpha is wiped, which turns every community route into
+        # a bogus 404 "contract" failure; use a community the API itself lists.
+        st_c, _, txt_c = cli.call("GET", "/api/v1/public/communities")
+        try:
+            community = str(json.loads(txt_c)["communities"][0]["id"]) if st_c == 200 else ""
+        except (KeyError, IndexError, ValueError, TypeError):
+            community = ""
+        if not community:
+            print(f"FAIL: no COMMUNITY_ID set and none discoverable (HTTP {st_c})", file=sys.stderr)
+            return 2
     ls, _, _ = cli.call("GET", "/api/v1/marketplace/bundles")
     rows = []
     for b in bundles:

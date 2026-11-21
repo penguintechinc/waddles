@@ -15,7 +15,7 @@ Phase 6 represents the advanced feature set that elevates Waddles from a solid m
 ### Identity Module Enhancements
 
 **Status**: Foundation exists, needs advanced features
-**File**: `core/identity_core_module/`
+**File**: core/identity_core_module
 **Estimated Effort**: 2-3 weeks
 
 #### Features to Implement
@@ -60,7 +60,7 @@ identity_2fa_secrets              # TOTP secrets (encrypted)
 
 #### Dependencies
 - **OAuth Providers**: Requires OAuth apps for Discord, Twitch, Slack
-- **Reputation Module**: Integration with `core/reputation_module/`
+- **Reputation Module**: Integration with core/reputation_module
 - **Email Service**: Hub module SMTP service
 - **Encryption**: For storing 2FA secrets (use `cryptography` library)
 
@@ -69,7 +69,7 @@ identity_2fa_secrets              # TOTP secrets (encrypted)
 ### Community Module Features
 
 **Status**: Basic structure exists, needs advanced community management
-**File**: `core/community_module/`
+**File**: core/community_module
 **Estimated Effort**: 2-3 weeks
 
 #### Features to Implement
@@ -120,7 +120,7 @@ community_ab_tests                # A/B test configurations
 ```
 
 #### Dependencies
-- **Analytics Module**: `core/analytics_core_module/` for metrics
+- **Analytics Module**: core/analytics_core_module for metrics
 - **All Trigger Modules**: For multi-platform broadcasting
 - **Browser Source**: For dashboard display in OBS
 
@@ -893,12 +893,12 @@ app.include_router(graphql_app, prefix="/graphql")
 ### Deployment Strategy
 
 **Option 1**: Integrate into Hub Module
-- Add `/graphql` endpoint to `admin/hub_module/backend/`
+- Add `/graphql` endpoint to admin/hub_module/backend
 - Share authentication and services with REST API
 - Simpler deployment, single codebase
 
 **Option 2**: Separate GraphQL Service
-- New service: `core/graphql_core_module/`
+- New service: core/graphql_core_module
 - Independent scaling and versioning
 - More complex deployment, additional container
 
@@ -1915,7 +1915,7 @@ slack-sdk==3.26.0             # Slack API
 
 Expand the existing loyalty/currency system with economy balancing dashboard, tournament system, gear crafting, and anti-abuse measures.
 
-**Current State**: Basic currency and gear systems exist (`action/interactive/loyalty_interaction_module/`)
+**Current State**: Basic currency and gear systems exist (action/interactive/loyalty_interaction_module)
 **Estimated Effort**: 3-4 weeks
 
 ### Feature 1: Economy Balancing Dashboard

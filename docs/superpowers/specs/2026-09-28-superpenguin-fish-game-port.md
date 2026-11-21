@@ -1,5 +1,7 @@
 # SuperPenguinTV Fishing Game — Port to Waddles C# App Bundles
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 **Status:** DESIGN — not started. **Author credit:** original game design and implementation by **superpenguintv**
 (MIT license, ported with permission). **Source:** `PenguinTwitchBot/Bot/Commands/Fishing/` (~21 files, C#/.NET,
 EF Core + SignalR overlay). **Target:** Waddles WASM app bundles (`waddle:bundle@1.0.0`, C# via `componentize-dotnet`),
@@ -268,7 +270,7 @@ Read: `action/interactive/loyalty_interaction_module/services/currency_service.p
 and `core/svc_action/src/capabilities.rs`) has exactly 8 variants — `Context, Http, Kv, Db, Relay, Flags, Log,
 Clock` — one per `stage.wit` import. There is no `Loyalty`/`Points`/`Currency` kind, and `stage.wit` declares no such
 interface. The v1.1 design doc adds `moderation` and `db.execute-batch` but nothing for currency either. The
-existing loyalty system (`action/interactive/loyalty_interaction_module`'s `CurrencyService`) is Python, called
+existing loyalty system (action/interactive/loyalty_interaction_module's `CurrencyService`) is Python, called
 in-process by the **native** (non-WASM) `core/svc_process/builtin_handlers/community_loyalty_process.py` — a different,
 legacy bundle mechanism from the WASM component model fishing will use, with no host-capability bridge between them.
 

@@ -12,7 +12,7 @@ All action modules are deployed as individual Docker containers with Flask/Quart
 
 ## Action Modules (Interactive)
 
-### AI Interaction Module (`action/interactive/ai_interaction_module/`)
+### AI Interaction Module (action/interactive/ai_interaction_module)
 
 **Purpose**: AI-powered chat responses with multi-provider support (Ollama, OpenAI, MCP)
 
@@ -51,7 +51,7 @@ EVENT_RESPONSE_TYPES=subscription,follow,donation
 
 ---
 
-### Alias Interaction Module (`action/interactive/alias_interaction_module/`)
+### Alias Interaction Module (action/interactive/alias_interaction_module)
 
 **Purpose**: Linux-style alias system for custom commands with variable substitution
 
@@ -71,7 +71,7 @@ EVENT_RESPONSE_TYPES=subscription,follow,donation
 
 ---
 
-### Shoutout Interaction Module (`action/interactive/shoutout_interaction_module_flask/`)
+### Shoutout Interaction Module (action/interactive/shoutout_interaction_module_flask)
 
 **Purpose**: Platform-specific user shoutouts with Twitch API integration and auto-shoutout functionality
 
@@ -98,7 +98,7 @@ EVENT_RESPONSE_TYPES=subscription,follow,donation
 
 ---
 
-### Inventory Interaction Module (`action/interactive/inventory_interaction_module_flask/`)
+### Inventory Interaction Module (action/interactive/inventory_interaction_module_flask)
 
 **Purpose**: Multi-threaded inventory management system for tracking any item (IRL or in-game) with label support
 
@@ -143,7 +143,7 @@ inventory_activity (
 
 ---
 
-### Memories Interaction Module (`action/interactive/memories_interaction_module_flask/`)
+### Memories Interaction Module (action/interactive/memories_interaction_module_flask)
 
 **Purpose**: Community memory management system for quotes, reminders, and URLs with label-based permissions
 
@@ -193,7 +193,7 @@ memory_categories (
 
 ---
 
-### YouTube Music Interaction Module (`action/interactive/youtube_music_interaction_module_flask/`)
+### YouTube Music Interaction Module (action/interactive/youtube_music_interaction_module_flask)
 
 **Purpose**: YouTube Music integration with search, playback control, and media browser source output
 
@@ -233,7 +233,7 @@ youtube_activity (
 
 ---
 
-### Spotify Interaction Module (`action/interactive/spotify_interaction_module_flask/`)
+### Spotify Interaction Module (action/interactive/spotify_interaction_module_flask)
 
 **Purpose**: Spotify integration with OAuth authentication, search, playback control, and media browser source output
 
@@ -276,7 +276,7 @@ spotify_search_cache (
 
 ---
 
-### Browser Source Core Module (`core/browser_source_core_module_flask/`)
+### Browser Source Core Module (core/browser_source_core_module_flask)
 
 **Purpose**: Multi-threaded browser source management system for OBS integration with ticker, media, and general display sources
 
@@ -359,7 +359,7 @@ browser_source_access_log (
 
 ---
 
-### Server Manager Interaction Module (`action/interactive/server_manager_interaction_module/`)
+### Server Manager Interaction Module (action/interactive/server_manager_interaction_module)
 
 **Purpose**: Comprehensive game server and voice server management with RCON, Mumble Ice RPC, and TeamSpeak ServerQuery support. Replaces and absorbs `server_status_interaction_module`.
 

@@ -450,7 +450,7 @@ curl "http://localhost:8098/api/v1/server-manager/42/servers/7/access-log?limit=
 
 ## Hub Backend Proxy Routes (`rcon.js`)
 
-The hub backend (`admin/hub_module/backend/`) exposes these routes, which proxy to the Python module after JWT auth and community scoping.
+The hub backend (admin/hub_module/backend) exposes these routes, which proxy to the Python module after JWT auth and community scoping.
 
 Base path: `/api/v1/:communityId/rcon`
 

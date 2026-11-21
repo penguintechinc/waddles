@@ -201,7 +201,7 @@ def main() -> int:
     base = os.environ.get("BASE_URL", "https://waddles-alpha.penguintech.cloud:8443")
     email = os.environ.get("HUB_TEST_EMAIL", "")
     pw = os.environ.get("HUB_TEST_PASS") or os.environ.get("INITIAL_ADMIN_PASSWORD", "")
-    community = os.environ.get("COMMUNITY_ID", "15959481-f9f1-47ce-be48-d975a6832d08")
+    community = os.environ.get("COMMUNITY_ID", "")  # empty -> discovered after login (never a stale hard-coded id)
     if not (email and pw):
         print("FAIL: HUB_TEST_EMAIL and HUB_TEST_PASS (or INITIAL_ADMIN_PASSWORD) must be set", file=sys.stderr)
         return 2
@@ -232,6 +232,17 @@ def main() -> int:
         print(f"FAIL: admin login returned HTTP {st}", file=sys.stderr)
         return 2
 
+    if not community:
+        # A hard-coded id goes stale when alpha is wiped, which turns every community route into
+        # a bogus 404 "contract" failure; use a community the API itself lists.
+        st_c, _, txt_c = cli.call("GET", "/api/v1/public/communities")
+        try:
+            community = str(json.loads(txt_c)["communities"][0]["id"]) if st_c == 200 else ""
+        except (KeyError, IndexError, ValueError, TypeError):
+            community = ""
+        if not community:
+            print(f"FAIL: no COMMUNITY_ID set and none discoverable (HTTP {st_c})", file=sys.stderr)
+            return 2
     ids: dict[str, list[str]] = defaultdict(list)
     ids["community_id"].append(community)
     results: list[dict] = []

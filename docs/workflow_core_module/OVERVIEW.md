@@ -35,7 +35,7 @@ The Workflow Core Module is a powerful automation engine that enables communitie
 
 | Item | Value |
 |---|---|
-| Source | `core/workflow_core_module/` |
+| Source | core/workflow_core_module |
 | Language | Python |
 | Port | 8070 (REST) |
 | gRPC Port | 50070 |

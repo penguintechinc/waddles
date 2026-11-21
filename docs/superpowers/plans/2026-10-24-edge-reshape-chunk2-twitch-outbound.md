@@ -1,5 +1,7 @@
 # Edge-Reshape Chunk 2, Stream B3: Per-Community Twitch Outbound Send — Implementation Plan
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Make a bundle's Twitch `chat.send` reply go out as the **community's own** Twitch bot identity into the **community's own** channel, resolved at send time through the Phase A `connection_resolver` — replacing the single static `TWITCH_IRC_NICK/OAUTH_TOKEN` identity (`outbound.rs:125` `TwitchOutboundIdentity`) and the bundle-supplied `channel` (`capabilities.rs:~1166`). Send-side sibling of B2 (inbound).
@@ -328,7 +330,7 @@ Mode table (ruling, mirrors B2's): flag ON + `TWITCH_IRC_OAUTH_TOKEN` **or** `TW
 ### Task 8: Chart grants, live hub e2e, docs, and the gate
 
 **Files:**
-- Modify: `k8s/helm/waddles/templates/` (svc-ingest + svc-action env/JWT-scope), `values-alpha.yaml` (+ beta/prod untouched), `core/svc_ingest/README.md`, `core/svc_action/README.md`, `Makefile`
+- Modify: k8s/helm/waddles/templates (svc-ingest + svc-action env/JWT-scope), `values-alpha.yaml` (+ beta/prod untouched), `core/svc_ingest/README.md`, `core/svc_action/README.md`, `Makefile`
 - Test: Helm render test; live test
 
 **Interfaces:**

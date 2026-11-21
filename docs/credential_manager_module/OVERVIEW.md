@@ -1,7 +1,7 @@
 # Credential Manager Module — Overview
 
 **Maintained by**: Penguin Tech Inc
-**Source location**: `core/credential_manager_module/`
+**Source location**: core/credential_manager_module
 **Language**: Python 3 (async, Quart web framework)
 **REST Port**: 8095 (env var: `MODULE_PORT`, default `8095`)
 **Module Name**: `credential_manager`

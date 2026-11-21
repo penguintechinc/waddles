@@ -365,6 +365,17 @@ test-supply-chain:
 	@bash scripts/ci/test-supply-chain.sh
 	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_supply_chain_verify_images_render.py
 
+# Per-service Valkey ACL least-privilege gate (docs/valkey-acl.md): the rendered ACL for the
+# alpha and beta topologies, then the render/check/real-path tests (real Valkey via docker; a
+# missing docker or helm fails loudly, never skips).
+.PHONY: check-valkey-acl
+check-valkey-acl:
+	@bash -c 'set -euo pipefail; for v in alpha beta; do \
+	  helm template waddlebot k8s/helm/waddlebot --values k8s/helm/waddlebot/values-$$v.yaml \
+	    --kube-version 1.30.0 --set global.deploymentTier=alpha \
+	  | python3 scripts/ci/check-valkey-acl-least-privilege.py --require-executor; done'
+	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_valkey_acl_render.py
+
 smoke-test:
 	@echo "Running smoke tests..."
 	@test -f tests/alpha-smoke-test.sh || { echo "tests/alpha-smoke-test.sh not found" >&2; exit 1; }
