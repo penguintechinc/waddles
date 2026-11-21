@@ -1,10 +1,10 @@
 """`POST /api/v1/internal/calendar/events/sync-discord` -- the Discord event-sync trigger endpoint.
 
-**This blueprint is hub-api's half only.** The `calendar_interaction_
-module`'s own trigger-wiring (calling this endpoint on event create/
-approve/update/cancel) is a SEPARATE follow-up PR -- this file defines
-the clean internal contract that follow-up calls against, same split
-`event_discord_sync_service.py`'s own module docstring describes.
+**This blueprint is hub-api's half only.** The calendar app bundle's
+trigger-wiring (calling this endpoint on event create/approve/update/
+cancel) is separate -- this file defines the clean internal contract it
+calls against, same split `event_discord_sync_service.py`'s own module
+docstring describes.
 
 **This follow-up PR also adds ONE more internal route here**: `POST
 .../calendar/guild-pairings/event-sync`, the write side `services.
@@ -12,10 +12,8 @@ guild_pairing.list_event_sync_enabled_pairings()` (the push engine's own
 fan-out read) was missing -- the public, tenant-JWT-gated `PATCH
 /api/v1/communities/<id>/guild-pairings/<pairing_id>` route
 (`blueprints/v1/guild_pairing.py`) doesn't thread `event_sync_enabled`
-through yet, and `calendar_interaction_module` never holds a user JWT to
-call it anyway (hub-api's own `EventCalendarProxyClient` forwards only
-`X-API-Key` + `X-User-Context` downstream, see `services/event_calendar_
-proxy.py`). Community-wide (every paired guild at once) rather than
+through yet, and the calendar bundle never holds a user JWT to call it
+anyway. Community-wide (every paired guild at once) rather than
 per-`pairing_id`, matching the calendar module's own `/<community_id>/
 sync/enable` route shape (no `pairing_id` in that path).
 

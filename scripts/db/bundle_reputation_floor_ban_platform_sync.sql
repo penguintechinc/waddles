@@ -1,4 +1,4 @@
--- Floor-ban PLATFORM SYNC -- SQL half. Applied by alembic 0138_floor_ban_platform_sync. Idempotent.
+-- Floor-ban PLATFORM SYNC -- SQL half. Applied by alembic 0140_floor_ban_platform_sync. Idempotent.
 --
 -- Lifts sync with the platform in BOTH directions, over the SAME outbox the ban used:
 --   * `action` (1 ban, 2 unban): a Waddles lift of a ban whose platform command was DELIVERED
@@ -9,7 +9,7 @@
 --   * `lift_origin` (1 admin, 2 platform): a lift that ORIGINATES on the platform
 --     (`reputation_floor_ban_lift_from_platform`, tenant + community derived by the host from the
 --     verified guild binding, never from the event) never enqueues an unban, so a sync cannot echo.
--- A lift stays sticky (0137) in both directions.
+-- A lift stays sticky (0139) in both directions.
 
 ALTER TABLE bundle_reputation_floor_bans
     ADD COLUMN IF NOT EXISTS action SMALLINT NOT NULL DEFAULT 1,
@@ -239,7 +239,7 @@ BEGIN
 END
 $fp$;
 
--- Enqueue: as 0137, but the quota / per-user cap count BANS only (action 1).
+-- Enqueue: as 0139, but the quota / per-user cap count BANS only (action 1).
 CREATE OR REPLACE FUNCTION reputation_floor_ban_enqueue(
     p_tenant bigint, p_community bigint, p_origin bigint, p_user_uuid uuid,
     p_scope smallint, p_key text, p_platform text
@@ -303,7 +303,7 @@ BEGIN
     -- Only the MOST RECENT lift of this subject/scope governs. It blocks until the score
     -- recovers (recovered_at) OR makes a NEW LOW: at least `lift_rearm_drop` below the score
     -- recorded at lift time (`score_at_lift`) -- a lift forgives past behaviour, not a new
-    -- offence. (No snapshot, e.g. a pre-0138 lift: only recovery re-arms.)
+    -- offence. (No snapshot, e.g. a pre-0140 lift: only recovery re-arms.)
     IF EXISTS (SELECT 1 FROM bundle_reputation_floor_bans l
                 WHERE l.id = (SELECT m.id FROM bundle_reputation_floor_bans m
                                WHERE m.tenant_id = p_tenant AND m.user_uuid = p_user_uuid

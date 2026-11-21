@@ -62,8 +62,8 @@ function CommunityReputationBans() {
 
   function handleManual(e) {
     e.preventDefault();
-    if (!/^\d+$/.test(userId.trim())) {
-      setActionError('Member ID must be a numeric hub user ID');
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userId.trim())) {
+      setActionError('Member ID must be the member\'s user UUID');
       return;
     }
     softBan(userId.trim(), expires ? new Date(expires).toISOString() : undefined);
@@ -126,7 +126,7 @@ function CommunityReputationBans() {
             </div>
           )}
           <form onSubmit={handleManual} className="mt-6 flex flex-wrap items-end gap-3" noValidate>
-            <TextField label="Member ID" value={userId} onChange={(e) => setUserId(e.target.value)} hint="Hub user ID" />
+            <TextField label="Member ID" value={userId} onChange={(e) => setUserId(e.target.value)} hint="Member user UUID" />
             <TextField label="Expires (optional)" type="datetime-local" value={expires} onChange={(e) => setExpires(e.target.value)} />
             <Button type="submit" variant="danger" disabled={busy}>Soft-ban member</Button>
           </form>

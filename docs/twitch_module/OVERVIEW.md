@@ -2,7 +2,7 @@
 
 ## Purpose
 
-The Twitch Module (`trigger/receiver/twitch_module/`) is a real-time message receiver that bridges Twitch streams to WaddleBot. It handles:
+The Twitch Module (trigger/receiver/twitch_module) is a real-time message receiver that bridges Twitch streams to WaddleBot. It handles:
 
 - **Dual-ingestion architecture**: TwitchIO IRC bot + EventSub webhooks for 100% message coverage
 - **Chat message routing**: Parses !commands, enforces broadcaster-only restrictions, splits long messages (500-char limit)

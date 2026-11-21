@@ -7,6 +7,7 @@ drives the real `HttpDiscordRoleTargetClient` over `httpx.MockTransport`.
 from __future__ import annotations
 
 import json as json_module
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -127,7 +128,30 @@ _ALL_ROLES = {
 }
 
 
-def _pair(dal: Any, community_id: int, *guilds: str, enabled: bool = True) -> None:
+def _pair(
+    dal: Any, community_id: int, *guilds: str, enabled: bool = True, shared_legacy: bool = False
+) -> None:
+    """Pair `guilds` to `community_id`.
+
+    `shared_legacy=True` inserts the rows directly, bypassing the one-tenant-per-guild claim
+    (`discord_guild_tenants`, 0137). That state can no longer be created through the API and the
+    0137 backfill refuses to migrate it; these tests keep seeding it only to prove the mirror /
+    binding cross-tenant collision defenses stay generic if such rows ever exist.
+    """
+    if shared_legacy:
+        now = datetime.now(UTC)
+        for g in guilds:
+            dal.guild_tenant_pairings.insert(
+                community_id=community_id,
+                discord_guild_id=g,
+                direction="bidirectional",
+                sync_enabled=enabled,
+                role_name_prefix="[T]",
+                created_at=now,
+                updated_at=now,
+            )
+        dal.commit()
+        return
     for g in guilds:
         p = create_pairing(
             dal,
@@ -523,7 +547,7 @@ class TestAllowlistAndCrossCommunity:
         t2 = dal.tenants.insert(slug="foreign-corp", is_active=True, is_global=False)
         cid2 = dal.communities.insert(name="foreign-community", tenant_id=t2)
         dal.commit()
-        _pair(dal, cid2, *guilds)
+        _pair(dal, cid2, *guilds, shared_legacy=True)
         return int(cid2)
 
     @staticmethod
@@ -716,7 +740,7 @@ class TestAllowlistAndCrossCommunity:
         t = dal.tenants.insert(slug=slug, is_active=True, is_global=False)
         cid = dal.communities.insert(name=f"{slug}-community", tenant_id=t)
         dal.commit()
-        _pair(dal, cid, *guilds)
+        _pair(dal, cid, *guilds, shared_legacy=True)
         return int(cid)
 
     async def test_cross_tenant_binding_vs_mirror_is_generic(self, guild_pairing_db: Any) -> None:

@@ -21,24 +21,31 @@ from services.storage_service import (
 
 
 def test_bundle_component_key_matches_the_documented_layout() -> None:
-    key = bundle_component_key("waddles.integrations.vendor-42.mybundle", "1.0.0", "abc123")
-    assert key == "bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc123.wasm"
+    key = bundle_component_key(
+        "penguintechinc.waddles.integrations-vendor-42-mybundle", "1.0.0", "abc123"
+    )
+    assert key == "bundles/penguintechinc.waddles.integrations-vendor-42-mybundle/1.0.0/abc123.wasm"
 
 
 def test_bundle_sidecar_key_matches_the_documented_layout() -> None:
     """The `app_versions.sidecar_key` value (migration 0024) -- same stem, `.json` extension."""
-    key = bundle_sidecar_key("waddles.integrations.vendor-42.mybundle", "1.0.0", "abc123")
-    assert key == "bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc123.json"
+    key = bundle_sidecar_key(
+        "penguintechinc.waddles.integrations-vendor-42-mybundle", "1.0.0", "abc123"
+    )
+    assert key == "bundles/penguintechinc.waddles.integrations-vendor-42-mybundle/1.0.0/abc123.json"
 
 
 async def test_upload_bundle_component_puts_the_component_and_a_json_sidecar() -> None:
     mock_client = MagicMock()
     with patch("services.storage_service._client", return_value=mock_client):
         key = await upload_bundle_component(
-            "waddles.integrations.vendor-42.mybundle", "1.0.0", "abc123", b"wasm-bytes"
+            "penguintechinc.waddles.integrations-vendor-42-mybundle",
+            "1.0.0",
+            "abc123",
+            b"wasm-bytes",
         )
 
-    assert key == "bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc123.wasm"
+    assert key == "bundles/penguintechinc.waddles.integrations-vendor-42-mybundle/1.0.0/abc123.wasm"
     assert mock_client.put_object.call_count == 2
 
     component_call, sidecar_call = mock_client.put_object.call_args_list
@@ -48,7 +55,7 @@ async def test_upload_bundle_component_puts_the_component_and_a_json_sidecar() -
     assert component_call.kwargs["ServerSideEncryption"] == "AES256"
 
     assert sidecar_call.kwargs["Key"] == (
-        "bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc123.json"
+        "bundles/penguintechinc.waddles.integrations-vendor-42-mybundle/1.0.0/abc123.json"
     )
     assert sidecar_call.kwargs["Body"] == b"{}"
     assert sidecar_call.kwargs["ServerSideEncryption"] == "AES256"
@@ -61,7 +68,7 @@ async def test_write_bundle_sidecar_overwrites_the_sidecar_with_canonical_json()
     later write to it.
     """
     document = {
-        "app_id": "waddles.integrations.vendor-42.mybundle",
+        "app_id": "penguintechinc.waddles.integrations-vendor-42-mybundle",
         "version": "1.0.0",
         "digest": "sha256:" + "a" * 64,
         "approval_id": 7,
@@ -72,10 +79,10 @@ async def test_write_bundle_sidecar_overwrites_the_sidecar_with_canonical_json()
     mock_client = MagicMock()
     with patch("services.storage_service._client", return_value=mock_client):
         key = await write_bundle_sidecar(
-            "waddles.integrations.vendor-42.mybundle", "1.0.0", "abc123", document
+            "penguintechinc.waddles.integrations-vendor-42-mybundle", "1.0.0", "abc123", document
         )
 
-    assert key == "bundles/waddles.integrations.vendor-42.mybundle/1.0.0/abc123.json"
+    assert key == "bundles/penguintechinc.waddles.integrations-vendor-42-mybundle/1.0.0/abc123.json"
     mock_client.put_object.assert_called_once()
     call = mock_client.put_object.call_args
     assert call.kwargs["Key"] == key

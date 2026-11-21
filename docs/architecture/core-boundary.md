@@ -13,15 +13,15 @@ name (`*_core_module` naming is not evidence).
 
 | Service | Source | Evidence |
 |---------|--------|----------|
-| identity | `core/identity_core_module` | OIDC/JWT/tenant claim — every service authenticates against it |
-| security | `core/security_core_module` | authz enforcement + audit — every Module's permission checks depend on it |
-| credentials | `core/credential_manager_module` | per-tenant secret custody — all platform integrations need it |
-| tenancy | `core/community_module` | communities/membership — every Module scopes queries to `community_id` |
-| reputation | `core/reputation_module` | Bot (router, loyalty) **and** Core security (bad-actor) + analytics (user-stats) |
-| analytics | `core/analytics_core_module` | shared telemetry sink — all Modules emit; Marketing reads it |
-| workflow | `core/workflow_core_module` | cross-Module automation executor — orchestrates every Module over gRPC |
-| event bus | **library** split from `processing/router_module` | consolidated `flask_core.StreamPipeline`; all stages publish/consume (see router split) |
-| marketplace | `admin/marketplace_module` | catalog / subscriptions / App installs — load-bearing for every Module |
+| identity | core/identity_core_module | OIDC/JWT/tenant claim — every service authenticates against it |
+| security | core/security_core_module | authz enforcement + audit — every Module's permission checks depend on it |
+| credentials | core/credential_manager_module | per-tenant secret custody — all platform integrations need it |
+| tenancy | core/community_module | communities/membership — every Module scopes queries to `community_id` |
+| reputation | core/reputation_module | Bot (router, loyalty) **and** Core security (bad-actor) + analytics (user-stats) |
+| analytics | core/analytics_core_module | shared telemetry sink — all Modules emit; Marketing reads it |
+| workflow | core/workflow_core_module | cross-Module automation executor — orchestrates every Module over gRPC |
+| event bus | **library** split from processing/router_module | consolidated `flask_core.StreamPipeline`; all stages publish/consume (see router split) |
+| marketplace | admin/marketplace_module | catalog / subscriptions / App installs — load-bearing for every Module |
 | hub | `admin/hub_module` | admin shell that mounts enabled Modules |
 | entitlement | new entitlement client — Task 1.5, not yet built | tier × flag gate consulted by every Feature in every Module |
 
@@ -34,8 +34,8 @@ All platform plumbing — receivers, actions, interaction commands, and the rout
 - **Triggers** `trigger/receiver/*` (8): discord, googlechat, kick_flask, mattermost, slack, teams, twitch, youtube_live (+ `platform_base` shim)
 - **Actions** `action/pushing/*` (10): discord, gcp_functions, googlechat, lambda, mattermost, openwhisk, slack, teams, twitch, youtube
 - **Interactions** `action/interactive/*` (Bot subset): ai, clip, server_manager, server_status *(deprecated)*
-- **From `core/`**: `ai_researcher_module` (standalone AI assistant), `labels_core_module` (only `calendar_interaction` consumes it — fails the 2-Module test despite the `_core_` name), `unified_music_module` (song-request provider library, dormant)
-- **Router command half** (`processing/router_module`): `command_processor.py`, `command_registry.py`, `emote_service.py`, `emote_providers/*`, `context_service.py`, `grpc_clients.py`, `controllers/router.py`, `controllers/admin.py`
+- **From `core/`**: `ai_researcher_module` (standalone AI assistant), `labels_core_module` (its only consumer, the old calendar module, is gone, so it fails the 2-Module test despite the `_core_` name), `unified_music_module` (song-request provider library, dormant)
+- **Router command half** (processing/router_module): `command_processor.py`, `command_registry.py`, `emote_service.py`, `emote_providers/*`, `context_service.py`, `grpc_clients.py`, `controllers/router.py`, `controllers/admin.py`
 
 ### Social
 

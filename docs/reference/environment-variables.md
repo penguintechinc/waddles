@@ -13,7 +13,6 @@ This document provides a comprehensive reference for environment variables used 
 - [Hub Module](#hub-module)
 - [Labels Core Module](#labels-core-module)
 - [Inventory Interaction Module](#inventory-interaction-module)
-- [Calendar Interaction Module](#calendar-interaction-module)
 - [Memories Interaction Module](#memories-interaction-module)
 - [YouTube Music Interaction Module](#youtube-music-interaction-module)
 - [Spotify Interaction Module](#spotify-interaction-module)
@@ -345,29 +344,6 @@ SYSLOG_FACILITY=LOCAL0
 MODULE_NAME=inventory_interaction_module
 MODULE_VERSION=1.0.0
 MODULE_PORT=8024
-```
-
----
-
-## Calendar Interaction Module
-
-Configuration for the event management system with approval workflows.
-
-```bash
-# Database
-DATABASE_URL=postgresql://user:pass@host:5432/waddlebot
-
-# Core API Integration
-CORE_API_URL=http://router-service:8000
-ROUTER_API_URL=http://router-service:8000/router
-
-# Labels Core Integration (for event-autoapprove label)
-LABELS_API_URL=http://labels-core-service:8025
-
-# Module Info
-MODULE_NAME=calendar_interaction_module
-MODULE_VERSION=1.0.0
-MODULE_PORT=8030
 ```
 
 ---

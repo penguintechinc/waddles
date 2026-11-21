@@ -108,7 +108,7 @@ pub enum FloorBanStatus {
     Refused = 6,
     /// In flight under a lease.
     Dispatched = 7,
-    /// An admin reversed the ban (alembic 0137): terminal, never enforced or retried.
+    /// An admin reversed the ban (alembic 0139): terminal, never enforced or retried.
     Lifted = 8,
 }
 

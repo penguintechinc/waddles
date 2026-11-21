@@ -2,7 +2,7 @@
 
 Complete documentation for the WaddleBot Slack Module receiver service.
 
-**Module Location**: `trigger/receiver/slack_module/`
+**Module Location**: trigger/receiver/slack_module
 **Language**: Python 3.12
 **Framework**: Quart + Slack Bolt
 **Port**: 8004
@@ -359,10 +359,10 @@ When updating Slack Module documentation:
 
 ## Quick Links
 
-- **Source Code**: `trigger/receiver/slack_module/services/`
+- **Source Code**: trigger/receiver/slack_module/services
 - **Tests**: `trigger/receiver/slack_module/test-api.sh`
 - **Configuration**: `.env.example` in module directory
-- **Docker**: `trigger/receiver/slack_module/Dockerfile`
+- **Docker**: trigger/receiver/slack_module/Dockerfile
 - **CI/CD**: `.github/workflows/test-slack-module.yml`
 
 ---

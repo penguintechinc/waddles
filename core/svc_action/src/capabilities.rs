@@ -3895,7 +3895,7 @@ mod tests {
     /// Grants every permission this file's existing (pre-gate) tests
     /// already exercised, for both app ids this suite uses
     /// (`kv_two_apps_in_the_same_tenant_are_isolated_through_the_handler`'s
-    /// `waddles.bot.other` included) under `scope()`'s `(7, 3, 1)` -- so
+    /// `penguintechinc.waddles.bot-other` included) under `scope()`'s `(7, 3, 1)` -- so
     /// every happy-path test keeps proving its own capability logic, not
     /// this landing's gate wiring (which the dedicated `gate_*` tests below
     /// exercise directly, including the deny-without-grant cases).
@@ -3903,7 +3903,7 @@ mod tests {
         let snapshot = bundle_capability_gate::InMemoryGrantSnapshot::new();
         for app_id in [
             "penguintechinc.waddles.fixture-bot-commands-default",
-            "waddles.bot.other",
+            "penguintechinc.waddles.bot-other",
         ] {
             let mut grants = std::collections::HashMap::new();
             for id in [
@@ -4424,7 +4424,7 @@ mod tests {
         for key in [
             ConfigKey::new(tenant + 1, community, s.app_id.clone()),
             ConfigKey::new(tenant, community + 1, s.app_id.clone()),
-            ConfigKey::new(tenant, community, "waddles.bot.other.default"),
+            ConfigKey::new(tenant, community, "penguintechinc.waddles.bot-other"),
         ] {
             src.set(key, 1, r#"{"leak":true}"#);
         }
@@ -5369,7 +5369,7 @@ mod tests {
             FakeRelayQueue::default(),
             &[
                 "penguintechinc.waddles.fixture-bot-commands-default",
-                "waddles.bot.other",
+                "penguintechinc.waddles.bot-other",
             ],
         );
         caps.handle(
@@ -5384,7 +5384,7 @@ mod tests {
         .unwrap();
 
         let other_app = InvokeScope {
-            app_id: "waddles.bot.other".to_string(),
+            app_id: "penguintechinc.waddles.bot-other".to_string(),
             ..scope()
         };
         let result = caps

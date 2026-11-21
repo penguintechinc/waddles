@@ -1,5 +1,7 @@
 # v3.0.x SCBM Module + App Architecture Design
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 **Date:** 2026-08-26
 **Status:** Draft
 **Branch:** docs/v3-scbm-architecture
@@ -276,7 +278,7 @@ codebase has zero SPIFFE references outside standards documents.
 The word "module" currently means three different things in this repo, which is why the
 existing `services/` consolidation is hard to reason about:
 
-- a deployable container — `core/identity_core_module/`
+- a deployable container — core/identity_core_module
 - a marketplace-installable unit — `hub_module_installations.module_id`
 - a Python package — `action/interactive/*_module/`
 
@@ -300,20 +302,20 @@ needs it, it belongs in Core, and if only one does, it does not.
 
 | Core service | Seeded from | Responsibility |
 |--------------|-------------|----------------|
-| identity | `core/identity_core_module` | OIDC/JWT, tenant claim, scopes |
-| security | `core/security_core_module` | authz enforcement, audit |
-| credentials | `core/credential_manager_module` | per-tenant secret custody |
-| tenancy | `core/community_module` | tenants, communities, membership |
+| identity | core/identity_core_module | OIDC/JWT, tenant claim, scopes |
+| security | core/security_core_module | authz enforcement, audit |
+| credentials | core/credential_manager_module | per-tenant secret custody |
+| tenancy | core/community_module | tenants, communities, membership |
 | event bus | `flask_core.stream_pipeline`, consolidated | **a shared library over Valkey Streams, not a service** — see Transport |
-| workflow | `core/workflow_core_module` | cross-Module automation |
-| analytics | `core/analytics_core_module` | shared telemetry sink |
-| marketplace | `admin/marketplace_module` | catalog, vendors, subscriptions, App installs + bindings |
+| workflow | core/workflow_core_module | cross-Module automation |
+| analytics | core/analytics_core_module | shared telemetry sink |
+| marketplace | admin/marketplace_module | catalog, vendors, subscriptions, App installs + bindings |
 | hub | `admin/hub_module` | admin shell that mounts enabled Modules |
 | entitlement client | new, wraps `penguin-licensing` + PostHog | the Feature gate |
 
 ### The router split
 
-`processing/router_module` today mixes two concerns: generic event routing, and
+processing/router_module today mixes two concerns: generic event routing, and
 Twitch/Discord command semantics (command registry, cooldowns, emote handling).
 
 The generic half becomes the Core **event bus** — which is a *library*, not a service. It is
@@ -489,8 +491,8 @@ between community and default.
 model.** Modules, Features and Apps are code and configuration; they do not each get a pod.
 v2.2.x's ~40 co-equal containers are the cost of having conflated the two.
 
-The spine is a **pipeline**, which is already the shape of the system — `trigger/receiver`
-→ `processing/router` → `action/*` — just spread across forty containers instead of three:
+The spine is a **pipeline**, which is already the shape of the system — trigger/receiver
+→ processing/router → `action/*` — just spread across forty containers instead of three:
 
 ```
         ┌──────────────┐      ┌──────────────┐      ┌──────────────┐
@@ -632,7 +634,7 @@ per tenant also maps naturally onto the Enterprise tier if it becomes a commerci
 
 `flask_core.stream_pipeline.StreamPipeline` already implements this — `XADD`,
 `XREADGROUP`, `XGROUP CREATE`, acking, and a DLQ. It is used by **exactly one service**
-(`processing/router_module`), behind an off-by-default flag. There is also a second,
+(processing/router_module), behind an off-by-default flag. There is also a second,
 overlapping implementation in `flask_core.message_queue.MessageQueue`.
 
 So the capability is built and unused. v3's work is adoption and consolidation, not
@@ -1015,7 +1017,7 @@ three that were noticed.
 app. The seven-container consolidation is therefore partly prototyped rather than green-field
 — harvest it, but replace its `sys.path.insert` imports with real packaging.
 
-**`core/module_rtc` is rewritten in Rust** during P3, per the Go phase-out rule. It stays
+**core/module_rtc is rewritten in Rust** during P3, per the Go phase-out rule. It stays
 `svc-rtc` either way — UDP media transport cannot share a pod with HTTP stages — so the
 decision is language, not placement.
 

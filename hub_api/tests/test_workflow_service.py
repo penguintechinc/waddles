@@ -5,8 +5,7 @@ entirely (`FakeWorkflowCore`, no real network I/O) -- which means the
 actual `httpx` call and success/failure/timeout branching inside
 `WorkflowCoreProxyClient.request()` is exercised nowhere else. This file
 closes that gap with `httpx.MockTransport` (real `httpx` request/response
-objects, no real socket), mirroring `tests/test_event_calendar_proxy.py`'s
-own pattern for the sibling Event group's proxy client. Also covers
+objects, no real socket). Also covers
 `validate_license()`'s DB-driven branches directly (no HTTP involved).
 """
 

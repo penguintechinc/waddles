@@ -28,6 +28,7 @@ services/clip_service.py`.
 from __future__ import annotations
 
 import os
+import uuid as _uuid
 from datetime import datetime
 from typing import Any
 
@@ -163,6 +164,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("updated_at", "datetime"),
             dal.Field("published_at", "datetime"),
             dal.Field("archived_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -226,6 +228,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("created_by", "integer"),
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -248,6 +251,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("platform_thread_id", "string"),
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -262,6 +266,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("content", "text", notnull=True),
             dal.Field("platform_message_id", "string"),
             dal.Field("created_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -278,6 +283,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("base_claims", "json"),
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -319,6 +325,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
             dal.Field("deleted_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 

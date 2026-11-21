@@ -849,6 +849,137 @@ infrastructure:
         cpu: "250m"
         memory: "256Mi"
 
+  # Per-service Valkey ACL users (security finding: every client authenticated as the shared
+  # `default` user with `~*`). Each service gets its OWN ACL user on each instance it needs,
+  # scoped to the key families it actually uses (inventory: docs/valkey-acl.md) and an
+  # allow-list of command categories (-@all first, -@dangerous last: no FLUSHALL/KEYS/CONFIG
+  # SET/ACL/DEBUG/...). Passwords are generated create-if-absent per service by the
+  # provision-secrets hook into <fullname>-valkey-user-<name> (keys VALKEY_DURABLE_PASSWORD /
+  # VALKEY_KV_PASSWORD), never in values, never logged; the Valkey pods receive them via
+  # secretKeyRef and pass only SHA-256 hashes (`#hex`) to the ACL rules.
+  # Bundle executors get NO user at all: bundles reach kv only through the host capability
+  # served by svc-process / svc-action, whose users hold `bundlekv:*`.
+  # Rules (enforced at render AND by scripts/ci/check-valkey-acl-least-privilege.py):
+  #   - name: ^[a-z][a-z0-9-]{1,30}$, never default/admin/probe;
+  #   - keys: explicit `~prefix...`, `%R~prefix...`, `%W~prefix...` patterns with a literal
+  #     prefix -- never `~*`, `allkeys` or a pattern starting with `*`;
+  #   - commands: must start with -@all; never +@all/allcommands/+@dangerous/+@admin, never
+  #     +flushall/+flushdb/+keys/+acl/+config (only `+config|get`), no pub/sub channels.
+  # Omit `commands` to inherit the instance's base allow-list below.
+  valkeyAcl:
+    # TRANSITIONAL (rollout step 2 of 3, docs/valkey-acl.md). true = the legacy password-only
+    # `default` user (old shared password, `~*`) stays enabled so clients that have not yet been
+    # switched to their own user keep working mid-roll. Flip to false once every client
+    # authenticates as its own user (step 3): `default` is then `reset` (off, no password, no
+    # keys, no commands) and an unauthenticated connection gets NOAUTH.
+    legacyDefaultUser: true
+    durableBaseCommands: "-@all +@connection +@read +@write +@stream +@keyspace +@transaction +@scripting -@dangerous"
+    # `+time` / `+config|get` AFTER -@dangerous: bundle_host_kv's Lua calls TIME and the kv
+    # wiring probes `CONFIG GET maxmemory-policy` (see valkey-kv.yaml).
+    kvBaseCommands: "-@all +@connection +@read +@write +@keyspace +@transaction +@scripting -@dangerous +time +config|get"
+    users:
+      # Rust ingest stage: writes per-source spine streams + analytics; drains the outbound
+      # transport queues; its own lease/dedupe/budget/session state; producer-only on the
+      # platform-unban event list (the consumer is svc-action).
+      svc-ingest:
+        durable:
+          keys:
+            - "~waddles:t:*:src:*"
+            - "~waddles:analytics"
+            - "%R~keys:tenant-dek:invalidate"
+            - "~waddles:transport:*"
+            - "~outbound:seen:*"
+            - "~waddles:ingest:*"
+            - "~waddles.ingest.interaction.*"
+            - "~waddles:webhook:dedup:*"
+            - "~waddles:eventsub:dedup:*"
+            - "~waddles:control:twitch:*"
+            - "~waddles:discord:*"
+            - "~waddles:connector:identify-budget:*"
+            - "~waddles:canary:latency:*"
+            - "~waddles:platform-unban:*:events"
+      # Rust process stage: consumes source streams, enqueues :action streams, serves the
+      # bundle-admin queue; host of the bundle `kv` + `media` capabilities on valkey-kv.
+      svc-process:
+        durable:
+          keys:
+            - "~waddles:t:*:src:*"
+            - "~waddles:t:*:app:*:action"
+            - "~waddles:dlq:process"
+            - "~waddles:bundle-admin:*"
+            - "%R~bundle:grants:invalidate"
+            - "%R~keys:tenant-dek:invalidate"
+            - "%R~waddles:bundle_config:v*"
+        kv:
+          keys:
+            - "~bundlekv:*"
+            - "~media:*"
+      # Rust action stage: consumes :action streams, enqueues outbound transport ops, rate
+      # limits, event-sync worker, usage metering, platform-unban consumer; bundle `kv` host.
+      svc-action:
+        durable:
+          keys:
+            - "~waddles:t:*:app:*:action"
+            - "~waddles:dlq:action"
+            - "~waddles:transport:*"
+            - "~waddles:ratelimit:*"
+            - "~waddles:event-sync:*"
+            - "~waddles:usage"
+            - "~waddles:platform-unban:*"
+            - "%R~bundle:grants:invalidate"
+            - "%R~waddles:bundle_config:v*"
+        kv:
+          keys:
+            - "~bundlekv:*"
+      # Rust analytics consumer: one stream + its DLQ, stream commands only.
+      svc-analytics:
+        durable:
+          keys:
+            - "~waddles:analytics"
+            - "~waddles:analytics:dlq"
+          commands: "-@all +@connection +@stream -@dangerous"
+      # hub-api (control plane): producer of the invalidation streams + admin/event-sync
+      # request queues, reader of their results, usage aggregator, token revocation, caches.
+      # NO delivery-stream write, NO platform-unban, NO bundlekv on the durable instance.
+      hub-api:
+        durable:
+          keys:
+            - "~waddles:jwt:*"
+            - "~waddles:landing:*"
+            - "~waddles:bundle_config:*"
+            - "~waddles:bundle-admin:requests"
+            - "~waddles:bundle-admin:result:*"
+            - "~waddles:event-sync:discord:requests"
+            - "~waddles:event-sync:discord:result:*"
+            - "~waddles:usage"
+            - "~bundle:grants:invalidate"
+            - "~keys:tenant-dek:invalidate"
+        # GDPR erasure of bundle kv data only: SCAN + UNLINK, no reads.
+        kv:
+          keys:
+            - "~bundlekv:*:data:*"
+          commands: "-@all +@connection +scan +unlink"
+      # role-sync-inbound CronJob: consumes the Discord source streams (XGROUP/XREADGROUP/XACK
+      # need read+write on the stream, so this is `~`, not `%R~`) + its own DLQ.
+      role-sync-inbound:
+        durable:
+          keys:
+            - "~waddles:t:*:src:discord:*"
+            - "~waddles:dlq:role_sync_inbound"
+          commands: "-@all +@connection +@read +@write +@stream -@dangerous"
+      # landing-stats CronJob: its own cache key family.
+      landing-stats:
+        durable:
+          keys:
+            - "~waddles:landing:*"
+          commands: "-@all +@connection +@read +@write +@keyspace -@dangerous"
+      # core-bundle-seeder Job: grant invalidation + bundle-config version bump.
+      core-bundle-seeder:
+        durable:
+          keys:
+            - "~bundle:grants:invalidate"
+            - "~waddles:bundle_config:*"
+
   # SeaweedFS Object Storage (replaces MinIO -- quay.io/minio/{minio,mc} started
   # returning 401 on anonymous pulls and Docker Hub never carried them; see
   # feature/seaweedfs-object-storage PR description for the full rationale).
@@ -2676,7 +2807,7 @@ config:
   # ('' = public form returns 503, fail closed); public verification page base URL.
   dsarUnverifiedExpiryHours: 72
   dsarContactRetentionDays: 30
-  dsarCaptchaProvider: ""
+  dsarCaptchaProvider: ""   # blank => altcha (self-hosted; key auto-generated by provision-secrets). turnstile|recaptcha are opt-in and need the operator Secret waddlebot-dsar-captcha
   dsarCaptchaSiteKey: ""
   dsarCaptchaHostnames: ""   # comma list; blank => host of the verify URL
   dsarRecaptchaVersion: "v3"  # v3 enforces score + action; v2 has neither
@@ -2854,7 +2985,7 @@ tetragon:
 # exact digest hub_api/Dockerfile's own FROM line already uses (Debian-only per
 # devops-containers.md; no new image to track/scan).
 waitForHubApi:
-  image: "python:3.13-slim-bookworm@sha256:a1165e272e578941b84abc79e4ab38a0305cd12803a5c4247979ac7655f4d641"
+  image: "python:3.13-slim-bookworm@sha256:a5a7017efc5969e00ae2b91c8eb0631049a569652aa4ffc4501769049ae45c72"
   stableChecks: 3
   stableIntervalSeconds: 5
   maxBackoffSeconds: 30

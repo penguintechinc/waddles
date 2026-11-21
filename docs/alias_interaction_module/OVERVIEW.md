@@ -37,7 +37,7 @@ This module integrates seamlessly with the WaddleBot ecosystem through the Flask
 
 | Item | Value |
 |---|---|
-| **Source Directory** | `action/interactive/alias_interaction_module/` |
+| **Source Directory** | action/interactive/alias_interaction_module |
 | **Language** | Python 3.12 |
 | **Framework** | Quart (async Flask) |
 | **Default Port** | 8010 (HTTP) |

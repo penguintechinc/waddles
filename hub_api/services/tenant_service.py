@@ -171,6 +171,7 @@ async def get_tenant_admins(async_dal: Any, dal: Any, *, tenant_id: int) -> list
         dal.tenant_admins.user_id,
         dal.tenant_admins.role,
         dal.tenant_admins.created_at,
+        dal.hub_users.uuid,
         dal.hub_users.username,
         dal.hub_users.display_name,
         dal.hub_users.email,

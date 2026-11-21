@@ -32,6 +32,7 @@ from quart_schema.openapi import OpenAPIProvider
 from werkzeug.datastructures import ImmutableDict
 from werkzeug.routing import BaseConverter
 
+from services.errors import not_found
 from services.schema import bind_auth_tables, bind_tenant_tables
 
 #: Converter name used in route rules: `<cuuid:community_id>`.
@@ -77,7 +78,9 @@ class CommunityOpenAPIProvider(OpenAPIProvider):
     def build_path_parameter(self, name: str, converter: BaseConverter) -> dict[str, Any]:
         """Path parameter object; `cuuid` is a UUID string, everything else is stock."""
         parameter = super().build_path_parameter(name, converter)
-        if isinstance(converter, CommunityUuidConverter):
+        if isinstance(converter, CommunityUuidConverter) or getattr(
+            converter, "public_uuid", False
+        ):
             parameter["schema"] = {"type": "string", "format": "uuid"}
         return parameter
 
@@ -190,6 +193,10 @@ async def lookup_public_id(community_id: int) -> str:
     `communities.public_id` is NOT NULL since alembic 0084, so a missing row/value is a bug and
     raises `RuntimeError` (fail loud) rather than emitting the numeric id.
     """
+    if community_id == UNKNOWN_COMMUNITY_ID:
+        # A well-formed UUID no community owns reached response construction (a global admin
+        # passes the tenant fence): that is "no such community" (404), never a 500.
+        raise not_found("Community not found")
     async_dal = current_app.config["async_dal"]
     dal = current_app.config["dal"]
     if "communities" not in dal.tables:

@@ -231,6 +231,7 @@ async def list_pairings(
 @guild_pairing_bp.route("/communities/<cuuid:community_id>/guild-pairings", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(GuildPairingResponse, status_code=201)
 async def create_pairing(
     community_id: int,
@@ -313,6 +314,7 @@ def _install_redirect_uri() -> str:
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(ServerInstallAuthorizeResponse)
 async def start_server_install(
     community_id: int,
@@ -371,6 +373,7 @@ async def start_server_install(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(GuildPairingResponse)
 async def update_pairing(
     community_id: int, pairing_id: int
@@ -411,6 +414,7 @@ async def update_pairing(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
@@ -457,6 +461,7 @@ async def list_bindings(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleSyncBindingResponse, status_code=201)
 async def create_binding(
     community_id: int, pairing_id: int
@@ -492,6 +497,7 @@ async def create_binding(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_binding(community_id: int, pairing_id: int, binding_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>/role-bindings/<binding_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
@@ -567,6 +573,7 @@ async def list_role_mirrors(
 @guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/role-mirrors", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleMirrorMappingResponse, status_code=201)
 async def create_role_mirror(
     community_id: int,
@@ -600,6 +607,7 @@ async def create_role_mirror(
 )
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 async def delete_role_mirror(community_id: int, mapping_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/discord/role-mirrors/<mapping_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)

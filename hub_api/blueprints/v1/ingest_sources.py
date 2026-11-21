@@ -296,6 +296,7 @@ async def list_ingest_sources(
 @ingest_sources_bp.route("", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:admin")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 @validate_request(CreateIngestSourceRequest)
 @validate_response(IngestSourceResponse, status_code=201)
 async def create_ingest_source(
@@ -306,6 +307,7 @@ async def create_ingest_source(
     install_dal = _install_dal()
     try:
         community_id, community_pid = await _community(community_public_id)
+        _require_community_admin(community_id)
         row = await svc.create_ingest_source(
             install_dal,
             tenant_id=tenant_id,
@@ -323,6 +325,7 @@ async def create_ingest_source(
 @ingest_sources_bp.route("/<string:ingest_source_id>", methods=["PATCH"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:admin")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 @validate_request(UpdateIngestSourceRequest)
 @validate_response(IngestSourceResponse)
 async def update_ingest_source(
@@ -333,6 +336,7 @@ async def update_ingest_source(
     install_dal = _install_dal()
     try:
         community_id, community_pid = await _community(community_public_id)
+        _require_community_admin(community_id)
         internal_id = await _source_internal_id(community_id, ingest_source_id)
         row = await svc.update_ingest_source(
             install_dal,
@@ -351,12 +355,14 @@ async def update_ingest_source(
 @ingest_sources_bp.route("/<string:ingest_source_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:admin")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def delete_ingest_source(community_public_id: str, ingest_source_id: str) -> tuple[Any, int]:
     """`DELETE .../ingest-sources/<uuid>` -- hard-deletes the source, disables its workstream."""
     tenant_id = _tenant_id()
     install_dal = _install_dal()
     try:
         community_id, _ = await _community(community_public_id)
+        _require_community_admin(community_id)
         internal_id = await _source_internal_id(community_id, ingest_source_id)
         deleted = await svc.delete_ingest_source(
             install_dal,

@@ -10,7 +10,7 @@ import { BundleAdminError, bundleAdminApi } from '../bundleAdminApi';
 
 vi.mock('../../lib/apiClient', () => ({ apiClient: { get: vi.fn(), put: vi.fn() } }));
 const client = vi.mocked(apiClient);
-const BASE = '/api/v1/apps/community/00000007-0000-4000-8000-000000000000/bundles/waddles.a.b.c';
+const BASE = '/api/v1/apps/community/00000007-0000-4000-8000-000000000000/bundles/penguintechinc.waddles.a-b-c';
 
 function axiosFail(status: number, data: unknown): AxiosError {
   const headers = new AxiosHeaders();
@@ -24,9 +24,9 @@ beforeEach(() => vi.clearAllMocks());
 describe('bundleAdminApi', () => {
   it('hits descriptor, config and history routes', async () => {
     client.get.mockResolvedValue({ data: { versions: [{ version: 1 }] } });
-    await bundleAdminApi.descriptor('00000007-0000-4000-8000-000000000000', 'waddles.a.b.c');
-    await bundleAdminApi.getConfig('00000007-0000-4000-8000-000000000000', 'waddles.a.b.c');
-    expect(await bundleAdminApi.history('00000007-0000-4000-8000-000000000000', 'waddles.a.b.c')).toEqual([{ version: 1 }]);
+    await bundleAdminApi.descriptor('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.a-b-c');
+    await bundleAdminApi.getConfig('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.a-b-c');
+    expect(await bundleAdminApi.history('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.a-b-c')).toEqual([{ version: 1 }]);
     expect(client.get).toHaveBeenNthCalledWith(1, `${BASE}/admin`);
     expect(client.get).toHaveBeenNthCalledWith(2, `${BASE}/config`);
     expect(client.get).toHaveBeenNthCalledWith(3, `${BASE}/config/history`, { params: { limit: 20 } });
@@ -34,7 +34,7 @@ describe('bundleAdminApi', () => {
 
   it('PUTs config with expectedVersion', async () => {
     client.put.mockResolvedValue({ data: { version: 3 } });
-    expect(await bundleAdminApi.saveConfig('00000007-0000-4000-8000-000000000000', 'waddles.a.b.c', { x: 1 }, 2)).toEqual({ version: 3 });
+    expect(await bundleAdminApi.saveConfig('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.a-b-c', { x: 1 }, 2)).toEqual({ version: 3 });
     expect(client.put).toHaveBeenCalledWith(`${BASE}/config`, { config: { x: 1 }, expectedVersion: 2 });
   });
 
@@ -42,7 +42,7 @@ describe('bundleAdminApi', () => {
     client.put.mockRejectedValue(
       axiosFail(422, { error: { code: 'config_invalid', message: 'bad', details: { errors: [{ path: '$.x', rule: 'type' }] } } }),
     );
-    const err = await bundleAdminApi.saveConfig('00000007-0000-4000-8000-000000000000', 'waddles.a.b.c', {}, 0).catch((e: unknown) => e);
+    const err = await bundleAdminApi.saveConfig('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.a-b-c', {}, 0).catch((e: unknown) => e);
     expect(err).toBeInstanceOf(BundleAdminError);
     expect((err as BundleAdminError).status).toBe(422);
     expect((err as BundleAdminError).code).toBe('config_invalid');
@@ -51,7 +51,7 @@ describe('bundleAdminApi', () => {
 
   it('falls back to a status code when the body has no envelope', async () => {
     client.get.mockRejectedValue(axiosFail(500, null));
-    const err = (await bundleAdminApi.getConfig('00000007-0000-4000-8000-000000000000', 'waddles.a.b.c').catch((e: unknown) => e)) as BundleAdminError;
+    const err = (await bundleAdminApi.getConfig('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.a-b-c').catch((e: unknown) => e)) as BundleAdminError;
     expect(err.code).toBe('ERROR_500');
     expect(err.fieldErrors).toEqual([]);
   });
@@ -59,6 +59,6 @@ describe('bundleAdminApi', () => {
   it('rethrows non-HTTP failures unchanged', async () => {
     const net = new Error('offline');
     client.get.mockRejectedValue(net);
-    await expect(bundleAdminApi.descriptor('00000007-0000-4000-8000-000000000000', 'waddles.a.b.c')).rejects.toBe(net);
+    await expect(bundleAdminApi.descriptor('00000007-0000-4000-8000-000000000000', 'penguintechinc.waddles.a-b-c')).rejects.toBe(net);
   });
 });

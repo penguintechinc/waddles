@@ -40,7 +40,7 @@ The module is built on async Python using Quart framework and implements enterpr
 
 | Item | Value |
 |---|---|
-| Source | `action/interactive/shoutout_interaction_module/` |
+| Source | action/interactive/shoutout_interaction_module |
 | Language | Python 3.13 (Quart async framework) |
 | Port | 8011 |
 | Version | 2.0.0 |
