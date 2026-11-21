@@ -45,7 +45,7 @@ from services.community_common import (
     get_current_user,
     is_valid_service_key,
 )
-from services.route_guards import community_member_guard
+from services.route_guards import community_admin_guard, community_member_guard
 
 activity_member_bp = Blueprint(
     "v1_community_activity_member", __name__, url_prefix="/api/v1/community"
@@ -146,6 +146,7 @@ async def my_activity_stats(
 @activity_admin_bp.route("/<cuuid:community_id>/leaderboard-config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(LeaderboardConfigResponse)
 async def leaderboard_config_get(
     community_id: int,
@@ -162,6 +163,7 @@ async def leaderboard_config_get(
 @activity_admin_bp.route("/<cuuid:community_id>/leaderboard-config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def leaderboard_config_update(community_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/leaderboard-config`."""
     ctx = get_tenant_context(request)

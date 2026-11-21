@@ -181,7 +181,7 @@ def _url(db: Any, user: int = MEMBER) -> str:
 
 
 def _h(user: int, *, scope: str = "tenant:admin") -> dict[str, str]:
-    """A bearer for `user`; the default carries the tenant-admin scope (a claim, not proof)."""
+    """A bearer for `user`; `scope` is irrelevant to authorization (the DB role decides)."""
     token = make_user_token(user_id=user, scope=scope, tenant=TENANT_SLUG)
     return {"Authorization": f"Bearer {token}"}
 
@@ -243,19 +243,20 @@ class TestFloorBanLift:
     async def test_tenant_admin_scope_claim_without_the_db_row_is_refused(
         self, client: Any, db: Any
     ) -> None:
-        """Keyed deny test: the `tenant:admin` claim alone is not proof (no `tenant_admins` row)."""
+        """Keyed deny test: a tenant-admin TOKEN without the `tenant_admins` DB row is refused."""
         _ban(db)
         resp = await client.delete(_url(db), headers=_h(MEMBER, scope="tenant:admin"))
         assert resp.status_code == 403
         assert not _allowed(db)
 
-    async def test_missing_tenant_admin_scope_is_refused_even_for_a_tenant_admin(
+    async def test_authorization_is_the_db_row_never_a_token_scope(
         self, client: Any, db: Any
     ) -> None:
+        """A tenant admin is admitted by the `tenant_admins` row whatever scopes the token has."""
         _ban(db)
         resp = await client.delete(_url(db), headers=_h(TENANT_ADMIN, scope=""))
-        assert resp.status_code == 403
-        assert not _allowed(db)
+        assert resp.status_code == 200
+        assert _allowed(db)
 
     @pytest.mark.parametrize("caller", (MEMBER, ADMIN))
     async def test_non_tenant_admin_is_refused_and_ban_stays(

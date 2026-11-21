@@ -125,10 +125,6 @@ NOSCOPE_ALLOWLIST: dict[str, str] = {
     "/api/v1/admin/<cuuid:community_id>/inventory/checkout": "member gate community_inventory_authz.py:115",
     "/api/v1/admin/<cuuid:community_id>/inventory/checkin": "member gate community_inventory_authz.py:115",
     "/api/v1/admin/<cuuid:community_id>/inventory/my-items": "member gate community_inventory_authz.py:115",
-    "/api/v1/admin/<cuuid:community_id>/support/": (
-        "member self-service + category list: DB membership gate blueprints/v1/support.py:92 "
-        "(`_member_gate`); deny tests tests/test_v1_support_blueprint.py::TestMemberGate"
-    ),
 }
 
 #: Where the admin routes that used to be "UNVERIFIED" are enforced. The walker already proves a

@@ -5,15 +5,17 @@ api.js`'s pinned contract and `routes/support.js`'s own admin/member split:
 
 - Admin (`AdminSupportDashboard.jsx`/`AdminSupportTicketDetail.jsx`):
   category CRUD, ticket triage (list/get/status/assign/priority/comment),
-  stats -- `tenant_middleware` + `require_scope("community.support:admin")`,
+  stats -- `tenant_middleware` + `require_scope("community.support:admin")` +
+  `@community_admin_guard` (the scope is TENANT-WIDE, so the guard supplies the
+  per-community admin standing),
   matching Node's `requireCommunityAdmin` and the established
   `community.<group>:admin` scope convention (`blueprints/v1/
   community_activity.py`).
 - Member (`SupportSubmitTicket.jsx`/`SupportMyTickets.jsx`): category read
   (view-only, needed for the ticket-submission form), submit, own-tickets
   list/get/comment -- `tenant_middleware` + an ACTIVE community-membership
-  check (`_member_gate`, 403 for a signed-in non-member). Node's plain
-  `requireAuth` let any tenant user act on any community's support desk;
+  check (`@community_member_guard`, 403 for a signed-in non-member of the URL
+  community). Node's plain `requireAuth` let any tenant user act on any community's support desk;
   the own-resource rule (`require_reporter_id`) still applies on top.
 
 **SECURITY FIX** (see `services/support_service.py`'s module docstring):
@@ -32,18 +34,18 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
-from flask_core.authz import has_required_scopes, require_scope
+from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request
 
 from services import support_service as svc
-from services.community_authz import _jwt_scopes
 from services.community_common import api_error, community_in_tenant
 from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dal, reads_from_replica
 from services.errors import ApiError
+from services.route_guards import community_admin_guard, community_member_guard
 
 ADMIN_SUPPORT_SCOPE = "community.support:admin"
 
@@ -64,34 +66,6 @@ def _tenant_ok(community_id: int) -> bool:
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     return community_in_tenant(current_app.config["dal"], community_id, ctx)
-
-
-def _member_gate(
-    community_id: int, *, admin_scope_ok: bool = False
-) -> tuple[dict[str, object], int] | None:
-    """404 for a cross-tenant community, 403 unless the caller is an ACTIVE member of it.
-
-    Member self-service routes act on the caller's own tickets, but a signed-in user who
-    does not belong to the community must still not file tickets in, read the categories
-    of, or comment within another community's support desk -- `tenant_middleware` alone
-    only proves the community shares the caller's tenant. `admin_scope_ok` lets a holder of
-    `community.support:admin` through without membership (the admin dashboard reads the same
-    category list).
-    """
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
-    if admin_scope_ok and has_required_scopes(_jwt_scopes(request), (ADMIN_SUPPORT_SCOPE,)):
-        return None
-    dal = current_app.config["dal"]
-    user_id = get_current_user_id(request)
-    rows = dal(
-        (dal.community_members.community_id == community_id)
-        & (dal.community_members.user_id == str(user_id))
-        & (dal.community_members.is_active == True)  # noqa: E712 - pydal idiom
-    ).select(limitby=(0, 1))
-    if not rows:
-        return api_error("Community membership required", status_code=403)
-    return None
 
 
 def _int_arg(name: str, default: int) -> int:
@@ -306,11 +280,9 @@ def _comment_dto(row: Any) -> CommentDTO:
 
 @support_admin_bp.route("/<cuuid:community_id>/support/categories", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def list_categories(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/categories` -- active member or support admin."""
-    denied = _member_gate(community_id, admin_scope_ok=True)
-    if denied is not None:
-        return denied
     dal = current_app.config["dal"]
     rows = svc.list_categories(dal, community_id)
     cpid = await lookup_public_id(community_id)
@@ -320,6 +292,7 @@ async def list_categories(community_id: int) -> tuple[dict[str, object], int]:
 @support_admin_bp.route("/<cuuid:community_id>/support/categories", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(CreateCategoryRequest)
 async def create_category(
     data: CreateCategoryRequest, community_id: int
@@ -348,6 +321,7 @@ async def create_category(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(UpdateCategoryRequest)
 async def update_category(
     data: UpdateCategoryRequest, community_id: int, category_id: int
@@ -378,6 +352,7 @@ async def update_category(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_category(community_id: int, category_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/support/categories/<categoryId>`."""
     if not _tenant_ok(community_id):
@@ -398,6 +373,7 @@ async def delete_category(community_id: int, category_id: int) -> tuple[dict[str
 @support_admin_bp.route("/<cuuid:community_id>/support/tickets", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def list_tickets(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/tickets` -- filters + pagination."""
     if not _tenant_ok(community_id):
@@ -424,6 +400,7 @@ async def list_tickets(community_id: int) -> tuple[dict[str, object], int]:
 @support_admin_bp.route("/<cuuid:community_id>/support/tickets/<int:ticket_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def get_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/tickets/<ticketId>` -- includes internal comments."""
     if not _tenant_ok(community_id):
@@ -447,6 +424,7 @@ async def get_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, objec
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(UpdateStatusRequest)
 async def update_ticket_status(
     data: UpdateStatusRequest, community_id: int, ticket_id: int
@@ -468,6 +446,7 @@ async def update_ticket_status(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(AssignRequest)
 async def assign_ticket(
     data: AssignRequest, community_id: int, ticket_id: int
@@ -489,6 +468,7 @@ async def assign_ticket(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(UpdatePriorityRequest)
 async def update_ticket_priority(
     data: UpdatePriorityRequest, community_id: int, ticket_id: int
@@ -510,6 +490,7 @@ async def update_ticket_priority(
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_request(AddCommentRequest)
 async def add_comment(
     data: AddCommentRequest, community_id: int, ticket_id: int
@@ -538,6 +519,7 @@ async def add_comment(
 @support_admin_bp.route("/<cuuid:community_id>/support/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @reads_from_replica("support.get_ticket_stats")
 async def get_ticket_stats(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/stats`."""
@@ -566,14 +548,12 @@ async def get_ticket_stats(community_id: int) -> tuple[dict[str, object], int]:
 
 @support_member_bp.route("/<cuuid:community_id>/support/submit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_request(CreateTicketRequest)
 async def submit_ticket(
     data: CreateTicketRequest, community_id: int
 ) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/support/submit`."""
-    denied = _member_gate(community_id)
-    if denied is not None:
-        return denied
     dal = current_app.config["dal"]
     user_id = get_current_user_id(request)
     fallback_name, fallback_email = _reporter_identity(dal, user_id)
@@ -598,11 +578,9 @@ async def submit_ticket(
 
 @support_member_bp.route("/<cuuid:community_id>/support/my-tickets", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def get_my_tickets(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/my-tickets`."""
-    denied = _member_gate(community_id)
-    if denied is not None:
-        return denied
     dal = current_app.config["dal"]
     user_id = get_current_user_id(request)
     pairs = svc.get_my_tickets(dal, community_id, user_id)
@@ -614,11 +592,9 @@ async def get_my_tickets(community_id: int) -> tuple[dict[str, object], int]:
     "/<cuuid:community_id>/support/my-tickets/<int:ticket_id>", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def get_my_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/support/my-tickets/<ticketId>` -- reporter-only (SECURITY FIX)."""
-    denied = _member_gate(community_id)
-    if denied is not None:
-        return denied
     dal = current_app.config["dal"]
     user_id = get_current_user_id(request)
     try:
@@ -642,6 +618,7 @@ async def get_my_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, ob
     "/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_request(AddOwnCommentRequest)
 async def add_own_comment(
     data: AddOwnCommentRequest, community_id: int, ticket_id: int
@@ -650,9 +627,6 @@ async def add_own_comment(
 
     Reporter-only (SECURITY FIX -- see this module's docstring).
     """
-    denied = _member_gate(community_id)
-    if denied is not None:
-        return denied
     dal = current_app.config["dal"]
     user_id = get_current_user_id(request)
     author_name, _ = _reporter_identity(dal, user_id)

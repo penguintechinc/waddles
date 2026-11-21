@@ -33,7 +33,6 @@ from typing import Any, cast
 from uuid import UUID
 
 from flask_core.api_utils import error_response
-from flask_core.authz import require_scope
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import document_response, validate_request, validate_response
@@ -60,10 +59,6 @@ from services.scope_registry import (
 )
 
 logger = logging.getLogger(__name__)
-
-#: The JWT scope every tenant-admin token carries (the DB-authoritative `tenant_admin_guard` is
-#: still applied: a scope is a claim, the `tenant_admins` row is the proof).
-SCOPE_TENANT_ADMIN = "tenant:admin"
 
 admin_bp = Blueprint("v1_admin", __name__, url_prefix="/api/v1/admin")
 
@@ -795,7 +790,6 @@ async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[A
 
 @admin_bp.route("/<cuuid:community_id>/reputation/floor-bans/<uuid:user_uuid>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope(SCOPE_TENANT_ADMIN)  # type: ignore[misc]
 @tenant_admin_guard  # type: ignore[misc]
 @document_response(MessageResponse)
 async def delete_reputation_floor_ban(community_id: int, user_uuid: UUID) -> tuple[Any, int]:
