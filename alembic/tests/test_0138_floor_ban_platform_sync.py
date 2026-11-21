@@ -31,7 +31,7 @@ _PATH = _ROOT / "alembic" / "versions" / "0138_floor_ban_platform_sync.py"
 _LIFT = "SELECT reputation_floor_ban_lift(%s, %s::uuid[], %s::uuid)"
 _PLATFORM_LIFT = (
     "SELECT r_lifted, r_soft_cleared FROM reputation_floor_ban_lift_from_platform("
-    "%s, %s, %s, %s::uuid, 'penguintechinc.waddles.chatguard')"
+    "%s, %s, %s, %s::uuid, 'penguintechinc.waddles.chatguard', 4102444800000)"
 )
 _ENQUEUE = (
     "SELECT r_state, r_id FROM reputation_floor_ban_enqueue("
@@ -599,7 +599,7 @@ class TestPlatformLiftHardening:
         _q(
             pg_db,
             "SELECT * FROM reputation_floor_ban_lift_from_platform(%s, %s, 'discord', %s::uuid, "
-            "'penguintechinc.waddles.chatguard')",
+            "'penguintechinc.waddles.chatguard', 4102444800000)",
             (tid, cid, user),
         )
         assert (
@@ -663,7 +663,7 @@ class TestPlatformLiftHardening:
             _q(
                 pg_db,
                 "SELECT * FROM reputation_floor_ban_lift_from_platform("
-                "%s, %s, 'discord', %s::uuid, NULL)",
+                "%s, %s, 'discord', %s::uuid, NULL, 4102444800000)",
                 (tid, cid, user),
             )
         assert _status(pg_db, rid) == 2
@@ -760,7 +760,7 @@ class TestRoundTrip:
         rid = _row(pg_db, tid, cid, user, 2)
         _q(pg_db, _LIFT, (tid, [user], str(uuid.uuid4())))
         assert len(_unbans(pg_db, tid, user)) == 1
-        alembic_cli("downgrade", "-1", dsn=pg_db.dsn)
+        alembic_cli("downgrade", "0137_floor_ban_lift", dsn=pg_db.dsn)
         cols = _q(
             pg_db,
             "SELECT column_name FROM information_schema.columns WHERE table_name = "
