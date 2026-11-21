@@ -198,6 +198,8 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
         for d in docs
         if d["kind"] == "Secret"
         and (d.get("stringData") or {}).get("VALKEY_KV_PASSWORD")
+        # per-service ACL user Secrets (test_valkey_acl_render.py) also carry this key name
+        and "-valkey-user-" not in d["metadata"]["name"]
     ]
     assert len(kv) == 1 and kv[0]["metadata"]["name"].endswith("-valkey-kv")
     pw = kv[0]["stringData"]["VALKEY_KV_PASSWORD"]
@@ -206,9 +208,14 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
     scanned = referrers = 0
     for d in docs:
         if d["kind"] == "Secret":
-            assert d is kv[0] or not any(
-                k.startswith("VALKEY_KV_") for k in (d.get("stringData") or {})
-            ), d["metadata"]["name"]
+            data = d.get("stringData") or {}
+            name = d["metadata"]["name"]
+            # The server-only probe Secret and the per-service ACL user Secrets
+            # (test_valkey_acl_render.py) own their OWN VALKEY_KV_* passwords, never this one.
+            if name.endswith("-valkey-kv-server") or "-valkey-user-" in name:
+                assert pw not in data.values(), name
+                continue
+            assert d is kv[0] or not any(k.startswith("VALKEY_KV_") for k in data), name
             continue
         blob = yaml.safe_dump(d)
         assert pw not in blob and _acl_sha256(pw) not in blob, d["metadata"]["name"]
