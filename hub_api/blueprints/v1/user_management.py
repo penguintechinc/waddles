@@ -263,9 +263,11 @@ def _row_dto(row: Any, *, is_super_admin: bool) -> UserDTO:
 async def list_users() -> ListUsersResponse | tuple[dict[str, object], int]:
     """List users."""
     async_dal, dal = _dal()
-    page = parse_page(request.args.get("page"))
-    if page is None:
-        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     role = request.args.get("role")

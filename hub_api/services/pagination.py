@@ -14,6 +14,10 @@ reinvent it a third time.
 
 from __future__ import annotations
 
+import re
+
+from services.errors import bad_request
+
 #: Hard ceiling when a call site doesn't pass its own `maximum=` --
 #: matches `HubAPIConfig.api_max_page_size`'s own default (`API_MAX_PAGE_SIZE`
 #: env var), kept as a plain constant here (not read from config) so this
@@ -21,6 +25,9 @@ from __future__ import annotations
 #: having already run -- callers that DO want the configured value pass
 #: `maximum=cfg.api_max_page_size` explicitly.
 DEFAULT_MAX_PAGE_SIZE = 100
+
+#: A page number: 1-9 ASCII digits (bounded so `int()` can never be handed a huge value).
+_PAGE_RE = re.compile(r"[0-9]{1,9}")
 
 
 def parse_limit(
@@ -43,15 +50,15 @@ def parse_limit(
     return min(maximum, max(minimum, parsed))
 
 
-def parse_page(raw: str | None) -> int | None:
-    """Parse a query-string `?page=` (default 1, values below 1 clamp to 1).
+def parse_page(raw: str | None) -> int:
+    """Parse a query-string `?page=`: missing/empty -> 1, otherwise a positive integer.
 
-    Returns `None` for a non-integer value so the caller answers 400 -- an unparsable page is a
-    client error, and a bare `int()` would otherwise surface it as a 500.
+    Validated explicitly (no exception-driven default): anything that is not 1-9 ASCII digits
+    raises a typed 400 `ApiError`, so a bad client value is a client error and never a 500.
+    Zero clamps to 1.
     """
     if raw is None or raw == "":
         return 1
-    try:
-        return max(1, int(raw))
-    except ValueError:
-        return None
+    if not _PAGE_RE.fullmatch(raw):
+        raise bad_request("Invalid page")
+    return max(1, int(raw))

@@ -38,6 +38,7 @@ flagged here as a natural follow-up, not silently invented.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
@@ -63,6 +64,7 @@ from services.user_public_id import (
     use_user_public_ids,
 )
 
+logger = logging.getLogger(__name__)
 platform_bp = Blueprint("v1_platform", __name__, url_prefix="/api/v1/platform")
 use_user_public_ids(platform_bp)
 
@@ -343,9 +345,11 @@ class PlatformStatsResponse:
 async def list_users() -> ListUsersResponse | tuple[dict[str, object], int]:
     """List users."""
     async_dal, dal = _dal()
-    page = parse_page(request.args.get("page"))
-    if page is None:
-        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     platform = request.args.get("platform")
@@ -470,9 +474,11 @@ async def deactivate_user(
 async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object], int]:
     """List communities."""
     async_dal, dal = _dal()
-    page = parse_page(request.args.get("page"))
-    if page is None:
-        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     is_active = request.args.get("isActive", "true") != "false"
@@ -618,9 +624,11 @@ async def get_system_health() -> tuple[SystemHealthResponse, int]:
 async def get_audit_log() -> AuditLogResponse | tuple[dict[str, object], int]:
     """Get audit log (append-only listing: scope-gated, no DB authz, replica lag is fine)."""
     async_dal, dal = get_read_dals()
-    page = parse_page(request.args.get("page"))
-    if page is None:
-        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
+    try:
+        page = parse_page(request.args.get("page"))
+    except ApiError as exc:
+        logger.info("invalid page rejected: code=%s", exc.code)
+        return _err(exc)
     limit = parse_limit(request.args.get("limit"), default=50)
     action = request.args.get("action")
     user_id_param = request.args.get("userId")
