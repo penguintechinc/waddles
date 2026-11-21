@@ -806,12 +806,19 @@ async fn identity_is_the_stored_numeric_id_a_renamed_channel_matches_a_mismatch_
 }
 
 #[tokio::test]
-async fn concurrent_fresh_reads_of_one_key_are_a_single_hub_call() {
+async fn waiters_that_asked_before_a_fresh_read_started_are_coalesced_into_it() {
     let inner = CountingLedger::new(Some("secret-1"));
-    inner
-        .delay_ms
-        .store(60, std::sync::atomic::Ordering::SeqCst);
     let cache = Arc::new(CachedLedger::new(Arc::clone(&inner)));
+    // Hold the key's gate so every caller records `asked` and queues before any read starts.
+    let gate = Arc::clone(
+        cache
+            .flights
+            .lock()
+            .unwrap()
+            .entry("key-12345678".to_string())
+            .or_default(),
+    );
+    let held = gate.lock().await;
     let mut tasks = Vec::new();
     for _ in 0..8 {
         let c = Arc::clone(&cache);
@@ -819,17 +826,51 @@ async fn concurrent_fresh_reads_of_one_key_are_a_single_hub_call() {
             c.lookup_fresh("key-12345678").await.unwrap().is_some()
         }));
     }
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    drop(held);
     for t in tasks {
         assert!(t.await.unwrap());
     }
     assert_eq!(
         inner.hits(),
         1,
-        "eight concurrent fresh reads coalesce into one"
+        "all eight asked before the read started: one hub call"
     );
-    // A later fresh read is a new read (never served from the old one).
+}
+
+#[tokio::test]
+async fn a_fresh_read_that_started_before_the_caller_asked_is_not_reused() {
+    let inner = CountingLedger::new(Some("secret-1"));
+    inner
+        .delay_ms
+        .store(80, std::sync::atomic::Ordering::SeqCst);
+    let cache = Arc::new(CachedLedger::new(Arc::clone(&inner)));
+    let c1 = Arc::clone(&cache);
+    let first = tokio::spawn(async move { c1.lookup_fresh("key-12345678").await });
+    // Let read #1 start, then (as if a revocation just happened) ask again mid-flight.
+    tokio::time::sleep(Duration::from_millis(30)).await;
+    *inner.secret.lock().unwrap() = None;
+    let second = cache.lookup_fresh("key-12345678").await.unwrap();
+    first.await.unwrap().unwrap();
+    assert!(
+        second.is_none(),
+        "the second caller must see the post-revocation row, not read #1's pre-revocation answer"
+    );
+    assert_eq!(
+        inner.hits(),
+        2,
+        "read #1 started before the second caller asked: a new read"
+    );
+}
+
+#[tokio::test]
+async fn plain_cached_entries_never_satisfy_a_fresh_read() {
+    let inner = CountingLedger::new(Some("secret-1"));
+    let cache = CachedLedger::new(Arc::clone(&inner));
+    cache.lookup("key-12345678").await.unwrap();
+    assert_eq!(inner.hits(), 1);
     cache.lookup_fresh("key-12345678").await.unwrap();
-    assert_eq!(inner.hits(), 2);
+    assert_eq!(inner.hits(), 2, "a fresh read always goes to hub-api");
 }
 
 #[tokio::test]

@@ -193,8 +193,17 @@ pub struct CachedLedger<L> {
     map: std::sync::Mutex<std::collections::HashMap<String, Cached>>,
     /// Per-key gate so concurrent fresh reads of one key coalesce into a single hub-api call.
     flights: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Per-key record of the last GATED fresh read, stamped with when its hub-api request STARTED.
+    /// Written only by [`SubscriptionLedger::lookup_fresh`]; never by the plain cached path.
+    generations: std::sync::Mutex<std::collections::HashMap<String, Generation>>,
     /// Last time a key's cache entry was evicted for a rotation retry (rate-limits eviction).
     evicted: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
+}
+
+/// One fresh read's answer and the instant its hub-api request started.
+struct Generation {
+    started: std::time::Instant,
+    entry: Option<(String, i64, i64, i64)>,
 }
 
 /// Minimum spacing between rotation-retry evictions of the same key: a flood of forged
@@ -218,6 +227,7 @@ impl<L: SubscriptionLedger> CachedLedger<L> {
             max: max.max(1),
             map: std::sync::Mutex::default(),
             flights: std::sync::Mutex::default(),
+            generations: std::sync::Mutex::default(),
             evicted: std::sync::Mutex::default(),
         }
     }
@@ -241,19 +251,51 @@ impl<L: SubscriptionLedger> CachedLedger<L> {
         }))
     }
 
-    /// The stored answer for `key` when it was stored at or after `since`.
-    fn stored_since(&self, key: &str, since: std::time::Instant) -> Option<Option<LedgerEntry>> {
-        let map = self.map.lock().ok()?;
-        let c = map.get(key)?;
-        if c.at < since {
+    /// The last gated fresh answer for `key` when its request started at or after `since`.
+    fn generation_since(
+        &self,
+        key: &str,
+        since: std::time::Instant,
+    ) -> Option<Option<LedgerEntry>> {
+        let gens = self.generations.lock().ok()?;
+        let g = gens.get(key)?;
+        if g.started < since {
             return None;
         }
-        Some(c.entry.as_ref().map(|(sec, t, co, cn)| LedgerEntry {
+        Some(g.entry.as_ref().map(|(sec, t, co, cn)| LedgerEntry {
             secret: SecretString::new(sec.clone()),
             tenant_id: *t,
             community_id: *co,
             connection_id: *cn,
         }))
+    }
+
+    fn record_generation(
+        &self,
+        key: &str,
+        started: std::time::Instant,
+        entry: Option<&LedgerEntry>,
+    ) {
+        let Ok(mut gens) = self.generations.lock() else {
+            return;
+        };
+        if gens.len() >= self.max && !gens.contains_key(key) {
+            gens.clear();
+        }
+        gens.insert(
+            key.to_string(),
+            Generation {
+                started,
+                entry: entry.map(|e| {
+                    (
+                        e.secret.expose().to_string(),
+                        e.tenant_id,
+                        e.community_id,
+                        e.connection_id,
+                    )
+                }),
+            },
+        );
     }
 
     fn store(&self, key: &str, entry: Option<&LedgerEntry>) {
@@ -315,10 +357,14 @@ impl<L: SubscriptionLedger> SubscriptionLedger for CachedLedger<L> {
                 Arc::clone(flights.entry(callback_key.to_string()).or_default())
             };
             let _held = gate.lock().await;
-            if let Some(hit) = self.stored_since(callback_key, asked) {
+            // Reuse a gated fresh read ONLY if its hub-api request started at or after this
+            // caller asked (so it cannot predate a revocation the caller already knows of).
+            if let Some(hit) = self.generation_since(callback_key, asked) {
                 return Ok(hit);
             }
+            let started = std::time::Instant::now();
             let found = self.inner.lookup_fresh(callback_key).await?;
+            self.record_generation(callback_key, started, found.as_ref());
             // Refresh the cache with what hub-api just said (a revoked row stops being served).
             self.store(callback_key, found.as_ref());
             Ok(found)
