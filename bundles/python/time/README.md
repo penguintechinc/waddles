@@ -1,4 +1,4 @@
-# time bundle (`waddles.core.example.time`)
+# time bundle (`penguintechinc.waddles.time`)
 
 `!time` -> current UTC time from the host clock capability. Python/WASM component modeled on `bundles/python/boop`.
 

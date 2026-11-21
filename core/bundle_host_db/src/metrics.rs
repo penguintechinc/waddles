@@ -121,7 +121,7 @@ mod tests {
         record_op_duration("insert", "ok", 0.001);
         record_rows("query", 3);
         record_call("get", "not_found");
-        record_quota_rejection("waddles.bot.a", "row_count");
-        record_authorize_denied("waddles.bot.a", DB_PERMISSION_ID);
+        record_quota_rejection("penguintechinc.waddles.fixture-bot-a", "row_count");
+        record_authorize_denied("penguintechinc.waddles.fixture-bot-a", DB_PERMISSION_ID);
     }
 }

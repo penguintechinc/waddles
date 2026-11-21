@@ -32,8 +32,8 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0017_loyalty_shoutout_apps.py"
 )
 
-LOYALTY_APP_ID = "waddles.community.loyalty.default"
-SHOUTOUT_APP_ID = "waddles.bot.shoutout.default"
+LOYALTY_APP_ID = "penguintechinc.waddles.loyalty-pipeline"
+SHOUTOUT_APP_ID = "penguintechinc.waddles.shoutout-pipeline"
 TENANT_SLUG = "global"
 BOT_TOKEN_REF = "DISCORD_BOT_TOKEN"
 
@@ -156,9 +156,9 @@ class TestUpgradeSeedsAppCatalog:
 
     def test_module_and_feature_follow_each_app_ids_namespace(self, upgrade_sql) -> None:
         assert "'community'" in upgrade_sql
-        assert "'waddles.community.loyalty'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
         assert "'bot'" in upgrade_sql
-        assert "'waddles.bot.shoutout'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
 
 
 class TestSeededStagesJsonIsValid:

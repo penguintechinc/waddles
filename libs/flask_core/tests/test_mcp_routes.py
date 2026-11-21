@@ -100,7 +100,7 @@ def seeded_registries(tenants: dict[str, int]) -> AsyncIterator[None]:
     feature_registry.register(ENTERPRISE_CONTRACT)
     app_registry.load(
         {
-            "app_id": "waddles.bot.shoutout.default",
+            "app_id": "penguintechinc.waddles.shoutout",
             "name": "Shoutout (default)",
             "version": "1.0.0",
             "feature": "waddles.bot.shoutout",
@@ -111,7 +111,7 @@ def seeded_registries(tenants: dict[str, int]) -> AsyncIterator[None]:
     )
     app_registry.load(
         {
-            "app_id": "waddles.bot.enterprise_thing.default",
+            "app_id": "penguintechinc.waddles.enterprise-thing",
             "name": "Enterprise Thing (default)",
             "version": "1.0.0",
             "feature": "waddles.bot.enterprise_thing",
@@ -391,4 +391,4 @@ class TestToolsCallGate:
         assert body["result"]["isError"] is False
         text = body["result"]["content"][0]["text"]
         assert "bot.shoutout@1" in text
-        assert "waddles.bot.shoutout.default" in text
+        assert "penguintechinc.waddles.shoutout" in text

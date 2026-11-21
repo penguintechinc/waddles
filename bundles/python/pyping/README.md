@@ -2,7 +2,7 @@
 
 `!pyping` -> `pong (py)` -- the minimal, real Python app bundle: the `componentize-py`
 equivalent of `bundles/rust/ping` (Rust) and `bundles/csharp/csping` (C#). First-party,
-**original Waddles content** (`provider: builtin`, `app_id: waddles.core.example.pyping`,
+**original Waddles content** (`provider: builtin`, `app_id: penguintechinc.waddles.pyping`,
 `author: PenguinTech/waddles`, Apache-2.0) -- no third-party attribution applies.
 
 It exists as the smallest end-to-end proof that a Python bundle compiles to a WASI 0.2

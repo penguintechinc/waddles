@@ -10,7 +10,7 @@ use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use svc_process::capabilities::EconomyWiring;
 use svc_process::identity::PgMemberDirectory;
 
-const SERVICE: &str = "waddles.core.service.economy";
+const SERVICE: &str = "penguintechinc.waddles.economy";
 const BOB: &str = "22222222-2222-4222-8222-222222222222";
 const PASSWORD: &str = "ephemeral-economy-e2e-password";
 

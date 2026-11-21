@@ -15,7 +15,7 @@ from waddle_sdk import event_dedupe, identity, log, relay, tool
 from waddle_sdk.command import CliArgument, CliCommandSpec, ParsedCliCommand, parse_cli_command
 from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 
-SERVICE = "waddles.core.service.economy"
+SERVICE = "penguintechinc.waddles.economy"
 _TARGET_ARGS = (
     CliArgument("user_value", required=False, help="host-issued user mention"),
     CliArgument("user", ("-u", "--user"), required=False, help="host-issued user mention"),

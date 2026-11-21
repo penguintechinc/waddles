@@ -54,7 +54,7 @@
 //! [`try_start_changelog_consumer`]'s multi-tenant `dispatch_spawner` read
 //! from the action stream via a named consumer group; running both for the
 //! same `app_id` splits one group's deliveries between two consumers
-//! (regression: `waddles.core.example.ping`, alpha 2026-10-03). Exactly one
+//! (regression: `penguintechinc.waddles.ping`, alpha 2026-10-03). Exactly one
 //! of the two ever starts per pod.
 //!
 //! The now-retired `GET /api/v1/distribution/bundles?stage=action` poll
@@ -315,7 +315,7 @@ where
     // `dispatch_spawner`, added by #550) both join a consumer group on the
     // SAME action stream whenever `ACTION_APP_ID` happens to match an
     // app_id the DB-driven path also serves (exactly what alpha hit for
-    // `waddles.core.example.ping`): two independent consumers split one
+    // `penguintechinc.waddles.ping`): two independent consumers split one
     // group's deliveries, so the legacy one dead-letters every entry it
     // receives (its own `Static` digest is empty, `UnknownBundle`). The
     // crate's top-doc "two sources run side by side, neither exclusive"
@@ -2470,8 +2470,11 @@ mod tests {
     /// constructing a license client, regardless of `ACTION_APP_ID`.
     #[tokio::test]
     async fn resolve_multi_tenant_path_decision_is_no_db_config_when_db_reader_password_unset() {
-        let cli =
-            CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.core.example.ping"]);
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--action-app-id",
+            "penguintechinc.waddles.ping",
+        ]);
         let config = Config {
             cli,
             db_password: Secret::new("test-password"),
@@ -2501,8 +2504,11 @@ mod tests {
     #[tokio::test]
     async fn resolve_multi_tenant_path_decision_is_multi_tenant_when_db_config_present_and_kill_switches_unseen(
     ) {
-        let cli =
-            CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.core.example.ping"]);
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--action-app-id",
+            "penguintechinc.waddles.ping",
+        ]);
         let config = Config {
             cli,
             db_password: Secret::new("test-password"),

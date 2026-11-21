@@ -210,7 +210,7 @@ mod tests {
         HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("waddles.core.example_echo")
+            .app_id("penguintechinc.waddles.echo")
             .app_version(2)
             .tenant_tier(TenantTier::Free)
     }
@@ -220,7 +220,7 @@ mod tests {
         let scope = builder().build().expect("all required fields set");
         assert_eq!(scope.tenant_id(), 7);
         assert_eq!(scope.community_id(), 3);
-        assert_eq!(scope.app_id(), "waddles.core.example_echo");
+        assert_eq!(scope.app_id(), "penguintechinc.waddles.echo");
         assert_eq!(scope.app_version(), 2);
         assert_eq!(scope.tenant_tier(), TenantTier::Free);
     }
@@ -229,7 +229,7 @@ mod tests {
     fn community_id_defaults_to_the_tenant_wide_sentinel() {
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)
-            .app_id("waddles.core.example_echo")
+            .app_id("penguintechinc.waddles.echo")
             .app_version(1)
             .tenant_tier(TenantTier::Enterprise)
             .build()
@@ -314,7 +314,7 @@ mod tests {
             &HostInvokeScopeBuilder::new()
                 .tenant_id(999)
                 .community_id(3)
-                .app_id("waddles.core.example_echo")
+                .app_id("penguintechinc.waddles.echo")
                 .app_version(2)
                 .tenant_tier(TenantTier::Free)
                 .build()

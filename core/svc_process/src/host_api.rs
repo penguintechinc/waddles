@@ -1602,7 +1602,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Context,
                         op: "get".to_string(),
                         args: serde_json::json!({}),
@@ -1651,7 +1651,7 @@ mod tests {
             .request(Message::Load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
                 component_key: "k".to_string(),
@@ -1668,7 +1668,7 @@ mod tests {
         let result = connection
             .invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Transform,
                     payload: serde_json::json!({}),
@@ -1713,7 +1713,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Context,
                         op: "get".to_string(),
                         args: serde_json::json!({}),
@@ -1766,7 +1766,7 @@ mod tests {
         let result = conn
             .invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Transform,
                     payload: serde_json::json!({}),
@@ -2775,7 +2775,7 @@ mod tests {
             Frame::new(
                 id,
                 Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     capability: penguin_bundle_host::wire::CapabilityKind::Clock,
                     op: "now-millis".to_string(),
                     args: serde_json::json!({}),

@@ -31,7 +31,7 @@ _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0019_kick_app.py"
 )
 
-KICK_APP_ID = "waddles.bot.kick.default"
+KICK_APP_ID = "penguintechinc.waddles.kick-pipeline"
 TENANT_SLUG = "global"
 
 KICK_CONFIG_DEFAULTS = {
@@ -147,7 +147,7 @@ class TestUpgradeSeedsAppCatalog:
         assert '"process"' not in upgrade_sql
 
     def test_kick_ingest_declares_no_communication_model_key(self, upgrade_sql) -> None:
-        """Matches the live waddles.bot.discord.default row's own shape --
+        """Matches the live penguintechinc.waddles.discord-pipeline row's own shape --
         discord's ingest stage carries no communication_model key either."""
         kick_ingest_start = upgrade_sql.index(
             '"ingest": {"entrypoint": "bundles.kick_ingest'
@@ -157,7 +157,7 @@ class TestUpgradeSeedsAppCatalog:
 
     def test_module_and_feature_follow_kick_app_id_namespace(self, upgrade_sql) -> None:
         assert "'bot'" in upgrade_sql
-        assert "'waddles.bot.kick'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
 
 
 class TestSeededStagesJsonIsValid:

@@ -67,10 +67,10 @@ pub const DEFAULT_HOST_API_PORT: u16 = 8301;
 /// connector world is core-namespace only and the digest pins the content).
 fn app_id(platform: &str) -> Option<&'static str> {
     match platform {
-        "twitch" => Some("waddles.core.service.twitch"),
-        "discord" => Some("waddles.core.service.discord"),
-        "youtube" => Some("waddles.core.service.youtube"),
-        "kick" => Some("waddles.core.service.kick"),
+        "twitch" => Some("penguintechinc.waddles.twitch"),
+        "discord" => Some("penguintechinc.waddles.discord"),
+        "youtube" => Some("penguintechinc.waddles.youtube"),
+        "kick" => Some("penguintechinc.waddles.kick"),
         _ => None,
     }
 }
@@ -621,7 +621,7 @@ mod tests {
         let reg = registry(&cfg).unwrap();
         assert_eq!(
             reg.resolve("kick").unwrap().app_id,
-            "waddles.core.service.kick"
+            "penguintechinc.waddles.kick"
         );
 
         env.insert("SENDER_EXEC_DIGEST_KICK", "   ".to_string());
@@ -795,7 +795,7 @@ mod tests {
         ] {
             let c = reg.resolve(p).unwrap();
             assert_eq!(c.digest, digest);
-            assert_eq!(c.app_id, format!("waddles.core.service.{p}"));
+            assert_eq!(c.app_id, format!("penguintechinc.waddles.{p}"));
         }
         assert!(reg.resolve("slack").is_err());
     }

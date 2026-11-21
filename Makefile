@@ -248,6 +248,20 @@ test-scripts:
 	@bash scripts/tests/test_release_auto_merge.sh
 	@bash scripts/tests/test_prune_agent_worktrees.sh
 	@python3 -m pytest -q -p no:cacheprovider scripts/ops
+	@python3 -m pytest -q -p no:cacheprovider scripts/rename/tests
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/tests/test_check_app_ids.py
+	@$(MAKE) check-app-ids
+
+# Structural app_id guard: every bundle app_id (catalog SQL/alembic seeds, manifests, core-bundles.yaml,
+# Rust *_APP_ID consts, tool.call grants) must be <org>.<repo>.<name>; zero ids examined = FAIL.
+.PHONY: webui-boot-check
+webui-boot-check: ## Build hub-webui image and boot it (fails if the Node server does not start)
+	@docker build -q -f admin/hub_module/Dockerfile.webui -t hub-webui:boot-check .
+	@scripts/ci/container-smoke.sh hub-webui hub-webui:boot-check 8080
+
+.PHONY: check-app-ids
+check-app-ids:
+	@python3 -I scripts/ci/check_app_ids.py
 
 # Read-only command-latency SLA report (p99 < 1 s, first door -> outbound confirmed): p50/p95/p99
 # per command and per hop from the data-plane histograms. Zero samples = FAIL.

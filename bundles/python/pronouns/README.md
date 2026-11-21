@@ -1,7 +1,7 @@
 # pronouns (Python)
 
 `!pronouns` -- per-user pronouns: set your own, read your own, read someone else's, clear.
-First-party (`provider: builtin`, `app_id: waddles.core.example.pronouns`), kv-only, WASI component.
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.pronouns`), kv-only, WASI component.
 
 | | |
 |---|---|

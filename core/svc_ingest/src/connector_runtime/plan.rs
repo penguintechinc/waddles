@@ -55,7 +55,7 @@ pub struct RuntimeEnv {
 pub trait ConnectorProfile: Send + Sync {
     /// Platform slug: `twitch` | `discord` | `youtube`.
     fn platform(&self) -> &'static str;
-    /// The connector bundle `app_id` (`waddles.core.service.<p>`).
+    /// The connector bundle `app_id` (`penguintechinc.waddles.<p>`).
     fn app_id(&self) -> &'static str;
     /// Provider name as hub-api's binding list knows it.
     fn provider(&self) -> &'static str;

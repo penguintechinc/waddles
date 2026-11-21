@@ -27,7 +27,7 @@ namespace WaddleBundleSuperpenguinTts;
 /// placeholder), whitespace is collapsed, empty text is refused and text over <see cref="MaxTextChars"/> is refused. The
 /// speaker is the host `{user:uuid}` placeholder; the media service must render placeholders before synthesis (README host needs).</para>
 ///
-/// <para><b>Fail loud.</b> Synthesis is the service tool `waddles.core.service.media/tts_synthesize` (args `{text, voice}`, result
+/// <para><b>Fail loud.</b> Synthesis is the service tool `penguintechinc.waddles.media/tts_synthesize` (args `{text, voice}`, result
 /// `{url}`). That tool does not exist yet. When the call is refused as unavailable, not granted or forbidden, the bundle logs an
 /// Error, tells chat exactly why, releases the user's cooldown and does NOT fall back to any other synthesis. A result
 /// without an https `url` (including a bare handle, which this app has no permission to resolve) throws.
@@ -42,7 +42,7 @@ public sealed class TtsLogic(Func<int, int, int>? nextInt = null) : WaddleProces
     internal const string CommandPrefix = "!";
     internal const string FlagKey = "waddles.command-superpenguin-tts";
     internal const string WidgetId = "superpenguin.tts";
-    internal const string MediaTarget = "waddles.core.service.media";
+    internal const string MediaTarget = "penguintechinc.waddles.media";
     internal const string SynthesizeTool = "tts_synthesize";
     internal const int MaxTextChars = 200;
     internal const int MaxVoices = 50;

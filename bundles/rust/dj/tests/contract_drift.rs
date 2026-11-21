@@ -11,9 +11,9 @@ use serde_json::Value;
 const HUB_MANIFEST: &str = include_str!("../hub-manifest.yaml");
 const BUNDLE_MANIFEST: &str = include_str!("../bundle.yaml");
 
-/// Tools of `waddles.core.service.music-requests` the DJ may request (from
+/// Tools of `penguintechinc.waddles.music-requests` the DJ may request (from
 /// `docs/music-requests-service.md`): every one must be granted, and nothing else.
-const REQUESTS_TARGET: &str = "waddles.core.service.music-requests";
+const REQUESTS_TARGET: &str = "penguintechinc.waddles.music-requests";
 const REQUESTS_TOOLS: [&str; 9] = [
     "history.list",
     "settings.set",
@@ -59,7 +59,7 @@ fn every_requested_tool_exists_in_its_producers_contract() {
             );
         } else if let Some(rest) = tool.strip_prefix("music.") {
             let (provider, op) = rest.split_once('.').unwrap();
-            assert_eq!(target, &format!("waddles.core.service.music-{provider}"));
+            assert_eq!(target, &format!("penguintechinc.waddles.music-{provider}"));
             // The DJ never plays media: no player tools may be requested.
             assert_ne!(op, "player.play", "DJ must not request playback tools");
             assert!(
@@ -94,13 +94,13 @@ fn manifests_drop_request_commands_overlay_and_economy_and_bump_the_version() {
             assert!(!m.contains(gone), "manifest still mentions {gone}");
         }
         assert!(m.contains("- '!dj'"), "!dj prefix kept");
-        assert!(m.contains("version: 1.1.0"));
+        assert!(m.contains("version: 1.1.1"));
     }
     let catalog = include_str!("../../../core-bundles.yaml");
     let at = catalog
-        .find("app_id: waddles.core.example.dj")
+        .find("app_id: penguintechinc.waddles.dj")
         .expect("dj catalog entry");
-    assert!(catalog[at..].lines().nth(1).unwrap().contains("\"1.1.0\""));
+    assert!(catalog[at..].lines().nth(1).unwrap().contains("\"1.1.1\""));
 }
 
 #[test]

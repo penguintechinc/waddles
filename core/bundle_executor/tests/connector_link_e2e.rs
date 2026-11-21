@@ -42,7 +42,7 @@ use tokio::net::TcpListener;
 use tokio_rustls::TlsAcceptor;
 
 const DISCORD_WASM: &[u8] = include_bytes!("fixtures/discord_connector.wasm");
-const DISCORD_APP: &str = "waddles.core.service.discord";
+const DISCORD_APP: &str = "penguintechinc.waddles.discord";
 const SERVER_ID: &str = "spiffe://waddlebot/svc-ingest-hostapi";
 const EXECUTOR_ID: &str = "spiffe://waddlebot/executor-connector";
 const STAGE_ID: &str = "spiffe://waddlebot/svc-action";

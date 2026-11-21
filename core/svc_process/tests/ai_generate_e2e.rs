@@ -26,7 +26,7 @@ use svc_process::ai::{AiWiring, OllamaBackend, OllamaConfig};
 use svc_process::capabilities::{CapabilityHandler, HttpEgressCatalog, StageCapabilities};
 use svc_process::license::FeatureGate;
 
-const APP_ID: &str = "waddles.ai.e2e";
+const APP_ID: &str = "penguintechinc.waddles.fixture-ai-e2e";
 /// A prompt secret that must appear in NO label, metric line or log-bound string.
 const SECRET_PROMPT_WORD: &str = "zebrafish-tango-7731";
 

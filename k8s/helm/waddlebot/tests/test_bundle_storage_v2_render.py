@@ -1,7 +1,7 @@
 """Helm-template + post-render assertions for bundle storage v2 wiring (docs/bundle-storage-v2.md).
 
 Regression (alpha helm upgrade, 2026-11-16): the post-upgrade core-bundle seeder failed
-`waddles.core.service.music-requests` with `bundle_data_provisioning_unavailable` because
+`penguintechinc.waddles.music-requests` with `bundle_data_provisioning_unavailable` because
 BUNDLE_MIGRATOR_PASSWORD was empty (feature off in values, no Secret, role with no password);
 its consumers then failed 422 `tool_target_cross_tenant`.
 

@@ -1,4 +1,4 @@
-# community_feed (`waddles.core.community.feed`, #484)
+# community_feed (`penguintechinc.waddles.feed`, #484)
 
 Generic read-only public-feed reader: `!feed [events]`, `!feed event <n|id>`, `!feed info [topic]`, `!feed sync` (mod), `!feed set url <https-url>` / `!feed reset url` (mod).
 

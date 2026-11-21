@@ -45,21 +45,21 @@ _MIGRATION_PATH = (
 # module name (before the colon) must resolve to `<module>.py` under the
 # matching stage's bundles directory.
 EXPECTED_ENTRYPOINT_MODULES = {
-    "waddles.social.quote.default": ("social_quote_process", "social_quote_action"),
-    "waddles.social.alias.default": ("social_alias_process", "social_alias_action"),
-    "waddles.social.welcome.default": ("social_welcome_process", "social_welcome_action"),
-    "waddles.community.chat.default": ("community_chat_process", None),
-    "waddles.community.polls.default": ("community_polls_process", "community_polls_action"),
-    "waddles.community.announcements.default": (
+    "penguintechinc.waddles.quote-pipeline": ("social_quote_process", "social_quote_action"),
+    "penguintechinc.waddles.alias-pipeline": ("social_alias_process", "social_alias_action"),
+    "penguintechinc.waddles.welcome-pipeline": ("social_welcome_process", "social_welcome_action"),
+    "penguintechinc.waddles.chat-pipeline": ("community_chat_process", None),
+    "penguintechinc.waddles.polls-pipeline": ("community_polls_process", "community_polls_action"),
+    "penguintechinc.waddles.announcements-pipeline": (
         "community_announcements_process",
         "community_announcements_action",
     ),
-    "waddles.marketing.engagement.default": (
+    "penguintechinc.waddles.engagement-pipeline": (
         "marketing_engagement_process",
         "marketing_engagement_action",
     ),
-    "waddles.streaming.stream.default": (None, "streaming_stream_action"),
-    "waddles.integrations.waddleai.default": (None, "integrations_waddleai_action"),
+    "penguintechinc.waddles.stream-pipeline": (None, "streaming_stream_action"),
+    "penguintechinc.waddles.waddleai": (None, "integrations_waddleai_action"),
 }
 
 # The four numbered files (084/091/095/096) that this migration only
@@ -286,9 +286,9 @@ class TestLegacySchemaMigrationsBookkeeping:
         # re-port their DDL/seed content, only bookkeep schema_migrations.
         # 091 is the one bookkeeping-only version that legitimately shares
         # its app_id substring with nothing else seeded, so assert its
-        # app_id (waddles.community.forums.default) never appears in an
+        # app_id (penguintechinc.waddles.forums-pipeline) never appears in an
         # app_catalog INSERT VALUES block.
-        assert "'waddles.community.forums.default'" not in upgrade_sql
+        assert "'penguintechinc.waddles.forums-pipeline'" not in upgrade_sql
 
 
 class TestDowngradeReversesEverythingUpgradeAdds:

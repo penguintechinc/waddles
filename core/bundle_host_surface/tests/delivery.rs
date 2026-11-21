@@ -47,7 +47,7 @@ impl SurfaceService for FakeSurfaces {
         };
         match req.surface_id.as_str() {
             "alert" => Ok(Response::new(PublishResponse { seq: 41 })),
-            "waddles.core.example.music.queue" => {
+            "penguintechinc.waddles.music.queue" => {
                 Err(Status::invalid_argument("bad [/queue:type]"))
             }
             "live.channels" => {
@@ -57,7 +57,7 @@ impl SurfaceService for FakeSurfaces {
                 Err(s)
             }
             "clip.alert" => Err(Status::permission_denied("forbidden")),
-            "waddles.core.example.music.now_playing" => Err(Status::out_of_range("too big")),
+            "penguintechinc.waddles.music.now_playing" => Err(Status::out_of_range("too big")),
             _ => Err(Status::unavailable("down")),
         }
     }
@@ -91,10 +91,10 @@ async fn start() -> (SurfaceHost, Arc<Mutex<Seen>>) {
 fn all_granted() -> SurfacePolicy {
     SurfacePolicy::from_permissions([
         "overlay.surface.alert",
-        "overlay.surface.waddles.core.example.music.queue",
+        "overlay.surface.penguintechinc.waddles.music.queue",
         "overlay.surface.live.channels",
         "overlay.surface.clip.alert",
-        "overlay.surface.waddles.core.example.music.now_playing",
+        "overlay.surface.penguintechinc.waddles.music.now_playing",
         "overlay.surface.unknown_surface",
     ])
 }
@@ -128,10 +128,10 @@ async fn every_server_refusal_maps_to_the_stable_guest_codes() {
     let (host, _seen) = start().await;
     let policy = all_granted();
     for (surface, want) in [
-        ("waddles.core.example.music.queue", "invalid"),
+        ("penguintechinc.waddles.music.queue", "invalid"),
         ("live.channels", "rate_limited"),
         ("clip.alert", "denied"),
-        ("waddles.core.example.music.now_playing", "too_large"),
+        ("penguintechinc.waddles.music.now_playing", "too_large"),
         ("unknown_surface", "unavailable"),
     ] {
         let err = host.publish(&policy, 1, surface, "{}").await.unwrap_err();
@@ -164,25 +164,26 @@ async fn a_dead_endpoint_is_unavailable_never_a_hang() {
 #[tokio::test]
 async fn publish_for_app_owns_the_apps_namespace_and_parses_the_guests_two_words() {
     let (host, seen) = start().await;
-    let own = "waddles.core.example.music.queue";
+    let own = "penguintechinc.waddles.music.queue";
     let args = serde_json::json!({"surface_id": own, "payload_json": "{}"});
     // The fake server answers `invalid_argument` for this surface id; the point is the call DID
     // reach it, for the host-verified community.
-    let e = bundle_host_surface::publish_for_app(&host, "waddles.core.example.music", 9, &args)
+    let e = bundle_host_surface::publish_for_app(&host, "penguintechinc.waddles.music", 9, &args)
         .await
         .unwrap_err();
     assert_eq!(e.code(), "invalid");
     assert_eq!(seen.lock().unwrap().request.as_ref().unwrap().1, 9);
     // Another bundle's namespace never leaves the host.
     let foreign =
-        serde_json::json!({"surface_id": "waddles.core.example.dj.queue", "payload_json": "{}"});
-    let e = bundle_host_surface::publish_for_app(&host, "waddles.core.example.music", 9, &foreign)
-        .await
-        .unwrap_err();
+        serde_json::json!({"surface_id": "penguintechinc.waddles.dj.queue", "payload_json": "{}"});
+    let e =
+        bundle_host_surface::publish_for_app(&host, "penguintechinc.waddles.music", 9, &foreign)
+            .await
+            .unwrap_err();
     assert_eq!(e.code(), "not_granted");
     // Extra keys (a guest naming a community) are refused.
     let sneaky = serde_json::json!({"surface_id": own, "payload_json": "{}", "community_id": 1});
-    let e = bundle_host_surface::publish_for_app(&host, "waddles.core.example.music", 9, &sneaky)
+    let e = bundle_host_surface::publish_for_app(&host, "penguintechinc.waddles.music", 9, &sneaky)
         .await
         .unwrap_err();
     assert_eq!(e.code(), "invalid");

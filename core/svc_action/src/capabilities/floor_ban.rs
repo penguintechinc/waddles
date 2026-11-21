@@ -137,7 +137,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let Some(wiring) = &self.tool else {
             return Err(FloorSendFailure::retry("service_unavailable", None));
         };
-        let service = format!("waddles.core.service.{platform}");
+        let service = format!("penguintechinc.waddles.{platform}");
         let Some(entry) =
             wiring
                 .snapshot

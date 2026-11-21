@@ -3215,7 +3215,7 @@ mod tests {
         let cli = CliConfig::parse_from([
             "svc-process",
             "--process-app-id",
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
         ]);
         let mut config = test_config(cli);
         config.db_reader_password = Some(crate::config::Secret::new("real-ro-password"));
@@ -3270,11 +3270,11 @@ mod tests {
         );
         assert!(!no_data_plane_path_available(
             PathDecision::NoDbConfig,
-            "waddles.bot.commands.default"
+            "penguintechinc.waddles.fixture-bot-commands-default"
         ));
         assert!(!no_data_plane_path_available(
             PathDecision::KillSwitchOn,
-            "waddles.bot.commands.default"
+            "penguintechinc.waddles.fixture-bot-commands-default"
         ));
         assert!(
             no_data_plane_path_available(PathDecision::NoDbConfig, ""),
@@ -3399,7 +3399,7 @@ mod tests {
         let cli = CliConfig::parse_from([
             "svc-process",
             "--process-app-id",
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = None;
@@ -3420,7 +3420,7 @@ mod tests {
         let cli = CliConfig::parse_from([
             "svc-process",
             "--process-app-id",
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
         ]);
         let mut config = test_config(cli);
         config.envelope_binding_keys = Some(crate::config::Secret::new("not-kid-colon-hex"));
@@ -3452,7 +3452,7 @@ mod tests {
         let cli = CliConfig::parse_from([
             "svc-process",
             "--process-app-id",
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
         ]);
         let config = test_config(cli);
         try_start_process_loop(
@@ -3490,7 +3490,7 @@ mod tests {
             let cli = CliConfig::parse_from([
                 "svc-process",
                 "--process-app-id",
-                "waddles.bot.commands.default",
+                "penguintechinc.waddles.fixture-bot-commands-default",
             ]);
             let config = test_config(cli);
             try_start_process_loop(
@@ -3531,7 +3531,7 @@ mod tests {
             let cli = CliConfig::parse_from([
                 "svc-process",
                 "--process-app-id",
-                "waddles.bot.commands.default",
+                "penguintechinc.waddles.fixture-bot-commands-default",
                 "--process-ingest-platform",
                 "twitch",
                 "--process-ingest-source-id",
@@ -4015,7 +4015,7 @@ mod tests {
             community_id: 2,
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
-            app_id: "waddles.core.service.test".to_string(),
+            app_id: "penguintechinc.waddles.test".to_string(),
             platform: "twitch".to_string(),
             source_id: "chan".to_string(),
         };

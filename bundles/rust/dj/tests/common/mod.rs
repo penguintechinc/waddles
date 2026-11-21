@@ -7,7 +7,7 @@
 //! drifting silently. Spotify player + economy have no shared contract file;
 //! their minimal schemas (taken from the producers' manifests) are inline.
 //!
-//! The shared queue service `waddles.core.service.music-requests` is mocked
+//! The shared queue service `penguintechinc.waddles.music-requests` is mocked
 //! from `docs/music-requests-service.md`: one [`Svc`] per COMMUNITY (the host
 //! derives the community, the DJ never names one), host-enforced scopes
 //! (`music:dj.manage` for `dj.set`), `NotGranted` without a grant, and item
@@ -391,7 +391,7 @@ impl FakeHost {
 }
 
 impl FakeHost {
-    /// The mocked `waddles.core.service.music-requests` (contract: docs/music-requests-service.md).
+    /// The mocked `penguintechinc.waddles.music-requests` (contract: docs/music-requests-service.md).
     fn requests_call(
         &self,
         tool: &str,
@@ -597,23 +597,23 @@ impl Host for FakeHost {
         {
             return Err(ToolErr::TargetUnavailable);
         }
-        if target == "waddles.core.service.music-requests" {
+        if target == "penguintechinc.waddles.music-requests" {
             return self.requests_call(tool, args, idem);
         }
         if let Some(rest) = tool.strip_prefix("music.") {
             let (provider, op) = rest.split_once('.').expect("music.<provider>.<op>");
-            assert_eq!(target, format!("waddles.core.service.music-{provider}"));
+            assert_eq!(target, format!("penguintechinc.waddles.music-{provider}"));
             return self.music_call(provider, op, args);
         }
         let result = match tool {
             "ai.complete" => {
-                assert_eq!(target, "waddles.core.service.ai");
+                assert_eq!(target, "penguintechinc.waddles.ai");
                 self.check_ai("ai.complete", "input", args);
                 let text = self.ai_complete.borrow_mut().remove(0);
                 json!({"text": text})
             }
             "ai.classify" => {
-                assert_eq!(target, "waddles.core.service.ai");
+                assert_eq!(target, "penguintechinc.waddles.ai");
                 self.check_ai("ai.classify", "input", args);
                 match self.ai_classify.borrow().clone() {
                     Some((l, c)) => json!({"label": l, "confidence": c, "reason": "scripted"}),

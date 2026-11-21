@@ -36,8 +36,8 @@ mod twitch_manifest_tests;
 #[path = "host_tools_youtube_manifest_tests.rs"]
 mod youtube_manifest_tests;
 
-const APP: &str = "waddles.test.app.caller";
-const TWITCH_SVC: &str = "waddles.core.service.twitch";
+const APP: &str = "penguintechinc.waddles.fixture-test-app-caller";
+const TWITCH_SVC: &str = "penguintechinc.waddles.twitch";
 const DISCORD_SVC: &str = super::super::event_sync::DISCORD_SERVICE_APP_ID;
 const UUID_A: &str = "3f2b8c1e-9d4a-4c55-8a10-0a1b2c3d4e5f";
 const UUID_B: &str = "7a1d2c3e-1111-4222-8333-444455556666";
@@ -316,7 +316,7 @@ fn ban_decl() -> HostOpDecl {
 
 /// The registered platform service bundle id of `platform`.
 fn svc_for(platform: &str) -> String {
-    format!("waddles.core.service.{platform}")
+    format!("penguintechinc.waddles.{platform}")
 }
 
 fn invoke(tool: &str, args: Value) -> HostCallBody {
@@ -1438,7 +1438,7 @@ async fn relay_push_can_never_reach_host_tool_only_ops_even_with_every_grant() {
             .handle(
                 &scope(),
                 HostCallBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     capability: CapabilityKind::Relay,
                     op: "send".to_string(),
                     args: json!({
@@ -1466,7 +1466,7 @@ async fn relay_push_refuses_eventsub_create_and_delete_but_list_still_queues() {
             .handle(
                 &scope(),
                 HostCallBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     capability: CapabilityKind::Relay,
                     op: "send".to_string(),
                     args: json!({
@@ -1487,7 +1487,7 @@ async fn relay_push_refuses_eventsub_create_and_delete_but_list_still_queues() {
     c.handle(
         &scope(),
         HostCallBody {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             capability: CapabilityKind::Relay,
             op: "send".to_string(),
             args: json!({
@@ -1590,7 +1590,7 @@ async fn host_ops_run_only_from_the_registered_platform_service_bundle() {
     for target in [
         "waddles.bot.other",
         DISCORD_SVC,
-        "waddles.core.service.youtube",
+        "penguintechinc.waddles.youtube",
     ] {
         plan.target_app_id = target.to_string();
         let r = c.run_host_tool(&twitch_event(Some("500")), &plan, &d).await;
@@ -1710,7 +1710,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
                 .handle(
                     &twitch_event(Some("500")),
                     HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: CapabilityKind::Relay,
                         op: "send".to_string(),
                         args: json!({
@@ -1738,7 +1738,7 @@ async fn relay_push_refuses_every_destructive_moderation_op_on_every_platform() 
         .handle(
             &twitch_event(Some("500")),
             HostCallBody {
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 capability: CapabilityKind::Relay,
                 op: "send".to_string(),
                 args: json!({

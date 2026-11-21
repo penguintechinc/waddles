@@ -22,7 +22,7 @@ mod common;
 
 use common::{run_many, Scenario, StageAnswer, TARGET_USER};
 
-const APP_ID: &str = "waddles.test.economy-py";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-economy-py";
 const OTHER_USER: &str = "66666666-7777-4888-8999-aaaaaaaaaaaa";
 
 /// Builds the Python test bundle for `world stage-next` inside the same

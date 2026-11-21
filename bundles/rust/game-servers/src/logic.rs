@@ -14,7 +14,7 @@
 use serde_json::{Value, json};
 
 /// The service bundle that owns the tools this app invokes.
-pub const SERVICE: &str = "waddles.core.service.gameserver";
+pub const SERVICE: &str = "penguintechinc.waddles.gameserver";
 pub const TOOL_LIST: &str = "gameserver.server.list";
 pub const TOOL_STATUS: &str = "gameserver.status.query";
 pub const TOOL_EXEC: &str = "gameserver.rcon.exec";
@@ -416,7 +416,7 @@ mod tests {
             json!({"server": "22222222-2222-3333-4444-555555555555", "command": "say hi"})
         );
         assert_eq!(c[3].2.as_deref(), Some("game-servers.rcon.m2"));
-        assert_eq!(SERVICE, "waddles.core.service.gameserver");
+        assert_eq!(SERVICE, "penguintechinc.waddles.gameserver");
     }
 
     #[test]

@@ -7,7 +7,7 @@
 -- submission), and the action stage sends engagement notifications to a
 -- platform channel.
 --
--- Both stages use the `waddles.marketing.engagement.default` app_id, following
+-- Both stages use the `penguintechinc.waddles.engagement-pipeline` app_id, following
 -- the bundle naming convention established by migrations 071 (demo echo),
 -- 082 (Discord send), and 083 (bot convergence).
 --
@@ -33,10 +33,10 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.marketing.engagement.default',
+    'penguintechinc.waddles.engagement-pipeline',
     '1.0.0',
     'marketing',
-    'waddles.marketing.engagement',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
@@ -53,7 +53,7 @@ INSERT INTO app_catalog (
 ON CONFLICT (app_id) DO NOTHING;
 
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.marketing.engagement.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.engagement-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

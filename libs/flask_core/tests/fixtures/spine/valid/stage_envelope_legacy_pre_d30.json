@@ -1,7 +1,7 @@
 {
   "tenant": "global",
   "community": null,
-  "app_id": "waddles.bot.commands.default",
+  "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
   "stage": "process",
   "event": {
     "platform": "twitch",

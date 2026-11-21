@@ -1,7 +1,7 @@
 # pat (Python)
 
 `!pat [@user]` -- a lighthearted flavor-text reply: the caller pats someone on the head. First-party
-(`provider: builtin`, `app_id: waddles.core.example.pat`), stateless relay, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.pat`), stateless relay, WASI component.
 
 | | |
 |---|---|

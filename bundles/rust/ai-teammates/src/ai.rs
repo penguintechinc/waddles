@@ -12,7 +12,7 @@ use waddle_sdk::tool::ToolError;
 use crate::host::Host;
 
 /// The AI service bundle that owns `ai.*`.
-pub const AI_SERVICE: &str = "waddles.core.service.ai";
+pub const AI_SERVICE: &str = "penguintechinc.waddles.ai";
 pub const TOOL_COMPLETE: &str = "ai.complete";
 pub const TOOL_CLASSIFY: &str = "ai.classify";
 pub const TOOL_RAG_QUERY: &str = "ai.rag.query";
@@ -31,17 +31,17 @@ pub const CONSUMED: [(&str, &str); 6] = [
     (AI_SERVICE, TOOL_COMPLETE),
     (AI_SERVICE, TOOL_CLASSIFY),
     (AI_SERVICE, TOOL_RAG_QUERY),
-    ("waddles.core.service.twitch", "twitch.live.channels"),
-    ("waddles.core.service.discord", "discord.live.channels"),
-    ("waddles.core.service.youtube", "youtube.live.channels"),
+    ("penguintechinc.waddles.twitch", "twitch.live.channels"),
+    ("penguintechinc.waddles.discord", "discord.live.channels"),
+    ("penguintechinc.waddles.youtube", "youtube.live.channels"),
 ];
 
 /// Platform service app id + `live.channels` tool for a platform, if it has one.
 pub fn live_tool(platform: &str) -> Option<(&'static str, &'static str)> {
     match platform {
-        "twitch" => Some(("waddles.core.service.twitch", "twitch.live.channels")),
-        "discord" => Some(("waddles.core.service.discord", "discord.live.channels")),
-        "youtube" => Some(("waddles.core.service.youtube", "youtube.live.channels")),
+        "twitch" => Some(("penguintechinc.waddles.twitch", "twitch.live.channels")),
+        "discord" => Some(("penguintechinc.waddles.discord", "discord.live.channels")),
+        "youtube" => Some(("penguintechinc.waddles.youtube", "youtube.live.channels")),
         _ => None,
     }
 }

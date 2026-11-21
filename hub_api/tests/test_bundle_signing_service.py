@@ -30,7 +30,7 @@ from services.bundle_signing_service import (
 )
 from services.errors import ApiError
 
-_APP_ID = "waddles.test.signing-app"
+_APP_ID = "penguintechinc.waddles.signing-app"
 _VERSION = "1.0.0"
 _DIGEST = "a" * 64
 _APPROVAL_ID = 7
@@ -45,7 +45,10 @@ def test_build_signing_payload_distinguishes_every_field() -> None:
         app_id=_APP_ID, version="2.0.0", digest=_DIGEST, approval_id=1
     )
     assert base != build_signing_payload(
-        app_id="waddles.test.a-different-app", version=_VERSION, digest=_DIGEST, approval_id=1
+        app_id="penguintechinc.waddles.a-different-app",
+        version=_VERSION,
+        digest=_DIGEST,
+        approval_id=1,
     )
     assert base != build_signing_payload(
         app_id=_APP_ID, version=_VERSION, digest="b" * 64, approval_id=1
@@ -64,14 +67,14 @@ def test_build_signing_payload_matches_the_cross_language_golden_vector() -> Non
     that catches a drift between the two encodings.
     """
     payload = build_signing_payload(
-        app_id="waddles.core.example.ping",
+        app_id="penguintechinc.waddles.ping",
         version="1.2.3",
         digest="sha256:deadbeef",
         approval_id=42,
     )
     expected = bytes.fromhex(
-        "776164646c65732d62756e646c652d7369672d763100000019776164646c65"
-        "732e636f72652e6578616d706c652e70696e6700000005312e322e330000000f7368613235363a6465616462"
+        "776164646c65732d62756e646c652d7369672d76310000001b70656e6775696e7465"
+        "6368696e632e776164646c65732e70696e6700000005312e322e330000000f7368613235363a6465616462"
         "656566000000000000002a"
     )
     assert payload == expected
@@ -162,7 +165,7 @@ def test_platform_signer_sign_produces_a_signature_verifiable_against_its_own_pu
         ),
         pytest.param(
             lambda p: build_signing_payload(
-                app_id="waddles.test.a-different-app",
+                app_id="penguintechinc.waddles.a-different-app",
                 version=p["version"],
                 digest=p["digest"],
                 approval_id=p["approval_id"],
@@ -285,7 +288,7 @@ async def test_sign_and_record_version_updates_the_row(install_dal: Any) -> None
 
 async def test_sign_and_record_version_raises_when_digest_is_missing(install_dal: Any) -> None:
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.test.no-digest-yet",
+        app_id="penguintechinc.waddles.no-digest-yet",
         version=_VERSION,
         artifact_digest=None,
         language="python",
@@ -300,7 +303,7 @@ async def test_sign_and_record_version_raises_when_digest_is_missing(install_dal
                 conn,
                 app_versions_table=versions_table,
                 version_id=version_id,
-                app_id="waddles.test.no-digest-yet",
+                app_id="penguintechinc.waddles.no-digest-yet",
                 version=_VERSION,
                 approval_id=1,
             )
@@ -475,26 +478,26 @@ async def test_upload_signed_sidecar_writes_the_expected_document(
         app_id: str, version: str, sha256_hex: str, document: dict[str, Any]
     ) -> str:
         calls.append((app_id, version, sha256_hex, document))
-        return "bundles/waddles.test.app/1/abc.json"
+        return "bundles/penguintechinc.waddles.app/1/abc.json"
 
     monkeypatch.setattr(bundle_signing_service.storage_service, "write_bundle_sidecar", fake_write)
 
     key = await upload_signed_sidecar(
-        app_id="waddles.test.app",
+        app_id="penguintechinc.waddles.app",
         version="1",
         digest="sha256:" + "c" * 64,
         approval_id=5,
         key_id="k1",
         signature="c2ln==",
     )
-    assert key == "bundles/waddles.test.app/1/abc.json"
+    assert key == "bundles/penguintechinc.waddles.app/1/abc.json"
     assert calls == [
         (
-            "waddles.test.app",
+            "penguintechinc.waddles.app",
             "1",
             "c" * 64,
             {
-                "app_id": "waddles.test.app",
+                "app_id": "penguintechinc.waddles.app",
                 "version": "1",
                 "digest": "sha256:" + "c" * 64,
                 "approval_id": 5,

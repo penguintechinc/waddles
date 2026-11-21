@@ -1,12 +1,11 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.compliment -- see bundles/python/pyping/hub-manifest.yaml's own header
+# penguintechinc.waddles.compliment -- see bundles/python/pyping/hub-manifest.yaml's own header
 # for why this is a separate file from this bundle's `bundle.yaml` (a different consumer's
 # schema).
 schema_version: 2
-app_id: waddles.core.example.compliment
+app_id: penguintechinc.waddles.compliment
 name: Random Compliment Bundle (Python)
-version: 1.0.8
-feature: waddles.core.example
+version: 1.0.9
 module: core
 provider: builtin
 author: github:penguintechinc

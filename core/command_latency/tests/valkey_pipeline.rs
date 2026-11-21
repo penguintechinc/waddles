@@ -210,7 +210,7 @@ async fn a_delivered_command_records_every_hop_and_the_e2e_across_real_stream_ho
     let reported = stage::report_confirmed(
         Kind::User,
         Some(&ts_invoke),
-        "waddles.core.example.ping",
+        "penguintechinc.waddles.ping",
         7,
         9,
         Outcome::Ok,

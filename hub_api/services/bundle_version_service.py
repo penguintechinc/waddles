@@ -54,6 +54,7 @@ from flask_core.stream_pipeline import bundle_stream_key
 from penguin_dal import AsyncDB
 
 from services import storage_service, valkey_admin_client
+from services.app_id_ownership import claim_app_id, release_unused_claim
 from services.bundle_component_validator import (
     ComponentValidatorUnavailableError,
     validate_component,
@@ -220,8 +221,15 @@ async def create_version(
     allow_wildcard_consumes: bool,
     allow_prebuilt: bool,
     trusted_source: bool = False,
+    enforce_owner: bool = True,
 ) -> Any:
     """Validate and persist a new bundle version upload at status `UPLOADED`.
+
+    After ALL validation, immediately before the upload write, atomically claims `app_id` in
+    `app_id_owners` (`claim_app_id`; the claim is released again if the write fails): a second
+    publisher is refused 403, and an app_id whose storage key collides with a different
+    app_id's is refused 409. `enforce_owner=False` (platform admin) never refuses on ownership,
+    only on a collision.
 
     Raises `ApiError` 400 (manifest rule failure or a manifest `app_id`
     that does not match `app_id`, `code` = the rule's `reason` /
@@ -348,6 +356,79 @@ async def create_version(
     # still 409s, same as before.
     if existing and not all(row.status == STATUS_REJECTED for row in existing):
         raise conflict(f"version {manifest.version} of {app_id} already exists")
+    claim_owner, should_claim = await _claim_owner(
+        install_dal, app_id=app_id, requested_by=requested_by, enforce_owner=enforce_owner
+    )
+    newly_claimed = False
+    if should_claim:
+        newly_claimed = await claim_app_id(
+            install_dal, app_id=app_id, owner_id=claim_owner, enforce_owner=enforce_owner
+        )
+    try:
+        return await _write_upload(
+            install_dal,
+            existing=existing,
+            app_id=app_id,
+            tenant_id=tenant_id,
+            requested_by=requested_by,
+            manifest=manifest,
+            raw=raw,
+            now=now,
+        )
+    except BaseException:
+        # No shared transaction with the claim (separate pooled connections), so compensate:
+        # a failed first upload must not leave an ownership row squatting the namespace.
+        if newly_claimed:
+            await release_unused_claim(install_dal, app_id=app_id)
+        raise
+
+
+async def _claim_owner(
+    install_dal: AsyncDB, *, app_id: str, requested_by: int | None, enforce_owner: bool
+) -> tuple[int | None, bool]:
+    """`(owner_id, should_claim)` for an upload.
+
+    Vendor path: the caller owns what they register. Admin path to an id that already has legacy
+    uploads: the owner is the earliest upload's `requested_by` (never the admin); if the earliest
+    uploads disagree, no claim is inserted and that is logged.
+    """
+    if enforce_owner:
+        return requested_by, True
+    rows = list(
+        await install_dal(install_dal.app_version_uploads.app_id == app_id).select(
+            orderby=install_dal.app_version_uploads.id
+        )
+    )
+    if not rows:
+        return requested_by, True
+    stamps = [_as_utc(r.created_at) for r in rows if r.created_at is not None]
+    earliest = (
+        [r for r in rows if r.created_at is not None and _as_utc(r.created_at) == min(stamps)]
+        if stamps
+        else rows[:1]
+    )
+    owners = {r.requested_by for r in earliest}
+    if len(owners) != 1:
+        logger.warning(
+            "app_id_owners: ambiguous legacy owner; no claim inserted",
+            extra={"app_id": app_id, "event_type": "AUTHZ", "action": "claim_app_id"},
+        )
+        return None, False
+    return owners.pop(), True
+
+
+async def _write_upload(
+    install_dal: AsyncDB,
+    *,
+    existing: Any,
+    app_id: str,
+    tenant_id: int,
+    requested_by: int | None,
+    manifest: Any,
+    raw: Any,
+    now: datetime,
+) -> Any:
+    """Insert (or reset a REJECTED row to UPLOADED) and return the `app_version_uploads` row."""
     existing_row = existing.first()
     if existing_row is not None:
         # `app_version_uploads` has `UNIQUE (app_id, version)` (migration 0023) -- a fresh

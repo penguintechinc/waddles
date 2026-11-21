@@ -137,7 +137,7 @@ def _envelope(payload: dict[str, Any], platform: str = "twitch") -> StageEnvelop
     return StageEnvelope(
         tenant="tenant-1",
         community=None,
-        app_id="waddles.core.example.memories",
+        app_id="penguintechinc.waddles.memories",
         stage="action",
         event=PlatformEvent(
             platform=platform,

@@ -13,7 +13,7 @@
 //! `BUNDLE_SIGNING_PUBLIC_KEYS` (an empty key set is REFUSED here -- there is
 //! no "verification off" for a connector), checks `sha256(bytes) == digest`,
 //! and pins the component under the host-constant `app_id`
-//! (`waddles.core.service.<p>`), the `connector-tools` world and a grant set
+//! (`penguintechinc.waddles.<p>`), the `connector-tools` world and a grant set
 //! that is a subset of the connector's own `hub-manifest.yaml` permissions
 //! (never broader -- see [`ConnectorPlatform::grants`]).
 //!
@@ -52,7 +52,7 @@ use crate::wire::{Connection, RequestHandler};
 pub struct ConnectorPlatform {
     /// `twitch` | `discord` | `youtube` | `spectrum` -- the bucket path segment.
     pub platform: &'static str,
-    /// The host-constant core `app_id` (`waddles.core.service.<p>`); never
+    /// The host-constant core `app_id` (`penguintechinc.waddles.<p>`); never
     /// read from a bucket object or a wire frame.
     pub app_id: &'static str,
     /// The permissions this connector is pinned with: ONLY those its own
@@ -65,22 +65,22 @@ pub struct ConnectorPlatform {
 pub const CONNECTOR_PLATFORMS: [ConnectorPlatform; 4] = [
     ConnectorPlatform {
         platform: "twitch",
-        app_id: "waddles.core.service.twitch",
+        app_id: "penguintechinc.waddles.twitch",
         grants: &[PERM_CONNECTOR_PII_READ, "flags.read", "platform.log"],
     },
     ConnectorPlatform {
         platform: "discord",
-        app_id: "waddles.core.service.discord",
+        app_id: "penguintechinc.waddles.discord",
         grants: &[PERM_CONNECTOR_PII_READ, "platform.log"],
     },
     ConnectorPlatform {
         platform: "youtube",
-        app_id: "waddles.core.service.youtube",
+        app_id: "penguintechinc.waddles.youtube",
         grants: &[PERM_CONNECTOR_PII_READ],
     },
     ConnectorPlatform {
         platform: "spectrum",
-        app_id: "waddles.core.service.spectrum",
+        app_id: "penguintechinc.waddles.spectrum",
         grants: &[PERM_CONNECTOR_PII_READ],
     },
 ];
@@ -307,8 +307,8 @@ mod tests {
         assert_eq!(
             got,
             vec![
-                ("twitch", "waddles.core.service.twitch", D1),
-                ("spectrum", "waddles.core.service.spectrum", D2)
+                ("twitch", "penguintechinc.waddles.twitch", D1),
+                ("spectrum", "penguintechinc.waddles.spectrum", D2)
             ]
         );
     }
@@ -362,7 +362,7 @@ mod tests {
     #[test]
     fn app_ids_are_host_constants_in_the_core_service_namespace() {
         for p in CONNECTOR_PLATFORMS {
-            assert_eq!(p.app_id, format!("waddles.core.service.{}", p.platform));
+            assert_eq!(p.app_id, format!("penguintechinc.waddles.{}", p.platform));
             assert!(p.grants.contains(&PERM_CONNECTOR_PII_READ));
         }
     }

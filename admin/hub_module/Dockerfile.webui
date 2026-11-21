@@ -53,7 +53,7 @@ RUN --mount=type=cache,id=waddles-npm-hub-webui-v${CACHE_EPOCH},target=/root/.np
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy the proxy/static server and the built frontend assets
-COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js admin/hub_module/webui-server/proxy.js admin/hub_module/webui-server/tls.js ./
+COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js admin/hub_module/webui-server/proxy.js admin/hub_module/webui-server/tls.js admin/hub_module/webui-server/internal-guard.js ./
 COPY --chown=nodejs:nodejs --from=frontend-build /build/admin/hub_module/frontend/dist ./dist
 
 ENV NODE_ENV=production

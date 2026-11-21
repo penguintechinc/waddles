@@ -47,12 +47,13 @@ impl WitWorld {
     }
 }
 
-/// Namespace prefix reserved for first-party core bundles (mirrors PR #419
-/// S1.1's `CORE_NAMESPACE_PREFIX` for `storage.tables`, applied here to the
-/// `connector` world per this design's S3.1/S3.2 "no exceptions" carve-out:
-/// `connector.*`/`connector.pii.read` are never grantable to a non-core
-/// `app_id`).
-pub const CORE_NAMESPACE_PREFIX: &str = "waddles.core.";
+/// Namespace prefix reserved for first-party core bundles and the strict
+/// "prefix + exactly one valid segment" check -- re-exported from the ONE
+/// implementation, `bundle_capability_gate::resource`, so the connector-world
+/// "no exceptions" carve-out (`connector.*`/`connector.pii.read` are never
+/// grantable to a non-core `app_id`) can never drift from the `storage.tables`
+/// schema choice. Golden vectors: `testdata/bundle_app_id/vectors.json`.
+pub use bundle_capability_gate::{is_core_namespace, CORE_NAMESPACE_PREFIX};
 
 /// Gates `identity.lookup` (spec S1, S3.1, S3.2.1 gate 2).
 pub const PERM_CONNECTOR_PII_READ: &str = "connector.pii.read";
@@ -86,7 +87,7 @@ impl VerifiedManifest {
 
     #[must_use]
     pub fn is_core_namespace(&self) -> bool {
-        self.app_id.starts_with(CORE_NAMESPACE_PREFIX)
+        is_core_namespace(&self.app_id)
     }
 
     #[must_use]
@@ -133,6 +134,22 @@ pub struct LinkerCacheKey {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn core_namespace_trust_is_new_org_only() {
+        assert!(super::is_core_namespace("penguintechinc.waddles.x"));
+        assert!(super::is_core_namespace(
+            "penguintechinc.waddles.discord-invite"
+        ));
+        for bad in [
+            "waddles.core.x",
+            "penguintechinc.waddles.",
+            "penguintechinc.waddles.a.b",
+            "psychoboy.penguintwitchbot.roll",
+        ] {
+            assert!(!super::is_core_namespace(bad), "{bad}");
+        }
+    }
+
     use super::*;
 
     fn perms(ids: &[&str]) -> HashSet<String> {
@@ -142,7 +159,7 @@ mod tests {
     #[test]
     fn core_connector_with_grant_may_link_identity() {
         let m = VerifiedManifest::new(
-            "waddles.core.connector.discord",
+            "penguintechinc.waddles.connector-discord",
             "sha256:aa",
             WitWorld::Connector,
             perms(&[PERM_CONNECTOR_PII_READ]),
@@ -168,7 +185,7 @@ mod tests {
     #[test]
     fn core_connector_without_grant_never_links_identity() {
         let m = VerifiedManifest::new(
-            "waddles.core.connector.discord",
+            "penguintechinc.waddles.connector-discord",
             "sha256:cc",
             WitWorld::Connector,
             perms(&["connector.receive:discord"]),
@@ -179,14 +196,14 @@ mod tests {
     #[test]
     fn connector_tools_world_shares_the_connector_identity_gate() {
         let granted = VerifiedManifest::new(
-            "waddles.core.connector.twitch",
+            "penguintechinc.waddles.connector-twitch",
             "sha256:c1",
             WitWorld::ConnectorTools,
             perms(&[PERM_CONNECTOR_PII_READ]),
         );
         assert!(granted.may_link_identity());
         let ungranted = VerifiedManifest::new(
-            "waddles.core.connector.twitch",
+            "penguintechinc.waddles.connector-twitch",
             "sha256:c2",
             WitWorld::ConnectorTools,
             perms(&[]),
@@ -218,7 +235,7 @@ mod tests {
     #[test]
     fn stage_world_never_links_identity_regardless_of_grants() {
         let m = VerifiedManifest::new(
-            "waddles.core.some-app",
+            "penguintechinc.waddles.some-app",
             "sha256:dd",
             WitWorld::Stage,
             perms(&[PERM_CONNECTOR_PII_READ]),
@@ -229,13 +246,13 @@ mod tests {
     #[test]
     fn cache_key_is_stable_under_permission_iteration_order() {
         let a = VerifiedManifest::new(
-            "waddles.core.x",
+            "penguintechinc.waddles.x",
             "sha256:ee",
             WitWorld::Connector,
             perms(&["b", "a"]),
         );
         let b = VerifiedManifest::new(
-            "waddles.core.x",
+            "penguintechinc.waddles.x",
             "sha256:ee",
             WitWorld::Connector,
             perms(&["a", "b"]),
@@ -246,19 +263,19 @@ mod tests {
     #[test]
     fn cache_key_diverges_on_permission_set_or_digest() {
         let base = VerifiedManifest::new(
-            "waddles.core.x",
+            "penguintechinc.waddles.x",
             "sha256:ff",
             WitWorld::Connector,
             perms(&["a"]),
         );
         let diff_perms = VerifiedManifest::new(
-            "waddles.core.x",
+            "penguintechinc.waddles.x",
             "sha256:ff",
             WitWorld::Connector,
             perms(&["a", "b"]),
         );
         let diff_digest = VerifiedManifest::new(
-            "waddles.core.x",
+            "penguintechinc.waddles.x",
             "sha256:00",
             WitWorld::Connector,
             perms(&["a"]),

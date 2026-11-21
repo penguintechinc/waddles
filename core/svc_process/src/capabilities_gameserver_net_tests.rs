@@ -22,7 +22,7 @@ use tokio::net::TcpListener;
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const CORE_APP: &str = "waddles.core.service.gameserver";
+const CORE_APP: &str = "penguintechinc.waddles.gameserver";
 const VENDOR_APP: &str = "acme.vendor.thing";
 const VERSION: i64 = 1;
 const SERVER: &str = "123e4567-e89b-12d3-a456-426614174000";

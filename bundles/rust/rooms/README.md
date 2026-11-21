@@ -1,9 +1,9 @@
-# waddles.core.app.rooms
+# penguintechinc.waddles.rooms
 
 Rust APP bundle (`world stage-next-tools`): rooms per community, rooms per calendar event
 (event `public_id` UUID stored as a data link -- no app-to-app call), virtual rooms inside a
 room (breakout / stage / green room), role-based access and schedules. Every media/token
-operation is a gated `tool.invoke` to `waddles.core.service.webrtc`. Also the home of
+operation is a gated `tool.invoke` to `penguintechinc.waddles.webrtc`. Also the home of
 room moderation (raise-hand queue, kick/mute/lock) -- see below.
 
 ## Chat (`!room`, `!rooms`)

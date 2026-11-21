@@ -1,4 +1,4 @@
-# waddle bundle (`waddles.core.example.waddle`)
+# waddle bundle (`penguintechinc.waddles.waddle`)
 
 `!waddle` -> a random penguin-themed reply. Python/WASM component modeled on `bundles/python/boop`.
 

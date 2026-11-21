@@ -1,15 +1,14 @@
 # hub-api install-pipeline manifest (schema_version 2) for the Discord platform CONNECTOR.
-# NOT the app bundle bundles/python/discord (waddles.core.example.discord) -- this is the
+# NOT the app bundle bundles/python/discord (penguintechinc.waddles.discord-invite) -- this is the
 # connector-tools `kind: service` connector (P6b T2). Cutover flag: waddles.connector-discord
 # (PostHog, default OFF); while OFF the hardcoded svc_ingest Discord path runs unchanged.
 # No secrets here: the bot token is a host-side connection resolved by opaque handle
 # `discord-bot` (see README "Secrets"). Transports (Gateway WS, interactions webhook route +
 # Ed25519 verify) are HOST configuration, not manifest fields.
 schema_version: 2
-app_id: waddles.core.service.discord
+app_id: penguintechinc.waddles.discord
 name: Discord Platform Connector (Rust)
-version: 1.0.8
-feature: waddles.core.service
+version: 1.0.9
 module: core
 provider: builtin
 language: rust

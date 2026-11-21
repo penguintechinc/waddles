@@ -1,6 +1,6 @@
 {
   "tool": "twitch.live.channels",
-  "target": "waddles.core.service.twitch",
+  "target": "penguintechinc.waddles.twitch",
   "access": "read",
   "source": "bundles/contracts/live-channels-contract.v1.json (PR #1119)",
   "request": {

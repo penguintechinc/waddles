@@ -1,4 +1,4 @@
-# echo bundle (`waddles.core.example.echo`)
+# echo bundle (`penguintechinc.waddles.echo`)
 
 `!echo <text>` -> echoes the text back (capped, never logged). Python/WASM component modeled on `bundles/python/boop`.
 

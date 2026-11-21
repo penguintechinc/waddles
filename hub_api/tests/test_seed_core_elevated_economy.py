@@ -38,14 +38,14 @@ _ELEVATED = [
 def test_never_auto_granted_covers_elevated_ids_except_the_services_own_transfer_from() -> None:
     assert ECONOMY_ELEVATED_IDS == {"economy.transfer_from", "economy.app_mint"}
     for pid in ECONOMY_ELEVATED_IDS:
-        assert never_auto_granted("waddles.core.example.ping", pid)
-        assert never_auto_granted("waddles.superpenguintv.duel", pid)
+        assert never_auto_granted("penguintechinc.waddles.ping", pid)
+        assert never_auto_granted("penguintechinc.waddles.duel", pid)
     assert not never_auto_granted(ECONOMY_SERVICE_APP_ID, "economy.transfer_from")
     assert never_auto_granted(ECONOMY_SERVICE_APP_ID, "economy.app_mint")
     # Ordinary permissions stay auto-grantable; resource-access grants stay human-only.
-    assert not never_auto_granted("waddles.core.example.ping", "storage.kv")
-    assert not never_auto_granted("waddles.core.example.ping", "economy.credit")
-    assert never_auto_granted("waddles.core.example.ping", "platform.table.read:users.score")
+    assert not never_auto_granted("penguintechinc.waddles.ping", "storage.kv")
+    assert not never_auto_granted("penguintechinc.waddles.ping", "economy.credit")
+    assert never_auto_granted("penguintechinc.waddles.ping", "platform.table.read:users.score")
 
 
 async def _grants_of(install_dal: Any, app_id: str, community_id: int) -> set[str]:
@@ -87,7 +87,7 @@ async def test_the_economy_service_bundle_is_granted_only_its_own_transfer_from(
     manifest = {
         **_MANIFEST,
         "app_id": ECONOMY_SERVICE_APP_ID,
-        "feature": "waddles.core.service",
+        "feature": "service",
         "permissions": [
             {"id": "storage.kv", "justification": "Reads the currency policy."},
             *_ELEVATED,

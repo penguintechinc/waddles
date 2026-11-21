@@ -15,7 +15,7 @@ use uuid::Uuid;
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-role-sync";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-role-sync";
 const VERSION: i64 = 1;
 const WRITE_ROLE: &str = "platform.table.write:community_members.role";
 const READ_ROLE: &str = "platform.table.read:community_members.role";

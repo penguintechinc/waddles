@@ -1,7 +1,7 @@
 # wheel (Python)
 
 `!wheel` -- a community-scoped, `kv`-backed spin-the-wheel random picker. First-party
-(`provider: builtin`, `app_id: waddles.core.example.wheel`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.wheel`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** (not a port; no third-party attribution applies).
 
 ## Commands

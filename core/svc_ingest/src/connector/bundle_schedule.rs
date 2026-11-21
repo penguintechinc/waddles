@@ -681,7 +681,9 @@ mod tests {
             tenant_slug: "t".into(),
             community_name: None,
         };
-        assert!(BundleScheduleTarget::new(ok.clone(), "waddles.core.calendar", spec).is_ok());
+        assert!(
+            BundleScheduleTarget::new(ok.clone(), "penguintechinc.waddles.calendar", spec).is_ok()
+        );
         for bad in ["", "Has:Colon", "a b", &"x".repeat(129)] {
             assert_eq!(
                 BundleScheduleTarget::new(ok.clone(), bad, spec).unwrap_err(),

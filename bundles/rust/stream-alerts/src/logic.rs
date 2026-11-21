@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 /// The only surface this bundle publishes to (namespaced under its app id).
-pub const SURFACE: &str = "waddles.core.app.stream-alerts.alerts";
+pub const SURFACE: &str = "penguintechinc.waddles.stream-alerts.alerts";
 
 /// Contract bounds (`bundles/contracts/surfaces.v1.json`).
 pub const MAX_TITLE: usize = 100;

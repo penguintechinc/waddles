@@ -18,7 +18,7 @@ use hub_client::bundle_config::{
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use serde_json::{json, Value};
 
-const APP: &str = "waddles.core.app.calendar";
+const APP: &str = "penguintechinc.waddles.calendar";
 const PASSWORD: &str = "bcro-test-password-0123456789";
 static SEQ: AtomicU64 = AtomicU64::new(0);
 
@@ -177,7 +177,7 @@ async fn warm_up_is_one_batched_query_with_hub_api_merge_semantics() {
     let cache = BundleConfigCache::new(src.clone(), None, CacheConfig::default());
     let mut keys: Vec<ConfigKey> = (10..70).map(key).collect();
     keys.push(ConfigKey::new(1, 99, APP)); // another tenant's community id under tenant 1
-    keys.push(ConfigKey::new(1, 10, "waddles.core.app.inactive")); // not active: absent
+    keys.push(ConfigKey::new(1, 10, "penguintechinc.waddles.app-inactive")); // not active: absent
     keys.push(key(10)); // duplicate scope: deduplicated
     let loaded = cache.seed(&keys).await;
     assert_eq!(src.query_count(), 1, "N scopes = ONE query");
@@ -218,7 +218,11 @@ async fn warm_up_is_one_batched_query_with_hub_api_merge_semantics() {
     assert_eq!(parsed(&own.config_json)["tenant2_only"], true);
     // An app that is not active for the tenant is NOT_FOUND on lazy-load.
     assert!(src
-        .get(&ConfigKey::new(1, 10, "waddles.core.app.inactive"))
+        .get(&ConfigKey::new(
+            1,
+            10,
+            "penguintechinc.waddles.app-inactive"
+        ))
         .await
         .is_err());
 }

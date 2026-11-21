@@ -1,4 +1,4 @@
-# uwu bundle (`waddles.core.example.uwu`)
+# uwu bundle (`penguintechinc.waddles.uwu`)
 
 `!uwu <text>` -> uwu-ifies the text (r/l -> w, 'nya' endings, a deterministic uwu/owo flourish). Python/WASM component modeled on `bundles/python/echo`.
 

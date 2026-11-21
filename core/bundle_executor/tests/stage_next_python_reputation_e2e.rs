@@ -21,7 +21,7 @@ mod common;
 
 use common::{run_many, Scenario, StageAnswer, TARGET_USER};
 
-const APP_ID: &str = "waddles.test.reputation-py";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-reputation-py";
 
 /// Builds the Python test bundle for `world stage-next` inside the same
 /// pinned image/componentize-py version production's builder uses.

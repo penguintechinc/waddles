@@ -44,7 +44,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 const WASM: &[u8] = include_bytes!("fixtures/kick_connector.wasm");
-const APP_ID: &str = "waddles.core.service.kick";
+const APP_ID: &str = "penguintechinc.waddles.kick";
 const MAX_FRAME: usize = 65_536;
 const ROUTE: &str = "kick-route-key-0123456789abcdefghijklmnopqrstuv";
 const NOW: i64 = 1_792_995_200;

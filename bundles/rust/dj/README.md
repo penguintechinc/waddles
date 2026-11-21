@@ -1,7 +1,7 @@
-# DJ app bundle (`waddles.core.example.dj`)
+# DJ app bundle (`penguintechinc.waddles.dj`)
 
 Rust WASM **app** bundle (`stage-next-tools` world). An **optional AI DJ layer** over the shared
-request queue service `waddles.core.service.music-requests` (contract:
+request queue service `penguintechinc.waddles.music-requests` (contract:
 `docs/music-requests-service.md`). The music bundle + that service are the core (queue, now
 playing, history, `!sr`/`!queue`); music works fully with the DJ absent or off. The DJ owns **no
 request queue and no request commands**: it keeps only its policy (bans, allow/deny lists, AI
@@ -96,7 +96,7 @@ and `dj.migrated` is set. If the DJ has no grant or the service is down the old 
 
 ## Consumed tool contract
 
-Queue service (`waddles.core.service.music-requests`, scopes enforced by the host from the invoking actor; the DJ never
+Queue service (`penguintechinc.waddles.music-requests`, scopes enforced by the host from the invoking actor; the DJ never
 sends an actor or community): `requests.list {limit}` -> `{now_playing, queue, total_queued, ai_dj_on}`,
 `requests.advance_due {}`, `requests.add {title, artist, source_url?, duration_ms, kind:"dj"}` -> `{item, position}`
 (errors `queue_full`, `duplicate`, `invalid_url`; needs `music:requests.manage`), `requests.import {items<=100}`,

@@ -15,8 +15,14 @@ from typing import Any
 from quart import Quart
 
 from services import community_authz as real_authz
-from services.route_guards import GUARD_ADMIN, mark_guarded
-from tests.route_guard_walker import has_enforcement_call, inline_guard_gaps, iter_routes
+from services import route_guards as real_guards
+from services.route_guards import GUARD_ADMIN, GUARD_ATTR, INLINE_ATTR, mark_guarded
+from tests.route_guard_walker import (
+    guard_kind,
+    has_enforcement_call,
+    inline_guard_gaps,
+    iter_routes,
+)
 
 
 async def authorize_community(*_a: object, **_k: object) -> None:
@@ -217,3 +223,51 @@ def test_planted_routes_registered_in_an_app_are_caught() -> None:
     gaps = inline_guard_gaps(routes, {})
     assert len(gaps) == 3, gaps  # stamped-ok: no deny test; stamped-comment: both problems
     assert not any("/planted/plain/" in g for g in gaps), gaps
+
+
+# ---- hand-stamped labels and outer guards cannot vouch for a stamp ---------------------------
+async def _hand_stamped(community_id: int) -> dict[str, int]:
+    return {"id": community_id}
+
+
+setattr(_hand_stamped, GUARD_ATTR, "admin")  # a label with no wrapper behind it
+
+
+async def _hand_stamped_inline(community_id: int) -> dict[str, int]:
+    return {"id": community_id}
+
+
+setattr(_hand_stamped_inline, GUARD_ATTR, "admin")
+setattr(_hand_stamped_inline, INLINE_ATTR, True)
+
+
+@real_guards.community_member_guard
+@mark_guarded(GUARD_ADMIN)
+async def _admin_stamp_under_member_guard(community_id: int) -> dict[str, int]:
+    return {"id": community_id}
+
+
+@real_guards.community_admin_guard
+async def _really_guarded(community_id: int) -> dict[str, int]:
+    return {"id": community_id}
+
+
+def test_hand_stamped_guard_attribute_fails() -> None:
+    """`setattr(view, "__authz_guard__", "admin")` is not a guard: only a real wrapper counts."""
+    assert guard_kind(_hand_stamped) is None
+    assert guard_kind(_really_guarded) == "admin"  # control: the real wrapper is recognised
+    assert not has_enforcement_call(_hand_stamped)
+
+
+def test_hand_stamped_inline_route_still_needs_enforcement_and_deny_test() -> None:
+    """A hand-set inline stamp goes through the stamp proof (call + keyed deny test) and fails."""
+    gaps = inline_guard_gaps([("GET", "/planted/hand", _hand_stamped_inline)], {})
+    assert len(gaps) == 2, gaps
+
+
+def test_outer_member_guard_cannot_satisfy_an_admin_stamp() -> None:
+    """Only the innermost handler is analysed for a stamp: an outer guard is not its proof."""
+    assert has_enforcement_call(_admin_stamp_under_member_guard)  # chain-wide it looks guarded
+    assert not has_enforcement_call(_admin_stamp_under_member_guard, handler_only=True)
+    gaps = inline_guard_gaps([("GET", "/planted/outer", _admin_stamp_under_member_guard)], {})
+    assert any("no enforcement call" in g for g in gaps), gaps

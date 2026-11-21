@@ -21,10 +21,10 @@ from flask_core.app_manifest import (
 import pytest
 
 _BASE: dict[str, object] = {
-    "app_id": "waddles.bot.discord.gateway",
+    "app_id": "penguintechinc.waddles.gateway",
     "name": "Discord Gateway Ingest",
     "version": "1.0.0",
-    "feature": "waddles.bot.discord",
+    "feature": "discord",
     "module": "bot",
     "provider": "builtin",
     "is_default": True,

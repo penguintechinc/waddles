@@ -30,7 +30,7 @@ use uuid::Uuid;
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-economy";
+const APP_ID: &str = "penguintechinc.waddles.test-economy";
 const VERSION: i64 = 1;
 /// The calling app (an APP bundle reaching the economy service via `tool.invoke`).
 const CALLER_APP: &str = "waddles.app.steal-game";

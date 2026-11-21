@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.example.chatguard
+app_id: penguintechinc.waddles.chatguard
 name: Chat Guard Bundle (Python)
-version: 1.1.2
-feature: waddles.core.example
+version: 1.1.3
 module: core
 provider: builtin
 author: github:penguintechinc
@@ -60,77 +59,77 @@ permissions:
     justification: "chatguard replies to moderators and warns the offending author via the relay host import (relay.push -> chat.send:twitch)"
   - id: "chat.send:youtube"
     justification: "chatguard replies to moderation commands on YouTube via the relay host import (relay.push -> chat.send:youtube)"
-  - id: "tool.call:waddles.core.service.twitch:twitch.moderation.ban"
+  - id: "tool.call:penguintechinc.waddles.twitch:twitch.moderation.ban"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.twitch:twitch.moderation.timeout"
+  - id: "tool.call:penguintechinc.waddles.twitch:twitch.moderation.timeout"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.twitch:twitch.moderation.unban"
+  - id: "tool.call:penguintechinc.waddles.twitch:twitch.moderation.unban"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.moderation.kick"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.moderation.kick"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.moderation.ban"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.moderation.ban"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.moderation.unban"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.moderation.unban"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.moderation.timeout"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.moderation.timeout"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.moderation.untimeout"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.moderation.untimeout"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.youtube:youtube.chat.ban"
+  - id: "tool.call:penguintechinc.waddles.youtube:youtube.chat.ban"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.youtube:youtube.chat.unban"
+  - id: "tool.call:penguintechinc.waddles.youtube:youtube.chat.unban"
     justification: "moderation commands delegate the platform ban/timeout to the platform service (host checks community:moderate; args carry a user uuid only)"
     params:
       write: true
 requested_tools:
 - tool: twitch.moderation.ban
   access: write
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: twitch.moderation.timeout
   access: write
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: twitch.moderation.unban
   access: write
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: discord.moderation.kick
   access: write
-  target_app_id: waddles.core.service.discord
+  target_app_id: penguintechinc.waddles.discord
 - tool: discord.moderation.ban
   access: write
-  target_app_id: waddles.core.service.discord
+  target_app_id: penguintechinc.waddles.discord
 - tool: discord.moderation.unban
   access: write
-  target_app_id: waddles.core.service.discord
+  target_app_id: penguintechinc.waddles.discord
 - tool: discord.moderation.timeout
   access: write
-  target_app_id: waddles.core.service.discord
+  target_app_id: penguintechinc.waddles.discord
 - tool: discord.moderation.untimeout
   access: write
-  target_app_id: waddles.core.service.discord
+  target_app_id: penguintechinc.waddles.discord
 - tool: youtube.chat.ban
   access: write
-  target_app_id: waddles.core.service.youtube
+  target_app_id: penguintechinc.waddles.youtube
 - tool: youtube.chat.unban
   access: write
-  target_app_id: waddles.core.service.youtube
+  target_app_id: penguintechinc.waddles.youtube
 config_schema: {}
 compatible_with: []
 incompatible_with: []

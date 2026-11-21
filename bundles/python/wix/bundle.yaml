@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.integration.wix
+app_id: penguintechinc.waddles.wix-event-sync
 name: Wix Integration (Python)
-version: 1.1.2
-feature: waddles.core.integration
+version: 1.1.3
 module: core
 provider: builtin
 author: github:penguintechinc
@@ -37,15 +36,15 @@ limits:
 permissions:
   - id: storage.kv
     justification: "Wix event ordering state, the Wix->Discord event id map and the last tool-failure code per module"
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.create"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.create"
     justification: "event sync: mirror a new Wix event as a Discord scheduled event (default-OFF module, approved grant required)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.update"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.update"
     justification: "event sync: mirror a Wix event edit to its Discord scheduled event (default-OFF module, approved grant required)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.cancel"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.cancel"
     justification: "event sync: cancel the Discord scheduled event when the Wix event is canceled (default-OFF module, approved grant required)"
     params:
       write: true
@@ -59,10 +58,10 @@ platform_compatibility:
 requested_tools:
   - tool: discord.scheduled_event.create
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.update
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.cancel
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord

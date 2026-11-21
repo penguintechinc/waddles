@@ -32,7 +32,7 @@ def test_csharp_app_and_its_service_grants_match_the_real_catalog(game):
     grants = {permission["id"]: permission for permission in manifest["permissions"]}
     assert manifest["requested_tools"]
     for request in manifest["requested_tools"]:
-        assert request["target_app_id"] == "waddles.core.service.economy"
+        assert request["target_app_id"] == "penguintechinc.waddles.economy"
         assert exported[request["tool"]]["access"] == request["access"]
         grant = grants[f"tool.call:{request['target_app_id']}:{request['tool']}"]
         assert grant["params"]["write"] == (request["access"] == "write")

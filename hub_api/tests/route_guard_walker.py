@@ -80,11 +80,43 @@ def is_inline_stamped(view: Any) -> bool:
     return any(getattr(fn, INLINE_ATTR, False) for fn in chain(view))
 
 
+_TRUSTED_GUARD_CODES: frozenset[Any] | None = None
+
+
+def _trusted_guard_codes() -> frozenset[Any]:
+    """Code objects of the REAL guard wrappers (`services.route_guards`).
+
+    Built by applying each guard to a dummy handler. `__authz_guard__` is just an attribute anyone
+    can `setattr`, so a label only counts when it sits on a wrapper that is genuinely one of these.
+    """
+    global _TRUSTED_GUARD_CODES
+    if _TRUSTED_GUARD_CODES is None:
+        route_guards = importlib.import_module("services.route_guards")
+
+        async def _dummy() -> None:
+            return None
+
+        wrappers = (
+            route_guards.community_admin_guard(_dummy),
+            route_guards.community_member_guard(_dummy),
+            route_guards.tenant_admin_guard(_dummy),
+            route_guards.platform_analytics_guard(_dummy),
+        )
+        _TRUSTED_GUARD_CODES = frozenset(w.__code__ for w in wrappers)
+    return _TRUSTED_GUARD_CODES
+
+
 def guard_kind(view: Any) -> str | None:
-    """The `__authz_guard__` label anywhere in the view's wrapper chain."""
+    """The guard label of a REAL guard wrapper (or a `mark_guarded` stamp) in the view's chain.
+
+    A hand-stamped `__authz_guard__` attribute with no real wrapper behind it is ignored; a
+    `mark_guarded` stamp is returned but is still only a label (`inline_guard_gaps` demands an
+    enforcement call plus a keyed deny test for it).
+    """
+    trusted = _trusted_guard_codes()
     for fn in chain(view):
         kind = getattr(fn, GUARD_ATTR, None)
-        if kind:
+        if kind and (getattr(fn, "__code__", None) in trusted or getattr(fn, INLINE_ATTR, False)):
             return str(kind)
     return None
 
@@ -216,8 +248,8 @@ def _terminates(stmts: list[ast.stmt]) -> bool:
 class _Analyzer:
     """All-paths enforcement analysis of one function (and the helpers it calls)."""
 
-    def __init__(self, depth: int, seen: set[Any]) -> None:
-        self.depth, self.seen = depth, seen
+    def __init__(self, depth: int, seen: set[Any], *, decorators: bool = True) -> None:
+        self.depth, self.seen, self.decorators = depth, seen, decorators
 
     def function(self, fn: Any) -> set[str]:
         code = getattr(fn, "__code__", None)
@@ -235,7 +267,7 @@ class _Analyzer:
             return set()
         self.scope, self.facts = _scope_of(fn), _Facts(node)
         hits: set[str] = set()
-        for deco in node.decorator_list:
+        for deco in node.decorator_list if self.decorators else []:
             obj = _resolve(self.scope, deco.func if isinstance(deco, ast.Call) else deco)
             if obj is not None and id(obj) in _primitives():
                 hits.add(_primitives()[id(obj)][0])
@@ -348,24 +380,27 @@ class _Analyzer:
         return inner.function(helper)
 
 
-def enforcement_calls(view: Any) -> set[str]:
+def enforcement_calls(view: Any, *, handler_only: bool = False) -> set[str]:
     """Authorization primitives the view's chain enforces on every path (helpers followed).
 
     A primitive counts only when it is resolved by identity, runs on every path (not under a
     one-armed `if`/loop/`except`, not in a `try` that swallows everything) and -- for
     value-returning primitives -- its result feeds a deny decision. Decorator guards count by
-    identity too.
+    identity too. `handler_only` analyses just the innermost handler body (no wrappers, no
+    decorators), so an outer guard cannot vouch for a stamp on the handler underneath it.
     """
     seen: set[Any] = set()
     found: set[str] = set()
+    if handler_only:
+        return _Analyzer(0, seen, decorators=False).function(chain(view)[-1])
     for fn in chain(view):
         found |= _Analyzer(0, seen).function(fn)
     return found
 
 
-def has_enforcement_call(view: Any) -> bool:
+def has_enforcement_call(view: Any, *, handler_only: bool = False) -> bool:
     """True when the view's call chain really enforces through an authorization primitive."""
-    return bool(enforcement_calls(view))
+    return bool(enforcement_calls(view, handler_only=handler_only))
 
 
 def required_scopes(view: Any) -> list[str]:
@@ -400,7 +435,7 @@ def inline_guard_gaps(
     for method, rule, view in routes:
         if not is_inline_stamped(view):
             continue
-        if not has_enforcement_call(view):
+        if not has_enforcement_call(view, handler_only=True):
             problems.append(f"{method} {rule}: stamped mark_guarded but no enforcement call")
         if (method, rule) not in registry:
             problems.append(f"{method} {rule}: stamped mark_guarded but no keyed deny test")

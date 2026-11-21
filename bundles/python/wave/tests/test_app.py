@@ -108,7 +108,7 @@ def _sample_envelope(platform: str, text: str, *, channel_id: str | None = "1234
     return StageEnvelope(
         tenant="tenant-1",
         community=None,
-        app_id="waddles.core.example.wave",
+        app_id="penguintechinc.waddles.wave",
         stage="action",
         event=PlatformEvent(
             platform=platform,

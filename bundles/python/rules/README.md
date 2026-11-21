@@ -1,7 +1,7 @@
 # rules (Python)
 
 `!rules` -- show and manage a per-community rules text. `kv`-only, first-party
-(`provider: builtin`, `app_id: waddles.core.example.rules`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.rules`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** (not a port; no third-party attribution applies).
 
 ## Commands

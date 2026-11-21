@@ -224,9 +224,9 @@ def test_stage_next_permission_on_stage_world_fails_the_build(
 ) -> None:
     """The silent-degrade shape: a stage-next-only permission with a `stage` world must raise."""
     with pytest.raises(bpb.BuildError, match="stage-next"):
-        bpb.resolve_wit_world("waddles.core.example.x", declared, ["storage.kv", permission_id])
+        bpb.resolve_wit_world("penguintechinc.waddles.example", declared, ["storage.kv", permission_id])
     assert (
-        bpb.resolve_wit_world("waddles.core.example.x", "stage-next", [permission_id])
+        bpb.resolve_wit_world("penguintechinc.waddles.example", "stage-next", [permission_id])
         == "stage-next"
     )
 
@@ -242,15 +242,15 @@ def test_stage_next_permission_on_stage_world_fails_the_build(
 )
 def test_plain_permissions_resolve_to_the_default_world(permissions: list[str]) -> None:
     """A bundle with no stage-next capability stays on `stage` (declared or by default)."""
-    assert bpb.resolve_wit_world("waddles.core.example.x", None, permissions) == "stage"
-    assert bpb.resolve_wit_world("waddles.core.example.x", "stage", permissions) == "stage"
+    assert bpb.resolve_wit_world("penguintechinc.waddles.example", None, permissions) == "stage"
+    assert bpb.resolve_wit_world("penguintechinc.waddles.example", "stage", permissions) == "stage"
 
 
 @pytest.mark.parametrize("declared", ["stage-v2", "connector", "", "Stage", 7, ["stage-next"]])
 def test_unknown_world_is_rejected(declared: object) -> None:
     """A typo or an unwired world name fails loud rather than reaching componentize-py."""
     with pytest.raises(bpb.BuildError, match="wit_world must be one of"):
-        bpb.resolve_wit_world("waddles.core.example.x", declared, [])
+        bpb.resolve_wit_world("penguintechinc.waddles.example", declared, [])
 
 
 def _tmp_repo(tmp_path: Path, permissions: list[dict[str, str]]) -> None:
@@ -258,7 +258,7 @@ def _tmp_repo(tmp_path: Path, permissions: list[dict[str, str]]) -> None:
     bundle = tmp_path / "bundles" / "python" / "x"
     (bundle / "src").mkdir(parents=True)
     (bundle / "hub-manifest.yaml").write_text(
-        yaml.safe_dump({"app_id": "waddles.core.example.x", "permissions": permissions}),
+        yaml.safe_dump({"app_id": "penguintechinc.waddles.example", "permissions": permissions}),
         encoding="utf-8",
     )
     for sub in ("wit/waddle-bundle", "sdk/waddle-sdk/src"):
@@ -294,7 +294,7 @@ def test_resolved_world_reaches_the_componentize_py_command_line(
 
     monkeypatch.setattr(bpb.subprocess, "run", fake_run)
     row: dict[str, Any] = {
-        "app_id": "waddles.core.example.x",
+        "app_id": "penguintechinc.waddles.example",
         "source_dir": "python/x",
         "manifest_path": "x.manifest.yaml",
         "artifact_path": "x.wasm",
@@ -302,7 +302,7 @@ def test_resolved_world_reaches_the_componentize_py_command_line(
     if wit_world is not None:
         row["wit_world"] = wit_world
 
-    assert bpb._build_one(row) == "waddles.core.example.x"
+    assert bpb._build_one(row) == "penguintechinc.waddles.example"
     assert len(seen) == 1
     cmd = seen[0]
     assert cmd[cmd.index("-w") + 1] == expected
@@ -322,7 +322,7 @@ def test_build_one_refuses_stage_next_permission_without_the_world(
 
     monkeypatch.setattr(bpb.subprocess, "run", boom)
     row = {
-        "app_id": "waddles.core.example.x",
+        "app_id": "penguintechinc.waddles.example",
         "source_dir": "python/x",
         "manifest_path": "x.manifest.yaml",
         "artifact_path": "x.wasm",
