@@ -4,7 +4,8 @@
 # `waddlebot.io/workload: executor-precompile` label both pod templates carry:
 #   1. a dedicated ServiceAccount with no API token (replaces the shared waddlebot SA),
 #   2. a default-deny CiliumNetworkPolicy: egress ONLY to kube-dns, Postgres, SeaweedFS S3 and
-#      (when deployed) the OTLP collector; nothing is allowed in,
+#      (when deployed) the OTLP collector; nothing is allowed in (plus an enqueue-Job-only CNP
+#      granting hub-api /ready egress for its wait-for-hub-api init container),
 #   3. an ENFORCED Tetragon exec allowlist (same helper + runc-init handling as every other workload,
 #      values.yaml `tetragon.*`): only the hub-api python runtime and the bundle-executor binary may exec.
 {{- if .Values.pipeline.hubApi.executorPrecompile.enabled }}
@@ -76,5 +77,33 @@ spec:
             - port: {{ .Values.egressPolicy.inCluster.otelGrpcPort | quote }}
               protocol: TCP
     {{- end }}
+{{- if .Values.pipeline.hubApi.executorPrecompile.enqueue.enabled }}
+---
+# Enqueue Job ONLY (not the CronJob compile/sign pods): its wait-for-hub-api init container polls
+# hub-api's /ready on the HTTP port before the Job may INSERT queue rows. Separate policy so the
+# shared executor-precompile CNP above stays hub-api-free; Cilium allow rules are additive.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-executor-precompile-enqueue-hubapi
+  namespace: {{ $ns }}
+  labels:
+    {{- include "waddlebot.labels" . | nindent 4 }}
+    app.kubernetes.io/component: executor-precompile-enqueue
+spec:
+  endpointSelector:
+    matchLabels:
+      waddlebot.io/workload: executor-precompile
+      app.kubernetes.io/component: executor-precompile-enqueue
+  egress:
+    - toEndpoints:
+        - matchLabels:
+            {{- include "waddlebot.selectorLabels" . | nindent 12 }}
+            app.kubernetes.io/component: hub-api
+      toPorts:
+        - ports:
+            - port: {{ .Values.egressPolicy.inCluster.hubApiHttpPort | quote }}
+              protocol: TCP
+{{- end }}
 {{- include "waddlebot.workloadPolicies" (dict "root" $ "component" "executor-precompile" "selector" (dict "waddlebot.io/workload" "executor-precompile") "ports" (list) "runtime" "python" "binaries" (list "/app/bundle-executor") "cnp" false) }}
 {{- end }}
