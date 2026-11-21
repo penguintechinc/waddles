@@ -35,6 +35,13 @@ from services import dsar_rate_limit, join_request_service
 from services import suppression_keys as keys
 from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.entity_ids import pid
+
+
+def _review_url(auth_db: Any, community_id: int, request_id: int, verb: str) -> str:
+    """`PUT .../join-requests/<request UUID>/<verb>` for a seeded request row."""
+    request_uuid = pid(auth_db.dal, "community_join_requests", request_id)
+    return f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_uuid}/{verb}"
 
 
 def _test_config() -> HubAPIConfig:
@@ -428,7 +435,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
+            _review_url(auth_db, community_id, request_id, "approve"),
             headers=_auth_header(user_id=outsider_id),
         )
         assert response.status_code == 403
@@ -448,7 +455,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
+            _review_url(auth_db, community_id, request_id, "approve"),
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 200
@@ -531,7 +538,7 @@ class TestApproveReject:
         request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
 
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
+            _review_url(auth_db, community_id, request_id, "approve"),
             headers=_auth_header(user_id=admin_id),
         )
 
@@ -566,7 +573,7 @@ class TestApproveReject:
         request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
 
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
+            _review_url(auth_db, community_id, request_id, "approve"),
             headers=_auth_header(user_id=admin_id),
         )
 
@@ -599,7 +606,7 @@ class TestApproveReject:
         request_id = self._pending(auth_db, community_id=community_id, applicant_id=applicant_id)
 
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/approve",
+            _review_url(auth_db, community_id, request_id, "approve"),
             headers=_auth_header(user_id=admin_id),
         )
 
@@ -613,13 +620,63 @@ class TestApproveReject:
         assert members == 0
         assert request.status == "pending"  # retryable once the key is fixed
 
+    async def test_foreign_community_request_uuid_is_the_same_404_as_unknown(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        """A request UUID from ANOTHER community never resolves under this community's URL."""
+        community_id = _seed_community(auth_db)
+        other_community_id = _seed_community(auth_db)
+        admin_id = _seed_admin(
+            auth_db, community_id=community_id, email="adminuuid@example.com", username="adminuuid"
+        )
+        applicant_id = _seed_user(auth_db, email="foreign@example.com", username="foreignapp")
+        foreign_request = self._pending(
+            auth_db, community_id=other_community_id, applicant_id=applicant_id
+        )
+        base = f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests"
+        foreign_uuid = pid(auth_db.dal, "community_join_requests", foreign_request)
+        unknown_uuid = "00000000-0000-4000-8000-0000000000ff"
+        for verb in ("approve", "reject"):
+            foreign = await client.put(
+                f"{base}/{foreign_uuid}/{verb}", headers=_auth_header(user_id=admin_id)
+            )
+            unknown = await client.put(
+                f"{base}/{unknown_uuid}/{verb}", headers=_auth_header(user_id=admin_id)
+            )
+            assert foreign.status_code == unknown.status_code == 404, verb
+            bodies = [await foreign.get_json(), await unknown.get_json()]
+            for body in bodies:
+                body["error"].pop("timestamp", None)
+            assert bodies[0] == bodies[1], verb
+        row = (
+            auth_db.dal(auth_db.dal.community_join_requests.id == foreign_request).select().first()
+        )
+        assert row.status == "pending"  # the other community's request was never touched
+
+    async def test_numeric_request_id_in_the_path_is_404(self, client: Any, auth_db: Any) -> None:
+        community_id = _seed_community(auth_db)
+        admin_id = _seed_admin(
+            auth_db, community_id=community_id, email="adminnum@example.com", username="adminnum"
+        )
+        request_id = self._pending(
+            auth_db,
+            community_id=community_id,
+            applicant_id=_seed_user(auth_db, email="num@example.com", username="numapp"),
+        )
+        for verb in ("approve", "reject"):
+            response = await client.put(
+                f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/{verb}",  # noqa: E501
+                headers=_auth_header(user_id=admin_id),
+            )
+            assert response.status_code == 404, verb
+
     async def test_approve_no_pending_request_is_404(self, client: Any, auth_db: Any) -> None:
         community_id = _seed_community(auth_db)
         admin_id = _seed_admin(
             auth_db, community_id=community_id, email="approver2@example.com", username="approver2"
         )
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/999999/approve",
+            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/00000000-0000-4000-8000-0000000000ff/approve",  # noqa: E501
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 404
@@ -639,7 +696,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/reject",
+            _review_url(auth_db, community_id, request_id, "reject"),
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 200
@@ -664,7 +721,7 @@ class TestApproveReject:
         auth_db.dal.commit()
 
         response = await client.put(
-            f"/api/v1/admin/{public_id(auth_db, community_id)}/join-requests/{request_id}/reject",
+            _review_url(auth_db, community_id, request_id, "reject"),
             headers=_auth_header(user_id=admin_id),
         )
         assert response.status_code == 404

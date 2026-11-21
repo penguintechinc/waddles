@@ -17,7 +17,8 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.guild_pairing import guild_pairing_bp
-from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
+from tests.entity_ids import pid
 
 
 @pytest.fixture
@@ -241,7 +242,11 @@ class TestUpdateAndDeletePairing:
     ) -> None:
         dal, community_id, _tenant_id, _global_id = guild_pairing_db
         response = await client.patch(
-            cpath(dal, "/api/v1/communities/{community_id}/guild-pairings/999999", community_id),
+            cpath(
+                dal,
+                "/api/v1/communities/{community_id}/guild-pairings/00000000-0000-4000-8000-0000000000ff",
+                community_id,
+            ),
             headers={
                 **auth_headers(scope="community.guild_pairing:write"),
                 "Content-Type": "application/json",
@@ -281,9 +286,9 @@ class TestUpdateAndDeletePairing:
 
 
 class TestRoleSyncBindings:
-    async def _pairing_id(self, client: Any, auth_headers: Any, dal: Any, community_id: int) -> int:
+    async def _pairing_id(self, client: Any, auth_headers: Any, dal: Any, community_id: int) -> str:
         created = await _create_pairing(client, auth_headers, dal, community_id)
-        return int((await created.get_json())["pairing"]["id"])
+        return str((await created.get_json())["pairing"]["id"])
 
     async def test_create_and_list_binding(
         self, client: Any, auth_headers: Any, guild_pairing_db: Any
@@ -446,10 +451,10 @@ class TestRoleSyncBindings:
 class TestPrivilegeHardening:
     """S1/S3 regressions at the HTTP surface (role-sync privilege hardening, v3.0)."""
 
-    async def _pairing_id(self, client: Any, auth_headers: Any, dal: Any, community_id: int) -> int:
+    async def _pairing_id(self, client: Any, auth_headers: Any, dal: Any, community_id: int) -> str:
         response = await _create_pairing(client, auth_headers, dal, community_id)
         assert response.status_code == 201
-        return int((await response.get_json())["pairing"]["id"])
+        return str((await response.get_json())["pairing"]["id"])
 
     async def _post_binding(
         self,
@@ -457,7 +462,7 @@ class TestPrivilegeHardening:
         auth_headers: Any,
         dal: Any,
         community_id: int,
-        pairing_id: int,
+        pairing_id: str,
         body: Any,
     ) -> Any:
         return await client.post(
@@ -530,13 +535,151 @@ class TestPrivilegeHardening:
     ) -> None:
         dal, community_id, _t, _g = guild_pairing_db
         pairing_id = await self._pairing_id(client, auth_headers, dal, community_id)
-        row = dal(dal.guild_tenant_pairings.id == pairing_id).select().first()
+        row = dal(dal.guild_tenant_pairings.public_id == pairing_id).select().first()
         assert row.ownership_verified_at is not None
         assert row.propagate_moderators is False
 
 
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).
 UUID_COMMUNITY_RESPONSES = True
+
+
+class TestUuidPathIds:
+    """`<puuid:>` ids (pairing, binding, mirror mapping): own UUID resolves, else 404."""
+
+    @staticmethod
+    def _seed(dal: Any, community_id: int, tenant_id: int) -> dict[str, Any]:
+        """A second community in the SAME tenant owning pairing/binding/mirror rows."""
+        from datetime import UTC, datetime
+
+        now = datetime.now(UTC)
+        other = dal.communities.insert(tenant_id=tenant_id)
+        pairing = dal.guild_tenant_pairings.insert(
+            community_id=other,
+            discord_guild_id="555",
+            direction="bidirectional",
+            sync_enabled=False,
+            role_name_prefix="[T]",
+            created_at=now,
+            updated_at=now,
+        )
+        binding = dal.community_role_sync_bindings.insert(
+            pairing_id=pairing,
+            sync_scope="subscriber_tier",
+            subscriber_tier=1,
+            discord_role_id="1",
+            created_at=now,
+            updated_at=now,
+        )
+        mapping = dal.discord_role_mirror_mappings.insert(
+            community_id=other,
+            source_guild_id="555",
+            source_role_id="1",
+            target_guild_id="556",
+            target_role_id="2",
+            created_at=now,
+        )
+        dal.commit()
+        return {"pairing": pairing, "binding": binding, "mapping": mapping}
+
+    def _routes(self, dal: Any, ids: dict[str, Any]) -> list[tuple[str, str, str]]:
+        """`(method, path-after-community, entity)` for every converted route of this blueprint."""
+        p = pid(dal, "guild_tenant_pairings", ids["pairing"])
+        b = pid(dal, "community_role_sync_bindings", ids["binding"])
+        m = pid(dal, "discord_role_mirror_mappings", ids["mapping"])
+        return [
+            ("patch", f"/guild-pairings/{p}", "pairing"),
+            ("delete", f"/guild-pairings/{p}", "pairing"),
+            ("get", f"/guild-pairings/{p}/role-bindings", "pairing"),
+            ("delete", f"/guild-pairings/{p}/role-bindings/{b}", "pairing"),
+            ("delete", f"/discord/role-mirrors/{m}", "mapping"),
+        ]
+
+    async def _call(
+        self, client: Any, auth_headers: Any, method: str, url: str, scope_kind: str = "write"
+    ) -> Any:
+        return await getattr(client, method)(
+            url,
+            headers={
+                **auth_headers(scope=f"community.guild_pairing:{scope_kind}"),
+                "Content-Type": "application/json",
+            },
+            **({"data": "{}"} if method == "patch" else {}),
+        )
+
+    async def test_foreign_community_uuids_are_the_same_404_as_unknown_ones(
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
+    ) -> None:
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
+        ids = self._seed(dal, community_id, tenant_id)
+        base = f"/api/v1/communities/{public_id(dal, community_id)}"
+        unknown = "00000000-0000-4000-8000-0000000000ff"
+        for method, path, _entity in self._routes(dal, ids):
+            kind = "read" if method == "get" else "write"
+            foreign = await self._call(client, auth_headers, method, base + path, kind)
+            # the same route with every id swapped for one nobody owns
+            masked = path
+            for real in (
+                pid(dal, "guild_tenant_pairings", ids["pairing"]),
+                pid(dal, "community_role_sync_bindings", ids["binding"]),
+                pid(dal, "discord_role_mirror_mappings", ids["mapping"]),
+            ):
+                masked = masked.replace(real, unknown)
+            missing = await self._call(client, auth_headers, method, base + masked, kind)
+            assert foreign.status_code == missing.status_code == 404, (method, path)
+            f_body, m_body = await foreign.get_json(), await missing.get_json()
+            for body in (f_body, m_body):
+                body["error"].pop("timestamp", None)  # the only per-request difference
+            assert f_body == m_body, (method, path)
+        # nothing of the other community was touched
+        assert dal(dal.guild_tenant_pairings.id == ids["pairing"]).count() == 1
+        assert dal(dal.community_role_sync_bindings.id == ids["binding"]).count() == 1
+        assert dal(dal.discord_role_mirror_mappings.id == ids["mapping"]).count() == 1
+
+    async def test_numeric_ids_in_the_path_do_not_route(
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
+    ) -> None:
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
+        base = f"/api/v1/communities/{public_id(dal, community_id)}"
+        for method, path in (
+            ("patch", "/guild-pairings/1"),
+            ("delete", "/guild-pairings/1"),
+            ("get", "/guild-pairings/1/role-bindings"),
+            ("delete", "/guild-pairings/1/role-bindings/1"),
+            ("delete", "/discord/role-mirrors/1"),
+        ):
+            kind = "read" if method == "get" else "write"
+            response = await self._call(client, auth_headers, method, base + path, kind)
+            assert response.status_code == 404, (method, path)
+
+    async def test_own_community_uuids_resolve_and_responses_carry_uuids(
+        self, client: Any, auth_headers: Any, guild_pairing_db: Any
+    ) -> None:
+        dal, community_id, tenant_id, _global_id = guild_pairing_db
+        created = await _create_pairing(client, auth_headers, dal, community_id)
+        pairing = (await created.get_json())["pairing"]
+        assert pairing["id"] == pid(
+            dal, "guild_tenant_pairings", dal(dal.guild_tenant_pairings.id > 0).select().first().id
+        )
+        base = f"/api/v1/communities/{public_id(dal, community_id)}/guild-pairings/{pairing['id']}"
+        made = await client.post(
+            base + "/role-bindings",
+            headers={
+                **auth_headers(scope="community.guild_pairing:write"),
+                "Content-Type": "application/json",
+            },
+            data=json_module.dumps(
+                {"sync_scope": "subscriber_tier", "subscriber_tier": 1, "discord_role_id": "42"}
+            ),
+        )
+        assert made.status_code == 201
+        binding = (await made.get_json())["binding"]
+        assert binding["pairing_id"] == pairing["id"]  # the pairing's UUID, not its numeric id
+        deleted = await self._call(
+            client, auth_headers, "delete", f"{base}/role-bindings/{binding['id']}"
+        )
+        assert deleted.status_code == 204
+        assert (await self._call(client, auth_headers, "delete", base)).status_code == 204
 
 
 pytestmark = pytest.mark.usefixtures("bypass_route_guards")

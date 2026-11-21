@@ -6,7 +6,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import MirrorRolesSection from '../MirrorRolesSection';
 import { roleSyncApi, type GuildPairing, type RoleMirrorMapping } from '../../../services/roleSyncApi';
 
-const pairing = (id: number, guild: string): GuildPairing => ({
+const pairing = (id: string, guild: string): GuildPairing => ({
   id,
   community_id: '00000007-0000-4000-8000-000000000000',
   discord_guild_id: guild,
@@ -19,10 +19,10 @@ const pairing = (id: number, guild: string): GuildPairing => ({
   updated_at: null,
 });
 
-const PAIRINGS = [pairing(1, '111'), pairing(2, '222')];
+const PAIRINGS = [pairing('1', '111'), pairing('2', '222')];
 
 const mapping = (over: Partial<RoleMirrorMapping> = {}): RoleMirrorMapping => ({
-  id: 5,
+  id: '5',
   community_id: '00000007-0000-4000-8000-000000000000',
   source_guild_id: '111',
   source_role_id: '10',
@@ -75,8 +75,8 @@ describe('MirrorRolesSection', () => {
   it('shows "Not synced yet" and a last error', async () => {
     stubRoles();
     vi.spyOn(roleSyncApi, 'listMirrors').mockResolvedValue([
-      mapping({ id: 1, last_synced_at: null }),
-      mapping({ id: 2, last_error: 'DiscordSyncError' }),
+      mapping({ id: '1', last_synced_at: null }),
+      mapping({ id: '2', last_error: 'DiscordSyncError' }),
     ]);
     renderSection();
     expect((await screen.findByTestId('mirror-result-1')).textContent).toBe('Not synced yet');
@@ -86,7 +86,7 @@ describe('MirrorRolesSection', () => {
   it('asks for two servers when fewer than two are paired', async () => {
     vi.spyOn(roleSyncApi, 'listMirrors').mockResolvedValue([]);
     vi.spyOn(roleSyncApi, 'listGuildRoles').mockResolvedValue([]);
-    renderSection(true, [pairing(1, '111')]);
+    renderSection(true, [pairing('1', '111')]);
     expect(await screen.findByTestId('mirror-needs-two-guilds')).toBeTruthy();
     expect(screen.queryByLabelText('Source server')).toBeNull();
   });
@@ -152,7 +152,7 @@ describe('MirrorRolesSection', () => {
     const del = vi.spyOn(roleSyncApi, 'deleteMirror').mockResolvedValue({} as never);
     renderSection();
     fireEvent.click(await screen.findByRole('button', { name: 'Delete mirror 5' }));
-    await waitFor(() => expect(del).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', 5));
+    await waitFor(() => expect(del).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000', '5'));
   });
 
   it('hides create form and delete buttons for non-admins', async () => {

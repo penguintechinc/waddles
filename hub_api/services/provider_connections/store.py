@@ -339,6 +339,35 @@ async def community_tenant_id(db: Any, community_id: int) -> int | None:
     return int(value) if value is not None else None
 
 
+async def resolve_public_connection_id(
+    db: Any, *, community_id: int, public_id: UUID
+) -> int | None:
+    """Numeric id of the connection with `public_id` that `community_id` holds a live grant on.
+
+    The grant join IS the community scope (a connection has no community column): a UUID that is
+    unknown, malformed upstream, or granted only to another community all return ``None``.
+    """
+    t = _tables(db)
+    column = t.connections.c.public_id
+    try:
+        native = column.type.python_type is UUID
+    except NotImplementedError:
+        native = False
+    stmt = (
+        select(t.connections.c.id)
+        .select_from(t.grants.join(t.connections, t.connections.c.id == t.grants.c.connection_id))
+        .where(
+            # Postgres reflects a native UUID; the sqlite test bootstrap stores 36-char text.
+            column == (public_id if native else str(public_id)),
+            t.grants.c.community_id == community_id,
+            t.grants.c.status != GRANT_REVOKED,
+        )
+    )
+    async with db.engine.connect() as conn:
+        value = (await conn.execute(stmt)).scalar_one_or_none()
+    return int(value) if value is not None else None
+
+
 async def count_community_connections(db: Any, *, community_id: int, platform: str) -> int:
     """How many live (non-revoked) ``platform`` connections ``community_id`` holds.
 

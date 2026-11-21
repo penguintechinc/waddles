@@ -593,8 +593,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.ROLE, AuditAction.ROLE_JOIN_REQUEST_DECIDED),
         (
-            ("PUT", f"{_ADM}/join-requests/<int:request_id>/approve"),
-            ("PUT", f"{_ADM}/join-requests/<int:request_id>/reject"),
+            ("PUT", f"{_ADM}/join-requests/<puuid:request_id>/approve"),
+            ("PUT", f"{_ADM}/join-requests/<puuid:request_id>/reject"),
         ),
     ),
     (
