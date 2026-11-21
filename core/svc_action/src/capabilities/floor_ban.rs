@@ -29,6 +29,11 @@ use super::{
     StageCapabilities, OUTBOUND_SCHEMA_VERSION,
 };
 
+/// Core moderation bundles whose confirmed platform `mod.unban` lifts the matching Waddles ban
+/// (explicit list, in addition to the `penguintechinc.waddles.` core-namespace check). Any other
+/// bundle needs the `reputation.floor_ban.lift` permission.
+pub(crate) const FLOOR_LIFT_CORE_ALLOWLIST: &[&str] = &["penguintechinc.waddles.chatguard"];
+
 /// Platforms whose floor ban this stage can deliver (`svc_process` refuses the rest up front).
 pub(crate) const FLOOR_BAN_PLATFORMS: &[&str] = &["discord"];
 
@@ -126,26 +131,56 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         let _ = self.unban_sync.set(sync);
     }
 
-    /// After the sender CONFIRMED a platform `mod.unban` (chatguard `!unban`, any bundle unban),
+    /// Whether `scope`'s calling bundle may turn its confirmed platform `mod.unban` into a lift of
+    /// the Waddles floor/soft ban: only a core moderation bundle on the explicit
+    /// [`FLOOR_LIFT_CORE_ALLOWLIST`], or any bundle holding the dedicated per-action permission
+    /// `reputation.floor_ban.lift` in this community. A vendor bundle's unban still reaches the
+    /// platform but lifts NOTHING in Waddles (a bundle must not be able to lift bans).
+    pub(crate) fn may_sync_lift(&self, scope: &InvokeScope) -> bool {
+        if bundle_capability_gate::is_core_namespace(&scope.app_id)
+            && FLOOR_LIFT_CORE_ALLOWLIST.contains(&scope.app_id.as_str())
+        {
+            return true;
+        }
+        self.gate
+            .authorize(
+                &scope.gate_scope(),
+                bundle_capability_gate::PermissionId::ReputationFloorBanLift,
+                ResourceRef::AppScoped(AppScopedResource::None),
+            )
+            .is_ok()
+    }
+
+    /// After the sender CONFIRMED a platform `mod.unban` (chatguard `!unban`, a granted bundle),
     /// lifts the matching Waddles floor ban and soft ban in THIS tenant + community (taken from
-    /// the invoke scope, never the event). No unban is enqueued back (no echo), a sync failure is
-    /// an ERROR log + metric but never fails the already-confirmed platform unban, and nothing but
-    /// the numeric tenant/community and counts is logged.
+    /// the invoke scope, never the event), but only for a trusted caller
+    /// ([`Self::may_sync_lift`]). The calling app id is recorded. No unban is enqueued back (no
+    /// echo), a sync failure is an ERROR log + metric but never fails the already-confirmed
+    /// platform unban, and nothing but the numeric tenant/community, app id and counts is logged.
     pub(crate) async fn sync_confirmed_unban(
         &self,
-        tenant_id: i32,
-        community_id: i32,
+        scope: &InvokeScope,
         platform: &str,
         user_uuid: &str,
     ) {
+        let (tenant_id, community_id) = (scope.tenant_id, scope.community_id);
         let Some(sync) = self.unban_sync.get() else {
             return;
         };
+        if !self.may_sync_lift(scope) {
+            self.stage_metrics
+                .record_floor_ban_dispatch("platform_lift_untrusted");
+            tracing::info!(
+                tenant_id, community_id, platform, app_id = %scope.app_id,
+                "platform unban confirmed; caller is not trusted to lift Waddles bans: nothing lifted"
+            );
+            return;
+        }
         let Ok(user) = user_uuid.parse::<Uuid>() else {
             return;
         };
         match sync
-            .lift_from_platform(tenant_id, community_id, platform, user)
+            .lift_from_platform(tenant_id, community_id, platform, user, &scope.app_id)
             .await
         {
             Ok((lifted, soft)) => {

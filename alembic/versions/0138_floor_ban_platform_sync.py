@@ -35,7 +35,7 @@ def downgrade() -> None:
     """Drop pending unban rows and the sync objects, then restore the 0114 + 0137 functions."""
     op.execute("DELETE FROM bundle_reputation_floor_bans WHERE action = 2")
     op.execute(
-        "DROP FUNCTION IF EXISTS reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid)"
+        "DROP FUNCTION IF EXISTS reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid, text)"
     )
     op.execute("DROP FUNCTION IF EXISTS reputation_floor_ban_claim(int, int)")
     op.execute(
@@ -50,7 +50,25 @@ def downgrade() -> None:
     op.execute(
         "ALTER TABLE bundle_reputation_tenant_policy DROP COLUMN IF EXISTS lift_rearm_drop"
     )
-    for column in ("score_at_lift", "lift_origin", "source_ban_id", "action"):
+    for constraint in (
+        "ck_bundle_reputation_floor_bans_unban_key",
+        "uq_bundle_reputation_floor_bans_action",
+        "ck_bundle_reputation_floor_bans_lift_source_app",
+    ):
+        op.execute(
+            f"ALTER TABLE bundle_reputation_floor_bans DROP CONSTRAINT IF EXISTS {constraint}"
+        )
+    op.execute(
+        "ALTER TABLE bundle_reputation_floor_bans ADD CONSTRAINT uq_bundle_reputation_floor_bans "
+        "UNIQUE (tenant_id, community_id, user_uuid, scope, idempotency_key)"
+    )
+    for column in (
+        "lift_source_app",
+        "score_at_lift",
+        "lift_origin",
+        "source_ban_id",
+        "action",
+    ):
         op.execute(
             f"ALTER TABLE bundle_reputation_floor_bans DROP COLUMN IF EXISTS {column}"
         )

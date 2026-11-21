@@ -15,7 +15,29 @@ ALTER TABLE bundle_reputation_floor_bans
     ADD COLUMN IF NOT EXISTS action SMALLINT NOT NULL DEFAULT 1,
     ADD COLUMN IF NOT EXISTS source_ban_id BIGINT,
     ADD COLUMN IF NOT EXISTS lift_origin SMALLINT,
-    ADD COLUMN IF NOT EXISTS score_at_lift INTEGER;
+    ADD COLUMN IF NOT EXISTS score_at_lift INTEGER,
+    ADD COLUMN IF NOT EXISTS lift_source_app TEXT;
+ALTER TABLE bundle_reputation_floor_bans
+    DROP CONSTRAINT IF EXISTS ck_bundle_reputation_floor_bans_lift_source_app;
+ALTER TABLE bundle_reputation_floor_bans
+    ADD CONSTRAINT ck_bundle_reputation_floor_bans_lift_source_app
+    CHECK (lift_source_app IS NULL OR lift_source_app ~ '^[a-z0-9._:-]{1,128}$');
+
+-- Separate idempotency NAMESPACES: a ban key and an unban key can never collide. `action` is
+-- part of the unique key (and every ON CONFLICT target below), the 'unban:' prefix is
+-- reserved for unban rows (CHECK here, rejected by enqueue and by the host's floor_key).
+ALTER TABLE bundle_reputation_floor_bans
+    DROP CONSTRAINT IF EXISTS uq_bundle_reputation_floor_bans;
+ALTER TABLE bundle_reputation_floor_bans
+    DROP CONSTRAINT IF EXISTS uq_bundle_reputation_floor_bans_action;
+ALTER TABLE bundle_reputation_floor_bans
+    ADD CONSTRAINT uq_bundle_reputation_floor_bans_action UNIQUE
+    (tenant_id, community_id, user_uuid, scope, action, idempotency_key);
+ALTER TABLE bundle_reputation_floor_bans
+    DROP CONSTRAINT IF EXISTS ck_bundle_reputation_floor_bans_unban_key;
+ALTER TABLE bundle_reputation_floor_bans
+    ADD CONSTRAINT ck_bundle_reputation_floor_bans_unban_key
+    CHECK (action = 2 OR left(idempotency_key, 6) <> 'unban:');
 ALTER TABLE bundle_reputation_floor_bans
     DROP CONSTRAINT IF EXISTS ck_bundle_reputation_floor_bans_action;
 ALTER TABLE bundle_reputation_floor_bans
@@ -93,6 +115,8 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $fl$
 DECLARE
     v_n int;
+    v_delivered int;
+    v_unbans int;
 BEGIN
     IF p_tenant IS NULL OR p_lifted_by IS NULL OR p_user_uuids IS NULL
        OR cardinality(p_user_uuids) < 1 OR cardinality(p_user_uuids) > 64 THEN
@@ -123,10 +147,23 @@ BEGIN
         SELECT l.tenant_id, l.community_id, l.origin_community_id, l.user_uuid, l.scope,
                'unban:' || l.id, l.reason, l.platform, 1, 2, l.id
           FROM lifted l WHERE l.old_status IN (2, 7)
-        ON CONFLICT (tenant_id, community_id, user_uuid, scope, idempotency_key) DO NOTHING
+        ON CONFLICT (tenant_id, community_id, user_uuid, scope, action, idempotency_key)
+        DO NOTHING
         RETURNING 1
     )
-    SELECT count(*) INTO v_n FROM lifted;
+    SELECT (SELECT count(*) FROM lifted),
+           (SELECT count(*) FROM lifted WHERE old_status IN (2, 7)),
+           (SELECT count(*) FROM unbans)
+      INTO v_n, v_delivered, v_unbans;
+    -- FAIL LOUD: every delivered ban lifted MUST have enqueued its unban. A shortfall (e.g. a
+    -- pre-existing row in the unban namespace) would leave the user banned on the platform
+    -- while Waddles says lifted, so the whole lift rolls back.
+    IF v_unbans < v_delivered THEN
+        RAISE EXCEPTION 'unban_shortfall'
+            USING ERRCODE = 'XX001',
+                  DETAIL = v_unbans::text || ' of ' || v_delivered::text
+                           || ' delivered bans got an unban';
+    END IF;
     RETURN v_n;
 END
 $fl$;
@@ -135,9 +172,13 @@ $fl$;
 -- community's in-force ban rows for the user on that platform with NO unban echo, and clears the
 -- community soft ban (ledgered). Tenant + community come from the host's verified binding; the
 -- community must belong to the tenant and every write is filtered by that tenant, so an event for
--- tenant B can never lift tenant A's ban. Returns (rows lifted, soft bans cleared).
+-- tenant B can never lift tenant A's ban. Only COMMUNITY-scope bans (scope 1) are lifted here;
+-- tenant-scope bans lift only through the tenant-admin path (reputation_floor_ban_lift). The
+-- calling app id is recorded on the ban row (lift_source_app) and the ledger row.
+-- Returns (rows lifted, soft bans cleared).
 CREATE OR REPLACE FUNCTION reputation_floor_ban_lift_from_platform(
-    p_tenant bigint, p_community bigint, p_platform text, p_user_uuid uuid
+    p_tenant bigint, p_community bigint, p_platform text, p_user_uuid uuid,
+    p_source_app text DEFAULT NULL
 ) RETURNS TABLE(r_lifted int, r_soft_cleared int)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $fp$
@@ -148,7 +189,8 @@ DECLARE
     v_soft int := 0;
 BEGIN
     IF p_tenant IS NULL OR p_community IS NULL OR p_user_uuid IS NULL OR p_platform IS NULL
-       OR p_platform !~ '^[a-z][a-z0-9]{1,31}$' THEN
+       OR p_platform !~ '^[a-z][a-z0-9]{1,31}$'
+       OR (p_source_app IS NOT NULL AND p_source_app !~ '^[a-z0-9._:-]{1,128}$') THEN
         RAISE EXCEPTION 'invalid_input' USING ERRCODE = '22023';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM communities WHERE id = p_community AND tenant_id = p_tenant) THEN
@@ -157,6 +199,7 @@ BEGIN
     END IF;
     UPDATE bundle_reputation_floor_bans b
        SET status = 8, lifted_at = NOW(), lifted_by = c_sync_actor, lift_origin = 2,
+           lift_source_app = p_source_app,
            score_at_lift = reputation_floor_current_score(
                b.tenant_id, b.community_id, b.user_uuid, b.scope),
            recovered_at = CASE WHEN reputation_verify_floor_breach(
@@ -165,18 +208,25 @@ BEGIN
            lease_token = NULL, lease_expires_at = NULL, next_retry_at = NULL,
            completed_at = COALESCE(b.completed_at, NOW()), updated_at = NOW()
      WHERE b.tenant_id = p_tenant AND b.community_id = p_community AND b.user_uuid = p_user_uuid
-       AND b.platform = p_platform AND b.action = 1 AND b.status IN (1, 2, 3, 4, 5, 7);
+       AND b.platform = p_platform AND b.action = 1 AND b.scope = 1
+       AND b.status IN (1, 2, 3, 4, 5, 7);
     GET DIAGNOSTICS v_lifted = ROW_COUNT;
-    IF to_regclass('bundle_reputation_soft_bans') IS NOT NULL THEN
+    -- The soft-ban clear is PLATFORM-scoped: it happens only when THIS call lifted a ban row of
+    -- this platform for this user, and only for a floor-set soft ban (reason 1) -- never a
+    -- manual (reason 2) soft ban and never on the strength of an unrelated platform's unban.
+    IF v_lifted > 0 AND to_regclass('bundle_reputation_soft_bans') IS NOT NULL THEN
         DELETE FROM bundle_reputation_soft_bans
-         WHERE tenant_id = p_tenant AND community_id = p_community AND user_uuid = p_user_uuid;
+         WHERE tenant_id = p_tenant AND community_id = p_community
+           AND user_uuid = p_user_uuid AND reason_code = 1;
         GET DIAGNOSTICS v_soft = ROW_COUNT;
         IF v_soft > 0 THEN
             INSERT INTO bundle_reputation_adjustments
                 (app_id, tenant_id, community_id, target_user_uuid, scope, delta, reason_code,
                  reason_code_id, kind, actor, source_event)
-            VALUES (NULL, p_tenant, p_community, p_user_uuid::text, 'community', 0, '1', 1,
-                    'soft_ban_clear', 'system:platform_sync', 'soft_ban.platform_unban');
+            VALUES ((SELECT c.app_id FROM app_catalog c WHERE c.app_id = p_source_app),
+                    p_tenant, p_community, p_user_uuid::text, 'community', 0, '1', 1,
+                    'soft_ban_clear', 'system:platform_sync',
+                    'soft_ban.platform_unban:' || COALESCE(p_source_app, 'platform'));
         END IF;
     END IF;
     RETURN QUERY SELECT v_lifted, v_soft;
@@ -212,12 +262,16 @@ BEGIN
         RAISE EXCEPTION 'reputation_floor_ban_enqueue: community is not in the named tenant'
             USING ERRCODE = '42501';
     END IF;
+    -- The `unban:` prefix is the reserved unban namespace: never a ban key.
+    IF left(p_key, 6) = 'unban:' THEN
+        RAISE EXCEPTION 'invalid_input' USING ERRCODE = '22023';
+    END IF;
     v_reason := CASE p_scope WHEN 1 THEN 'community_hard_floor' ELSE 'tenant_floor' END;
     PERFORM pg_advisory_xact_lock(hashtextextended('rep_floor_ban:' || p_community, 0));
 
     SELECT b.id, b.status INTO v_id, v_status FROM bundle_reputation_floor_bans b
      WHERE b.tenant_id = p_tenant AND b.community_id = p_community AND b.user_uuid = p_user_uuid
-       AND b.scope = p_scope AND b.idempotency_key = p_key;
+       AND b.scope = p_scope AND b.action = 1 AND b.idempotency_key = p_key;
     -- 8 (lifted) is terminal for the SAME key: a lift is sticky for that ban occurrence.
     IF FOUND AND v_status IN (1, 2, 3, 4, 7, 8) THEN
         r_state := 1; r_id := v_id; RETURN NEXT; RETURN;
@@ -229,7 +283,7 @@ BEGIN
              reason, platform, status, last_error, completed_at)
         VALUES (p_tenant, p_community, p_origin, p_user_uuid, p_scope, p_key, v_reason,
                 p_platform, 6, 'kill_switch', NOW())
-        ON CONFLICT (tenant_id, community_id, user_uuid, scope, idempotency_key)
+        ON CONFLICT (tenant_id, community_id, user_uuid, scope, action, idempotency_key)
         DO UPDATE SET status = 6, last_error = 'kill_switch', next_retry_at = NULL,
                       updated_at = NOW()
         RETURNING id INTO v_id;
@@ -261,7 +315,7 @@ BEGIN
              reason, platform, status, last_error, completed_at)
         VALUES (p_tenant, p_community, p_origin, p_user_uuid, p_scope, p_key, v_reason,
                 p_platform, 6, 'lift_sticky', NOW())
-        ON CONFLICT (tenant_id, community_id, user_uuid, scope, idempotency_key)
+        ON CONFLICT (tenant_id, community_id, user_uuid, scope, action, idempotency_key)
         DO UPDATE SET status = 6, last_error = 'lift_sticky', next_retry_at = NULL,
                       updated_at = NOW()
         RETURNING id INTO v_id;
@@ -274,7 +328,7 @@ BEGIN
              reason, platform, status, last_error, completed_at)
         VALUES (p_tenant, p_community, p_origin, p_user_uuid, p_scope, p_key, v_reason,
                 p_platform, 6, 'floor_not_breached', NOW())
-        ON CONFLICT (tenant_id, community_id, user_uuid, scope, idempotency_key)
+        ON CONFLICT (tenant_id, community_id, user_uuid, scope, action, idempotency_key)
         DO UPDATE SET status = 6, last_error = 'floor_not_breached', next_retry_at = NULL,
                       updated_at = NOW()
         RETURNING id INTO v_id;
@@ -305,7 +359,7 @@ BEGIN
         VALUES (p_tenant, p_community, p_origin, p_user_uuid, p_scope, p_key, v_reason,
                 p_platform, 5, 'rate_limited',
                 GREATEST(NOW() + INTERVAL '30 seconds', v_oldest + INTERVAL '1 hour'))
-        ON CONFLICT (tenant_id, community_id, user_uuid, scope, idempotency_key)
+        ON CONFLICT (tenant_id, community_id, user_uuid, scope, action, idempotency_key)
         DO UPDATE SET status = 5, last_error = 'rate_limited', updated_at = NOW(),
                       next_retry_at = GREATEST(NOW() + INTERVAL '30 seconds',
                                                v_oldest + INTERVAL '1 hour')
@@ -317,7 +371,7 @@ BEGIN
         (tenant_id, community_id, origin_community_id, user_uuid, scope, idempotency_key,
          reason, platform, status)
     VALUES (p_tenant, p_community, p_origin, p_user_uuid, p_scope, p_key, v_reason, p_platform, 1)
-    ON CONFLICT (tenant_id, community_id, user_uuid, scope, idempotency_key)
+    ON CONFLICT (tenant_id, community_id, user_uuid, scope, action, idempotency_key)
     DO UPDATE SET status = 1, last_error = NULL, next_retry_at = NULL, updated_at = NOW()
     RETURNING id INTO v_id;
     r_state := 0; r_id := v_id; RETURN NEXT;
@@ -498,7 +552,7 @@ REVOKE ALL ON FUNCTION
     reputation_floor_current_score(bigint, bigint, uuid, smallint),
     reputation_floor_lift_rearm_drop(bigint, bigint, smallint),
     reputation_floor_ban_lift(bigint, uuid[], uuid),
-    reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid),
+    reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid, text),
     reputation_floor_ban_enqueue(bigint, bigint, bigint, uuid, smallint, text, text),
     reputation_floor_ban_claim(int, int),
     reputation_floor_ban_recheck(bigint, uuid),
@@ -516,7 +570,7 @@ BEGIN
         GRANT EXECUTE ON FUNCTION
             reputation_floor_ban_claim(int, int),
             reputation_floor_ban_recheck(bigint, uuid),
-            reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid)
+            reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid, text)
             TO waddles_svc_action;
     END IF;
     IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'hub_api') THEN

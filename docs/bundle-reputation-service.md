@@ -108,11 +108,24 @@ re-join. A confirmed ban with no suppression code (no linked identity on that pl
   with backoff and dead-letters it (ERROR alert) like a ban, emitting a signed `mod.unban` over the same sender path
   (the community's own bound guild/credentials). Unban rows never deny access, are not throttled by the hourly ban
   quota and are not cancelled by a recovered score. Undelivered bans (1/3/4/5) enqueue no unban.
-- **Platform -> Waddles**: after the sender CONFIRMS a platform `mod.unban` (chatguard `!unban`, any bundle unban), svc_action
-  calls `reputation_floor_ban_lift_from_platform(tenant, community, platform, user)`: tenant + community come from the
-  invoke scope (never an event field), only THAT community's ban rows for that platform are lifted (`lifted_by` = the fixed
-  `system:platform_sync` UUID, `lift_origin = 2`), the community soft ban is cleared and ledgered, and NO unban is enqueued
-  back (no echo). Replays are no-ops. Both directions are sticky (see above).
+- **Platform -> Waddles**: after the sender CONFIRMS a platform `mod.unban`, svc_action calls
+  `reputation_floor_ban_lift_from_platform(tenant, community, platform, user, source_app)` -- but ONLY for a trusted
+  caller: a core moderation bundle on svc_action's explicit allowlist (`penguintechinc.waddles.chatguard`, i.e. `!unban`),
+  or a bundle holding the per-action permission `reputation.floor_ban.lift` in that community (dangerous; core-reviewed).
+  A vendor bundle's `mod.unban` still reaches the platform but lifts NOTHING in Waddles. Tenant + community come from the
+  invoke scope (never an event field); only COMMUNITY-scope bans (scope 1) of that community and platform are lifted
+  (tenant-scope bans lift only via the tenant-admin route); `lifted_by` is the fixed `system:platform_sync` UUID,
+  `lift_origin = 2`, and the calling app id is recorded (`lift_source_app`, ledger `source_event`). The community soft ban
+  is cleared only when the same call lifted a ban row of that platform, and only a floor-set soft ban (reason 1), never a
+  manual one. NO unban is enqueued back (no echo); replays are no-ops. Both directions are sticky.
+- **Outbox namespaces**: ban and unban rows live in separate idempotency namespaces (`action` is part of the unique key;
+  the `unban:` key prefix is reserved and rejected for bans by SQL and by the host). `reputation_floor_ban_lift` fails
+  loudly (`unban_shortfall`, whole lift rolled back) if a delivered ban could not get its unban.
+- **Re-arm on a new low**: a lift records `score_at_lift`. A later score at least `lift_rearm_drop` below it (policy
+  column on `bundle_reputation_policy` / `bundle_reputation_tenant_policy`, default 5 = the largest single activity delta
+  the host accepts, i.e. one maximal ordinary penalty step; no other per-offence penalty knob exists) bans again, provided
+  the floor is still breached; recover-then-cross also bans; the same score stays lifted. Only the most recent lift
+  governs.
 - **Not yet wired**: native platform events (Discord `GUILD_BAN_REMOVE`, Twitch EventSub `channel.unban`) -- ingest does not
   consume them yet; the floor-ban path supports Discord only (Twitch bans are refused `platform_not_supported`).
 

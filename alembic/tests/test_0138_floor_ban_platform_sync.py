@@ -31,7 +31,7 @@ _PATH = _ROOT / "alembic" / "versions" / "0138_floor_ban_platform_sync.py"
 _LIFT = "SELECT reputation_floor_ban_lift(%s, %s::uuid[], %s::uuid)"
 _PLATFORM_LIFT = (
     "SELECT r_lifted, r_soft_cleared FROM reputation_floor_ban_lift_from_platform("
-    "%s, %s, %s, %s::uuid)"
+    "%s, %s, %s, %s::uuid, 'penguintechinc.waddles.chatguard')"
 )
 _ENQUEUE = (
     "SELECT r_state, r_id FROM reputation_floor_ban_enqueue("
@@ -282,7 +282,7 @@ class TestPlatformUnbanLiftsWithoutEcho:
         _q(
             pg_db,
             "INSERT INTO bundle_reputation_soft_bans (tenant_id, community_id, user_uuid, "
-            "reason_code, set_by) VALUES (%s, %s, %s, 2, 'system:floor')",
+            "reason_code, set_by) VALUES (%s, %s, %s, 1, 'system:floor')",
             (tid, cid, user),
         )
         assert _q(pg_db, _PLATFORM_LIFT, (tid, cid, "discord", user))[0] == (1, 1)
@@ -545,6 +545,148 @@ class TestRearmOnANewLow:
             (tid,),
         )
         assert _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 2, "evt3"))[0][0] == 0
+
+
+def _row_scope(
+    db: PgTestDatabase, tid: int, cid: int, user: str, status: int, scope: int
+) -> int:
+    return _q(
+        db,
+        "INSERT INTO bundle_reputation_floor_bans (tenant_id, community_id, origin_community_id, "
+        "user_uuid, scope, idempotency_key, reason, platform, status) "
+        "VALUES (%s, %s, %s, %s, %s, %s, %s, 'discord', %s) RETURNING id",
+        (
+            tid,
+            cid,
+            cid,
+            user,
+            scope,
+            f"k-{uuid.uuid4().hex[:12]}",
+            "community_hard_floor" if scope == 1 else "tenant_floor",
+            status,
+        ),
+    )[0][0]
+
+
+@requires_docker
+class TestPlatformLiftHardening:
+    def test_a_community_platform_unban_never_lifts_a_tenant_scope_ban(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _setup(pg_db, "t-plat-scope2")
+        user = str(uuid.uuid4())
+        community_ban = _row_scope(pg_db, tid, cid, user, 2, 1)
+        tenant_ban = _row_scope(pg_db, tid, cid, user, 2, 2)
+        assert _q(pg_db, _PLATFORM_LIFT, (tid, cid, "discord", user))[0][0] == 1
+        assert (_status(pg_db, community_ban), _status(pg_db, tenant_ban)) == (8, 2)
+        assert _denying(pg_db, tid, user) == 1, "the tenant-scope ban still denies"
+        # Tenant-scope bans lift only through the tenant-admin path.
+        assert _q(pg_db, _LIFT, (tid, [user], str(uuid.uuid4())))[0][0] == 1
+        assert _status(pg_db, tenant_ban) == 8
+
+    def test_the_calling_app_is_recorded_on_the_ban_and_the_ledger(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _setup(pg_db, "t-plat-app")
+        user = str(uuid.uuid4())
+        rid = _row(pg_db, tid, cid, user, 2)
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_soft_bans (tenant_id, community_id, user_uuid, "
+            "reason_code, set_by) VALUES (%s, %s, %s, 1, 'system:floor')",
+            (tid, cid, user),
+        )
+        _q(
+            pg_db,
+            "SELECT * FROM reputation_floor_ban_lift_from_platform(%s, %s, 'discord', %s::uuid, "
+            "'penguintechinc.waddles.chatguard')",
+            (tid, cid, user),
+        )
+        assert (
+            _q(
+                pg_db,
+                "SELECT lift_source_app FROM bundle_reputation_floor_bans WHERE id = %s",
+                (rid,),
+            )[0][0]
+            == "penguintechinc.waddles.chatguard"
+        )
+        assert _q(
+            pg_db,
+            "SELECT source_event FROM bundle_reputation_adjustments WHERE community_id = %s "
+            "AND kind = 'soft_ban_clear'",
+            (cid,),
+        ) == [("soft_ban.platform_unban:penguintechinc.waddles.chatguard",)]
+
+    def test_a_manual_soft_ban_and_an_unrelated_soft_ban_are_never_cleared(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _setup(pg_db, "t-plat-soft")
+        manual, floor_only = str(uuid.uuid4()), str(uuid.uuid4())
+        for user, reason in ((manual, 2), (floor_only, 1)):
+            _q(
+                pg_db,
+                "INSERT INTO bundle_reputation_soft_bans (tenant_id, community_id, user_uuid, "
+                "reason_code, set_by) VALUES (%s, %s, %s, %s, 'x')",
+                (tid, cid, user, reason),
+            )
+        # A user with a delivered ban AND a MANUAL soft ban: only the ban is lifted.
+        _row(pg_db, tid, cid, manual, 2)
+        assert _q(pg_db, _PLATFORM_LIFT, (tid, cid, "discord", manual))[0] == (1, 0)
+        # A user with a floor soft ban but NO ban row for this platform: nothing is cleared.
+        assert _q(pg_db, _PLATFORM_LIFT, (tid, cid, "discord", floor_only))[0] == (0, 0)
+        assert (
+            _q(
+                pg_db,
+                "SELECT count(*) FROM bundle_reputation_soft_bans WHERE community_id = %s",
+                (cid,),
+            )[0][0]
+            == 2
+        )
+
+    def test_the_unban_namespace_cannot_collide_with_ban_keys(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _setup(pg_db, "t-ns")
+        user = str(uuid.uuid4())
+        with pytest.raises(psycopg2.errors.InvalidParameterValue):
+            _q(pg_db, _ENQUEUE, (tid, cid, cid, user, 1, "unban:7"))
+        with pytest.raises(psycopg2.errors.CheckViolation):
+            _q(
+                pg_db,
+                "INSERT INTO bundle_reputation_floor_bans (tenant_id, community_id, "
+                "origin_community_id, user_uuid, scope, idempotency_key, reason, platform, status) "
+                "VALUES (%s, %s, %s, %s, 1, 'unban:9', 'community_hard_floor', 'discord', 2)",
+                (tid, cid, cid, user),
+            )
+        # A ban key and an unban key with the same text live in different namespaces.
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_floor_bans (tenant_id, community_id, "
+            "origin_community_id, user_uuid, scope, idempotency_key, reason, platform, status, "
+            "action) VALUES (%s, %s, %s, %s, 1, 'same', 'community_hard_floor', 'discord', 2, 1), "
+            "(%s, %s, %s, %s, 1, 'same', 'community_hard_floor', 'discord', 1, 2)",
+            (tid, cid, cid, user, tid, cid, cid, user),
+        )
+
+    def test_a_shortfall_of_unbans_fails_the_lift_loudly_and_rolls_it_back(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _setup(pg_db, "t-shortfall")
+        user = str(uuid.uuid4())
+        rid = _row(pg_db, tid, cid, user, 2)
+        # Something already occupies this ban's unban slot: the INSERT would silently do nothing.
+        _q(
+            pg_db,
+            "INSERT INTO bundle_reputation_floor_bans (tenant_id, community_id, "
+            "origin_community_id, user_uuid, scope, idempotency_key, reason, platform, status, "
+            "action) VALUES (%s, %s, %s, %s, 1, %s, 'community_hard_floor', 'discord', 6, 2)",
+            (tid, cid, cid, user, f"unban:{rid}"),
+        )
+        with pytest.raises(psycopg2.errors.DataCorrupted, match="unban_shortfall"):
+            _q(pg_db, _LIFT, (tid, [user], str(uuid.uuid4())))
+        assert _status(pg_db, rid) == 2, (
+            "the whole lift rolled back: the ban still stands"
+        )
 
 
 @requires_docker

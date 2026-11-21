@@ -153,6 +153,10 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     "reputation.history.read": "normal",
     "reputation.tenant.read": "normal",
     "reputation.moderation.write": "dangerous",
+    #: Per-action grant mirrored from `core/bundle_capability_gate`: lets a bundle's CONFIRMED
+    #: platform `mod.unban` lift the matching Waddles floor/soft ban in its own community (core
+    #: moderation bundles on svc_action's explicit allowlist hold it implicitly).
+    "reputation.floor_ban.lift": "dangerous",
     #: Shared community currency (issue #714), `core/bundle_capability_gate`'s
     #: `economy.*` families. `read` = balance/leaderboard; `wager` = atomic
     #: stake-debit/payout-credit (+ `max-bet`); `transfer` = member-to-member.

@@ -165,7 +165,9 @@ pub trait FloorBanStore: Send + Sync {
 /// The platform -> Waddles half of the ban-lift sync: lifts the Waddles floor ban (and clears the
 /// soft ban) that matches a platform-side unban. NEVER enqueues an unban back (no echo), is scoped
 /// to the tenant + community the HOST derived from the verified binding (never an event field),
-/// and is idempotent: with nothing in force it changes nothing.
+/// and is idempotent: with nothing in force it changes nothing. Only COMMUNITY-scope bans
+/// are lifted (tenant-scope bans lift only through the tenant-admin path), the soft-ban clear
+/// is platform-scoped, and `source_app` (the calling bundle) is recorded on the ban + ledger.
 pub trait UnbanSync: Send + Sync {
     /// Returns `(floor bans lifted, soft bans cleared)`.
     fn lift_from_platform<'a>(
@@ -174,6 +176,7 @@ pub trait UnbanSync: Send + Sync {
         community_id: i32,
         platform: &'a str,
         user: Uuid,
+        source_app: &'a str,
     ) -> StoreFuture<'a, (i32, i32)>;
 }
 
@@ -536,18 +539,20 @@ impl UnbanSync for PgFloorBanStore {
         community_id: i32,
         platform: &'a str,
         user: Uuid,
+        source_app: &'a str,
     ) -> StoreFuture<'a, (i32, i32)> {
         Box::pin(async move {
             let rows = self
                 .conn
                 .query_all_raw(stmt(
                     "SELECT r_lifted, r_soft_cleared FROM \
-                     reputation_floor_ban_lift_from_platform($1::bigint, $2::bigint, $3::text, $4::uuid)",
+                     reputation_floor_ban_lift_from_platform($1::bigint, $2::bigint, $3::text, $4::uuid, $5::text)",
                     vec![
                         Value::BigInt(Some(i64::from(tenant_id))),
                         Value::BigInt(Some(i64::from(community_id))),
                         Value::String(Some(platform.to_string())),
                         Value::Uuid(Some(user)),
+                        Value::String(Some(source_app.to_string())),
                     ],
                 ))
                 .await
