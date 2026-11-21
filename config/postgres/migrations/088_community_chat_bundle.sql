@@ -35,7 +35,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.chat-pipeline',
     '1.0.0',
     'community',
-    'waddles.community.chat',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
