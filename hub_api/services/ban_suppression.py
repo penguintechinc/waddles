@@ -339,7 +339,7 @@ def floor_ban_rows(dal: Any, user_uuids: Collection[str]) -> list[FloorBanRow]:
         return []
     _bind(dal)
     table = dal[FLOOR_BAN_TABLE]
-    # `action` 2 rows are UNBAN deliveries (alembic 0138): they restore access and never deny.
+    # `action` 2 rows are UNBAN deliveries (alembic 0140): they restore access and never deny.
     rows = dal((table.user_uuid.belongs(tokens)) & (table.action == 1)).select(
         table.tenant_id, table.platform, table.user_uuid, table.status
     )
