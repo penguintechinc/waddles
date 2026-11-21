@@ -481,6 +481,30 @@ pub struct ExecOutcome {
     /// The platform id a create-style op produced (the new Discord scheduled
     /// event's snowflake, parsed from the reply), else `None`.
     pub result_id: Option<String>,
+    /// `Some("already_banned" | "already_unbanned")` when Helix answered the exact
+    /// idempotent-state 400 for a Twitch ban/unban: the desired state already holds, so the op
+    /// counts as delivered. `None` for every ordinary success.
+    pub idempotent: Option<&'static str>,
+}
+
+/// Helix's exact 400 `message` for banning a user who is already banned.
+pub const HELIX_ALREADY_BANNED: &str = "The user specified in the user_id field is already banned.";
+/// Helix's exact 400 `message` for unbanning a user who is not banned.
+pub const HELIX_NOT_BANNED: &str = "The user in the user_id query parameter is not banned.";
+
+/// The idempotent outcome a Twitch `mod.ban` / `mod.unban` 400 body names, matched on Helix's
+/// exact `message` only; any other 400 (bad id, missing scope, rate shape) is a real failure.
+fn helix_idempotent_outcome(kind: &str, body: &[u8]) -> Option<&'static str> {
+    let msg = serde_json::from_slice::<serde_json::Value>(body)
+        .ok()?
+        .get("message")?
+        .as_str()?
+        .to_owned();
+    match (kind, msg.as_str()) {
+        ("mod.ban", HELIX_ALREADY_BANNED) => Some("already_banned"),
+        ("mod.unban", HELIX_NOT_BANNED) => Some("already_unbanned"),
+        _ => None,
+    }
 }
 
 /// What to execute.
@@ -704,7 +728,7 @@ where
             .with_label_values(&[platform, kind])
             .observe(start.elapsed().as_secs_f64());
         let outcome = match &res {
-            Ok(_) => "ok",
+            Ok(o) => o.idempotent.unwrap_or("ok"),
             Err(e) => e.outcome(),
         };
         EXEC_TOTAL
@@ -950,7 +974,8 @@ where
         drop((values, creds));
         subst::check_distinct_body_ints(&kind.distinct_body_ints, prepared.body.as_deref())
             .map_err(ExecError::Subst)?;
-        let outcome = self.send(prepared, kind.result).await?;
+        let idem_kind = (req.platform == "twitch").then_some(kind_name);
+        let outcome = self.send(prepared, kind.result, idem_kind).await?;
         if kind.needs_duty {
             self.duties.after_send(&cx, &outcome).await;
         }
@@ -962,7 +987,12 @@ where
     /// resource's snowflake `id`; a reply without one is a failed op (the
     /// producer could never address the resource again) and is surfaced, not
     /// defaulted.
-    async fn send(&self, p: PreparedRequest, result: ResultMode) -> Result<ExecOutcome, ExecError> {
+    async fn send(
+        &self,
+        p: PreparedRequest,
+        result: ResultMode,
+        idem_kind: Option<&str>,
+    ) -> Result<ExecOutcome, ExecError> {
         let method = reqwest::Method::from_bytes(p.method.as_bytes())
             .map_err(|_| ExecError::Egress("method"))?;
         let headers: Vec<(String, String)> = p
@@ -988,6 +1018,22 @@ where
                 Ok(ExecOutcome {
                     status: resp.status,
                     result_id,
+                    idempotent: None,
+                })
+            }
+            400 if idem_kind
+                .and_then(|k| helix_idempotent_outcome(k, &resp.body))
+                .is_some() =>
+            {
+                let state = idem_kind.and_then(|k| helix_idempotent_outcome(k, &resp.body));
+                tracing::info!(
+                    outcome = state.unwrap_or_default(),
+                    "twitch moderation already in the desired state; counted as delivered"
+                );
+                Ok(ExecOutcome {
+                    status: resp.status,
+                    result_id: None,
+                    idempotent: state,
                 })
             }
             300..=399 => Err(ExecError::Redirect),

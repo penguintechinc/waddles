@@ -1612,3 +1612,71 @@ async fn twitch_bound_scope_ignores_no_payload_channel_and_is_ban_ops_only() {
     assert!(r.exec.execute(&req("twitch", &a, Some(7))).await.is_err());
     assert!(sent(&r).await.is_empty());
 }
+
+async fn helix_400(message: &str) -> MockServer {
+    let s = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(400).set_body_json(
+            serde_json::json!({"error": "Bad Request", "status": 400, "message": message}),
+        ))
+        .mount(&s)
+        .await;
+    s
+}
+
+/// Helix's exact "already banned" / "not banned" 400s are idempotent SUCCESS (counted under
+/// their own outcome label); any other 400, or the message on the wrong op, still fails loudly.
+#[tokio::test]
+async fn twitch_ban_and_unban_idempotent_400s_are_delivered_and_other_400s_fail() {
+    use super::{HELIX_ALREADY_BANNED, HELIX_NOT_BANNED};
+    let run = |unban: bool, msg: &'static str| async move {
+        let mut slots = MapSlots::twitch();
+        slots.bound = Some("#bound_chan".to_string());
+        let server = helix_400(msg).await;
+        let r = rig_on(
+            server,
+            PlatformPolicy::twitch(),
+            twitch_ban_tpl(unban),
+            slots,
+            true,
+        );
+        let a = bound_scope_op(
+            if unban { "mod.unban" } else { "mod.ban" },
+            None,
+            "channel:-",
+        );
+        r.exec.execute(&req("twitch", &a, Some(7))).await
+    };
+    let before_u = exec_count("twitch", "mod.unban", "already_unbanned");
+    let before_b = exec_count("twitch", "mod.ban", "already_banned");
+    assert_eq!(
+        run(true, HELIX_NOT_BANNED).await.unwrap().idempotent,
+        Some("already_unbanned")
+    );
+    assert_eq!(
+        run(false, HELIX_ALREADY_BANNED).await.unwrap().idempotent,
+        Some("already_banned")
+    );
+    assert!(exec_count("twitch", "mod.unban", "already_unbanned") > before_u);
+    assert!(exec_count("twitch", "mod.ban", "already_banned") > before_b);
+    // Any other 400 fails loudly.
+    assert_eq!(
+        run(true, "The user_id is invalid.").await.unwrap_err(),
+        ExecError::Upstream(400)
+    );
+    assert_eq!(
+        run(false, "Missing scope moderator:manage:banned_users")
+            .await
+            .unwrap_err(),
+        ExecError::Upstream(400)
+    );
+    // The idempotent message only counts on its own op.
+    assert_eq!(
+        run(false, HELIX_NOT_BANNED).await.unwrap_err(),
+        ExecError::Upstream(400)
+    );
+    assert_eq!(
+        run(true, HELIX_ALREADY_BANNED).await.unwrap_err(),
+        ExecError::Upstream(400)
+    );
+}
