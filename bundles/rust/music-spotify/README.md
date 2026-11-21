@@ -1,4 +1,4 @@
-# waddles.core.service.music-spotify
+# penguintechinc.waddles.music-spotify
 
 Always-on `kind: service` bundle (Rust, `world stage-tools`) owning the Spotify tool surface of the
 music catalog. App bundles (e.g. the DJ/request-queue bundle) call these tools via `tool.invoke`;

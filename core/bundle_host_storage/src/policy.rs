@@ -95,10 +95,11 @@ mod tests {
 
     #[test]
     fn own_prefix_needs_no_grant_other_needs_exact_grant() {
-        let g = GrantSet::from_permission_ids(["storage.read:media", "tool.call:x:y"]).unwrap();
+        let g = GrantSet::from_permission_ids(["storage.read:acme.bot.media", "tool.call:x:y"])
+            .unwrap();
         assert_eq!(authorize("me", "me", Op::Delete, &g), Ok(false));
-        assert_eq!(authorize("me", "media", Op::Read, &g), Ok(true));
-        assert!(authorize("me", "media", Op::Write, &g).is_err());
+        assert_eq!(authorize("me", "acme.bot.media", Op::Read, &g), Ok(true));
+        assert!(authorize("me", "acme.bot.media", Op::Write, &g).is_err());
         assert!(authorize("me", "other", Op::Read, &g).is_err());
     }
 

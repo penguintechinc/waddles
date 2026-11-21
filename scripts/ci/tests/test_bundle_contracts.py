@@ -265,7 +265,7 @@ def test_consumer_fixtures_match_contract() -> None:
                 snapshots += 1
                 drift += _snapshot_drift(p, d, producers)
             continue
-        if "target" in d and d["target"] != "waddles.core.service." + d["tool"].split(".")[0]:
+        if "target" in d and d["target"] != "penguintechinc.waddles." + d["tool"].split(".")[0]:
             drift.append(f"{p}: target {d['target']} does not match tool family")
         drift += [f"{p}: {e}" for e in _incompat(d["request"], exp["input_schema"], "request", request=True)]
         drift += [f"{p}: {e}" for e in _incompat(d.get("response", {}), exp["output_schema"], "response", request=False)]

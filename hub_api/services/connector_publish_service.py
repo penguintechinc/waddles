@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 CONNECTOR_PLATFORMS: tuple[str, ...] = ("twitch", "discord", "youtube")
 #: Host-constant app id the executor pins each connector under (`connector_boot.rs`).
-CONNECTOR_APP_ID_PREFIX = "waddles.core.service."
+CONNECTOR_APP_ID_PREFIX = "penguintechinc.waddles."
 #: Connector sidecars carry no per-tenant install approval.
 CONNECTOR_APPROVAL_ID = 0
 KEY_FILE_ENV = "BUNDLE_SIGNING_PRIVATE_KEY_FILE"
@@ -67,7 +67,7 @@ class PublishedConnector:
 
 
 def connector_app_id(platform: str) -> str:
-    """The host-constant `app_id` for `platform` (`waddles.core.service.<p>`)."""
+    """The host-constant `app_id` for `platform` (`penguintechinc.waddles.<p>`)."""
     return f"{CONNECTOR_APP_ID_PREFIX}{platform}"
 
 

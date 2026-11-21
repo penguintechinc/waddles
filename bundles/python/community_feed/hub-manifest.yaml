@@ -1,9 +1,8 @@
-# hub-api install-pipeline manifest (schema_version 2) for waddles.core.community.feed -- see bundles/python/pyping/hub-manifest.yaml for why this is separate from bundle.yaml.
+# hub-api install-pipeline manifest (schema_version 2) for penguintechinc.waddles.feed -- see bundles/python/pyping/hub-manifest.yaml for why this is separate from bundle.yaml.
 schema_version: 2
-app_id: waddles.core.community.feed
+app_id: penguintechinc.waddles.feed
 name: Community Feed Reader (Python)
-version: 1.0.4
-feature: waddles.core.community
+version: 1.0.5
 module: core
 provider: builtin
 author: github:penguintechinc

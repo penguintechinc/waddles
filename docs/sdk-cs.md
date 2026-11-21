@@ -104,7 +104,7 @@ split a big game into several bundles (core/shop/tournament) rather than one com
 | stream-online / moderation capabilities | first, bonus-tickets, roulette timeout | not in any world |
 | victim-debit or `transfer` with arbitrary `from` (admin/pot path) | steal | actor-only |
 | Vendor-onboarding lifecycle export | non-core C# bundles on stage-next worlds | Fixed: optional `streaming-lifecycle` is accepted; both process/action exports remain mandatory and other extra exports fail |
-| Decision on catalog placement of third-party ports | roll (and every port) is `waddles.integrations.*`; `seed_core_bundles._guard_core_namespace` hard-refuses non-`waddles.core.*` rows, so NO catalog row was added | vendor path only (blocked by the validator row above) |
+| Decision on catalog placement of third-party ports | roll (and every port) is `psychoboy.penguintwitchbot.*`; `seed_core_bundles._guard_core_namespace` hard-refuses non-`penguintechinc.*` rows, so NO catalog row was added | vendor path only (blocked by the validator row above) |
 
 ## Wave-4 toolkit (new ports)
 

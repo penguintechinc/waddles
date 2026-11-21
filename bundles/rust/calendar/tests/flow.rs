@@ -172,7 +172,7 @@ fn discord_sync_create_update_cancel_with_mapping_and_idempotency() {
     let calls = w.calls();
     assert_eq!(calls.len(), 1);
     assert_eq!(calls[0].tool, "discord.scheduled_event.create");
-    assert_eq!(calls[0].target, "waddles.core.service.discord");
+    assert_eq!(calls[0].target, "penguintechinc.waddles.discord");
     assert_eq!(
         calls[0].args["location"], "Online",
         "default location when absent"

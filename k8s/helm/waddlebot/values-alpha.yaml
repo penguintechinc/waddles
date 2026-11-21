@@ -162,7 +162,7 @@ pipeline:
       requests: { cpu: "100m", memory: "128Mi" }
       limits: { cpu: "400m", memory: "384Mi" }
   # core-bundle-seeder-job.yaml -- explicit true here (matches values.yaml's own default)
-  # since this is the environment this milestone's own e2e proof (waddles.core.example.ping/
+  # since this is the environment this milestone's own e2e proof (penguintechinc.waddles.ping/
   # pyping + the Discord guild connection below) targets first.
   #
   # fix/seeder-memory: this override previously capped the seeder at 64Mi/128Mi -- far
@@ -342,7 +342,7 @@ pipeline:
       # fix/alpha-deploy-executor-and-failfast -- the legacy single-app env
       # (processAppId, processIngestPlatform/SourceId, processBundleDigest/
       # Version/ComponentKey/SidecarKey, including the stale pinned
-      # waddles.core.example.ping 1.0.0 digest sha256:4d24eedf...) is REMOVED
+      # penguintechinc.waddles.ping 1.0.0 digest sha256:4d24eedf...) is REMOVED
       # here. The DB-driven multi-tenant active-bundle loader below
       # (feature/bundle-reader-role, waddles_bundle_reader RO Postgres role)
       # is the sole bundle-selection path in this cluster now -- it serves
@@ -381,7 +381,7 @@ pipeline:
         FLAG_WADDLES_COMMAND_ROLL: "true"
         FLAG_WADDLES_COMMAND_LURK: "true"
         FLAG_WADDLES_COMMAND_COUNT: "true"
-        # PR #615 (waddles.core.example.command, custom text commands/timers) --
+        # PR #615 (penguintechinc.waddles.command, custom text commands/timers) --
         # same Docker ENV baseline convention as the 4 flags above.
         FLAG_WADDLES_COMMAND_CUSTOMCOMMANDS: "true"
       resources:

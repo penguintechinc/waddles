@@ -57,7 +57,7 @@ def test_generated_manifests_are_current_and_carry_the_attribution_contract(slug
         assert "THE SOFTWARE IS PROVIDED \"AS IS\"" in manifest["notice"]
     assert bundle["permissions"] == install["permissions"]
     assert bundle["requested_tools"] == install["requested_tools"]
-    assert bundle["app_id"] == f"waddles.integrations.superpenguin.{slug}"
+    assert bundle["app_id"] == f"psychoboy.penguintwitchbot.{slug}"
 
 
 @pytest.mark.parametrize("slug", WAVE4)

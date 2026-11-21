@@ -45,13 +45,13 @@ from flask_core.app_installations_db import (
 from flask_core.app_manifest import parse_manifest
 from flask_core.app_registry import AppRegistry
 
-FEATURE = "waddles.bot.giveaway"
+FEATURE = "giveaway"
 
 
 def _manifest(suffix: str, *, is_default: bool = False):
     return parse_manifest(
         {
-            "app_id": f"{FEATURE}.{suffix}",
+            "app_id": f"penguintechinc.waddles.{suffix}",
             "name": suffix,
             "version": "1.0.0",
             "feature": FEATURE,
@@ -201,7 +201,7 @@ class TestDBInstallationLookupFind:
 
         lookup = DBInstallationLookup(db)
         rows = await lookup.find(
-            "waddles.bot.other-feature", tenant=str(tenant), community=community
+            "penguintechinc.waddles.other-feature", tenant=str(tenant), community=community
         )
         assert rows == []
 
@@ -274,7 +274,7 @@ class TestDBInstallationLookupFeedsResolveApps:
 class TestInvariantAvailabilityRequiresCatalog:
     async def test_blocks_availability_insert_for_unknown_app_id(self, db) -> None:
         with pytest.raises(AppTierError) as excinfo:
-            await check_availability_insert_allowed(db, "waddles.bot.giveaway.does-not-exist")
+            await check_availability_insert_allowed(db, "penguintechinc.waddles.does-not-exist")
         assert excinfo.value.reason == REASON_APP_NOT_INSTALLED
 
     async def test_allows_availability_insert_for_catalog_app_id(self, db) -> None:

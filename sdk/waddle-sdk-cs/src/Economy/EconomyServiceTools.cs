@@ -14,15 +14,15 @@ public sealed record EconomyViewResult(
     [property: JsonPropertyName("alias")] string Alias);
 
 /// <summary>
-/// Typed client for the platform economy SERVICE bundle (`waddles.core.service.economy`, `bundles/rust/economy`). The WIT
+/// Typed client for the platform economy SERVICE bundle (`penguintechinc.waddles.economy`, `bundles/rust/economy`). The WIT
 /// `economy` import moves money atomically but cannot tell a bundle what the community CALLS its currency; the service's
-/// read tools return that alias. Requires `tool.call:waddles.core.service.economy:points_view` (read) in the manifest and a
+/// read tools return that alias. Requires `tool.call:penguintechinc.waddles.economy:points_view` (read) in the manifest and a
 /// `stage-next-tools` build.
 /// </summary>
 public static class EconomyServiceTools
 {
     /// <summary>The economy service bundle's app id.</summary>
-    public const string Target = "waddles.core.service.economy";
+    public const string Target = "penguintechinc.waddles.economy";
 
     /// <summary>The economy service's documented default currency alias, used only when the tool call cannot answer.</summary>
     public const string DefaultAlias = "waddlebucks";

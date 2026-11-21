@@ -19,7 +19,7 @@ use penguin_spine::{PlatformEvent, StageEnvelope, PROCESS_TARGET_APP_ID_KEY};
 /// APP_ID` (the Python alpha this stage's own `crate::spine` runs
 /// alongside during the v3.0 cut-over, migration `0016_moderation_
 /// enforce_app`).
-pub const MODERATION_ENFORCE_APP_ID: &str = "waddles.community.moderation.default";
+pub const MODERATION_ENFORCE_APP_ID: &str = "penguintechinc.waddles.moderation-pipeline";
 
 /// Identity payload keys copied verbatim onto the synthetic enforcement
 /// envelope -- a byte-exact port of `core/svc_process/runner.py::
@@ -230,7 +230,7 @@ mod tests {
             "schema_version": 2,
             "tenant": "acme",
             "community": "main",
-            "app_id": "waddles.bot.commands.default",
+            "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
             "stage": "process",
             "event": {
                 "platform": "twitch",
@@ -315,18 +315,18 @@ mod tests {
         let mut payload = serde_json::Map::new();
         payload.insert(
             PROCESS_TARGET_APP_ID_KEY.to_string(),
-            serde_json::json!("waddles.community.forums.default"),
+            serde_json::json!("penguintechinc.waddles.forums-pipeline"),
         );
         let mut approved = HashMap::new();
         approved.insert(
-            "waddles.community.forums.default".to_string(),
+            "penguintechinc.waddles.forums-pipeline".to_string(),
             "acme".to_string(),
         );
         let decision = resolve_cross_app_route(&mut payload, "acme", &approved);
         assert_eq!(
             decision,
             RouteDecision::Redirect {
-                target_app_id: "waddles.community.forums.default".to_string()
+                target_app_id: "penguintechinc.waddles.forums-pipeline".to_string()
             }
         );
         assert!(!payload.contains_key(PROCESS_TARGET_APP_ID_KEY));
@@ -354,12 +354,12 @@ mod tests {
         let mut payload = serde_json::Map::new();
         payload.insert(
             PROCESS_TARGET_APP_ID_KEY.to_string(),
-            serde_json::json!("waddles.community.forums.default"),
+            serde_json::json!("penguintechinc.waddles.forums-pipeline"),
         );
         let mut approved = HashMap::new();
         // Approved, but for a DIFFERENT tenant than the source envelope's.
         approved.insert(
-            "waddles.community.forums.default".to_string(),
+            "penguintechinc.waddles.forums-pipeline".to_string(),
             "other-tenant".to_string(),
         );
         let decision = resolve_cross_app_route(&mut payload, "acme", &approved);
@@ -393,14 +393,14 @@ mod tests {
     #[test]
     fn parse_approved_targets_reads_app_id_tenant_pairs() {
         let approved = parse_approved_targets(
-            "waddles.community.forums.default:acme,waddles.community.moderation.default:acme",
+            "penguintechinc.waddles.forums-pipeline:acme,penguintechinc.waddles.moderation-pipeline:acme",
         );
         assert_eq!(
-            approved.get("waddles.community.forums.default"),
+            approved.get("penguintechinc.waddles.forums-pipeline"),
             Some(&"acme".to_string())
         );
         assert_eq!(
-            approved.get("waddles.community.moderation.default"),
+            approved.get("penguintechinc.waddles.moderation-pipeline"),
             Some(&"acme".to_string())
         );
     }

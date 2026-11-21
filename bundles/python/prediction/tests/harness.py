@@ -47,7 +47,7 @@ async def _transform_in_context(
     event: PlatformEvent, community: str | None = COMM
 ) -> PlatformEvent | None:
     """The real `transform` entry point, inside the bundle context the host binds around it."""
-    with bundle_context(tenant="t", community=community, app_id=f"waddles.core.example.{NS}"):
+    with bundle_context(tenant="t", community=community, app_id=f"penguintechinc.waddles.example-{NS}"):
         return await app.transform(event)
 
 
@@ -204,7 +204,7 @@ def to_envelope(event: PlatformEvent, community: str | None = COMM) -> StageEnve
     return StageEnvelope(
         tenant="t",
         community=community,
-        app_id=f"waddles.core.example.{NS}",
+        app_id=f"penguintechinc.waddles.example-{NS}",
         stage="action",
         event=event,
         ts="2026-10-22T00:00:00Z",

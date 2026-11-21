@@ -1,7 +1,7 @@
 # announce (Python)
 
 `!announce` -- saved per-community announcement messages. Community-scoped, first-party
-(`provider: builtin`, `app_id: waddles.core.example.announce`), **inspired by** the general
+(`provider: builtin`, `app_id: penguintechinc.waddles.announce`), **inspired by** the general
 "mods save a short message under a name, viewers recall it later" shape common to many chat
 bots, including superpenguintv (Psychoboy)'s
 [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) -- not a literal port. No
@@ -117,4 +117,4 @@ PII-free logs (gh-674).
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.announce`).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.announce`).

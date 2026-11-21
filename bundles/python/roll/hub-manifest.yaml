@@ -1,5 +1,5 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.roll -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.roll -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
 # 1.0.0 is permanently retired -- fix/bump-command-bundles-1.0.1. The deployed wasm was
@@ -11,10 +11,9 @@
 # flags-enabled source. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
 # retirement comment (fix/csping-version-bump, #575).
 schema_version: 2
-app_id: waddles.core.example.roll
+app_id: penguintechinc.waddles.roll
 name: Dice Roll Example Bundle (Python)
-version: 1.0.7
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

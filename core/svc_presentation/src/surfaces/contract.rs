@@ -96,7 +96,7 @@ pub struct SurfaceSpec {
 }
 
 impl SurfaceSpec {
-    /// The surface id (`waddles.core.example.music.now_playing`).
+    /// The surface id (`penguintechinc.waddles.music.now_playing`).
     pub fn id(&self) -> &str {
         &self.id
     }

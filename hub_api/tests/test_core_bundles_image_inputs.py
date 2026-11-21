@@ -4,7 +4,7 @@ The `waddlebot-core-bundle-seeder` image (`bundles/Dockerfile.core-bundles`) is 
 `/core-bundles/<manifest_path>` and `/core-bundles/<artifact_path>` come from. A catalog row whose
 Rust/C# bundle has no build stage or no `COPY` into `/core-bundles` passes every YAML-level check
 and then dies on the alpha deploy with `FileNotFoundError: /core-bundles/<name>.manifest.yaml`
-(`waddles.core.app.reputation-accrual` did exactly that). These tests statically cross-check the
+(`penguintechinc.waddles.reputation-accrual` did exactly that). These tests cross-check the
 catalog against the Dockerfile's build inputs; the denominators are asserted so an empty or
 mis-rooted scan fails instead of passing vacuously.
 """

@@ -19,16 +19,16 @@ from services.bundle_storage_access import (
 from services.permission_summary_service import build_permission_summary, permission_hash
 
 _ENTRY = {
-    "prefix_owner": "waddles.harness.media",
+    "prefix_owner": "penguintechinc.waddles.media",
     "ops": ["read", "list"],
     "reason": "Fetch generated clips",
 }
 _RAW = {
     "schema_version": 2,
-    "app_id": "waddles.core.role_sync.default",
+    "app_id": "penguintechinc.waddles.role-sync",
     "name": "Role sync",
     "version": "1.0.0",
-    "feature": "waddles.core.role_sync",
+    "feature": "role_sync",
     "module": "core",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -53,10 +53,10 @@ def _parse(**extra: Any) -> Any:
 
 
 def test_is_dangerous_family_and_non_collision_with_existing_storage_ids() -> None:
-    pid = "storage.read:waddles.harness.media"
+    pid = "storage.read:penguintechinc.waddles.media"
     assert resolve_risk(pid) == "dangerous" and is_dangerous(pid)
     assert permission_family(pid) == "storage.read"
-    assert parse_storage_access_id(pid) == ("read", "waddles.harness.media")
+    assert parse_storage_access_id(pid) == ("read", "penguintechinc.waddles.media")
     assert not is_storage_access_id("storage.kv") and not is_storage_access_id("storage.tables")
     for bad in (
         "storage.read:",
@@ -71,7 +71,10 @@ def test_is_dangerous_family_and_non_collision_with_existing_storage_ids() -> No
 def test_manifest_folds_into_dangerous_permissions() -> None:
     manifest = _parse(storage_access=[_ENTRY])
     ids = {d.id: d for d in manifest.permission_declarations}
-    assert set(ids) == {"storage.read:waddles.harness.media", "storage.list:waddles.harness.media"}
+    assert set(ids) == {
+        "storage.read:penguintechinc.waddles.media",
+        "storage.list:penguintechinc.waddles.media",
+    }
     assert all(d.risk == "dangerous" for d in ids.values())
     assert manifest.storage_access[0].reason == _ENTRY["reason"]
 
@@ -81,7 +84,7 @@ def test_manifest_folds_into_dangerous_permissions() -> None:
     [
         {"prefix_owner": "../x"},
         {"prefix_owner": "Bad Owner"},
-        {"prefix_owner": "waddles.core.role_sync.default"},
+        {"prefix_owner": "penguintechinc.waddles.role-sync"},
         {"ops": []},
         {"ops": ["admin"]},
         {"reason": ""},
@@ -95,7 +98,9 @@ def test_invalid_entries_rejected(mutation: dict[str, Any]) -> None:
 
 def test_direct_permission_id_rejected() -> None:
     with pytest.raises(ManifestV2Error) as exc:
-        _parse(permissions=[{"id": "storage.read:waddles.harness.media", "justification": "x"}])
+        _parse(
+            permissions=[{"id": "storage.read:penguintechinc.waddles.media", "justification": "x"}]
+        )
     assert exc.value.reason == "use_storage_access_block"
 
 
@@ -122,7 +127,7 @@ def test_summary_carries_storage_access_and_widening_changes_hash() -> None:
     wide = _summary(storage_access=[_ENTRY])
     assert wide["storageAccess"] == [
         {
-            "prefixOwner": "waddles.harness.media",
+            "prefixOwner": "penguintechinc.waddles.media",
             "ops": ["list", "read"],
             "reason": _ENTRY["reason"],
         }
@@ -131,7 +136,10 @@ def test_summary_carries_storage_access_and_widening_changes_hash() -> None:
     assert classify_diff(wide, narrow) == "widened"
     assert classify_diff(narrow, wide) == "narrowed"
     new_owner = _summary(
-        storage_access=[_ENTRY, {**_ENTRY, "prefix_owner": "waddles.other.svc", "ops": ["read"]}]
+        storage_access=[
+            _ENTRY,
+            {**_ENTRY, "prefix_owner": "penguintechinc.waddles.svc", "ops": ["read"]},
+        ]
     )
     assert classify_diff(new_owner, wide) == "widened"
     assert "storageAccess" not in _summary()
@@ -167,7 +175,7 @@ async def test_system_reseed_preserves_human_approved_storage_access(install_dal
         install_dal, app_id=manifest.app_id, version=manifest.version
     )
     assert ids == frozenset(
-        {"storage.read:waddles.harness.media", "storage.list:waddles.harness.media"}
+        {"storage.read:penguintechinc.waddles.media", "storage.list:penguintechinc.waddles.media"}
     )
 
 
@@ -177,14 +185,14 @@ def test_access_grants_response_carries_storage_blocks_explicitly() -> None:
     resp = access_grants_response(
         {
             "storageAccess": [
-                {"prefixOwner": "waddles.harness.media", "ops": ["read"], "reason": "r"}
+                {"prefixOwner": "penguintechinc.waddles.media", "ops": ["read"], "reason": "r"}
             ]
         },
-        frozenset({"storage.read:waddles.harness.media"}),
+        frozenset({"storage.read:penguintechinc.waddles.media"}),
         frozenset(),
-        frozenset({"storage.read:waddles.harness.media"}),
+        frozenset({"storage.read:penguintechinc.waddles.media"}),
     )
     assert [(s.prefixOwner, s.ops, s.reason) for s in resp.storageAccess] == [
-        ("waddles.harness.media", ["read"], "r")
+        ("penguintechinc.waddles.media", ["read"], "r")
     ]
     assert resp.tableAccess == []

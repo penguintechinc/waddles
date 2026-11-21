@@ -51,7 +51,7 @@ fn one(b: &BindingSummary) -> DesiredConnection {
 fn identity_constants() {
     let p = YoutubeProfile::new();
     assert_eq!(p.platform(), "youtube");
-    assert_eq!(p.app_id(), "waddles.core.service.youtube");
+    assert_eq!(p.app_id(), "penguintechinc.waddles.youtube");
     assert_eq!(p.provider(), "youtube");
     assert_eq!(p.capability(), "chat_ingest");
 }

@@ -19,7 +19,6 @@ from __future__ import annotations
 import json
 import logging
 import os
-import re
 import time
 from typing import Any, Final
 
@@ -31,6 +30,7 @@ from waddles.hub.internal.v1 import bundle_config_pb2, bundle_config_pb2_grpc
 from grpc_internal.interceptors import service_claims
 from services import bundle_community_config_runtime as runtime
 from services import bundle_install_dal
+from services.bundle_app_id import is_valid_app_id
 
 logger = logging.getLogger(__name__)
 _tracer = trace.get_tracer("waddles.hub_api.bundle_config")
@@ -52,7 +52,6 @@ DEFAULT_ALLOWED_SERVICES: Final = ("svc-process", "svc-action")
 API_VERSION: Final = "v1"
 MAX_BATCH: Final = 200
 _MAX_ID: Final = 2**31 - 1
-_APP_ID_RE: Final = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 
 
 def _allowed_services() -> frozenset[str]:
@@ -123,7 +122,7 @@ class BundleConfigServicer(bundle_config_pb2_grpc.BundleConfigServiceServicer): 
             raise _RefusedError(
                 grpc.StatusCode.UNIMPLEMENTED, f"api_version {request.api_version!r} not supported"
             )
-        if not 0 <= request.community_id <= _MAX_ID or _APP_ID_RE.fullmatch(request.app_id) is None:
+        if not 0 <= request.community_id <= _MAX_ID or not is_valid_app_id(request.app_id):
             raise _RefusedError(grpc.StatusCode.INVALID_ARGUMENT, "invalid request")
         tenant_id = await self._tenant_id(claims, request.tenant_id)
         try:

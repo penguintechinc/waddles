@@ -1,9 +1,8 @@
 # gameserver SERVICE bundle (bundle.yaml). exported_tools is identical to hub-manifest.yaml (the seeder's agreement check fails on drift).
 schema_version: 2
-app_id: waddles.core.service.gameserver
+app_id: penguintechinc.waddles.gameserver
 name: Game Server Service Bundle (Rust)
-version: 1.0.2
-feature: waddles.core.service
+version: 1.0.3
 module: core
 provider: builtin
 author: github:penguintechinc

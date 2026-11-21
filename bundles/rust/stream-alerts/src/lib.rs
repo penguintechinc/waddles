@@ -2,7 +2,7 @@
 //!
 //! A chat-stage APP on `world stage-next-tools`. The process stage turns an event into a
 //! text-only alert; the action stage re-validates it and calls `overlay.publish-surface` on this
-//! bundle's own namespaced surface (`waddles.core.app.stream-alerts.alerts`). All logic lives in
+//! bundle's own namespaced surface (`penguintechinc.waddles.stream-alerts.alerts`). All logic lives in
 //! [`logic`]; this file supplies the wasm seam and the WIT exports.
 pub mod logic;
 

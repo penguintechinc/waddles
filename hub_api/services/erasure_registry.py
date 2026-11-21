@@ -419,6 +419,7 @@ RULES: tuple[Rule, ...] = (
     ref("app_stream_grants", "granted_by", reason=_ACTOR),
     ref("app_tenant_permission_restrictions", "restricted_by", reason=_ACTOR),
     ref("app_version_uploads", "requested_by", reason=_ACTOR),
+    ref("app_id_owners", "owner_id", reason=_ACTOR),
     ref("auto_shoutout_creators", "added_by", reason=_ACTOR),
     ref("bot_detection_results", "reviewed_by", reason=_ACTOR),
     ref(

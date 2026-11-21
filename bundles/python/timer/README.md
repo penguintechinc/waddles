@@ -2,7 +2,7 @@
 
 `!timer` -- **recurring auto-announcement messages** ("follow the socials", "drink water"):
 moderators register a message with an interval and the bot posts it periodically. First-party
-(`provider: builtin`, `app_id: waddles.core.example.timer`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.timer`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** -- recurring announcements are a common stream-tool
 concept, but no third-party source, code or text is used, so no attribution applies. kv-only
 (`storage.kv`); no `db`, no egress.

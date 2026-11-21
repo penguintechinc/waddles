@@ -12,13 +12,13 @@ from quart_schema import QuartSchema
 from blueprints.v1.bundle_approvals_bulk import BLUEPRINTS
 from tests.conftest import make_token
 
-_APP = "waddles.socials.music.default"
+_APP = "penguintechinc.waddles.music"
 _MANIFEST = {
     "schema_version": 2,
     "app_id": _APP,
     "name": "Music Station",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",

@@ -1,6 +1,6 @@
 # motivate (Python)
 
-`!motivate [@user]` -> a random motivational line, optionally aimed at a mentioned user. First-party (`provider: builtin`, `app_id: waddles.core.example.motivate`), stateless
+`!motivate [@user]` -> a random motivational line, optionally aimed at a mentioned user. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.motivate`), stateless
 (no kv/db), WASI component. Static SFW lines original to Waddles; no AI, no external API.
 
 | | |

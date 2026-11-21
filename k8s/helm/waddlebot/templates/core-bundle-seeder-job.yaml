@@ -1,5 +1,5 @@
 # Core-bundle seeder -- post-install/post-upgrade hook Job that activates first-party
-# `waddles.core.*` App Bundles (hub_api/cli/seed_core_bundles.py) under the platform's SYSTEM
+# `penguintechinc.waddles.*` App Bundles (hub_api/cli/seed_core_bundles.py) under the platform's SYSTEM
 # identity, no human global-admin approval. Runs AFTER templates/migrations-job.yaml, now
 # that both are post-install hooks (2026-10-01 user decision: the schema always comes from
 # that Job, fresh install included) -- ordering between them is by hook-weight within the
@@ -101,7 +101,7 @@ spec:
         - name: MODULE_NAME
           value: "core-bundle-seeder"
         # Bundle storage v2: same BUNDLE_MIGRATOR_* as hub-api -- approving a core bundle with a
-        # db-v2 schema (e.g. waddles.core.service.music-requests) provisions its tables here.
+        # db-v2 schema (e.g. penguintechinc.waddles.music-requests) provisions its tables here.
         # Without it the service fails `bundle_data_provisioning_unavailable`, is never made
         # available, and every consumer is refused 422 `tool_target_cross_tenant`.
 {{- include "waddlebot.bundleMigratorEnv" . | nindent 8 }}

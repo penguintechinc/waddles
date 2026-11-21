@@ -133,7 +133,7 @@ def test_dispatch_relays_to_origin_platform(platform: str, host) -> None:
     envelope = StageEnvelope(
         tenant="t",
         community=None,
-        app_id="waddles.core.example.eli5",
+        app_id="penguintechinc.waddles.eli5",
         stage="action",
         event=_event("Imagine a super strong vacuum.", platform=platform),
         ts="2026-10-21T00:00:00.000Z",

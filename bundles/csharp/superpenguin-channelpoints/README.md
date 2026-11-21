@@ -7,11 +7,11 @@ Twitch platform service/host own every Twitch API call.
 
 | | |
 |---|---|
-| App id | `waddles.integrations.superpenguin.channelpoints` |
+| App id | `psychoboy.penguintwitchbot.channelpoints` |
 | World | `stage-next-tools` (WASI component, `process-stage` + `action-stage` + `streaming-lifecycle`) |
 | Flag | `waddles.command-superpenguin-channelpoints` (default OFF) |
 | Consumes | Twitch `channel.channel_points_custom_reward_redemption.add`; `chat.message` with prefix `!redeem` (Twitch, Discord) |
-| Tools consumed | `waddles.core.service.economy`: `points_view` (read), `adjust_balance` (write) |
+| Tools consumed | `penguintechinc.waddles.economy`: `points_view` (read), `adjust_balance` (write) |
 | Host imports used | `kv`, `identity.resolve_actor`, `relay` (chat reply), `overlay.push` (alert-box), `log`, `flags` |
 | State | `kv`, community-scoped: `cp.map` (mapping table), `cp.out.<hash>` (per-redemption outcome, 24 h), `cp.cnt.<reason>` (counters) |
 

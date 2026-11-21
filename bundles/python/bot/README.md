@@ -1,4 +1,4 @@
-# bot bundle (`waddles.core.example.bot`)
+# bot bundle (`penguintechinc.waddles.bot`)
 
 `!bot` -> static bot name/version/links. Python/WASM component modeled on `bundles/python/boop`.
 

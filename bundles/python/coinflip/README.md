@@ -1,7 +1,7 @@
 # coinflip (Python)
 
 `!flip` (alias `!coinflip`) -- a 50/50 coinflip minigame. Community-scoped fun content,
-first-party (`provider: builtin`, `app_id: waddles.core.example.coinflip`). Net-new Waddles
+first-party (`provider: builtin`, `app_id: penguintechinc.waddles.coinflip`). Net-new Waddles
 content -- no inspiration source, no attribution/notice required (contrast `bundles/python/fish`,
 which credits superpenguintv (Psychoboy) for its catch-and-track concept).
 
@@ -117,4 +117,4 @@ install needed.
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.coinflip`).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.coinflip`).

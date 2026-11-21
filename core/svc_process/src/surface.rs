@@ -121,8 +121,8 @@ mod tests {
     use std::sync::Mutex;
     use tonic::{Request, Response, Status};
 
-    const APP: &str = "waddles.core.example.music";
-    const OWN: &str = "waddles.core.example.music.now_playing";
+    const APP: &str = "penguintechinc.waddles.music";
+    const OWN: &str = "penguintechinc.waddles.music.now_playing";
 
     struct Flag(bool);
 
@@ -235,8 +235,8 @@ mod tests {
     async fn a_bundle_cannot_publish_into_another_bundles_namespace() {
         let (w, seen) = wiring(true).await;
         for surface in [
-            "waddles.core.example.dj.now_playing",
-            "waddles.core.example.musicbox.queue",
+            "penguintechinc.waddles.dj.now_playing",
+            "penguintechinc.waddles.musicbox.queue",
             "alert",
         ] {
             let e = publish(Some(&w), APP, 7, &args(surface, "{}"))

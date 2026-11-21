@@ -58,15 +58,15 @@ async def test_publish_version_sets_key_with_ttl_on_real_valkey(valkey_url: str)
     client = aioredis.from_url(valkey_url, decode_responses=True)
     try:
         ok = await rt.publish_version(
-            client, tenant_id=7, community_id=42, app_id="waddles.socials.demo.default", version=3
+            client, tenant_id=7, community_id=42, app_id="penguintechinc.waddles.demo", version=3
         )
         assert ok is True
-        key = "waddles:bundle_config:v:7:42:waddles.socials.demo.default"
-        assert rt.version_key(7, 42, "waddles.socials.demo.default") == key
+        key = "waddles:bundle_config:v:7:42:penguintechinc.waddles.demo"
+        assert rt.version_key(7, 42, "penguintechinc.waddles.demo") == key
         assert await client.get(key) == "3"
         assert 0 < await client.ttl(key) <= rt.VERSION_KEY_TTL_S
         await rt.publish_version(
-            client, tenant_id=7, community_id=42, app_id="waddles.socials.demo.default", version=4
+            client, tenant_id=7, community_id=42, app_id="penguintechinc.waddles.demo", version=4
         )
         assert await client.get(key) == "4"
     finally:

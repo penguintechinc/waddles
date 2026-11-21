@@ -1,5 +1,5 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.count -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.count -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 #
 # 1.0.0 is permanently retired -- fix/bump-command-bundles-1.0.1. The deployed wasm was
@@ -15,10 +15,9 @@
 # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
 # fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
 schema_version: 2
-app_id: waddles.core.example.count
+app_id: penguintechinc.waddles.count
 name: Dynamic Counter Bundle (Python)
-version: 1.0.12
-feature: waddles.core.example
+version: 1.0.13
 module: core
 provider: builtin
 author: github:penguintechinc

@@ -41,7 +41,7 @@ def _install_fake_component_modules(
         get_context=lambda: wit_shapes.BundleContext(
             tenant="acme",
             community="main",
-            app_id="waddles.social.alias.default",
+            app_id="penguintechinc.waddles.alias-pipeline",
             feature="alias",
             version="1.0.0",
             message_id="msg-1",
@@ -186,7 +186,7 @@ def test_dispatch_raises_unsupported_stage_when_bundle_has_no_dispatch(
     envelope = wit_shapes.WitStageEnvelope(
         tenant="acme",
         community="main",
-        app_id="waddles.social.alias.default",
+        app_id="penguintechinc.waddles.alias-pipeline",
         stage="action",
         event=wit_shapes.WitPlatformEvent(
             platform="discord",
@@ -223,7 +223,7 @@ def test_dispatch_maps_retryable_exception_to_transport_error(
     envelope = wit_shapes.WitStageEnvelope(
         tenant="acme",
         community="main",
-        app_id="waddles.social.alias.default",
+        app_id="penguintechinc.waddles.alias-pipeline",
         stage="action",
         event=wit_shapes.WitPlatformEvent(
             platform="discord",
@@ -266,7 +266,7 @@ def test_dispatch_maps_retryable_exception_subclass_to_transport_error(
     envelope = wit_shapes.WitStageEnvelope(
         tenant="acme",
         community="main",
-        app_id="waddles.social.alias.default",
+        app_id="penguintechinc.waddles.alias-pipeline",
         stage="action",
         event=wit_shapes.WitPlatformEvent(
             platform="discord",
@@ -305,7 +305,7 @@ def test_dispatch_success_builds_transport_result(monkeypatch: pytest.MonkeyPatc
     envelope = wit_shapes.WitStageEnvelope(
         tenant="acme",
         community="main",
-        app_id="waddles.social.alias.default",
+        app_id="penguintechinc.waddles.alias-pipeline",
         stage="action",
         event=wit_shapes.WitPlatformEvent(
             platform="discord",
@@ -350,7 +350,7 @@ def test_dispatch_returning_error_http_status_maps_to_ok_false(
     envelope = wit_shapes.WitStageEnvelope(
         tenant="acme",
         community="main",
-        app_id="waddles.social.alias.default",
+        app_id="penguintechinc.waddles.alias-pipeline",
         stage="action",
         event=wit_shapes.WitPlatformEvent(
             platform="discord",
@@ -388,7 +388,7 @@ def test_dispatch_result_with_no_http_status_still_maps_to_ok_true(
     envelope = wit_shapes.WitStageEnvelope(
         tenant="acme",
         community="main",
-        app_id="waddles.social.alias.default",
+        app_id="penguintechinc.waddles.alias-pipeline",
         stage="action",
         event=wit_shapes.WitPlatformEvent(
             platform="discord",
@@ -416,7 +416,7 @@ def _install_v2_context(monkeypatch: pytest.MonkeyPatch, *, tenant_id: int, comm
             community_id=community_id,
             tenant="acme",
             community="main",
-            app_id="waddles.social.alias.default",
+            app_id="penguintechinc.waddles.alias-pipeline",
             feature="f",
             version="1",
             message_id="m",

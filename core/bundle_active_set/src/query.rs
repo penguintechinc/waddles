@@ -1701,14 +1701,14 @@ mod tests {
         let digest = format!("sha256:{}", "f".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.core.economy.svc".to_string(),
+                app_id: "penguintechinc.waddles.economy-svc".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.core.economy.svc".to_string(),
+                app_id: "penguintechinc.waddles.economy-svc".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest),
                 scan_status: "scanned".to_string(),
@@ -1723,13 +1723,13 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.core.economy.svc".to_string(),
+                app_id: "penguintechinc.waddles.economy-svc".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: serde_json::json!({
                     "capabilities": ["kv", "mcp.tools"],
                     "exportedTools": [{"name": "adjust", "access": "write", "risk": "dangerous"}],
-                    "requestedTools": [{"target": "waddles.core.other.svc", "tool": "ping", "access": "read"}],
+                    "requestedTools": [{"target": "penguintechinc.waddles.other-svc", "tool": "ping", "access": "read"}],
                 }),
             }]])
             .into_connection();
@@ -1737,7 +1737,7 @@ mod tests {
         let tools = &result.rows[0].tools;
         assert!(tools.is_tool_service);
         assert_eq!(tools.exported_tool("adjust").map(|t| t.write), Some(true));
-        assert!(tools.requests("waddles.core.other.svc", "ping"));
+        assert!(tools.requests("penguintechinc.waddles.other-svc", "ping"));
         Ok(())
     }
 

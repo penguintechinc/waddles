@@ -35,7 +35,7 @@ use docker_container::{start_container_blocking, DockerContainer};
 const POSTGRES_IMAGE: &str = "postgres:17.6-bookworm";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const REP_PASSWORD: &str = "waddles_bundle_reputation_test_pw";
-const APP_ID: &str = "waddles.core.test-reputation";
+const APP_ID: &str = "penguintechinc.waddles.test-reputation";
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_store.sql");
 const HOST_OPS_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_host_ops.sql");
 const FLOOR_BAN_DDL: &str = include_str!("../../../scripts/db/bundle_reputation_floor_ban.sql");
@@ -191,7 +191,7 @@ async fn fixture() -> Fixture {
          INSERT INTO tenants (id, slug) VALUES (1, 't1'), (2, 't2');
          INSERT INTO communities (id, tenant_id) VALUES (10, 1), (20, 2);
          INSERT INTO app_catalog (app_id) VALUES
-             ('waddles.core.test-reputation'), ('waddles.core.other-reputation');",
+             ('penguintechinc.waddles.test-reputation'), ('penguintechinc.waddles.other-reputation');",
     )
     .await;
     // The role must exist BEFORE the shipped DDL so its grants block fires
@@ -974,10 +974,12 @@ async fn tenant_policy_and_active_logic_app_read_the_contract_objects() {
              INSERT INTO app_version_uploads VALUES ('{app}', '1', '{{\"provides\": [\"reputation-logic\"]}}');"
         )
     };
-    exec(&f.su, &install("waddles.core.app.reputation-accrual")).await;
+    exec(&f.su, &install("penguintechinc.waddles.reputation-accrual")).await;
     assert_eq!(
         f.store.active_logic_app(&scope()).await,
-        Ok(Some("waddles.core.app.reputation-accrual".to_string()))
+        Ok(Some(
+            "penguintechinc.waddles.reputation-accrual".to_string()
+        ))
     );
     // Two providers -> ambiguous -> NULL (host fails closed).
     exec(&f.su, &install("acme.second-logic")).await;

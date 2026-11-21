@@ -120,7 +120,7 @@ def _env(
     return StageEnvelope(
         tenant="tenant-1",
         community=community,
-        app_id="waddles.core.example.gamble",
+        app_id="penguintechinc.waddles.gamble",
         stage="action",
         event=PlatformEvent(
             platform="twitch",

@@ -1,5 +1,5 @@
 //! End-to-end behaviour of the DJ over the contract-enforcing fake host and the mocked
-//! shared queue service (`waddles.core.service.music-requests`).
+//! shared queue service (`penguintechinc.waddles.music-requests`).
 
 mod common;
 
@@ -71,7 +71,7 @@ fn svc_calls(h: &FakeHost) -> Vec<String> {
     h.calls
         .borrow()
         .iter()
-        .filter(|c| c.0 == "waddles.core.service.music-requests")
+        .filter(|c| c.0 == "penguintechinc.waddles.music-requests")
         .map(|c| c.1.clone())
         .collect()
 }

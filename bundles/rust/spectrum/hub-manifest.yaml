@@ -5,10 +5,9 @@
 # No outbound capability is requested on purpose (#101: writing to RSI's undocumented API
 # risks banning the org). The session credential never enters this component.
 schema_version: 2
-app_id: waddles.core.service.spectrum
+app_id: penguintechinc.waddles.spectrum
 name: RSI Spectrum Platform Connector (Rust, inbound-only)
-version: 0.1.1
-feature: waddles.core.service
+version: 0.1.2
 module: core
 provider: builtin
 author: github:penguintechinc

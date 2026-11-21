@@ -1,4 +1,4 @@
-# waddles.core.service.spectrum -- RSI Spectrum connector (Rust, `connector` world, inbound-only)
+# penguintechinc.waddles.spectrum -- RSI Spectrum connector (Rust, `connector` world, inbound-only)
 
 gh #486 (re-specs #101). Slice 1 of the Spectrum v3 port: the **component + pure logic + golden parity**.
 The legacy Python path (`core/svc_ingest/receivers/spectrum_{poll,org}.py`) stays live and unchanged.

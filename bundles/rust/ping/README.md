@@ -2,7 +2,7 @@
 
 `!ping` -> `pong` -- the minimal, real **Rust** app bundle and the original deployable fixture for
 the end-to-end bundle pipeline. First-party (`provider: builtin`,
-`app_id: waddles.core.example.ping`, `author: PenguinTech/waddles`, Apache-2.0), **original Waddles
+`app_id: penguintechinc.waddles.ping`, `author: PenguinTech/waddles`, Apache-2.0), **original Waddles
 content** -- no third-party attribution applies. Its siblings are `bundles/python/pyping`
 (`!pyping` -> `pong (py)`) and `bundles/csharp/csping` (`!csping`); together they are the
 "big three" language check (a reply on each language's own command).

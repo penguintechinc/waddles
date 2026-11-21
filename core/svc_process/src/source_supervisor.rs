@@ -652,7 +652,7 @@ mod tests {
             "NOGROUP".to_string(),
             Some(
                 "No such key 'waddles:t:acme:c:_tenant:src:twitch:tw-x:events' or consumer \
-                 group 'waddles.bot.commands.default' in XREADGROUP with GROUP option"
+                 group 'penguintechinc.waddles.fixture-bot-commands-default' in XREADGROUP with GROUP option"
                     .to_string(),
             ),
         ));

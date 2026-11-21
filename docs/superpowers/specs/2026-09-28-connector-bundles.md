@@ -409,7 +409,7 @@ Both go through one gated host capability, `identity.lookup` (§1) — never ad 
 
 | Order | Connector | Why here |
 |---|---|---|
-| 1 | **Echo** (receiver+sender, `waddles.core.example.echo`-style reference) | Proves the entire connector pipeline (host transport skeleton, `identity` import, pinning, signing) against a synthetic, zero-real-traffic connector before touching any live platform. |
+| 1 | **Echo** (receiver+sender, `penguintechinc.waddles.echo`-style reference) | Proves the entire connector pipeline (host transport skeleton, `identity` import, pinning, signing) against a synthetic, zero-real-traffic connector before touching any live platform. |
 | 2 | **Twitch EventSub** (receiver) | Stateless webhook transport — no session/RESUME/sharding complexity. The already-correct `eventsub.py`/Rust-port logic (connections-credentials §3.2 Increment 4) targets the connector WASM shape **directly** — this design supersedes that spec's "port to native Rust first" step; porting straight to WASM avoids a double migration. |
 | 3 | **Twitch IRC** (receiver) | Persistent connection, but no sharding/RESUME — validates the WebSocket-family transport's heartbeat/keepalive isolation (§3.5) and IRC channel pooling (§2) before Discord's harder case. |
 | 4 | **Discord Gateway** (receiver) | Hardest: sharding, IDENTIFY budget, and — new in this design — real `OP_RESUME`/session storage, closing a gap the native implementation never had. |
@@ -449,7 +449,7 @@ Every connector's WASM `on-frame` output is verified against the native/Python i
 | 1 | Linker-isolation test suite (§3.2.1's merge gate): a tampered/vendor-signed component claiming `connector` fails signature verification; a core-signed `connector` component without `connector.pii.read` has no `identity.lookup` linked | Rust tests | previous two tasks |
 | 1 | `on-frame` fuel metering (§3.5): `EXECUTOR_CONNECTOR_FUEL_LIMIT`, alongside the existing epoch deadline | Rust (`bundle_executor`) | Phase 0 |
 | 1 | Trap-isolation handling in the connector call site (§2.6): catch guest traps/epoch/fuel aborts, scope the failure to one `source_id`, destroy (never recycle) the involved `Store`, emit `waddles_connector_trap_total` | Rust (`bundle_executor`, svc_ingest) | previous task |
-| 2 | Echo connector bundle (`waddles.core.example.echo`-style): `on-connect`/`on-frame`/`on-disconnect` over a synthetic in-memory transport; end-to-end pipeline smoke test | Rust bundle | Phase 1 |
+| 2 | Echo connector bundle (`penguintechinc.waddles.echo`-style): `on-connect`/`on-frame`/`on-disconnect` over a synthetic in-memory transport; end-to-end pipeline smoke test | Rust bundle | Phase 1 |
 | 2 | Shadow-mode harness: run a connector bundle alongside a native receiver on the same frames, diff `normalized-event` output, count divergences | Rust (svc_ingest test harness) | Phase 2 (Echo) |
 | 3 | Twitch EventSub connector bundle: `on-frame` ports `eventsub.py`'s normalization logic (signature verification stays host-side, §2, before the bundle sees anything) | Rust bundle | Phase 1 |
 | 3 | Wire the EventSub webhook receiver's `Transport` impl to dispatch into the connector bundle instead of `normalize_twitch_eventsub` | Rust (svc_ingest) | previous task |

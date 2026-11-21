@@ -7,7 +7,7 @@ seeds `platform_vault has no active bundle_signing key`. The fix reads the vault
 its public columns and accepts the Job's bundle-signing Secret only when it is that key -- the
 platform KEK stays inside hub-api (test_suppression_hub_api_env_render.py pins that).
 
-Also: the seeder approves bundles with a db-v2 schema (e.g. `waddles.core.service.music-requests`),
+Also: the seeder approves bundles with a db-v2 schema (e.g. `penguintechinc.waddles.music-requests`),
 which provisions tables through `BUNDLE_MIGRATOR_PASSWORD` -- previously wired into hub-api only,
 so the seeder failed `bundle_data_provisioning_unavailable` and every consumer of that service
 then hit 422 `tool_target_cross_tenant`.

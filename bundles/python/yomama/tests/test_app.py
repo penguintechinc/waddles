@@ -140,7 +140,7 @@ def test_dispatch_relays_and_rejects_bad_payload(host: _Host) -> None:
     env = StageEnvelope(
         tenant="t",
         community="c",
-        app_id="waddles.core.example.yomama",
+        app_id="penguintechinc.waddles.yomama",
         stage="action",
         event=out,
         ts="2026-10-21T00:00:00.000Z",

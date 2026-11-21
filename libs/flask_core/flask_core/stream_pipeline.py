@@ -43,7 +43,7 @@ from datetime import datetime
 # of a single shared stream per stage.
 #
 # `app_id` is a dot-delimited reverse-DNS-style identifier (e.g.
-# `waddles.bot.shoutout.default`). Dots are valid Valkey/Redis key bytes,
+# `penguintechinc.waddles.shoutout-pipeline`). Dots are valid Valkey/Redis key bytes,
 # so `app_id` passes through these builders unescaped and intact.
 
 BUNDLE_STAGES = ("ingest", "process", "action")

@@ -48,17 +48,10 @@ fn validate_path(path: &str) -> Result<(), StorageError> {
     Ok(())
 }
 
-/// A bundle app_id usable as a prefix owner (`[a-z0-9][a-z0-9._-]{0,62}`).
+/// A bundle app_id usable as a prefix owner: the one shared app-id grammar
+/// (`bundle_capability_gate::is_valid_app_id`).
 pub fn validate_owner(owner: &str) -> Result<(), StorageError> {
-    let b = owner.as_bytes();
-    let ok = !b.is_empty()
-        && b.len() <= 63
-        && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit())
-        && b.iter().all(|c| {
-            c.is_ascii_lowercase() || c.is_ascii_digit() || matches!(c, b'.' | b'_' | b'-')
-        })
-        && !owner.contains("..");
-    if ok {
+    if bundle_capability_gate::is_valid_app_id(owner) {
         Ok(())
     } else {
         Err(StorageError::Invalid("bad prefix owner".into()))
@@ -110,7 +103,9 @@ mod tests {
     #[test]
     fn owner_validation() {
         assert!(validate_owner("waddles.harness.media").is_ok());
-        for o in ["", "A", "a/b", "a..b", ".a", "a b", &"a".repeat(64)] {
+        for o in [
+            "", "A", "a/b", "a..b", ".a", "a b", "a.b", "a.b.c.d", "a.b_c.d",
+        ] {
             assert!(validate_owner(o).is_err(), "{o}");
         }
     }

@@ -1,7 +1,7 @@
 # uptime (Python)
 
 `!uptime` -- humanized time since this community first activated the bundle (`up 3d 4h 12m`).
-First-party (`provider: builtin`, `app_id: waddles.core.example.uptime`), kv-only, WASI component.
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.uptime`), kv-only, WASI component.
 
 | | |
 |---|---|

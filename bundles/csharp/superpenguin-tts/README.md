@@ -22,7 +22,7 @@ Mod gate = the payload's `is_mod`/`is_broadcaster` literal `true`, fail-closed. 
 
 ## Synthesis contract (service tool, pinned by tests)
 
-`tool.invoke` target `waddles.core.service.media`, tool `tts_synthesize`:
+`tool.invoke` target `penguintechinc.waddles.media`, tool `tts_synthesize`:
 
 ```
 args   {"text": "<{user:uuid} says message>", "voice": "<voice id>"}      (idempotency key = hash(message id, play id))
@@ -48,7 +48,7 @@ Assets and what was not ported: `overlay/_ASSETS.md`.
 
 | Need | Today |
 |---|---|
-| Media service tool `tts_synthesize` in the tool catalog (`bundles/rust/...` media service; args/result above) | **does not exist**; the grant `tool.call:waddles.core.service.media:tts_synthesize` cannot resolve and the bundle refuses |
+| Media service tool `tts_synthesize` in the tool catalog (`bundles/rust/...` media service; args/result above) | **does not exist**; the grant `tool.call:penguintechinc.waddles.media:tts_synthesize` cannot resolve and the bundle refuses |
 | Media service renders `{user:uuid}` placeholders in `text` before synthesis (the PII boundary: a bundle never sees names) | not specified yet; without it the voice would read the placeholder |
 | `overlay` host capability handler in svc-process/svc-action | **not implemented**: the executor answers `not-implemented`, so a play surfaces a `WaddleTransportException` |
 | Overlay call quota | catalog quota for `overlay.media` is 1 call / 10 s; plays inside 10 s are refused by the host until it is raised |

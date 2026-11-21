@@ -15,10 +15,10 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.social.alias.default',
+    'penguintechinc.waddles.alias-pipeline',
     '1.0.0',
     'social',
-    'waddles.social.alias',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
@@ -34,7 +34,7 @@ INSERT INTO app_catalog (
 ON CONFLICT (app_id) DO NOTHING;
 
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.social.alias.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.alias-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

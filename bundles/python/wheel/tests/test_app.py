@@ -28,7 +28,7 @@ from app import (
     transform,
 )
 
-_APP_ID = "waddles.core.example.wheel"
+_APP_ID = "penguintechinc.waddles.wheel"
 
 
 def _run(coro):

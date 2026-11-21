@@ -22,7 +22,7 @@ use uuid::Uuid;
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-identity";
+const APP_ID: &str = "penguintechinc.waddles.test-identity";
 const VERSION: i64 = 1;
 /// A raw platform account id and handle that must NEVER appear in a result.
 const RAW_ACTOR_ID: &str = "1001";

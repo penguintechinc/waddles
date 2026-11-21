@@ -3,7 +3,7 @@
 Opt-in keyword/event auto-responder: greets people, acknowledges the bot's name, and answers
 thanks -- plus a mod-only `!greeter` command to switch each responder on/off. Standalone-bundle
 reimplementation of the free-text half of `core/svc_process/builtin_handlers/bot_process.py`
-(`_handle_keyword`). First-party (`provider: builtin`, `app_id: waddles.core.example.greeter`),
+(`_handle_keyword`). First-party (`provider: builtin`, `app_id: penguintechinc.waddles.greeter`),
 kv-only, WASI component.
 
 | | |

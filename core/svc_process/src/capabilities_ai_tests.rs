@@ -23,7 +23,7 @@ use std::time::{Duration, Instant};
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-ai";
+const APP_ID: &str = "penguintechinc.waddles.test-ai";
 const VERSION: i64 = 1;
 
 /// How the scripted backend answers.

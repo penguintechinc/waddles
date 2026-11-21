@@ -33,9 +33,29 @@ not a FROZEN-status change — the pipeline/entrypoint contract below is unaffec
 
 ---
 
+## 0. Bundle app_id Naming
+
+Every bundle has exactly one `app_id` of the form `<github-org>.<repo>.<bundle-name>`.
+
+- **Three segments**, dot-separated: the GitHub org that owns the source, the repo that holds it, and the bundle's own name.
+- **One grammar, enforced everywhere** (hub-api, gRPC servicers, Rust gate, tool-call parsing): each segment matches `[a-z0-9][a-z0-9-]*`, exactly three segments, at most 127 bytes. No uppercase, dots or **underscores** inside a segment.
+- **GitHub names map `_` to `-`** when lowercased: repo `Stream_Tools` under org `Acme_Corp` publishes as `acme-corp.stream-tools.<bundle-name>`.
+- **Storage namespaces are derived, never hand-written**: the table, kv namespace and object prefix for an app are `<readable>_<sha256(app_id)[:16]>` (`bundle_storage_key`), so distinct ids can never share state even when they sanitise alike (`acme.bot.kv-store` vs `acme.bot-kv.store`). The id grammar and key derivation are pinned by golden vectors in `testdata/bundle_app_id/vectors.json`, read by both the Rust and Python test suites.
+- **Ownership is first-claim**: the first publisher to register an `app_id` owns it (`app_id_owners`); a second publisher is refused, as is any id whose storage key already belongs to another id.
+- **`penguintechinc` is reserved** for first-party bundles. Third-party publishers use their own GitHub org and repo; a manifest claiming `penguintechinc` from any other source is rejected.
+
+| Publisher | Example `app_id` |
+|-----------|------------------|
+| First-party (this repo) | `penguintechinc.waddles.calendar` |
+| First-party (this repo) | `penguintechinc.waddles.discord` |
+| Third-party | `acme-corp.stream-tools.raid-alerts` |
+| Ported community bot | `psychoboy.penguintwitchbot.roll` |
+
+---
+
 ## 1. Model Overview
 
-A **bundle** is `waddles.<module>.<feature>.<name>` — one `app_catalog.app_id` implementing
+A **bundle** is `<github-org>.<repo>.<bundle-name>` — one `app_catalog.app_id` implementing
 1–3 pipeline stages (`ingest`, `process`, `action`). Each stage is a pure Python entrypoint
 (`module:function`, resolved via `importlib`, never `exec()`) polled and driven by that stage's
 runner container. Stages communicate only via the typed `StageEnvelope`/`PlatformEvent`
@@ -153,7 +173,7 @@ already handle — a bundle script never touches JSON directly).
 
 ## 3. Registering a Bundle (migration convention)
 
-One row in `app_catalog`, keyed by `app_id` (`waddles.<module>.<feature>.<name>`), carries every
+One row in `app_catalog`, keyed by `app_id` (`<github-org>.<repo>.<bundle-name>`), carries every
 stage's `{entrypoint, config, spec}` triple in a single `stages JSONB` column:
 
 ```json
@@ -189,13 +209,13 @@ actually serves it to a poller — declaring `stages` alone is not enough:
 ```sql
 -- Tenant-wide (every community under this tenant can use it)
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.<module>.<feature>.<name>', TRUE
+SELECT t.id, '<github-org>.<repo>.<bundle-name>', TRUE
 FROM tenants t WHERE t.slug = 'default'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;
 
 -- OR community-scoped (one specific community only) — use app_activations instead:
 -- INSERT INTO app_activations (community_id, tenant_id, app_id, enabled, config)
--- VALUES (<community_id>, <tenant_id>, 'waddles.<module>.<feature>.<name>', TRUE, '{}'::jsonb)
+-- VALUES (<community_id>, <tenant_id>, '<github-org>.<repo>.<bundle-name>', TRUE, '{}'::jsonb)
 -- ON CONFLICT (community_id, app_id) DO NOTHING;
 ```
 

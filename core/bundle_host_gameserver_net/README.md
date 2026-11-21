@@ -6,7 +6,7 @@ guarded RCON / TCP / UDP access to **admin-registered** game-server connections.
 
 ```
 guest --rcon-open(server uuid)--> executor --host-call(db,"gameserver_net.*")--> svc_process::capabilities::gameserver_net
-   1. first-party core namespace only (waddles.core.*)
+   1. first-party core namespace only (penguintechinc.waddles.*)
    2. gate: `gameserver.net` (dangerous, global-admin approved)
    3. wiring + flag `waddles.bundle-gameserver-net` (default OFF; fail-loud not_implemented / feature_disabled)
    4. GameNet: directory lookup (tenant+community scoped) -> rate limit -> SSRF guard on RESOLVED IP

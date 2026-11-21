@@ -156,7 +156,7 @@ async fn rig() -> Rig {
     let wire = WireRig::start_with_permissions(
         vec![RigConnector {
             platform: "discord".into(),
-            app_id: "waddles.core.service.discord".into(),
+            app_id: "penguintechinc.waddles.discord".into(),
             wasm: DISCORD_WASM,
             world: WitWorld::ConnectorTools,
         }],

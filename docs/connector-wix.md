@@ -1,4 +1,4 @@
-# Wix webhook connector (`waddles.core.service.wix`)
+# Wix webhook connector (`penguintechinc.waddles.wix`)
 
 Connector service bundle for Wix app webhooks (inbound) plus the outbound `wix.event.*` tools (1.1.0, see below). Generic: any community that installs a Wix app and
 stores its credentials can use it. Flag: PostHog `waddles.connector-wix` (default OFF); env baseline
