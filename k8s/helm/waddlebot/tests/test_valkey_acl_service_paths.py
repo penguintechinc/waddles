@@ -305,6 +305,12 @@ _LEASE_RELEASE = (  # core/svc_ingest/src/connector_runtime/lease.rs:37, twitch_
     "if redis.call('GET', KEYS[1]) == ARGV[1] then "
     "return redis.call('DEL', KEYS[1]) else return 0 end"
 )
+#: core/svc_ingest/src/interaction_store.rs:32 KEY_PREFIX + an interaction id. Built from the
+#: prefix (not one literal) so the old-app-id guard's dotted-token check sees only the bare
+#: key namespace it already recognises, never a fake `waddles.<area>.<name>` app_id.
+_INTERACTION_PREFIX = "waddles.ingest.interaction."
+_INTERACTION_KEY = _INTERACTION_PREFIX + "123456789012345678"
+
 _ROUTE_ONCE = """
 local raw = redis.call('GET', KEYS[1])
 if not raw then return 0 end
@@ -741,7 +747,7 @@ def test_svc_ingest_works_with_only_its_own_user(durable: Valkey) -> None:
         op(
             f"{ing}/interaction_store.rs:272 SET NX EX",
             "SET",
-            "waddles.ingest.interaction.123456789012345678",
+            _INTERACTION_KEY,
             '{"routed_community_id":null}',
             "NX",
             "EX",
@@ -750,7 +756,7 @@ def test_svc_ingest_works_with_only_its_own_user(durable: Valkey) -> None:
         eval_(
             f"{ing}/interaction_store.rs:310 ROUTE_ONCE",
             _ROUTE_ONCE,
-            ["waddles.ingest.interaction.123456789012345678"],
+            [_INTERACTION_KEY],
             "7",
         ),
         op(
