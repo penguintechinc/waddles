@@ -271,7 +271,7 @@ class TestClassifyRequest:
 
     def test_semantic_route_overrides_the_generic_action(self) -> None:
         result = classify_request(
-            _facts(method="DELETE", rule="/api/v1/tenant/<tenant_slug>/admins/<int:user_id>")
+            _facts(method="DELETE", rule="/api/v1/tenant/<tenant_slug>/admins/<uuuid:user_id>")
         )
         assert result is not None
         assert (result.category, result.action) == (

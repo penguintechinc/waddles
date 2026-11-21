@@ -24,6 +24,7 @@ from pydal import Field
 from quart import Quart
 
 from services.community_public_id import install_community_public_ids
+from services.user_public_id import install_user_public_ids
 
 #: Valid-shape UUID guaranteed to match no seeded community (unknown-community 404 tests).
 UNKNOWN_PUBLIC_ID = "00000000-0000-4000-8000-00000000dead"
@@ -102,6 +103,7 @@ def install_community_ids(app: Quart, dal: Any) -> None:
         app.config["async_dal"] = _SyncAsyncDal(dal)
     app.config.setdefault("dal", dal)
     install_community_public_ids(app)
+    install_user_public_ids(app)
 
 
 _COMMUNITY_KEYS = frozenset({"communityId", "community_id"})

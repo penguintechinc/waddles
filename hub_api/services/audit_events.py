@@ -374,7 +374,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("POST", "/api/v1/tenant/<tenant_slug>/admins"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_ADDED
     ),
-    ("DELETE", "/api/v1/tenant/<tenant_slug>/admins/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/tenant/<tenant_slug>/admins/<uuuid:user_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_REMOVED
     ),
     ("POST", "/api/v1/superadmin/tenants"): RouteAudit(
@@ -387,29 +387,30 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
         AuditCategory.TENANT, AuditAction.TENANT_DELETED
     ),
     # --- session revocation (admin) ---
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/revoke-sessions"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/revoke-sessions"): RouteAudit(
         AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/sessions/<int:session_id>/revoke"): RouteAudit(
-        AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
-    ),
+    (
+        "POST",
+        "/api/v1/superadmin/users/<uuuid:user_id>/sessions/<int:session_id>/revoke",
+    ): RouteAudit(AuditCategory.AUTHN, AuditAction.SESSION_REVOKED),
     # --- role / privilege changes ---
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/super-admin-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/super-admin-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_SUPER_ADMIN_CHANGED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/vendor-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/vendor-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_VENDOR_CHANGED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/analytics-consumer-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/analytics-consumer-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_ANALYTICS_CONSUMER_CHANGED
     ),
-    ("PUT", "/api/v1/platform/users/<int:user_id>/role"): RouteAudit(
+    ("PUT", "/api/v1/platform/users/<uuuid:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_PLATFORM_USER_CHANGED
     ),
     ("POST", "/api/v1/communities/<cuuid:community_id>/join"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>/role"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
     ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/roles"): RouteAudit(
@@ -423,16 +424,16 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ),
     # --- user administration ---
     ("POST", "/api/v1/superadmin/users"): RouteAudit(AuditCategory.USER, AuditAction.USER_CREATED),
-    ("PUT", "/api/v1/superadmin/users/<int:user_id>"): RouteAudit(
+    ("PUT", "/api/v1/superadmin/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_UPDATED
     ),
-    ("DELETE", "/api/v1/superadmin/users/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/superadmin/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_DELETED
     ),
-    ("DELETE", "/api/v1/platform/users/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/platform/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_DELETED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/password-reset"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/password-reset"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_PASSWORD_RESET
     ),
     # --- statutory privacy rights (audited in every entitled tenant; never gated themselves) ---
@@ -476,7 +477,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/tenant/<tenant_slug>/reputation/config"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_POLICY_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>/reputation"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>/reputation"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_OVERRIDDEN
     ),
 }
@@ -514,8 +515,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_SOFT_BAN_CHANGED),
         (
-            ("PUT", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
-            ("DELETE", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
+            ("PUT", f"{_ADM}/reputation/soft-bans/<uuuid:user_id>"),
+            ("DELETE", f"{_ADM}/reputation/soft-bans/<uuuid:user_id>"),
         ),
     ),
     (
@@ -725,7 +726,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("PUT", "/api/v1/admin/<cuuid:community_id>/settings"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkout"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkin"),
-            ("DELETE", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>"),
+            ("DELETE", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/temp-password"),
             ("PUT", "/api/v1/admin/<cuuid:community_id>/modules/<int:module_id>/config"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/channels"),

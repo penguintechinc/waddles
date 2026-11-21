@@ -28,6 +28,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.platform import platform_bp
 from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 
 @pytest.fixture
@@ -126,7 +127,7 @@ class TestUsers:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["pagination"]["total"] == 1
-        assert body["users"][0]["userId"] == "42"
+        assert body["users"][0]["userId"] == uid(42)
 
     async def test_list_users_search_and_platform_filters(
         self, client: Any, platform_db: Any
@@ -153,7 +154,7 @@ class TestUsers:
             query_string={"search": "Alice"},
         )
         body = await by_search.get_json()
-        assert [u["userId"] for u in body["users"]] == ["1"]
+        assert [u["userId"] for u in body["users"]] == [uid(1)]
 
         by_platform = await client.get(
             "/api/v1/platform/users",
@@ -161,20 +162,20 @@ class TestUsers:
             query_string={"platform": "discord"},
         )
         body2 = await by_platform.get_json()
-        assert [u["userId"] for u in body2["users"]] == ["2"]
+        assert [u["userId"] for u in body2["users"]] == [uid(2)]
 
     async def test_get_user_not_found_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/platform/users/9999", headers=_admin_headers())
+        response = await client.get(f"/api/v1/platform/users/{uid(9999)}", headers=_admin_headers())
         assert response.status_code == 404
 
     async def test_get_user_found_with_memberships(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)
         _seed_member(platform_db, community_id=community_id, user_id="7")
 
-        response = await client.get("/api/v1/platform/users/7", headers=_admin_headers())
+        response = await client.get(f"/api/v1/platform/users/{uid(7)}", headers=_admin_headers())
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["user"]["userId"] == "7"
+        assert body["user"]["userId"] == uid(7)
         assert body["user"]["isPlatformAdmin"] is False
         assert len(body["user"]["memberships"]) == 1
 
@@ -182,7 +183,7 @@ class TestUsers:
         self, client: Any, platform_db: Any
     ) -> None:
         response = await client.put(
-            "/api/v1/platform/users/7/role",
+            f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
             json={"role": "platform-admin"},
         )
@@ -201,7 +202,9 @@ class TestUsers:
 
     async def test_update_user_role_invalid_role_is_400(self, client: Any) -> None:
         response = await client.put(
-            "/api/v1/platform/users/7/role", headers=_admin_headers(), json={"role": "bogus"}
+            f"/api/v1/platform/users/{uid(7)}/role",
+            headers=_admin_headers(),
+            json={"role": "bogus"},
         )
         assert response.status_code == 400
 
@@ -210,13 +213,13 @@ class TestUsers:
     ) -> None:
         """Second grant call hits the UPDATE-existing-row branch, not the INSERT branch."""
         first = await client.put(
-            "/api/v1/platform/users/7/role",
+            f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
             json={"role": "support"},
         )
         assert first.status_code == 200
         second = await client.put(
-            "/api/v1/platform/users/7/role",
+            f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
             json={"role": "platform-admin"},
         )
@@ -229,13 +232,13 @@ class TestUsers:
 
     async def test_update_user_role_clear_deactivates(self, client: Any, platform_db: Any) -> None:
         grant = await client.put(
-            "/api/v1/platform/users/7/role",
+            f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
             json={"role": "platform-admin"},
         )
         assert grant.status_code == 200
         clear = await client.put(
-            "/api/v1/platform/users/7/role", headers=_admin_headers(), json={"role": None}
+            f"/api/v1/platform/users/{uid(7)}/role", headers=_admin_headers(), json={"role": None}
         )
         assert clear.status_code == 200
         rows = await platform_db.select_async(
@@ -248,7 +251,7 @@ class TestUsers:
         _seed_member(platform_db, community_id=community_id, user_id="7")
 
         response = await client.delete(
-            "/api/v1/platform/users/7", headers=_admin_headers(), json={"reason": "spam"}
+            f"/api/v1/platform/users/{uid(7)}", headers=_admin_headers(), json={"reason": "spam"}
         )
         assert response.status_code == 200
         rows = await platform_db.select_async(

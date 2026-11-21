@@ -35,6 +35,7 @@ from blueprints.v1.analytics import analytics_bp
 from services import analytics_service
 from services.analytics_proxy import ProxyResult
 from tests.community_ids import cpath, install_community_ids
+from tests.user_ids import uid
 
 
 @pytest.fixture
@@ -101,8 +102,8 @@ class TestAuthBypass:
             "/api/v1/analytics/platform/growth",
             "/api/v1/analytics/platform/activity",
             "/api/v1/analytics/platform/community-health",
-            "/api/v1/analytics/admin/users/1/stats",
-            "/api/v1/analytics/admin/users/1/reputation",
+            f"/api/v1/analytics/admin/users/{uid(1)}/stats",
+            f"/api/v1/analytics/admin/users/{uid(1)}/reputation",
         ],
     )
     async def test_missing_token_is_401(self, client: Any, path: str, proxy_stub: Any) -> None:
@@ -114,7 +115,11 @@ class TestAuthBypass:
     ) -> None:
         dal, community_id = community_db
         response = await client.get(
-            cpath(dal, "/api/v1/analytics/community/{community_id}/members/7/stats", community_id)
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
+                community_id,
+            )
         )
         assert response.status_code == 401
 
@@ -337,7 +342,7 @@ class TestSuperAdminUserViews:
         self, client: Any, user_auth_headers: Any, proxy_stub: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/analytics/admin/users/99/stats",
+            f"/api/v1/analytics/admin/users/{uid(99)}/stats",
             headers=user_auth_headers(user_id=1, scope="analytics:read"),
         )
         assert response.status_code == 403
@@ -346,7 +351,7 @@ class TestSuperAdminUserViews:
         self, client: Any, user_auth_headers: Any, proxy_stub: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/analytics/admin/users/99/stats",
+            f"/api/v1/analytics/admin/users/{uid(99)}/stats",
             headers=user_auth_headers(user_id=1, scope="users:admin"),
         )
         assert response.status_code == 200
@@ -358,7 +363,7 @@ class TestSuperAdminUserViews:
         self, client: Any, user_auth_headers: Any, proxy_stub: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/analytics/admin/users/99/reputation",
+            f"/api/v1/analytics/admin/users/{uid(99)}/reputation",
             headers=user_auth_headers(user_id=1, scope="users:admin"),
         )
         assert response.status_code == 200
@@ -378,7 +383,11 @@ class TestCommunityMemberViews:
     ) -> None:
         dal, community_id = community_db
         response = await client.get(
-            cpath(dal, "/api/v1/analytics/community/{community_id}/members/7/stats", community_id),
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
+                community_id,
+            ),
             headers=auth_headers(scope="community.analytics:read"),
         )
         assert response.status_code == 403
@@ -390,7 +399,11 @@ class TestCommunityMemberViews:
         dal.community_members.insert(community_id=community_id, user_id="7", is_active=True)
         dal.commit()
         response = await client.get(
-            cpath(dal, "/api/v1/analytics/community/{community_id}/members/7/stats", community_id),
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 200
@@ -409,7 +422,9 @@ class TestCommunityMemberViews:
         dal.commit()
         response = await client.get(
             cpath(
-                dal, "/api/v1/analytics/community/{community_id}/members/7/reputation", community_id
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/reputation",
+                community_id,
             ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
@@ -435,7 +450,7 @@ class TestCrossTenantLeak:
         response = await client.get(
             cpath(
                 dal,
-                "/api/v1/analytics/community/{community_id}/members/7/stats",
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
                 other_community_id,
             ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
@@ -450,7 +465,9 @@ class TestCrossTenantLeak:
         # No community_members row for user_id="404" -- never joined this community.
         response = await client.get(
             cpath(
-                dal, "/api/v1/analytics/community/{community_id}/members/404/stats", community_id
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(404)}/stats",
+                community_id,
             ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
@@ -464,7 +481,7 @@ class TestCrossTenantLeak:
         response = await client.get(
             cpath(
                 dal,
-                "/api/v1/analytics/community/{community_id}/members/404/reputation",
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(404)}/reputation",
                 community_id,
             ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
@@ -485,7 +502,7 @@ class TestCrossTenantLeak:
         response = await client.get(
             cpath(
                 dal,
-                "/api/v1/analytics/community/{community_id}/members/7/reputation",
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/reputation",
                 other_community_id,
             ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),

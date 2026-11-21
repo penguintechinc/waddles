@@ -31,6 +31,7 @@ from pg_docker import (  # noqa: E402  # type: ignore[import-not-found]
 
 from services import community_reputation_service as svc  # noqa: E402
 from services import data_privacy_service as privacy  # noqa: E402
+from tests.user_ids import uid  # noqa: E402
 
 pg_only = pytest.mark.skipif(not DOCKER_AVAILABLE, reason="docker CLI not available")
 
@@ -258,7 +259,7 @@ class TestOverrideAndApplyOnPostgres:
             actor_user_id=ADMIN_ID,
         )
         listed = await svc.list_soft_bans(adal, dal, community_id=cid)
-        assert [(b.userId, b.reason, b.setByType) for b in listed] == [("42", "manual", "admin")]
+        assert [(b.userId, b.reason, b.setByType) for b in listed] == [(uid(42), "manual", "admin")]
         assert _q(pg_db, "SELECT reputation_is_soft_banned(%s, %s, %s)", (tid, cid, USER_UUID)) == [
             (True,)
         ]

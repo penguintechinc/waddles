@@ -55,8 +55,10 @@ from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+from services.user_public_id import lookup_user_public_ids, public_id_for, use_user_public_ids
 
 platform_bp = Blueprint("v1_platform", __name__, url_prefix="/api/v1/platform")
+use_user_public_ids(platform_bp)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -95,7 +97,7 @@ class PaginationDTO:
 class PlatformUserDTO:
     """Platform user DTO (list row)."""
 
-    userId: str
+    userId: str | None
     displayName: str | None
     platform: str | None
     platformUserId: str | None
@@ -128,7 +130,7 @@ class CommunityMembershipDTO:
 class PlatformUserDetailDTO:
     """Platform user detail DTO."""
 
-    userId: str
+    userId: str | None
     displayName: str | None
     platform: str | None
     platformUserId: str | None
@@ -343,11 +345,12 @@ async def list_users() -> ListUsersResponse:
     rows, total, total_pages = await svc.list_users(
         async_dal, dal, page=page, limit=limit, search=search, platform=platform
     )
+    user_uuids = await lookup_user_public_ids(r.user_id for r in rows)
     return ListUsersResponse(
         success=True,
         users=[
             PlatformUserDTO(
-                userId=r.user_id,
+                userId=public_id_for(user_uuids, r.user_id),
                 displayName=r.display_name,
                 platform=r.platform,
                 platformUserId=r.platform_user_id,
@@ -362,7 +365,7 @@ async def list_users() -> ListUsersResponse:
     )
 
 
-@platform_bp.route("/users/<int:user_id>", methods=["GET"])
+@platform_bp.route("/users/<uuuid:user_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 # NOT @validate_response -- `user: PlatformUserDetailDTO` is a nested
@@ -382,7 +385,9 @@ async def get_user(user_id: int) -> tuple[Any, int]:
         GetUserResponse(
             success=True,
             user=PlatformUserDetailDTO(
-                userId=str(result["user_id"]),
+                userId=public_id_for(
+                    await lookup_user_public_ids([result["user_id"]]), result["user_id"]
+                ),
                 displayName=result["display_name"],
                 platform=result["platform"],
                 platformUserId=result["platform_user_id"],
@@ -408,7 +413,7 @@ async def get_user(user_id: int) -> tuple[Any, int]:
     )
 
 
-@platform_bp.route("/users/<int:user_id>/role", methods=["PUT"])
+@platform_bp.route("/users/<uuuid:user_id>/role", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(UpdateUserRoleRequest)
@@ -425,7 +430,7 @@ async def update_user_role(
     return MessageResponse(success=True, message="User role updated")
 
 
-@platform_bp.route("/users/<int:user_id>", methods=["DELETE"])
+@platform_bp.route("/users/<uuuid:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_request(DeactivateUserRequest)

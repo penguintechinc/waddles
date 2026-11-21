@@ -17,6 +17,7 @@ from blueprints.v1.tenant import tenant_bp
 from services.global_identity import grant_global_admin_sync, is_global_admin_sync
 from tests.conftest import TENANT_SLUG
 from tests.test_v1_tenant_blueprint import _admin_headers, _seed_user
+from tests.user_ids import uid
 
 CODE = "SYSTEM_TENANT_ADMIN_VIA_SUPERADMIN_ONLY"
 
@@ -54,7 +55,7 @@ async def test_add_system_admin_via_tenant_route_is_403_typed(
     response = await client.post(
         "/api/v1/tenant/system/admins",
         headers=_admin_headers(user_id=admin_id, tenant="system"),
-        json={"userId": other, "role": "tenant-owner"},
+        json={"userId": uid(other), "role": "tenant-owner"},
     )
     assert response.status_code == 403
     body = await response.get_json()
@@ -69,7 +70,7 @@ async def test_remove_system_admin_via_tenant_route_is_403_typed(
     """Removing the (last) `system` admin through the tenant API is refused; they survive."""
     admin_id, _ = _seed_system(tenant_admin_db)
     response = await client.delete(
-        f"/api/v1/tenant/system/admins/{admin_id}",
+        f"/api/v1/tenant/system/admins/{uid(admin_id)}",
         headers=_admin_headers(user_id=admin_id, tenant="system"),
     )
     assert response.status_code == 403
@@ -86,10 +87,10 @@ async def test_ordinary_tenant_admin_add_and_remove_still_work(
     added = await client.post(
         f"/api/v1/tenant/{TENANT_SLUG}/admins",
         headers=_admin_headers(),
-        json={"userId": user_id, "role": "tenant-admin"},
+        json={"userId": uid(user_id), "role": "tenant-admin"},
     )
     assert added.status_code == 200
     removed = await client.delete(
-        f"/api/v1/tenant/{TENANT_SLUG}/admins/{user_id}", headers=_admin_headers()
+        f"/api/v1/tenant/{TENANT_SLUG}/admins/{uid(user_id)}", headers=_admin_headers()
     )
     assert removed.status_code == 200

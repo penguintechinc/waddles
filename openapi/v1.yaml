@@ -3793,8 +3793,10 @@ components:
           - type: 'null'
           title: Platformuserid
         userId:
+          anyOf:
+          - type: string
+          - type: 'null'
           title: Userid
-          type: string
       required:
       - userId
       - displayName
@@ -6026,7 +6028,7 @@ components:
           type: string
         userId:
           title: Userid
-          type: integer
+          type: string
       required:
       - userId
       - displayName
@@ -6553,7 +6555,7 @@ components:
           title: Emailverified
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           default: true
           title: Isactive
@@ -10672,7 +10674,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -10722,7 +10725,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -10768,7 +10772,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -12785,7 +12790,7 @@ paths:
                 title: HistoryResponse
                 type: object
           description: Reputation ledger entries, newest first.
-      summary: Reputation ledger, newest first (`?userId=` hub user id, `?limit=`,
+      summary: Reputation ledger, newest first (`?userId=` hub user UUID, `?limit=`,
         `?offset=`).
   /api/v1/admin/{community_id}/reputation/soft-bans:
     get:
@@ -12835,7 +12840,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12870,7 +12876,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -14466,7 +14473,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -14480,7 +14488,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -14500,7 +14509,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -14520,7 +14530,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -23591,7 +23602,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -23634,7 +23646,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -23648,7 +23661,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -25582,7 +25596,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25611,7 +25626,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25639,7 +25655,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -25673,7 +25690,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -25700,7 +25718,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25731,7 +25750,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25769,7 +25789,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25824,7 +25845,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25857,7 +25879,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: session_id
         required: true
@@ -25916,7 +25939,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -25959,7 +25983,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -26002,7 +26027,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -26611,8 +26637,9 @@ paths:
                   title: Role
                   type: string
                 userId:
+                  format: uuid
                   title: Userid
-                  type: integer
+                  type: string
               required:
               - userId
               title: AddTenantAdminRequest
@@ -27920,7 +27947,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:

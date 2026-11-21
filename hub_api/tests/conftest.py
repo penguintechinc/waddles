@@ -2177,6 +2177,49 @@ def bundle_data_pg_conn(bundle_data_pg_url: str) -> Any:
 
 
 @pytest.fixture(autouse=True)
+def deterministic_user_uuids(  # type: ignore[no-untyped-def]
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+):
+    """Swap the two `hub_users.uuid` DB lookups for the pure mapping in `tests/user_ids.py`.
+
+    User/member routes take `<uuuid:user_id>`; existing tests seed users by numeric id, so the
+    fake maps numeric id <-> `uid(n)` without needing a `hub_users.uuid` row. Tests proving the
+    real lookup opt out with `@pytest.mark.real_user_ids`.
+    """
+    if request.node.get_closest_marker("real_user_ids"):
+        yield
+        return
+    import sys
+
+    from services import user_public_id
+    from tests.user_ids import uid, uid_to_int
+
+    async def fake_lookup_user_id(public_id: str) -> int:
+        resolved = uid_to_int(public_id)
+        return resolved if resolved > 0 else user_public_id.UNKNOWN_USER_ID
+
+    async def fake_lookup_user_public_ids(user_ids, **_kwargs):  # type: ignore[no-untyped-def]
+        out: dict[int, str] = {}
+        for raw in user_ids:
+            try:
+                out[int(str(raw))] = uid(int(str(raw)))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    real_one = user_public_id.lookup_user_id
+    real_many = user_public_id.lookup_user_public_ids
+    for name, module in list(sys.modules.items()):
+        if module is None or not name.startswith(("services", "blueprints")):
+            continue
+        if getattr(module, "lookup_user_id", None) is real_one:
+            monkeypatch.setattr(module, "lookup_user_id", fake_lookup_user_id)
+        if getattr(module, "lookup_user_public_ids", None) is real_many:
+            monkeypatch.setattr(module, "lookup_user_public_ids", fake_lookup_user_public_ids)
+    yield
+
+
+@pytest.fixture(autouse=True)
 def _uuid_community_response_guard(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
     """Opt-in guard against numeric community ids in JSON responses.
 
