@@ -177,6 +177,13 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             return;
         }
         let Ok(user) = user_uuid.parse::<Uuid>() else {
+            // Fail loud: a confirmed unban whose user token is malformed cannot lift anything.
+            self.stage_metrics
+                .record_floor_ban_dispatch("platform_lift_error");
+            tracing::warn!(
+                tenant_id, community_id, platform, app_id = %scope.app_id,
+                "platform unban confirmed but the user token is not a UUID: nothing lifted"
+            );
             return;
         };
         match sync

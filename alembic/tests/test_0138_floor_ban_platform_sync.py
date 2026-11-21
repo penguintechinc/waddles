@@ -643,6 +643,44 @@ class TestPlatformLiftHardening:
             == 2
         )
 
+    def test_a_call_without_the_calling_app_fails_and_no_stale_overload_exists(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        tid, cid = _setup(pg_db, "t-plat-noapp")
+        user = str(uuid.uuid4())
+        rid = _row(pg_db, tid, cid, user, 2)
+        with pytest.raises(
+            psycopg2.errors.UndefinedFunction
+        ):  # the old 4-argument overload
+            _q(
+                pg_db,
+                "SELECT * FROM reputation_floor_ban_lift_from_platform(%s, %s, 'discord', %s::uuid)",
+                (tid, cid, user),
+            )
+        with pytest.raises(
+            psycopg2.errors.InvalidParameterValue
+        ):  # NULL app: no default
+            _q(
+                pg_db,
+                "SELECT * FROM reputation_floor_ban_lift_from_platform("
+                "%s, %s, 'discord', %s::uuid, NULL)",
+                (tid, cid, user),
+            )
+        assert _status(pg_db, rid) == 2
+
+    @pytest.mark.parametrize("status", (1, 3, 4, 5, 7))
+    def test_a_platform_unban_also_cancels_undelivered_bans(
+        self, pg_db: PgTestDatabase, status: int
+    ) -> None:
+        tid, cid = _setup(pg_db, f"t-plat-cancel-{status}")
+        user = str(uuid.uuid4())
+        rid = _row(pg_db, tid, cid, user, status)
+        assert _q(pg_db, _PLATFORM_LIFT, (tid, cid, "discord", user))[0][0] == 1
+        assert _status(pg_db, rid) == 8
+        assert _denying(pg_db, tid, user) == 0
+        claimed = {r[0] for r in _q(pg_db, _CLAIM)}
+        assert rid not in claimed, "a cancelled ban is never sent"
+
     def test_the_unban_namespace_cannot_collide_with_ban_keys(
         self, pg_db: PgTestDatabase
     ) -> None:

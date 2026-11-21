@@ -174,11 +174,17 @@ $fl$;
 -- community must belong to the tenant and every write is filtered by that tenant, so an event for
 -- tenant B can never lift tenant A's ban. Only COMMUNITY-scope bans (scope 1) are lifted here;
 -- tenant-scope bans lift only through the tenant-admin path (reputation_floor_ban_lift). The
--- calling app id is recorded on the ban row (lift_source_app) and the ledger row.
+-- calling app id (mandatory) is recorded on the ban row (lift_source_app) and the ledger row.
+-- NOTE: the platform has already unbanned the user, so this also CANCELS the community's
+-- undelivered bans (statuses 1 queued, 3 retry, 4 dead, 5 rate limited, 7 in flight): they
+-- become lifted and are never sent.
 -- Returns (rows lifted, soft bans cleared).
+-- A call without the calling app must FAIL: no default, and the pre-source-app overload is
+-- dropped so a stale privileged 4-argument function can never be reached.
+DROP FUNCTION IF EXISTS reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid);
 CREATE OR REPLACE FUNCTION reputation_floor_ban_lift_from_platform(
     p_tenant bigint, p_community bigint, p_platform text, p_user_uuid uuid,
-    p_source_app text DEFAULT NULL
+    p_source_app text
 ) RETURNS TABLE(r_lifted int, r_soft_cleared int)
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp
 AS $fp$
@@ -190,7 +196,7 @@ DECLARE
 BEGIN
     IF p_tenant IS NULL OR p_community IS NULL OR p_user_uuid IS NULL OR p_platform IS NULL
        OR p_platform !~ '^[a-z][a-z0-9]{1,31}$'
-       OR (p_source_app IS NOT NULL AND p_source_app !~ '^[a-z0-9._:-]{1,128}$') THEN
+       OR p_source_app IS NULL OR p_source_app !~ '^[a-z0-9._:-]{1,128}$' THEN
         RAISE EXCEPTION 'invalid_input' USING ERRCODE = '22023';
     END IF;
     IF NOT EXISTS (SELECT 1 FROM communities WHERE id = p_community AND tenant_id = p_tenant) THEN
@@ -226,7 +232,7 @@ BEGIN
             VALUES ((SELECT c.app_id FROM app_catalog c WHERE c.app_id = p_source_app),
                     p_tenant, p_community, p_user_uuid::text, 'community', 0, '1', 1,
                     'soft_ban_clear', 'system:platform_sync',
-                    'soft_ban.platform_unban:' || COALESCE(p_source_app, 'platform'));
+                    'soft_ban.platform_unban:' || p_source_app);
         END IF;
     END IF;
     RETURN QUERY SELECT v_lifted, v_soft;

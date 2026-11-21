@@ -117,7 +117,10 @@ re-join. A confirmed ban with no suppression code (no linked identity on that pl
   (tenant-scope bans lift only via the tenant-admin route); `lifted_by` is the fixed `system:platform_sync` UUID,
   `lift_origin = 2`, and the calling app id is recorded (`lift_source_app`, ledger `source_event`). The community soft ban
   is cleared only when the same call lifted a ban row of that platform, and only a floor-set soft ban (reason 1), never a
-  manual one. NO unban is enqueued back (no echo); replays are no-ops. Both directions are sticky.
+  manual one. The platform has already unbanned the user, so this lift also CANCELS the community's undelivered bans
+  (statuses 1 queued, 3 retry, 4 dead, 5 rate limited, 7 in flight): they become lifted and are never sent. The calling app
+  is mandatory (no default; the pre-source-app overload is dropped). NO unban is enqueued back (no echo); replays are no-ops.
+  Both directions are sticky.
 - **Outbox namespaces**: ban and unban rows live in separate idempotency namespaces (`action` is part of the unique key;
   the `unban:` key prefix is reserved and rejected for bans by SQL and by the host). `reputation_floor_ban_lift` fails
   loudly (`unban_shortfall`, whole lift rolled back) if a delivered ban could not get its unban.

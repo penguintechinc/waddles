@@ -37,6 +37,9 @@ def downgrade() -> None:
     op.execute(
         "DROP FUNCTION IF EXISTS reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid, text)"
     )
+    op.execute(
+        "DROP FUNCTION IF EXISTS reputation_floor_ban_lift_from_platform(bigint, bigint, text, uuid)"
+    )
     op.execute("DROP FUNCTION IF EXISTS reputation_floor_ban_claim(int, int)")
     op.execute(
         "DROP FUNCTION IF EXISTS reputation_floor_current_score(bigint, bigint, uuid, smallint)"
