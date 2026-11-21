@@ -13,6 +13,7 @@ use serde_json::{json, Value};
 
 use super::*;
 use crate::outbound_creds::TwitchCredentialSource;
+use connection_resolver::SecretString;
 
 const SEED: [u8; 32] = [7u8; 32];
 const UUID: &str = "11111111-2222-4333-8444-555555555555";
@@ -163,7 +164,7 @@ fn ev(bcast: &str, login: &str, user: &str) -> Value {
 }
 
 async fn run(r: &Rig, e: &LedgerEntry, s: &Value, v: &Value, ts: &str) -> Outcome {
-    r.unban.handle(e, s, v, ts).await
+    r.unban.handle(e, s, v, ts, "msg-1").await
 }
 
 fn pubkey() -> UnparsedPublicKey<Vec<u8>> {
@@ -543,4 +544,178 @@ async fn the_live_state_read_is_scoped_by_ids_and_fails_closed() {
             Err(())
         );
     }
+}
+
+// ---- Ledger cache -----------------------------------------------------------------------
+
+/// Counts hub lookups; serves a mutable secret (or "unknown" / an outage).
+struct CountingLedger {
+    hits: std::sync::atomic::AtomicUsize,
+    secret: Mutex<Option<&'static str>>,
+    down: std::sync::atomic::AtomicBool,
+}
+
+impl CountingLedger {
+    fn new(secret: Option<&'static str>) -> Arc<Self> {
+        Arc::new(Self {
+            hits: std::sync::atomic::AtomicUsize::new(0),
+            secret: Mutex::new(secret),
+            down: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+    fn hits(&self) -> usize {
+        self.hits.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl SubscriptionLedger for Arc<CountingLedger> {
+    fn lookup<'a>(&'a self, _key: &'a str) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+        Box::pin(async move {
+            self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.down.load(std::sync::atomic::Ordering::SeqCst) {
+                return Err(LedgerError::Unavailable);
+            }
+            Ok(self.secret.lock().unwrap().map(|s| LedgerEntry {
+                secret: SecretString::new(s.to_string()),
+                tenant_id: 7,
+                community_id: 9,
+                connection_id: 33,
+            }))
+        })
+    }
+}
+
+#[tokio::test]
+async fn the_ledger_cache_serves_repeats_from_memory_and_refetches_after_invalidation() {
+    let inner = CountingLedger::new(Some("secret-1"));
+    let cache = CachedLedger::new(Arc::clone(&inner));
+    for _ in 0..5 {
+        let e = cache.lookup("key-12345678").await.unwrap().unwrap();
+        assert_eq!(
+            (
+                e.secret.expose(),
+                e.tenant_id,
+                e.community_id,
+                e.connection_id
+            ),
+            ("secret-1", 7, 9, 33)
+        );
+    }
+    assert_eq!(inner.hits(), 1, "one hub call for five deliveries");
+    // Secret rotated at hub-api: still the old one from memory until invalidated...
+    *inner.secret.lock().unwrap() = Some("secret-2");
+    assert_eq!(
+        cache
+            .lookup("key-12345678")
+            .await
+            .unwrap()
+            .unwrap()
+            .secret
+            .expose(),
+        "secret-1"
+    );
+    cache.invalidate("key-12345678");
+    assert_eq!(
+        cache
+            .lookup("key-12345678")
+            .await
+            .unwrap()
+            .unwrap()
+            .secret
+            .expose(),
+        "secret-2"
+    );
+    assert_eq!(inner.hits(), 2);
+}
+
+#[tokio::test]
+async fn positive_entries_expire_negatives_expire_fast_and_errors_are_never_cached() {
+    let inner = CountingLedger::new(Some("secret-1"));
+    let cache = CachedLedger::with_limits(
+        Arc::clone(&inner),
+        Duration::from_millis(40),
+        Duration::from_millis(10),
+        8,
+    );
+    cache.lookup("key-12345678").await.unwrap();
+    tokio::time::sleep(Duration::from_millis(60)).await;
+    cache.lookup("key-12345678").await.unwrap();
+    assert_eq!(inner.hits(), 2, "positive entry expired after its TTL");
+
+    // Unknown subscription: remembered only briefly.
+    *inner.secret.lock().unwrap() = None;
+    assert!(cache.lookup("key-nope-0001").await.unwrap().is_none());
+    assert!(cache.lookup("key-nope-0001").await.unwrap().is_none());
+    assert_eq!(inner.hits(), 3, "negative answer served from memory");
+    tokio::time::sleep(Duration::from_millis(25)).await;
+    *inner.secret.lock().unwrap() = Some("secret-new");
+    assert!(
+        cache.lookup("key-nope-0001").await.unwrap().is_some(),
+        "a new subscription is picked up once the short negative TTL passes"
+    );
+
+    // An outage is an error each time, never a cached answer.
+    inner.down.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = inner.hits();
+    assert!(cache.lookup("key-other-001").await.is_err());
+    assert!(cache.lookup("key-other-001").await.is_err());
+    assert_eq!(inner.hits(), before + 2);
+}
+
+#[tokio::test]
+async fn the_cache_is_bounded() {
+    let inner = CountingLedger::new(Some("s"));
+    let cache = CachedLedger::with_limits(Arc::clone(&inner), CACHE_TTL, NEGATIVE_TTL, 4);
+    for i in 0..50 {
+        cache.lookup(&format!("key-{i:08}")).await.unwrap();
+    }
+    assert!(cache.map.lock().unwrap().len() <= 4);
+}
+
+#[tokio::test]
+async fn the_event_id_is_derived_from_the_message_id_so_a_redelivery_dedupes_downstream() {
+    let r = good_rig();
+    for _ in 0..2 {
+        let out = r
+            .unban
+            .handle(
+                &entry(7, 9, 33),
+                &sub("141"),
+                &ev("141", "alice", "777"),
+                TS,
+                "msg-same",
+            )
+            .await;
+        assert_eq!(out, Outcome::Forwarded);
+    }
+    let out = r
+        .unban
+        .handle(
+            &entry(7, 9, 33),
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            TS,
+            "msg-other",
+        )
+        .await;
+    assert_eq!(out, Outcome::Forwarded);
+    let ids: Vec<String> = r
+        .sink
+        .pushed
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|p| {
+            serde_json::from_str::<Value>(p).unwrap()["event_id"]
+                .as_str()
+                .unwrap()
+                .to_string()
+        })
+        .collect();
+    assert_eq!(ids[0], ids[1], "same message id, same event id");
+    assert_ne!(ids[0], ids[2], "different message id, different event id");
+    assert_eq!(
+        ids[0],
+        Uuid::new_v5(&EVENT_ID_NAMESPACE, b"msg-same").to_string()
+    );
 }

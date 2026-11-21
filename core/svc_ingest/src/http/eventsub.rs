@@ -93,6 +93,10 @@ impl From<EventSubError> for ApiError {
             EventSubError::VerificationFailed => {
                 ApiError::Forbidden("eventsub verification failed".to_string())
             }
+            // 5xx: Twitch redelivers, so an unban is not lost to a hub-api blip.
+            EventSubError::LedgerUnavailable => {
+                ApiError::Internal(anyhow::anyhow!("eventsub ledger unavailable"))
+            }
         }
     }
 }
@@ -151,6 +155,7 @@ fn outcome_label(result: &Result<EventSubResponse, EventSubError>) -> &'static s
         Err(EventSubError::UnsupportedContentType) => "unsupported_content_type",
         Err(EventSubError::MalformedBody) => "malformed_body",
         Err(EventSubError::VerificationFailed) => "verification_failed",
+        Err(EventSubError::LedgerUnavailable) => "ledger_unavailable",
     }
 }
 

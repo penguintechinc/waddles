@@ -327,6 +327,10 @@ pub enum EventSubError {
     /// subscription secret -- deliberately one variant, one message.
     #[error("eventsub verification failed")]
     VerificationFailed,
+    /// The subscription ledger could not be read for a `channel.unban` delivery: answered 5xx so
+    /// Twitch redelivers (a 2xx would lose the unban for good).
+    #[error("eventsub subscription ledger unavailable")]
+    LedgerUnavailable,
 }
 
 /// The non-error outcomes [`handle_webhook`] can produce; `crate::http::
@@ -542,6 +546,21 @@ where
     .await
 }
 
+/// Read-only peek: is this an (unauthenticated) `channel.unban` notification? Used only to pick
+/// a retryable status when the ledger is down; never to authorize anything.
+fn is_unban_notification(message_type: Option<&str>, body: &[u8]) -> bool {
+    message_type == Some("notification")
+        && serde_json::from_slice::<serde_json::Value>(body)
+            .ok()
+            .and_then(|v| {
+                v.get("subscription")?
+                    .get("type")?
+                    .as_str()
+                    .map(|t| t == crate::twitch_unban::EVENT_TYPE)
+            })
+            .unwrap_or(false)
+}
+
 /// [`handle_webhook`] with the Twitch-native unban forwarder (`channel.unban`).
 ///
 /// With `unban = Some(_)` the delivery's callback key is first looked up in the subscription
@@ -600,11 +619,21 @@ where
     // knows is verified with ITS secret and nothing else, and yields the tenant/community/
     // connection the delivery is bound to. A ledger outage degrades to the legacy resolver for
     // ordinary events; an unban is never honoured without a ledger entry.
-    let ledger_entry = match unban {
+    let mut ledger_entry = match unban {
         Some(u) => match u.ledger_entry(callback_key).await {
             Ok(entry) => entry,
             Err(_) => {
-                tracing::warn!(callback_key, "eventsub.ledger_unavailable");
+                tracing::warn!(
+                    key_tag = %crate::twitch_unban::key_tag(callback_key),
+                    "eventsub.ledger_unavailable"
+                );
+                // An unban must never be decided without its ledger row, and a 2xx would stop
+                // Twitch redelivering it: peek the (still unauthenticated, read-only) type and
+                // answer 5xx. Ordinary events keep the legacy-resolver fallback.
+                if is_unban_notification(headers.message_type, body) {
+                    metrics.record_eventsub_verification("ledger_unavailable");
+                    return Err(EventSubError::LedgerUnavailable);
+                }
                 None
             }
         },
@@ -624,9 +653,29 @@ where
     };
 
     if !verify_signature(&secret, message_id, timestamp, body, signature) {
-        metrics.record_eventsub_verification("bad_signature");
-        tracing::warn!(callback_key, "eventsub.invalid_signature");
-        return Err(EventSubError::VerificationFailed);
+        // A cached ledger secret may be stale after a rotation: evict it and re-read ONCE before
+        // rejecting. The retry only ever uses the ledger's current secret for this same key.
+        let mut recovered = false;
+        if let (Some(u), Some(_)) = (unban, &ledger_entry) {
+            u.invalidate_ledger(callback_key);
+            if let Ok(Some(fresh)) = u.ledger_entry(callback_key).await {
+                if verify_signature(
+                    fresh.secret.expose(),
+                    message_id,
+                    timestamp,
+                    body,
+                    signature,
+                ) {
+                    ledger_entry = Some(fresh);
+                    recovered = true;
+                }
+            }
+        }
+        if !recovered {
+            metrics.record_eventsub_verification("bad_signature");
+            tracing::warn!(callback_key, "eventsub.invalid_signature");
+            return Err(EventSubError::VerificationFailed);
+        }
     }
 
     if !timestamp_within_replay_window(timestamp, chrono::Utc::now()) {
@@ -724,7 +773,9 @@ where
             let event_body = body_json.get("event").cloned().unwrap_or_default();
             match (unban, &ledger_entry) {
                 (Some(u), Some(entry)) => {
-                    let _ = u.handle(entry, &subscription, &event_body, timestamp).await;
+                    let _ = u
+                        .handle(entry, &subscription, &event_body, timestamp, message_id)
+                        .await;
                 }
                 (Some(u), None) => {
                     let _ = u.unbound();
@@ -1990,5 +2041,112 @@ mod tests {
             Ok(EventSubResponse::Challenge(c)) => assert_eq!(c, "pogchamp-kappa-360noscope"),
             other => panic!("expected the challenge, got {other:?}"),
         }
+    }
+
+    /// A ledger that is always down.
+    struct DownLedger;
+    impl SubscriptionLedger for DownLedger {
+        fn lookup<'a>(
+            &'a self,
+            _key: &'a str,
+        ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+            Box::pin(async { Err(LedgerError::Unavailable) })
+        }
+    }
+
+    fn down_rig() -> (TwitchUnban, Arc<Sink>) {
+        let sink = Arc::new(Sink::default());
+        let u = TwitchUnban::new(
+            Arc::new(DownLedger),
+            Arc::new(Bound(vec![((7, 9, 33), "alice")])),
+            Arc::new(Bans(false)),
+            Arc::new(Tok),
+            Arc::clone(&sink) as Arc<dyn UnbanSink>,
+            Some(Signer::from_seed("k1", &[7u8; 32]).unwrap()),
+        );
+        (u, sink)
+    }
+
+    #[tokio::test]
+    async fn a_ledger_outage_on_an_unban_is_a_retryable_error_never_a_2xx_or_a_global_secret_pass()
+    {
+        let (u, sink) = down_rig();
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        // Even a delivery signed with the legacy/global secret must not be honoured or acked.
+        let sig = sign(SECRET, "m-9", &ts, &body);
+        let h = headers("m-9", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Err(EventSubError::LedgerUnavailable)), "{r:?}");
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_ledger_outage_still_lets_ordinary_events_use_the_legacy_resolver() {
+        let (u, _sink) = down_rig();
+        let body = serde_json::json!({
+            "subscription": {"id": "s", "type": "channel.follow",
+                "condition": {"broadcaster_user_id": "141"}},
+            "event": {"user_id": "5", "user_login": "x", "broadcaster_user_id": "141"}
+        })
+        .to_string()
+        .into_bytes();
+        let ts = now_ts();
+        let sig = sign(SECRET, "m-10", &ts, &body);
+        let h = headers("m-10", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(!matches!(r, Err(EventSubError::LedgerUnavailable)), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn a_rotated_secret_is_refetched_once_and_a_bad_signature_still_fails() {
+        // Cached ledger holding the OLD secret; hub-api now serves the rotated one.
+        struct Rotating(std::sync::Mutex<&'static str>);
+        impl SubscriptionLedger for Arc<Rotating> {
+            fn lookup<'a>(
+                &'a self,
+                _k: &'a str,
+            ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+                let s = *self.0.lock().unwrap();
+                Box::pin(async move {
+                    Ok(Some(LedgerEntry {
+                        secret: connection_resolver::SecretString::new(s.to_string()),
+                        tenant_id: 7,
+                        community_id: 9,
+                        connection_id: 33,
+                    }))
+                })
+            }
+        }
+        let inner = Arc::new(Rotating(std::sync::Mutex::new("old-secret-xxxx")));
+        let sink = Arc::new(Sink::default());
+        let u = TwitchUnban::new(
+            Arc::new(crate::twitch_unban::CachedLedger::new(Arc::clone(&inner))),
+            Arc::new(Bound(vec![((7, 9, 33), "alice")])),
+            Arc::new(Bans(false)),
+            Arc::new(Tok),
+            Arc::clone(&sink) as Arc<dyn UnbanSink>,
+            Some(Signer::from_seed("k1", &[7u8; 32]).unwrap()),
+        );
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        // Prime the cache with the old secret.
+        let sig_old = sign("old-secret-xxxx", "m-a", &ts, &body);
+        let h = headers("m-a", &ts, &sig_old, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        // Rotate: a delivery signed with the new secret recovers via one invalidate + refetch.
+        *inner.0.lock().unwrap() = "new-secret-yyyy";
+        let sig_new = sign("new-secret-yyyy", "m-b", &ts, &body);
+        let h = headers("m-b", &ts, &sig_new, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert_eq!(sink.0.lock().unwrap().len(), 2);
+        // A signature under neither secret is still rejected.
+        let sig_bad = sign("some-other-secret", "m-c", &ts, &body);
+        let h = headers("m-c", &ts, &sig_bad, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Err(EventSubError::VerificationFailed)), "{r:?}");
+        assert_eq!(sink.0.lock().unwrap().len(), 2);
     }
 }

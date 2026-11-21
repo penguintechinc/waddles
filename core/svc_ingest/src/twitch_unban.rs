@@ -53,6 +53,8 @@ use crate::twitch_sessions::spec::{SessionSpec, CAPABILITY, MAX_PAGES, PAGE_LIMI
 pub const EVENTS_LIST: &str = "waddles:platform-unban:twitch:events";
 /// Signature domain-separation label; must equal svc-action's.
 pub const DOMAIN: &[u8] = b"waddles.platform-unban.twitch.v1";
+/// Fixed UUIDv5 namespace for event ids derived from EventSub message ids.
+pub const EVENT_ID_NAMESPACE: Uuid = Uuid::from_u128(0x7a3e_5b1c_9d42_4f08_a6c1_2b8e_d4f7_3095);
 /// Wire platform of the event.
 pub const PLATFORM: &str = "twitch";
 /// EventSub subscription type this module handles.
@@ -148,6 +150,124 @@ pub trait SubscriptionLedger: Send + Sync {
         &'a self,
         callback_key: &'a str,
     ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>>;
+
+    /// Drops any cached answer for `callback_key` so the next lookup re-reads the source (called
+    /// on an HMAC failure: the secret may have been rotated). A no-op for uncached ledgers.
+    fn invalidate(&self, _callback_key: &str) {}
+}
+
+/// How long a found ledger entry is served from memory.
+pub const CACHE_TTL: Duration = Duration::from_secs(60);
+/// How long "no such subscription" is remembered (short: a new subscription must work quickly).
+pub const NEGATIVE_TTL: Duration = Duration::from_secs(5);
+/// Most callback keys held at once (bounds memory against key-spraying).
+pub const CACHE_MAX: usize = 1024;
+
+/// One cached lookup result.
+struct Cached {
+    at: std::time::Instant,
+    /// `None` = the ledger said there is no such subscription.
+    entry: Option<(String, i64, i64, i64)>,
+}
+
+/// In-process TTL cache over a [`SubscriptionLedger`]: positive answers for `ttl`, negative ones
+/// for `negative_ttl` (a few seconds), bounded to `max` keys. Ledger errors are never cached.
+/// [`SubscriptionLedger::invalidate`] evicts a key so a rotated secret is re-fetched once.
+pub struct CachedLedger<L> {
+    inner: L,
+    ttl: Duration,
+    negative_ttl: Duration,
+    max: usize,
+    map: std::sync::Mutex<std::collections::HashMap<String, Cached>>,
+}
+
+impl<L: SubscriptionLedger> CachedLedger<L> {
+    /// Wraps `inner` with the standard TTLs and bound.
+    #[must_use]
+    pub fn new(inner: L) -> Self {
+        Self::with_limits(inner, CACHE_TTL, NEGATIVE_TTL, CACHE_MAX)
+    }
+
+    /// Wraps `inner` with explicit limits (tests).
+    #[must_use]
+    pub fn with_limits(inner: L, ttl: Duration, negative_ttl: Duration, max: usize) -> Self {
+        Self {
+            inner,
+            ttl,
+            negative_ttl,
+            max: max.max(1),
+            map: std::sync::Mutex::default(),
+        }
+    }
+
+    fn fresh(&self, key: &str) -> Option<Option<LedgerEntry>> {
+        let map = self.map.lock().ok()?;
+        let c = map.get(key)?;
+        let ttl = if c.entry.is_some() {
+            self.ttl
+        } else {
+            self.negative_ttl
+        };
+        if c.at.elapsed() >= ttl {
+            return None;
+        }
+        Some(c.entry.as_ref().map(|(sec, t, co, cn)| LedgerEntry {
+            secret: SecretString::new(sec.clone()),
+            tenant_id: *t,
+            community_id: *co,
+            connection_id: *cn,
+        }))
+    }
+
+    fn store(&self, key: &str, entry: Option<&LedgerEntry>) {
+        let Ok(mut map) = self.map.lock() else {
+            return;
+        };
+        if map.len() >= self.max && !map.contains_key(key) {
+            let ttl = self.ttl;
+            map.retain(|_, c| c.at.elapsed() < ttl);
+            if map.len() >= self.max {
+                map.clear();
+            }
+        }
+        map.insert(
+            key.to_string(),
+            Cached {
+                at: std::time::Instant::now(),
+                entry: entry.map(|e| {
+                    (
+                        e.secret.expose().to_string(),
+                        e.tenant_id,
+                        e.community_id,
+                        e.connection_id,
+                    )
+                }),
+            },
+        );
+    }
+}
+
+impl<L: SubscriptionLedger> SubscriptionLedger for CachedLedger<L> {
+    fn lookup<'a>(
+        &'a self,
+        callback_key: &'a str,
+    ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+        Box::pin(async move {
+            if let Some(hit) = self.fresh(callback_key) {
+                return Ok(hit);
+            }
+            let found = self.inner.lookup(callback_key).await?;
+            self.store(callback_key, found.as_ref());
+            Ok(found)
+        })
+    }
+
+    fn invalidate(&self, callback_key: &str) {
+        if let Ok(mut map) = self.map.lock() {
+            map.remove(callback_key);
+        }
+        self.inner.invalidate(callback_key);
+    }
 }
 
 #[derive(Deserialize)]
@@ -163,8 +283,7 @@ struct LedgerBody {
 }
 
 /// Production [`SubscriptionLedger`]: hub-api over HTTP with a machine JWT of scope
-/// [`SECRET_READ_SCOPE`]. No cache: a secret rotated or a subscription deleted takes effect on
-/// the next delivery.
+/// [`SECRET_READ_SCOPE`]. Uncached by itself; production wraps it in [`CachedLedger`].
 pub struct HubSubscriptionLedger {
     http: reqwest::Client,
     base: String,
@@ -186,6 +305,12 @@ impl HubSubscriptionLedger {
             jwt,
         })
     }
+}
+
+/// A short, non-reversible tag of a callback key for logs (never the full key).
+#[must_use]
+pub fn key_tag(key: &str) -> String {
+    key.chars().take(4).collect::<String>() + "..."
 }
 
 /// A callback key is an opaque URL-safe token; anything else never reaches the ledger.
@@ -602,6 +727,12 @@ impl TwitchUnban {
         self.ledger.lookup(callback_key).await
     }
 
+    /// Evicts the cached ledger answer for `callback_key` (HMAC failure: the secret may have
+    /// rotated, so the next lookup re-reads hub-api).
+    pub fn invalidate_ledger(&self, callback_key: &str) {
+        self.ledger.invalidate(callback_key);
+    }
+
     /// Counts a delivery for a subscription the ledger does not know (never forwarded).
     pub fn unbound(&self) -> Outcome {
         note("ignored", "unknown_subscription");
@@ -618,6 +749,7 @@ impl TwitchUnban {
         subscription: &serde_json::Value,
         event: &serde_json::Value,
         message_timestamp: &str,
+        message_id: &str,
     ) -> Outcome {
         note("received", "-");
         let text = |v: &serde_json::Value, k: &str| -> Option<String> {
@@ -694,7 +826,9 @@ impl TwitchUnban {
             );
             return ignored("no_signing_key", entry);
         };
-        let event_id = Uuid::new_v4().to_string();
+        // Deterministic from Twitch's stable `message_id`: a redelivery maps to the SAME event id,
+        // so svc-action's single-use marker dedupes it even if ingest's own dedupe store was down.
+        let event_id = Uuid::new_v5(&EVENT_ID_NAMESPACE, message_id.as_bytes()).to_string();
         let exp_ms = now_ms().saturating_add(EVENT_TTL_MS);
         let msg = signing_bytes(
             &event_id,

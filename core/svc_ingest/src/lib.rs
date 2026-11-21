@@ -1293,10 +1293,9 @@ fn build_twitch_unban(
             twitch_unban::SECRET_READ_SCOPE,
         ));
         Ok(twitch_unban::TwitchUnban::new(
-            Arc::new(twitch_unban::HubSubscriptionLedger::new(
-                &cli.hub_api_url,
-                jwt,
-            )?),
+            Arc::new(twitch_unban::CachedLedger::new(
+                twitch_unban::HubSubscriptionLedger::new(&cli.hub_api_url, jwt)?,
+            )),
             Arc::new(twitch_unban::ResolverOwner::new(resolver()?)),
             Arc::new(twitch_unban::HelixBanState::new(
                 outbound_creds::ResolverTwitchCredentials::new(resolver()?),
