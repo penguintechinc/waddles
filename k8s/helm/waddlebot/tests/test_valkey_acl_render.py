@@ -205,6 +205,8 @@ def test_provision_hook_generates_distinct_strong_passwords_per_user() -> None:
         data = secrets[f"w-waddlebot-valkey-user-{name}"]["data"]
         assert data, name
         for key, v in data.items():
+            if key == "VALKEY_DURABLE_URL_TLS_AUTH":
+                continue  # derived from the password, checked in test_per_user_auth_url_*
             assert key in _PW_KEY.values()
             assert len(v) >= 32 and not v.startswith("REPLACE_ME"), (name, key)
             pws.append(v)
@@ -220,8 +222,8 @@ def test_provision_hook_generates_distinct_strong_passwords_per_user() -> None:
 def test_legacy_default_user_on_is_marked_and_off_is_reset() -> None:
     """legacyDefaultUser=true: legacy user + marker + VALKEY_PASSWORD; false: `default reset`, no marker."""
     for legacy, docs in (
-        (True, _docs()),
-        (False, _docs(extra=("infrastructure.valkeyAcl.legacyDefaultUser=false",))),
+        (True, _docs(extra=("infrastructure.valkeyAcl.legacyDefaultUser=true",))),
+        (False, _docs()),
     ):
         for sts_name in _INSTANCES:
             sts = _sts(docs, sts_name)
@@ -294,10 +296,17 @@ def test_ci_check_passes_on_every_env(values: str) -> None:
     """The shipped ACL passes the least-privilege gate everywhere (denominator printed)."""
     r = _helm(values)
     assert r.returncode == 0, r.stderr
-    flags = () if values == "values-ci.yaml" else ("--require-executor",)
+    flags = (
+        ("--require-clients",)
+        if values == "values-ci.yaml"
+        else ("--require-executor", "--require-clients")
+    )
     res = _run_check(r.stdout, *flags)
     assert res.returncode == 0, res.stderr
     assert "examined: 11 service ACL users across 2 instance(s)" in res.stdout
+    assert "WARN" not in res.stdout, (
+        "legacy default user must be off in every shipped env"
+    )
 
 
 def _plant(stream: str, old: str, new: str) -> str:
@@ -370,7 +379,7 @@ def test_ci_check_fails_on_planted_cross_service_grant() -> None:
 
 def test_ci_check_fails_on_unmarked_legacy_default_and_on_empty_input() -> None:
     """Legacy `default` without the transition marker fails; zero users examined fails."""
-    r = _helm("values-alpha.yaml")
+    r = _helm("values-alpha.yaml", ("infrastructure.valkeyAcl.legacyDefaultUser=true",))
     stripped = r.stdout.replace(
         'valkey.waddles/legacy-default-user: "true"', 'valkey.waddles/other: "x"'
     )
@@ -598,3 +607,178 @@ def test_real_bundlekv_only_reachable_by_kv_host_services(
     # bundle kv never lives on the durable instance for anyone
     for user in ("svc-process", "svc-action", "hub-api"):
         assert "NOPERM" in durable.cli(user, "GET", key), user
+
+
+# ---------------------------------------------------------------------------------------------
+# client wiring (part B): every client authenticates as its OWN user
+# ---------------------------------------------------------------------------------------------
+
+_CLIENTS = {
+    # workload name -> (container user, instances it must authenticate to)
+    "w-waddlebot-svc-ingest-rust": ("svc-ingest", ("durable",)),
+    "w-waddlebot-svc-process-rust": ("svc-process", ("durable", "kv")),
+    "w-waddlebot-svc-action-rust": ("svc-action", ("durable", "kv")),
+    "w-waddlebot-svc-analytics": ("svc-analytics", ("durable",)),
+    "w-waddlebot-hub-api-v3": ("hub-api", ("durable", "kv")),
+    "w-waddlebot-landing-stats-refresh": ("landing-stats", ("durable",)),
+    "w-waddlebot-core-bundle-seeder": ("core-bundle-seeder", ("durable",)),
+    "w-waddlebot-role-sync-inbound": ("role-sync-inbound", ("durable",)),
+}
+_ALL_CLIENTS_ON = (
+    "pipeline.svcAnalytics.enabled=true",
+    "pipeline.roleSync.enabled=true",
+    "pipeline.roleSync.inbound.enabled=true",
+)
+
+
+def _pod_spec(d: dict[str, Any]) -> dict[str, Any]:
+    """Pod spec of a Deployment/Job/CronJob."""
+    if d["kind"] == "CronJob":
+        return d["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    return d["spec"]["template"]["spec"]
+
+
+def test_every_client_authenticates_as_its_own_user() -> None:
+    """Each Valkey client: VALKEY_USERNAME/VALKEY_KV_USERNAME = its user, passwords from ITS Secret."""
+    docs = _docs(extra=_ALL_CLIENTS_ON)
+    found = 0
+    for d in docs:
+        if (
+            d["kind"] not in ("Deployment", "Job", "CronJob")
+            or d["metadata"]["name"] not in _CLIENTS
+        ):
+            continue
+        user, insts = _CLIENTS[d["metadata"]["name"]]
+        env = {e["name"]: e for e in _pod_spec(d)["containers"][0]["env"]}
+        sec = f"w-waddlebot-valkey-user-{user}"
+        if "durable" in insts:
+            assert env["VALKEY_USERNAME"]["value"] == user
+            assert env["VALKEY_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+                "name": sec,
+                "key": "VALKEY_DURABLE_PASSWORD",
+            }
+            url_ref = env["VALKEY_URL"]["valueFrom"]["secretKeyRef"]
+            assert url_ref["key"] in (
+                "VALKEY_DURABLE_URL_TLS",
+                "VALKEY_DURABLE_URL_TLS_AUTH",
+            )
+            if url_ref["key"].endswith("_AUTH"):
+                assert url_ref["name"] == sec, (
+                    "an auth URL must carry the client's OWN user"
+                )
+        if "kv" in insts:
+            assert env["VALKEY_KV_USERNAME"]["value"] == user
+            assert env["VALKEY_KV_PASSWORD"]["valueFrom"]["secretKeyRef"] == {
+                "name": sec,
+                "key": "VALKEY_KV_PASSWORD",
+            }
+        found += 1
+    assert found == len(_CLIENTS), (
+        f"expected {len(_CLIENTS)} client workloads, found {found}"
+    )
+
+
+def test_per_user_auth_url_embeds_its_own_user_and_password() -> None:
+    """The provisioned per-user VALKEY_DURABLE_URL_TLS_AUTH = rediss://<user>:<own pw>@durable."""
+    secrets = materialize(_docs())
+    n = 0
+    for name, cfg in _values()["infrastructure"]["valkeyAcl"]["users"].items():
+        if not cfg.get("durable"):
+            continue
+        data = secrets[f"w-waddlebot-valkey-user-{name}"]["data"]
+        url = data["VALKEY_DURABLE_URL_TLS_AUTH"]
+        assert url.startswith(
+            f"rediss://{name}:{data['VALKEY_DURABLE_PASSWORD']}@infra-valkey-durable."
+        ), name
+        assert "ssl_cert_reqs=required" in url
+        n += 1
+    assert n >= 8
+
+
+def test_ci_check_fails_when_a_client_uses_the_shared_password() -> None:
+    """A client planted back onto the legacy shared password fails the gate."""
+    r = _helm("values-alpha.yaml")
+    head = "- name: VALKEY_PASSWORD\n          valueFrom:\n            secretKeyRef:\n              name: "
+    old = head + "w-waddlebot-valkey-user-svc-ingest\n              key: VALKEY_DURABLE_PASSWORD"
+    new = head + "w-waddlebot-secrets\n              key: VALKEY_DURABLE_PASSWORD"
+    res = _run_check(_plant(r.stdout, old, new), "--require-executor", "--require-clients")
+    assert res.returncode == 1 and "shared legacy password" in res.stderr, res.stderr
+
+
+def test_client_wiring_refuses_a_user_without_an_acl_entry() -> None:
+    """Removing a client's ACL user fails the render (no silent fallback to `default`)."""
+    r = _helm(
+        "values-alpha.yaml", ("infrastructure.valkeyAcl.users.landing-stats=null",)
+    )
+    assert (
+        r.returncode != 0
+        and "valkeyAcl.users.landing-stats.durable is not configured" in r.stderr
+    )
+
+
+@pytest.mark.parametrize(
+    ("override", "needle"),
+    [
+        ("-@all +xadd", "not allowed in a selector"),
+        ("+xgroup|create", "must start with -@all"),
+    ],
+)
+def test_render_refuses_wide_selectors(override: str, needle: str) -> None:
+    """Selectors may only grant consumer-group admin on specific key families."""
+    sel = "infrastructure.valkeyAcl.users.hub-api.durable.selectors[0]"
+    r = _helm("values-alpha.yaml", (f"{sel}.keys={{~waddles:t:*:src:*}}", f"{sel}.commands={override}"))
+    assert r.returncode != 0 and needle in r.stderr, r.stderr[-400:]
+    wide = _helm("values-alpha.yaml", (f"{sel}.keys={{~*}}", f"{sel}.commands=-@all +xgroup|create"))
+    assert wide.returncode != 0 and "literal prefix" in wide.stderr, wide.stderr[-400:]
+
+
+def test_ci_check_fails_on_planted_wide_selector() -> None:
+    """A selector widened in the rendered manifest fails the gate."""
+    r = _helm("values-alpha.yaml")
+    planted = _plant(
+        r.stdout,
+        "'(~waddles:t:*:src:* ~waddles:t:*:app:* -@all +xgroup|create +xgroup|destroy)'",
+        "'(~waddles:t:*:src:* ~waddles:t:*:app:* -@all +xadd)'",
+    )
+    res = _run_check(planted, "--require-executor")
+    assert res.returncode == 1 and "only consumer-group admin" in res.stderr, res.stderr
+
+
+def test_real_hub_api_may_only_provision_groups_on_spine_streams(
+    durable: _Valkey,
+) -> None:
+    """hub-api's selector: XGROUP CREATE/DESTROY on spine streams works; XADD/XREADGROUP are NOPERM."""
+    src = "waddles:t:acme:c:main:src:discord:g9:events"
+    stage = "waddles:t:acme:c:_tenant:app:acme.bot:process"
+    for key in (src, stage):
+        assert (
+            durable.cli(
+                "hub-api", "XGROUP", "CREATE", key, "acme.bot", "$", "MKSTREAM"
+            ).strip()
+            == "OK"
+        )
+        assert "NOPERM" in durable.cli("hub-api", "XADD", key, "*", "k", "v")
+        assert "NOPERM" in durable.cli(
+            "hub-api",
+            "XREADGROUP",
+            "GROUP",
+            "acme.bot",
+            "c1",
+            "COUNT",
+            "1",
+            "STREAMS",
+            key,
+            ">",
+        )
+        assert (
+            durable.cli("hub-api", "XGROUP", "DESTROY", key, "acme.bot").strip() == "1"
+        )
+    assert (
+        durable.cli(
+            "core-bundle-seeder", "XGROUP", "CREATE", stage, "seed", "$", "MKSTREAM"
+        ).strip()
+        == "OK"
+    )
+    assert "NOPERM" in durable.cli(
+        "core-bundle-seeder", "XGROUP", "CREATE", src, "seed", "$", "MKSTREAM"
+    )

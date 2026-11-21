@@ -24,11 +24,11 @@ const NODE_ENV = process.env.NODE_ENV ?? 'development';
 if (!process.env.HUB_API_URL && NODE_ENV === 'production') {
   console.error(
     '[hub-webui] FATAL: HUB_API_URL is required when NODE_ENV=production ' +
-      '-- refusing to start with the localhost:8060 dev default',
+      '-- refusing to start with the localhost:8204 dev default',
   );
   process.exit(1);
 }
-const HUB_API_URL = process.env.HUB_API_URL ?? 'http://localhost:8060';
+const HUB_API_URL = process.env.HUB_API_URL ?? 'http://localhost:8204';
 const DIST_DIR = join(__dirname, 'dist');
 
 const app = express();
