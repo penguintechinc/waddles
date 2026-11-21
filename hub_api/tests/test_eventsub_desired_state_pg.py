@@ -965,7 +965,14 @@ class TestContractHttp:
         assert resp.status_code == 200
         row = (await world.rows())[0]
         plain = decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
-        assert (await resp.get_json())["secret"] == plain
+        body = await resp.get_json()
+        assert body["secret"] == plain
+        # The key is bound to the tenant/community/connection that own the subscription.
+        assert (body["tenant_id"], body["community_id"], body["connection_id"]) == (
+            row.tenant_id,
+            row.community_id,
+            row.connection_id,
+        )
         assert item["callbackKey"] == key
         assert (
             await client.get("/api/v1/internal/eventsub/secret/unknown-key-0123456789", headers=hdr)

@@ -24,7 +24,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from typing import Any, Final
@@ -763,18 +763,40 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
     )
 
 
+@dataclass(slots=True, frozen=True)
+class CallbackBinding:
+    """A callback key's secret and the tenant, community and connection that own it."""
+
+    secret: str = field(repr=False)
+    tenant_id: int
+    community_id: int
+    connection_id: int
+
+
 async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> str:
     """Webhook secret for the ingest verifier, by opaque callback key (decrypted, never logged).
 
     DELETE_PENDING rows still resolve: a late notification for a not-yet-deleted subscription
     must still verify.
     """
+    return (await binding_for_callback_key(install_dal, callback_key)).secret
+
+
+async def binding_for_callback_key(install_dal: AsyncDB, callback_key: str) -> CallbackBinding:
+    """Secret AND owning ``(tenant, community, connection)`` of a callback key.
+
+    A delivery is only meaningful for the subscription that received it: the ingest verifier
+    binds an event to exactly this tuple (never to anything read from the payload).
+    """
     if not _CALLBACK_KEY_RE.fullmatch(callback_key):
         raise UnknownSubscriptionError("unknown callback key") from None
     async with install_dal.engine.connect() as conn:
         row = (
             await conn.execute(
-                text(f"SELECT public_id, secret_enc FROM {_TABLE} WHERE callback_key = :k"),  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                text(
+                    f"SELECT public_id, secret_enc, tenant_id, community_id, connection_id "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                    f"FROM {_TABLE} WHERE callback_key = :k"
+                ),
                 {"k": callback_key},
             )
         ).first()
@@ -784,4 +806,9 @@ async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> st
     _ops.add(1, {"op": "secret", "outcome": "ok"})
     # Every eventsub row is sealed AAD-bound (there is no legacy layout), so pin SEAL_AAD:
     # a no-AAD ciphertext is refused rather than accepted through the migration fallback.
-    return open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD)
+    return CallbackBinding(
+        secret=open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD),
+        tenant_id=int(row.tenant_id),
+        community_id=int(row.community_id),
+        connection_id=int(row.connection_id),
+    )
