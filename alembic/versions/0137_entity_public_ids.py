@@ -15,9 +15,10 @@ Already covered elsewhere (no change): `communities`, `tenants`, `app_catalog` (
 Deliberately excluded: `community_polls` / `community_forms` (their routes are deleted) and
 `tier_code` (an int enum code, not an entity id).
 
-A table absent from the database (the minimal CI bootstrap never replays the legacy SQL baseline) is
-skipped with a WARNING -- same precedent as 0091/0093; a full chain always has them all and the
-real-Postgres test asserts it.
+A table absent from the database is skipped ONLY when it is on `MINIMAL_BOOTSTRAP_ABSENT` -- the
+tables known to be missing from the minimal CI bootstrap (which never replays the legacy SQL baseline
+nor migrations before 0020) -- and that skip is logged at INFO. Any other absent table (a typo'd
+name, a renamed table) RAISES, so a full chain can never silently end up without a `public_id`.
 
 Revision ID: 0137_entity_public_ids
 Revises: 0136_app_id_owners
@@ -73,34 +74,79 @@ ENTITY_TABLES: dict[str, str] = {
 }
 
 
-def _exists(table: str) -> bool:
-    """True when `table` exists in the connected database (offline mode: assume it does)."""
+#: Tables the minimal CI bootstrap (`alembic/tests/pg_docker.py`: stub FK tables + `alembic stamp
+#: 0019`) does not have -- their DDL lives in legacy SQL migrations or in migrations before 0020.
+#: Measured by migrating that bootstrap to head; every other listed table is created by 0020+.
+MINIMAL_BOOTSTRAP_ABSENT: frozenset[str] = frozenset(
+    {
+        "ai_knowledge_sources",
+        "ai_ticket_suggestions",
+        "announcements",
+        "community_access_tokens",
+        "community_join_requests",
+        "community_radio_stations",
+        "community_roles",
+        "hub_channels",
+        "hub_forum_posts",
+        "hub_forum_replies",
+        "hub_modules",
+        "hub_sessions",
+        "inventory_items",
+        "marketplace_modules",
+        "marketplace_submissions",
+        "marketplace_subscriptions",
+        "server_status_configs",
+        "shoutout_creators",
+        "support_ticket_categories",
+        "support_tickets",
+        "user_passkeys",
+        "vendor_discount_codes",
+        "vendor_submissions",
+    }
+)
+
+
+def _present(table: str) -> bool:
+    """True to migrate `table`; False to skip a known-absent one; raises for any other absence."""
     bind = op.get_bind()
-    if bind is None:
+    if bind is None:  # offline SQL generation: assume the full chain
         return True
-    return bool(bind.exec_driver_sql("SELECT to_regclass(%s)", (table,)).scalar())
+    if bind.exec_driver_sql("SELECT to_regclass(%s)", (table,)).scalar():
+        return True
+    if table in MINIMAL_BOOTSTRAP_ABSENT:
+        _LOG.info("entity_public_ids: %s absent (minimal CI bootstrap); skipped", table)
+        return False
+    raise RuntimeError(
+        f"entity_public_ids: table {table!r} does not exist and is not a known minimal-bootstrap "
+        "absentee; fix its name in ENTITY_TABLES (or add it to MINIMAL_BOOTSTRAP_ABSENT)"
+    )
 
 
 def upgrade() -> None:
     """Add, backfill and uniquely constrain `public_id` on every listed table (idempotent)."""
     for table in ENTITY_TABLES:
-        if not _exists(table):
-            _LOG.warning("entity_public_ids: table %s absent; skipped", table)
+        if not _present(table):
             continue
         op.execute(
             f"ALTER TABLE {table} "
             "ADD COLUMN IF NOT EXISTS public_id UUID NOT NULL DEFAULT gen_random_uuid()"
         )
-        op.execute(f"UPDATE {table} SET public_id = gen_random_uuid() WHERE public_id IS NULL")
-        op.execute(f"ALTER TABLE {table} ALTER COLUMN public_id SET DEFAULT gen_random_uuid()")
+        op.execute(
+            f"UPDATE {table} SET public_id = gen_random_uuid() WHERE public_id IS NULL"
+        )
+        op.execute(
+            f"ALTER TABLE {table} ALTER COLUMN public_id SET DEFAULT gen_random_uuid()"
+        )
         op.execute(f"ALTER TABLE {table} ALTER COLUMN public_id SET NOT NULL")
-        op.execute(f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{table}_public_id ON {table} (public_id)")
+        op.execute(
+            f"CREATE UNIQUE INDEX IF NOT EXISTS uq_{table}_public_id ON {table} (public_id)"
+        )
 
 
 def downgrade() -> None:
     """Drop the unique index and the column from every listed table."""
     for table in ENTITY_TABLES:
-        if not _exists(table):
+        if not _present(table):
             continue
         op.execute(f"DROP INDEX IF EXISTS uq_{table}_public_id")
         op.execute(f"ALTER TABLE {table} DROP COLUMN IF EXISTS public_id")
