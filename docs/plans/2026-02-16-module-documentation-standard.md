@@ -1,5 +1,7 @@
 # Module Documentation Standard — Full Compliance Plan
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Create the missing `docs/<module_name>/` folders (8-file standard) for every module that lacks one, and backfill `OVERVIEW.md` into the 11 existing compliant modules.
@@ -20,17 +22,17 @@ These modules have the original 7-file set but are missing `OVERVIEW.md`. **Phas
 
 | docs/ folder | Source |
 |---|---|
-| `ai_interaction_module` | `action/interactive/ai_interaction_module/` |
-| `browser_source_core_module` | `core/browser_source_core_module/` |
-| `community_module` | `core/community_module/` |
+| `ai_interaction_module` | action/interactive/ai_interaction_module |
+| `browser_source_core_module` | core/browser_source_core_module |
+| `community_module` | core/community_module |
 | `hub_module` | `admin/hub_module/` |
-| `identity_core_module` | `core/identity_core_module/` |
-| `labels_core_module` | `core/labels_core_module/` |
-| `reputation_module` | `core/reputation_module/` |
-| `router_module` | `processing/router_module/` |
-| `security_core_module` | `core/security_core_module/` |
-| `unified_music_module` | `core/unified_music_module/` |
-| `workflow_core_module` | `core/workflow_core_module/` |
+| `identity_core_module` | core/identity_core_module |
+| `labels_core_module` | core/labels_core_module |
+| `reputation_module` | core/reputation_module |
+| `router_module` | processing/router_module |
+| `security_core_module` | core/security_core_module |
+| `unified_music_module` | core/unified_music_module |
+| `workflow_core_module` | core/workflow_core_module |
 
 ### Incomplete Index Folders (not module docs — leave as-is)
 
@@ -115,17 +117,17 @@ Every module folder must contain these exact files. Before writing any file, **r
 **Step 1: For each module below, read its existing docs**
 
 Modules to update (in this order):
-1. `docs/router_module/` — source: `processing/router_module/`
-2. `docs/ai_interaction_module/` — source: `action/interactive/ai_interaction_module/`
-3. `docs/browser_source_core_module/` — source: `core/browser_source_core_module/`
-4. `docs/community_module/` — source: `core/community_module/`
+1. `docs/router_module/` — source: processing/router_module
+2. `docs/ai_interaction_module/` — source: action/interactive/ai_interaction_module
+3. `docs/browser_source_core_module/` — source: core/browser_source_core_module
+4. `docs/community_module/` — source: core/community_module
 5. `docs/hub_module/` — source: `admin/hub_module/`
-6. `docs/identity_core_module/` — source: `core/identity_core_module/`
-7. `docs/labels_core_module/` — source: `core/labels_core_module/`
-8. `docs/reputation_module/` — source: `core/reputation_module/`
-9. `docs/security_core_module/` — source: `core/security_core_module/`
-10. `docs/unified_music_module/` — source: `core/unified_music_module/`
-11. `docs/workflow_core_module/` — source: `core/workflow_core_module/`
+6. `docs/identity_core_module/` — source: core/identity_core_module
+7. `docs/labels_core_module/` — source: core/labels_core_module
+8. `docs/reputation_module/` — source: core/reputation_module
+9. `docs/security_core_module/` — source: core/security_core_module
+10. `docs/unified_music_module/` — source: core/unified_music_module
+11. `docs/workflow_core_module/` — source: core/workflow_core_module
 
 For each: read `docs/<module>/ARCHITECTURE.md` (first 50 lines) and `docs/<module>/USAGE.md` (first 30 lines) to get the summary content.
 
@@ -840,7 +842,7 @@ git commit -m "docs: complete module documentation standard compliance audit"
 
 ## Notes on "translate" Module
 
-The user noted `docs/translate` as missing. During codebase exploration, no standalone `translate_*_module` directory was found in `action/interactive/`, `core/`, or `action/pushing/`. Translation functionality exists as a service within `processing/router_module/services/translation_providers/`.
+The user noted `docs/translate` as missing. During codebase exploration, no standalone `translate_*_module` directory was found in action/interactive, `core/`, or action/pushing. Translation functionality exists as a service within processing/router_module/services/translation_providers.
 
 **If a translate module is planned or already exists elsewhere:**
 - Follow the same Task pattern above: read source → create `docs/translate_interaction_module/` with 7 files → commit.

@@ -64,6 +64,9 @@ pub const MAX_RETRY_WAIT: Duration = Duration::from_secs(10);
 /// Per-request timeout.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// Discord error code "Unknown Ban": the user is not banned from the guild.
+const CODE_UNKNOWN_BAN: u64 = 10026;
+
 /// Discord error code: "Cannot send messages to this user" (DMs closed or
 /// no shared guild / blocked).
 const CODE_CANNOT_DM_USER: u64 = 50007;
@@ -234,11 +237,21 @@ impl DiscordRestClient {
                 None,
             )
             .await?;
-        match resp.status {
-            200 => Ok(true),
-            404 => Ok(false),
-            status => Err(DiscordRestError::Status { status, code: None }),
+        if resp.status == 200 {
+            return Ok(true);
         }
+        let code = serde_json::from_slice::<serde_json::Value>(&resp.body)
+            .ok()
+            .and_then(|v| v.get("code").and_then(serde_json::Value::as_u64));
+        // Only Discord's "Unknown Ban" means not banned; any other 404 (unknown guild/user,
+        // no body) is an unreadable state and must fail closed.
+        if resp.status == 404 && code == Some(CODE_UNKNOWN_BAN) {
+            return Ok(false);
+        }
+        Err(DiscordRestError::Status {
+            status: resp.status,
+            code,
+        })
     }
 
     /// `chat.delete`: `DELETE /channels/{channel_id}/messages/{message_id}`.
@@ -731,19 +744,45 @@ mod tests {
     #[tokio::test]
     async fn is_banned_maps_200_404_and_refuses_everything_else() {
         let server = MockServer::start().await;
-        for (user, status) in [("111", 200u16), ("222", 404), ("333", 403)] {
-            Mock::given(method("GET"))
-                .and(path(format!("/guilds/555/bans/{user}")))
-                .respond_with(ResponseTemplate::new(status).set_body_json(serde_json::json!({})))
-                .mount(&server)
-                .await;
-        }
+        let mount = |user: &'static str, status: u16, body: Option<serde_json::Value>| {
+            let server = &server;
+            async move {
+                let mut r = ResponseTemplate::new(status);
+                if let Some(b) = body {
+                    r = r.set_body_json(b);
+                }
+                Mock::given(method("GET"))
+                    .and(path(format!("/guilds/555/bans/{user}")))
+                    .respond_with(r)
+                    .mount(server)
+                    .await;
+            }
+        };
+        mount("111", 200, Some(serde_json::json!({}))).await;
+        mount("222", 404, Some(serde_json::json!({"code": 10026}))).await;
+        mount("333", 403, Some(serde_json::json!({}))).await;
+        mount("444", 404, Some(serde_json::json!({"code": 10004}))).await;
+        mount("666", 404, None).await;
         let c = client(&server);
         assert!(c.is_banned("555", "111").await.unwrap());
         assert!(!c.is_banned("555", "222").await.unwrap());
         assert!(matches!(
             c.is_banned("555", "333").await,
             Err(DiscordRestError::Status { status: 403, .. })
+        ));
+        assert!(matches!(
+            c.is_banned("555", "444").await,
+            Err(DiscordRestError::Status {
+                status: 404,
+                code: Some(10004)
+            })
+        ));
+        assert!(matches!(
+            c.is_banned("555", "666").await,
+            Err(DiscordRestError::Status {
+                status: 404,
+                code: None
+            })
         ));
         assert!(matches!(
             c.is_banned("555", "../x").await,

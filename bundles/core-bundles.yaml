@@ -1,4 +1,4 @@
-# Catalog of first-party waddles.core.* App Bundles the core-bundle-seeder
+# Catalog of first-party penguintechinc.waddles.* App Bundles the core-bundle-seeder
 # (hub_api/cli/seed_core_bundles.py) activates at deploy time, under the platform's SYSTEM
 # identity -- no human global-admin approval (that stays reserved for third-party vendor
 # bundles, services/vendor_bundle_authz.py::CORE_NAMESPACE_PREFIX).
@@ -863,7 +863,7 @@ bundles:
   # Utility pack (2026-10-09, feature/bundles-utility-pack): alias / lastseen / dailycounter /
   # weather. All gate behind `waddles.command-<name>` flags (default OFF) inside `transform()`;
   # this entry only installs the bundles. Original logic (no PenguinTwitchBot port), so
-  # waddles.core.example.* rather than waddles.integrations.superpenguin.*. `weather` declares
+  # penguintechinc.waddles.<name> (platform-authored) rather than psychoboy.penguintwitchbot.<name>. `weather` declares
   # `net.http.fqdn:api.weatherapi.com` (GET) and reads its key via secret-ref WEATHER_API_KEY
   # (operator-provisioned, never in the repo). `lastseen` supports self + Discord @mention +
   # literal UUID only -- free-text name lookup needs #429.

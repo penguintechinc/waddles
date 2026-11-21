@@ -3,7 +3,7 @@
 User decision 2026-11-20: lifting a ban returns the user to normal access patterns. The route is
 `DELETE /api/v1/admin/<community>/reputation/floor-bans/<user>` (tenant admins only). The
 Postgres-only `reputation_floor_ban_lift()` function is faked with a table-writing stand-in here;
-its real behaviour is covered against Postgres in `alembic/tests/test_0137_floor_ban_lift.py`.
+its real behaviour is covered against Postgres in `alembic/tests/test_0139_floor_ban_lift.py`.
 The gate under test is the inventory member authz (`require_inventory_member`), which reads both
 ban tables.
 """
@@ -327,7 +327,7 @@ class TestFloorBanLift:
 class TestUnbanDeliveryRowsNeverDeny:
     @pytest.mark.parametrize("status", (1, 2, 3, 4, 5, 7))
     def test_an_unban_row_in_any_status_does_not_deny(self, db: Any, status: int) -> None:
-        """Rows with action 2 (alembic 0138) are platform UNBAN deliveries: they restore access."""
+        """Rows with action 2 (alembic 0140) are platform UNBAN deliveries: they restore access."""
         _ban(db, status=status, action=2)
         assert _allowed(db)
 

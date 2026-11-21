@@ -2,7 +2,13 @@
 
 * **Object storage (SeaweedFS / S3)** -- the avatar/banner the subject uploaded. The URLs come from
   the rows holding them (`erasure_registry.OBJECT_SOURCES`), collected before those rows go.
-* **Valkey bundle KV** -- per-user bundle state. Keys are
+* **Valkey bundle KV** -- per-user bundle state, held on the dedicated `valkey-kv` instance
+  (`VALKEY_KV_URL`, optional `VALKEY_KV_USERNAME` / `VALKEY_KV_PASSWORD`).
+  `VALKEY_URL` / `REDIS_URL` point at the DURABLE delivery Valkey, which holds no bundle KV:
+  they are never used here
+  (falling back to them reported success while leaving the data behind). The hub-api ACL user on
+  the kv instance is scoped to exactly `SCAN`, `UNLINK`, `EXISTS`, `DECRBY`, `DEL` on `bundlekv:*`.
+  Keys are
   `bundlekv:{tenant}:{community|_tenant}:{app_id}:data:{guest_key}` (`core/bundle_host_kv/src/
   scope.rs`); a bundle that keeps per-user state embeds the user's PII-free uuid token in
   `guest_key`, so a SCAN for the subject's uuid finds it. State keyed by a handle or a free-form
@@ -24,6 +30,8 @@ import os
 import uuid
 from collections.abc import Iterable, Sequence
 from typing import Any, Protocol
+
+from flask_core.valkey_tls import build_tls_kwargs
 
 from services import erasure_registry as registry
 from services import storage_service
@@ -83,10 +91,13 @@ def erase_kv_keys(client: Any, user_uuids: Iterable[str]) -> int:
 
 
 class EnvExternalErasure:
-    """Production default: this deployment's S3 bucket and the Valkey from `VALKEY_URL`/`REDIS_URL`.
+    """Production default: this deployment's S3 bucket and the dedicated bundle-KV Valkey.
 
-    A deployment with neither env var set has no bundle KV to erase; that is logged (WARNING) and
-    reported as zero keys, never raised -- an unconfigured store holds nothing of ours.
+    The KV connection comes ONLY from `VALKEY_KV_URL` (+ optional `VALKEY_KV_USERNAME` /
+    `VALKEY_KV_PASSWORD`, passed as client kwargs, never logged); `rediss://` verifies against
+    `VALKEY_CA_FILE`. `VALKEY_URL` / `REDIS_URL` are never consulted. With user uuids to erase and
+    no `VALKEY_KV_URL`, this raises (the erasure rolls back to `failed`; the retry re-runs it).
+    Commands issued on the kv instance: SCAN, UNLINK, EXISTS, DECRBY, DEL.
     """
 
     def erase(self, *, object_urls: Sequence[str], user_uuids: Sequence[str]) -> dict[str, int]:
@@ -96,19 +107,28 @@ class EnvExternalErasure:
             deleted = storage_service.delete_owned_objects_strict(object_urls)
             if deleted:
                 counts["objects_deleted"] = deleted
-        url = os.getenv("VALKEY_URL") or os.getenv("REDIS_URL")
         if not user_uuids:
             return counts
+        url = (os.getenv("VALKEY_KV_URL") or "").strip()
         if not url:
-            logger.warning("dsar.kv_erasure_skipped_unconfigured")
-            return counts
+            raise RuntimeError(
+                "VALKEY_KV_URL is not set: cannot erase the subject's bundle KV data"
+            )
         import redis  # local import: only the KV path needs the sync client
 
-        client = redis.Redis.from_url(url, socket_timeout=10, socket_connect_timeout=5)
+        kwargs: dict[str, Any] = {"socket_timeout": 10, "socket_connect_timeout": 5}
+        kwargs.update(build_tls_kwargs(url))
+        username = os.getenv("VALKEY_KV_USERNAME")
+        password = os.getenv("VALKEY_KV_PASSWORD")
+        if username:
+            kwargs["username"] = username
+        if password:
+            kwargs["password"] = password
+        client = redis.Redis.from_url(url, **kwargs)
         try:
             keys = erase_kv_keys(client, user_uuids)
         finally:
-            client.close()
+            client.close()  # type: ignore[no-untyped-call]
         if keys:
             counts["kv_keys_deleted"] = keys
         return counts

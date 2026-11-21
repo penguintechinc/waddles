@@ -20,7 +20,7 @@ Module code lives in exactly one place. Edit these:
 | Router / processing | `processing/<module>/` |
 
 The consolidated `services/*` containers COPY module code **from** these trees at build
-time (e.g. `services/interactive-social/Dockerfile` does
+time (e.g. services/interactive-social/Dockerfile does
 `COPY action/interactive/alias_interaction_module ./alias_interaction_module`). The
 aggregator's own `app.py`/`config.py`/`requirements.txt` are the only files under
 `services/*` that are real build inputs.
@@ -36,7 +36,7 @@ The analysis found the reverse: **the orphans are the older side.**
 - Most `config.py` diffs are regressions — `postgresql://` reverted to the deprecated
   `postgres://`, older dependency pins (aiohttp, protobuf, pytest), or a stray incomplete
   `pydal → penguin_dal` import that nothing else in the tree supports.
-- The `services/core-identity/identity_core_module` orphan was **security-regressed** —
+- The services/core-identity/identity_core_module orphan was **security-regressed** —
   it dropped the per-user authorization guard in `grpc_handler.py` (an IDOR: any valid
   token could enumerate any user's linked platforms) and hardcoded a fallback
   `SECRET_KEY`. Deleting it removes a hazard rather than losing work.

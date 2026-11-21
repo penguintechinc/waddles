@@ -87,7 +87,7 @@ undelivered ones, so hub-api (SELECT only on the table) erases a subject through
 
 #### Lifting a floor ban (a lifted user regains normal access)
 
-Status `8` = **lifted** (alembic 0137; `lifted_at`, `lifted_by` = the acting admin's hub UUID). Statuses 1-5 and 7
+Status `8` = **lifted** (alembic 0139; `lifted_at`, `lifted_by` = the acting admin's hub UUID). Statuses 1-5 and 7
 deny (`ban_suppression.FLOOR_BAN_ACTIVE_STATUSES`); 6 (refused) and 8 never do, so a lifted user is treated exactly as if
 never banned and a later enqueue re-bans normally. Lift = `DELETE /api/v1/admin/{community}/reputation/floor-bans/{user_uuid}` (the member's hub public UUID, resolved server-side)
 (tenant admins only -- a floor ban is tenant-wide; community admins get 403), which calls the SECURITY DEFINER
@@ -101,7 +101,7 @@ active `AUTO_BAN` restriction, so the keyed suppression code is written (same tr
 re-join. A confirmed ban with no suppression code (no linked identity on that platform) fails the whole erasure
 (rolled back) instead of leaving the identifier behind.
 
-### Platform sync (both directions, alembic 0138)
+### Platform sync (both directions, alembic 0140)
 
 - **Waddles -> platform**: lifting a ban whose platform command was delivered (status 2 done, or 7 in flight) enqueues
   exactly one UNBAN (`action = 2`, key `unban:<ban id>`) in the SAME outbox; the action-stage dispatcher claims, retries
@@ -132,7 +132,7 @@ re-join. A confirmed ban with no suppression code (no linked identity on that pl
   `LPUSH`es it to `waddles:platform-unban:discord:events` (unpaired / lookup failure / tokenize failure -> ignored,
   `svc_ingest_platform_unban_total{outcome=ignored,reason}`). svc-action (`core/svc_action/src/platform_unban.rs`)
   `BRPOP`s it, verifies the signature with the PUBLIC key (it can verify, never mint), freshness (5 min) and single use,
-  then calls `reputation_floor_ban_lift_from_platform_guild` (alembic 0140) under the fixed source
+  then calls `reputation_floor_ban_lift_from_platform_guild` (alembic 0142) under the fixed source
   Replay safety: frames replayed after a gateway RESUME carry the pre-disconnect observed time, and svc-ingest confirms Discord's current state (`GET /guilds/{id}/bans/{user}` = 404) before forwarding; a user banned again, or an unreadable state, is dropped (`ignored{reason=rebanned|ban_state_unavailable}`).
   `system:discord-gateway` (counted on `waddles_floor_ban_dispatch_total{result=gateway_unban_*}`). That function lifts in
   EVERY community of the signed tenant linked to the guild (approved `community_servers`, else the legacy primary

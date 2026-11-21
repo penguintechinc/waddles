@@ -1,5 +1,7 @@
 # M1.5 — Bundle DAL Migration Inventory
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Status: **Committed artifact — the Inventory deliverable of M1.5** (`docs/superpowers/specs/2026-09-14-rust-data-plane-design.md`
 §16 "M1.5 — Bundle DAL migration"). Read this alongside the Gate deliverable:
 `scripts/check-bundle-dal-imports.sh` / `make check-bundle-dal`.
@@ -8,7 +10,7 @@ Spec wording: "Every bundle under `bundles/python/` that imports
 `flask_core.database.AsyncDAL` or reaches a DAL through `get_bundle_dal()` is
 listed, with the count reported — a zero count is a failure of the inventory,
 not a pass." `bundles/python/` does not exist in this repo (verified: only
-`core/svc_action/builtin_handlers`, `core/svc_ingest/builtin_handlers`, `core/svc_process/builtin_handlers`
+core/svc_action/builtin_handlers, core/svc_ingest/builtin_handlers, core/svc_process/builtin_handlers
 exist under `core/*/bundles/`) — those three are the real scan targets, matching
 the gate script and the in-flight migration branches.
 
@@ -19,9 +21,9 @@ counted via `find`, not assumed):
 
 | Directory | `.py` files |
 |---|---|
-| `core/svc_action/builtin_handlers` | 19 |
-| `core/svc_ingest/builtin_handlers` | 12 |
-| `core/svc_process/builtin_handlers` | 17 |
+| core/svc_action/builtin_handlers | 19 |
+| core/svc_ingest/builtin_handlers | 12 |
+| core/svc_process/builtin_handlers | 17 |
 | **Total** | **48** |
 
 Non-zero denominator confirmed — the inventory below is not a zero-count
@@ -59,7 +61,7 @@ migration, cross-checked against the independent bundle-migration plan on
 | 15 | `social_shoutout_process.py` | svc_process | `get_bundle_dal()` |
 | 16 | `social_welcome_process.py` | svc_process | `get_bundle_dal()` |
 
-`core/svc_ingest/builtin_handlers` (12 files: 7 `*_ingest.py` normalizers + 5
+core/svc_ingest/builtin_handlers (12 files: 7 `*_ingest.py` normalizers + 5
 `*_gateway_manifest.py` registration modules): **0** hits — ingest bundles
 normalize platform events and register `AppManifest`s, they don't touch the
 DAL.

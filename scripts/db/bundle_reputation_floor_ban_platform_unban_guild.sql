@@ -1,5 +1,5 @@
 -- Floor-ban platform-originated unban (Discord-native), time-bounded + guild-wide. Applied by alembic
--- 0139_floor_ban_unban_observed. Idempotent.
+-- 0142_floor_ban_unban_observed. Idempotent.
 --
 -- 1. `reputation_floor_ban_lift_from_platform` gains `p_observed_ms` (epoch ms the platform event was
 --    OBSERVED). A platform unban lifts only bans that already EXISTED when it happened

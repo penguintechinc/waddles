@@ -32,6 +32,8 @@ from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 from tests.conftest import TENANT_SLUG
 
 SERVICE_API_KEY = "test-service-key"
+U1_UUID = "11111111-1111-4111-8111-111111111111"
+FOREIGN_UUID = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
@@ -60,6 +62,21 @@ def loyalty_db(tmp_path: Any) -> Any:
         dal(dal[table_name]).count()
     yield async_dal, community_id
     dal.close()
+
+
+@pytest.fixture(autouse=True)
+def _members(loyalty_db: Any) -> None:
+    """`u1` (twitch) is a member of the fixture community; FOREIGN_UUID belongs to another one."""
+    async_dal, community_id = loyalty_db
+    dal = async_dal.dal
+    other = dal.communities.insert(name="other-community", tenant_id=1, is_active=True)
+    dal.community_members.insert(
+        community_id=community_id, platform="twitch", platform_user_id="u1", user_uuid=U1_UUID
+    )
+    dal.community_members.insert(
+        community_id=other, platform="twitch", platform_user_id="u9", user_uuid=FOREIGN_UUID
+    )
+    dal.commit()
 
 
 @pytest.fixture
@@ -154,7 +171,7 @@ class TestScopeAndTenant:
         [
             ("PUT", "loyalty/config", "community.loyalty:write"),
             ("GET", "loyalty/leaderboard", "community.loyalty:read"),
-            ("PUT", "loyalty/user/u1/balance", "community.loyalty:admin"),
+            ("PUT", f"loyalty/user/{U1_UUID}/balance", "community.loyalty:admin"),
             ("POST", "loyalty/wipe", "community.loyalty:admin"),
             ("GET", "loyalty/stats", "community.loyalty:read"),
         ],
@@ -244,7 +261,12 @@ class TestLeaderboardAndBalance:
     ) -> None:
         async_dal, community_id = loyalty_db
         response = await client.put(
-            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
+            cpath(
+                async_dal,
+                "/api/v1/admin/{community_id}/loyalty/user/{U1}/balance",
+                community_id,
+                U1=U1_UUID,
+            ),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -260,7 +282,12 @@ class TestLeaderboardAndBalance:
     ) -> None:
         async_dal, community_id = loyalty_db
         response = await client.put(
-            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
+            cpath(
+                async_dal,
+                "/api/v1/admin/{community_id}/loyalty/user/{U1}/balance",
+                community_id,
+                U1=U1_UUID,
+            ),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -274,7 +301,12 @@ class TestLeaderboardAndBalance:
     ) -> None:
         async_dal, community_id = loyalty_db
         response = await client.put(
-            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
+            cpath(
+                async_dal,
+                "/api/v1/admin/{community_id}/loyalty/user/{U1}/balance",
+                community_id,
+                U1=U1_UUID,
+            ),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -284,13 +316,90 @@ class TestLeaderboardAndBalance:
         assert response.status_code == 409
 
 
+class TestAdjustBalanceMemberUuid:
+    """regression: the URL carries the member's public UUID, never a raw platform id."""
+
+    async def _put(
+        self, client: Any, auth_headers: Any, loyalty_db: Any, member: str, platform: str = "twitch"
+    ) -> Any:
+        async_dal, community_id = loyalty_db
+        return await client.put(
+            cpath(
+                async_dal,
+                "/api/v1/admin/{community_id}/loyalty/user/{member}/balance",
+                community_id,
+                member=member,
+            ),
+            headers={
+                **auth_headers(scope="community.loyalty:admin", user_id="1"),
+                "Content-Type": "application/json",
+            },
+            json={"platform": platform, "delta": 10, "note": "n"},
+        )
+
+    async def test_unknown_member_uuid_is_404(
+        self, client: Any, auth_headers: Any, loyalty_db: Any
+    ) -> None:
+        response = await self._put(
+            client, auth_headers, loyalty_db, "33333333-3333-4333-8333-333333333333"
+        )
+        assert response.status_code == 404
+
+    async def test_member_of_another_community_is_404(
+        self, client: Any, auth_headers: Any, loyalty_db: Any
+    ) -> None:
+        response = await self._put(client, auth_headers, loyalty_db, FOREIGN_UUID)
+        assert response.status_code == 404
+        assert loyalty_db[0].dal(loyalty_db[0].dal.loyalty_balances).count() == 0
+
+    async def test_platform_without_a_member_row_is_404(
+        self, client: Any, auth_headers: Any, loyalty_db: Any
+    ) -> None:
+        response = await self._put(client, auth_headers, loyalty_db, U1_UUID, platform="discord")
+        assert response.status_code == 404
+
+    async def test_raw_platform_id_in_path_no_longer_routes(
+        self, client: Any, auth_headers: Any, loyalty_db: Any
+    ) -> None:
+        response = await self._put(client, auth_headers, loyalty_db, "u1")
+        assert response.status_code == 404
+
+    async def test_success_keeps_audit_row_keyed_on_resolved_identity(
+        self, client: Any, auth_headers: Any, loyalty_db: Any
+    ) -> None:
+        response = await self._put(client, auth_headers, loyalty_db, U1_UUID)
+        assert response.status_code == 200
+        dal = loyalty_db[0].dal
+        rows = dal(dal.loyalty_transactions).select()
+        assert len(rows) == 1
+        assert (rows[0].platform, rows[0].platform_user_id, rows[0].delta) == ("twitch", "u1", 10)
+        assert rows[0].actor_platform_user_id == "1"
+
+    async def test_leaderboard_exposes_user_uuid_not_required_for_unlinked(
+        self, client: Any, auth_headers: Any, loyalty_db: Any
+    ) -> None:
+        await self._put(client, auth_headers, loyalty_db, U1_UUID)
+        async_dal, community_id = loyalty_db
+        response = await client.get(
+            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/leaderboard", community_id),
+            headers=auth_headers(scope="community.loyalty:read"),
+        )
+        entries = (await response.get_json())["data"]["entries"]
+        assert entries[0]["user_uuid"] == U1_UUID
+
+
 class TestWipeAndStats:
     async def test_wipe_zeroes_balances(
         self, client: Any, auth_headers: Any, loyalty_db: Any
     ) -> None:
         async_dal, community_id = loyalty_db
         await client.put(
-            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
+            cpath(
+                async_dal,
+                "/api/v1/admin/{community_id}/loyalty/user/{U1}/balance",
+                community_id,
+                U1=U1_UUID,
+            ),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",
@@ -308,7 +417,12 @@ class TestWipeAndStats:
     async def test_stats_aggregates(self, client: Any, auth_headers: Any, loyalty_db: Any) -> None:
         async_dal, community_id = loyalty_db
         await client.put(
-            cpath(async_dal, "/api/v1/admin/{community_id}/loyalty/user/u1/balance", community_id),
+            cpath(
+                async_dal,
+                "/api/v1/admin/{community_id}/loyalty/user/{U1}/balance",
+                community_id,
+                U1=U1_UUID,
+            ),
             headers={
                 **auth_headers(scope="community.loyalty:admin", user_id="1"),
                 "Content-Type": "application/json",

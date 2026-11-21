@@ -12,7 +12,7 @@ All action modules are deployed as individual Docker containers with Flask/Quart
 
 ## Action Modules (Interactive)
 
-### AI Interaction Module (`action/interactive/ai_interaction_module/`)
+### AI Interaction Module (action/interactive/ai_interaction_module)
 
 **Purpose**: AI-powered chat responses with multi-provider support (Ollama, OpenAI, MCP)
 
@@ -51,7 +51,7 @@ EVENT_RESPONSE_TYPES=subscription,follow,donation
 
 ---
 
-### Alias Interaction Module (`action/interactive/alias_interaction_module/`)
+### Alias Interaction Module (action/interactive/alias_interaction_module)
 
 **Purpose**: Linux-style alias system for custom commands with variable substitution
 
@@ -71,7 +71,7 @@ EVENT_RESPONSE_TYPES=subscription,follow,donation
 
 ---
 
-### Shoutout Interaction Module (`action/interactive/shoutout_interaction_module_flask/`)
+### Shoutout Interaction Module (action/interactive/shoutout_interaction_module_flask)
 
 **Purpose**: Platform-specific user shoutouts with Twitch API integration and auto-shoutout functionality
 
@@ -98,7 +98,7 @@ EVENT_RESPONSE_TYPES=subscription,follow,donation
 
 ---
 
-### Inventory Interaction Module (`action/interactive/inventory_interaction_module_flask/`)
+### Inventory Interaction Module (action/interactive/inventory_interaction_module_flask)
 
 **Purpose**: Multi-threaded inventory management system for tracking any item (IRL or in-game) with label support
 
@@ -143,49 +143,7 @@ inventory_activity (
 
 ---
 
-### Calendar Interaction Module (`action/interactive/calendar_interaction_module_flask/`)
-
-**Purpose**: Event management system with approval workflows, recurring events, and label-based auto-approval
-
-**Key Features**:
-- **Event Management**: Complete event lifecycle management with CRUD operations
-- **Approval Workflow**: Events require approval by community admins/moderators unless user has 'event-autoapprove' label
-- **Recurring Events**: Support for daily, weekly, monthly, and yearly recurring events
-- **Attendee Management**: Users can join/leave events with capacity limits
-- **Event Reminders**: Automatic reminder system (1 day, 1 hour, 15 minutes before)
-- **Label Integration**: Integrates with labels_core_module for permission checking
-
-**Command List**:
-- `!calendar create "Event Title" "YYYY-MM-DD HH:MM" [description] [location] [max_attendees]` - Create new event
-- `!calendar list [pending|approved|rejected]` - List events by status
-- `!calendar join <event_id>` - Join an event
-- `!calendar leave <event_id>` - Leave an event
-- `!calendar approve <event_id>` - Approve pending event (admin/moderator only)
-- `!calendar reject <event_id> "reason"` - Reject pending event (admin/moderator only)
-- `!calendar cancel <event_id>` - Cancel event (creator only)
-
-**Database Schema**:
-```sql
-events (
-    id, community_id, entity_id, title, description, event_date, end_date,
-    location, max_attendees, created_by, created_by_name, status,
-    approved_by, approved_by_name, approved_at, rejection_reason,
-    attendees, tags, is_recurring, recurring_pattern, recurring_end_date,
-    notification_sent, created_at, updated_at
-)
-
-event_attendees (
-    id, event_id, user_id, user_name, status, joined_at
-)
-
-event_reminders (
-    id, event_id, reminder_time, reminder_type, message, sent, created_at
-)
-```
-
----
-
-### Memories Interaction Module (`action/interactive/memories_interaction_module_flask/`)
+### Memories Interaction Module (action/interactive/memories_interaction_module_flask)
 
 **Purpose**: Community memory management system for quotes, reminders, and URLs with label-based permissions
 
@@ -235,7 +193,7 @@ memory_categories (
 
 ---
 
-### YouTube Music Interaction Module (`action/interactive/youtube_music_interaction_module_flask/`)
+### YouTube Music Interaction Module (action/interactive/youtube_music_interaction_module_flask)
 
 **Purpose**: YouTube Music integration with search, playback control, and media browser source output
 
@@ -275,7 +233,7 @@ youtube_activity (
 
 ---
 
-### Spotify Interaction Module (`action/interactive/spotify_interaction_module_flask/`)
+### Spotify Interaction Module (action/interactive/spotify_interaction_module_flask)
 
 **Purpose**: Spotify integration with OAuth authentication, search, playback control, and media browser source output
 
@@ -318,7 +276,7 @@ spotify_search_cache (
 
 ---
 
-### Browser Source Core Module (`core/browser_source_core_module_flask/`)
+### Browser Source Core Module (core/browser_source_core_module_flask)
 
 **Purpose**: Multi-threaded browser source management system for OBS integration with ticker, media, and general display sources
 
@@ -401,7 +359,7 @@ browser_source_access_log (
 
 ---
 
-### Server Manager Interaction Module (`action/interactive/server_manager_interaction_module/`)
+### Server Manager Interaction Module (action/interactive/server_manager_interaction_module)
 
 **Purpose**: Comprehensive game server and voice server management with RCON, Mumble Ice RPC, and TeamSpeak ServerQuery support. Replaces and absorbs `server_status_interaction_module`.
 

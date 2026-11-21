@@ -811,7 +811,7 @@ mod tests {
         let err = verify_artifact_signature(
             &sidecar,
             &keys,
-            "waddles.test.a-different-app",
+            "penguintechinc.waddles.test-a-different-app",
             VERSION,
             DIGEST,
         );

@@ -33,8 +33,11 @@ live routes actually use.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import datetime
 from typing import Any
+
+from services.pg_array_types import PG_INT_ARRAY, PG_TEXT_ARRAY
 
 
 def bind_bot_tables(dal: Any) -> None:
@@ -78,6 +81,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("platform_username", "string", length=255, notnull=True),
         dal.Field("added_by", "reference hub_users"),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     dal.define_table(
@@ -114,6 +118,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("created_at", "datetime", default=datetime.utcnow),
         dal.Field("updated_at", "datetime", default=datetime.utcnow, update=datetime.utcnow),
         dal.Field("deleted_at", "datetime"),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     dal.define_table(
@@ -139,7 +144,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("min_reputation_to_join", "integer"),
         dal.Field("sync_interval_minutes", "integer", default=5),
         dal.Field("notify_on_action", "boolean", default=True),
-        dal.Field("exempt_roles", "list:string", default=[]),
+        dal.Field("exempt_roles", PG_TEXT_ARRAY, default=[]),
         dal.Field("sync_to_community", "boolean", default=False),
         dal.Field("last_enforced_at", "datetime"),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
@@ -176,6 +181,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("index_errors", "text"),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
         dal.Field("updated_at", "datetime", default=datetime.utcnow, update=datetime.utcnow),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     dal.define_table(
@@ -184,10 +190,11 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("community_id", "integer"),
         dal.Field("suggestion_text", "text", notnull=True),
         dal.Field("confidence_score", "double", notnull=True),
-        dal.Field("cited_chunks", "list:integer", default=[]),
+        dal.Field("cited_chunks", PG_INT_ARRAY, default=[]),
         dal.Field("feedback", "string", length=20),
         dal.Field("is_auto_posted", "boolean", default=False),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     # `ai_knowledge_chunks.embedding` (pgvector `vector(384)`) is written

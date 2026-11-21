@@ -1,4 +1,4 @@
--- Floor-ban LIFT -- SQL half. Applied by alembic 0137_floor_ban_lift. Idempotent.
+-- Floor-ban LIFT -- SQL half. Applied by alembic 0139_floor_ban_lift. Idempotent.
 --
 -- A reversed automated ban must return the user to normal access, so the outbox gets an explicit
 -- terminal LIFTED state (status 8) instead of an enforced row that denies forever:

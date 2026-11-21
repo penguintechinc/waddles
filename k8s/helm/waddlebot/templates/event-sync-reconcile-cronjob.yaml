@@ -2,7 +2,7 @@
 # one reconcile pass per invocation (run_event_sync_reconcile_batch()). Sweeps calendar_events rows
 # left `pending`/`sync_error` by status='approved' -- the backstop for the immediate, webhook-triggered
 # path (POST /api/v1/internal/calendar/events/sync-discord, see blueprints/v1/event_discord_sync.py)
-# that the calendar_interaction_module's own trigger-wiring calls (a SEPARATE follow-up PR). Mirrors
+# that the calendar bundle's trigger-wiring calls. Mirrors
 # core-bundle-seeder-job.yaml's rootless/envFrom/wait-for-hub-api shape -- same hub-api container
 # image (this is hub_api's own module, not a separate container), different entrypoint via
 # `command`/`args` overriding the image's default `hypercorn app:app` CMD.

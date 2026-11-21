@@ -21,7 +21,7 @@ from tests.erasure_support import FakeRedis, FakeS3
 U1 = "11111111-1111-4111-8111-111111111111"
 U2 = "22222222-2222-4222-8222-222222222222"
 OTHER = "99999999-9999-4999-8999-999999999999"
-PREFIX = "bundlekv:acme:main:waddles.bot.counter"
+PREFIX = "bundlekv:acme:main:penguintechinc.waddles.bot-counter"
 
 
 def _data(key: str) -> str:
@@ -157,7 +157,7 @@ class TestEnvExternalErasure:
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         redis = FakeRedis({_data(f"a.{U1}"): "1"})
-        monkeypatch.setenv("VALKEY_URL", "redis://valkey:6379/0")
+        monkeypatch.setenv("VALKEY_KV_URL", "redis://valkey-kv:6379/0")
         monkeypatch.setattr(
             storage_service, "delete_owned_objects_strict", lambda urls: len(list(urls))
         )
@@ -167,33 +167,45 @@ class TestEnvExternalErasure:
         counts = external.EnvExternalErasure().erase(object_urls=["u1", "u2"], user_uuids=[U1])
         assert counts == {"objects_deleted": 2, "kv_keys_deleted": 1}
 
-    def test_an_unconfigured_valkey_is_skipped_with_a_warning_not_raised(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
-    ) -> None:
-        monkeypatch.delenv("VALKEY_URL", raising=False)
-        monkeypatch.delenv("REDIS_URL", raising=False)
-        counts = external.EnvExternalErasure().erase(object_urls=[], user_uuids=[U1])
-        assert counts == {}
-        assert any(r.message == "dsar.kv_erasure_skipped_unconfigured" for r in caplog.records)
-
-    def test_redis_url_is_the_fallback_for_valkey_url(
+    def test_unset_kv_url_raises_and_never_connects_to_the_durable_valkey(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.delenv("VALKEY_URL", raising=False)
+        monkeypatch.delenv("VALKEY_KV_URL", raising=False)
+        monkeypatch.setenv("VALKEY_URL", "redis://durable:6379/0")
         monkeypatch.setenv("REDIS_URL", "redis://fallback:6379/0")
-        seen: list[str] = []
         import redis as redis_module
 
-        def from_url(url: str, **_kw: Any) -> FakeRedis:
-            seen.append(url)
+        def from_url(*_a: Any, **_k: Any) -> Any:
+            raise AssertionError("must not construct any client")
+
+        monkeypatch.setattr(redis_module.Redis, "from_url", staticmethod(from_url))
+        with pytest.raises(RuntimeError, match="VALKEY_KV_URL"):
+            external.EnvExternalErasure().erase(object_urls=[], user_uuids=[U1])
+        monkeypatch.setenv("VALKEY_KV_URL", "   ")
+        with pytest.raises(RuntimeError, match="VALKEY_KV_URL"):
+            external.EnvExternalErasure().erase(object_urls=[], user_uuids=[U1])
+
+    def test_credentials_are_passed_as_kwargs_not_in_the_url(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("VALKEY_KV_URL", "redis://valkey-kv:6379/0")
+        monkeypatch.setenv("VALKEY_KV_USERNAME", "hub-api")
+        monkeypatch.setenv("VALKEY_KV_PASSWORD", "pw")
+        seen: list[tuple[str, dict[str, Any]]] = []
+        import redis as redis_module
+
+        def from_url(url: str, **kw: Any) -> FakeRedis:
+            seen.append((url, kw))
             return FakeRedis()
 
         monkeypatch.setattr(redis_module.Redis, "from_url", staticmethod(from_url))
         external.EnvExternalErasure().erase(object_urls=[], user_uuids=[U1])
-        assert seen == ["redis://fallback:6379/0"]
+        assert seen[0][0] == "redis://valkey-kv:6379/0"
+        assert seen[0][1]["username"] == "hub-api"
+        assert seen[0][1]["password"] == "pw"
 
     def test_a_valkey_error_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("VALKEY_URL", "redis://valkey:6379/0")
+        monkeypatch.setenv("VALKEY_KV_URL", "redis://valkey-kv:6379/0")
         import redis as redis_module
 
         def from_url(*_a: Any, **_k: Any) -> Any:
@@ -204,7 +216,8 @@ class TestEnvExternalErasure:
             external.EnvExternalErasure().erase(object_urls=[], user_uuids=[U1])
 
     def test_no_uuids_means_no_valkey_connection(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setenv("VALKEY_URL", "redis://valkey:6379/0")
+        monkeypatch.setenv("VALKEY_KV_URL", "redis://valkey-kv:6379/0")
+        monkeypatch.setenv("VALKEY_URL", "redis://durable:6379/0")
         import redis as redis_module
 
         def from_url(*_a: Any, **_k: Any) -> Any:
@@ -244,3 +257,17 @@ class TestRealValkey:
             for key in client.scan_iter(match=f"bundlekv:erasure-test-{run}:*"):
                 client.delete(key)
             client.close()
+
+
+@pytest.mark.real_env_erasure
+def test_service_default_path_raises_without_valkey_kv_url(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The service's default store (no injected fake) fails loud when VALKEY_KV_URL is unset."""
+    from services import data_privacy_service
+
+    monkeypatch.delenv("VALKEY_KV_URL", raising=False)
+    monkeypatch.setenv("VALKEY_URL", "redis://durable:6379/0")
+    assert data_privacy_service.EnvExternalErasure is external.EnvExternalErasure
+    with pytest.raises(RuntimeError, match="VALKEY_KV_URL"):
+        data_privacy_service.EnvExternalErasure().erase(object_urls=[], user_uuids=[U1])

@@ -31,6 +31,7 @@ from services.schema import (
 )
 from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 OTHER_TENANT = "other-tenant"
 
@@ -290,8 +291,10 @@ class TestCommunityConfig:
         assert (await client.get(f"{base}/at-risk", headers=_h(2))).status_code == 403
         assert (await client.get(f"{base}/history", headers=_h(2))).status_code == 403
         assert (await client.get(f"{base}/soft-bans", headers=_h(2))).status_code == 403
-        assert (await client.put(f"{base}/soft-bans/2", headers=_h(2), json={})).status_code == 403
-        assert (await client.delete(f"{base}/soft-bans/2", headers=_h(2))).status_code == 403
+        assert (
+            await client.put(f"{base}/soft-bans/{uid(2)}", headers=_h(2), json={})
+        ).status_code == 403
+        assert (await client.delete(f"{base}/soft-bans/{uid(2)}", headers=_h(2))).status_code == 403
         messages = [r.getMessage() for r in caplog.records if r.name == "blueprints.v1.admin"]
         expected = (
             "get_reputation_config",
@@ -312,7 +315,7 @@ class TestCommunityConfig:
     ) -> None:
         caplog.set_level("WARNING", logger="blueprints.v1.admin")
         r = await client.put(
-            f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans/2",
+            f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans/{uid(2)}",
             headers=_h(1),
             json={"expiresAt": "not-a-date"},
         )
@@ -352,10 +355,10 @@ class TestSoftBans:
         self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
-        assert (await client.put(f"{base}/2", headers=_h(1), json={})).status_code == 200
+        assert (await client.put(f"{base}/{uid(2)}", headers=_h(1), json={})).status_code == 200
         listed = await (await client.get(base, headers=_h(1))).get_json()
         assert [(b["userId"], b["reason"], b["setByType"]) for b in listed["softBans"]] == [
-            ("2", "manual", "admin")
+            (uid(2), "manual", "admin")
         ]
         assert set(listed["softBans"][0]) == {
             "userId",
@@ -365,8 +368,8 @@ class TestSoftBans:
             "setAt",
             "expiresAt",
         }
-        assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 200
-        assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 404
+        assert (await client.delete(f"{base}/{uid(2)}", headers=_h(1))).status_code == 200
+        assert (await client.delete(f"{base}/{uid(2)}", headers=_h(1))).status_code == 404
         assert (await (await client.get(base, headers=_h(1))).get_json())["softBans"] == []
 
     async def test_floor_set_soft_ban_is_listed_as_floor_and_admin_can_clear_it(
@@ -386,7 +389,7 @@ class TestSoftBans:
         listed = await (await client.get(base, headers=_h(1))).get_json()
         assert listed["softBans"][0]["reason"] == "floor"
         assert listed["softBans"][0]["setByType"] == "system"
-        assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 200
+        assert (await client.delete(f"{base}/{uid(2)}", headers=_h(1))).status_code == 200
 
     async def test_expired_bans_are_not_listed_and_past_expiry_is_400(
         self, client: Any, rep_db: Any, seeded: dict[str, Any]
@@ -394,28 +397,30 @@ class TestSoftBans:
         base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         assert (
-            await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": past})
+            await client.put(f"{base}/{uid(2)}", headers=_h(1), json={"expiresAt": past})
         ).status_code == 400
         future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         assert (
-            await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": future})
+            await client.put(f"{base}/{uid(2)}", headers=_h(1), json={"expiresAt": future})
         ).status_code == 200
         assert (
-            await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": "nope"})
+            await client.put(f"{base}/{uid(2)}", headers=_h(1), json={"expiresAt": "nope"})
         ).status_code == 400
 
     async def test_unknown_member_is_404(self, client: Any, seeded: dict[str, Any]) -> None:
         base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
-        assert (await client.put(f"{base}/999", headers=_h(1), json={})).status_code == 404
+        assert (await client.put(f"{base}/{uid(999)}", headers=_h(1), json={})).status_code == 404
 
     async def test_member_and_foreign_admin_are_403(
         self, client: Any, seeded: dict[str, Any]
     ) -> None:
         base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
-        for uid in (2, 3):
-            assert (await client.put(f"{base}/2", headers=_h(uid), json={})).status_code == 403
-            assert (await client.delete(f"{base}/2", headers=_h(uid))).status_code == 403
-            assert (await client.get(base, headers=_h(uid))).status_code == 403
+        for caller in (2, 3):
+            assert (
+                await client.put(f"{base}/{uid(2)}", headers=_h(caller), json={})
+            ).status_code == 403
+            assert (await client.delete(f"{base}/{uid(2)}", headers=_h(caller))).status_code == 403
+            assert (await client.get(base, headers=_h(caller))).status_code == 403
 
 
 class TestAtRiskAndHistory:
@@ -432,8 +437,8 @@ class TestAtRiskAndHistory:
             (m["userId"], m["score"], m["belowSoftBanFloor"], m["belowHardBanFloor"])
             for m in members
         ] == [
-            ("10", 380, True, True),
-            ("11", 570, False, False),
+            (uid(10), 380, True, True),
+            (uid(11), 570, False, False),
         ]
 
     async def test_history_lists_newest_first_filters_and_hides_internal_actor_ids(
@@ -474,7 +479,9 @@ class TestAtRiskAndHistory:
             "sourceEvent",
             "occurredAt",
         }
-        only = (await (await client.get(f"{url}?userId=2", headers=_h(1))).get_json())["entries"]
+        only = (await (await client.get(f"{url}?userId={uid(2)}", headers=_h(1))).get_json())[
+            "entries"
+        ]
         assert len(only) == 2
         assert (await client.get(f"{url}?userId=abc", headers=_h(1))).status_code == 400
         assert (await client.get(url, headers=_h(2))).status_code == 403

@@ -123,7 +123,7 @@ async fn a_denied_write_surfaces_the_mapped_variant() {
     let out = reputation::Host::adjust(&mut st, "u".into(), 1, "r".into()).await;
     assert!(matches!(out, Err(reputation::Error::DailyCapExceeded)));
 
-    let mut no_bridge = ExecState::new(None, "waddles.test.app".to_string(), 1);
+    let mut no_bridge = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
     let out = reputation::Host::get(&mut no_bridge, "u".into()).await;
     assert!(matches!(out, Err(reputation::Error::Backend(_))));
 }
@@ -276,7 +276,7 @@ async fn soft_ban_ops_decode_the_flag() {
 /// `not_implemented` transport error (fail-loud, never a fabricated success).
 #[tokio::test]
 async fn overlay_calls_fail_loud_with_not_implemented() {
-    let mut st = ExecState::new(None, "waddles.test.app".to_string(), 1);
+    let mut st = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
     let widget = overlay::WidgetDescriptor {
         widget_id: "w".into(),
         display_name: "W".into(),

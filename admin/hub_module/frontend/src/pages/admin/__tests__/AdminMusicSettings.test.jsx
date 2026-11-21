@@ -73,7 +73,7 @@ describe('AdminMusicSettings', () => {
   });
 
   it('shows the API error and falls back to defaults when load fails', async () => {
-    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 402, data: { error: { message: 'not enabled' } } } });
+    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 500, data: { error: { message: 'not enabled' } } } });
     mount();
     await screen.findByText('not enabled');
     expect(screen.getByText('No blocked artists')).toBeTruthy();
@@ -85,5 +85,12 @@ describe('AdminMusicSettings', () => {
     await screen.findByText('Music Settings');
     fireEvent.click(screen.getAllByText('Save Settings')[0]);
     await screen.findByText('nope');
+  });
+
+  it('renders the UpgradeNotice upsell (not an error banner) on a 402', async () => {
+    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 402, data: {} } });
+    mount();
+    expect(await screen.findByTestId('upgrade-notice')).toBeTruthy();
+    expect(screen.queryByText('Failed to load music settings')).toBeNull();
   });
 });

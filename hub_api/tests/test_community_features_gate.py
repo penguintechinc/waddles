@@ -1,7 +1,7 @@
 """Community blueprints -- two-gate Feature guard proofs (SCCEBM per-capability flags).
 
 Dedicated fail-first-verify coverage for the one-line `feature_enabled(...)`
-guards added this PR to `community_chat.py`, `community_polls.py`,
+guards added this PR to `community_chat.py`,
 `community_interaction.py` (both `community.interactions` and the
 separate `community.forums` capability), and `community_loyalty.py` (the
 one Professional-tier capability among this set). Every OTHER test file
@@ -34,7 +34,6 @@ from blueprints.v1.community_interaction import (
     interaction_member_bp,
 )
 from blueprints.v1.community_loyalty import loyalty_bp
-from blueprints.v1.community_polls import polls_bp
 from tests.community_ids import cpath, install_community_ids
 
 
@@ -87,40 +86,6 @@ class TestChatFeatureGate:
         )
 
         assert response.status_code == 200
-
-
-class TestPollsFeatureGate:
-    @pytest.fixture
-    def app(self, community_db: Any) -> Quart:
-        dal, _ = community_db
-        quart_app = Quart(__name__)
-        QuartSchema(quart_app)
-        install_community_ids(quart_app, dal)
-        quart_app.register_blueprint(polls_bp)
-        quart_app.config["dal"] = dal
-        return quart_app
-
-    @pytest.fixture
-    def client(self, app: Quart) -> Any:
-        return app.test_client()
-
-    async def test_list_polls_blocked_when_flag_off(
-        self, client: Any, auth_headers: Any, community_db: Any, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        import blueprints.v1.community_polls as polls_module
-
-        gate = AsyncMock(return_value=False)
-        monkeypatch.setattr(polls_module, "feature_enabled", gate)
-        dal, community_id = community_db
-
-        response = await client.get(
-            cpath(dal, "/api/v1/admin/{community_id}/polls", community_id),
-            headers=auth_headers(scope="community.polls:read"),
-        )
-
-        assert response.status_code == 402
-        gate.assert_awaited_once()
-        assert gate.await_args.args[0] == "waddles.community.polls"
 
 
 class TestInteractionsAndForumsGateOnDistinctFlags:

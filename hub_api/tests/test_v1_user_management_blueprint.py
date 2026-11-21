@@ -37,6 +37,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.user_management import user_management_bp
 from services.global_identity import is_global_admin_sync, is_global_user_sync
 from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token, seed_super_admin
+from tests.user_ids import row_id, row_uuid, uid
 
 
 @pytest.fixture
@@ -194,7 +195,7 @@ class TestCreateUser:
         assert body["user"]["email"] == "new@example.com"
         assert body["user"]["isSuperAdmin"] is True
         assert "password" not in {k.lower() for k in body["user"]}
-        new_id = body["user"]["id"]
+        new_id = row_id(auth_db, body["user"]["id"])
         assert is_global_admin_sync(auth_db.dal, new_id) is True
         assert is_global_user_sync(auth_db.dal, new_id) is True
         assert _is_member(auth_db, new_id, "system")
@@ -212,7 +213,7 @@ class TestCreateUser:
             "displayName": "Acme Corp",
         }
         assert body["user"]["isSuperAdmin"] is False
-        new_id = body["user"]["id"]
+        new_id = row_id(auth_db, body["user"]["id"])
         assert _is_member(auth_db, new_id, TENANT_SLUG)
         dal = auth_db.dal
         row = dal(dal.tenant_admins.user_id == new_id).select().first()
@@ -322,7 +323,7 @@ class TestGlobalAdminRoleAssignment:
     async def test_cannot_revoke_the_last_global_admin(self, client: Any, auth_db: Any) -> None:
         seed_super_admin(auth_db, user_id=1)
         response = await client.post(
-            "/api/v1/superadmin/users/1/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(1)}/super-admin-role",
             headers=_admin_headers(),
             json={"grant": False},
         )
@@ -335,7 +336,7 @@ class TestGlobalAdminRoleAssignment:
         seed_super_admin(auth_db, user_id=1, bootstrap=True)
         target = _seed_user(auth_db, email="t@example.com")
         granted = await client.post(
-            f"/api/v1/superadmin/users/{target}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(target)}/super-admin-role",
             headers=_admin_headers(),
             json={"grant": True},
         )
@@ -345,9 +346,9 @@ class TestGlobalAdminRoleAssignment:
             "/api/v1/superadmin/users?role=super_admin", headers=_admin_headers()
         )
         ids = {u["id"] for u in (await listing.get_json())["users"]}
-        assert ids == {1, target}
+        assert ids == {row_uuid(auth_db, 1), row_uuid(auth_db, target)}
         revoked = await client.post(
-            f"/api/v1/superadmin/users/{target}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(target)}/super-admin-role",
             headers=_admin_headers(),
             json={"grant": False},
         )
@@ -357,22 +358,34 @@ class TestGlobalAdminRoleAssignment:
         assert is_global_user_sync(auth_db.dal, target) is True
 
 
+class TestListUsersPage:
+    async def test_non_integer_page_is_400_not_500(self, client: Any) -> None:
+        response = await client.get(
+            "/api/v1/superadmin/users", headers=_admin_headers(), query_string={"page": "abc"}
+        )
+        assert response.status_code == 400
+
+
 class TestGetUpdateDeleteUser:
     async def test_get_user_not_found_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/superadmin/users/9999", headers=_admin_headers())
+        response = await client.get(
+            f"/api/v1/superadmin/users/{uid(9999)}", headers=_admin_headers()
+        )
         assert response.status_code == 404
 
     async def test_get_user_found(self, client: Any, auth_db: Any) -> None:
         user_id = _seed_user(auth_db)
-        response = await client.get(f"/api/v1/superadmin/users/{user_id}", headers=_admin_headers())
+        response = await client.get(
+            f"/api/v1/superadmin/users/{uid(user_id)}", headers=_admin_headers()
+        )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body["user"]["id"] == user_id
+        assert body["user"]["id"] == row_uuid(auth_db, user_id)
 
     async def test_update_user_success(self, client: Any, auth_db: Any) -> None:
         user_id = _seed_user(auth_db)
         response = await client.put(
-            f"/api/v1/superadmin/users/{user_id}",
+            f"/api/v1/superadmin/users/{uid(user_id)}",
             headers=_admin_headers(),
             json={"isActive": False},
         )
@@ -383,7 +396,7 @@ class TestGetUpdateDeleteUser:
     async def test_delete_user_cannot_delete_self(self, client: Any, auth_db: Any) -> None:
         user_id = _seed_user(auth_db, email="self@example.com")
         response = await client.delete(
-            f"/api/v1/superadmin/users/{user_id}", headers=_admin_headers(user_id=user_id)
+            f"/api/v1/superadmin/users/{uid(user_id)}", headers=_admin_headers(user_id=user_id)
         )
         assert response.status_code == 403
 
@@ -398,7 +411,7 @@ class TestRoleAssignment:
         seed_super_admin(auth_db, user_id=1, bootstrap=True)
         user_id = _seed_user(auth_db)
         response = await client.post(
-            f"/api/v1/superadmin/users/{user_id}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(user_id)}/super-admin-role",
             headers=_admin_headers(),
             json={"grant": True},
         )
@@ -419,7 +432,7 @@ class TestRoleAssignment:
         """
         user_id = _seed_user(auth_db)
         response = await client.post(
-            f"/api/v1/superadmin/users/{user_id}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(user_id)}/super-admin-role",
             headers=_admin_headers(user_id=999),  # no hub_users row at all
             json={"grant": True},
         )
@@ -428,7 +441,7 @@ class TestRoleAssignment:
     async def test_assign_analytics_consumer_role(self, client: Any, auth_db: Any) -> None:
         user_id = _seed_user(auth_db)
         response = await client.post(
-            f"/api/v1/superadmin/users/{user_id}/analytics-consumer-role",
+            f"/api/v1/superadmin/users/{uid(user_id)}/analytics-consumer-role",
             headers=_admin_headers(),
             json={"enabled": True},
         )
@@ -464,7 +477,7 @@ class TestPrivilegeEscalationRegression:
         """
         _seed_tenant_owner(auth_db, user_id=1)
         response = await client.post(
-            "/api/v1/superadmin/users/1/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(1)}/super-admin-role",
             headers=_tenant_owner_headers(user_id=1),
             json={"grant": True},
         )
@@ -477,7 +490,7 @@ class TestPrivilegeEscalationRegression:
         _seed_tenant_owner(auth_db, user_id=1)
         target_id = _seed_user(auth_db, email="victim@example.com")
         response = await client.post(
-            f"/api/v1/superadmin/users/{target_id}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(target_id)}/super-admin-role",
             headers=_tenant_owner_headers(user_id=1),
             json={"grant": True},
         )
@@ -506,7 +519,7 @@ class TestPrivilegeEscalationRegression:
         dal.commit()
 
         response = await client.put(
-            f"/api/v1/superadmin/users/{tenant_b_user_id}",
+            f"/api/v1/superadmin/users/{uid(tenant_b_user_id)}",
             headers=_tenant_owner_headers(user_id=1, tenant_slug=TENANT_SLUG),
             json={"isActive": False},
         )
@@ -536,7 +549,7 @@ class TestPrivilegeEscalationRegression:
         seed_super_admin(auth_db, user_id=1, bootstrap=True)
         target_id = _seed_user(auth_db)
         response = await client.post(
-            f"/api/v1/superadmin/users/{target_id}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(target_id)}/super-admin-role",
             headers=_admin_headers(user_id=1),
             json={"grant": True},
         )

@@ -25,7 +25,7 @@ from services.tenant_app_availability_service import (
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.socials-music",
     "name": "Music Station",
     "version": "3.0.1",
     "feature": "waddles.socials.music",
@@ -67,7 +67,7 @@ async def _seed_installed(install_dal: Any, *, manifest: dict = _MANIFEST) -> An
 async def test_set_available_requires_a_current_global_install(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await set_available(
-            install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+            install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
         )
     assert exc.value.status_code == 409
 
@@ -75,7 +75,7 @@ async def test_set_available_requires_a_current_global_install(install_dal: Any)
 async def test_set_available_enables_it(install_dal: Any) -> None:
     await _seed_installed(install_dal)
     row = await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     assert row.available is True
     assert row.tenant_id == 1
@@ -84,14 +84,14 @@ async def test_set_available_enables_it(install_dal: Any) -> None:
 async def test_set_available_is_idempotent_upsert(install_dal: Any) -> None:
     await _seed_installed(install_dal)
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=2
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=2
     )
     rows = await install_dal(
         (install_dal.bundle_tenant_availability.tenant_id == 1)
-        & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+        & (install_dal.bundle_tenant_availability.app_id == "penguintechinc.waddles.socials-music")
     ).select()
     assert len(rows) == 1
     assert rows.first().updated_by == 2
@@ -103,7 +103,7 @@ async def test_set_available_rejects_a_non_current_pinned_version(install_dal: A
         await set_available(
             install_dal,
             tenant_id=1,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.socials-music",
             updated_by=1,
             pinned_version_id=999999,
         )
@@ -115,7 +115,7 @@ async def test_set_available_accepts_the_current_pinned_version(install_dal: Any
     row = await set_available(
         install_dal,
         tenant_id=1,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         updated_by=1,
         pinned_version_id=installed.version_id,
     )
@@ -125,7 +125,7 @@ async def test_set_available_accepts_the_current_pinned_version(install_dal: Any
 async def test_unset_available_unknown_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await unset_available(
-            install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+            install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
         )
     assert exc.value.status_code == 404
 
@@ -133,15 +133,18 @@ async def test_unset_available_unknown_raises_404(install_dal: Any) -> None:
 async def test_unset_available_disables_it(install_dal: Any) -> None:
     await _seed_installed(install_dal)
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     await unset_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     row = (
         await install_dal(
             (install_dal.bundle_tenant_availability.tenant_id == 1)
-            & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+            & (
+                install_dal.bundle_tenant_availability.app_id
+                == "penguintechinc.waddles.socials-music"
+            )
         ).select()
     ).first()
     assert row.available is False
@@ -153,26 +156,26 @@ async def test_unset_available_cascades_deactivates_communities(install_dal: Any
 
     await _seed_installed(install_dal)
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     await activate_for_community(
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         activated_by=1,
     )
     active_before = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+        install_dal.app_active_versions.app_id == "penguintechinc.waddles.socials-music"
     ).select()
     assert active_before
 
     await unset_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     active_after = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+        install_dal.app_active_versions.app_id == "penguintechinc.waddles.socials-music"
     ).select()
     assert not active_after
 
@@ -180,10 +183,10 @@ async def test_unset_available_cascades_deactivates_communities(install_dal: Any
 async def test_list_availability_returns_rows_for_tenant(install_dal: Any) -> None:
     await _seed_installed(install_dal)
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     rows = await list_availability(install_dal, tenant_id=1)
-    assert any(r.app_id == "waddles.socials.music.default" for r in rows)
+    assert any(r.app_id == "penguintechinc.waddles.socials-music" for r in rows)
 
 
 async def test_unset_available_finishes_the_cascade_then_raises_when_the_audit_write_fails(
@@ -200,14 +203,14 @@ async def test_unset_available_finishes_the_cascade_then_raises_when_the_audit_w
 
     await _seed_installed(install_dal)
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
     )
     community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme-community")
     await activate_for_community(
         install_dal,
         tenant_id=1,
         community_id=community_id,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         activated_by=1,
     )
 
@@ -217,16 +220,19 @@ async def test_unset_available_finishes_the_cascade_then_raises_when_the_audit_w
     monkeypatch.setattr(bundle_audit, "record", audit_store_down)
     with pytest.raises(AuditWriteError):
         await unset_available(
-            install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+            install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", updated_by=1
         )
     still_active = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+        install_dal.app_active_versions.app_id == "penguintechinc.waddles.socials-music"
     ).select()
     assert not still_active  # the cascade ran despite the audit failure
     availability = (
         await install_dal(
             (install_dal.bundle_tenant_availability.tenant_id == 1)
-            & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+            & (
+                install_dal.bundle_tenant_availability.app_id
+                == "penguintechinc.waddles.socials-music"
+            )
         ).select()
     ).first()
     assert availability.available is False

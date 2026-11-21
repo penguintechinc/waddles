@@ -36,7 +36,7 @@ The Community Module integrates closely with the Hub Module (for administration)
 
 | Item | Value |
 |---|---|
-| Source | `core/community_module/` |
+| Source | core/community_module |
 | Language | Python 3.13 (Quart) |
 | Port | 8020 (REST API) |
 | Database | PostgreSQL (via PyDAL) |

@@ -64,7 +64,7 @@ describe('AccessGrantWarning', () => {
         summary={{
           ...SUMMARY,
           storageAccess: [
-            { prefixOwner: 'waddles.harness.media', ops: ['list', 'read'], reason: 'Fetch clips' },
+            { prefixOwner: 'penguintechinc.waddles.harness-media', ops: ['list', 'read'], reason: 'Fetch clips' },
           ],
         }}
       />,
@@ -77,7 +77,7 @@ describe('AccessGrantWarning', () => {
     const entry = storage.querySelector('[data-testid="access-grant-entry"]');
     expect(entry.className).toContain('text-red-500');
     expect(entry.className).toContain('font-bold');
-    expect(entry).toHaveTextContent('waddles.harness.media');
+    expect(entry).toHaveTextContent('penguintechinc.waddles.harness-media');
     expect(entry).toHaveTextContent('ops: list, read');
     expect(entry).toHaveTextContent('Reason: Fetch clips');
   });

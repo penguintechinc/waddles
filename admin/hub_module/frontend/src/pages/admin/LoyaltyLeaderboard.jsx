@@ -20,7 +20,7 @@ function formatCurrency(amount, symbol) {
  * Admin leaderboard + balance management for one community's MVP
  * core-currency loyalty system (gh-317) — binds to
  * `services.community_loyalty.LeaderboardEntryDTO`
- * (`platform`/`platform_user_id`/`balance`) and `StatsDTO`. Entries are
+ * (`platform`/`platform_user_id`/`balance`/`user_uuid`) and `StatsDTO`. Entries are
  * keyed by platform identity, not a hub user id — there is no username,
  * avatar, or hub-user join available from this endpoint.
  */
@@ -94,7 +94,7 @@ function LoyaltyLeaderboard() {
     const delta = data.action === 'remove' ? -amount : amount;
     setActionLoading(true);
     try {
-      await adminApi.adjustLoyaltyBalance(communityId, selectedEntry.platform_user_id, {
+      await adminApi.adjustLoyaltyBalance(communityId, selectedEntry.user_uuid, {
         platform: selectedEntry.platform,
         delta,
         note: data.note?.trim() || undefined,
@@ -321,6 +321,8 @@ function LoyaltyLeaderboard() {
                     <button
                       onClick={() => openAdjustModal(entry)}
                       data-testid={`loyalty-adjust-${entry.platform}-${entry.platform_user_id}`}
+                      disabled={!entry.user_uuid}
+                      title={entry.user_uuid ? undefined : "Member has no resolved public id"}
                       className="btn btn-secondary text-sm"
                     >
                       Adjust
