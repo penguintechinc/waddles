@@ -1,0 +1,546 @@
+//! Unit tests of the Twitch `channel.unban` forwarder: subscription binding, cross-tenant
+//! refusal, live-state check, observed time and the signed envelope.
+
+#![allow(clippy::unwrap_used, clippy::expect_used)]
+
+use std::sync::Mutex;
+use std::time::Duration;
+
+use base64::engine::general_purpose::STANDARD as B64;
+use base64::Engine as _;
+use ring::signature::{Ed25519KeyPair, KeyPair, UnparsedPublicKey, ED25519};
+use serde_json::{json, Value};
+
+use super::*;
+use crate::outbound_creds::TwitchCredentialSource;
+
+const SEED: [u8; 32] = [7u8; 32];
+const UUID: &str = "11111111-2222-4333-8444-555555555555";
+const TS: &str = "2026-11-21T12:00:00.123456789Z";
+const TS_MS: u64 = 1_795_262_400_123;
+
+fn entry(tenant: i64, community: i64, connection: i64) -> LedgerEntry {
+    LedgerEntry {
+        secret: SecretString::new("s3cret".to_string()),
+        tenant_id: tenant,
+        community_id: community,
+        connection_id: connection,
+    }
+}
+
+struct NoLedger;
+impl SubscriptionLedger for NoLedger {
+    fn lookup<'a>(&'a self, _k: &'a str) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+        Box::pin(async { Ok(None) })
+    }
+}
+
+/// `(tenant, community, connection)` -> bound login.
+type OwnerRow = ((i64, i64, i64), Result<String, OwnerError>);
+struct Owner(Vec<OwnerRow>);
+impl ConnectionOwner for Owner {
+    fn bound_login<'a>(&'a self, t: i64, c: i64, n: i64) -> BoxFut<'a, Result<String, OwnerError>> {
+        let r = self
+            .0
+            .iter()
+            .find(|(k, _)| *k == (t, c, n))
+            .map_or(Err(OwnerError::NotFound), |(_, r)| r.clone());
+        Box::pin(async move { r })
+    }
+}
+
+struct Bans(Result<bool, ()>, Mutex<Vec<(i64, String, String, String)>>);
+impl BanState for Bans {
+    fn is_banned<'a>(
+        &'a self,
+        community_id: i64,
+        login: &'a str,
+        bcast: &'a str,
+        user: &'a str,
+    ) -> BoxFut<'a, Result<bool, ()>> {
+        self.1.lock().unwrap().push((
+            community_id,
+            login.to_string(),
+            bcast.to_string(),
+            user.to_string(),
+        ));
+        let r = self.0;
+        Box::pin(async move { r })
+    }
+}
+
+struct Tok(
+    Result<String, TokenizeError>,
+    Mutex<Vec<(CallScope, String)>>,
+);
+impl IdentityTokenizer for Tok {
+    fn tokenize<'a>(
+        &'a self,
+        scope: &'a CallScope,
+        id: &'a str,
+    ) -> BoxFut<'a, Result<String, TokenizeError>> {
+        self.1.lock().unwrap().push((scope.clone(), id.to_string()));
+        let r = self.0.clone();
+        Box::pin(async move { r })
+    }
+}
+
+#[derive(Default)]
+struct Sink {
+    pushed: Mutex<Vec<String>>,
+    fail: bool,
+}
+impl UnbanSink for Sink {
+    fn push<'a>(&'a self, payload: String) -> BoxFut<'a, Result<(), ()>> {
+        let ok = !self.fail;
+        if ok {
+            self.pushed.lock().unwrap().push(payload);
+        }
+        Box::pin(async move {
+            if ok {
+                Ok(())
+            } else {
+                Err(())
+            }
+        })
+    }
+}
+
+struct Rig {
+    unban: TwitchUnban,
+    sink: Arc<Sink>,
+    bans: Arc<Bans>,
+    tok: Arc<Tok>,
+}
+
+fn rig(
+    owner: Vec<OwnerRow>,
+    banned: Result<bool, ()>,
+    token: Result<String, TokenizeError>,
+    signer: bool,
+    sink_fails: bool,
+) -> Rig {
+    let sink = Arc::new(Sink {
+        fail: sink_fails,
+        ..Sink::default()
+    });
+    let bans = Arc::new(Bans(banned, Mutex::default()));
+    let tok = Arc::new(Tok(token, Mutex::default()));
+    let unban = TwitchUnban::new(
+        Arc::new(NoLedger),
+        Arc::new(Owner(owner)),
+        Arc::clone(&bans) as Arc<dyn BanState>,
+        Arc::clone(&tok) as Arc<dyn IdentityTokenizer>,
+        Arc::clone(&sink) as Arc<dyn UnbanSink>,
+        signer.then(|| Signer::from_seed("k1", &SEED).unwrap()),
+    );
+    Rig {
+        unban,
+        sink,
+        bans,
+        tok,
+    }
+}
+
+fn good_rig() -> Rig {
+    rig(
+        vec![((7, 9, 33), Ok("alice".to_string()))],
+        Ok(false),
+        Ok(UUID.to_string()),
+        true,
+        false,
+    )
+}
+
+fn sub(bcast: &str) -> Value {
+    json!({"id": "s1", "type": "channel.unban", "condition": {"broadcaster_user_id": bcast}})
+}
+
+fn ev(bcast: &str, login: &str, user: &str) -> Value {
+    json!({"broadcaster_user_id": bcast, "broadcaster_user_login": login,
+           "broadcaster_user_name": login, "user_id": user, "user_login": "bob",
+           "moderator_user_id": "5"})
+}
+
+async fn run(r: &Rig, e: &LedgerEntry, s: &Value, v: &Value, ts: &str) -> Outcome {
+    r.unban.handle(e, s, v, ts).await
+}
+
+fn pubkey() -> UnparsedPublicKey<Vec<u8>> {
+    let pair = Ed25519KeyPair::from_seed_unchecked(&SEED).unwrap();
+    UnparsedPublicKey::new(&ED25519, pair.public_key().as_ref().to_vec())
+}
+
+#[tokio::test]
+async fn a_bound_unban_is_signed_with_ledger_ids_the_event_time_and_only_the_user_token() {
+    let r = good_rig();
+    let out = run(
+        &r,
+        &entry(7, 9, 33),
+        &sub("141"),
+        &ev("141", "Alice", "777"),
+        TS,
+    )
+    .await;
+    assert_eq!(out, Outcome::Forwarded);
+    let pushed = r.sink.pushed.lock().unwrap().clone();
+    assert_eq!(pushed.len(), 1);
+    assert!(
+        !pushed[0].contains("777"),
+        "the raw Twitch user id is never queued"
+    );
+    let w: Value = serde_json::from_str(&pushed[0]).unwrap();
+    assert_eq!(
+        (
+            w["tenant_id"].as_i64(),
+            w["community_id"].as_i64(),
+            w["connection_id"].as_i64()
+        ),
+        (Some(7), Some(9), Some(33)),
+        "binding comes from the ledger row"
+    );
+    assert_eq!(w["observed_ms"], TS_MS);
+    assert_eq!(w["platform"], "twitch");
+    assert_eq!(w["broadcaster_id"], "141");
+    assert_eq!(w["user_uuid"], UUID);
+    // The signature covers every field and verifies under the public key.
+    let msg = signing_bytes(
+        w["event_id"].as_str().unwrap(),
+        7,
+        9,
+        33,
+        "141",
+        UUID,
+        TS_MS,
+        w["exp_ms"].as_u64().unwrap(),
+    );
+    let sig = B64.decode(w["sig"].as_str().unwrap()).unwrap();
+    assert!(pubkey().verify(&msg, &sig).is_ok());
+    let other = signing_bytes("x", 8, 9, 33, "141", UUID, TS_MS, 1);
+    assert!(pubkey().verify(&other, &sig).is_err());
+    // The tokenizer was scoped to the ledger tenant/community/connection.
+    let calls = r.tok.1.lock().unwrap().clone();
+    assert_eq!(calls[0].0.tenant_id, 7);
+    assert_eq!(calls[0].0.connection_id, 33);
+    assert_eq!(calls[0].1, "777");
+    // Live state was read for THIS community's binding.
+    assert_eq!(
+        r.bans.1.lock().unwrap()[0],
+        (9, "alice".into(), "141".into(), "777".into())
+    );
+}
+
+#[tokio::test]
+async fn a_valid_delivery_from_one_tenant_naming_anothers_broadcaster_forwards_nothing() {
+    // Tenant 7's subscription (community 9, connection 33) is bound to `alice`. The event names
+    // tenant 8's broadcaster `mallory` (id 999): signature-valid for tenant 7, but not its channel.
+    let r = good_rig();
+    let before = count("ignored", "broadcaster_mismatch");
+    let out = run(
+        &r,
+        &entry(7, 9, 33),
+        &sub("999"),
+        &ev("999", "mallory", "777"),
+        TS,
+    )
+    .await;
+    assert_eq!(out, Outcome::Ignored("broadcaster_mismatch"));
+    assert!(count("ignored", "broadcaster_mismatch") > before);
+    assert!(r.sink.pushed.lock().unwrap().is_empty());
+    assert!(r.tok.1.lock().unwrap().is_empty(), "nothing was tokenized");
+    assert!(
+        r.bans.1.lock().unwrap().is_empty(),
+        "no Helix call was made"
+    );
+}
+
+#[tokio::test]
+async fn an_unknown_or_cross_tenant_binding_is_ignored_with_a_metric() {
+    let r = rig(vec![], Ok(false), Ok(UUID.into()), true, false);
+    let before = count("ignored", "unknown_broadcaster");
+    assert_eq!(
+        run(
+            &r,
+            &entry(7, 9, 33),
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            TS
+        )
+        .await,
+        Outcome::Ignored("unknown_broadcaster")
+    );
+    assert!(count("ignored", "unknown_broadcaster") > before);
+    let r = rig(
+        vec![((7, 9, 33), Err(OwnerError::TenantMismatch))],
+        Ok(false),
+        Ok(UUID.into()),
+        true,
+        false,
+    );
+    assert_eq!(
+        run(
+            &r,
+            &entry(7, 9, 33),
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            TS
+        )
+        .await,
+        Outcome::Ignored("tenant_mismatch")
+    );
+    let r = rig(
+        vec![((7, 9, 33), Err(OwnerError::Unavailable))],
+        Ok(false),
+        Ok(UUID.into()),
+        true,
+        false,
+    );
+    assert_eq!(
+        run(
+            &r,
+            &entry(7, 9, 33),
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            TS
+        )
+        .await,
+        Outcome::Ignored("binding_unavailable")
+    );
+    // A connection of ANOTHER tenant/community is simply not this subscription's binding.
+    let r = good_rig();
+    assert_eq!(
+        run(
+            &r,
+            &entry(8, 9, 33),
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            TS
+        )
+        .await,
+        Outcome::Ignored("unknown_broadcaster")
+    );
+    assert!(r.sink.pushed.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn a_rebanned_user_or_an_unreadable_state_is_dropped_never_lifted() {
+    let r = rig(
+        vec![((7, 9, 33), Ok("alice".into()))],
+        Ok(true),
+        Ok(UUID.into()),
+        true,
+        false,
+    );
+    assert_eq!(
+        run(
+            &r,
+            &entry(7, 9, 33),
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            TS
+        )
+        .await,
+        Outcome::Ignored("rebanned")
+    );
+    let r = rig(
+        vec![((7, 9, 33), Ok("alice".into()))],
+        Err(()),
+        Ok(UUID.into()),
+        true,
+        false,
+    );
+    assert_eq!(
+        run(
+            &r,
+            &entry(7, 9, 33),
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            TS
+        )
+        .await,
+        Outcome::Ignored("ban_state_unavailable")
+    );
+    assert!(r.sink.pushed.lock().unwrap().is_empty());
+    assert!(r.tok.1.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn malformed_condition_timestamp_tokenizer_signer_and_sink_failures_all_fail_closed() {
+    let e = entry(7, 9, 33);
+    let r = good_rig();
+    // subscription condition vs event broadcaster disagree
+    assert_eq!(
+        run(&r, &e, &sub("141"), &ev("142", "alice", "777"), TS).await,
+        Outcome::Ignored("condition_mismatch")
+    );
+    // missing / non-numeric ids
+    assert_eq!(
+        run(
+            &r,
+            &e,
+            &sub("141"),
+            &json!({"broadcaster_user_id": "141"}),
+            TS
+        )
+        .await,
+        Outcome::Ignored("malformed")
+    );
+    assert_eq!(
+        run(&r, &e, &sub("141"), &ev("141", "alice", "7x7"), TS).await,
+        Outcome::Ignored("malformed")
+    );
+    // bad / far-future timestamp
+    assert_eq!(
+        run(&r, &e, &sub("141"), &ev("141", "alice", "777"), "yesterday").await,
+        Outcome::Ignored("bad_timestamp")
+    );
+    assert_eq!(
+        run(
+            &r,
+            &e,
+            &sub("141"),
+            &ev("141", "alice", "777"),
+            "2999-01-01T00:00:00Z"
+        )
+        .await,
+        Outcome::Ignored("bad_timestamp")
+    );
+    // tokenizer failures
+    for (err, reason) in [
+        (TokenizeError::Unavailable, "tokenize_unavailable"),
+        (TokenizeError::Denied, "tokenize_refused"),
+    ] {
+        let r = rig(
+            vec![((7, 9, 33), Ok("alice".into()))],
+            Ok(false),
+            Err(err),
+            true,
+            false,
+        );
+        assert_eq!(
+            run(&r, &e, &sub("141"), &ev("141", "alice", "777"), TS).await,
+            Outcome::Ignored(reason)
+        );
+    }
+    // no signing key, sink down
+    let r = rig(
+        vec![((7, 9, 33), Ok("alice".into()))],
+        Ok(false),
+        Ok(UUID.into()),
+        false,
+        false,
+    );
+    assert_eq!(
+        run(&r, &e, &sub("141"), &ev("141", "alice", "777"), TS).await,
+        Outcome::Ignored("no_signing_key")
+    );
+    let r = rig(
+        vec![((7, 9, 33), Ok("alice".into()))],
+        Ok(false),
+        Ok(UUID.into()),
+        true,
+        true,
+    );
+    assert_eq!(
+        run(&r, &e, &sub("141"), &ev("141", "alice", "777"), TS).await,
+        Outcome::Ignored("publish_failed")
+    );
+}
+
+#[test]
+fn the_twitch_domain_label_separates_it_from_the_discord_signature() {
+    assert_ne!(DOMAIN, crate::platform_unban::DOMAIN);
+    // Same field values under the Discord layout never produce Twitch's bytes.
+    let t = signing_bytes("e", 7, 9, 33, "141", UUID, 5, 6);
+    let d = crate::platform_unban::signing_bytes("e", 7, 33, "twitch", "141", UUID, 5, 6);
+    assert_ne!(t, d);
+    assert!(t.starts_with(DOMAIN) && d.starts_with(crate::platform_unban::DOMAIN));
+}
+
+#[test]
+fn callback_keys_are_validated_before_any_hub_call() {
+    assert!(is_callback_key("abcdefgh-12_34"));
+    for bad in ["", "short", "has space!!", "../etc/passwd", &"a".repeat(65)] {
+        assert!(!is_callback_key(bad), "{bad}");
+    }
+}
+
+// ---- Helix live-state read -------------------------------------------------------------
+
+struct NoCreds;
+impl TwitchCredentialSource for NoCreds {
+    async fn credential(
+        &self,
+        _c: Option<i64>,
+        _ch: &str,
+    ) -> Result<crate::outbound_creds::TwitchCredential, crate::outbound_creds::CredError> {
+        Err(crate::outbound_creds::CredError::NoBinding)
+    }
+}
+
+fn helix(server: &wiremock::MockServer) -> HelixBanState<NoCreds> {
+    HelixBanState::with_endpoint(
+        NoCreds,
+        "cid123".to_string(),
+        bundle_host_http::guarded::GuardedClient::new(
+            bundle_host_http::guarded::GuardedLimits {
+                max_redirects: 0,
+                timeout: Duration::from_secs(5),
+                max_response_bytes: 64 * 1024,
+            },
+            vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)],
+        ),
+        format!("{}/helix/moderation/banned", server.uri()),
+    )
+}
+
+async fn helix_server(status: u16, body: Value) -> wiremock::MockServer {
+    let s = wiremock::MockServer::start().await;
+    wiremock::Mock::given(wiremock::matchers::any())
+        .respond_with(wiremock::ResponseTemplate::new(status).set_body_json(body))
+        .mount(&s)
+        .await;
+    s
+}
+
+#[tokio::test]
+async fn the_live_state_read_is_scoped_by_ids_and_fails_closed() {
+    // Not banned: Helix answers an empty list.
+    let s = helix_server(200, json!({"data": []})).await;
+    assert_eq!(
+        helix(&s).state_with_token("tok", "141", "777").await,
+        Ok(false)
+    );
+    let req = &s.received_requests().await.unwrap()[0];
+    let q: std::collections::HashMap<_, _> = req.url.query_pairs().into_owned().collect();
+    assert_eq!(
+        (q["broadcaster_id"].as_str(), q["user_id"].as_str()),
+        ("141", "777")
+    );
+    assert_eq!(
+        req.headers.get("authorization").unwrap().to_str().unwrap(),
+        "Bearer tok"
+    );
+    assert_eq!(
+        req.headers.get("client-id").unwrap().to_str().unwrap(),
+        "cid123"
+    );
+    // Banned (or timed out) now: a row is present.
+    let s = helix_server(200, json!({"data": [{"user_id": "777", "expires_at": ""}]})).await;
+    assert_eq!(
+        helix(&s).state_with_token("tok", "141", "777").await,
+        Ok(true)
+    );
+    // Any non-2xx or unparseable answer is an error, never "not banned".
+    for (status, body) in [
+        (401, json!({})),
+        (500, json!({})),
+        (200, json!({"nope": 1})),
+    ] {
+        let s = helix_server(status, body).await;
+        assert_eq!(
+            helix(&s).state_with_token("tok", "141", "777").await,
+            Err(())
+        );
+    }
+}

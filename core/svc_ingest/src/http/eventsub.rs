@@ -55,6 +55,8 @@ pub struct EventSubState {
     /// Identity-field (`actor`) DEK provider -- `crate::identity_crypto`,
     /// forwarded to `handle_webhook` unchanged.
     pub dek_provider: crate::identity_crypto::ConfiguredDekProvider,
+    /// Twitch-native unban forwarder (`channel.unban`); `None` = off.
+    pub unban: Option<crate::twitch_unban::TwitchUnban>,
 }
 
 /// Body-size cap enforced at the HTTP layer via
@@ -220,7 +222,7 @@ async fn process(
             .and_then(|v| v.to_str().ok()),
     };
 
-    let result = twitch_eventsub::handle_webhook(
+    let result = twitch_eventsub::handle_webhook_with(
         &es.resolver,
         &es.dedup,
         &es.revocation,
@@ -234,6 +236,7 @@ async fn process(
         content_type,
         &raw_headers,
         &body,
+        es.unban.as_ref(),
     )
     .await;
 

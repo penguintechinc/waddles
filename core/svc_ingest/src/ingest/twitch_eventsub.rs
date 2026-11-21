@@ -523,6 +523,56 @@ where
     A: EventAppender,
     Dk: crate::identity_crypto::DekProvider,
 {
+    handle_webhook_with(
+        resolver,
+        dedup,
+        revocation,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        dek_provider,
+        callback_key,
+        content_type,
+        headers,
+        body,
+        None,
+    )
+    .await
+}
+
+/// [`handle_webhook`] with the Twitch-native unban forwarder (`channel.unban`).
+///
+/// With `unban = Some(_)` the delivery's callback key is first looked up in the subscription
+/// ledger: a key the ledger KNOWS is verified with THAT subscription's own secret only (never the
+/// shared fallback), and a `channel.unban` notification is only ever honoured for such a key,
+/// bound to the tenant/community/connection that own it. A key the ledger does not know keeps the
+/// legacy resolver path for every other event type, but can never carry an unban.
+#[allow(clippy::too_many_arguments)]
+pub async fn handle_webhook_with<R, D, V, A, Dk>(
+    resolver: &R,
+    dedup: &D,
+    revocation: &V,
+    appender: &A,
+    metrics: &IngestMetrics,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    dek_provider: &Dk,
+    callback_key: &str,
+    content_type: Option<&str>,
+    headers: &RawHeaders<'_>,
+    body: &[u8],
+    unban: Option<&crate::twitch_unban::TwitchUnban>,
+) -> Result<EventSubResponse, EventSubError>
+where
+    R: SubscriptionSecretResolver,
+    D: ReplayGuard,
+    V: RevocationSink,
+    A: EventAppender,
+    Dk: crate::identity_crypto::DekProvider,
+{
     if !is_allowed_content_type(content_type) {
         metrics.record_eventsub_verification("bad_content_type");
         return Err(EventSubError::UnsupportedContentType);
@@ -546,12 +596,31 @@ where
         return Err(EventSubError::VerificationFailed);
     };
 
+    // The subscription ledger (when configured) is consulted by `callback_key` alone: a key it
+    // knows is verified with ITS secret and nothing else, and yields the tenant/community/
+    // connection the delivery is bound to. A ledger outage degrades to the legacy resolver for
+    // ordinary events; an unban is never honoured without a ledger entry.
+    let ledger_entry = match unban {
+        Some(u) => match u.ledger_entry(callback_key).await {
+            Ok(entry) => entry,
+            Err(_) => {
+                tracing::warn!(callback_key, "eventsub.ledger_unavailable");
+                None
+            }
+        },
+        None => None,
+    };
     // Secret resolution reads only `callback_key` (URL path) + headers --
     // never the body, which is not yet authenticated (and not yet parsed).
-    let Ok(secret) = resolver.resolve_secret(callback_key, headers).await else {
-        metrics.record_eventsub_verification("secret_not_found");
-        tracing::warn!(callback_key, "eventsub.secret_not_found");
-        return Err(EventSubError::VerificationFailed);
+    let secret = if let Some(entry) = &ledger_entry {
+        entry.secret.expose().to_string()
+    } else {
+        let Ok(secret) = resolver.resolve_secret(callback_key, headers).await else {
+            metrics.record_eventsub_verification("secret_not_found");
+            tracing::warn!(callback_key, "eventsub.secret_not_found");
+            return Err(EventSubError::VerificationFailed);
+        };
+        secret
     };
 
     if !verify_signature(&secret, message_id, timestamp, body, signature) {
@@ -648,6 +717,24 @@ where
             }
             Ok(EventSubResponse::Acknowledged)
         }
+        "notification" if subscription_type == crate::twitch_unban::EVENT_TYPE => {
+            // Twitch-native unban: honoured only for a ledger-bound subscription, never routed
+            // to the event stream. Every outcome acknowledges (Twitch must not redeliver or
+            // revoke over a refusal we decided on); refusals are counted inside.
+            let event_body = body_json.get("event").cloned().unwrap_or_default();
+            match (unban, &ledger_entry) {
+                (Some(u), Some(entry)) => {
+                    let _ = u.handle(entry, &subscription, &event_body, timestamp).await;
+                }
+                (Some(u), None) => {
+                    let _ = u.unbound();
+                }
+                (None, _) => {
+                    tracing::debug!("eventsub.unban_handler_not_configured");
+                }
+            }
+            Ok(EventSubResponse::Ack)
+        }
         "notification" => {
             if !KNOWN_EVENT_TYPES.contains(&subscription_type.as_str()) {
                 tracing::debug!(subscription_type, "eventsub.unhandled_event_type");
@@ -691,7 +778,7 @@ where
 mod tests {
     use super::*;
     use penguin_spine::SpineError;
-    use std::sync::Mutex;
+    use std::sync::{Arc, Mutex};
 
     fn test_keyring() -> KeyRing {
         KeyRing::new(vec![("k1".to_string(), vec![9u8; 32])])
@@ -1594,5 +1681,314 @@ mod tests {
         // key) -- changing it silently would break every alpha subscription
         // still pointed at the legacy URL.
         assert_eq!(LEGACY_CALLBACK_KEY, "legacy-default");
+    }
+
+    // ---- Twitch-native unban (`channel.unban`) on the webhook receiver --------------------
+
+    use crate::commands_reconcile::BoxFut;
+    use crate::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
+    use crate::platform_unban::{Signer, UnbanSink};
+    use crate::twitch_unban::{
+        BanState, ConnectionOwner, LedgerEntry, LedgerError, OwnerError, SubscriptionLedger,
+        TwitchUnban,
+    };
+
+    const LEDGER_SECRET: &str = "ledger-secret-for-sub-7";
+    const UNBAN_KEY: &str = "unban-key-1234";
+    const UNBAN_UUID: &str = "11111111-2222-4333-8444-555555555555";
+
+    /// hub-api ledger double: callback key -> (secret, tenant, community, connection).
+    type LedgerRow = (&'static str, (&'static str, i64, i64, i64));
+    struct Ledger(Vec<LedgerRow>);
+    impl SubscriptionLedger for Ledger {
+        fn lookup<'a>(
+            &'a self,
+            key: &'a str,
+        ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+            let found = self.0.iter().find(|(k, _)| *k == key).map(|(_, v)| v);
+            let r = found.map(|(secret, t, c, n)| LedgerEntry {
+                secret: connection_resolver::SecretString::new((*secret).to_string()),
+                tenant_id: *t,
+                community_id: *c,
+                connection_id: *n,
+            });
+            Box::pin(async move { Ok(r) })
+        }
+    }
+
+    /// Binding double: `(tenant, community, connection)` -> bound login.
+    struct Bound(Vec<((i64, i64, i64), &'static str)>);
+    impl ConnectionOwner for Bound {
+        fn bound_login<'a>(
+            &'a self,
+            t: i64,
+            c: i64,
+            n: i64,
+        ) -> BoxFut<'a, Result<String, OwnerError>> {
+            let r = self
+                .0
+                .iter()
+                .find(|(k, _)| *k == (t, c, n))
+                .map(|(_, l)| (*l).to_string())
+                .ok_or(OwnerError::NotFound);
+            Box::pin(async move { r })
+        }
+    }
+
+    struct Bans(bool);
+    impl BanState for Bans {
+        fn is_banned<'a>(
+            &'a self,
+            _c: i64,
+            _l: &'a str,
+            _b: &'a str,
+            _u: &'a str,
+        ) -> BoxFut<'a, Result<bool, ()>> {
+            let b = self.0;
+            Box::pin(async move { Ok(b) })
+        }
+    }
+
+    struct Tok;
+    impl IdentityTokenizer for Tok {
+        fn tokenize<'a>(
+            &'a self,
+            _s: &'a CallScope,
+            _id: &'a str,
+        ) -> BoxFut<'a, Result<String, TokenizeError>> {
+            Box::pin(async { Ok(UNBAN_UUID.to_string()) })
+        }
+    }
+
+    #[derive(Default)]
+    struct Sink(Mutex<Vec<String>>);
+    impl UnbanSink for Sink {
+        fn push<'a>(&'a self, payload: String) -> BoxFut<'a, Result<(), ()>> {
+            self.0.lock().unwrap().push(payload);
+            Box::pin(async { Ok(()) })
+        }
+    }
+
+    fn unban_rig(banned: bool) -> (TwitchUnban, Arc<Sink>) {
+        let sink = Arc::new(Sink::default());
+        let u = TwitchUnban::new(
+            Arc::new(Ledger(vec![(UNBAN_KEY, (LEDGER_SECRET, 7, 9, 33))])),
+            Arc::new(Bound(vec![((7, 9, 33), "alice")])),
+            Arc::new(Bans(banned)),
+            Arc::new(Tok),
+            Arc::clone(&sink) as Arc<dyn UnbanSink>,
+            Some(Signer::from_seed("k1", &[7u8; 32]).unwrap()),
+        );
+        (u, sink)
+    }
+
+    fn unban_body(bcast: &str, login: &str) -> Vec<u8> {
+        serde_json::json!({
+            "subscription": {"id": "sub-7", "type": "channel.unban",
+                "condition": {"broadcaster_user_id": bcast}},
+            "event": {"broadcaster_user_id": bcast, "broadcaster_user_login": login,
+                "user_id": "777", "user_login": "bob", "moderator_user_id": "5"}
+        })
+        .to_string()
+        .into_bytes()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn call_unban(
+        unban: &TwitchUnban,
+        resolver: &FakeResolver,
+        dedup: &FakeDedup,
+        key: &str,
+        h: &RawHeaders<'_>,
+        body: &[u8],
+    ) -> Result<EventSubResponse, EventSubError> {
+        struct Dek;
+        impl crate::identity_crypto::DekProvider for Dek {
+            async fn get_dek(
+                &self,
+                _t: i64,
+            ) -> Result<
+                (crate::identity_crypto::Dek, u32),
+                crate::identity_crypto::DekUnavailableError,
+            > {
+                Ok((zeroize::Zeroizing::new([9u8; 32]), 1))
+            }
+        }
+        handle_webhook_with(
+            resolver,
+            dedup,
+            &FakeRevocationSink::default(),
+            &RecordingAppender::default(),
+            &test_metrics(),
+            &test_keyring(),
+            "k1",
+            &test_scope(),
+            &Dek,
+            key,
+            Some("application/json"),
+            h,
+            body,
+            Some(unban),
+        )
+        .await
+    }
+
+    fn now_ts() -> String {
+        chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    }
+
+    fn global() -> FakeResolver {
+        FakeResolver {
+            secret: Some(SECRET.to_string()),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_valid_unban_is_verified_with_the_subscriptions_own_secret_and_forwarded_once() {
+        let (u, sink) = unban_rig(false);
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        let sig = sign(LEDGER_SECRET, "m-1", &ts, &body);
+        let h = headers("m-1", &ts, &sig, "notification");
+        let dedup = FakeDedup::default();
+        let r = call_unban(&u, &global(), &dedup, UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        let pushed = sink.0.lock().unwrap().clone();
+        assert_eq!(pushed.len(), 1);
+        let w: serde_json::Value = serde_json::from_str(&pushed[0]).unwrap();
+        // The binding is the ledger row's, the time is the (HMAC-covered) message timestamp.
+        assert_eq!(
+            (
+                w["tenant_id"].as_i64(),
+                w["community_id"].as_i64(),
+                w["connection_id"].as_i64()
+            ),
+            (Some(7), Some(9), Some(33))
+        );
+        assert_eq!(
+            w["observed_ms"].as_u64(),
+            chrono::DateTime::parse_from_rfc3339(&ts)
+                .ok()
+                .map(|d| u64::try_from(d.timestamp_millis()).unwrap())
+        );
+        // A replay of the same message id is deduplicated: nothing more is forwarded.
+        let r = call_unban(&u, &global(), &dedup, UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::DuplicateIgnored)), "{r:?}");
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn an_invalid_signature_or_the_global_secret_never_reaches_the_forwarder() {
+        let (u, sink) = unban_rig(false);
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        // Signed with the shared/global secret for a key the ledger KNOWS: no fallback.
+        let sig = sign(SECRET, "m-2", &ts, &body);
+        let h = headers("m-2", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Err(EventSubError::VerificationFailed)));
+        // Garbage signature.
+        let h = headers("m-3", &ts, "sha256=00", "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Err(EventSubError::VerificationFailed)));
+        // Body tampered after signing.
+        let sig = sign(LEDGER_SECRET, "m-4", &ts, &body);
+        let h = headers("m-4", &ts, &sig, "notification");
+        let tampered = unban_body("141", "mallory");
+        let r = call_unban(
+            &u,
+            &global(),
+            &FakeDedup::default(),
+            UNBAN_KEY,
+            &h,
+            &tampered,
+        )
+        .await;
+        assert!(matches!(r, Err(EventSubError::VerificationFailed)));
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_stale_timestamp_is_rejected_even_with_a_valid_signature() {
+        let (u, sink) = unban_rig(false);
+        let body = unban_body("141", "alice");
+        let ts = (chrono::Utc::now() - chrono::Duration::minutes(20))
+            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let sig = sign(LEDGER_SECRET, "m-5", &ts, &body);
+        let h = headers("m-5", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Err(EventSubError::VerificationFailed)));
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_valid_signature_from_one_tenants_subscription_naming_anothers_broadcaster_lifts_nothing(
+    ) {
+        let (u, sink) = unban_rig(false);
+        // Tenant 7's subscription is bound to `alice`; the (signature-valid) body names tenant
+        // 8's broadcaster `mallory` / 999.
+        let body = unban_body("999", "mallory");
+        let ts = now_ts();
+        let sig = sign(LEDGER_SECRET, "m-6", &ts, &body);
+        let h = headers("m-6", &ts, &sig, "notification");
+        let before = crate::twitch_unban::count("ignored", "broadcaster_mismatch");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert!(crate::twitch_unban::count("ignored", "broadcaster_mismatch") > before);
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn an_unban_on_a_key_the_ledger_does_not_know_is_acked_counted_and_never_forwarded() {
+        let (u, sink) = unban_rig(false);
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        // Legacy/global-secret path verifies the HMAC, but there is no binding to lift under.
+        let sig = sign(SECRET, "m-7", &ts, &body);
+        let h = headers("m-7", &ts, &sig, "notification");
+        let before = crate::twitch_unban::count("ignored", "unknown_subscription");
+        let r = call_unban(
+            &u,
+            &global(),
+            &FakeDedup::default(),
+            "other-key-12345",
+            &h,
+            &body,
+        )
+        .await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert!(crate::twitch_unban::count("ignored", "unknown_subscription") > before);
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_rebanned_user_is_dropped_at_the_webhook() {
+        let (u, sink) = unban_rig(true);
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        let sig = sign(LEDGER_SECRET, "m-8", &ts, &body);
+        let h = headers("m-8", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn the_subscription_challenge_is_answered_with_the_ledger_secret() {
+        let (u, _sink) = unban_rig(false);
+        let body = serde_json::json!({
+            "challenge": "pogchamp-kappa-360noscope",
+            "subscription": {"id": "sub-7", "type": "channel.unban",
+                "condition": {"broadcaster_user_id": "141"}}
+        })
+        .to_string()
+        .into_bytes();
+        let ts = now_ts();
+        let sig = sign(LEDGER_SECRET, "m-9", &ts, &body);
+        let h = headers("m-9", &ts, &sig, "webhook_callback_verification");
+        match call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await {
+            Ok(EventSubResponse::Challenge(c)) => assert_eq!(c, "pogchamp-kappa-360noscope"),
+            other => panic!("expected the challenge, got {other:?}"),
+        }
     }
 }

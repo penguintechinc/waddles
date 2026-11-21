@@ -157,6 +157,8 @@ re-join. A confirmed ban with no suppression code (no linked identity on that pl
 - **Not yet wired**: native platform events (Discord `GUILD_BAN_REMOVE`, Twitch EventSub `channel.unban`) -- ingest does not
   consume them yet; the floor-ban path supports Discord only (Twitch bans are refused `platform_not_supported`).
 
+**Twitch-native unban (EventSub `channel.unban`).** Same shape, bound per subscription: svc-ingest (`core/svc_ingest/src/twitch_unban.rs`) verifies the delivery HMAC with the receiving subscription's own ledger secret (hub-api `eventsub:secret-read`), takes tenant/community/connection from that ledger row, requires the event's broadcaster to equal the connection's bound channel, confirms Twitch's live state (`GET /moderation/banned`, must be NOT banned, fail closed), tokenizes the user and signs `{event id, tenant, community, connection, broadcaster, user uuid, observed time (EventSub message_timestamp), expiry}` with the shared Ed25519 key under the label `waddles.platform-unban.twitch.v1` onto `waddles:platform-unban:twitch:events`. svc-action (`core/svc_action/src/twitch_unban.rs`) verifies with the PUBLIC key, freshness and single use, then lifts in that one community via `reputation_floor_ban_lift_from_platform` under `system:twitch-eventsub` (`waddles_floor_ban_dispatch_total{result=eventsub_unban_*}`). A cross-tenant broadcaster, an unknown subscription, a re-banned user or an unreadable state forwards nothing (`svc_ingest_twitch_unban_total{outcome=ignored,reason}`).
+
 ### Soft ban
 
 Cannot WIN anything in that community (games, raffles, giveaways, economy payouts). State lives in the

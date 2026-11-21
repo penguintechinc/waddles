@@ -92,6 +92,7 @@ pub mod senders;
 pub mod stage_metrics;
 pub mod surface;
 pub mod telemetry;
+pub mod twitch_unban;
 pub mod usage;
 pub mod wiring;
 
@@ -971,6 +972,7 @@ async fn start_floor_ban_dispatcher(
     // matching Waddles floor ban over this same connection pool.
     caps.set_unban_sync(store.clone());
     start_platform_unban_consumer(spine_cfg, store.clone()).await;
+    start_twitch_unban_consumer(spine_cfg, store.clone()).await;
     let metrics = stage_metrics::stage_metrics();
     tokio::spawn(async move {
         floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, flag, shutdown_signal())
@@ -1010,6 +1012,44 @@ async fn start_platform_unban_consumer(
     ));
     tokio::spawn(async move {
         platform_unban::run_consumer(handler, pop, shutdown_signal()).await;
+    });
+}
+
+/// Starts the Twitch EventSub unban consumer ([`twitch_unban`]): svc-ingest's signed
+/// `channel.unban` events lift the matching Waddles floor ban in the one community they name.
+/// Shares the public verify ring with the Discord consumer; no usable ring or a Valkey failure is
+/// logged loudly and leaves it off. Nothing runs unverified.
+async fn start_twitch_unban_consumer(
+    spine_cfg: &penguin_spine::SpineConfig,
+    lift: Arc<floor_ban_dispatch::PgFloorBanStore>,
+) {
+    let Some(keys) = resolve_platform_unban_keys() else {
+        tracing::error!(
+            "twitch-unban consumer NOT started: PLATFORM_UNBAN_PUBLIC_KEYS unusable; Twitch-native unbans will not lift Waddles bans"
+        );
+        return;
+    };
+    let (pop, seen) = match (
+        usage::connect(spine_cfg).await,
+        usage::connect(spine_cfg).await,
+    ) {
+        (Ok(pop), Ok(seen)) => (pop, seen),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(error = %e, "twitch-unban consumer NOT started: valkey connection failed");
+            return;
+        }
+    };
+    let handler = Arc::new(twitch_unban::TwitchUnban::new(
+        lift,
+        keys,
+        Arc::new(platform_unban::ValkeySeen::with_prefix(
+            seen,
+            twitch_unban::SEEN_PREFIX,
+        )),
+        stage_metrics::stage_metrics(),
+    ));
+    tokio::spawn(async move {
+        twitch_unban::run_consumer(handler, pop, shutdown_signal()).await;
     });
 }
 
