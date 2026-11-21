@@ -20,8 +20,8 @@ tables known to be missing from the minimal CI bootstrap (which never replays th
 nor migrations before 0020) -- and that skip is logged at INFO. Any other absent table (a typo'd
 name, a renamed table) RAISES, so a full chain can never silently end up without a `public_id`.
 
-Revision ID: 0137_entity_public_ids
-Revises: 0136_app_id_owners
+Revision ID: 0138_entity_public_ids
+Revises: 0137_discord_guild_tenants
 Create Date: 2026-11-21
 """
 
@@ -31,8 +31,8 @@ import logging
 
 from alembic import op
 
-revision = "0137_entity_public_ids"
-down_revision = "0136_app_id_owners"
+revision = "0138_entity_public_ids"
+down_revision = "0137_discord_guild_tenants"
 branch_labels = None
 depends_on = None
 
