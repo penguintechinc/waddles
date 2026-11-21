@@ -820,13 +820,13 @@ pub(crate) mod tests {
     }
 
     pub(crate) fn state_with(bridge: Arc<HostBridge>) -> ExecState {
-        ExecState::new(Some(bridge), "waddles.test.app".to_string(), 1)
+        ExecState::new(Some(bridge), "penguintechinc.waddles.test-app".to_string(), 1)
     }
 
     #[tokio::test]
     async fn context_get_context_decodes_a_real_host_result() {
         let bridge = one_shot_bridge(Ok(serde_json::json!({
-            "tenant": "t1", "community": "c1", "app_id": "waddles.test.app",
+            "tenant": "t1", "community": "c1", "app_id": "penguintechinc.waddles.test-app",
             "feature": "process", "version": "1", "message_id": "m1",
             "config_json": "{\"k\":1}"
         })));
@@ -840,7 +840,7 @@ pub(crate) mod tests {
     #[tokio::test]
     async fn context_folds_host_web_base_url_into_config_json_and_host_wins() {
         let bridge = one_shot_bridge(Ok(serde_json::json!({
-            "tenant": "t1", "community": "c1", "app_id": "waddles.test.app",
+            "tenant": "t1", "community": "c1", "app_id": "penguintechinc.waddles.test-app",
             "feature": "process", "version": "1", "message_id": "m1",
             "config_json": "{\"k\":1,\"web_base_url\":\"https://evil.example\"}",
             "web_base_url": "https://app.example.org"
@@ -1424,33 +1424,33 @@ pub(crate) mod tests {
 
     #[tokio::test]
     async fn flags_enabled_fails_open_to_default_without_a_bridge() {
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         assert!(flags::Host::enabled(&mut state, "waddles.some-feature".to_string(), true).await);
         assert!(!flags::Host::enabled(&mut state, "waddles.some-feature".to_string(), false).await);
     }
 
     #[tokio::test]
     async fn flags_tier_defaults_to_free_without_a_bridge() {
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         assert_eq!(flags::Host::tier(&mut state).await, "free");
     }
 
     #[tokio::test]
     async fn clock_falls_back_to_local_time_without_a_bridge() {
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         assert!(clock::Host::now_millis(&mut state).await > 0);
     }
 
     #[tokio::test]
     async fn context_returns_empty_but_well_formed_without_a_bridge() {
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         let ctx = context::Host::get_context(&mut state).await;
         assert_eq!(ctx.config_json, "{}");
     }
 
     #[tokio::test]
     async fn log_write_never_panics_without_a_bridge() {
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         log::Host::write(
             &mut state,
             log::Level::Debug,

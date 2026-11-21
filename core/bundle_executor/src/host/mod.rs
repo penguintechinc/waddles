@@ -316,8 +316,8 @@ mod tests {
     #[test]
     fn exec_state_starts_with_no_state_and_a_fresh_table() {
         crate::init_test_tracing();
-        let state = ExecState::new(None, "waddles.test.app".to_string(), 1);
-        assert_eq!(state.app_id, "waddles.test.app");
+        let state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
+        assert_eq!(state.app_id, "penguintechinc.waddles.test-app");
         assert_eq!(state.call_id, 1);
         assert!(state.bridge.is_none());
     }
@@ -371,7 +371,7 @@ mod tests {
     #[test]
     fn with_memory_limit_mb_denies_growth_past_the_cap() {
         let mut state =
-            ExecState::new(None, "waddles.test.app".to_string(), 1).with_memory_limit_mb(1);
+            ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1).with_memory_limit_mb(1);
         let one_mib = 1024 * 1024;
         assert!(!state.memory_cap_hit(), "no growth has been denied yet");
         assert!(state
@@ -430,7 +430,7 @@ mod tests {
     /// `access-denied`, before any socket() syscall, without panicking.
     #[test]
     fn wasi_tcp_create_socket_is_denied_natively() {
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         let mut view = state.sockets();
         let result = tcp_create_socket::Host::create_tcp_socket(&mut view, IpAddressFamily::Ipv4);
         let err = result.expect_err("TCP socket creation must be denied");
@@ -444,7 +444,7 @@ mod tests {
     #[tokio::test]
     async fn wasi_udp_create_socket_is_denied_natively() {
         use wasmtime_wasi::p2::bindings::sockets::udp_create_socket;
-        let mut state = ExecState::new(None, "waddles.test.app".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
         let mut view = state.sockets();
         let result =
             udp_create_socket::Host::create_udp_socket(&mut view, IpAddressFamily::Ipv4).await;

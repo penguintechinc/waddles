@@ -2758,13 +2758,13 @@ mod tests {
     #[tokio::test]
     async fn manifest_wildcard_entry_denies_every_concrete_host() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("*.googleapis.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://storage.googleapis.com/"}),
             )
             .await
@@ -2778,13 +2778,13 @@ mod tests {
     #[tokio::test]
     async fn ip_literal_host_not_on_allowlist_is_denied() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
             )
             .await
@@ -2801,7 +2801,7 @@ mod tests {
             Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -2809,7 +2809,7 @@ mod tests {
         );
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
             )
             .await;
@@ -2827,7 +2827,7 @@ mod tests {
             Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
             limits,
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("93.184.216.34:8443".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -2835,7 +2835,7 @@ mod tests {
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
             )
             .await
@@ -2848,13 +2848,13 @@ mod tests {
     #[tokio::test]
     async fn non_default_port_is_denied_even_for_an_allowlisted_host() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://api.spotify.com:8443/"}),
             )
             .await
@@ -2870,7 +2870,7 @@ mod tests {
             Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
             limits,
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -2878,7 +2878,7 @@ mod tests {
         );
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://api.spotify.com:8443/"}),
             )
             .await;
@@ -2924,7 +2924,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -2934,7 +2934,7 @@ mod tests {
 
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://api.spotify.com/"}),
             )
             .await
@@ -3097,13 +3097,13 @@ mod tests {
         // must match that normalized form, same as any other host
         // comparison this guard does. `a9fe:a9fe` == `169.254.169.254`.
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("::ffff:a9fe:a9fe".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://[::ffff:169.254.169.254]/latest/meta-data"}),
             )
             .await
@@ -3116,13 +3116,13 @@ mod tests {
     #[tokio::test]
     async fn scheme_not_https_is_denied() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("example.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "http://example.com/"}),
             )
             .await
@@ -3133,13 +3133,13 @@ mod tests {
     #[tokio::test]
     async fn embedded_credentials_are_malformed_url() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("example.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://user:pass@example.com/"}),
             )
             .await
@@ -3150,13 +3150,13 @@ mod tests {
     #[tokio::test]
     async fn host_not_on_allowlist_is_denied() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://evil.example.com/"}),
             )
             .await
@@ -3167,13 +3167,13 @@ mod tests {
     #[tokio::test]
     async fn method_not_declared_for_host_is_denied() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "DELETE", "url": "https://api.spotify.com/"}),
             )
             .await
@@ -3187,17 +3187,17 @@ mod tests {
     /// (spec §8.2) actually increments on a denial.
     #[tokio::test]
     async fn undeclared_host_denial_is_counted_in_the_metric() {
-        let guard = guard_with("waddles.a.b.c", vec![], FakeTransport::default());
+        let guard = guard_with("penguintechinc.waddles.a-b-c", vec![], FakeTransport::default());
         let _ = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://evil.example.com/"}),
             )
             .await
             .unwrap_err();
         let value = guard
             .denied_total
-            .with_label_values(&["waddles.a.b.c", "host_not_declared"])
+            .with_label_values(&["penguintechinc.waddles.a-b-c", "host_not_declared"])
             .get();
         assert_eq!(value, 1);
     }
@@ -3212,13 +3212,13 @@ mod tests {
     #[tokio::test]
     async fn ssrf_to_cloud_metadata_ip_is_blocked_even_when_declared() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("169.254.169.254".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://169.254.169.254/latest/meta-data"}),
             )
             .await
@@ -3229,13 +3229,13 @@ mod tests {
     #[tokio::test]
     async fn ssrf_to_a_private_ip_is_blocked_by_default() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
             )
             .await
@@ -3250,13 +3250,13 @@ mod tests {
     #[tokio::test]
     async fn private_ip_grant_is_denied_by_default_instance_policy() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
             )
             .await
@@ -3270,7 +3270,7 @@ mod tests {
             Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -3281,7 +3281,7 @@ mod tests {
         })));
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
             )
             .await;
@@ -3297,7 +3297,7 @@ mod tests {
     async fn private_ip_via_public_ip_grant_is_denied() {
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 public_ip_grants: vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
                 ..EgressRuleRow::default()
@@ -3315,7 +3315,7 @@ mod tests {
         })));
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.0.0.5/"}),
             )
             .await
@@ -3330,7 +3330,7 @@ mod tests {
     async fn public_ip_via_private_ip_grant_is_denied() {
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 private_ip_grants: vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
                 ..EgressRuleRow::default()
@@ -3348,7 +3348,7 @@ mod tests {
         })));
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
             )
             .await
@@ -3363,13 +3363,13 @@ mod tests {
     #[tokio::test]
     async fn public_ip_via_fqdn_grant_for_a_different_host_is_denied() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://93.184.216.34/"}),
             )
             .await
@@ -3392,7 +3392,7 @@ mod tests {
             Arc::new(FakeTransport::default()),
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -3404,7 +3404,7 @@ mod tests {
         .with_resolver(resolver as Arc<dyn Resolver>);
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://api.spotify.com/"}),
             )
             .await
@@ -3424,7 +3424,7 @@ mod tests {
         });
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 fqdn_grants: vec![("api.spotify.com".to_string(), vec!["GET".to_string()])],
                 private_ip_grants: vec![("10.0.0.9".to_string(), vec!["GET".to_string()])],
@@ -3444,7 +3444,7 @@ mod tests {
         .with_resolver(resolver as Arc<dyn Resolver>);
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://api.spotify.com/"}),
             )
             .await;
@@ -3458,7 +3458,7 @@ mod tests {
     async fn private_ip_cidr_grant_covers_any_address_in_range() {
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
                 ..EgressRuleRow::default()
@@ -3476,7 +3476,7 @@ mod tests {
         })));
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.55.66.77/"}),
             )
             .await;
@@ -3499,7 +3499,7 @@ mod tests {
     async fn private_ip_cidr_grant_covers_an_ipv4_mapped_ipv6_target() {
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
                 ..EgressRuleRow::default()
@@ -3517,7 +3517,7 @@ mod tests {
         })));
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://[::ffff:10.55.66.77]/"}),
             )
             .await;
@@ -3533,7 +3533,7 @@ mod tests {
     async fn cluster_cidr_denylist_beats_a_matching_private_ip_grant() {
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
                 ..EgressRuleRow::default()
@@ -3552,7 +3552,7 @@ mod tests {
         .with_cluster_denylist(ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap());
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
             )
             .await
@@ -3588,7 +3588,7 @@ mod tests {
     async fn cluster_cidr_denylist_denies_an_ipv4_mapped_ipv6_target() {
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 private_ip_grants: vec![("10.0.0.0/8".to_string(), vec!["GET".to_string()])],
                 ..EgressRuleRow::default()
@@ -3607,7 +3607,7 @@ mod tests {
         .with_cluster_denylist(ClusterCidrDenylist::parse(["10.244.0.0/16"]).unwrap());
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://[::ffff:10.244.5.6]/"}),
             )
             .await
@@ -3699,7 +3699,7 @@ mod tests {
     async fn cloud_metadata_is_always_denied_even_with_a_matching_grant_and_policy_opt_in() {
         let catalog = TestCatalog::new();
         catalog.insert(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             EgressRuleRow {
                 public_ip_grants: vec![("169.254.169.254".to_string(), vec!["GET".to_string()])],
                 ..EgressRuleRow::default()
@@ -3717,7 +3717,7 @@ mod tests {
         })));
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://169.254.169.254/"}),
             )
             .await
@@ -3737,7 +3737,7 @@ mod tests {
             Arc::new(FakeTransport::default()),
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("gateway.discord.gg".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -3745,7 +3745,7 @@ mod tests {
         )
         .with_resolver(Arc::clone(&resolver) as Arc<dyn Resolver>);
         let target = guard
-            .validate_dial("waddles.a.b.c", "gateway.discord.gg:443")
+            .validate_dial("penguintechinc.waddles.a-b-c", "gateway.discord.gg:443")
             .await
             .expect("wss dial to a declared fqdn is validated");
         assert_eq!(target.host, "gateway.discord.gg");
@@ -3768,7 +3768,7 @@ mod tests {
             Arc::new(FakeTransport::default()),
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("irc.twitch.tv".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -3776,7 +3776,7 @@ mod tests {
         )
         .with_resolver(resolver as Arc<dyn Resolver>);
         let target = guard
-            .validate_dial("waddles.a.b.c", "irc.twitch.tv:6697")
+            .validate_dial("penguintechinc.waddles.a-b-c", "irc.twitch.tv:6697")
             .await
             .expect("irc-over-tls dial on 6697 is validated");
         assert_eq!(target.port, 6697);
@@ -3784,9 +3784,9 @@ mod tests {
 
     #[tokio::test]
     async fn validate_dial_denies_an_undeclared_host() {
-        let guard = guard_with("waddles.a.b.c", vec![], FakeTransport::default());
+        let guard = guard_with("penguintechinc.waddles.a-b-c", vec![], FakeTransport::default());
         let err = guard
-            .validate_dial("waddles.a.b.c", "evil.example.com:443")
+            .validate_dial("penguintechinc.waddles.a-b-c", "evil.example.com:443")
             .await
             .unwrap_err();
         assert_eq!(err.code, "host_not_declared");
@@ -3795,12 +3795,12 @@ mod tests {
     #[tokio::test]
     async fn validate_dial_denies_ssrf_to_metadata_even_when_declared() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("169.254.169.254".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
-            .validate_dial("waddles.a.b.c", "169.254.169.254:443")
+            .validate_dial("penguintechinc.waddles.a-b-c", "169.254.169.254:443")
             .await
             .unwrap_err();
         assert_eq!(err.code, "ssrf_blocked_address");
@@ -3809,12 +3809,12 @@ mod tests {
     #[tokio::test]
     async fn validate_dial_denies_a_private_ip_dial_by_default_instance_policy() {
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("10.0.0.5".to_string(), vec!["GET".to_string()])],
             FakeTransport::default(),
         );
         let err = guard
-            .validate_dial("waddles.a.b.c", "10.0.0.5:6697")
+            .validate_dial("penguintechinc.waddles.a-b-c", "10.0.0.5:6697")
             .await
             .unwrap_err();
         assert_eq!(err.code, "ssrf_blocked_address");
@@ -3826,14 +3826,14 @@ mod tests {
             Arc::new(FakeTransport::default()),
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("gateway.discord.gg".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
             boxed(StaticFlag(false)),
         );
         let err = guard
-            .validate_dial("waddles.a.b.c", "gateway.discord.gg:443")
+            .validate_dial("penguintechinc.waddles.a-b-c", "gateway.discord.gg:443")
             .await
             .unwrap_err();
         assert_eq!(err.code, "feature_disabled");
@@ -3874,7 +3874,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -3882,7 +3882,7 @@ mod tests {
         );
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/"}),
             )
             .await
@@ -3901,7 +3901,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -3910,7 +3910,7 @@ mod tests {
         .with_proxy_assertion_signer(Arc::new(StaticSigner));
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/"}),
             )
             .await
@@ -3921,7 +3921,7 @@ mod tests {
             .iter()
             .find(|(k, _)| k == PROXY_ASSERTION_HEADER)
             .expect("assertion header present");
-        assert!(header.1.starts_with("waddles.a.b.c|discord.com|"));
+        assert!(header.1.starts_with("penguintechinc.waddles.a-b-c|discord.com|"));
     }
 
     // PKCS8-DER-encoded ECDSA P-256 test keypair (fixed, test-only) -- same
@@ -3967,7 +3967,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -3982,7 +3982,7 @@ mod tests {
         )));
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/"}),
             )
             .await
@@ -4007,7 +4007,7 @@ mod tests {
         assert_eq!(verified.sub, "spiffe://penguintech.io/alpha/svc-process");
         assert_eq!(verified.tenant, "tenant-a");
         assert_eq!(verified.community, "community-a");
-        assert_eq!(verified.app, "waddles.a.b.c");
+        assert_eq!(verified.app, "penguintechinc.waddles.a-b-c");
         assert_eq!(verified.category, DestinationCategory::Fqdn);
         assert_eq!(verified.destination, "discord.com");
         assert_eq!(verified.port, 443);
@@ -4034,7 +4034,7 @@ mod tests {
             "spiffe://penguintech.io/alpha/svc-process",
             "tenant-a",
             "community-a",
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             DestinationCategory::Fqdn,
             "discord.com",
             443,
@@ -4193,13 +4193,13 @@ mod tests {
             truncated: false,
         }));
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("discord.com".to_string(), vec!["POST".to_string()])],
             transport,
         );
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "POST", "url": "https://discord.com/api/webhooks/1"}),
             )
             .await
@@ -4230,13 +4230,13 @@ mod tests {
             truncated: true,
         }));
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("discord.com".to_string(), vec!["GET".to_string()])],
             transport,
         );
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/big"}),
             )
             .await
@@ -4284,7 +4284,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row_and_secrets(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
                 HashMap::from([(
                     "DISCORD_TOKEN_REF".to_string(),
@@ -4307,7 +4307,7 @@ mod tests {
         assert!(!guest_args_serialized.contains("sk-live"));
 
         guard
-            .send("waddles.a.b.c", &guest_args)
+            .send("penguintechinc.waddles.a-b-c", &guest_args)
             .await
             .expect("send succeeds");
 
@@ -4345,7 +4345,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row_and_secrets(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
                 HashMap::from([(
                     "DISCORD_TOKEN_REF".to_string(),
@@ -4357,7 +4357,7 @@ mod tests {
         );
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({
                     "method": "POST",
                     "url": "https://discord.com/api/webhooks/1",
@@ -4385,7 +4385,7 @@ mod tests {
             Arc::new(FakeTransport::default()),
             default_limits(),
             catalog_with_row_and_secrets(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
                 HashMap::from([(
                     "DISCORD_TOKEN_REF".to_string(),
@@ -4397,7 +4397,7 @@ mod tests {
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({
                     "method": "POST",
                     "url": "https://discord.com/api/webhooks/1",
@@ -4437,7 +4437,7 @@ mod tests {
             // No grants at all -- the bundle's activation config never
             // mentions `DATABASE_URL` (or anything else) as a secret ref.
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
             ),
             test_metrics(),
@@ -4445,7 +4445,7 @@ mod tests {
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({
                     "method": "POST",
                     "url": "https://discord.com/api/webhooks/1",
@@ -4474,7 +4474,7 @@ mod tests {
             Arc::new(FakeTransport::default()),
             default_limits(),
             catalog_with_row_and_secrets(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
                 HashMap::from([(
                     "DISCORD_TOKEN_REF".to_string(),
@@ -4486,7 +4486,7 @@ mod tests {
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({
                     "method": "POST",
                     "url": "https://discord.com/api/webhooks/1",
@@ -4514,7 +4514,7 @@ mod tests {
             ),
             limits,
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -4522,10 +4522,10 @@ mod tests {
         );
         let args = serde_json::json!({"method": "GET", "url": "https://discord.com/"});
         guard
-            .send("waddles.a.b.c", &args)
+            .send("penguintechinc.waddles.a-b-c", &args)
             .await
             .expect("first call within burst succeeds");
-        let err = guard.send("waddles.a.b.c", &args).await.unwrap_err();
+        let err = guard.send("penguintechinc.waddles.a-b-c", &args).await.unwrap_err();
         assert_eq!(err.code, "rate_limited");
     }
 
@@ -4544,13 +4544,13 @@ mod tests {
                     truncated: false,
                 }));
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("discord.com".to_string(), vec!["GET".to_string()])],
             transport,
         );
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/start"}),
             )
             .await
@@ -4570,13 +4570,13 @@ mod tests {
             truncated: false,
         }));
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("discord.com".to_string(), vec!["GET".to_string()])],
             transport,
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/start"}),
             )
             .await
@@ -4615,7 +4615,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row_and_secrets(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![
                     ("host-a.example.com".to_string(), vec!["GET".to_string()]),
                     ("host-b.example.com".to_string(), vec!["GET".to_string()]),
@@ -4633,7 +4633,7 @@ mod tests {
 
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({
                     "method": "GET",
                     "url": "https://host-a.example.com/start",
@@ -4690,7 +4690,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row_and_secrets(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("host-a.example.com".to_string(), vec!["GET".to_string()])],
                 HashMap::from([("TOKEN_REF".to_string(), "EGRESS_TEST_HOST_A".to_string())]),
             ),
@@ -4705,7 +4705,7 @@ mod tests {
 
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({
                     "method": "GET",
                     "url": "https://host-a.example.com/start",
@@ -4760,7 +4760,7 @@ mod tests {
         );
         row.secret_granted_hosts = HashSet::from(["host-b.example.com".to_string()]);
         let catalog = TestCatalog::new();
-        catalog.insert("waddles.a.b.c", row);
+        catalog.insert("penguintechinc.waddles.a-b-c", row);
         let guard = EgressGuard::new(
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
@@ -4776,7 +4776,7 @@ mod tests {
 
         guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({
                     "method": "GET",
                     "url": "https://host-a.example.com/start",
@@ -4814,13 +4814,13 @@ mod tests {
             truncated: false,
         }));
         let guard = guard_with(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             vec![("discord.com".to_string(), vec!["GET".to_string()])],
             transport,
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/start"}),
             )
             .await
@@ -4852,7 +4852,7 @@ mod tests {
             ),
             limits,
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["GET".to_string()])],
             ),
             test_metrics(),
@@ -4860,7 +4860,7 @@ mod tests {
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://discord.com/start"}),
             )
             .await
@@ -4870,9 +4870,9 @@ mod tests {
 
     #[tokio::test]
     async fn malformed_args_are_rejected_as_invalid_args() {
-        let guard = guard_with("waddles.a.b.c", vec![], FakeTransport::default());
+        let guard = guard_with("penguintechinc.waddles.a-b-c", vec![], FakeTransport::default());
         let err = guard
-            .send("waddles.a.b.c", &serde_json::json!({"not": "a request"}))
+            .send("penguintechinc.waddles.a-b-c", &serde_json::json!({"not": "a request"}))
             .await
             .unwrap_err();
         assert_eq!(err.code, "invalid_args");
@@ -4891,7 +4891,7 @@ mod tests {
             Arc::clone(&transport) as Arc<dyn HttpTransport>,
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
             ),
             test_metrics(),
@@ -4899,7 +4899,7 @@ mod tests {
         );
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "POST", "url": "https://discord.com/api/webhooks/1"}),
             )
             .await
@@ -4910,7 +4910,7 @@ mod tests {
         assert!(transport.requests.lock().unwrap().is_empty());
         let value = guard
             .denied_total
-            .with_label_values(&["waddles.a.b.c", "feature_disabled"])
+            .with_label_values(&["penguintechinc.waddles.a-b-c", "feature_disabled"])
             .get();
         assert_eq!(value, 1);
     }
@@ -4921,7 +4921,7 @@ mod tests {
             Arc::new(FakeTransport::default().queue(Ok(ok_response()))),
             default_limits(),
             catalog_with_row(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 vec![("discord.com".to_string(), vec!["POST".to_string()])],
             ),
             test_metrics(),
@@ -4929,7 +4929,7 @@ mod tests {
         );
         let result = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "POST", "url": "https://discord.com/api/webhooks/1"}),
             )
             .await;
@@ -5028,7 +5028,7 @@ mod tests {
     // response that could carry the value back out. The value never enters
     // the guest. --
 
-    const QS_APP: &str = "waddles.a.b.c";
+    const QS_APP: &str = "penguintechinc.waddles.a-b-c";
     const QS_WEATHER: &str = "api.weatherapi.com";
     const QS_SECRET: &str = "wk_live_9f8e7d6c5b4a3210";
     const QS_HEADER_SECRET: &str = "hdr-token-abc123";

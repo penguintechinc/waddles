@@ -26,7 +26,7 @@ license: MIT
 source_url: https://github.com/acme/waddles-bundle
 homepage_url: https://acme.example.com
 alternative_to:
-  - waddles.socials.music.default
+  - penguintechinc.waddles.socials-music
 notice: "Portions (c) Acme Corp, under MIT."
 category: alternatives
 ```

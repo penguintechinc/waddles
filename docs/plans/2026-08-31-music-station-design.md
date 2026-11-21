@@ -370,8 +370,8 @@ at all — today's Connect-device control (`spotify_provider.py:367-386`) plays 
 
 | Stage | Component(s) | What it does |
 |---|---|---|
-| `ingest` | 3 source-specific bundles: `waddles.social.music-station.spotify-ingest`, `...youtube-ingest`, `...soundcloud-ingest` | OAuth-backed resolve of a request/playlist URL into `Track` events (§5, §6) |
-| `process` | 1 shared component: `waddles.social.music-station.queue` | dedupe, ordering, requester limits, now-playing advance, category filtering (§4, §7) |
+| `ingest` | 3 source-specific bundles: `penguintechinc.waddles.social-music-station-spotify-ingest`, `...youtube-ingest`, `...soundcloud-ingest` | OAuth-backed resolve of a request/playlist URL into `Track` events (§5, §6) |
+| `process` | 1 shared component: `penguintechinc.waddles.social-music-station-queue` | dedupe, ordering, requester limits, now-playing advance, category filtering (§4, §7) |
 | `action` | optional, thin | e.g. an optional "now playing" chat announcement — not required by the model |
 | `presentation` | Music Station player + queue/request-list rendering | client-side playback, live queue state (§8) |
 

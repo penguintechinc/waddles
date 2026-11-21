@@ -203,7 +203,7 @@ mod tests {
 
     #[test]
     fn authorize_kv_denies_an_app_id_the_snapshot_has_never_seen() {
-        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.unknown");
+        let scope = KvScope::new("acme", Some("main".to_string()), "penguintechinc.waddles.bot-unknown");
         let snapshot = snapshot_granting("penguintechinc.waddles.fixture-bot-a");
         let err = authorize_kv(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");

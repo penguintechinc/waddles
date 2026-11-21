@@ -139,7 +139,7 @@ def test_0092_0095_are_noops_when_legacy_objects_already_exist() -> None:
                 updated_at TIMESTAMPTZ DEFAULT NOW()
             );
             ALTER TABLE app_catalog ADD COLUMN status TEXT DEFAULT 'disabled-sentinel';
-            INSERT INTO app_catalog (app_id) VALUES ('waddles.t.f.a');
+            INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.t-f-a');
             """,
         )
         before = _psql(

@@ -139,7 +139,7 @@ mod tests {
     fn validate_identifier_accepts_the_allowed_shape() {
         assert!(validate_identifier("fishing_core").is_ok());
         assert!(validate_identifier("a").is_ok());
-        assert!(validate_identifier("waddles_core_quotes_1").is_ok());
+        assert!(validate_identifier("penguintechinc_waddles_quotes_1").is_ok());
     }
 
     #[test]

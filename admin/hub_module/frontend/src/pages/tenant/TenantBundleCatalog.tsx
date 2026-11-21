@@ -139,7 +139,7 @@ export default function TenantBundleCatalog() {
               type="text"
               value={newAppId}
               onChange={(event) => setNewAppId(event.target.value)}
-              placeholder="waddles.example.app"
+              placeholder="penguintechinc.waddles.my-app"
               className="bg-surface-raised border border-line rounded-md px-3 py-2 text-fg focus:outline-none focus:ring-2 focus:ring-sky-500"
             />
           </div>

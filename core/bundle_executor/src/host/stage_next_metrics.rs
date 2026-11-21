@@ -347,8 +347,8 @@ mod tests {
         (h, m)
     }
 
-    const APP: &str = "waddles.test.app";
-    const OTHER: &str = "waddles.test.other";
+    const APP: &str = "penguintechinc.waddles.test-app";
+    const OTHER: &str = "penguintechinc.waddles.test-other";
 
     fn limit(r: Result<(), metrics::Error>) -> bool {
         matches!(r, Err(metrics::Error::LimitExceeded))
@@ -564,7 +564,7 @@ mod tests {
             Err(metrics::Error::LimitExceeded)
         ));
         // Another bundle has its own budget; an already-used name keeps working.
-        m.counter_add("waddles.test.other", "one_too_many", 1, &[])
+        m.counter_add("penguintechinc.waddles.test-other", "one_too_many", 1, &[])
             .unwrap();
         m.counter_add(APP, "dual", 1, &[]).unwrap();
     }
@@ -593,7 +593,7 @@ mod tests {
     #[tokio::test]
     async fn the_wit_host_impl_stamps_the_invocations_app_id() {
         use crate::engine::stage_next_world::waddle::bundle::metrics::Host;
-        let mut state = ExecState::new(None, "waddles.test.host-impl".to_string(), 1);
+        let mut state = ExecState::new(None, "penguintechinc.waddles.test-host-impl".to_string(), 1);
         state
             .counter_add("host_impl_total".into(), 2, vec![l("outcome", "ok")])
             .await

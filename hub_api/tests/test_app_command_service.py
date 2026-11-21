@@ -30,8 +30,8 @@ from services.bundle_manifest_v2 import (
     Limits,
 )
 
-_A = "waddles.core.alpha.default"
-_B = "waddles.core.beta.default"
+_A = "penguintechinc.waddles.alpha"
+_B = "penguintechinc.waddles.beta"
 _T0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 _T1 = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 _T2 = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)

@@ -205,7 +205,8 @@ class AuditValidationError(ValueError):
 
 
 #: ``<identifier>@<semver>`` -- how bundle lifecycle events name a versioned artefact
-#: (``waddles.core.ping@1.0.0``). The part after ``@`` must look like a version (digits first,
+#: (``penguintechinc.waddles.ping@1.0.0``). The part after ``@`` must look like a version
+#: (digits first,
 #: no letters-only TLD), so an e-mail address still cannot pass as an identifier.
 _VERSIONED_REF_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9_.\-]{1,100}@\d+(\.\d+){0,3}([\-+][A-Za-z0-9.\-+]{0,30})?$"

@@ -23,8 +23,8 @@ const IMAGE: &str = "postgres:17.6-bookworm";
 const SU_PW: &str = "postgres_test_superuser_pw";
 const ROLE_PW: &str = "waddles_bundle_storage_audit_test_pw";
 const DDL: &str = include_str!("../../../scripts/db/bundle_storage_audit.sql");
-const OWNER: &str = "waddles.harness.media";
-const CONSUMER: &str = "waddles.app.clips";
+const OWNER: &str = "penguintechinc.waddles.harness-media";
+const CONSUMER: &str = "penguintechinc.waddles.app-clips";
 
 fn scope(app: &str, grants: &[&str]) -> StorageScope {
     StorageScope {
@@ -80,7 +80,7 @@ async fn audit_rows_land_in_postgres_and_role_is_insert_only() {
         StorageHost::with_rate_limit(backend, Arc::new(PgAuditSink::new(role_db.clone())), 1000);
 
     let owner = scope(OWNER, &[]);
-    let consumer = scope(CONSUMER, &["storage.read:waddles.harness.media"]);
+    let consumer = scope(CONSUMER, &["storage.read:penguintechinc.waddles.harness-media"]);
     h.put(
         &owner,
         None,

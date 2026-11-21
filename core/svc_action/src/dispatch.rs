@@ -2253,7 +2253,7 @@ mod tests {
             mac,
             "k1",
         );
-        let err = crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.other.app.default")
+        let err = crate::hop::verify_hop(&ring, &d.env, &d.stream, "penguintechinc.waddles.other-app")
             .unwrap_err();
         assert_eq!(err.as_metric_reason(), "grant_scope_mismatch");
     }
@@ -4162,7 +4162,7 @@ mod tests {
 
         #[tokio::test]
         async fn every_stream_is_sampled_each_interval_until_the_guard_drops() {
-            let (source, calls, _fail) = scripted(vec![stat("waddles.mx.sampler.v1", 0)]);
+            let (source, calls, _fail) = scripted(vec![stat("penguintechinc.waddles.mx-sampler-v1", 0)]);
             let streams = vec!["stream-a".to_string(), "stream-b".to_string()];
             let guard = spawn_group_backlog_sampler(source, streams, 20, 5_000)
                 .expect("a sampler is spawned for a non-zero interval");
@@ -4204,8 +4204,8 @@ mod tests {
         #[tokio::test]
         async fn a_group_above_the_pel_alert_is_still_sampled_without_disturbing_the_loop() {
             let (source, calls, _fail) = scripted(vec![
-                stat("waddles.mx.stuck.v1", 9_999),
-                stat("waddles.mx.fine.v1", 1),
+                stat("penguintechinc.waddles.mx-stuck-v1", 9_999),
+                stat("penguintechinc.waddles.mx-fine-v1", 1),
             ]);
             let _guard = spawn_group_backlog_sampler(source, vec!["s".to_string()], 15, 5_000)
                 .expect("sampler spawned");
@@ -4253,7 +4253,7 @@ mod tests {
                 .await
                 .expect("connect");
             let stream = test_support::unique_key("backlog-sampler-stream");
-            let group = "waddles.mx.backlog.v1";
+            let group = "penguintechinc.waddles.mx-backlog-v1";
             client.ensure_group(&stream, group).await.expect("group");
 
             // Three entries; read two without acking -> pending 2, lag 1.

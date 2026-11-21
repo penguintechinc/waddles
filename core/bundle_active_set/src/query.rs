@@ -901,14 +901,14 @@ mod tests {
         // `Vec<app_install_approvals::Model>` (which wouldn't type-check).
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest),
                 scan_status: "scanned".to_string(),
@@ -929,7 +929,7 @@ mod tests {
         );
         assert_eq!(
             result.excluded,
-            vec![("waddles.test.app".to_string(), ExclusionReason::NoApproval)]
+            vec![("penguintechinc.waddles.test-app".to_string(), ExclusionReason::NoApproval)]
         );
         Ok(())
     }
@@ -944,14 +944,14 @@ mod tests {
         let digest = format!("sha256:{}", "c".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest.clone()),
                 scan_status: "scanned".to_string(),
@@ -969,7 +969,7 @@ mod tests {
                 // sentinel-mismatch doc on the entity module) against
                 // this active row's `community_id = 0` sentinel.
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -977,7 +977,7 @@ mod tests {
             .into_connection();
         let result = read_active_set(&db, 1, 0, None).await?;
         assert_eq!(result.rows.len(), 1);
-        assert_eq!(result.rows[0].app_id, "waddles.test.app");
+        assert_eq!(result.rows[0].app_id, "penguintechinc.waddles.test-app");
         assert_eq!(result.rows[0].digest, digest);
         let (expected_component, expected_sidecar) = derive_component_keys(&digest);
         assert_eq!(result.rows[0].component_key, expected_component);
@@ -986,7 +986,7 @@ mod tests {
         assert_eq!(
             result.degraded,
             vec![(
-                "waddles.test.app".to_string(),
+                "penguintechinc.waddles.test-app".to_string(),
                 DegradedReason::MissingComponentKey
             )]
         );
@@ -1001,18 +1001,18 @@ mod tests {
     async fn read_active_set_uses_the_real_component_key_column_when_present(
     ) -> Result<(), ActiveSetError> {
         let digest = format!("sha256:{}", "f".repeat(64));
-        let real_component_key = "bundles/waddles.test.app/1/real.wasm".to_string();
-        let real_sidecar_key = "bundles/waddles.test.app/1/real.json".to_string();
+        let real_component_key = "bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string();
+        let real_sidecar_key = "bundles/penguintechinc.waddles.test-app/1/real.json".to_string();
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest.clone()),
                 scan_status: "scanned".to_string(),
@@ -1027,7 +1027,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -1060,19 +1060,19 @@ mod tests {
         let digest = format!("sha256:{}", "d".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest),
                 scan_status: "scanned".to_string(),
-                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
-                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                component_key: Some("bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/penguintechinc.waddles.test-app/1/real.json".to_string()),
                 artifact_signature: Some("c2lnbmF0dXJl".to_string()),
                 artifact_signature_key_id: Some("platform-2026-09".to_string()),
                 artifact_signed_approval_id: Some(42),
@@ -1082,7 +1082,7 @@ mod tests {
                 id: 42,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -1113,19 +1113,19 @@ mod tests {
         let digest = format!("sha256:{}", "e".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest),
                 scan_status: "scanned".to_string(),
-                component_key: Some("bundles/waddles.test.app/1/real.wasm".to_string()),
-                sidecar_key: Some("bundles/waddles.test.app/1/real.json".to_string()),
+                component_key: Some("bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string()),
+                sidecar_key: Some("bundles/penguintechinc.waddles.test-app/1/real.json".to_string()),
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
@@ -1135,7 +1135,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -1157,17 +1157,17 @@ mod tests {
     async fn read_active_set_derives_only_the_sidecar_when_component_key_is_present_but_sidecar_is_null(
     ) -> Result<(), ActiveSetError> {
         let digest = format!("sha256:{}", "a1".repeat(32));
-        let real_component_key = "bundles/waddles.test.app/1/real.wasm".to_string();
+        let real_component_key = "bundles/penguintechinc.waddles.test-app/1/real.wasm".to_string();
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest.clone()),
                 scan_status: "scanned".to_string(),
@@ -1182,7 +1182,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -1257,14 +1257,14 @@ mod tests {
     async fn read_active_set_excludes_a_version_missing_its_digest() -> Result<(), ActiveSetError> {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: None,
                 scan_status: "not_scanned".to_string(),
@@ -1279,7 +1279,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -1290,7 +1290,7 @@ mod tests {
         assert_eq!(
             result.excluded,
             vec![(
-                "waddles.test.app".to_string(),
+                "penguintechinc.waddles.test-app".to_string(),
                 ExclusionReason::MissingDigest
             )]
         );
@@ -1364,14 +1364,14 @@ mod tests {
         let hex = "1".repeat(64);
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(hex.clone()),
                 scan_status: "scanned".to_string(),
@@ -1386,7 +1386,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -1539,14 +1539,14 @@ mod tests {
     async fn read_active_set_excludes_a_malformed_artifact_digest() -> Result<(), ActiveSetError> {
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some("not-a-digest".to_string()),
                 scan_status: "scanned".to_string(),
@@ -1561,7 +1561,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: sea_orm::JsonValue::Null,
@@ -1572,7 +1572,7 @@ mod tests {
         assert_eq!(
             result.excluded,
             vec![(
-                "waddles.test.app".to_string(),
+                "penguintechinc.waddles.test-app".to_string(),
                 ExclusionReason::MalformedDigest
             )]
         );
@@ -1654,19 +1654,19 @@ mod tests {
         let digest = format!("sha256:{}", "d".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest.clone()),
                 scan_status: "scanned".to_string(),
-                component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
-                sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+                component_key: Some("bundles/penguintechinc.waddles.test-app/1/c.wasm".to_string()),
+                sidecar_key: Some("bundles/penguintechinc.waddles.test-app/1/s.json".to_string()),
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
@@ -1676,7 +1676,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: serde_json::json!({
@@ -1751,19 +1751,19 @@ mod tests {
         let digest = format!("sha256:{}", "e".repeat(64));
         let db = MockDatabase::new(DatabaseBackend::Postgres)
             .append_query_results([vec![app_active_versions::Model {
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 tenant_id: 1,
                 community_id: 0,
                 version_id: 10,
             }]])
             .append_query_results([vec![app_versions::Model {
                 id: 10,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 artifact_digest: Some(digest.clone()),
                 scan_status: "scanned".to_string(),
-                component_key: Some("bundles/waddles.test.app/1/c.wasm".to_string()),
-                sidecar_key: Some("bundles/waddles.test.app/1/s.json".to_string()),
+                component_key: Some("bundles/penguintechinc.waddles.test-app/1/c.wasm".to_string()),
+                sidecar_key: Some("bundles/penguintechinc.waddles.test-app/1/s.json".to_string()),
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
@@ -1773,7 +1773,7 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: None,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 superseded_by: None,
                 summary_json: serde_json::json!({

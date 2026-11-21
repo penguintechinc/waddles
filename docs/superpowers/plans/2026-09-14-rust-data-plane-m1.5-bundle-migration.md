@@ -3489,13 +3489,13 @@ EOF
 | `bot_process.py` | `penguintechinc.waddles.discord-pipeline`, `penguintechinc.waddles.twitch-pipeline` | yes (2 rows, one file) |
 | `community_announcements_process.py` | `penguintechinc.waddles.announcements-pipeline` | yes |
 | `community_chat_process.py` | `penguintechinc.waddles.chat-pipeline` | yes |
-| `community_context_process.py` | `waddles.community.context.default` | **no — new row** |
+| `community_context_process.py` | `penguintechinc.waddles.community-context` | **no — new row** |
 | `community_forums_process.py` | `penguintechinc.waddles.forums-pipeline` | yes |
 | `community_loyalty_process.py` | `penguintechinc.waddles.loyalty-pipeline` | yes |
 | `community_polls_process.py` | `penguintechinc.waddles.polls-pipeline` | yes |
-| `community_reputation_process.py` | `waddles.community.reputation.default` | **no — new row** |
+| `community_reputation_process.py` | `penguintechinc.waddles.community-reputation` | **no — new row** |
 | `echo_process.py` | `penguintechinc.waddles.echo-pipeline` | yes |
-| `inventory_process.py` | `waddles.community.inventory.default` | **no — new row** |
+| `inventory_process.py` | `penguintechinc.waddles.community-inventory` | **no — new row** |
 | `marketing_engagement_process.py` | `penguintechinc.waddles.engagement-pipeline` | yes |
 | `social_alias_process.py` | `penguintechinc.waddles.alias-pipeline` | yes |
 | `social_music_process.py` | `penguintechinc.waddles.music-pipeline` | yes |
@@ -3643,7 +3643,7 @@ _CONSUMES_BY_APP_ID: dict[str, str] = {
 # 0016/0017/0019 each establish for other app_ids.
 _NEW_APP_ROWS: tuple[dict[str, str], ...] = (
     {
-        "app_id": "waddles.community.reputation.default",
+        "app_id": "penguintechinc.waddles.community-reputation",
         "module": "community",
         "feature": "waddles.community.reputation",
         "entrypoint": "bundles.community_reputation_process:transform",
@@ -3655,7 +3655,7 @@ _NEW_APP_ROWS: tuple[dict[str, str], ...] = (
         ),
     },
     {
-        "app_id": "waddles.community.context.default",
+        "app_id": "penguintechinc.waddles.community-context",
         "module": "community",
         "feature": "waddles.community.context",
         "entrypoint": "bundles.community_context_process:transform",
@@ -3667,7 +3667,7 @@ _NEW_APP_ROWS: tuple[dict[str, str], ...] = (
         ),
     },
     {
-        "app_id": "waddles.community.inventory.default",
+        "app_id": "penguintechinc.waddles.community-inventory",
         "module": "community",
         "feature": "waddles.community.inventory",
         "entrypoint": "bundles.inventory_process:transform",

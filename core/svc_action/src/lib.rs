@@ -418,7 +418,7 @@ where
 /// Product identifier `penguin_licensing::LicenseConfig` validates against
 /// and the flag-key prefix it resolves under (spec §13.5: "Flag keys
 /// follow `{product}.{feature}`") -- both flags this service checks are
-/// `waddles.core.*`.
+/// `penguintechinc.waddles.*`.
 const LICENSE_PRODUCT: &str = "waddles";
 
 /// PenguinTech/Waddles-owned bypass suffix -- the sole license/flag
@@ -2387,7 +2387,7 @@ mod tests {
         let _guard = ENV_LOCK.lock().await;
         // SAFETY: serialized by ENV_LOCK.
         unsafe { std::env::remove_var("ENVELOPE_BINDING_KEYS") };
-        let cli = CliConfig::parse_from(["svc-action", "--action-app-id", "waddles.a.b.c"]);
+        let cli = CliConfig::parse_from(["svc-action", "--action-app-id", "penguintechinc.waddles.a-b-c"]);
         let config = Config {
             cli,
             db_password: Secret::new("test-password"),
@@ -2551,7 +2551,7 @@ mod tests {
         cli.validate().expect("populated denylist passes");
         let catalog = Arc::new(distribution::BundleCatalog::new());
         catalog.update(vec![distribution::BundleRow {
-            app_id: "waddles.a.b.c".to_string(),
+            app_id: "penguintechinc.waddles.a-b-c".to_string(),
             version: "1.0.0".to_string(),
             artifact_digest: Some("sha256:00".to_string()),
             component_key: "k".to_string(),
@@ -2572,7 +2572,7 @@ mod tests {
         .expect("valid config produces a guard");
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
             )
             .await
@@ -2600,7 +2600,7 @@ mod tests {
         );
         let catalog = Arc::new(distribution::BundleCatalog::new());
         catalog.update(vec![distribution::BundleRow {
-            app_id: "waddles.a.b.c".to_string(),
+            app_id: "penguintechinc.waddles.a-b-c".to_string(),
             version: "1.0.0".to_string(),
             artifact_digest: Some("sha256:00".to_string()),
             component_key: "k".to_string(),
@@ -2621,7 +2621,7 @@ mod tests {
         .expect("valid config produces a guard");
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.0.0.9/"}),
             )
             .await
@@ -2759,11 +2759,11 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let loader = tokio::spawn(env_bundle_loader_loop(
             Arc::clone(&connections),
-            "waddles.a.b.c".to_string(),
+            "penguintechinc.waddles.a-b-c".to_string(),
             "2.0.0".to_string(),
             "sha256:aa".to_string(),
-            "bundles/waddles.a.b.c/2.0.0/aa.wasm".to_string(),
-            "bundles/waddles.a.b.c/2.0.0/aa.json".to_string(),
+            "bundles/penguintechinc.waddles.a-b-c/2.0.0/aa.wasm".to_string(),
+            "bundles/penguintechinc.waddles.a-b-c/2.0.0/aa.json".to_string(),
             2000,
             shutdown_rx,
         ));
@@ -2782,14 +2782,14 @@ mod tests {
             .await
             .clone()
             .expect("the fake executor must have received a load frame");
-        assert_eq!(load_body.app_id, "waddles.a.b.c");
+        assert_eq!(load_body.app_id, "penguintechinc.waddles.a-b-c");
         assert_eq!(load_body.version, "2.0.0");
         assert_eq!(load_body.digest, "sha256:aa");
         assert_eq!(
             load_body.component_key,
-            "bundles/waddles.a.b.c/2.0.0/aa.wasm"
+            "bundles/penguintechinc.waddles.a-b-c/2.0.0/aa.wasm"
         );
-        assert_eq!(load_body.sidecar_key, "bundles/waddles.a.b.c/2.0.0/aa.json");
+        assert_eq!(load_body.sidecar_key, "bundles/penguintechinc.waddles.a-b-c/2.0.0/aa.json");
     }
 
     /// `env_bundle_loader_loop` must terminate promptly once `shutdown`
@@ -2802,7 +2802,7 @@ mod tests {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let loader = tokio::spawn(env_bundle_loader_loop(
             connections,
-            "waddles.a.b.c".to_string(),
+            "penguintechinc.waddles.a-b-c".to_string(),
             "1".to_string(),
             "sha256:aa".to_string(),
             "component-key".to_string(),

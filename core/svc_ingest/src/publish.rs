@@ -79,7 +79,8 @@ pub fn deterministic_workstream_id(source_id: &str) -> String {
 /// Sanitizes one `app_id` path segment (PA-ENVELOPE): lowercase, every
 /// character outside `[a-z0-9_-]` becomes `-`, and any leading run of
 /// characters outside `[a-z0-9]` is stripped, so the segment can never
-/// violate `penguin_spine`'s `^waddles\.<seg>\.<seg>\.<seg>$` app_id regex.
+/// violate `penguin_spine`'s `^[a-z0-9-]+\.[a-z0-9-]+\.[a-z0-9-]+$` app_id regex (the
+/// caller additionally maps `_` to `-`, which that regex does not allow).
 #[must_use]
 pub fn app_id_slug(raw: &str) -> String {
     let mut out: String = raw
@@ -697,9 +698,9 @@ async fn publish_resolved_inner<A: EventAppender, M: SpineMetrics + ?Sized, D: D
         tenant_id: resolved.as_ref().map(|r| r.tenant_id),
         community_id: resolved.as_ref().map(|r| r.community_id),
         app_id: format!(
-            "waddles.ingest.{}.{}",
-            app_id_slug(&platform),
-            app_id_slug(source_id)
+            "penguintechinc.waddles.ingest-{}-{}",
+            app_id_slug(&platform).replace('_', "-"),
+            app_id_slug(source_id).replace('_', "-")
         ),
         // "process", NOT "ingest": `StageEnvelope.stage` names the stage
         // that will read/consume this entry off the stream and therefore
@@ -899,7 +900,7 @@ mod tests {
         );
         assert_eq!(env.schema_version, LEGACY_ENVELOPE_SCHEMA_VERSION);
         assert_eq!(env.stage, "process");
-        assert_eq!(env.app_id, "waddles.ingest.twitch.tw-channela");
+        assert_eq!(env.app_id, "penguintechinc.waddles.ingest-twitch-tw-channela");
         assert_eq!(env.target_app_id, None);
         assert_eq!(env.tenant, "acme");
         assert_eq!(env.community.as_deref(), Some("main"));
@@ -1187,7 +1188,7 @@ mod tests {
         .await
         .unwrap();
         let app_id = &appender.calls.lock().unwrap()[0].1.app_id;
-        assert_eq!(app_id, "waddles.ingest.custom-github.acme-github");
+        assert_eq!(app_id, "penguintechinc.waddles.ingest-custom-github-acme-github");
         assert!(app_id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));

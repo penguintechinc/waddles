@@ -1,4 +1,4 @@
-# core-bundle-seeder -- builds the first-party waddles.core.* example bundles to real WASI 0.2
+# core-bundle-seeder -- builds the first-party penguintechinc.waddles.* example bundles to real WASI 0.2
 # components, then packages them + their hub-api manifests + bundles/core-bundles.yaml into the
 # hub-api runtime, with hub_api/cli/seed_core_bundles.py as the entrypoint.
 #

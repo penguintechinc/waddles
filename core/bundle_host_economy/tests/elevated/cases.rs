@@ -11,8 +11,8 @@ use bundle_host_economy::{
     ELEVATED_MAX_PER_OP_CEILING,
 };
 
-const CALLER: &str = "waddles.app.steal-game";
-const OTHER_CALLER: &str = "waddles.app.other-game";
+const CALLER: &str = "penguintechinc.waddles.app-steal-game";
+const OTHER_CALLER: &str = "penguintechinc.waddles.app-other-game";
 const TF: &str = "economy.transfer_from";
 const MINT: &str = "economy.app_mint";
 /// The hub user who approved the grants (`community_permission_grants.granted_by`).
@@ -130,7 +130,7 @@ async fn a_revoked_grant_a_wrong_permission_a_wrong_app_and_a_wrong_community_al
         Err(EconomyError::ElevatedNotGranted)
     );
     // Another app's grant does not authorize this caller.
-    grant(&f, "waddles.app.third", TF, "{}").await;
+    grant(&f, "penguintechinc.waddles.app-third", TF, "{}").await;
     assert_eq!(
         steal(&f, f.bob, f.alice, 10).await,
         Err(EconomyError::ElevatedNotGranted)

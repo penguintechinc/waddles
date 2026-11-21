@@ -285,7 +285,7 @@ mod tests {
             }
         });
         let bridge = crate::stage_bridge::bridge_to_stage(exec_io).await.unwrap();
-        ExecState::new(Some(bridge), "waddles.test.media".to_string(), 1)
+        ExecState::new(Some(bridge), "penguintechinc.waddles.test-media".to_string(), 1)
     }
 
     /// Every `media` host import round-trips over the real host-call path and maps typed
