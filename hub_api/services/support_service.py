@@ -305,6 +305,18 @@ def create_ticket(
     if not clean_subject:
         raise bad_request("Subject is required")
 
+    if category_id is not None:
+        owned = (
+            dal(
+                (dal.support_ticket_categories.id == category_id)
+                & (dal.support_ticket_categories.community_id == community_id)
+            )
+            .select(dal.support_ticket_categories.id)
+            .first()
+        )
+        if owned is None:  # a category of another community must never be attached here
+            raise not_found("Category not found")
+
     count = dal(dal.support_tickets.community_id == community_id).count()
     ticket_number = f"SUP-{count + 1:05d}"
     now = datetime.utcnow()
