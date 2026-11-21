@@ -209,6 +209,12 @@ pub trait ReplayGuard: Send + Sync {
     /// subsequent call within the TTL window (a duplicate -- must not
     /// re-process).
     async fn check_and_mark(&self, message_id: &str) -> Result<bool, ReplayGuardError>;
+
+    /// Releases the marker of `message_id` so a redelivery is processed again (used when a
+    /// verified delivery hit a transient failure and is answered 5xx). Default: no-op.
+    async fn forget(&self, _message_id: &str) -> Result<(), ReplayGuardError> {
+        Ok(())
+    }
 }
 
 /// Production [`ReplayGuard`]: Valkey `SET NX PX` on a per-message-id key.
@@ -251,6 +257,15 @@ impl ReplayGuard for RedisReplayGuard {
             .await
             .map_err(|e| ReplayGuardError(e.to_string()))?;
         Ok(result.is_some())
+    }
+
+    async fn forget(&self, message_id: &str) -> Result<(), ReplayGuardError> {
+        let mut conn = self.conn.clone();
+        redis::cmd("DEL")
+            .arg(format!("{DEDUP_KEY_PREFIX}{message_id}"))
+            .query_async::<()>(&mut conn)
+            .await
+            .map_err(|e| ReplayGuardError(e.to_string()))
     }
 }
 
@@ -331,6 +346,10 @@ pub enum EventSubError {
     /// Twitch redelivers (a 2xx would lose the unban for good).
     #[error("eventsub subscription ledger unavailable")]
     LedgerUnavailable,
+    /// A transient dependency failure while handling a verified `channel.unban`: 5xx so Twitch
+    /// redelivers (the dedup marker is released first).
+    #[error("eventsub unban hit a transient failure")]
+    Retryable,
 }
 
 /// The non-error outcomes [`handle_webhook`] can produce; `crate::http::
@@ -812,9 +831,17 @@ where
             let event_body = body_json.get("event").cloned().unwrap_or_default();
             match (unban, &ledger_entry) {
                 (Some(u), Some(entry)) => {
-                    let _ = u
+                    if let crate::twitch_unban::Outcome::Retry(_) = u
                         .handle(entry, &subscription, &event_body, timestamp, message_id)
-                        .await;
+                        .await
+                    {
+                        // Release the dedup marker or Twitch's redelivery would be swallowed.
+                        if let Err(err) = dedup.forget(message_id).await {
+                            tracing::warn!(error = %err, "eventsub.dedup_forget_failed");
+                        }
+                        metrics.record_eventsub_verification("unban_retry");
+                        return Err(EventSubError::Retryable);
+                    }
                 }
                 (Some(u), None) => {
                     let _ = u.unbound();
@@ -928,6 +955,10 @@ mod tests {
                 return Err(ReplayGuardError("simulated valkey outage".to_string()));
             }
             Ok(self.seen.lock().unwrap().insert(message_id.to_string()))
+        }
+        async fn forget(&self, message_id: &str) -> Result<(), ReplayGuardError> {
+            self.seen.lock().unwrap().remove(message_id);
+            Ok(())
         }
     }
 
@@ -2364,5 +2395,70 @@ mod tests {
             1,
             "nothing forwarded after rotation or revoke"
         );
+    }
+
+    /// Ban-state double that fails (transient) while `down` is set.
+    struct Flaky(Arc<std::sync::atomic::AtomicBool>);
+    impl BanState for Flaky {
+        fn is_banned<'a>(
+            &'a self,
+            _c: i64,
+            _l: &'a str,
+            _b: &'a str,
+            _u: &'a str,
+        ) -> BoxFut<'a, Result<bool, ()>> {
+            let down = self.0.load(std::sync::atomic::Ordering::SeqCst);
+            Box::pin(async move {
+                if down {
+                    Err(())
+                } else {
+                    Ok(false)
+                }
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn a_transient_failure_on_a_verified_unban_is_5xx_and_the_redelivery_is_processed() {
+        let down = Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sink = Arc::new(Sink::default());
+        let u = TwitchUnban::new(
+            Arc::new(Ledger(vec![(UNBAN_KEY, (LEDGER_SECRET, 7, 9, 33))])),
+            Arc::new(Bound(vec![((7, 9, 33), "alice")])),
+            Arc::new(Flaky(Arc::clone(&down))),
+            Arc::new(Tok),
+            Arc::clone(&sink) as Arc<dyn UnbanSink>,
+            Some(Signer::from_seed("k1", &[7u8; 32]).unwrap()),
+        );
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        let sig = sign(LEDGER_SECRET, "m-t1", &ts, &body);
+        let h = headers("m-t1", &ts, &sig, "notification");
+        let dedup = FakeDedup::default();
+        // Twitch's ban-state read fails: 5xx, nothing forwarded.
+        let r = call_unban(&u, &global(), &dedup, UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Err(EventSubError::Retryable)), "{r:?}");
+        assert!(sink.0.lock().unwrap().is_empty());
+        // Dependency recovers; Twitch redelivers the SAME message id: it is NOT swallowed as a
+        // duplicate and is forwarded once.
+        down.store(false, std::sync::atomic::Ordering::SeqCst);
+        let r = call_unban(&u, &global(), &dedup, UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+        // And a further redelivery is now a duplicate.
+        let r = call_unban(&u, &global(), &dedup, UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::DuplicateIgnored)), "{r:?}");
+    }
+
+    #[tokio::test]
+    async fn permanent_rejections_stay_2xx_and_are_not_retried() {
+        let (u, sink) = unban_rig(true); // re-banned: permanent drop
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        let sig = sign(LEDGER_SECRET, "m-p1", &ts, &body);
+        let h = headers("m-p1", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert!(sink.0.lock().unwrap().is_empty());
     }
 }

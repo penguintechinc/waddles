@@ -215,7 +215,10 @@ async fn a_bound_unban_is_signed_with_ledger_ids_the_event_time_and_only_the_use
     );
     assert_eq!(w["observed_ms"], TS_MS);
     assert_eq!(w["platform"], "twitch");
-    assert_eq!(w["broadcaster_id"], "141");
+    assert!(
+        w.get("broadcaster_id").is_none(),
+        "the raw broadcaster id is never queued"
+    );
     assert_eq!(w["user_uuid"], UUID);
     // The signature covers every field and verifies under the public key.
     let msg = signing_bytes(
@@ -223,14 +226,13 @@ async fn a_bound_unban_is_signed_with_ledger_ids_the_event_time_and_only_the_use
         7,
         9,
         33,
-        "141",
         UUID,
         TS_MS,
         w["exp_ms"].as_u64().unwrap(),
     );
     let sig = B64.decode(w["sig"].as_str().unwrap()).unwrap();
     assert!(pubkey().verify(&msg, &sig).is_ok());
-    let other = signing_bytes("x", 8, 9, 33, "141", UUID, TS_MS, 1);
+    let other = signing_bytes("x", 8, 9, 33, UUID, TS_MS, 1);
     assert!(pubkey().verify(&other, &sig).is_err());
     // The tokenizer was scoped to the ledger tenant/community/connection.
     let calls = r.tok.1.lock().unwrap().clone();
@@ -318,7 +320,7 @@ async fn an_unknown_or_cross_tenant_binding_is_ignored_with_a_metric() {
             TS
         )
         .await,
-        Outcome::Ignored("binding_unavailable")
+        Outcome::Retry("binding_unavailable")
     );
     // A connection of ANOTHER tenant/community is simply not this subscription's binding.
     let r = good_rig();
@@ -372,7 +374,7 @@ async fn a_rebanned_user_or_an_unreadable_state_is_dropped_never_lifted() {
             TS
         )
         .await,
-        Outcome::Ignored("ban_state_unavailable")
+        Outcome::Retry("ban_state_unavailable")
     );
     assert!(r.sink.pushed.lock().unwrap().is_empty());
     assert!(r.tok.1.lock().unwrap().is_empty());
@@ -431,9 +433,14 @@ async fn malformed_condition_timestamp_tokenizer_signer_and_sink_failures_all_fa
             true,
             false,
         );
+        let expected = if reason == "tokenize_unavailable" {
+            Outcome::Retry(reason)
+        } else {
+            Outcome::Ignored(reason)
+        };
         assert_eq!(
             run(&r, &e, &sub("141"), &ev("141", "alice", "777"), TS).await,
-            Outcome::Ignored(reason)
+            expected
         );
     }
     // no signing key, sink down
@@ -457,7 +464,7 @@ async fn malformed_condition_timestamp_tokenizer_signer_and_sink_failures_all_fa
     );
     assert_eq!(
         run(&r, &e, &sub("141"), &ev("141", "alice", "777"), TS).await,
-        Outcome::Ignored("publish_failed")
+        Outcome::Retry("publish_failed")
     );
 }
 
@@ -465,7 +472,7 @@ async fn malformed_condition_timestamp_tokenizer_signer_and_sink_failures_all_fa
 fn the_twitch_domain_label_separates_it_from_the_discord_signature() {
     assert_ne!(DOMAIN, crate::platform_unban::DOMAIN);
     // Same field values under the Discord layout never produce Twitch's bytes.
-    let t = signing_bytes("e", 7, 9, 33, "141", UUID, 5, 6);
+    let t = signing_bytes("e", 7, 9, 33, UUID, 5, 6);
     let d = crate::platform_unban::signing_bytes("e", 7, 33, "twitch", "141", UUID, 5, 6);
     assert_ne!(t, d);
     assert!(t.starts_with(DOMAIN) && d.starts_with(crate::platform_unban::DOMAIN));

@@ -77,19 +77,10 @@ fn keys(kp: &Ed25519KeyPair) -> VerifyKeys {
 }
 
 fn event_with(kp: &Ed25519KeyPair, tenant: i64, community: i64, observed: u64, exp: u64) -> String {
-    let msg = signing_bytes(
-        EVENT,
-        tenant,
-        community,
-        31,
-        BROADCASTER,
-        UUID,
-        observed,
-        exp,
-    );
+    let msg = signing_bytes(EVENT, tenant, community, 31, UUID, observed, exp);
     let sig = b64(kp.sign(&msg).as_ref());
     serde_json::json!({"v":1,"event_id":EVENT,"tenant_id":tenant,"community_id":community,
-        "connection_id":31,"platform":"twitch","broadcaster_id":BROADCASTER,"user_uuid":UUID,
+        "connection_id":31,"platform":"twitch","user_uuid":UUID,
         "observed_ms":observed,"exp_ms":exp,"kid":"k1","sig":sig})
     .to_string()
 }
@@ -105,7 +96,7 @@ fn handler(lift: Arc<FakeLift>, seen_down: bool) -> TwitchUnban {
 
 #[test]
 fn the_domain_label_separates_twitch_from_discord_signatures() {
-    let twitch = signing_bytes(EVENT, 7, 9, 31, BROADCASTER, UUID, 1_000, 2_000);
+    let twitch = signing_bytes(EVENT, 7, 9, 31, UUID, 1_000, 2_000);
     assert!(twitch.starts_with(DOMAIN));
     assert!(!twitch.starts_with(crate::platform_unban::DOMAIN));
 }
@@ -164,7 +155,6 @@ async fn forged_tampered_stale_cross_tenant_and_replayed_events_never_reach_the_
         ("\"community_id\":9", "\"community_id\":10"),
         ("\"connection_id\":31", "\"connection_id\":32"),
         ("\"observed_ms\":1500", "\"observed_ms\":1900"),
-        ("141981764", "999999999"),
     ] {
         assert_eq!(
             h.handle(&good.replace(from, to), 1_000).await,
@@ -219,7 +209,7 @@ async fn a_discord_signed_event_does_not_verify_as_a_twitch_event() {
     );
     let sig = b64(kp.sign(&msg).as_ref());
     let raw = serde_json::json!({"v":1,"event_id":EVENT,"tenant_id":7,"community_id":9,
-        "connection_id":31,"platform":"twitch","broadcaster_id":BROADCASTER,"user_uuid":UUID,
+        "connection_id":31,"platform":"twitch","user_uuid":UUID,
         "observed_ms":1_500,"exp_ms":2_000,"kid":"k1","sig":sig})
     .to_string();
     let lift = Arc::new(FakeLift::default());

@@ -117,6 +117,18 @@ fn ignored(reason: &'static str, entry: &LedgerEntry) -> Outcome {
     Outcome::Ignored(reason)
 }
 
+fn retry(reason: &'static str, entry: &LedgerEntry) -> Outcome {
+    note("retry", reason);
+    tracing::warn!(
+        reason,
+        tenant_id = entry.tenant_id,
+        community_id = entry.community_id,
+        connection_id = entry.connection_id,
+        "twitch unban event hit a transient failure; answering 5xx so Twitch redelivers"
+    );
+    Outcome::Retry(reason)
+}
+
 /// What a `channel.unban` delivery came to.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Outcome {
@@ -124,6 +136,9 @@ pub enum Outcome {
     Forwarded,
     /// Dropped (counted) with a fixed reason; the Waddles ban stays in force.
     Ignored(&'static str),
+    /// A transient dependency failure (binding list, ban-state read, tokenizer, queue): the
+    /// receiver answers 5xx so Twitch redelivers; nothing was forwarded.
+    Retry(&'static str),
 }
 
 /// What a callback key is bound to: its secret and the owning tenant/community/connection.
@@ -713,7 +728,6 @@ pub fn signing_bytes(
     tenant_id: i64,
     community_id: i64,
     connection_id: i64,
-    broadcaster_id: &str,
     user_uuid: &str,
     observed_ms: u64,
     exp_ms: u64,
@@ -725,16 +739,8 @@ pub fn signing_bytes(
         observed_ms.to_string(),
         exp_ms.to_string(),
     ];
-    let parts: [&str; 9] = [
-        event_id,
-        &nums[0],
-        &nums[1],
-        &nums[2],
-        broadcaster_id,
-        user_uuid,
-        &nums[3],
-        &nums[4],
-        PLATFORM,
+    let parts: [&str; 8] = [
+        event_id, &nums[0], &nums[1], &nums[2], user_uuid, &nums[3], &nums[4], PLATFORM,
     ];
     let mut out = DOMAIN.to_vec();
     for part in parts {
@@ -759,8 +765,6 @@ pub struct WireEvent<'a> {
     pub connection_id: i64,
     /// Always `twitch`.
     pub platform: &'a str,
-    /// The broadcaster's numeric Twitch user id (not PII for the channel owner's own binding).
-    pub broadcaster_id: &'a str,
     /// The tokenized user UUID.
     pub user_uuid: &'a str,
     /// EventSub message timestamp, epoch ms.
@@ -930,7 +934,7 @@ impl TwitchUnban {
             Ok(l) => l,
             Err(OwnerError::NotFound) => return ignored("unknown_broadcaster", entry),
             Err(OwnerError::TenantMismatch) => return ignored("tenant_mismatch", entry),
-            Err(OwnerError::Unavailable) => return ignored("binding_unavailable", entry),
+            Err(OwnerError::Unavailable) => return retry("binding_unavailable", entry),
         };
         // Identity is the immutable numeric id stored on the binding by hub-api, never the
         // mutable login and never a payload value. A binding without it is refused outright.
@@ -955,7 +959,7 @@ impl TwitchUnban {
         {
             Ok(false) => {}
             Ok(true) => return ignored("rebanned", entry),
-            Err(()) => return ignored("ban_state_unavailable", entry),
+            Err(()) => return retry("ban_state_unavailable", entry),
         }
         let call = CallScope {
             platform: PLATFORM,
@@ -967,7 +971,7 @@ impl TwitchUnban {
             Ok(u) if Uuid::parse_str(&u).is_ok() => u,
             Ok(_) => return ignored("tokenize_invalid", entry),
             Err(TokenizeError::Unavailable | TokenizeError::RateLimited) => {
-                return ignored("tokenize_unavailable", entry)
+                return retry("tokenize_unavailable", entry)
             }
             Err(_) => return ignored("tokenize_refused", entry),
         };
@@ -987,7 +991,6 @@ impl TwitchUnban {
             entry.tenant_id,
             entry.community_id,
             entry.connection_id,
-            &ev_bcast,
             &user_uuid,
             observed_ms,
             exp_ms,
@@ -1000,7 +1003,6 @@ impl TwitchUnban {
             community_id: entry.community_id,
             connection_id: entry.connection_id,
             platform: PLATFORM,
-            broadcaster_id: &ev_bcast,
             user_uuid: &user_uuid,
             observed_ms,
             exp_ms,
@@ -1028,7 +1030,7 @@ impl TwitchUnban {
                     community_id = entry.community_id,
                     "ALERT twitch unban event could not be queued; the Waddles ban stays in force"
                 );
-                Outcome::Ignored("publish_failed")
+                Outcome::Retry("publish_failed")
             }
         }
     }

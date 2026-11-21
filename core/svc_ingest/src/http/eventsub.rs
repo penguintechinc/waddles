@@ -97,6 +97,9 @@ impl From<EventSubError> for ApiError {
             EventSubError::LedgerUnavailable => {
                 ApiError::Internal(anyhow::anyhow!("eventsub ledger unavailable"))
             }
+            EventSubError::Retryable => {
+                ApiError::Internal(anyhow::anyhow!("eventsub unban transient failure"))
+            }
         }
     }
 }
@@ -156,6 +159,7 @@ fn outcome_label(result: &Result<EventSubResponse, EventSubError>) -> &'static s
         Err(EventSubError::MalformedBody) => "malformed_body",
         Err(EventSubError::VerificationFailed) => "verification_failed",
         Err(EventSubError::LedgerUnavailable) => "ledger_unavailable",
+        Err(EventSubError::Retryable) => "unban_retry",
     }
 }
 

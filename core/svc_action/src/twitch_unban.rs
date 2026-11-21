@@ -10,7 +10,7 @@
 //!
 //! **Trust.** Same dedicated Ed25519 pair as the Discord path (this stage holds PUBLIC keys only)
 //! under a Twitch-specific domain label ([`DOMAIN`]) so neither platform's signature can stand in
-//! for the other's. The signature covers the event id, tenant, community, connection, broadcaster,
+//! for the other's. The signature covers the event id, tenant, community, connection,
 //! tokenized user, the time the unban was OBSERVED (EventSub `message_timestamp`) and the expiry.
 //! The lift is recorded under [`SOURCE_APP`], only lifts bans armed at or before the observed time,
 //! and is idempotent. **No echo**: the lift never enqueues a platform unban. Logs and metrics carry
@@ -50,7 +50,6 @@ struct Event {
     community_id: i64,
     connection_id: i64,
     platform: String,
-    broadcaster_id: String,
     user_uuid: String,
     observed_ms: u64,
     exp_ms: u64,
@@ -58,7 +57,7 @@ struct Event {
     sig: String,
 }
 
-/// The exact bytes ingest signs: the domain label, then nine length-prefixed (u32 BE) parts;
+/// The exact bytes ingest signs: the domain label, then eight length-prefixed (u32 BE) parts;
 /// numbers as decimal text. Must equal ingest's `twitch_unban::signing_bytes`.
 #[must_use]
 #[allow(clippy::too_many_arguments)] // the signed field set is the contract; one param per field
@@ -67,7 +66,6 @@ pub fn signing_bytes(
     tenant_id: i64,
     community_id: i64,
     connection_id: i64,
-    broadcaster_id: &str,
     user_uuid: &str,
     observed_ms: u64,
     exp_ms: u64,
@@ -79,16 +77,8 @@ pub fn signing_bytes(
         observed_ms.to_string(),
         exp_ms.to_string(),
     ];
-    let parts: [&str; 9] = [
-        event_id,
-        &nums[0],
-        &nums[1],
-        &nums[2],
-        broadcaster_id,
-        user_uuid,
-        &nums[3],
-        &nums[4],
-        PLATFORM,
+    let parts: [&str; 8] = [
+        event_id, &nums[0], &nums[1], &nums[2], user_uuid, &nums[3], &nums[4], PLATFORM,
     ];
     let mut out = DOMAIN.to_vec();
     for part in parts {
@@ -151,9 +141,6 @@ impl TwitchUnban {
             || ev.connection_id < 1
             || observed < 1
             || Uuid::parse_str(&ev.event_id).is_err()
-            || ev.broadcaster_id.is_empty()
-            || ev.broadcaster_id.len() > 20
-            || !ev.broadcaster_id.bytes().all(|b| b.is_ascii_digit())
         {
             return self.rejected("eventsub_unban_malformed", "malformed");
         }
@@ -165,7 +152,6 @@ impl TwitchUnban {
             ev.tenant_id,
             ev.community_id,
             ev.connection_id,
-            &ev.broadcaster_id,
             &ev.user_uuid,
             ev.observed_ms,
             ev.exp_ms,
