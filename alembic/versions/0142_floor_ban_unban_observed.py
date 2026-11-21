@@ -4,8 +4,8 @@ A platform unban lifts only bans that existed when it was observed (a stale even
 newer ban), and a Discord-native unban lifts every community of ONE tenant linked to the guild. DDL
 and functions live in `scripts/db/bundle_reputation_floor_ban_platform_unban_guild.sql`.
 
-Revision ID: 0140_floor_ban_unban_observed
-Revises: 0139_floor_ban_rearm_policy
+Revision ID: 0142_floor_ban_unban_observed
+Revises: 0141_floor_ban_rearm_policy
 Create Date: 2026-11-21
 """
 
@@ -15,8 +15,8 @@ from pathlib import Path
 
 from alembic import op
 
-revision = "0140_floor_ban_unban_observed"
-down_revision = "0139_floor_ban_rearm_policy"
+revision = "0142_floor_ban_unban_observed"
+down_revision = "0141_floor_ban_rearm_policy"
 branch_labels = None
 depends_on = None
 
@@ -31,7 +31,7 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Drop the new functions and restore the 0138 5-arg lift (re-applies the idempotent 0138 SQL)."""
+    """Drop the new objects and restore the 5-arg lift (re-applies the platform-sync SQL)."""
     op.execute(
         "DROP TRIGGER IF EXISTS trg_bundle_reputation_floor_bans_armed_at "
         "ON bundle_reputation_floor_bans"

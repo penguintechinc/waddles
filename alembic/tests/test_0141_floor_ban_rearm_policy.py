@@ -133,7 +133,7 @@ class TestRoundTrip:
     def test_downgrade_then_reupgrade(self, pg_db: PgTestDatabase) -> None:
         tid, cid = _tenant(pg_db, "t-rp-roundtrip")
         _q(pg_db, _SET, (tid, 60))
-        alembic_cli("downgrade", "0138_floor_ban_platform_sync", dsn=pg_db.dsn)
+        alembic_cli("downgrade", "0140_floor_ban_platform_sync", dsn=pg_db.dsn)
         assert _q(pg_db, _COLUMN), "per-community column restored"
         assert _q(pg_db, _DROP, (tid, cid, 2))[0][0] == 60
         alembic_cli("upgrade", "head", dsn=pg_db.dsn)

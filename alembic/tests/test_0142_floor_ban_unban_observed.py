@@ -1,4 +1,4 @@
-"""Tests for 0140_floor_ban_unban_observed against a real Postgres (`pg_docker.py` harness).
+"""Tests for 0142_floor_ban_unban_observed against a real Postgres (`pg_docker.py` harness).
 
 Covers chain position / single head; the observed-time bound (an unban observed at T never lifts a
 ban created after T, so a re-ban survives a late event); the guild-wide lift (every community of the
@@ -26,7 +26,7 @@ requires_docker = pytest.mark.skipif(
 )
 
 _ROOT = Path(__file__).resolve().parents[2]
-_PATH = _ROOT / "alembic" / "versions" / "0140_floor_ban_unban_observed.py"
+_PATH = _ROOT / "alembic" / "versions" / "0142_floor_ban_unban_observed.py"
 _SRC = "system:discord-gateway"
 _FAR = 4102444800000  # 2100-01-01, ms
 _GUILD_LIFT = (
@@ -36,7 +36,7 @@ _GUILD_LIFT = (
 
 
 def _load():  # type: ignore[no-untyped-def]
-    spec = importlib.util.spec_from_file_location("migration_0140", _PATH)
+    spec = importlib.util.spec_from_file_location("migration_0142", _PATH)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -44,11 +44,11 @@ def _load():  # type: ignore[no-untyped-def]
 
 
 class TestMigrationMetadata:
-    def test_id_fits_varchar32_and_chains_after_0139(self) -> None:
+    def test_id_fits_varchar32_and_chains_after_0141(self) -> None:
         m = _load()
-        assert m.revision == "0140_floor_ban_unban_observed"
+        assert m.revision == "0142_floor_ban_unban_observed"
         assert len(m.revision) <= 32
-        assert m.down_revision == "0139_floor_ban_rearm_policy"
+        assert m.down_revision == "0141_floor_ban_rearm_policy"
 
     def test_single_head(self) -> None:
         cfg = Config(str(_ROOT / "alembic.ini"))
@@ -70,7 +70,7 @@ _COMMUNITY_SERVERS = (
 def pg_db() -> Iterator[PgTestDatabase]:
     if not DOCKER_AVAILABLE:
         pytest.skip("docker CLI not available in this environment")
-    with migrated_postgres("0140-unban-observed") as db:
+    with migrated_postgres("0142-unban-observed") as db:
         # Created by the config/postgres base schema (not alembic); same shape as 000_*.sql.
         _q(db, _COMMUNITY_SERVERS)
         yield db
@@ -376,7 +376,7 @@ class TestRoundTrip:
     def test_downgrade_restores_the_five_arg_lift_then_reupgrades(
         self, pg_db: PgTestDatabase
     ) -> None:
-        alembic_cli("downgrade", "0139_floor_ban_rearm_policy", dsn=pg_db.dsn)
+        alembic_cli("downgrade", "0141_floor_ban_rearm_policy", dsn=pg_db.dsn)
         found = _q(
             pg_db,
             "SELECT count(*) FROM pg_proc WHERE proname = "
