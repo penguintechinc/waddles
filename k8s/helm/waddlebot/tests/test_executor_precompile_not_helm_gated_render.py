@@ -119,7 +119,9 @@ def test_enqueue_job_is_per_revision_and_only_enqueues(values: str) -> None:
     assert spec["ttlSecondsAfterFinished"] > 0
     assert spec["activeDeadlineSeconds"] > 0
     pod = spec["template"]["spec"]
-    assert "initContainers" not in pod
+    # Only the shared hub-api readiness gate may run first (it INSERTs into a hub-api-owned table);
+    # no compile/backfill work ever moves into an init container.
+    assert [c["name"] for c in pod.get("initContainers", [])] == ["wait-for-hub-api"]
     (container,) = pod["containers"]
     assert container["command"] == [
         "python3",
