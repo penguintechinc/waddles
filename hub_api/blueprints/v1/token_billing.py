@@ -406,7 +406,7 @@ _service_debit_auth = machine_authenticated(
 )
 
 
-@tokens_internal_bp.route("/<int:community_id>/tokens/debit", methods=["POST"])
+@tokens_internal_bp.route("/<cuuid:community_id>/tokens/debit", methods=["POST"])
 @_service_debit_auth
 @validate_request(ServiceDebitRequest)
 @validate_response(TokenLedgerResponse)
@@ -416,7 +416,8 @@ async def service_debit_tokens(
     """Debit a community's balance on behalf of an ACTIVE member -- machine identity only.
 
     Auth: community-bound machine JWT (`token.billing:debit`, `system` tenant, `community`
-    claim == `<id>`; see `machine_authenticated`) from the allow-listed `svc-streaming`
+    claim == the numeric id of the community whose public UUID is `<id>`; see
+    `machine_authenticated`) from the allow-listed `svc-streaming`
     identity. The acting member (`actor_user_id`) must hold an active membership row in this
     very community, so a service can never spend a community's tokens for an outsider or a
     member of another tenant's community. 403 otherwise; no ledger mutation.

@@ -210,7 +210,7 @@ export default function AdminVendorReview() {
           <div className="scopes-list">
             {submission.scopes && submission.scopes.length > 0 ? (
               submission.scopes.map((scope) => (
-                <div key={scope.id} className="scope-item" style={{borderLeftColor: RISK_COLORS[scope.risk_level]}}>
+                <div key={scope.scopeName ?? scope.scope_name ?? scope.id} className="scope-item" style={{borderLeftColor: RISK_COLORS[scope.risk_level]}}>
                   <div className="scope-header">
                     <h4>{scope.scope_name}</h4>
                     <span className={`risk-badge risk-${scope.risk_level}`}>
