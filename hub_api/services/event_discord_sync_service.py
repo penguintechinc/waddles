@@ -1,8 +1,7 @@
 """Discord event-sync push engine -- Waddles calendar (SoT) -> Discord guild scheduled events.
 
 **Direction: Waddles pushes OUT, Discord never pushes back.** `calendar_
-events` (owned by `action/interactive/calendar_interaction_module/
-services/calendar_service.py`) is the single source of truth; this
+events` (a legacy table the calendar app bundle writes) is the single source of truth; this
 engine's job is purely to mirror an `approved` event onto every Discord
 guild its community has opted into via `guild_tenant_pairings.
 event_sync_enabled` (migration 0039_event_sync_enabled -- a SECOND,
@@ -13,8 +12,7 @@ module mirrors that module's own shape closely (same `CredentialResolver`
 the design rationale this one inherits wholesale.
 
 **Trigger model.** `sync_event()` is the synchronous entry point the
-`calendar_interaction_module`'s own trigger-wiring (a SEPARATE follow-up
-PR, not built here) will call via `POST /api/v1/internal/calendar/events/
+calendar app bundle's trigger-wiring will call via `POST /api/v1/internal/calendar/events/
 sync-discord` (`blueprints/v1/event_discord_sync.py`) whenever an event is
 created/approved/updated/cancelled. `run_event_sync_reconcile_batch()` is
 the periodic CronJob backstop (same "reconciliation-by-polling never
@@ -65,9 +63,9 @@ batch.
 pairing ids and counts only -- never a Discord username or event title.
 
 RBAC: `calendar_event_discord_syncs` is hub-api-owned (sole writer);
-`calendar_events` itself is the legacy `calendar_interaction_module`
-table (not owned by this migration) -- see `services/schema.py::
-bind_calendar_sync_tables()`'s own docstring.
+`calendar_events` itself is the legacy calendar table (not owned by this
+migration) -- see `services/schema.py::bind_calendar_sync_tables()`'s own
+docstring.
 """
 
 from __future__ import annotations

@@ -36,7 +36,10 @@ pg = _load("pg_docker_demo", "alembic/tests/pg_docker.py")
 pytestmark = pytest.mark.skipif(not pg.DOCKER_AVAILABLE, reason="docker not available")
 
 DDL = """
-CREATE TABLE communities (id SERIAL PRIMARY KEY, name TEXT);
+CREATE TABLE communities (id SERIAL PRIMARY KEY, name TEXT, tenant_id INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE discord_guild_tenants (
+    discord_guild_id VARCHAR(255) PRIMARY KEY, tenant_id INTEGER NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(), claimed_by_uuid UUID);
 CREATE TABLE hub_users (
     id SERIAL PRIMARY KEY, display_name VARCHAR(255), username VARCHAR(255) UNIQUE,
     is_active BOOLEAN DEFAULT true, uuid UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE);
@@ -120,7 +123,8 @@ def conn(dsn: str) -> Iterator[psycopg2.extensions.connection]:
     c = psycopg2.connect(dsn)
     with c, c.cursor() as cur:
         cur.execute(
-            "TRUNCATE community_role_sync_bindings, guild_tenant_pairings, community_members, "
+            "TRUNCATE community_role_sync_bindings, guild_tenant_pairings, discord_guild_tenants, "
+            "community_members, "
             "hub_user_identities, hub_users RESTART IDENTITY CASCADE"
         )
     yield c
@@ -142,6 +146,8 @@ def test_seed_creates_all_links(conn: psycopg2.extensions.connection) -> None:
             "SELECT direction, sync_enabled, event_sync_enabled FROM guild_tenant_pairings"
         )
         assert cur.fetchall() == [("discord_to_twitch", True, True)]
+        cur.execute("SELECT discord_guild_id, tenant_id FROM discord_guild_tenants")
+        assert cur.fetchall() == [(cfg.guild_id, 1)], "the seed must claim the guild (0137)"
         cur.execute("SELECT role, user_id, is_active FROM community_members")
         assert cur.fetchall() == [("member", str(result.hub_user_id), True)]
         cur.execute(

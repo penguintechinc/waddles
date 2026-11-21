@@ -32,7 +32,7 @@
     "a/b.c.d",
     "a.b.c%41",
     "\u00fc.b.c",
-    "waddles.core.x.y",
+    "penguintechinc.waddles.x.y",
     "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb.cccccccccccccccccccccccccccccccccccccccccccccccccc"
   ],
   "core": {
@@ -44,7 +44,7 @@
     ],
     "no": [
       "",
-      "waddles.core.x",
+      "penguintechinc-waddles.x",
       "penguintechinc.waddles.",
       "penguintechinc.waddles.a.b",
       "penguintechinc.waddles.-x",

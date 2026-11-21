@@ -110,7 +110,7 @@ describe('SuperAdminBundleApprovals', () => {
         success: true,
         bundles: [
           {
-            appId: 'waddles.socials.music.default',
+            appId: 'penguintechinc.waddles.socials-music',
             name: 'Music',
             kind: 'app',
             version: '3.0.1',
@@ -298,7 +298,7 @@ describe('SuperAdminBundleApprovals', () => {
           summary: {
             egress: [],
             storageAccess: [
-              { prefixOwner: 'waddles.harness.media', ops: ['read'], reason: 'Fetch clips' },
+              { prefixOwner: 'penguintechinc.waddles.harness-media', ops: ['read'], reason: 'Fetch clips' },
             ],
           },
           permissionHash: 'sha256:abc',
@@ -306,7 +306,7 @@ describe('SuperAdminBundleApprovals', () => {
       });
       bundleApi.approveVersion.mockResolvedValue({ data: { success: true } });
       bundleApi.getAccessGrants.mockResolvedValue({
-        data: { success: true, dangerousIds: ['storage.read:waddles.harness.media'] },
+        data: { success: true, dangerousIds: ['storage.read:penguintechinc.waddles.harness-media'] },
       });
       bundleApi.approvePermissions.mockResolvedValue({ data: { success: true } });
       render(<SuperAdminBundleApprovals />);
@@ -316,7 +316,7 @@ describe('SuperAdminBundleApprovals', () => {
       });
       await screen.findByTestId('bundle-approvals-summary');
       expect(screen.getByTestId('access-grant-storageAccess')).toHaveTextContent(
-        'waddles.harness.media',
+        'penguintechinc.waddles.harness-media',
       );
       const install = screen.getByTestId('bundle-approvals-install-button');
       expect(install).toBeDisabled();
@@ -327,7 +327,7 @@ describe('SuperAdminBundleApprovals', () => {
       expect(bundleApi.approvePermissions).toHaveBeenCalledWith(
         'acme.widgets.mybundle',
         '1.0.0',
-        ['storage.read:waddles.harness.media'],
+        ['storage.read:penguintechinc.waddles.harness-media'],
       );
     });
 

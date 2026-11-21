@@ -155,7 +155,7 @@
 
 **Interfaces:**
 - Consumes: the `tool` import + `tool-provider` export bindings (Task 1).
-- Produces: the ergonomic surface bundles use — `await economy_is_a_bundle.invoke("waddles.core.economy", "adjust_balance", ...)` client-side; `@tool("adjust_balance")` server-side.
+- Produces: the ergonomic surface bundles use — `await economy_is_a_bundle.invoke("penguintechinc.waddles.economy", "adjust_balance", ...)` client-side; `@tool("adjust_balance")` server-side.
 
 - [ ] **Step 0 (framework fix carried from Task 4+5):** `tool-provider.call(name, args)` has no idempotency param, and the stage currently does NOT forward `tool.invoke`'s `idempotency_key` into the args the target guest receives — so a target bundle can't honor it. Fix: the stage (`core/bundle_tool_call` / the nested-invoke payload build) merges `idempotency_key` into the forwarded args JSON under a reserved field (e.g. `"__idempotency_key"`); the service-side SDK helper reads it from there and passes it to the host cap (economy/reputation). Add a test that the key round-trips to the target handler. Without this, P4 write-idempotency is broken.
 - [ ] **Step 1:** Write failing SDK tests (client encodes/decodes; registry routes `call("echo", ...)` to the decorated fn; unknown tool → typed error; idempotency-key round-trips).

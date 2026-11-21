@@ -227,7 +227,7 @@ async fn db_insert_get_update_delete_round_trip() {
     assert!(matches!(e, db_v2::Error::Conflict(_)));
 
     // A value the wire cannot carry fails loud BEFORE any host call.
-    let mut st = ExecState::new(None, "waddles.test.app".to_string(), 1);
+    let mut st = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
     let e = db_v2::Host::insert(
         &mut st,
         "t".into(),

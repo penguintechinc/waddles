@@ -26,7 +26,7 @@ LOGIC_A = {
     "provides": ["reputation-logic"],
 }
 LOGIC_B = {**_MANIFEST, "app_id": "thirdparty.app.my-reputation", "provides": "reputation-logic"}
-PLAIN = {**_MANIFEST, "app_id": "waddles.socials.music.default"}
+PLAIN = {**_MANIFEST, "app_id": "penguintechinc.waddles.socials-music"}
 
 
 def _is_conflict(exc: pytest.ExceptionInfo[ApiError], active_app: str) -> bool:
