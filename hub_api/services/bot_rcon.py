@@ -34,6 +34,11 @@ __all__ = ["is_private_host"]
 logger = logging.getLogger(__name__)
 
 
+#: `server_status_configs.visibility` values a plain community member may see. Single source for
+#: the member listing AND the member status/players lookups, so the two cannot drift.
+MEMBER_VISIBLE_VISIBILITIES: tuple[str, ...] = ("members", "registered")
+
+
 class RconValidationError(ValueError):
     """A request failed the same checks `rconController.js` enforces (-> 400)."""
 
@@ -359,7 +364,7 @@ def list_servers(dal: Any, community_id: int, *, is_admin: bool) -> list[Any]:
         return [_to_server(row) for row in rows]
 
     rows = dal(
-        base & dal.server_status_configs.visibility.belongs(["members", "registered"])
+        base & dal.server_status_configs.visibility.belongs(list(MEMBER_VISIBLE_VISIBILITIES))
     ).select(orderby=dal.server_status_configs.display_name)
     return [_to_member_view(row) for row in rows]
 
@@ -464,8 +469,14 @@ def delete_server(dal: Any, community_id: int, server_id: int) -> None:
     dal.commit()
 
 
-def get_active_server(dal: Any, community_id: int, server_id: int) -> Any:
-    """Active (not soft-deleted) server of this community, else `RconNotFoundError`."""
+def get_active_server(
+    dal: Any, community_id: int, server_id: int, *, member_only: bool = False
+) -> Any:
+    """Active (not soft-deleted) server of this community, else `RconNotFoundError`.
+
+    `member_only=True` additionally requires a member-visible `visibility`; a hidden server is
+    then indistinguishable from a missing one (same error, no existence oracle).
+    """
     row = (
         dal(
             (dal.server_status_configs.id == server_id)
@@ -475,7 +486,7 @@ def get_active_server(dal: Any, community_id: int, server_id: int) -> Any:
         .select()
         .first()
     )
-    if row is None:
+    if row is None or (member_only and row.visibility not in MEMBER_VISIBLE_VISIBILITIES):
         raise RconNotFoundError("Server not found")
     return row
 
@@ -513,9 +524,14 @@ async def execute_command(
     )
 
 
-async def get_server_status(dal: Any, community_id: int, server_id: int) -> MemberStatusResponse:
-    """`GET .../rcon/info/:id/status` (member-visible: allowlist DTO only)."""
-    row = get_active_server(dal, community_id, server_id)
+async def get_server_status(
+    dal: Any, community_id: int, server_id: int, *, row: Any
+) -> MemberStatusResponse:
+    """`GET .../rcon/info/:id/status` (member-visible: allowlist DTO only).
+
+    `row` is the caller-authorized `server_status_configs` row (visibility already checked by the
+    route via `get_active_server(..., member_only=...)`, run off the event loop).
+    """
     return shape_member_status(
         await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/status"),
         server_name=row.display_name,
@@ -524,9 +540,10 @@ async def get_server_status(dal: Any, community_id: int, server_id: int) -> Memb
     )
 
 
-async def get_player_list(dal: Any, community_id: int, server_id: int) -> MemberPlayersResponse:
-    """`GET .../rcon/info/:id/players` (member-visible: allowlist DTO only)."""
-    row = get_active_server(dal, community_id, server_id)
+async def get_player_list(
+    dal: Any, community_id: int, server_id: int, *, row: Any
+) -> MemberPlayersResponse:
+    """`GET .../rcon/info/:id/players` (member-visible: allowlist DTO only); `row` as above."""
     return shape_member_players(
         await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/players"),
         host=row.host,

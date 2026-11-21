@@ -162,8 +162,7 @@ async def test_member_info_services_never_pass_upstream_through(
     monkeypatch: pytest.MonkeyPatch, fn: str
 ) -> None:
     monkeypatch.setattr(bot_rcon, "_proxy", AsyncMock(return_value=UPSTREAM))
-    monkeypatch.setattr(bot_rcon, "get_active_server", lambda *_a: ROW)
-    shaped: Any = await getattr(bot_rcon, fn)(None, 1, 1)
+    shaped: Any = await getattr(bot_rcon, fn)(None, 1, 1, row=ROW)
     text = str(shaped)
     for leaked in LEAKS:
         assert leaked not in text
