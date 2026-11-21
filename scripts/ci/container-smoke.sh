@@ -7,9 +7,10 @@
 # Fails when the container exits before answering, or after MAX_RETRIES polls.
 #
 # Per-module runtime prerequisites (the image fails fast without them, by design):
-#   hub-api    NODE_ENV=production requires SESSION_MAC_KEY + SERVICE_API_KEY, and
-#              initializeDatabase() requires a reachable Postgres. A throwaway
-#              postgres sidecar on a private docker network supplies the DB.
+#   hub-api    Python/Quart (hypercorn binds 0.0.0.0:8204, see hub_api/Dockerfile);
+#              requires SESSION_MAC_KEY + SERVICE_API_KEY and a reachable Postgres.
+#              A throwaway postgres sidecar on a private docker network supplies the DB.
+#              <port> must equal the image's bind port: -p maps <port>:<port>.
 #   hub-webui  NODE_ENV=production requires HUB_API_URL (no localhost fallback).
 #
 # Secrets are ephemeral (openssl rand), written to 0600 env-files, never echoed.
