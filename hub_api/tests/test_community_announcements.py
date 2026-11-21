@@ -148,7 +148,7 @@ class TestCreateAndLifecycle:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{cu(community_id)}/announcements/9999",
+            f"/api/v1/admin/{cu(community_id)}/announcements/{UNKNOWN_PUBLIC_ID}",
             headers=auth_headers(scope="community.announcements:read"),
         )
         assert response.status_code == 404
@@ -234,7 +234,7 @@ class TestCreateAndLifecycle:
         assert updated["published_at"] is not None
 
         missing_resp = await client.put(
-            f"/api/v1/admin/{cu(community_id)}/announcements/9999",
+            f"/api/v1/admin/{cu(community_id)}/announcements/{UNKNOWN_PUBLIC_ID}",
             headers={**headers, "Content-Type": "application/json"},
             data=json_module.dumps({"title": "x"}),
         )
@@ -324,7 +324,7 @@ class TestCreateAndLifecycle:
             ("POST", "/archive"),
         ]:
             response = await client.open(
-                f"/api/v1/admin/{cu(community_id)}/announcements/9999{suffix}",
+                f"/api/v1/admin/{cu(community_id)}/announcements/{UNKNOWN_PUBLIC_ID}{suffix}",
                 method=method,
                 headers=headers,
             )
@@ -401,7 +401,7 @@ class TestBroadcast:
         headers = auth_headers(scope="community.announcements:write", user_id="1")
         response = await _post_json(
             client,
-            f"/api/v1/admin/{cu(community_id)}/announcements/1/broadcast",
+            f"/api/v1/admin/{cu(community_id)}/announcements/{UNKNOWN_PUBLIC_ID}/broadcast",
             headers,
             {"platforms": []},
         )
@@ -414,7 +414,7 @@ class TestBroadcast:
         headers = auth_headers(scope="community.announcements:write", user_id="1")
         response = await _post_json(
             client,
-            f"/api/v1/admin/{cu(community_id)}/announcements/9999/broadcast",
+            f"/api/v1/admin/{cu(community_id)}/announcements/{UNKNOWN_PUBLIC_ID}/broadcast",
             headers,
             {"platforms": ["discord"]},
         )
@@ -538,7 +538,7 @@ class TestBroadcast:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{cu(community_id)}/announcements/9999/broadcast-status",
+            f"/api/v1/admin/{cu(community_id)}/announcements/{UNKNOWN_PUBLIC_ID}/broadcast-status",
             headers=auth_headers(scope="community.announcements:read"),
         )
         assert response.status_code == 404
@@ -608,6 +608,78 @@ class TestPostToPlatformDirect:
             ok, err = await _post_to_platform("discord", {"title": "x"})
         assert ok is False
         assert err is not None
+
+
+class TestAnnouncementPublicUuid:
+    """`<puuid:announcement_id>`: a UUID resolves, a foreign-community UUID and a numeric id 404."""
+
+    async def test_uuid_resolves_and_foreign_and_numeric_404(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid, second_community
+
+        dal, community_id = community_db
+        other = second_community(dal, community_id)
+        headers = auth_headers(scope="community.announcements:write", user_id="1")
+        created = await _post_json(
+            client,
+            f"/api/v1/admin/{cu(community_id)}/announcements",
+            headers,
+            {"title": "t", "content": "c", "status": "published"},
+        )
+        uuid_id = assert_uuid((await created.get_json())["data"]["id"])
+        read = auth_headers(scope="community.announcements:read")
+
+        ok = await client.get(
+            f"/api/v1/admin/{cu(community_id)}/announcements/{uuid_id}", headers=read
+        )
+        assert ok.status_code == 200
+        assert (await ok.get_json())["data"]["id"] == uuid_id
+
+        foreign = await client.get(
+            f"/api/v1/admin/{cu(other)}/announcements/{uuid_id}", headers=read
+        )
+        unknown = await client.get(
+            f"/api/v1/admin/{cu(community_id)}/announcements/{UNKNOWN_PUBLIC_ID}", headers=read
+        )
+        malformed = await client.get(
+            f"/api/v1/admin/{cu(community_id)}/announcements/not-a-uuid", headers=read
+        )
+        numeric_id = dal(dal.announcements.public_id == uuid_id).select().first().id
+        numeric = await client.get(
+            f"/api/v1/admin/{cu(community_id)}/announcements/{numeric_id}", headers=read
+        )
+        assert [r.status_code for r in (foreign, unknown, malformed, numeric)] == [404] * 4
+        f_err = (await foreign.get_json())["error"]
+        u_err = (await unknown.get_json())["error"]
+        assert f_err["message"] == u_err["message"]  # foreign == unknown: no existence oracle
+
+    async def test_broadcast_status_emits_announcement_uuid(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid
+
+        dal, community_id = community_db
+        headers = auth_headers(scope="community.announcements:write", user_id="1")
+        created = await _post_json(
+            client,
+            f"/api/v1/admin/{cu(community_id)}/announcements",
+            headers,
+            {"title": "t", "content": "c", "status": "published"},
+        )
+        uuid_id = (await created.get_json())["data"]["id"]
+        numeric_id = dal(dal.announcements.public_id == uuid_id).select().first().id
+        dal.announcement_broadcasts.insert(
+            announcement_id=numeric_id, platform="discord", status="sent"
+        )
+        dal.commit()
+        status = await client.get(
+            f"/api/v1/admin/{cu(community_id)}/announcements/{uuid_id}/broadcast-status",
+            headers=auth_headers(scope="community.announcements:read"),
+        )
+        rows = (await status.get_json())["data"]
+        assert len(rows) == 1
+        assert assert_uuid(rows[0]["announcement_id"]) == uuid_id
 
 
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).

@@ -61,10 +61,10 @@ spec:
               service:
                 name: {{ if .rawService }}{{ .rawService }}{{ else }}{{ $fullName }}-{{ .service }}{{ end }}
                 port:
-                  number: {{ .port }}
+                  number: {{ include "waddlebot.routeBackendPort" (dict "root" $ "route" .) }}
               {{- else }}
               serviceName: {{ if .rawService }}{{ .rawService }}{{ else }}{{ $fullName }}-{{ .service }}{{ end }}
-              servicePort: {{ .port }}
+              servicePort: {{ include "waddlebot.routeBackendPort" (dict "root" $ "route" .) }}
               {{- end }}
           {{- end }}
     {{- end }}

@@ -49,7 +49,7 @@ export function usePendingJoinRequests(communityId: string): UseQueryResult<Join
 }
 
 export interface ReviewJoinRequestVariables {
-  requestId: number;
+  requestId: string;
   decision: 'approve' | 'reject';
 }
 

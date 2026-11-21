@@ -37,6 +37,7 @@ from services import session_service
 from services.auth_amr import passkey_amr
 from services.errors import bad_request, not_found, unauthorized
 from services.global_identity import is_global_admin
+from services.public_ids import parse_public_id
 
 RP_NAME = os.getenv("PASSKEY_RP_NAME", "Waddles")
 RP_ID = os.getenv("PASSKEY_RP_ID", "localhost")
@@ -230,6 +231,22 @@ async def list_credentials(async_dal: Any, dal: Any, *, user_id: int) -> list[An
         dal(dal.user_passkeys.user_id == user_id), orderby=~dal.user_passkeys.created_at
     )
     return list(rows)
+
+
+async def resolve_credential_public_id(
+    async_dal: Any, dal: Any, *, user_id: int, public_id: object
+) -> int | None:
+    """Numeric id of the passkey `public_id` owned by `user_id`, else `None`.
+
+    Malformed, unknown and another-user's UUIDs all miss identically (uniform 404).
+    """
+    canonical = parse_public_id(public_id)
+    if canonical is None:
+        return None
+    rows = await async_dal.select_async(
+        dal((dal.user_passkeys.public_id == canonical) & (dal.user_passkeys.user_id == user_id))
+    )
+    return int(rows.first().id) if rows else None
 
 
 async def remove_credential(

@@ -91,7 +91,7 @@ async fn token_ledger_debit_is_timed_and_propagates_the_callers_trace() {
     let sink = OtelSink::install();
     let metrics = StreamMetrics::with_meter(&sink.meter());
     let (addr, captured) = capture_server(
-        "/api/v1/internal/communities/{community_id}/tokens/debit",
+        "/api/v1/internal/communities/{community_public_id}/tokens/debit",
         serde_json::json!({"balance_after": 5}),
     )
     .await;
@@ -106,6 +106,7 @@ async fn token_ledger_debit_is_timed_and_propagates_the_callers_trace() {
             &format!("http://{addr}"),
             42,
             7,
+            "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
             3,
             "transcode",
             "ref-1",
@@ -135,6 +136,7 @@ async fn token_ledger_debit_is_timed_and_propagates_the_callers_trace() {
             "http://127.0.0.1:1",
             42,
             7,
+            "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f",
             3,
             "transcode",
             "ref-2",

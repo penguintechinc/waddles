@@ -78,10 +78,10 @@ def world(guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 # --------------------------------------------------------------------------------------------
 
 _CHILD_IDS = {
-    "<int:pairing_id>": "1",
-    "<int:binding_id>": "1",
-    "<int:mapping_id>": "1",
-    "<int:token_id>": "1",
+    "<puuid:pairing_id>": "00000000-0000-4000-8000-0000000000aa",
+    "<puuid:binding_id>": "00000000-0000-4000-8000-0000000000aa",
+    "<puuid:mapping_id>": "00000000-0000-4000-8000-0000000000aa",
+    "<puuid:token_id>": "00000000-0000-4000-8000-0000000000aa",
 }
 
 

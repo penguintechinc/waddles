@@ -39,10 +39,17 @@ from services import access_token_service as svc
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.public_id_rows import row_public_id
+from services.public_ids import PublicIdTarget, build_view_arg_translator
 from services.route_guards import community_admin_guard
 
 user_tokens_bp = Blueprint("v1_user_tokens", __name__, url_prefix="/api/v1/user/tokens")
 community_tokens_bp = Blueprint("v1_community_tokens", __name__, url_prefix="/api/v1/admin")
+
+# `<puuid:token_id>` -> numeric before the handler, scoped to the URL community.
+community_tokens_bp.before_request(
+    build_view_arg_translator({"token_id": PublicIdTarget("community_access_tokens")})
+)
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -103,9 +110,9 @@ class PatDTO:
 
 @dataclass(slots=True, frozen=True)
 class CatDTO:
-    """CAT metadata -- no hash, no plaintext."""
+    """CAT metadata -- no hash, no plaintext; `id` is the token's public UUID."""
 
-    id: int
+    id: str
     name: str
     scopes: list[str]
     created_at: str | None
@@ -161,7 +168,7 @@ def _pat_dto(row: Any) -> PatDTO:
 
 def _cat_dto(row: Any, created_by_name: str | None) -> CatDTO:
     return CatDTO(
-        id=row.id,
+        id=row_public_id(row),
         name=row.name,
         scopes=list(row.scopes) if row.scopes else [],
         created_at=_iso(row.created_at),
@@ -301,7 +308,7 @@ async def create_cat(data: CreateCatRequest, community_id: int) -> tuple[dict[st
     }, 201
 
 
-@community_tokens_bp.route("/<cuuid:community_id>/tokens/cats/<int:token_id>", methods=["DELETE"])
+@community_tokens_bp.route("/<cuuid:community_id>/tokens/cats/<puuid:token_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.tokens:admin")  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]

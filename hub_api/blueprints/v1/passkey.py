@@ -23,7 +23,8 @@ from quart_schema import validate_request, validate_response
 
 from services import passkey_service
 from services.current_user import get_current_session_id, get_current_user_id
-from services.errors import ApiError
+from services.errors import ApiError, not_found
+from services.public_ids import PublicId
 
 passkey_bp = Blueprint("v1_user_passkey", __name__, url_prefix="/api/v1/user/passkey")
 
@@ -69,7 +70,7 @@ class SimpleSuccessResponse:
 class CredentialDTO:
     """Credential DTO."""
 
-    id: int
+    id: str
     deviceName: str | None
     createdAt: str | None
     lastUsedAt: str | None
@@ -128,7 +129,7 @@ async def list_credentials() -> ListCredentialsResponse:
         success=True,
         credentials=[
             CredentialDTO(
-                id=r.id,
+                id=str(r.public_id),
                 deviceName=r.device_name,
                 createdAt=r.created_at.isoformat() if r.created_at else None,
                 lastUsedAt=r.last_used_at.isoformat() if r.last_used_at else None,
@@ -138,21 +139,26 @@ async def list_credentials() -> ListCredentialsResponse:
     )
 
 
-@passkey_bp.route("/credentials/<int:credential_id>", methods=["DELETE"])
+@passkey_bp.route("/credentials/<puuid:credential_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
 async def remove_credential(
-    credential_id: int,
+    credential_id: PublicId,
 ) -> SimpleSuccessResponse | tuple[dict[str, object], int]:
     """Remove credential."""
     async_dal, dal = _dal()
     try:
         user_id = get_current_user_id(request)
+        pk_id = await passkey_service.resolve_credential_public_id(
+            async_dal, dal, user_id=user_id, public_id=credential_id
+        )
+        if pk_id is None:
+            raise not_found("Credential not found")
         await passkey_service.remove_credential(
             async_dal,
             dal,
             user_id=user_id,
-            credential_pk_id=credential_id,
+            credential_pk_id=pk_id,
             keep_session_id=get_current_session_id(request),
         )
     except ApiError as exc:

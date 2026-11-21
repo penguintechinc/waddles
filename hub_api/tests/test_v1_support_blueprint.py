@@ -163,7 +163,7 @@ class TestMemberGate:
                 dal,
                 "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}",
                 community_id,
-                ticket_id=1,
+                ticket_id="00000000-0000-4000-8000-00000000dead",
             ),
             headers=user_auth_headers(user_id=99),
         )
@@ -173,7 +173,7 @@ class TestMemberGate:
                 dal,
                 "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}/comments",
                 community_id,
-                ticket_id=1,
+                ticket_id="00000000-0000-4000-8000-00000000dead",
             ),
             user_auth_headers(user_id=99),
             {"content": "hi"},
@@ -775,3 +775,113 @@ class TestStats:
 
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).
 UUID_COMMUNITY_RESPONSES = True
+
+
+class TestSupportPublicUuids:
+    """Category / ticket ids are public UUIDs, scoped to the URL community."""
+
+    async def _seed(self, client: Any, auth_headers: Any, user_auth_headers: Any, db: Any) -> Any:
+        from tests.entity_uuid_support import assert_uuid
+
+        dal, community_id = db
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
+        cat = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            admin,
+            {"name": "Billing"},
+        )
+        category = assert_uuid((await cat.get_json())["category"]["id"])
+        sub = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=1),
+            {"subject": "Help", "category_id": category},
+        )
+        assert sub.status_code == 201
+        ticket = (await sub.get_json())["ticket"]
+        assert ticket["category_id"] == category
+        return admin, category, assert_uuid(ticket["id"])
+
+    async def test_uuid_resolves_in_url_community(
+        self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid
+
+        dal, community_id = support_token_db
+        admin, category, ticket = await self._seed(
+            client, auth_headers, user_auth_headers, support_token_db
+        )
+        got = await client.get(
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}",
+                community_id,
+                ticket_id=ticket,
+            ),
+            headers=admin,
+        )
+        assert got.status_code == 200
+        assert (await got.get_json())["ticket"]["id"] == ticket
+        comment = await _post_json(
+            client,
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id=ticket,
+            ),
+            admin,
+            {"content": "hi"},
+        )
+        assert assert_uuid((await comment.get_json())["comment"]["ticket_id"]) == ticket
+        filtered = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/tickets", community_id)
+            + f"?category_id={category}",
+            headers=admin,
+        )
+        assert [t["id"] for t in (await filtered.get_json())["tickets"]] == [ticket]
+        numeric_filter = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/tickets", community_id)
+            + "?category_id=1",
+            headers=admin,
+        )
+        assert numeric_filter.status_code == 404
+
+    async def test_foreign_community_and_numeric_ids_are_404(
+        self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import second_community
+
+        dal, community_id = support_token_db
+        admin, category, ticket = await self._seed(
+            client, auth_headers, user_auth_headers, support_token_db
+        )
+        other = second_community(dal, community_id)
+        seed_membership(
+            SimpleNamespace(dal=dal),
+            community_id=other,
+            user_id=SUPPORT_ADMIN_UID,
+            role="community-admin",
+        )
+        ticket_n = int(dal(dal.support_tickets.public_id == ticket).select().first().id)
+        category_n = int(
+            dal(dal.support_ticket_categories.public_id == category).select().first().id
+        )
+        tickets = "/api/v1/admin/{community_id}/support/tickets/{ticket_id}"
+        cats = "/api/v1/admin/{community_id}/support/categories/{category_id}"
+        urls = [
+            cpath(dal, tickets, other, ticket_id=ticket),
+            cpath(dal, tickets, community_id, ticket_id=ticket_n),
+            cpath(dal, tickets, community_id, ticket_id="not-a-uuid"),
+        ]
+        for url in urls:
+            resp = await client.get(url, headers=admin)
+            assert resp.status_code == 404, url
+        for url in (
+            cpath(dal, cats, other, category_id=category),
+            cpath(dal, cats, community_id, category_id=category_n),
+        ):
+            resp = await client.delete(url, headers=admin)
+            assert resp.status_code == 404, url
+        assert dal(dal.support_ticket_categories.id == category_n).count() == 1

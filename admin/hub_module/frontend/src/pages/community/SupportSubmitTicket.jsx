@@ -51,7 +51,7 @@ function SupportSubmitTicket() {
     setError(null);
     try {
       setSubmitting(true);
-      const res = await supportApi.submitTicket(communityId, form);
+      const res = await supportApi.submitTicket(communityId, { ...form, category_id: form.category_id || null });
       setSubmitted(res.data?.ticket || { ticket_number: 'Submitted' });
     } catch (err) {
       setError(err.response?.data?.error || 'Failed to submit ticket');

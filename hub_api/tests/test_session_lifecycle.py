@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import logging
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -128,6 +129,15 @@ def _set_cookies(response: Any) -> dict[str, str]:
 def _cookie_value(response: Any, name: str) -> str | None:
     raw = _set_cookies(response).get(name)
     return raw.split("=", 1)[1].split(";", 1)[0] if raw else None
+
+
+_UNKNOWN_PUBLIC_ID = "00000000-0000-4000-8000-0000000000a1"
+
+
+def _session_public_id(auth_db: Any, session_pk: int) -> str:
+    """The `hub_sessions.public_id` UUID of session row `session_pk` (what the API now takes)."""
+    row = auth_db.dal(auth_db.dal.hub_sessions.id == session_pk).select().first()
+    return str(row.public_id)
 
 
 def _claims(token: str) -> dict[str, Any]:
@@ -753,8 +763,13 @@ class TestAuthenticatorChangesKeepTheCurrentSession:
         self, app: Quart, browser: Any, probe: Any, auth_db: Any
     ) -> None:
         user_id = _seed_user(auth_db)
-        passkey_id = auth_db.dal.user_passkeys.insert(
-            user_id=user_id, credential_id="cred-1", public_key="pk", device_name="key"
+        passkey_id = str(uuid.uuid4())
+        auth_db.dal.user_passkeys.insert(
+            user_id=user_id,
+            credential_id="cred-1",
+            public_key="pk",
+            device_name="key",
+            public_id=passkey_id,
         )
         auth_db.dal.commit()
         phone = app.test_client()
@@ -778,9 +793,10 @@ class TestAuthenticatorChangesKeepTheCurrentSession:
         phone_access = await _login_token(app.test_client(), tenant=TENANT_SLUG)
         mine = await _login_token(browser, tenant=TENANT_SLUG)
         response = await browser.delete(
-            "/api/v1/user/passkey/credentials/999", headers={"Authorization": f"Bearer {mine}"}
+            f"/api/v1/user/passkey/credentials/{_UNKNOWN_PUBLIC_ID}",
+            headers={"Authorization": f"Bearer {mine}"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 404  # nothing removed: uniform 404, no session revoked
         assert await _alive(probe, phone_access)
 
     async def test_unlinking_an_identity_signs_out_the_other_devices_only(
@@ -853,6 +869,8 @@ class TestAdminRevocation:
         assert response.status_code == 200
         (session,) = (await response.get_json())["sessions"]
         assert set(session) == {"id", "createdAt", "expiresAt", "isActive", "revokedAt"}
+        assert session["id"] == _session_public_id(auth_db, _sessions(auth_db)[0].id)
+        assert not str(session["id"]).isdigit()
         assert session["isActive"] is True
 
     async def test_revoke_one_session_ends_that_session_only(
@@ -862,7 +880,7 @@ class TestAdminRevocation:
         phone = app.test_client()
         phone_access = await _login_token(phone)
         mine = await _login_token(browser)
-        target = int(_claims(phone_access)["sid"])
+        target = _session_public_id(auth_db, int(_claims(phone_access)["sid"]))
 
         response = await probe.post(
             f"/api/v1/superadmin/users/{uid(user_id)}/sessions/{target}/revoke",
@@ -879,14 +897,26 @@ class TestAdminRevocation:
         assert (await phone.post("/api/v1/auth/refresh")).status_code == 401
         assert await _alive(probe, mine)
 
+    @pytest.mark.parametrize("bad", ["1", "not-a-uuid", _UNKNOWN_PUBLIC_ID])
+    async def test_numeric_malformed_and_unknown_session_ids_are_404(
+        self, probe: Any, auth_db: Any, bad: str
+    ) -> None:
+        user_id = _seed_user(auth_db)
+        response = await probe.post(
+            f"/api/v1/superadmin/users/{uid(user_id)}/sessions/{bad}/revoke",
+            headers=_admin_headers(user_id=99),
+        )
+        assert response.status_code == 404
+
     async def test_a_session_of_another_user_is_404(
         self, app: Quart, probe: Any, auth_db: Any
     ) -> None:
         alice = _seed_user(auth_db)
         _seed_user(auth_db, email="bob@example.com")
         bob_access = await _login_token(app.test_client(), email="bob@example.com")
+        bob_sid = _session_public_id(auth_db, int(_claims(bob_access)["sid"]))
         response = await probe.post(
-            f"/api/v1/superadmin/users/{uid(alice)}/sessions/{_claims(bob_access)['sid']}/revoke",
+            f"/api/v1/superadmin/users/{uid(alice)}/sessions/{bob_sid}/revoke",
             headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 404
@@ -944,7 +974,7 @@ class TestAdminRevocation:
         [
             ("GET", f"/api/v1/superadmin/users/{uid(1)}/sessions"),
             ("POST", f"/api/v1/superadmin/users/{uid(1)}/revoke-sessions"),
-            ("POST", f"/api/v1/superadmin/users/{uid(1)}/sessions/1/revoke"),
+            ("POST", f"/api/v1/superadmin/users/{uid(1)}/sessions/{_UNKNOWN_PUBLIC_ID}/revoke"),
         ],
     )
     async def test_requires_the_users_admin_scope(

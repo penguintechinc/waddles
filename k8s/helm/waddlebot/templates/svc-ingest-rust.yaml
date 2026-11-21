@@ -302,16 +302,7 @@ spec:
         # `value:` -- this entry was already a secretKeyRef pre-TLS, and switching an
         # existing env entry's field TYPE breaks Kubernetes' strategic-merge-patch on an
         # in-place upgrade (see secrets.yaml's comment on VALKEY_URL_TLS).
-        - name: VALKEY_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_URL_TLS
-        - name: VALKEY_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_PASSWORD
+        {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "svc-ingest" "url" "plain") | nindent 8 }}
         {{- else }}
         - name: VALKEY_URL
           valueFrom:

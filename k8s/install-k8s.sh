@@ -368,7 +368,7 @@ configure_access() {
         echo "  - Or use: minikube service hub -n $NAMESPACE"
     else
         echo "  - http://waddlebot.local (via Ingress)"
-        echo "  - Or use port-forward: kubectl port-forward -n $NAMESPACE svc/hub 8060:8060"
+        echo "  - Or use port-forward: kubectl port-forward -n $NAMESPACE svc/waddlebot-hub-webui-v3 8080:8080"
     fi
 
     echo ""

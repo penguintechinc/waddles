@@ -32,7 +32,7 @@ function errInfo(err: unknown): { status?: number; code?: string; message?: stri
 }
 
 interface Props {
-  tenantId: number;
+  tenantId: string;
   tenantSlug: string;
   onClose: () => void;
 }

@@ -27,7 +27,8 @@ def env(tenant_admin_db: Any) -> Any:
     dal.tenants.insert(slug="system", display_name="System", is_active=True)
     dal.commit()
     dal(dal.tenant_license_pools).count()
-    tenant_id = int(dal(dal.tenants.slug == TENANT_SLUG).select().first().id)
+    tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
+    tenant_id = str(tenant_row.public_id)
     app = Quart(__name__)
     QuartSchema(app)
     app.register_blueprint(superadmin_license_pools_bp)
@@ -65,3 +66,19 @@ async def test_system_tenant_global_admin_still_allowed(env: Any) -> None:
     put = await env.client.put(f"{url}/2", headers=headers, json={"limit": 5})
     assert put.status_code == 200
     assert (await env.client.get(url, headers=headers)).status_code == 200
+
+
+async def test_numeric_malformed_and_unknown_tenant_ids_are_404(env: Any) -> None:
+    headers = _hdr("*:admin", "system")
+    for bad in ("1", "not-a-uuid", "00000000-0000-4000-8000-0000000000a1"):
+        url = f"/api/v1/superadmin/tenants/{bad}/license-pools"
+        assert (await env.client.get(url, headers=headers)).status_code == 404
+        put = await env.client.put(f"{url}/2", headers=headers, json={"limit": 5})
+        assert put.status_code == 404
+
+
+async def test_pools_response_carries_the_tenant_uuid(env: Any) -> None:
+    headers = _hdr("*:admin", "system")
+    url = f"/api/v1/superadmin/tenants/{env.tenant}/license-pools"
+    body = await (await env.client.get(url, headers=headers)).get_json()
+    assert body["tenantId"] == env.tenant

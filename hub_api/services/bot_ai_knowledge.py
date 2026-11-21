@@ -955,7 +955,8 @@ def validate_feedback(feedback: str) -> None:
 
 def get_suggestion_scope(dal: Any, suggestion_id: int) -> tuple[bool, int | None]:
     """Return `(exists, owning community_id)` for a suggestion; NULL owner = super-admin only."""
-    row = dal.ai_ticket_suggestions[suggestion_id]
+    # Query form: `table[-1]` (the unknown-UUID sentinel) raises KeyError in pydal instead of None.
+    row = dal(dal.ai_ticket_suggestions.id == suggestion_id).select().first()
     if row is None:
         return False, None
     return True, row.community_id

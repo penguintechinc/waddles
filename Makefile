@@ -373,8 +373,8 @@ check-valkey-acl:
 	@bash -c 'set -euo pipefail; for v in alpha beta; do \
 	  helm template waddlebot k8s/helm/waddlebot --values k8s/helm/waddlebot/values-$$v.yaml \
 	    --kube-version 1.30.0 --set global.deploymentTier=alpha \
-	  | python3 scripts/ci/check-valkey-acl-least-privilege.py --require-executor; done'
-	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_valkey_acl_render.py
+	  | python3 scripts/ci/check-valkey-acl-least-privilege.py --require-executor --require-clients; done'
+	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_valkey_acl_render.py k8s/helm/waddlebot/tests/test_valkey_acl_service_paths.py
 
 smoke-test:
 	@echo "Running smoke tests..."

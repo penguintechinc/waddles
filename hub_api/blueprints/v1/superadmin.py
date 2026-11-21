@@ -32,12 +32,18 @@ from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
 from services.pool_provider import get_pool_provider
+from services.public_ids import PublicIdTarget, build_view_arg_translator
 from services.system_tenant_guard import is_system_tenant_request, system_tenant_denied
 from services.tenant_key_provisioning import TenantKeyProvisioningError, provision_new_tenant
 
 logger = logging.getLogger(__name__)
 
 superadmin_bp = Blueprint("v1_superadmin_platform", __name__, url_prefix="/api/v1/superadmin")
+# `<puuid:tenant_id>` -> numeric tenants.id (global table: unscoped; the system-tenant gate and
+# `tenants:admin` scope still decide who may call). Unknown/malformed UUID -> the handler's 404.
+superadmin_bp.before_request(
+    build_view_arg_translator({"tenant_id": PublicIdTarget("tenants", community_param=None)})
+)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -247,9 +253,9 @@ class ReassignOwnerRequest:
 
 @dataclass(slots=True, frozen=True)
 class TenantDTO:
-    """Tenant DTO."""
+    """Tenant DTO (`id` is the tenant's public UUID, never the numeric key)."""
 
-    id: int
+    id: str
     slug: str
     displayName: str
     description: str | None
@@ -288,7 +294,7 @@ class CreateTenantRequest:
 class CreatedTenantDTO:
     """Response DTO for a newly-created tenant."""
 
-    id: int
+    id: str
     slug: str
     displayName: str
     createdAt: str | None
@@ -667,7 +673,7 @@ async def list_tenants() -> TenantsResponse:
     )
     tenants = [
         TenantDTO(
-            id=t.id,
+            id=str(t.public_id),
             slug=t.slug,
             displayName=t.display_name,
             description=t.description,
@@ -743,7 +749,7 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
         CreateTenantResponse(
             success=True,
             tenant=CreatedTenantDTO(
-                id=tenant.id,
+                id=str(tenant.public_id),
                 slug=tenant.slug,
                 displayName=tenant.display_name,
                 createdAt=_iso(tenant.created_at),
@@ -753,7 +759,7 @@ async def create_tenant(data: CreateTenantRequest) -> tuple[Any, int]:
     )
 
 
-@superadmin_bp.route("/tenants/<int:tenant_id>", methods=["PUT"])
+@superadmin_bp.route("/tenants/<puuid:tenant_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenants:admin")  # type: ignore[misc]
 @validate_request(UpdateTenantRequest)
@@ -781,7 +787,7 @@ async def update_tenant(
     return MessageResponse(success=True, message="Tenant updated")
 
 
-@superadmin_bp.route("/tenants/<int:tenant_id>", methods=["DELETE"])
+@superadmin_bp.route("/tenants/<puuid:tenant_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenants:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)

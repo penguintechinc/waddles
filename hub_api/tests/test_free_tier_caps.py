@@ -659,7 +659,7 @@ class TestReservedTenants:
     ) -> None:
         _seed_bootstrap(admin_db)  # creates the `system` tenant
         dal = admin_db.dal
-        system_id = dal(dal.tenants.slug == "system").select().first().id
+        system_id = dal(dal.tenants.slug == "system").select().first().public_id
         put = await client.put(
             f"/api/v1/superadmin/tenants/{system_id}", headers=_headers(), json={"isActive": False}
         )

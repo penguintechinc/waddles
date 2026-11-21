@@ -227,31 +227,31 @@ describe('superTenantApi', () => {
   });
 
   it('create POSTs the payload', async () => {
-    rec.reply.data = { success: true, tenant: { id: 9, slug: 'acme', displayName: 'Acme', createdAt: null } };
+    rec.reply.data = { success: true, tenant: { id: 'aaaaaaaa-0000-4000-8000-000000000009', slug: 'acme', displayName: 'Acme', createdAt: null } };
 
     const res = await superTenantApi.create({ slug: 'acme', displayName: 'Acme', seatLimit: 10 });
 
-    expect(res.data.tenant.id).toBe(9);
+    expect(res.data.tenant.id).toBe('aaaaaaaa-0000-4000-8000-000000000009');
     expect(sent().method).toBe('post');
     expect(bodyOf(sent())).toEqual({ slug: 'acme', displayName: 'Acme', seatLimit: 10 });
   });
 
   it('update PUTs to the tenant id', async () => {
-    await superTenantApi.update(9, { isActive: false });
+    await superTenantApi.update('aaaaaaaa-0000-4000-8000-000000000009', { isActive: false });
     expect(sent().method).toBe('put');
-    expect(sent().url).toBe('/api/v1/superadmin/tenants/9');
+    expect(sent().url).toBe('/api/v1/superadmin/tenants/aaaaaaaa-0000-4000-8000-000000000009');
     expect(bodyOf(sent())).toEqual({ isActive: false });
   });
 
   it('deactivate DELETEs the tenant id', async () => {
-    await superTenantApi.deactivate(9);
+    await superTenantApi.deactivate('aaaaaaaa-0000-4000-8000-000000000009');
     expect(sent().method).toBe('delete');
-    expect(sent().url).toBe('/api/v1/superadmin/tenants/9');
+    expect(sent().url).toBe('/api/v1/superadmin/tenants/aaaaaaaa-0000-4000-8000-000000000009');
   });
 
   it('propagates a 403 for non-super-admins', async () => {
     failWith(403, { success: false });
-    await expect(superTenantApi.deactivate(9)).rejects.toMatchObject({ response: { status: 403 } });
+    await expect(superTenantApi.deactivate('aaaaaaaa-0000-4000-8000-000000000009')).rejects.toMatchObject({ response: { status: 403 } });
   });
 });
 

@@ -866,13 +866,14 @@ infrastructure:
   #   - commands: must start with -@all; never +@all/allcommands/+@dangerous/+@admin, never
   #     +flushall/+flushdb/+keys/+acl/+config (only `+config|get`), no pub/sub channels.
   # Omit `commands` to inherit the instance's base allow-list below.
+  # `selectors` (optional): extra ACL selectors `(keys commands)` for a NARROW command set on keys
+  # the user does not own -- only consumer-group admin (+xgroup|create, +xgroup|destroy,
+  # +xinfo|groups, +xinfo|stream) is allowed there.
   valkeyAcl:
-    # TRANSITIONAL (rollout step 2 of 3, docs/valkey-acl.md). true = the legacy password-only
-    # `default` user (old shared password, `~*`) stays enabled so clients that have not yet been
-    # switched to their own user keep working mid-roll. Flip to false once every client
-    # authenticates as its own user (step 3): `default` is then `reset` (off, no password, no
-    # keys, no commands) and an unauthenticated connection gets NOAUTH.
-    legacyDefaultUser: true
+    # Rollout step 3 done (docs/valkey-acl.md): every client authenticates as its own user, so
+    # `default` is `reset` (off, no password, no keys, no commands; unauthenticated = NOAUTH).
+    # ROLLBACK ONLY: true re-enables the legacy shared-password `default` user (`~*`).
+    legacyDefaultUser: false
     durableBaseCommands: "-@all +@connection +@read +@write +@stream +@keyspace +@transaction +@scripting -@dangerous"
     # `+time` / `+config|get` AFTER -@dangerous: bundle_host_kv's Lua calls TIME and the kv
     # wiring probes `CONFIG GET maxmemory-policy` (see valkey-kv.yaml).
@@ -926,6 +927,9 @@ infrastructure:
             - "~waddles:event-sync:*"
             - "~waddles:usage"
             - "~waddles:platform-unban:*"
+            # latency canary: the action stage LPUSHes the canary's result for the driver
+            # (core/svc_action/src/capabilities.rs, command_latency::canary::RESULT_KEY).
+            - "~waddles:canary:latency:result"
             - "%R~bundle:grants:invalidate"
             - "%R~waddles:bundle_config:v*"
         kv:
@@ -939,8 +943,12 @@ infrastructure:
             - "~waddles:analytics:dlq"
           commands: "-@all +@connection +@stream -@dangerous"
       # hub-api (control plane): producer of the invalidation streams + admin/event-sync
-      # request queues, reader of their results, usage aggregator, token revocation, caches.
-      # NO delivery-stream write, NO platform-unban, NO bundlekv on the durable instance.
+      # request queues, reader of their results, usage aggregator (consumer group on
+      # waddles:usage), JWT revocation, rate limiter, SSO/OAuth/DSAR state, caches.
+      # Spine streams: ONLY consumer-group provisioning (app_source_binding_service.py,
+      # source_group_reconciler.py, bundle_version_service.py: XGROUP CREATE/DESTROY on
+      # source/bundle streams) via a selector -- it can never XADD/XREAD delivery streams.
+      # NO platform-unban, NO bundlekv on the durable instance.
       hub-api:
         durable:
           keys:
@@ -954,11 +962,24 @@ infrastructure:
             - "~waddles:usage"
             - "~bundle:grants:invalidate"
             - "~keys:tenant-dek:invalidate"
-        # GDPR erasure of bundle kv data only: SCAN + UNLINK, no reads.
+            - "~hub_api_rate_limit:*"
+            - "~sso:state:*"
+            - "~sso:saml:assertion:*"
+            - "~oauth:tenant_discord_install:state:*"
+            - "~oauth:twitch_install:state:*"
+            - "~oauth:conn:state:*"
+            - "~dsar:rl:*"
+            - "~dsar:once:*"
+          selectors:
+            - keys: ["~waddles:t:*:src:*", "~waddles:t:*:app:*"]
+              commands: "-@all +xgroup|create +xgroup|destroy"
+        # GDPR Art. 17 erasure of per-user bundle kv (erasure_external.py): SCAN the data keys,
+        # UNLINK hits, adjust each app's `:count`. No reads of kv values.
         kv:
           keys:
             - "~bundlekv:*:data:*"
-          commands: "-@all +@connection +scan +unlink"
+            - "~bundlekv:*:count"
+          commands: "-@all +@connection +scan +unlink +exists +decrby +del"
       # role-sync-inbound CronJob: consumes the Discord source streams (XGROUP/XREADGROUP/XACK
       # need read+write on the stream, so this is `~`, not `%R~`) + its own DLQ.
       role-sync-inbound:
@@ -973,12 +994,16 @@ infrastructure:
           keys:
             - "~waddles:landing:*"
           commands: "-@all +@connection +@read +@write +@keyspace -@dangerous"
-      # core-bundle-seeder Job: grant invalidation + bundle-config version bump.
+      # core-bundle-seeder Job: grant invalidation + bundle-config version bump, and the
+      # per-stage consumer groups of the bundles it publishes (bundle_version_service.py).
       core-bundle-seeder:
         durable:
           keys:
             - "~bundle:grants:invalidate"
             - "~waddles:bundle_config:*"
+          selectors:
+            - keys: ["~waddles:t:*:app:*"]
+              commands: "-@all +xgroup|create +xgroup|destroy"
 
   # SeaweedFS Object Storage (replaces MinIO -- quay.io/minio/{minio,mc} started
   # returning 401 on anonymous pulls and Docker Hub never carried them; see
