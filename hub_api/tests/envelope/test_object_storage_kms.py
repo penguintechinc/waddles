@@ -208,8 +208,12 @@ async def _all_writes() -> None:
     await storage_service.upload_community_asset(
         b"img", "l.png", "image/png", folder="community-logos"
     )
-    await storage_service.upload_bundle_component("waddles.x.y", "1.0.0", "ab" * 32, b"wasm")
-    await storage_service.write_bundle_sidecar("waddles.x.y", "1.0.0", "ab" * 32, {"k": "v"})
+    await storage_service.upload_bundle_component(
+        "penguintechinc.waddles.x-y", "1.0.0", "ab" * 32, b"wasm"
+    )
+    await storage_service.write_bundle_sidecar(
+        "penguintechinc.waddles.x-y", "1.0.0", "ab" * 32, {"k": "v"}
+    )
 
 
 class TestStorageServiceOnTheWire:
@@ -241,5 +245,7 @@ class TestStorageServiceOnTheWire:
         with pytest.raises(ExternalKmsNotEntitledError):
             await storage_service.upload_avatar(b"img", "a.png", "image/png")
         with pytest.raises(ExternalKmsNotEntitledError):
-            await storage_service.upload_bundle_component("waddles.x.y", "1.0.0", "ab" * 32, b"w")
+            await storage_service.upload_bundle_component(
+                "penguintechinc.waddles.x-y", "1.0.0", "ab" * 32, b"w"
+            )
         assert s3.puts() == []  # not a single object reached the store, under any key

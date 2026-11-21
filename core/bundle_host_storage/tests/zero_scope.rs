@@ -8,7 +8,7 @@ use bundle_host_storage::{
 };
 use bytes::Bytes;
 
-const APP: &str = "waddles.harness.media";
+const APP: &str = "penguintechinc.waddles.harness-media";
 
 fn scope(tenant: u64, community: u64) -> StorageScope {
     StorageScope {
@@ -50,11 +50,17 @@ async fn unresolved_zero_scope_is_refused_on_every_op() {
         assert!(is_invalid(h.delete(&s, None, "k.mp4").await), "delete");
         assert!(is_invalid(h.list(&s, None, "", None, 10).await), "list");
         assert!(
-            is_invalid(h.tag_add(&s, None, "k.mp4", "waddles.app.clips").await),
+            is_invalid(
+                h.tag_add(&s, None, "k.mp4", "penguintechinc.waddles.app-clips")
+                    .await
+            ),
             "tag_add"
         );
         assert!(
-            is_invalid(h.tag_remove(&s, None, "k.mp4", "waddles.app.clips").await),
+            is_invalid(
+                h.tag_remove(&s, None, "k.mp4", "penguintechinc.waddles.app-clips")
+                    .await
+            ),
             "tag_remove"
         );
     }

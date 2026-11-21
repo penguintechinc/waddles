@@ -14,7 +14,7 @@
      - Layout management (`required_scope: community:admin`): `add_component`, `update_component`, `remove_component`, `list_components`, `clear_layout`, `set_canvas_theme`.
      - Presentation App Bundle Registration & Live Output: `register_widget` (idempotently registers a bundle's custom widget descriptor, output kind [`sanitized_html` | `image` | `text` | `surface`], default `(x, y, width, height, z_index)`, and configurable `props_schema`) and `push_widget` (pushes live `sanitized_html`, `image`, or `text` frames for a `widget_id` to all connected composite scenes and standalone widget browser sources in the community).
 3. **Presentation-Layer App Bundles (`stages.presentation` + `register_widget` / `push_widget`)**:
-   - Just like bundles can plug into `process` and `action` stages (`_ALLOWED_STAGES = {"process", "action", "presentation"}` in `bundle_manifest_v2.py`), developers can build **presentation app bundles** (e.g., `waddles.community.overlay.starwars_avatars`, `penguintechinc.waddles.dj`, `waddles.core.overlay.alerts`).
+   - Just like bundles can plug into `process` and `action` stages (`_ALLOWED_STAGES = {"process", "action", "presentation"}` in `bundle_manifest_v2.py`), developers can build **presentation app bundles** (e.g., `penguintechinc.waddles.community-overlay-starwars-avatars`, `penguintechinc.waddles.dj`, `penguintechinc.waddles.overlay-alerts`).
    - When loaded/enabled for a community, the presentation app bundle registers its widget(s) with `penguintechinc.waddles.overlay` via `register_widget` (and/or declares `overlay_widgets:` in `bundle.yaml` / `hub-manifest.yaml` for static seeding) and pushes live updates via `push_widget` (`output_kind: "sanitized_html" | "image" | "text"`).
    - **Server-Side HTML/CSS Sanitization (`ammonia` allowlist in `svc-presentation` / `overlay` host)**: When a presentation app bundle outputs `sanitized_html` (e.g., positioned avatar sprites, health bars, speech bubbles, or styled cards for a Star Wars–style Stream Avatars overlay), the Rust host sanitizes the markup through a strict `ammonia` allowlist (`div, span, p, strong, em, b, i, br, ul, ol, li, img, svg, path, circle, rect, g, text` with safe presentational/animation classes and bounded inline positioning, stripping all `<script>`, `on*` event handlers, `javascript:`/`data:text/html` URIs, `<iframe/object/embed/form/style>`, and validating all `img[src]` against `https://` + allowed hosts) and detokenizes any `{user:<uuid>}` tokens via `OverlayDetokenizer` **before** the frame ever reaches SSE or the browser DOM.
 
@@ -32,7 +32,7 @@
 ┌────────────────────────────────────────────────────────────────────────────────────────┐
 │                 Presentation-Layer & App Bundles (WASM — Plug & Play)                  │
 │  ┌──────────────────────────┐ ┌──────────────────────────┐ ┌────────────────────────┐  │
-│  │ penguintechinc.waddles.dj  │ │ waddles.core.overlay.    │ │ Custom Presentation    │  │
+│  │ penguintechinc.waddles.dj  │ │ penguintechinc.waddles.overlay.    │ │ Custom Presentation    │  │
 │  │ • Album Cover + Details  │ │   alerts                 │ │ App Bundle (e.g.       │  │
 │  │ • Song Request Queue     │ │ • Sub/Follow/Cheer/Raid  │ │   Star Wars Avatars)   │  │
 │  └────────────┬─────────────┘ └────────────┬─────────────┘ └───────────┬────────────┘  │
@@ -95,7 +95,7 @@
 Just as Waddles supports bundles for **gateway/connector**, **process**, and **action** stages, any developer can author a **presentation app bundle** (declaring `stages.presentation` and/or calling `penguintechinc.waddles.overlay` via `tool.invoke`).
 
 ### 2.1 How a Presentation App Bundle Works (Example: Star Wars–Style Stream Avatars)
-Suppose a developer builds `waddles.community.overlay.starwars_avatars`:
+Suppose a developer builds `penguintechinc.waddles.community-overlay-starwars-avatars`:
 1. **Install & Enable**: When the bundle is enabled for a community, its initialization / presentation stage (or manifest `overlay_widgets` registration) calls `penguintechinc.waddles.overlay` → `register_widget`:
    - `widget_id`: `"starwars_avatars.stage_strip"`
    - `display_name`: `"Galactic Stream Avatars (Jedi / Sith Walkers)"`
@@ -103,7 +103,7 @@ Suppose a developer builds `waddles.community.overlay.starwars_avatars`:
    - `allow_standalone_output`: `true` (gives the streamer both a draggable component in the Overlay Builder **and** a standalone overlay URL `/{overlay_code}/widget/starwars_avatars.stage_strip?key=<VIEW_KEY>`)
    - `default_layout`: `{ "x": 0, "y": 920, "width": 1920, "height": 160, "z_index": 35 }`
    - `props_schema`: `{ "faction_theme": { "type": "string", "enum": ["rebel", "empire", "mandalorian"], "default": "rebel" }, "max_avatars": { "type": "integer", "default": 25, "minimum": 1, "maximum": 60 } }`
-2. **Automatic Designer Discovery**: Because `waddles.community.overlay.starwars_avatars` is enabled in the user's active community, the **Overlay Builder** in the Web UI automatically displays **"Galactic Stream Avatars (Jedi / Sith Walkers)"** in the left-hand component palette. The streamer drags it onto the bottom of their `1920×1080` canvas (or clicks **+ Add to Overlay**).
+2. **Automatic Designer Discovery**: Because `penguintechinc.waddles.community-overlay-starwars-avatars` is enabled in the user's active community, the **Overlay Builder** in the Web UI automatically displays **"Galactic Stream Avatars (Jedi / Sith Walkers)"** in the left-hand component palette. The streamer drags it onto the bottom of their `1920×1080` canvas (or clicks **+ Add to Overlay**).
 3. **Live Runtime Pushes (`push_widget`)**: As chatters talk, use `!jump`, `!duel`, or join the stream, the bundle's `process`/`action`/`presentation` stage calls `penguintechinc.waddles.overlay` → `push_widget`:
    ```json
    {
@@ -139,8 +139,8 @@ Alongside custom presentation app bundles (`sanitized_html` / `image` / `text`),
 |-----------|-----------------|-------------|---------------------------------------|-------------------------------|
 | `dj.music.album_now_playing` | `penguintechinc.waddles.dj` | `surface` (`music.now_playing`) | `x: 48, y: 860, w: 460, h: 160, z: 20` | **Music Album Cover & Track Details**: Square album art (`artwork_url`, `https://` validated, with vinyl/note fallback), track `title`, `artist`, elapsed/duration progress bar, and provider badge (`spotify`/`youtube`/`soundcloud`). |
 | `dj.music.song_request_queue` | `penguintechinc.waddles.dj` | `surface` (`music.queue`) | `x: 48, y: 560, w: 460, h: 280, z: 15` | **Song Request / Up-Next Queue**: Active song request queue (`up_next` tracks up to `max_items` prop, track title/artist/duration, `total_queued` counter, and configurable `!sr` header prompt). |
-| `alerts.stream.event_box` | `waddles.core.overlay.alerts` | `surface` (`alert` / `alert_box`) | `x: 660, y: 120, w: 600, h: 220, z: 50` | **Stream Alerts (Sub, Follow, Cheer, Raid, Donation, Custom)**: Animated popup card triggered on `alert` / `alert_box` events. Supports filtering by `kinds` prop, custom duration, accent color, and detokenized display names. |
-| `avatars.galactic.stage_strip` | `waddles.core.overlay.galactic_avatars` *(reference presentation app bundle)* | `sanitized_html` / `image` | `x: 0, y: 920, w: 1920, h: 160, z: 35` | **Galactic Stream Avatars (Presentation App Bundle)**: Renders sci-fi/Star-Wars-inspired pixel/sprite avatars along the bottom of the stream canvas for active chatters (`!avatar`, `!jump`, `!duel`), demonstrating dynamic `register_widget` + `push_widget(sanitized_html/image/text)`. |
+| `alerts.stream.event_box` | `penguintechinc.waddles.overlay-alerts` | `surface` (`alert` / `alert_box`) | `x: 660, y: 120, w: 600, h: 220, z: 50` | **Stream Alerts (Sub, Follow, Cheer, Raid, Donation, Custom)**: Animated popup card triggered on `alert` / `alert_box` events. Supports filtering by `kinds` prop, custom duration, accent color, and detokenized display names. |
+| `avatars.galactic.stage_strip` | `penguintechinc.waddles.overlay-galactic-avatars` *(reference presentation app bundle)* | `sanitized_html` / `image` | `x: 0, y: 920, w: 1920, h: 160, z: 35` | **Galactic Stream Avatars (Presentation App Bundle)**: Renders sci-fi/Star-Wars-inspired pixel/sprite avatars along the bottom of the stream canvas for active chatters (`!avatar`, `!jump`, `!duel`), demonstrating dynamic `register_widget` + `push_widget(sanitized_html/image/text)`. |
 | `core.static.media` | Built-in (`svc-presentation`) | `surface` (`media`) | `x: 640, y: 260, w: 640, h: 360, z: 30` | Standard static Media card placed as a region on the composite canvas. |
 | `core.static.chat` | Built-in (`svc-presentation`) | `surface` (`chat`) | `x: 1480, y: 180, w: 400, h: 640, z: 10` | Standard static Chat box placed on the composite canvas. |
 | `core.static.ticker` | Built-in (`svc-presentation`) | `surface` (`ticker`) | `x: 0, y: 1024, w: 1920, h: 56, z: 40` | Bottom news/announcement ticker bar. |
@@ -331,9 +331,9 @@ Following the established service-bundle pattern from `penguintechinc.waddles.re
 
 - [ ] **Step 1: Update `penguintechinc.waddles.dj` with `overlay_widgets` descriptors & `artwork_url` publishing**
   Declare `dj.music.album_now_playing` (`output_kind: surface`, `surface_id: music.now_playing`) and `dj.music.song_request_queue` (`output_kind: surface`, `surface_id: music.queue`), request `penguintechinc.waddles.overlay` tools (`register_widget`, `push_widget`), and include optional `artwork_url` on published tracks.
-- [ ] **Step 2: Create presentation-layer app bundle `waddles.core.overlay.alerts` (`bundles/rust/stream-alerts/`)**
+- [ ] **Step 2: Create presentation-layer app bundle `penguintechinc.waddles.overlay-alerts` (`bundles/rust/stream-alerts/`)**
   Build a Rust app bundle on `world stage-next-tools` that registers `alerts.stream.event_box` with `penguintechinc.waddles.overlay` (`register_widget`) and publishes follow/sub/raid/cheer/donation alerts via `publish-surface("alert", ...)` and `push_widget`.
-- [ ] **Step 3: Create presentation-layer app bundle `waddles.core.overlay.galactic_avatars` (`bundles/rust/galactic-avatars/`)**
+- [ ] **Step 3: Create presentation-layer app bundle `penguintechinc.waddles.overlay-galactic-avatars` (`bundles/rust/galactic-avatars/`)**
   Build a reference presentation app bundle (Star Wars–inspired Stream Avatars stage strip) on `world stage-next-tools` that:
   - Declares `stages.presentation` and `stages.action` (`!avatar`, `!jump`, `!duel`, `!force`).
   - Calls `penguintechinc.waddles.overlay` → `register_widget` to register `avatars.galactic.stage_strip` (`output_kind: "sanitized_html"`, `allow_standalone_output: true`, `default_x: 0, default_y: 920, default_width: 1920, default_height: 160`).
@@ -392,7 +392,7 @@ Following the established service-bundle pattern from `penguintechinc.waddles.re
   - `PUT /api/v1/admin/<int:community_id>/overlay/builder/layout`
   - `POST /api/v1/admin/<int:community_id>/overlay/builder/test-event`
 - [ ] **Step 4: Write unit & API filter tests (`tests/unit/test_overlay_builder_api.py`)**
-  Test community isolation, verify enabling/disabling a presentation app bundle (like `waddles.core.overlay.galactic_avatars`) dynamically adds/hides its widget in the community's builder palette, and assert exact response DTO field sets.
+  Test community isolation, verify enabling/disabling a presentation app bundle (like `penguintechinc.waddles.overlay-galactic-avatars`) dynamically adds/hides its widget in the community's builder palette, and assert exact response DTO field sets.
 
 ---
 
