@@ -31,6 +31,7 @@ auto-discovery -- no edit to `routers/v1.py` needed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -53,6 +54,8 @@ from services.public_ids import (
     resolve_public_id_sync,
 )
 from services.route_guards import community_admin_guard, community_member_guard
+
+logger = logging.getLogger(__name__)
 
 ADMIN_SUPPORT_SCOPE = "community.support:admin"
 
@@ -621,6 +624,7 @@ async def submit_ticket(
             custom_fields=data.custom_fields,
         )
     except ApiError as exc:
+        logger.debug("support ticket create refused: %s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
     cpid = await lookup_public_id(community_id)
     return {"ticket": asdict(_ticket_dto(row, None, cpid, _cat_pids(dal, [row])))}, 201
