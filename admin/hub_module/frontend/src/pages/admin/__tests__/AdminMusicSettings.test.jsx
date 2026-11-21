@@ -73,7 +73,7 @@ describe('AdminMusicSettings', () => {
   });
 
   it('shows the API error and falls back to defaults when load fails', async () => {
-    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 402, data: { error: { message: 'not enabled' } } } });
+    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 500, data: { error: { message: 'not enabled' } } } });
     mount();
     await screen.findByText('not enabled');
     expect(screen.getByText('No blocked artists')).toBeTruthy();
