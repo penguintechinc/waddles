@@ -46,8 +46,83 @@ pub const MAC_PLATFORM: &str = "platform-unban";
 pub const MAC_OP: &str = "ban.removed";
 /// MAC `origin_channel`; must equal ingest's.
 pub const MAC_NO_ORIGIN: &str = "-";
-/// The only platform this consumer serves.
+/// The Discord platform id (the default [`PlatformSpec`]).
 pub const PLATFORM: &str = "discord";
+
+/// Metric result labels of one platform's consumer (`waddles_floor_ban_dispatch_total{result}`).
+#[derive(Debug)]
+pub struct Labels {
+    /// A floor ban was lifted.
+    pub lifted: &'static str,
+    /// Valid event, nothing in force.
+    pub no_ban: &'static str,
+    /// Lift failed / store down.
+    pub error: &'static str,
+    /// Unparseable or structurally invalid entry.
+    pub malformed: &'static str,
+    /// MAC did not verify.
+    pub bad_signature: &'static str,
+    /// Past its deadline or implausibly far ahead.
+    pub expired: &'static str,
+    /// Event id already handled.
+    pub replayed: &'static str,
+}
+
+/// Everything that differs between platforms' unban streams: the ONE implementation of
+/// envelope parse, MAC verification, freshness and single use serves them all.
+#[derive(Debug)]
+pub struct PlatformSpec {
+    /// Wire platform of the events.
+    pub platform: &'static str,
+    /// Valkey list svc-ingest pushes onto.
+    pub events_list: &'static str,
+    /// Prefix of the single-use markers.
+    pub seen_prefix: &'static str,
+    /// Fixed `p_source_app` of the lift.
+    pub source_app: &'static str,
+    /// MAC domain-separation label (`platform` slot); per platform so a MAC minted for one
+    /// platform can never stand in for another's.
+    pub mac_platform: &'static str,
+    /// Metric labels.
+    pub labels: Labels,
+}
+
+/// Discord `GUILD_BAN_REMOVE` events.
+pub static DISCORD: PlatformSpec = PlatformSpec {
+    platform: PLATFORM,
+    events_list: EVENTS_LIST,
+    seen_prefix: SEEN_PREFIX,
+    source_app: SOURCE_APP,
+    mac_platform: MAC_PLATFORM,
+    labels: Labels {
+        lifted: "gateway_unban_lifted",
+        no_ban: "gateway_unban_no_ban",
+        error: "gateway_unban_error",
+        malformed: "gateway_unban_malformed",
+        bad_signature: "gateway_unban_bad_signature",
+        expired: "gateway_unban_expired",
+        replayed: "gateway_unban_replayed",
+    },
+};
+
+/// Twitch EventSub `channel.unban` events. The wire `guild_id` field carries the broadcaster's
+/// numeric Twitch user id (the contract keeps one envelope shape for every platform).
+pub static TWITCH: PlatformSpec = PlatformSpec {
+    platform: "twitch",
+    events_list: "waddles:platform-unban:twitch:events",
+    seen_prefix: "waddles:platform-unban:twitch:seen:",
+    source_app: "system:twitch-eventsub",
+    mac_platform: "platform-unban-twitch",
+    labels: Labels {
+        lifted: "eventsub_unban_lifted",
+        no_ban: "eventsub_unban_no_ban",
+        error: "eventsub_unban_error",
+        malformed: "eventsub_unban_malformed",
+        bad_signature: "eventsub_unban_bad_signature",
+        expired: "eventsub_unban_expired",
+        replayed: "eventsub_unban_replayed",
+    },
+};
 /// Largest accepted entry, bytes.
 const MAX_ENTRY_BYTES: usize = 4 * 1024;
 /// An event's deadline may be at most this far ahead (ingest's TTL plus clock skew).
@@ -99,13 +174,20 @@ pub trait SeenStore: Send + Sync {
 /// Valkey `SET NX EX` marker store.
 pub struct ValkeySeen {
     conn: redis::aio::ConnectionManager,
+    prefix: &'static str,
 }
 
 impl ValkeySeen {
     /// Wraps a connected manager.
     #[must_use]
     pub fn new(conn: redis::aio::ConnectionManager) -> Self {
-        Self { conn }
+        Self::with_prefix(conn, SEEN_PREFIX)
+    }
+
+    /// Wraps a connected manager with an explicit marker prefix (one per platform).
+    #[must_use]
+    pub fn with_prefix(conn: redis::aio::ConnectionManager, prefix: &'static str) -> Self {
+        Self { conn, prefix }
     }
 }
 
@@ -114,7 +196,7 @@ impl SeenStore for ValkeySeen {
         Box::pin(async move {
             let mut conn = self.conn.clone();
             let set: Option<String> = redis::cmd("SET")
-                .arg(format!("{SEEN_PREFIX}{event_id}"))
+                .arg(format!("{}{event_id}", self.prefix))
                 .arg(1)
                 .arg("NX")
                 .arg("EX")
@@ -129,6 +211,7 @@ impl SeenStore for ValkeySeen {
 
 /// Verifies and applies platform-originated unban events.
 pub struct PlatformUnban {
+    spec: &'static PlatformSpec,
     lift: Arc<dyn UnbanSync>,
     keys: PinKeys,
     seen: Arc<dyn SeenStore>,
@@ -150,7 +233,20 @@ impl PlatformUnban {
         seen: Arc<dyn SeenStore>,
         metrics: Arc<StageMetrics>,
     ) -> Self {
+        Self::with_spec(&DISCORD, lift, keys, seen, metrics)
+    }
+
+    /// Builds the handler for one platform's stream.
+    #[must_use]
+    pub fn with_spec(
+        spec: &'static PlatformSpec,
+        lift: Arc<dyn UnbanSync>,
+        keys: PinKeys,
+        seen: Arc<dyn SeenStore>,
+        metrics: Arc<StageMetrics>,
+    ) -> Self {
         Self {
+            spec,
             lift,
             keys,
             seen,
@@ -167,31 +263,31 @@ impl PlatformUnban {
     /// Handles one raw list entry at `now` (epoch ms).
     pub async fn handle(&self, raw: &str, now: u64) -> Outcome {
         if raw.len() > MAX_ENTRY_BYTES {
-            return self.rejected("gateway_unban_malformed", "oversize");
+            return self.rejected(self.spec.labels.malformed, "oversize");
         }
         let Ok(ev) = serde_json::from_str::<Event>(raw) else {
-            return self.rejected("gateway_unban_malformed", "malformed");
+            return self.rejected(self.spec.labels.malformed, "malformed");
         };
         let (Ok(tenant), Ok(community)) =
             (i32::try_from(ev.tenant_id), i32::try_from(ev.community_id))
         else {
-            return self.rejected("gateway_unban_malformed", "bad_scope");
+            return self.rejected(self.spec.labels.malformed, "bad_scope");
         };
         if ev.v != 1
-            || ev.platform != PLATFORM
+            || ev.platform != self.spec.platform
             || tenant < 1
             || community < 1
             || Uuid::parse_str(&ev.event_id).is_err()
             || ev.guild_id.is_empty()
             || ev.guild_id.len() > 20
         {
-            return self.rejected("gateway_unban_malformed", "malformed");
+            return self.rejected(self.spec.labels.malformed, "malformed");
         }
         let Ok(user) = Uuid::parse_str(&ev.user_uuid) else {
-            return self.rejected("gateway_unban_malformed", "bad_user");
+            return self.rejected(self.spec.labels.malformed, "bad_user");
         };
         let fields = PinFields {
-            platform: MAC_PLATFORM,
+            platform: self.spec.mac_platform,
             op: MAC_OP,
             channel: &ev.guild_id,
             origin_channel: MAC_NO_ORIGIN,
@@ -204,18 +300,18 @@ impl PlatformUnban {
             tenant_id: ev.tenant_id,
         };
         if self.keys.verify(&fields, &ev.sig).is_err() {
-            return self.rejected("gateway_unban_bad_signature", "bad_signature");
+            return self.rejected(self.spec.labels.bad_signature, "bad_signature");
         }
         if ev.exp_ms < now || ev.exp_ms > now.saturating_add(MAX_AHEAD_MS) {
-            return self.rejected("gateway_unban_expired", "expired");
+            return self.rejected(self.spec.labels.expired, "expired");
         }
         match self.seen.claim(&ev.event_id).await {
             Ok(true) => {}
-            Ok(false) => return self.rejected("gateway_unban_replayed", "replayed"),
+            Ok(false) => return self.rejected(self.spec.labels.replayed, "replayed"),
             Err(_) => {
                 // Fail closed: without the single-use marker a replay could lift a fresh ban.
                 self.metrics
-                    .record_floor_ban_dispatch("gateway_unban_error");
+                    .record_floor_ban_dispatch(self.spec.labels.error);
                 tracing::error!(
                     tenant_id = tenant,
                     community_id = community,
@@ -226,39 +322,48 @@ impl PlatformUnban {
         }
         match self
             .lift
-            .lift_from_platform(tenant, community, PLATFORM, user, SOURCE_APP)
+            .lift_from_platform(
+                tenant,
+                community,
+                self.spec.platform,
+                user,
+                self.spec.source_app,
+            )
             .await
         {
             Ok((lifted, soft)) if lifted + soft > 0 => {
                 self.metrics
-                    .record_floor_ban_dispatch("gateway_unban_lifted");
+                    .record_floor_ban_dispatch(self.spec.labels.lifted);
                 tracing::info!(
                     tenant_id = tenant,
                     community_id = community,
                     lifted,
                     soft_cleared = soft,
-                    "discord-native unban lifted the Waddles ban (no echo)"
+                    platform = self.spec.platform,
+                    "platform-native unban lifted the Waddles ban (no echo)"
                 );
                 Outcome::Lifted { lifted, soft }
             }
             Ok(_) => {
                 self.metrics
-                    .record_floor_ban_dispatch("gateway_unban_no_ban");
+                    .record_floor_ban_dispatch(self.spec.labels.no_ban);
                 tracing::info!(
                     tenant_id = tenant,
                     community_id = community,
-                    "discord-native unban: no community-scope Waddles ban in force"
+                    platform = self.spec.platform,
+                    "platform-native unban: no community-scope Waddles ban in force"
                 );
                 Outcome::NoBan
             }
             Err(e) => {
                 self.metrics
-                    .record_floor_ban_dispatch("gateway_unban_error");
+                    .record_floor_ban_dispatch(self.spec.labels.error);
                 tracing::error!(
                     tenant_id = tenant,
                     community_id = community,
+                    platform = self.spec.platform,
                     error = %e,
-                    "ALERT discord-native unban: the Waddles floor ban could NOT be lifted"
+                    "ALERT platform-native unban: the Waddles floor ban could NOT be lifted"
                 );
                 Outcome::Error
             }
@@ -278,7 +383,7 @@ pub async fn run_consumer<S>(
     let mut failures: u32 = 0;
     loop {
         let mut pop = redis::cmd("BRPOP");
-        pop.arg(EVENTS_LIST).arg(POP_TIMEOUT_SECS);
+        pop.arg(handler.spec.events_list).arg(POP_TIMEOUT_SECS);
         let popped = tokio::select! {
             () = &mut shutdown => return,
             r = pop.query_async::<Option<(String, String)>>(&mut pop_conn) => r,
@@ -503,5 +608,101 @@ mod tests {
                 .await,
             Outcome::Error
         );
+    }
+
+    fn twitch_event(keys: &PinKeys, mac_platform: &str, exp: u64) -> String {
+        let f = PinFields {
+            platform: mac_platform,
+            op: MAC_OP,
+            channel: "141981764",
+            origin_channel: MAC_NO_ORIGIN,
+            message_id: "",
+            text: "",
+            user_id: UUID,
+            op_id: EVENT,
+            exp_ms: exp,
+            community_id: 9,
+            tenant_id: 7,
+        };
+        let sig = keys.sign(&f).unwrap();
+        serde_json::json!({"v":1,"event_id":EVENT,"tenant_id":7,"community_id":9,
+            "platform":"twitch","guild_id":"141981764","user_uuid":UUID,
+            "exp_ms":exp,"sig":sig})
+        .to_string()
+    }
+
+    fn twitch_handler(lift: Arc<FakeLift>) -> PlatformUnban {
+        PlatformUnban::with_spec(
+            &TWITCH,
+            lift,
+            keys(),
+            Arc::new(FakeSeen(Mutex::default(), false)),
+            crate::stage_metrics::stage_metrics(),
+        )
+    }
+
+    /// A verified EventSub unban lifts under the fixed `system:twitch-eventsub` identity, and the
+    /// consumer enqueues nothing back (the only effect is the one lift call: no echo).
+    #[tokio::test]
+    async fn a_verified_twitch_event_lifts_under_the_eventsub_identity() {
+        let lift = Arc::new(FakeLift::default());
+        let h = twitch_handler(lift.clone());
+        let out = h
+            .handle(&twitch_event(&keys(), TWITCH.mac_platform, 2_000), 1_000)
+            .await;
+        assert_eq!(out, Outcome::Lifted { lifted: 1, soft: 0 });
+        assert_eq!(
+            lift.calls.lock().unwrap().as_slice(),
+            &[(
+                7,
+                9,
+                "twitch".into(),
+                Uuid::parse_str(UUID).unwrap(),
+                "system:twitch-eventsub".into()
+            )]
+        );
+    }
+
+    /// Domain separation: a Discord-labelled MAC (or an event naming the other platform) can
+    /// never lift through the Twitch consumer, nor the reverse.
+    #[tokio::test]
+    async fn platform_macs_and_platform_names_do_not_cross() {
+        let lift = Arc::new(FakeLift::default());
+        let h = twitch_handler(lift.clone());
+        assert_eq!(
+            h.handle(&twitch_event(&keys(), DISCORD.mac_platform, 2_000), 1_000)
+                .await,
+            Outcome::Rejected("bad_signature")
+        );
+        // A Discord event into the Twitch handler: wrong platform.
+        assert_eq!(
+            h.handle(&event(&keys(), 2_000, 7, 9), 1_000).await,
+            Outcome::Rejected("malformed")
+        );
+        // A Twitch event into the Discord handler: wrong platform.
+        let d = handler(lift.clone(), false);
+        assert_eq!(
+            d.handle(&twitch_event(&keys(), TWITCH.mac_platform, 2_000), 1_000)
+                .await,
+            Outcome::Rejected("malformed")
+        );
+        assert!(lift.calls.lock().unwrap().is_empty());
+    }
+
+    /// Invalid, expired and replayed Twitch events never reach the lift.
+    #[tokio::test]
+    async fn invalid_expired_and_replayed_twitch_events_never_lift() {
+        let lift = Arc::new(FakeLift::default());
+        let h = twitch_handler(lift.clone());
+        let good = twitch_event(&keys(), TWITCH.mac_platform, 2_000);
+        let tampered = good.replace("141981764", "141981765");
+        assert_eq!(
+            h.handle(&tampered, 1_000).await,
+            Outcome::Rejected("bad_signature")
+        );
+        assert_eq!(h.handle(&good, 5_000).await, Outcome::Rejected("expired"));
+        assert!(matches!(h.handle(&good, 1_000).await, Outcome::Lifted { .. }));
+        assert_eq!(h.handle(&good, 1_000).await, Outcome::Rejected("replayed"));
+        assert_eq!(lift.calls.lock().unwrap().len(), 1);
     }
 }

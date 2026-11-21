@@ -1003,13 +1003,38 @@ async fn start_platform_unban_consumer(
         }
     };
     let handler = Arc::new(platform_unban::PlatformUnban::new(
-        lift,
-        keys,
+        Arc::clone(&lift) as Arc<dyn floor_ban_dispatch::UnbanSync>,
+        keys.clone(),
         Arc::new(platform_unban::ValkeySeen::new(seen)),
         stage_metrics::stage_metrics(),
     ));
     tokio::spawn(async move {
         platform_unban::run_consumer(handler, pop, shutdown_signal()).await;
+    });
+    // Twitch EventSub `channel.unban`: the same consumer over its own list, markers, MAC label
+    // and fixed source identity.
+    let (tw_pop, tw_seen) = match (
+        usage::connect(spine_cfg).await,
+        usage::connect(spine_cfg).await,
+    ) {
+        (Ok(pop), Ok(seen)) => (pop, seen),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(error = %e, "twitch platform-unban consumer NOT started: valkey connection failed");
+            return;
+        }
+    };
+    let tw_handler = Arc::new(platform_unban::PlatformUnban::with_spec(
+        &platform_unban::TWITCH,
+        lift,
+        keys,
+        Arc::new(platform_unban::ValkeySeen::with_prefix(
+            tw_seen,
+            platform_unban::TWITCH.seen_prefix,
+        )),
+        stage_metrics::stage_metrics(),
+    ));
+    tokio::spawn(async move {
+        platform_unban::run_consumer(tw_handler, tw_pop, shutdown_signal()).await;
     });
 }
 
