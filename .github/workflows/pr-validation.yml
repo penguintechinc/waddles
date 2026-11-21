@@ -820,6 +820,14 @@ jobs:
       - name: Helm chart template tests (pytest)
         run: python3 -m pytest k8s/helm/waddlebot/tests/ -v
 
+      # hub-api owns bootstrap: every non-hub-api Deployment/Job must start behind the shared
+      # wait-for-hub-api init container; pre-hub-api hooks are exempt only via the reasoned tables in
+      # the checker. It was previously reachable only through `make test-helm-matrix` (never run by
+      # CI), so release drifted to 3 violating Jobs with nothing red. Fails on zero workloads examined;
+      # tests/test_wait_for_hub_api_gate.py (pytest step above) proves a planted Job fails it.
+      - name: wait-for-hub-api gate (every non-hub-api workload waits for hub-api)
+        run: make check-wait-for-hub-api
+
       # #1382 -- a service-leaf Certificate whose SAN falls outside the internal CA's
       # permitted X.509 nameConstraint subtrees is rejected by rustls-webpki (which checks
       # EVERY SAN, not just the dialled name), crashlooping the consumer and blocking
