@@ -228,7 +228,7 @@ while IFS= read -r -d '' f; do
 
   # --- Helm / k8s -------------------------------------------------------------
   case "${f}" in
-    k8s/*|*/Chart.yaml|*/values*.yaml|*/templates/*|docker-compose*.yml)
+    k8s/*|*/Chart.yaml|*/values*.yaml|*/templates/*|docker-compose*.yml|scripts/check_wait_for_hub_api.py)
       HIT[helm]=true ;;
   esac
 
