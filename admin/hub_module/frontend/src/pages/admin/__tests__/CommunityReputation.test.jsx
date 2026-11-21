@@ -85,6 +85,7 @@ describe('TenantReputationSettings', () => {
         tenantAutoBanEnabled: true,
         tenantAutoBanFloor: 350,
         tenantAtRiskThreshold: 450,
+        liftRearmDrop: 5,
       }),
     );
     expect(await screen.findByText(/settings saved/i)).toBeInTheDocument();
