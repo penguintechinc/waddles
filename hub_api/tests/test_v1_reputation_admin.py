@@ -485,6 +485,7 @@ TENANT_FIELDS = {
     "tenantAutoBanEnabled",
     "tenantAutoBanFloor",
     "tenantAtRiskThreshold",
+    "liftRearmDrop",
     "updatedAt",
 }
 
@@ -501,6 +502,7 @@ class TestTenantConfig:
         assert r.status_code == 200 and set(body) == TENANT_FIELDS
         assert body["tenantAutoBanEnabled"] is False
         assert (body["tenantAutoBanFloor"], body["tenantAtRiskThreshold"]) == (350, 450)
+        assert body["liftRearmDrop"] == 5, "default: one maximal activity step"
 
     async def test_tenant_admin_sets_and_it_persists(
         self, client: Any, seeded: dict[str, Any]
@@ -549,6 +551,56 @@ class TestTenantConfig:
     ) -> None:
         r = await client.put(self._url(), headers=_h(1, scope="tenant:admin"), json=payload)
         assert r.status_code == 400
+
+    async def test_lift_rearm_drop_is_tenant_admin_settable_and_persists(
+        self, client: Any, seeded: dict[str, Any]
+    ) -> None:
+        h = _h(1, scope="tenant:admin")
+        r = await client.put(self._url(), headers=h, json={"liftRearmDrop": 12})
+        assert r.status_code == 200 and (await r.get_json())["liftRearmDrop"] == 12
+        body = await (await client.get(self._url(), headers=h)).get_json()
+        assert body["liftRearmDrop"] == 12
+        # A PUT that omits it leaves it unchanged.
+        await client.put(self._url(), headers=h, json={"tenantAutoBanFloor": 340})
+        again = await (await client.get(self._url(), headers=h)).get_json()
+        assert again["liftRearmDrop"] == 12 and again["tenantAutoBanFloor"] == 340
+
+    @pytest.mark.parametrize("value", [0, -3, 101, 5.5, "abc", None.__class__.__name__])
+    async def test_lift_rearm_drop_out_of_range_or_wrong_type_is_400(
+        self, client: Any, seeded: dict[str, Any], value: Any
+    ) -> None:
+        r = await client.put(
+            self._url(), headers=_h(1, scope="tenant:admin"), json={"liftRearmDrop": value}
+        )
+        assert r.status_code in {400, 422}
+        body = await (await client.get(self._url(), headers=_h(1, scope="tenant:admin"))).get_json()
+        assert body["liftRearmDrop"] == 5, "a rejected value changes nothing"
+
+    async def test_a_community_admin_cannot_set_lift_rearm_drop(
+        self, client: Any, seeded: dict[str, Any]
+    ) -> None:
+        r = await client.put(self._url(), headers=_h(1), json={"liftRearmDrop": 50})
+        assert r.status_code == 403
+
+    def test_the_tenant_config_write_is_audited_as_a_reputation_policy_change(self) -> None:
+        from services.audit_events import (
+            AuditAction,
+            RequestFacts,
+            classify_request,
+        )
+
+        got = classify_request(
+            RequestFacts(
+                method="PUT",
+                rule="/api/v1/tenant/<tenant_slug>/reputation/config",
+                status_code=200,
+                scope_checked=True,
+                denied=False,
+                authenticated=True,
+            )
+        )
+        assert got is not None
+        assert got.action == AuditAction.ADMIN_REPUTATION_POLICY_CHANGED
 
     async def test_unauthenticated_is_401(self, client: Any) -> None:
         assert (await client.get(self._url())).status_code == 401

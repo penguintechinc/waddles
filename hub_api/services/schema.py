@@ -1330,6 +1330,7 @@ def bind_reputation_policy_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("tenant_auto_ban_enabled", "boolean", default=False),
             Field("tenant_auto_ban_floor", "integer", default=350),
             Field("tenant_at_risk_threshold", "integer", default=450),
+            Field("lift_rearm_drop", "integer", default=5),
             Field("updated_at", "datetime"),
             primarykey=["tenant_id"],
             migrate=migrate,
