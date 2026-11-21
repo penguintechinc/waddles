@@ -141,7 +141,7 @@ mod tests {
             "penguintechinc.waddles.discord-invite"
         ));
         for bad in [
-            "waddles.core.x",
+            "penguintechinc-waddles.x",
             "penguintechinc.waddles.",
             "penguintechinc.waddles.a.b",
             "psychoboy.penguintwitchbot.roll",

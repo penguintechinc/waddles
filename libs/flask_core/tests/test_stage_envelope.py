@@ -26,7 +26,7 @@ from flask_core.stream_pipeline import (
 
 TENANT = "tenant-1"
 COMMUNITY = "community-1"
-APP_ID = "waddles.bot.example.default"
+APP_ID = "penguintechinc.waddles.bot-example"
 
 
 def _make_event(**overrides: object) -> PlatformEvent:

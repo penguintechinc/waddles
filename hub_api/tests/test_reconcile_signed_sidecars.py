@@ -17,7 +17,7 @@ import pytest
 from cli import reconcile_signed_sidecars as reconciler
 from cli.reconcile_signed_sidecars import _select_signed_versions, reconcile_one
 
-_APP_ID = "waddles.socials.music.default"
+_APP_ID = "penguintechinc.waddles.socials-music"
 _VERSION = "3.0.1"
 _DIGEST = "sha256:" + "a" * 64
 

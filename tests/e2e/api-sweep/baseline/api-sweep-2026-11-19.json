@@ -9,11 +9,11 @@
   },
   "mutations_enabled": false,
   "old_prefix_hits": {
-   "waddles.core.service": 11,
-   "waddles.core.example": 6,
-   "waddles.core.app": 5,
-   "waddles.core.integration": 3,
-   "waddles.core.community": 5
+   "core.service": 11,
+   "core.example": 6,
+   "core.app": 5,
+   "core.integration": 3,
+   "core.community": 5
   },
   "old_prefix_routes": 11,
   "p50_ms": 89,

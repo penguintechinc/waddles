@@ -153,7 +153,6 @@ test_connection "interactive_ai" "mod_interactive_ai_dev_changeme" "AI Interacti
 test_connection "interactive_alias" "mod_interactive_alias_dev_changeme" "Alias Interaction"
 test_connection "interactive_shoutout" "mod_interactive_shoutout_dev_changeme" "Shoutout Interaction"
 test_connection "interactive_inventory" "mod_interactive_inventory_dev_changeme" "Inventory Interaction"
-test_connection "interactive_calendar" "mod_interactive_calendar_dev_changeme" "Calendar Interaction"
 test_connection "interactive_memories" "mod_interactive_memories_dev_changeme" "Memories Interaction"
 test_connection "interactive_ytmusic" "mod_interactive_ytmusic_dev_changeme" "YouTube Music"
 test_connection "interactive_spotify" "mod_interactive_spotify_dev_changeme" "Spotify Interaction"

@@ -57,10 +57,18 @@ from services.scope_registry import (
     SCOPE_SETTINGS_MANAGE,
     SCOPE_TEMP_PASSWORD,
 )
+from services.user_public_id import (
+    lookup_user_id,
+    lookup_user_public_ids,
+    parse_public_user_id,
+    public_id_for,
+    use_user_public_ids,
+)
 
 logger = logging.getLogger(__name__)
 
 admin_bp = Blueprint("v1_admin", __name__, url_prefix="/api/v1/admin")
+use_user_public_ids(admin_bp)
 
 
 async def _require_member_scope(community_id: int, scope: str) -> None:
@@ -491,10 +499,11 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
         )
     except ApiError as exc:
         return _err(exc)
+    user_uuids = await lookup_user_public_ids((member.user_id for member, _ in rows))
     members = [
         MemberDTO(
             id=member.id,
-            userId=member.user_id,
+            userId=public_id_for(user_uuids, member.user_id),
             username=getattr(user, "username", None),
             email=getattr(user, "email", None),
             avatarUrl=getattr(user, "avatar_url", None),
@@ -513,7 +522,7 @@ async def get_members(community_id: int) -> MembersResponse | tuple[dict[str, ob
     )
 
 
-@admin_bp.route("/<cuuid:community_id>/members/<int:user_id>/role", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/members/<uuuid:user_id>/role", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_MEMBERS_ROLES)  # type: ignore[misc]
 @validate_request(UpdateRoleRequest)
@@ -545,7 +554,7 @@ async def update_member_role(
     return MessageResponse(success=True, message="Role updated")
 
 
-@admin_bp.route("/<cuuid:community_id>/members/<int:user_id>/reputation", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/members/<uuuid:user_id>/reputation", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_REPUTATION_MANAGE)  # type: ignore[misc]
 @validate_request(AdjustReputationRequest)
@@ -679,10 +688,11 @@ async def get_reputation_at_risk(community_id: int) -> tuple[Any, int]:
 @tenant_middleware  # type: ignore[misc]
 @document_response(HistoryResponse)
 async def get_reputation_history(community_id: int) -> tuple[Any, int]:
-    """Reputation ledger, newest first (`?userId=` hub user id, `?limit=`, `?offset=`)."""
+    """Reputation ledger, newest first (`?userId=` hub user UUID, `?limit=`, `?offset=`)."""
     async_dal, dal = _dal()
     raw_user = request.args.get("userId")
-    if raw_user is not None and not raw_user.isdigit():
+    user_public_id = parse_public_user_id(raw_user) if raw_user is not None else None
+    if raw_user is not None and user_public_id is None:
         return _err(ApiError("Invalid userId", 400, "BAD_REQUEST"))
     raw_offset = request.args.get("offset", "0")
     if not raw_offset.isdigit():
@@ -693,7 +703,7 @@ async def get_reputation_history(community_id: int) -> tuple[Any, int]:
             async_dal,
             dal,
             community_id=community_id,
-            user_id=int(raw_user) if raw_user is not None else None,
+            user_id=await lookup_user_id(user_public_id) if user_public_id else None,
             limit=parse_limit(request.args.get("limit"), default=50),
             offset=int(raw_offset),
         )
@@ -727,7 +737,7 @@ async def list_reputation_soft_bans(community_id: int) -> tuple[Any, int]:
     return jsonify_dto(SoftBansResponse(success=True, softBans=bans))
 
 
-@admin_bp.route("/<cuuid:community_id>/reputation/soft-bans/<int:user_id>", methods=["PUT"])
+@admin_bp.route("/<cuuid:community_id>/reputation/soft-bans/<uuuid:user_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SoftBanRequest)
 @document_response(MessageResponse)
@@ -762,7 +772,7 @@ async def put_reputation_soft_ban(
     return jsonify_dto(MessageResponse(success=True, message="Soft ban set"))
 
 
-@admin_bp.route("/<cuuid:community_id>/reputation/soft-bans/<int:user_id>", methods=["DELETE"])
+@admin_bp.route("/<cuuid:community_id>/reputation/soft-bans/<uuuid:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @document_response(MessageResponse)
 async def delete_reputation_soft_ban(community_id: int, user_id: int) -> tuple[Any, int]:
@@ -819,7 +829,7 @@ async def delete_reputation_floor_ban(community_id: int, user_uuid: UUID) -> tup
     return jsonify_dto(MessageResponse(success=True, message="Floor ban lifted"))
 
 
-@admin_bp.route("/<cuuid:community_id>/members/<int:user_id>", methods=["DELETE"])
+@admin_bp.route("/<cuuid:community_id>/members/<uuuid:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_member_scope(SCOPE_MEMBERS_REMOVE)  # type: ignore[misc]
 @validate_request(RemoveMemberRequest)

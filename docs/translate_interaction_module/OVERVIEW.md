@@ -57,6 +57,6 @@ translate_interaction_module/
 
 ## Related Modules
 
-- `processing/router_module` — calls this module via gRPC for every message
+- processing/router_module — calls this module via gRPC for every message
 - `admin/hub_module` — manages `community_translation_settings` DB table (CRUD)
-- `core/identity_core_module` — JWT validation key shared via `MODULE_SECRET_KEY`
+- core/identity_core_module — JWT validation key shared via `MODULE_SECRET_KEY`

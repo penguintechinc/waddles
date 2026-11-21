@@ -204,6 +204,8 @@ class GuildTenantPairing(db.Model):
     sync_enabled = Column(Boolean, nullable=False, default=False)
     role_name_prefix = Column(String(50), nullable=False)
     created_by_user_id = Column(Integer, ForeignKey('hub_users.id'), nullable=True)
+    # entity-public-ids migration: the UUID that crosses the API boundary (numeric id is internal).
+    public_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()), unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -252,5 +254,7 @@ class CommunityRoleSyncBinding(db.Model):
     subscriber_tier = Column(SmallInteger, nullable=True)
     community_role = Column(String(20), nullable=True)
     discord_role_id = Column(String(255), nullable=False)
+    # entity-public-ids migration: the UUID that crosses the API boundary (numeric id is internal).
+    public_id = Column(String(36), nullable=False, default=lambda: str(uuid.uuid4()), unique=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

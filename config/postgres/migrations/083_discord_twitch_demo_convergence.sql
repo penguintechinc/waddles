@@ -14,10 +14,10 @@
 --     `penguintechinc.waddles.discord-pipeline` with ONLY an `action` stage.
 --   - `feature/v3-svc-gateway-discord`'s own (now-deleted)
 --     `082_discord_gateway_bundle.sql` seeded a SEPARATE
---     `waddles.bot.discord.gateway` with only an `ingest` stage.
+--     `penguintechinc.waddles.bot-discord-gateway` with only an `ingest` stage.
 --   - `feature/v3-connector-twitch`'s own (now-deleted)
 --     `082_twitch_gateway_bundle.sql`/`083_twitch_send_action_bundle.sql`
---     split Twitch the same way: `waddles.bot.twitch.gateway` (ingest
+--     split Twitch the same way: `penguintechinc.waddles.bot-twitch-gateway` (ingest
 --     only) vs `penguintechinc.waddles.twitch-pipeline` (action only).
 --
 -- This migration merges Discord's ingest+process stages onto the ONE

@@ -32,7 +32,7 @@ PLATFORM_CHAIN_ID: Final[str] = "platform"
 _ACTION_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_.]{1,99}$")
 _DETAIL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 #: Identifier-shaped strings only: no spaces, no ``@`` (so no e-mail address), no quotes.
-_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:/<>=\-]{1,128}$")
+_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:/<>=*\-]{1,128}$")
 _TARGET_TYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_.]{0,49}$")
 
 MAX_DETAIL_KEYS: Final[int] = 16
@@ -206,7 +206,8 @@ class AuditValidationError(ValueError):
 
 
 #: ``<identifier>@<semver>`` -- how bundle lifecycle events name a versioned artefact
-#: (``waddles.core.ping@1.0.0``). The part after ``@`` must look like a version (digits first,
+#: (``penguintechinc.waddles.ping@1.0.0``). The part after ``@`` must look like a version
+#: (digits first,
 #: no letters-only TLD), so an e-mail address still cannot pass as an identifier.
 _VERSIONED_REF_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9_.\-]{1,100}@\d+(\.\d+){0,3}([\-+][A-Za-z0-9.\-+]{0,30})?$"
@@ -218,7 +219,7 @@ def _check_token(label: str, value: str) -> str:
     if _TOKEN_RE.match(value) or _VERSIONED_REF_RE.match(value):
         return value
     raise AuditValidationError(
-        f"{label} must be identifier-shaped ([A-Za-z0-9_.:/<>=-], 1-128 chars, or "
+        f"{label} must be identifier-shaped ([A-Za-z0-9_.:/<>=*-], 1-128 chars, or "
         "name@version); free text and e-mail-shaped values are not auditable"
     )
 
@@ -375,7 +376,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("POST", "/api/v1/tenant/<tenant_slug>/admins"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_ADDED
     ),
-    ("DELETE", "/api/v1/tenant/<tenant_slug>/admins/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/tenant/<tenant_slug>/admins/<uuuid:user_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_REMOVED
     ),
     ("POST", "/api/v1/superadmin/tenants"): RouteAudit(
@@ -388,29 +389,30 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
         AuditCategory.TENANT, AuditAction.TENANT_DELETED
     ),
     # --- session revocation (admin) ---
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/revoke-sessions"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/revoke-sessions"): RouteAudit(
         AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/sessions/<int:session_id>/revoke"): RouteAudit(
-        AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
-    ),
+    (
+        "POST",
+        "/api/v1/superadmin/users/<uuuid:user_id>/sessions/<int:session_id>/revoke",
+    ): RouteAudit(AuditCategory.AUTHN, AuditAction.SESSION_REVOKED),
     # --- role / privilege changes ---
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/super-admin-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/super-admin-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_SUPER_ADMIN_CHANGED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/vendor-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/vendor-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_VENDOR_CHANGED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/analytics-consumer-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/analytics-consumer-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_ANALYTICS_CONSUMER_CHANGED
     ),
-    ("PUT", "/api/v1/platform/users/<int:user_id>/role"): RouteAudit(
+    ("PUT", "/api/v1/platform/users/<uuuid:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_PLATFORM_USER_CHANGED
     ),
     ("POST", "/api/v1/communities/<cuuid:community_id>/join"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>/role"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
     ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/roles"): RouteAudit(
@@ -424,16 +426,16 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ),
     # --- user administration ---
     ("POST", "/api/v1/superadmin/users"): RouteAudit(AuditCategory.USER, AuditAction.USER_CREATED),
-    ("PUT", "/api/v1/superadmin/users/<int:user_id>"): RouteAudit(
+    ("PUT", "/api/v1/superadmin/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_UPDATED
     ),
-    ("DELETE", "/api/v1/superadmin/users/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/superadmin/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_DELETED
     ),
-    ("DELETE", "/api/v1/platform/users/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/platform/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_DELETED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/password-reset"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/password-reset"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_PASSWORD_RESET
     ),
     # --- statutory privacy rights (audited in every entitled tenant; never gated themselves) ---
@@ -477,7 +479,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/tenant/<tenant_slug>/reputation/config"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_POLICY_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>/reputation"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>/reputation"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_OVERRIDDEN
     ),
 }
@@ -491,7 +493,6 @@ def _ra(category: AuditCategory, action: AuditAction) -> RouteAudit:
 _P = "/api/v1"
 _ADM = "/api/v1/admin/<cuuid:community_id>"
 _ADMS = "/api/v1/admin/<cuuid:community_id>"
-_CAL = "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>"
 _WF = "/api/v1/admin/<cuuid:community_id>/workflows"
 _APPS = "/api/v1/apps/community/<cuuid:community_id>"
 
@@ -515,8 +516,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_SOFT_BAN_CHANGED),
         (
-            ("PUT", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
-            ("DELETE", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
+            ("PUT", f"{_ADM}/reputation/soft-bans/<uuuid:user_id>"),
+            ("DELETE", f"{_ADM}/reputation/soft-bans/<uuuid:user_id>"),
         ),
     ),
     (
@@ -593,14 +594,6 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.USER, AuditAction.USER_IDENTITY_PRIMARY_CHANGED),
         (("PUT", f"{_P}/user/identities/primary"),),
-    ),
-    (
-        _ra(AuditCategory.ROLE, AuditAction.ROLE_EVENT_ADMIN_CHANGED),
-        (
-            ("POST", f"{_CAL}/admins"),
-            ("PUT", f"{_CAL}/admins/<admin_id>"),
-            ("DELETE", f"{_CAL}/admins/<admin_id>"),
-        ),
     ),
     (
         _ra(AuditCategory.ROLE, AuditAction.ROLE_JOIN_REQUEST_DECIDED),
@@ -700,29 +693,6 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         ),
     ),
     (
-        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_CALENDAR_EVENT_CHANGED),
-        (
-            ("POST", f"{_ADMS}/calendar/events"),
-            ("PUT", _CAL),
-            ("DELETE", _CAL),
-            ("POST", f"{_CAL}/approve"),
-            ("POST", f"{_CAL}/reject"),
-        ),
-    ),
-    (
-        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_TICKETING_CHANGED),
-        (
-            ("POST", f"{_CAL}/ticketing/enable"),
-            ("POST", f"{_CAL}/ticketing/disable"),
-            ("POST", f"{_CAL}/ticket-types"),
-            ("PUT", f"{_CAL}/ticket-types/<type_id>"),
-            ("DELETE", f"{_CAL}/ticket-types/<type_id>"),
-            ("POST", f"{_CAL}/tickets"),
-            ("POST", f"{_CAL}/tickets/<ticket_id>/cancel"),
-            ("POST", f"{_CAL}/tickets/<ticket_id>/transfer"),
-        ),
-    ),
-    (
         # Community admin routes gated by dedicated community scopes resolved in-handler (they
         # used a JWT `require_scope`, which the generic admin-action rule covered).
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_ACTION),
@@ -730,7 +700,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("PUT", "/api/v1/admin/<cuuid:community_id>/settings"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkout"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkin"),
-            ("DELETE", "/api/v1/admin/<cuuid:community_id>/members/<int:user_id>"),
+            ("DELETE", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/temp-password"),
             ("PUT", "/api/v1/admin/<cuuid:community_id>/modules/<int:module_id>/config"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/channels"),
@@ -818,36 +788,17 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ),
     ("POST", "/api/v1/github-sync/webhook"): _R_PUBLIC,
     ("POST", "/api/v1/marketplace/public/vendor/submit"): _R_PUBLIC,
-    ("POST", "/api/v1/calendar/book/<slug>"): _R_PUBLIC,
-    ("DELETE", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
-    ("POST", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/booking-pages/<page_id>/members/<user_id>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/bookings/<uuid>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/oauth/calendars/<id>"): _R_SELF,
     ("DELETE", "/api/v1/user/profile/avatar"): _R_SELF,
-    ("POST", "/api/v1/calendar/booking-pages"): _R_SELF,
-    ("POST", "/api/v1/calendar/booking-pages/<page_id>/members"): _R_SELF,
-    ("POST", "/api/v1/calendar/oauth/calendars/<id>/sync"): _R_SELF,
     ("POST", "/api/v1/user/profile/avatar"): _R_SELF,
-    ("PUT", "/api/v1/calendar/availability/settings"): _R_SELF,
-    ("PUT", "/api/v1/calendar/availability/weekly"): _R_SELF,
-    ("PUT", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
     ("PUT", "/api/v1/user/profile"): _R_SELF,
     ("POST", "/api/v1/<cuuid:community_id>/join-requests"): _R_SELF,
     ("POST", "/api/v1/<cuuid:community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
-    ("POST", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/check-in"): _R_OPS,
-    (
-        "POST",
-        "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
-    ): _R_OPS,
     (
         "POST",
         "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel",
     ): _R_OPS,
     ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/test"): _R_OPS,
     ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/validate"): _R_OPS,
-    ("POST", "/api/v1/admin/calendar/verify-ticket"): _R_OPS,
     (
         "POST",
         "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments",

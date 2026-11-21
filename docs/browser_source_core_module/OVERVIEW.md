@@ -37,7 +37,7 @@ This module is essential for professional streaming workflows—streamers depend
 
 | Item | Value |
 |---|---|
-| Source | `core/browser_source_core_module/` |
+| Source | core/browser_source_core_module |
 | Language | Python 3.13 |
 | Framework | Quart (async Flask) |
 | REST Port | 8027 |

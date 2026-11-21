@@ -76,8 +76,8 @@ public class BundleContextInfoTests
     [Fact]
     public void equality_is_value_based_and_covers_optional_community()
     {
-        var a = new BundleContextInfo("t1", "c1", "waddles.a.b.c", "waddles.a.b", "1.0.0", "m1", "{}");
-        var b = new BundleContextInfo("t1", "c1", "waddles.a.b.c", "waddles.a.b", "1.0.0", "m1", "{}");
+        var a = new BundleContextInfo("t1", "c1", "penguintechinc.waddles.a-b-c", "penguintechinc.waddles.a-b", "1.0.0", "m1", "{}");
+        var b = new BundleContextInfo("t1", "c1", "penguintechinc.waddles.a-b-c", "penguintechinc.waddles.a-b", "1.0.0", "m1", "{}");
         var noCommunity = a with { Community = null };
 
         Assert.Equal(a, b);
@@ -90,9 +90,9 @@ public class BundleContextInfoTests
 public class StageEnvelopeInfoTests
 {
     private static StageEnvelopeInfo Sample() => new(
-        "tenant-1", "community-1", "waddles.a.b.c", "action",
+        "tenant-1", "community-1", "penguintechinc.waddles.a-b-c", "action",
         new PlatformEventInfo("twitch", "chat.message", "user-1", "{}", "2026-09-28T00:00:00.000Z"),
-        "2026-09-28T00:00:00.000Z", "waddles.a.b.d", "traceparent-value");
+        "2026-09-28T00:00:00.000Z", "penguintechinc.waddles.a-b-d", "traceparent-value");
 
     [Fact]
     public void equality_is_value_based_across_every_field()

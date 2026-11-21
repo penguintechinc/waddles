@@ -87,7 +87,7 @@ undelivered ones, so hub-api (SELECT only on the table) erases a subject through
 
 #### Lifting a floor ban (a lifted user regains normal access)
 
-Status `8` = **lifted** (alembic 0137; `lifted_at`, `lifted_by` = the acting admin's hub UUID). Statuses 1-5 and 7
+Status `8` = **lifted** (alembic 0139; `lifted_at`, `lifted_by` = the acting admin's hub UUID). Statuses 1-5 and 7
 deny (`ban_suppression.FLOOR_BAN_ACTIVE_STATUSES`); 6 (refused) and 8 never do, so a lifted user is treated exactly as if
 never banned and a later enqueue re-bans normally. Lift = `DELETE /api/v1/admin/{community}/reputation/floor-bans/{user_uuid}` (the member's hub public UUID, resolved server-side)
 (tenant admins only -- a floor ban is tenant-wide; community admins get 403), which calls the SECURITY DEFINER

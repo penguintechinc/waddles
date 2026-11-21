@@ -39,6 +39,7 @@ from services.auth_service import SessionUser, create_session_token
 from services.global_identity import grant_global_admin_sync, revoke_global_admin_sync
 from services.session_cookie import REFRESH_COOKIE_NAME, SESSION_COOKIE_NAME
 from tests.conftest import SECRET_KEY, TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 PASSWORD = "correcthorse"
 
@@ -847,7 +848,7 @@ class TestAdminRevocation:
         user_id = _seed_user(auth_db)
         await _login(browser)
         response = await probe.get(
-            f"/api/v1/superadmin/users/{user_id}/sessions", headers=_admin_headers(user_id=99)
+            f"/api/v1/superadmin/users/{uid(user_id)}/sessions", headers=_admin_headers(user_id=99)
         )
         assert response.status_code == 200
         (session,) = (await response.get_json())["sessions"]
@@ -864,7 +865,7 @@ class TestAdminRevocation:
         target = int(_claims(phone_access)["sid"])
 
         response = await probe.post(
-            f"/api/v1/superadmin/users/{user_id}/sessions/{target}/revoke",
+            f"/api/v1/superadmin/users/{uid(user_id)}/sessions/{target}/revoke",
             headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 200
@@ -885,7 +886,7 @@ class TestAdminRevocation:
         _seed_user(auth_db, email="bob@example.com")
         bob_access = await _login_token(app.test_client(), email="bob@example.com")
         response = await probe.post(
-            f"/api/v1/superadmin/users/{alice}/sessions/{_claims(bob_access)['sid']}/revoke",
+            f"/api/v1/superadmin/users/{uid(alice)}/sessions/{_claims(bob_access)['sid']}/revoke",
             headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 404
@@ -898,7 +899,7 @@ class TestAdminRevocation:
         tokens = [await _login_token(browser), await _login_token(app.test_client())]
         minted_elsewhere = make_user_token(user_id=user_id)
         response = await probe.post(
-            f"/api/v1/superadmin/users/{user_id}/revoke-sessions",
+            f"/api/v1/superadmin/users/{uid(user_id)}/revoke-sessions",
             headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 200
@@ -923,7 +924,7 @@ class TestAdminRevocation:
 
         monkeypatch.setattr(isolated_token_revocation._backend, "put_max", down)
         response = await probe.post(
-            f"/api/v1/superadmin/users/{user_id}/revoke-sessions",
+            f"/api/v1/superadmin/users/{uid(user_id)}/revoke-sessions",
             headers=_admin_headers(user_id=99),
         )
         body = await response.get_json()
@@ -933,16 +934,17 @@ class TestAdminRevocation:
 
     async def test_unknown_user_is_404(self, probe: Any) -> None:
         response = await probe.post(
-            "/api/v1/superadmin/users/424242/revoke-sessions", headers=_admin_headers(user_id=99)
+            f"/api/v1/superadmin/users/{uid(424242)}/revoke-sessions",
+            headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 404
 
     @pytest.mark.parametrize(
         ("method", "path"),
         [
-            ("GET", "/api/v1/superadmin/users/1/sessions"),
-            ("POST", "/api/v1/superadmin/users/1/revoke-sessions"),
-            ("POST", "/api/v1/superadmin/users/1/sessions/1/revoke"),
+            ("GET", f"/api/v1/superadmin/users/{uid(1)}/sessions"),
+            ("POST", f"/api/v1/superadmin/users/{uid(1)}/revoke-sessions"),
+            ("POST", f"/api/v1/superadmin/users/{uid(1)}/sessions/1/revoke"),
         ],
     )
     async def test_requires_the_users_admin_scope(
@@ -960,7 +962,7 @@ class TestAdminRevocation:
         user_id = _seed_user(auth_db)
         access = await _login_token(app.test_client())
         response = await probe.put(
-            f"/api/v1/superadmin/users/{user_id}",
+            f"/api/v1/superadmin/users/{uid(user_id)}",
             headers=_admin_headers(user_id=99),
             json={"isActive": False},
         )
@@ -973,7 +975,7 @@ class TestAdminRevocation:
         user_id = _seed_user(auth_db)
         access = await _login_token(app.test_client())
         response = await probe.delete(
-            f"/api/v1/superadmin/users/{user_id}", headers=_admin_headers(user_id=99)
+            f"/api/v1/superadmin/users/{uid(user_id)}", headers=_admin_headers(user_id=99)
         )
         assert response.status_code == 200
         assert not await _alive(probe, access)
@@ -992,7 +994,7 @@ class TestAdminRevocation:
             + await _login_token(app.test_client(), email="root@example.com", tenant=TENANT_SLUG)
         }
         response = await probe.post(
-            f"/api/v1/superadmin/users/{target}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(target)}/super-admin-role",
             headers=caller_headers,
             json={"grant": False},
         )

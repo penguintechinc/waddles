@@ -31,7 +31,7 @@ python-dotenv>=1.0.0
 
 ### Environment Setup
 
-Create `.env` file in `trigger/receiver/slack_module/`:
+Create `.env` file in trigger/receiver/slack_module:
 
 ```bash
 # Server Configuration

@@ -37,6 +37,7 @@ from services.schema import (
     bind_erasure_reputation_tables,
     bind_reputation_policy_tables,
 )
+from services.user_public_id import lookup_user_public_ids, public_id_for
 
 logger = logging.getLogger(__name__)
 
@@ -675,9 +676,12 @@ async def get_at_risk(
         orderby=balance,
         limitby=(0, max(1, min(int(limit), _MAX_LIMIT))),
     )
+    user_uuids = await lookup_user_public_ids(
+        (row.community_members.user_id for row in rows), async_dal=async_dal, dal=dal
+    )
     return [
         AtRiskEntryDTO(
-            userId=row.community_members.user_id,
+            userId=public_id_for(user_uuids, row.community_members.user_id),
             displayName=row.community_members.display_name or "unknown",
             score=int(row[balance]),
             tier=reputation_tier(int(row[balance])),
@@ -761,9 +765,12 @@ async def list_soft_bans(
         orderby=~bans.set_at,
         limitby=(0, max(1, min(int(limit), _MAX_LIMIT))),
     )
+    user_uuids = await lookup_user_public_ids(
+        (r.community_members.user_id for r in rows), async_dal=async_dal, dal=dal
+    )
     return [
         SoftBanEntryDTO(
-            userId=r.community_members.user_id,
+            userId=public_id_for(user_uuids, r.community_members.user_id),
             displayName=r.community_members.display_name or "unknown",
             reason=SoftBanReason(int(r.bundle_reputation_soft_bans.reason_code)).name.lower(),
             setByType=_actor_type(r.bundle_reputation_soft_bans.set_by),

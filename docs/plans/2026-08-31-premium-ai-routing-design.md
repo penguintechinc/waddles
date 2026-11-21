@@ -1,5 +1,7 @@
 # Premium-AI Routing + Model-Selection Design (free-local / premium-metered / BYOK)
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 **Date:** 2026-08-31
 **Status:** Draft
 **Branch:** feature/v3-premium-ai-spec
@@ -84,7 +86,7 @@ A single entry point every AI-using module calls, replacing per-module `AIServic
 AIRouter.route(AIRequest) -> AIResponse        # one call; router picks tier, dispatches, meters
 ```
 
-Recommended home: a **shared library** `libs/ai_routing/` (in-process, hot path) whose adapters wrap
+Recommended home: a **shared library** libs/ai_routing (in-process, hot path) whose adapters wrap
 the *existing* providers (`OllamaProvider`, `WaddleAIProvider`, direct OpenAI/Anthropic clients) — see
 §8 "which container hosts routing".
 
@@ -282,7 +284,7 @@ Enterprise for `ai.byok`. Resolve in §8.
 | 2 | **Premium-no-balance behavior** | **Recommend the split (§2):** interactive → block-with-upgrade; ambient → fallback-to-free. Confirm defaults per call-site |
 | 3 | **BYOK provider set + key backend** | Launch: OpenAI + Anthropic + custom OpenAI-compatible; later Azure/Gemini. Backend: **envelope-encrypted (KMS/DEK) or Vault/External-Secrets ref**, upgrading the plaintext-capable `custom_api_key_encrypted` precedent |
 | 4 | **Token counting method** | **Provider-reported preferred**, tokenizer fallback. Reserve/hold vs post-charge for large generations — pick one |
-| 5 | **Which container hosts routing** | **Recommend: routing logic = shared lib `libs/ai_routing/` (in-process, hot path); stateful concerns — BYOK key decryption, balance check/decrement, pricing, model_access_policy — resolved through hub-api (control plane owns secrets + billing + primary writes), cached short-TTL.** A dedicated AI svc is **not** recommended (extra hop; AI modules already are the action-pipeline consumers). Rationale below |
+| 5 | **Which container hosts routing** | **Recommend: routing logic = shared lib libs/ai_routing (in-process, hot path); stateful concerns — BYOK key decryption, balance check/decrement, pricing, model_access_policy — resolved through hub-api (control plane owns secrets + billing + primary writes), cached short-TTL.** A dedicated AI svc is **not** recommended (extra hop; AI modules already are the action-pipeline consumers). Rationale below |
 | 6 | **WaddleAI relationship** | `integrations.waddleai` is an enterprise-gated feature (`core_platform_module/features.py:177`) and `WaddleAIProvider` is an OpenAI-compat proxy already in-tree. Options: (a) a BYOK-class external target with a platform-managed key, (b) the premium-external routing engine itself, (c) orthogonal enterprise integration. **Recommend (a)** — WaddleAI as an enterprise external provider adapter under BYOK routing. Confirm |
 | 7 | **model_access_policy** | Greenfield table; confirm scope granularity (org/team/user), home (product DB vs license-server), and default REJECT vs default-allow-with-blocklist (spec assumes **default REJECT**) |
 | 8 | **Consolidate the two abstractions** | Fold ai_interaction `AIService` and ai_researcher `AIProviderService` into the one router; fix the ollama/waddleai-vs-ollama/openai/anthropic mismatch (`ai_researcher/config.py:439`). Confirm lib location + migration order |

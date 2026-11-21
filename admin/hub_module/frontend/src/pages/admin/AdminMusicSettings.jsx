@@ -1,6 +1,7 @@
 import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui/UpgradeNotice';
 import { MusicalNoteIcon, AdjustmentsHorizontalIcon, ExclamationTriangleIcon, TrashIcon, PlusIcon } from '@heroicons/react/24/outline';
 
 /** Defaults shown until the community's saved settings load (mirrors hub-api's DTO fields). */
@@ -26,6 +27,7 @@ function AdminMusicSettings() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
   const [newArtist, setNewArtist] = useState('');
+  const [gated, setGated] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -36,7 +38,10 @@ function AdminMusicSettings() {
         if (!cancelled) setConfig({ ...DEFAULTS, ...(response.data?.settings || {}) });
       } catch (err) {
         console.error('[AdminMusicSettings] Load failed', { status: err.response?.status });
-        if (!cancelled) {
+        if (!cancelled && isLicensedFeatureError(err)) {
+          // 402 = licensed feature not available on this tier: an upsell, not an error.
+          setGated(true);
+        } else if (!cancelled) {
           setConfig({ ...DEFAULTS });
           setMessage({ type: 'error', text: err.response?.data?.error?.message || 'Failed to load music settings' });
         }
@@ -74,6 +79,10 @@ function AdminMusicSettings() {
     }
     if (!config.blockedArtists.includes(name)) update('blockedArtists', [...config.blockedArtists, name]);
     setNewArtist('');
+  }
+
+  if (gated) {
+    return <UpgradeNotice feature="Music Station" />;
   }
 
   if (loading) {

@@ -40,7 +40,7 @@
 
 ## 2. Where bundle data lives
 
-**No separate database.** Bundle tables live in the same `waddles` Postgres instance as every control-plane/service table, inside two dedicated schemas: `app_core` (first-party `waddles.core.*` bundles) and `app_community` (third-party/vendor bundles, e.g. superpenguin). Schema membership is the isolation and provenance marker — not a naming convention layered onto a shared flat namespace.
+**No separate database.** Bundle tables live in the same `waddles` Postgres instance as every control-plane/service table, inside two dedicated schemas: `app_core` (first-party `penguintechinc.waddles.*` bundles) and `app_community` (third-party/vendor bundles, e.g. superpenguin). Schema membership is the isolation and provenance marker — not a naming convention layered onto a shared flat namespace.
 
 ```
                          waddles (single Postgres instance)
@@ -50,7 +50,7 @@
    │    - waddles_bundle_runtime: NO grants here (explicit REVOKE)         │
    │                                                                       │
    │  app_core                          app_community                     │
-   │    table waddles_core_quotes         table superpenguin_fishing_core │
+   │    table penguintechinc_waddles_quotes         table superpenguin_fishing_core │
    │    table fishing_core                table ...                       │
    │    table fishing_shop                                                │
    │    - waddles_bundle_migrator: DDL only, hub-api, approval/upgrade time│
@@ -85,7 +85,7 @@ The data-plane role (`waddles_bundle_runtime`) is real-time read/write only — 
 | world-conformance validation | Schema validation: `data.table.columns[]`/`indexes[]` checked against the type allowlist (§3.1), column/index/width caps, PII name-heuristic gate (§3.2) — rejects here, before anything is staged | hub-api (manifest validator) | Identical — validation doesn't distinguish provenance |
 | stage to MinIO | none (package artifact staging only) | — | — |
 | provision consumer groups | **Table provisioning happens in this same step** — schema+table name derived (§3.4), DDL plan computed | hub-api (`waddles_bundle_migrator`) | **Vendor (`app_community`):** DDL plan computed here, **execution deferred** until the approval step — a rejected upload never leaves a table behind. **Core (`app_core`):** provisioned immediately via the system seeder path (first-party code, no human-approval gate) |
-| approval | Global-admin approval decision. **Any `jsonb`-typed column declared by a vendor bundle adds a mandatory secondary human review item** (in addition to write-time key-name PII scanning, §3.1/§3.2) — approval cannot complete on the primary reviewer's sign-off alone | Global admin (human) + secondary reviewer for `jsonb` columns | **Vendor:** approval is what unblocks the deferred DDL apply from the previous step — `CREATE TABLE`/indexes/RLS/grants execute now, inside the approval transaction. **Core:** no separate approval gate here — already provisioned via the seeder path, gated instead by the platform's normal code-review/merge process for `waddles.core.*` (a `jsonb` column in a core bundle still gets the same secondary-review flag in that review process) |
+| approval | Global-admin approval decision. **Any `jsonb`-typed column declared by a vendor bundle adds a mandatory secondary human review item** (in addition to write-time key-name PII scanning, §3.1/§3.2) — approval cannot complete on the primary reviewer's sign-off alone | Global admin (human) + secondary reviewer for `jsonb` columns | **Vendor:** approval is what unblocks the deferred DDL apply from the previous step — `CREATE TABLE`/indexes/RLS/grants execute now, inside the approval transaction. **Core:** no separate approval gate here — already provisioned via the seeder path, gated instead by the platform's normal code-review/merge process for `penguintechinc.waddles.*` (a `jsonb` column in a core bundle still gets the same secondary-review flag in that review process) |
 | activation | Table becomes reachable to `tables.*` calls | svc_process/svc_action (`waddles_bundle_runtime` — grants already exist from provisioning, but `authorize()`/app-active checks, §8, gate actual traffic until this step) | Identical |
 | (new-version approval) | Upgrade: schema-version diff, additive auto-apply or destructive ack+transform (§11) | hub-api (`waddles_bundle_migrator`) | Same vendor/core split as initial approval |
 | (uninstall) | Teardown: hold-and-confirm, DEK crypto-shred, chunked delete, optional archive (§10) | hub-api (`waddles_bundle_migrator`) | Identical — teardown isn't provenance-gated |
@@ -120,7 +120,7 @@ Caps: ≤32 declared columns, ≤8 indexes, ≤4 columns per composite index.
 
 ### 3.4 Table naming and identifier safety
 
-**Schema** is chosen server-side at catalog approval from the bundle's provider/namespace — `app_core` for first-party `waddles.core.*` bundles, `app_community` for everything else — **never from the manifest's own claim**. **Table name** is the sanitized app id: lower-cased, any character outside `[a-z0-9_]` rejected at manifest-approval time, truncated with an 8-hex-char `sha256(app_id)` suffix if it would exceed Postgres's 63-byte `NAMEDATALEN`. Every reference is schema-qualified and goes through `quote_ident` for both the schema and table name — never string interpolation. Examples: `app_core.waddles_core_quotes`, `app_community.superpenguin_fishing_core`. The fully-qualified name is computed once at approval, stored as `bundle_data_table_name` in hub-api's app registry (authoritative — the data plane looks it up, never re-derives it).
+**Schema** is chosen server-side at catalog approval from the bundle's provider/namespace — `app_core` for first-party `penguintechinc.waddles.*` bundles, `app_community` for everything else — **never from the manifest's own claim**. **Table name** is the sanitized app id: lower-cased, any character outside `[a-z0-9_]` rejected at manifest-approval time, truncated with an 8-hex-char `sha256(app_id)` suffix if it would exceed Postgres's 63-byte `NAMEDATALEN`. Every reference is schema-qualified and goes through `quote_ident` for both the schema and table name — never string interpolation. Examples: `app_core.penguintechinc_waddles_quotes`, `app_community.superpenguin_fishing_core`. The fully-qualified name is computed once at approval, stored as `bundle_data_table_name` in hub-api's app registry (authoritative — the data plane looks it up, never re-derives it).
 
 ### 3.5 Indexes (unchanged from Rev 3)
 

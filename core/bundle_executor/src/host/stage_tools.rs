@@ -129,7 +129,7 @@ mod tests {
         });
         let state = ExecState::new(
             Some(HostBridge::new(connection)),
-            "waddles.test.caller".to_string(),
+            "penguintechinc.waddles.test-caller".to_string(),
             7,
         );
         (state, seen_rx)

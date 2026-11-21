@@ -3,7 +3,7 @@
 User decision 2026-11-20: lifting a ban returns the user to normal access patterns. The route is
 `DELETE /api/v1/admin/<community>/reputation/floor-bans/<user>` (tenant admins only). The
 Postgres-only `reputation_floor_ban_lift()` function is faked with a table-writing stand-in here;
-its real behaviour is covered against Postgres in `alembic/tests/test_0137_floor_ban_lift.py`.
+its real behaviour is covered against Postgres in `alembic/tests/test_0139_floor_ban_lift.py`.
 The gate under test is the inventory member authz (`require_inventory_member`), which reads both
 ban tables.
 """

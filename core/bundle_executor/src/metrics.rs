@@ -927,10 +927,30 @@ mod tests {
     #[test]
     fn load_phases_and_outcomes_are_recorded_with_second_scaled_buckets() {
         let (h, m) = fresh();
-        m.record_load_phase("waddles.t.a", "fetch", "ok", Duration::from_millis(120));
-        m.record_load_phase("waddles.t.a", "verify", "ok", Duration::from_millis(5));
-        m.record_load_phase("waddles.t.a", "precompile", "error", Duration::from_secs(3));
-        m.record_load_phase("waddles.t.a", "total", "ok", Duration::from_secs(4));
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "fetch",
+            "ok",
+            Duration::from_millis(120),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "verify",
+            "ok",
+            Duration::from_millis(5),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "precompile",
+            "error",
+            Duration::from_secs(3),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "total",
+            "ok",
+            Duration::from_secs(4),
+        );
         m.record_load("ok");
         m.record_load("already_resident");
         m.record_load("already_resident");
@@ -945,7 +965,7 @@ mod tests {
                 h.count(
                     "waddles_executor_load_seconds",
                     &[
-                        ("app_id", "waddles.t.a"),
+                        ("app_id", "penguintechinc.waddles.t-a"),
                         ("phase", phase),
                         ("result", result)
                     ]
@@ -995,27 +1015,31 @@ mod tests {
     fn invoke_records_latency_and_a_sandbox_trip_only_when_one_occurred() {
         let (h, m) = fresh();
         m.record_invoke(
-            "waddles.t.b",
+            "penguintechinc.waddles.t-b",
             "transform",
             "ok",
             None,
             Duration::from_micros(300),
         );
         m.record_invoke(
-            "waddles.t.b",
+            "penguintechinc.waddles.t-b",
             "transform",
             "executor_deadline",
             Some("timeout"),
             Duration::from_millis(500),
         );
-        m.record_instantiate("waddles.t.b", Duration::from_micros(80));
-        m.record_guest("waddles.t.b", "transform", Duration::from_micros(200));
+        m.record_instantiate("penguintechinc.waddles.t-b", Duration::from_micros(80));
+        m.record_guest(
+            "penguintechinc.waddles.t-b",
+            "transform",
+            Duration::from_micros(200),
+        );
 
         assert_eq!(
             h.count(
                 "waddles_executor_invoke_seconds",
                 &[
-                    ("app_id", "waddles.t.b"),
+                    ("app_id", "penguintechinc.waddles.t-b"),
                     ("export", "transform"),
                     ("result", "ok")
                 ]
@@ -1032,7 +1056,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_sandbox_trip_total",
-                &[("app_id", "waddles.t.b"), ("limit", "timeout")]
+                &[
+                    ("app_id", "penguintechinc.waddles.t-b"),
+                    ("limit", "timeout")
+                ]
             ),
             1.0
         );
@@ -1045,14 +1072,17 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_instantiate_seconds",
-                &[("app_id", "waddles.t.b")]
+                &[("app_id", "penguintechinc.waddles.t-b")]
             ),
             1.0
         );
         assert_eq!(
             h.count(
                 "waddles_executor_guest_seconds",
-                &[("app_id", "waddles.t.b"), ("export", "transform")]
+                &[
+                    ("app_id", "penguintechinc.waddles.t-b"),
+                    ("export", "transform")
+                ]
             ),
             1.0
         );
@@ -1330,7 +1360,7 @@ mod tests {
         let b = executor_metrics();
         assert!(Arc::ptr_eq(&a, &b));
         a.record_load_phase(
-            "waddles.test.singleton",
+            "penguintechinc.waddles.test-singleton",
             "total",
             "ok",
             Duration::from_millis(1),
@@ -1338,7 +1368,7 @@ mod tests {
         assert_eq!(
             test_support::shared().count(
                 "waddles_executor_load_seconds",
-                &[("app_id", "waddles.test.singleton")]
+                &[("app_id", "penguintechinc.waddles.test-singleton")]
             ),
             1.0
         );

@@ -72,7 +72,6 @@ Waddles uses a sophisticated multi-workflow CI/CD pipeline that automates:
 ├── build-alias-interaction.yml
 ├── build-shoutout-interaction.yml
 ├── build-inventory-interaction.yml
-├── build-calendar-interaction.yml
 ├── build-memories-interaction.yml
 ├── build-youtube-music-interaction.yml
 ├── build-spotify-interaction.yml
@@ -477,7 +476,6 @@ jobs:
 - `build-alias-interaction.yml` - Command aliases (port 8006)
 - `build-shoutout-interaction.yml` - User shoutouts (port 8007)
 - `build-inventory-interaction.yml` - Inventory management (port 8008)
-- `build-calendar-interaction.yml` - Event scheduling (port 8009)
 - `build-memories-interaction.yml` - Memories/quotes (port 8014)
 - `build-youtube-music-interaction.yml` - YouTube Music (port 8015)
 - `build-spotify-interaction.yml` - Spotify integration (port 8016)
