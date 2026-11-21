@@ -3326,6 +3326,11 @@ serviceJwt:
         # user UUID to the raw platform user id through IdentityService.ResolvePlatformUser
         # (hub_api/grpc_internal/servicers.py REQUIRED_SCOPES). Granted to this identity alone.
         - "identity:platform-user:resolve"
+        # Connector runtime identity tokenizer (core/svc_ingest/src/connector/host_calls.rs
+        # HubIdentityTokenizer): mints the tenant-scoped user UUID for a platform user id --
+        # connector identity.lookup and the Discord-native unban sync (platform_unban.rs).
+        # Granted to svc-process too; hub-api authorizes by scope.
+        - "identity:ephemeral:mint"
         # feature/bundle-host-scheduling -- scheduled bundle reconcile: svc-ingest polls
         # BundleScheduleService.ListBundleSchedules over internal gRPC (hub_api/grpc_internal/bundle_schedule_servicer.py) for the
         # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api
@@ -3399,6 +3404,16 @@ autoProvisionedKeys:
     secretName: ""  # default: "<fullname>-executor-precompile-signing" when empty
     publicKeyConfigMapName: ""  # default: "<fullname>-executor-precompile-signing-public"
     keyId: "precompile-1"
+    externalSecret: false
+  # Discord-native unban sync -- DEDICATED Ed25519 keypair signing platform-unban events
+  # (core/svc_ingest/src/platform_unban.rs). Private half (PLATFORM_UNBAN_PRIVATE_KEY, base64
+  # 32-byte seed) is mounted ONLY into svc-ingest (the signer); the public half
+  # (PLATFORM_UNBAN_PUBLIC_KEYS JSON) is published to publicKeyConfigMapName for svc-action, which
+  # therefore can only VERIFY and can never mint an unban event. Create-if-absent like the others.
+  platformUnban:
+    secretName: ""  # default: "<fullname>-platform-unban-signing" when empty
+    publicKeyConfigMapName: ""  # default: "<fullname>-platform-unban-signing-public"
+    keyId: "unban-1"
     externalSecret: false
   # PR #438 -- per-service ES256 (ECDSA P-256) machine-JWT signing key.
   # Private half: SERVICE_JWT_PRIVATE_KEY_<kid>/SERVICE_JWT_ACTIVE_KID in secretName

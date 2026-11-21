@@ -79,6 +79,35 @@ pub enum TapVerdict {
 pub trait FrameTap: Send + Sync {
     /// Inspects `bytes`; only `platform`s the tap owns are touched.
     fn on_frame<'a>(&'a self, platform: &'a str, bytes: &'a [u8]) -> BoxFut<'a, TapVerdict>;
+
+    /// Like [`Self::on_frame`], with the HOST-derived binding of the connection that RECEIVED the
+    /// frame (`None` when the driver has none, e.g. a bare test driver). The default ignores it;
+    /// taps whose decision depends on WHICH connection the frame arrived on override this.
+    fn on_frame_bound<'a>(
+        &'a self,
+        platform: &'a str,
+        _binding: Option<&'a FrameBinding>,
+        bytes: &'a [u8],
+    ) -> BoxFut<'a, TapVerdict> {
+        self.on_frame(platform, bytes)
+    }
+}
+
+/// What the host knows about the connection a frame arrived on. Built by the supervisor from the
+/// resolved connection (never from frame content): the tenant is the scope authority's answer,
+/// `bound_guild` is the guild the connection's own validated binding names.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FrameBinding {
+    /// Authoritative tenant of the receiving connection.
+    pub tenant_id: i64,
+    /// Community the connection is bound to.
+    pub community_id: i64,
+    /// Hub-api connection row (numeric).
+    pub connection_id: i64,
+    /// The guild/server this connection is bound to (`None` when not applicable).
+    pub bound_guild: Option<String>,
+    /// `true` only for the gateway WebSocket transport (never poll, webhook or HTTP edges).
+    pub gateway_ws: bool,
 }
 
 /// Why an ack could not be delivered (never carries the URL or token).

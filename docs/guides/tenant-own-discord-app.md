@@ -31,7 +31,7 @@ Published by Penguin Technologies, Inc.
 3. Under **Privileged Gateway Intents**, turn ON:
    - **Server Members Intent** (required: role sync; without it the gateway closes with code 4014)
    - **Message Content Intent** (required: Waddles requests it to read command text)
-4. Waddles connects with these gateway intents: Guilds, Guild Members, Guild Messages, Message Content. Presence is not used and need not be enabled.
+4. Waddles connects with these gateway intents: Guilds, Guild Members, Guild Moderation, Guild Messages, Message Content. **Guild Moderation** (delivers `GUILD_BAN_REMOVE`, so an unban done in Discord lifts the Waddles ban) is NOT privileged: there is no Developer Portal toggle and nothing to enable. Presence is not used and need not be enabled.
 5. Click **Save Changes**.
 
 ## 5. OAuth2: Client Secret and redirect URI

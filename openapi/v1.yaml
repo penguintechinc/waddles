@@ -12753,6 +12753,45 @@ paths:
             product policy).
       summary: Set the community's soft/hard ban floors + flags and at-risk threshold
         (400 if invalid).
+  /api/v1/admin/{community_id}/reputation/floor-bans/{user_uuid}:
+    delete:
+      description: '
+
+        Tenant admins only: a floor ban denies in every community of the tenant.'
+      operationId: delete_delete_reputation_floor_ban
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      - in: path
+        name: user_uuid
+        required: true
+        schema:
+          type: string
+      responses:
+        '200':
+          content:
+            application/json:
+              schema:
+                description: Response DTO for message endpoints.
+                properties:
+                  message:
+                    title: Message
+                    type: string
+                  success:
+                    title: Success
+                    type: boolean
+                required:
+                - success
+                - message
+                title: MessageResponse
+                type: object
+          description: Response DTO for message endpoints.
+      summary: Lift a member's automated floor ban tenant-wide so they regain normal
+        access (audited).
   /api/v1/admin/{community_id}/reputation/history:
     get:
       description: ''
@@ -27698,6 +27737,9 @@ paths:
               schema:
                 description: Tenant reputation policy.
                 properties:
+                  liftRearmDrop:
+                    title: Liftrearmdrop
+                    type: integer
                   success:
                     title: Success
                     type: boolean
@@ -27720,6 +27762,7 @@ paths:
                 - tenantAutoBanEnabled
                 - tenantAutoBanFloor
                 - tenantAtRiskThreshold
+                - liftRearmDrop
                 - updatedAt
                 title: TenantReputationConfigResponse
                 type: object
@@ -27738,9 +27781,21 @@ paths:
         content:
           application/json:
             schema:
-              description: PUT body -- only supplied fields change; 300 <= floor <
-                atRiskThreshold <= 850.
+              description: 'PUT body -- only supplied fields change; 300 <= floor
+                < atRiskThreshold <= 850.
+
+
+                `liftRearmDrop` (1-100): how far below the score recorded at a ban
+                lift a NEW low must fall
+
+                for the floor to ban again (default 5).'
               properties:
+                liftRearmDrop:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Liftrearmdrop
                 tenantAtRiskThreshold:
                   anyOf:
                   - type: integer
@@ -27768,6 +27823,9 @@ paths:
               schema:
                 description: Tenant reputation policy.
                 properties:
+                  liftRearmDrop:
+                    title: Liftrearmdrop
+                    type: integer
                   success:
                     title: Success
                     type: boolean
@@ -27790,6 +27848,7 @@ paths:
                 - tenantAutoBanEnabled
                 - tenantAutoBanFloor
                 - tenantAtRiskThreshold
+                - liftRearmDrop
                 - updatedAt
                 title: TenantReputationConfigResponse
                 type: object

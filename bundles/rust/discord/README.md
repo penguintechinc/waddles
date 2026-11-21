@@ -33,7 +33,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
 | Concern | Hardcoded path | Connector / host split |
 |---|---|---|
 | Opcodes handled | 0 DISPATCH, 1 HEARTBEAT (answer immediately), 2 IDENTIFY (send), 6 RESUME (send), 7 RECONNECT, 9 INVALID_SESSION (`d` = resumable flag, never collapsed), 10 HELLO, 11 HEARTBEAT_ACK | `gateway.rs` builds IDENTIFY/RESUME/HEARTBEAT and `classify`es 1/7/9/10/11/READY/RESUMED. Acting on them is the host's job (see Host duties) |
-| Intents | `GUILDS \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33281, nothing else | `GUILDS \| GUILD_MEMBERS \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33283 (`DEFAULT_INTENTS`) -- **1.0.3 adds the PRIVILEGED `GUILD_MEMBERS` intent** for inbound role sync; enable **Server Members Intent** in the Discord developer portal (Bot tab) or the gateway closes 4014 and the connection parks |
+| Intents | `GUILDS \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33281, nothing else | `GUILDS \| GUILD_MEMBERS \| GUILD_MODERATION \| GUILD_MESSAGES \| MESSAGE_CONTENT` = 33287 (`DEFAULT_INTENTS`, adds non-privileged `GUILD_MODERATION` for `GUILD_BAN_REMOVE`, consumed by the host tap, never the connector) -- **1.0.3 adds the PRIVILEGED `GUILD_MEMBERS` intent** for inbound role sync; enable **Server Members Intent** in the Discord developer portal (Bot tab) or the gateway closes 4014 and the connection parks |
 | IDENTIFY payload | `properties {os: linux, browser/device: penguin-connector-discord}` | identical bytes minus the token: `"token":"{{DISCORD_BOT_TOKEN}}"` slot + secret-ref handle `discord-bot` |
 | RESUME | `session_id` + `seq` from `READY`, reconnect to `resume_gateway_url`; RESUME-first, exempt from the IDENTIFY budget; `resumable:true` INVALID_SESSION retries RESUME once, else clear + IDENTIFY | RESUME body built when the host session-token names a `session_id`; persistence/ordering/retry stay host-side |
 | Heartbeat | timer on `heartbeat_interval`, body `{op:1,d:seq}`, `awaiting_ack` -> `HeartbeatAckTimeout` -> reconnect | `on-heartbeat-due` returns the `seq` body when the token carries `seq`, else `none` (host default `d:null`). Timer + ACK-timeout = host (P6a T5 scheduler) |
@@ -69,7 +69,7 @@ Source of truth read in full: `ingest/discord.rs` (supervisor, permissions resol
    `query: "v=10&encoding=json"`), `heartbeat_ack` (op 11, `max_unacked: 1`), `handshake_after: FirstFrame` (HELLO before
    IDENTIFY/RESUME) and `jitter_first_heartbeat` to the session rules -- full example in `docs/connector-host-capability.md`.
    The host (not the connector) captures and validates the resume URL; the connector's `resume_gateway_url` session-token field is
-   no longer needed for dialling. **Intents** are `33283` (1.0.3: adds privileged `GUILD_MEMBERS`; portal toggle required);
+   no longer needed for dialling. **Intents** are `33287` (`GUILD_MODERATION` added for the host's ban-remove tap; 1.0.3: adds privileged `GUILD_MEMBERS`; portal toggle required);
    **sharding** is single-shard (no `shard` field), identify buckets / `session_start_limit` remain host-only.
 2. **Session token.** `ctx.session-token` MUST be the JSON in `session.rs` (`{"session_id","seq",
    "resume_gateway_url","self_user_id"}`, all optional), maintained by the host from the frames

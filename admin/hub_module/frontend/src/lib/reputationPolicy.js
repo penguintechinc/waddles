@@ -18,9 +18,18 @@ export function validateScore(value, label) {
   return null;
 }
 
+export const LIFT_REARM_MIN = 1;
+export const LIFT_REARM_MAX = 100;
+
 /** Validates tenant policy: both in range and floor strictly below the at-risk threshold. */
-export function validateTenantPolicy({ floor, atRisk }) {
+export function validateTenantPolicy({ floor, atRisk, liftRearmDrop }) {
   const errors = {};
+  if (liftRearmDrop !== undefined) {
+    const n = Number(liftRearmDrop);
+    if (liftRearmDrop === '' || !Number.isInteger(n) || n < LIFT_REARM_MIN || n > LIFT_REARM_MAX) {
+      errors.liftRearmDrop = `Re-arm drop must be a whole number between ${LIFT_REARM_MIN} and ${LIFT_REARM_MAX}`;
+    }
+  }
   const f = validateScore(floor, 'Auto-ban floor');
   const a = validateScore(atRisk, 'At-risk threshold');
   if (f) errors.floor = f;

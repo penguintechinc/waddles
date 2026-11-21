@@ -90,6 +90,7 @@ pub mod outbound_creds_youtube;
 pub mod outbound_ops;
 pub mod outbound_pin;
 pub mod pin_sig;
+pub mod platform_unban;
 pub mod platform_users;
 pub mod publish;
 pub mod scope_resolver;

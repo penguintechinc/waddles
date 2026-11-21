@@ -71,10 +71,13 @@ impl std::fmt::Debug for DiscordBinding {
 
 /// Produces a community's [`DiscordBinding`]; resolves on every call and
 /// never falls back to another community's credential.
-#[allow(async_fn_in_trait)] // service-binary-internal, as TwitchCredentialSource
 pub trait DiscordCredentialSource: Send + Sync {
-    /// The binding for `community_id` (`None` = the entry has no scope).
-    async fn binding(&self, community_id: Option<i64>) -> Result<DiscordBinding, CredError>;
+    /// The binding for `community_id` (`None` = the entry has no scope). The future is `Send`
+    /// so a binding can be fetched from inside a boxed (`Send`) gateway-tap future.
+    fn binding(
+        &self,
+        community_id: Option<i64>,
+    ) -> impl std::future::Future<Output = Result<DiscordBinding, CredError>> + Send;
 }
 
 /// `true` for a managed-role key `[a-z][a-z0-9_-]{0,31}`.
