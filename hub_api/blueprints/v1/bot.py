@@ -1611,8 +1611,9 @@ async def list_rcon_info(community_id: int) -> Any:
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]
+@validate_response(bot_rcon.MemberStatusResponse)
 async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
-    """`api.js` `rconApi.getServerStatus` -- proxy passthrough, see module docstring."""
+    """`api.js` `rconApi.getServerStatus` -- member allowlist DTO, never a passthrough."""
     denied = await _require_community(community_id)
     if denied:
         return denied
@@ -1624,8 +1625,9 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]
+@validate_response(bot_rcon.MemberPlayersResponse)
 async def get_rcon_player_list(community_id: int, server_id: int) -> Any:
-    """`api.js` `rconApi.getPlayerList` -- proxy passthrough, see module docstring."""
+    """`api.js` `rconApi.getPlayerList` -- member allowlist DTO, never a passthrough."""
     denied = await _require_community(community_id)
     if denied:
         return denied

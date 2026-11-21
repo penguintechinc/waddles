@@ -10,6 +10,8 @@ Node controller's own docstring ("proxies commands to Python module").
 
 from __future__ import annotations
 
+import ipaddress
+import logging
 import os
 import re
 from dataclasses import dataclass, field
@@ -27,6 +29,8 @@ from .url_guard import is_private_host
 # `bot_ai_knowledge.py` could reuse the identical check rather than
 # duplicating it).
 __all__ = ["is_private_host"]
+
+logger = logging.getLogger(__name__)
 
 
 class RconValidationError(ValueError):
@@ -48,40 +52,140 @@ async def _proxy(path: str, method: str = "GET", body: dict[str, Any] | None = N
     return response.json()
 
 
-#: Key tokens that mark connection details or credentials. The server-manager upstream is outside
-#: this repo, so its status/players payload is untrusted: members must never receive these.
-_SENSITIVE_KEY_TOKENS = frozenset(
-    {
-        "password", "passwd", "secret", "token", "credential", "credentials", "key", "apikey",
-        "host", "hostname", "ip", "port", "address", "url", "uri", "dsn",
-    }
-)  # fmt: skip
+#: A string value is connection-detail-shaped when it holds a URL, a dotted-quad IPv4, an IPv6
+#: literal, or a `host:port` pair. Such values are redacted from the member view.
+_URL_RE = re.compile(r"[a-z][a-z0-9+.\-]*://|\bwww\.", re.IGNORECASE)
+_IPV4_RE = re.compile(r"(?<![\d.])\d{1,3}(?:\.\d{1,3}){3}(?![\d.])")
+_HOST_PORT_RE = re.compile(r"(?<![\w.\-])[\w\-]+(?:\.[\w\-]+)*:\d{2,5}(?!\d)")
+_IPV6_RE = re.compile(r"[0-9a-f:.]*:[0-9a-f:.]*:[0-9a-f:.]*", re.IGNORECASE)
 
 
-def _key_is_sensitive(key: str) -> bool:
-    """True when any snake/camel-case token of `key` names a connection detail or credential."""
-    spaced = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key)
-    return any(
-        token in _SENSITIVE_KEY_TOKENS for token in re.split(r"[^A-Za-z0-9]+", spaced.lower())
+def _looks_like_connection_detail(value: str) -> bool:
+    """True when `value` embeds a URL, IP address or `host:port` string."""
+    if _URL_RE.search(value) or _IPV4_RE.search(value) or _HOST_PORT_RE.search(value):
+        return True
+    for token in _IPV6_RE.findall(value):
+        try:
+            ipaddress.IPv6Address(token.strip("[]"))
+        except ValueError:
+            continue
+        return True
+    return False
+
+
+@dataclass(slots=True, frozen=True)
+class MemberServerStatus:
+    """Allowlist DTO -- the only status fields a plain member may see for a game server."""
+
+    online: bool | None = None
+    server_name: str | None = None
+    players_online: int | None = None
+    max_players: int | None = None
+    map: str | None = None
+    game: str | None = None
+    version: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MemberPlayer:
+    """Allowlist DTO -- the only per-player fields a plain member may see."""
+
+    name: str | None = None
+    score: float | None = None
+    ping: int | None = None
+    duration: float | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class MemberStatusResponse:
+    """Member response for `rcon/info/:id/status`."""
+
+    success: bool
+    status: MemberServerStatus
+
+
+@dataclass(slots=True, frozen=True)
+class MemberPlayersResponse:
+    """Member response for `rcon/info/:id/players`."""
+
+    success: bool
+    players: list[MemberPlayer]
+
+
+def _first(src: dict[str, Any], *keys: str) -> Any:
+    """First present value among `keys` (upstream spelling aliases), else None."""
+    for key in keys:
+        if key in src:
+            return src[key]
+    return None
+
+
+def _clean_str(field_name: str, value: Any) -> str | None:
+    """Return `value` if a plain string free of connection details, else None (PII-free warning)."""
+    if not isinstance(value, str):
+        return None
+    text = value.strip()[:128]
+    if _looks_like_connection_detail(text):
+        logger.warning("rcon member view: redacted connection-like value in field %s", field_name)
+        return None
+    return text or None
+
+
+def _clean_int(value: Any) -> int | None:
+    """Return a non-negative int (bools and non-numbers rejected), else None."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return int(value) if 0 <= value < 2**31 else None
+
+
+def _clean_number(value: Any) -> float | None:
+    """Return a finite non-negative number (bools and non-numbers rejected), else None."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        return None
+    return float(value) if 0 <= value < 2**31 else None
+
+
+def shape_member_status(payload: Any) -> MemberStatusResponse:
+    """Build the member status response ONLY from allowlisted, type-checked fields.
+
+    The server-manager upstream is outside this repo, so its payload is untrusted. Unknown keys
+    (any spelling of host/ip/port/credential, nested objects) are dropped by construction, and
+    string values that look like an IP, URL or `host:port` are redacted.
+    """
+    top = payload if isinstance(payload, dict) else {}
+    nested = top.get("status")
+    src = nested if isinstance(nested, dict) else top
+    online = _first(src, "online")
+    return MemberStatusResponse(
+        success=top.get("success") is True,
+        status=MemberServerStatus(
+            online=online if isinstance(online, bool) else None,
+            server_name=_clean_str("server_name", _first(src, "server_name", "name")),
+            players_online=_clean_int(_first(src, "players_online", "clients_online", "players")),
+            max_players=_clean_int(_first(src, "max_players")),
+            map=_clean_str("map", _first(src, "map")),
+            game=_clean_str("game", _first(src, "game")),
+            version=_clean_str("version", _first(src, "version")),
+        ),
     )
 
 
-def shape_member_view(payload: Any) -> Any:
-    """Recursively drop host/port/address/credential keys from an upstream proxy response.
-
-    The member-facing RCON info routes pass the server-manager response through; this guarantees a
-    plain community member never sees a server's host, ports or secrets even if the upstream
-    starts returning them.
-    """
-    if isinstance(payload, dict):
-        return {
-            k: shape_member_view(v)
-            for k, v in payload.items()
-            if not (isinstance(k, str) and _key_is_sensitive(k))
-        }
-    if isinstance(payload, list):
-        return [shape_member_view(item) for item in payload]
-    return payload
+def shape_member_players(payload: Any) -> MemberPlayersResponse:
+    """Build the member player list ONLY from allowlisted, type-checked per-player fields."""
+    top = payload if isinstance(payload, dict) else {}
+    raw = _first(top, "players", "clients", "users")
+    rows = raw if isinstance(raw, list) else []
+    players = [
+        MemberPlayer(
+            name=_clean_str("player.name", _first(row, "name", "nickname")),
+            score=_clean_number(_first(row, "score")),
+            ping=_clean_int(_first(row, "ping")),
+            duration=_clean_number(_first(row, "duration")),
+        )
+        for row in rows[:512]
+        if isinstance(row, dict)
+    ]
+    return MemberPlayersResponse(success=top.get("success") is True, players=players)
 
 
 # ── DTOs ──────────────────────────────────────────────────────────────────
@@ -381,16 +485,16 @@ async def execute_command(
     )
 
 
-async def get_server_status(dal: Any, community_id: int, server_id: int) -> Any:
-    """`GET .../rcon/info/:id/status` (member-visible: connection details are stripped)."""
-    return shape_member_view(
+async def get_server_status(dal: Any, community_id: int, server_id: int) -> MemberStatusResponse:
+    """`GET .../rcon/info/:id/status` (member-visible: allowlist DTO only)."""
+    return shape_member_status(
         await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/status")
     )
 
 
-async def get_player_list(dal: Any, community_id: int, server_id: int) -> Any:
-    """`GET .../rcon/info/:id/players` (member-visible: connection details are stripped)."""
-    return shape_member_view(
+async def get_player_list(dal: Any, community_id: int, server_id: int) -> MemberPlayersResponse:
+    """`GET .../rcon/info/:id/players` (member-visible: allowlist DTO only)."""
+    return shape_member_players(
         await _proxy(f"/api/v1/server-manager/{community_id}/servers/{server_id}/players")
     )
 

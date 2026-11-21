@@ -1269,6 +1269,46 @@ class TestRconLiveCommandProxy:
         )
         assert response.status_code == 200
 
+    async def test_member_routes_return_exact_allowlisted_field_set(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        community_uuid: str,
+        monkeypatch: Any,
+    ) -> None:
+        stuffed = {
+            "success": True,
+            "status": {
+                "online": True, "server_name": "1.2.3.4:27015", "players": 2, "map": "m",
+                "serverIp": "10.0.0.1", "connect_str": "10.0.0.1:1", "rcon_password": "pw",
+                "host": "h", "conn": {"addr": "10.0.0.2:2"},
+            },
+            "players": [{"name": "bob", "ping": 5, "ip": "10.0.0.3", "addr": {"ip": "10.0.0.4"}}],
+        }  # fmt: skip
+
+        async def fake_proxy(path: str, method: str = "GET", body: Any = None) -> Any:
+            return stuffed
+
+        monkeypatch.setattr(bot_rcon, "_proxy", fake_proxy)
+        base = f"/api/v1/admin/{community_uuid}/rcon/info/{seeded_server_id}"
+        headers = auth_headers(scope="bot.server_manager:read")
+        status = await (await client.get(f"{base}/status", headers=headers)).get_json()
+        players = await (await client.get(f"{base}/players", headers=headers)).get_json()
+        assert set(status) == {"success", "status"}
+        assert set(status["status"]) == {
+            "online", "server_name", "players_online", "max_players", "map", "game", "version",
+        }  # fmt: skip
+        assert status["status"]["server_name"] is None
+        assert status["status"]["players_online"] == 2
+        assert set(players) == {"success", "players"}
+        assert set(players["players"][0]) == {"name", "score", "ping", "duration"}
+        assert players["players"][0]["name"] == "bob"
+        blob = str(status) + str(players)
+        for leaked in ("10.0.0", "rcon_password", "pw", "connect_str", "serverIp", "conn"):
+            assert leaked not in blob
+
 
 class TestRconCommandLogAndMemberInfo:
     async def test_command_log_empty(
