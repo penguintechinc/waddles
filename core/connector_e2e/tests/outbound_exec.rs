@@ -320,19 +320,19 @@ async fn rig(flag: bool) -> Rig {
         vec![
             RigConnector {
                 platform: "twitch".into(),
-                app_id: "waddles.core.service.twitch".into(),
+                app_id: "penguintechinc.waddles.twitch".into(),
                 wasm: TWITCH_WASM,
                 world: WitWorld::ConnectorTools,
             },
             RigConnector {
                 platform: "discord".into(),
-                app_id: "waddles.core.service.discord".into(),
+                app_id: "penguintechinc.waddles.discord".into(),
                 wasm: DISCORD_WASM,
                 world: WitWorld::ConnectorTools,
             },
             RigConnector {
                 platform: "youtube".into(),
-                app_id: "waddles.core.service.youtube".into(),
+                app_id: "penguintechinc.waddles.youtube".into(),
                 wasm: YOUTUBE_WASM,
                 world: WitWorld::ConnectorTools,
             },

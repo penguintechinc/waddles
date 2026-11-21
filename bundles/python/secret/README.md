@@ -1,7 +1,7 @@
 # secret (Python)
 
 `!secret <username> <message>` -- one-time secret messaging (feature #684). First-party
-(`provider: builtin`, `app_id: waddles.core.example.secret`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.secret`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** (not a port; no third-party attribution applies).
 
 The sender's chat message is deleted, the secret is stored by hub-api as a **single-use** secret,

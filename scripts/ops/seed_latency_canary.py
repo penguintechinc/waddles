@@ -46,18 +46,18 @@ EXIT_OK = 0
 EXIT_FAIL = 1
 EXIT_REFUSED = 2
 
-PING_APP_ID = "waddles.core.example.ping"
+PING_APP_ID = "penguintechinc.waddles.ping"
 COMMUNITY_NAME = "latency-canary"
 # Reputation / economy accrual: the reputation-accrual APP plus the two SERVICE bundles. Their
 # per-community off switch is the bundle community config key `accrual_enabled`.
 ACCRUAL_BUNDLES = (
-    "waddles.core.app.reputation-accrual",
-    "waddles.core.service.reputation",
-    "waddles.core.service.economy",
+    "penguintechinc.waddles.reputation-accrual",
+    "penguintechinc.waddles.reputation",
+    "penguintechinc.waddles.economy",
 )
 ACCRUAL_KEY = "accrual_enabled"
 # Substrings of APP bundle ids that mint/accrue and must NOT be active in the canary community.
-# Service bundles (`.service.`) are never touched here: they are tenant-wide and are switched off
+# Service bundles (SERVICE_APP_IDS) are never touched here: they are tenant-wide and are switched off
 # through ACCRUAL_BUNDLES' community config instead.
 DENY_PATTERNS = (
     "reputation",
@@ -69,6 +69,27 @@ DENY_PATTERNS = (
     "lottery",
     "jackpot",
     "blackjack",
+)
+# Tenant-wide SERVICE bundle ids (the id carries no kind marker, so they are listed explicitly).
+SERVICE_APP_IDS = frozenset(
+    f"penguintechinc.waddles.{n}"
+    for n in (
+        "ai",
+        "discord",
+        "economy",
+        "gameserver",
+        "kick",
+        "music-requests",
+        "music-soundcloud",
+        "music-spotify",
+        "music-youtube",
+        "reputation",
+        "spectrum",
+        "twitch",
+        "webrtc",
+        "wix",
+        "youtube",
+    )
 )
 TOKEN_ENV = "WADDLES_ADMIN_TOKEN"
 
@@ -201,7 +222,7 @@ def active_app_ids(http: Http, community_id: str) -> list[str]:
 def is_denied_app(app_id: str, deny: Sequence[str]) -> bool:
     """Whether an activated APP bundle should be deactivated (service bundles never are)."""
     low = app_id.lower()
-    return ".service." not in low and any(p in low for p in deny)
+    return app_id not in SERVICE_APP_IDS and any(p in low for p in deny)
 
 
 def _bundle_config_path(community_id: str, app_id: str) -> str:

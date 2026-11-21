@@ -49,7 +49,7 @@ fn core_connector_manifest(digest: &str, granted: bool) -> VerifiedManifest {
         perms.insert(PERM_CONNECTOR_PII_READ.to_string());
     }
     VerifiedManifest::new(
-        "waddles.core.connector.discord",
+        "penguintechinc.waddles.connector-discord",
         digest,
         WitWorld::Connector,
         perms,
@@ -74,7 +74,7 @@ fn vendor_connector_manifest(digest: &str) -> VerifiedManifest {
 
 fn stage_manifest(digest: &str) -> VerifiedManifest {
     VerifiedManifest::new(
-        "waddles.core.some-app",
+        "penguintechinc.waddles.some-app",
         digest,
         WitWorld::Stage,
         HashSet::new(),

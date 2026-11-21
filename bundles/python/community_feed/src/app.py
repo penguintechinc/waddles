@@ -1,4 +1,4 @@
-"""`!feed` -> READ-ONLY community events and public info (`waddles.core.community.feed`).
+"""`!feed` -> READ-ONLY community events and public info (`penguintechinc.waddles.feed`).
 
 Commands (all answer from a per-community cached snapshot of the community's public JSON feed):
 

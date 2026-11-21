@@ -1,7 +1,7 @@
 # lottery (Python)
 
 `!lottery` -- a periodic ticket lottery. First-party (`provider: builtin`,
-`app_id: waddles.core.example.lottery`), net-new Waddles content (a generic ticket-lottery
+`app_id: penguintechinc.waddles.lottery`), net-new Waddles content (a generic ticket-lottery
 mechanic; no attribution required). Points only; no real-money ties. Activation-gated only -- no
 feature flag.
 

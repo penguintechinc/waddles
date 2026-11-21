@@ -52,7 +52,7 @@ def _matching_placeholder_label(value: str) -> str | None:
 # unlike a Secret's data/stringData (inherently sensitive by definition), a
 # plain Deployment env var can legitimately contain the substring "example"
 # in non-secret demo/sample data (e.g. this chart's own
-# "waddles.core.example.ping" demo bundle app_id). Scoping to credential-
+# "penguintechinc.waddles.ping" demo bundle app_id). Scoping to credential-
 # shaped names avoids false positives there while still catching a
 # credential accidentally hardcoded as a literal `value:` instead of a
 # `valueFrom.secretKeyRef`.

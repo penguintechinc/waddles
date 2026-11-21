@@ -2256,7 +2256,7 @@ mod tests {
             "schema_version": if t.is_some() { 3 } else { 2 },
             "tenant": "acme", "community": "main",
             "tenant_id": t, "community_id": c,
-            "app_id": "waddles.bot.commands.default", "stage": "process",
+            "app_id": "penguintechinc.waddles.fixture-bot-commands-default", "stage": "process",
             "event": {"platform": "twitch", "event_type": "chat.message", "actor": null,
                       "payload": {}, "occurred_at": "2026-10-14T00:00:00.000Z"},
             "ts": "2026-10-14T00:00:00.000Z", "target_app_id": null,
@@ -2292,7 +2292,7 @@ mod tests {
             "NOGROUP".to_string(),
             Some(
                 "No such key 'waddles:t:default:c:_tenant:src:twitch:tw-x:events' or consumer \
-                 group 'waddles.core.example.ping' in XREADGROUP with GROUP option"
+                 group 'penguintechinc.waddles.ping' in XREADGROUP with GROUP option"
                     .to_string(),
             ),
         ));
@@ -2374,7 +2374,7 @@ mod tests {
                 "schema_version": 2,
                 "tenant": tenant,
                 "community": community,
-                "app_id": "waddles.bot.commands.default",
+                "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
                 "stage": "process",
                 "event": {
                     "platform": "twitch",
@@ -2401,7 +2401,7 @@ mod tests {
             // exact "shared ingest-source stream" shape `d.group` exists
             // for (see `penguin_spine::Delivered`'s own doc comment at the
             // pinned rev).
-            group: "waddles.bot.commands.default".to_string(),
+            group: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
         };
         crate::identity_crypto::test_support::encrypt_delivered(&mut d, true);
         d
@@ -2457,7 +2457,7 @@ mod tests {
                 "schema_version": 2,
                 "tenant": tenant,
                 "community": community,
-                "app_id": "waddles.bot.commands.default",
+                "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
                 "stage": "process",
                 "event": {
                     "platform": "discord",
@@ -2477,7 +2477,7 @@ mod tests {
             }))
             .unwrap(),
             deliveries: 1,
-            group: "waddles.bot.commands.default".to_string(),
+            group: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
         };
         crate::identity_crypto::test_support::encrypt_delivered(&mut d, true);
         d
@@ -2767,7 +2767,7 @@ mod tests {
         // snapshot themselves (matching digest) right after doing so.
         let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
         app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             version: "1".to_string(),
             version_id: 1,
             digest: String::new(),
@@ -2783,7 +2783,7 @@ mod tests {
             tools: Default::default(),
         }]);
         let deps = ProcessDeps {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             // Empty `Static` by default -- see `DigestSource::Static`'s
             // doc: an empty digest skips `ensure_loaded` entirely, which is
             // what every pre-existing test in this module (fixed before
@@ -3183,17 +3183,17 @@ mod tests {
                 .await;
         let digests = Arc::new(ActiveDigests::new());
         digests.set(
-            test_scope("waddles.bot.commands.default"),
+            test_scope("penguintechinc.waddles.fixture-bot-commands-default"),
             active_digest.clone(),
         );
         digests.set_language(
-            test_scope("waddles.bot.commands.default"),
+            test_scope("penguintechinc.waddles.fixture-bot-commands-default"),
             "rust".to_string(),
         );
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
         deps.digest_source = DigestSource::Active {
-            scope: test_scope("waddles.bot.commands.default"),
+            scope: test_scope("penguintechinc.waddles.fixture-bot-commands-default"),
             digests,
         };
         deps.component_key = "k".to_string();
@@ -3222,7 +3222,7 @@ mod tests {
         let mut d3 = d1.clone();
         d3.env.community = Some("other".to_string());
         let digests = Arc::new(ActiveDigests::new());
-        let scope = test_scope("waddles.bot.commands.default");
+        let scope = test_scope("penguintechinc.waddles.fixture-bot-commands-default");
         let mut deps = test_deps(FakeSpineOps::default(), Arc::new(ConnectionRegistry::new()));
         deps.digest_source = DigestSource::Active {
             scope: scope.clone(),
@@ -3270,7 +3270,7 @@ mod tests {
             connected_registry_with_fake_executor_expecting_load_first(serde_json::json!(null), 0)
                 .await;
         let digests = Arc::new(ActiveDigests::new());
-        let scope = test_scope("waddles.bot.commands.default");
+        let scope = test_scope("penguintechinc.waddles.fixture-bot-commands-default");
         digests.set(scope.clone(), format!("sha256:{}", "a".repeat(64)));
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
@@ -3345,7 +3345,7 @@ mod tests {
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
         deps.digest_source = DigestSource::Active {
-            scope: test_scope("waddles.bot.commands.default"),
+            scope: test_scope("penguintechinc.waddles.fixture-bot-commands-default"),
             digests,
         };
 
@@ -3387,7 +3387,10 @@ mod tests {
         let ring = test_ring();
         let d = fixture_delivered("acme", Some("main"), &ring, "k1");
         let digests = Arc::new(ActiveDigests::new());
-        digests.force_set_for_test(test_scope("waddles.bot.commands.default"), String::new());
+        digests.force_set_for_test(
+            test_scope("penguintechinc.waddles.fixture-bot-commands-default"),
+            String::new(),
+        );
         let spine = FakeSpineOps::default();
         // No executor connection at all -- if `handle_delivered` ever tried
         // to invoke, it would fail before reaching the executor, proving
@@ -3396,7 +3399,7 @@ mod tests {
         // known_for_the_scope` above).
         let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
         deps.digest_source = DigestSource::Active {
-            scope: test_scope("waddles.bot.commands.default"),
+            scope: test_scope("penguintechinc.waddles.fixture-bot-commands-default"),
             digests,
         };
 
@@ -3698,8 +3701,12 @@ mod tests {
             "sha256:deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_string();
         deps.digest_source = DigestSource::Static(digest.clone());
         deps.version = "3".to_string();
-        deps.component_key = "bundles/waddles.bot.commands.default/3/deadbeef.wasm".to_string();
-        deps.sidecar_key = "bundles/waddles.bot.commands.default/3/deadbeef.json".to_string();
+        deps.component_key =
+            "bundles/penguintechinc.waddles.fixture-bot-commands-default/3/deadbeef.wasm"
+                .to_string();
+        deps.sidecar_key =
+            "bundles/penguintechinc.waddles.fixture-bot-commands-default/3/deadbeef.json"
+                .to_string();
         deps.app_version_snapshot
             .update(&[bundle_active_set::ActiveBundleRow {
                 app_id: deps.app_id.clone(),
@@ -3934,7 +3941,7 @@ mod tests {
         // this SAME app_id, still active in scope.
         deps.app_version_snapshot
             .update(&[bundle_active_set::ActiveBundleRow {
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 version: "2".to_string(),
                 version_id: 2,
                 digest: "sha256:new-after-upgrade".to_string(),
@@ -4002,7 +4009,7 @@ mod tests {
         deps.app_version_snapshot.update(&[]);
         assert_eq!(
             deps.app_version_snapshot
-                .resolve_for_app("waddles.bot.commands.default"),
+                .resolve_for_app("penguintechinc.waddles.fixture-bot-commands-default"),
             None,
             "a deactivated app_id must no longer resolve in the live snapshot"
         );
@@ -4044,10 +4051,13 @@ mod tests {
         assert_eq!(appended.len(), 1);
         assert_eq!(
             appended[0].0,
-            "waddles:t:acme:c:main:app:waddles.bot.commands.default:action"
+            "waddles:t:acme:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action"
         );
         assert_eq!(appended[0].1.stage, "action");
-        assert_eq!(appended[0].1.app_id, "waddles.bot.commands.default");
+        assert_eq!(
+            appended[0].1.app_id,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         // Binding/workstream/event_id carried unchanged (see the module
         // doc: the MAC formula doesn't cover app_id/stage).
         assert_eq!(appended[0].1.binding, d.env.binding);
@@ -4204,7 +4214,7 @@ mod tests {
             actor: None,
             payload: serde_json::from_value(serde_json::json!({
                 "text": "posted",
-                "_target_app_id": "waddles.community.forums.default"
+                "_target_app_id": "penguintechinc.waddles.forums-pipeline"
             }))
             .unwrap(),
             occurred_at: "2026-09-22T00:00:01.000Z".to_string(),
@@ -4215,7 +4225,7 @@ mod tests {
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
         deps.approved_targets.insert(
-            "waddles.community.forums.default".to_string(),
+            "penguintechinc.waddles.forums-pipeline".to_string(),
             "acme".to_string(),
         );
 
@@ -4225,9 +4235,12 @@ mod tests {
         assert_eq!(appended.len(), 1);
         assert_eq!(
             appended[0].0,
-            "waddles:t:acme:c:main:app:waddles.community.forums.default:action"
+            "waddles:t:acme:c:main:app:penguintechinc.waddles.forums-pipeline:action"
         );
-        assert_eq!(appended[0].1.app_id, "waddles.community.forums.default");
+        assert_eq!(
+            appended[0].1.app_id,
+            "penguintechinc.waddles.forums-pipeline"
+        );
         assert!(!appended[0].1.event.payload.contains_key("_target_app_id"));
     }
 
@@ -4259,7 +4272,7 @@ mod tests {
         assert_eq!(
             *metrics.skipped.lock().unwrap(),
             vec![(
-                "waddles.bot.commands.default".to_string(),
+                "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 "route_denied".to_string()
             )]
         );
@@ -4385,8 +4398,8 @@ mod tests {
         // Shared ingest-source-stream shape: the envelope's own app_id is
         // svc-ingest's generic stamped value, NOT the reading bundle's
         // group.
-        d.env.app_id = "waddles.core.ingest.default".to_string();
-        d.group = "waddles.bot.commands.default".to_string();
+        d.env.app_id = "penguintechinc.waddles.ingest-default".to_string();
+        d.group = "penguintechinc.waddles.fixture-bot-commands-default".to_string();
 
         let spine = FakeSpineOps::default();
         // No executor connection -> `handle_delivered` dead-letters.
@@ -4404,7 +4417,10 @@ mod tests {
         // `d.group`. This test's own job is only to prove `d.group` still
         // holds its distinct, correct value at the point this crate hands
         // the entry off -- asserted directly here.
-        assert_eq!(d.group, "waddles.bot.commands.default");
+        assert_eq!(
+            d.group,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         assert_ne!(d.group, d.env.app_id);
     }
 
@@ -4576,7 +4592,8 @@ mod tests {
                     &Frame::new(
                         100 + n as u64,
                         Message::HostCall(HostCallBody {
-                            app_id: "waddles.bot.commands.default".to_string(),
+                            app_id: "penguintechinc.waddles.fixture-bot-commands-default"
+                                .to_string(),
                             capability: CapabilityKind::Db,
                             op: op.to_string(),
                             args,
@@ -4671,7 +4688,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 7,
                 community_id: 3,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: 1,
             },
             bundle_capability_gate::GrantSet {
@@ -5725,7 +5742,7 @@ mod tests {
                     "community": "main",
                     "tenant_id": TENANT_ID,
                     "community_id": COMMUNITY_ID,
-                    "app_id": "waddles.bot.commands.default",
+                    "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
                     "stage": "process",
                     "event": {
                         "platform": "discord",
@@ -5745,7 +5762,7 @@ mod tests {
                 }))
                 .unwrap(),
                 deliveries: 1,
-                group: "waddles.bot.commands.default".to_string(),
+                group: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             }
         }
 

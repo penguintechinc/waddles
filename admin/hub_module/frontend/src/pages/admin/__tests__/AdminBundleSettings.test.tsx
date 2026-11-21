@@ -32,8 +32,8 @@ const auth = vi.mocked(useAuth);
 const activation = vi.mocked(bundleActivationApi);
 const api = vi.mocked(bundleAdminApi);
 
-const GREET = 'waddles.core.social.greeter';
-const PLAIN = 'waddles.core.util.ping';
+const GREET = 'penguintechinc.waddles.greeter';
+const PLAIN = 'penguintechinc.waddles.ping';
 const SCHEMA = {
   type: 'object',
   description: 'Welcome new members.',
@@ -206,7 +206,7 @@ describe('AdminBundleSettings', () => {
 
 describe('helpers', () => {
   it('bundleName humanises the last app-id segment', () => {
-    expect(bundleName('waddles.core.x.role_sync-map')).toBe('Role Sync Map');
+    expect(bundleName('penguintechinc.waddles.role_sync-map')).toBe('Role Sync Map');
   });
 
   it('toErrorSchema nests JSON paths and keeps root errors', () => {

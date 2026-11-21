@@ -194,23 +194,23 @@ def db_via_module():
 class TestAppCatalogCRUD:
     def test_insert_and_select_round_trip(self, db):
         db.app_catalog.insert(
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             manifest_version="1.0.0",
             module="bot",
-            feature="waddles.bot.giveaway",
+            feature="giveaway",
             provider="builtin",
             execution_model="native",
             is_default=True,
             compatible_with=[],
-            incompatible_with=["waddles.bot.giveaway.legacy"],
+            incompatible_with=["penguintechinc.waddles.legacy"],
             platform_compatibility={"tested_with": "v3.0.x", "min_version": "3.0.0"},
         )
         db.commit()
-        row = db(db.app_catalog.app_id == "waddles.bot.giveaway.giveaway-classic").select().first()
-        assert row.app_id == "waddles.bot.giveaway.giveaway-classic"
-        assert row.feature == "waddles.bot.giveaway"
+        row = db(db.app_catalog.app_id == "penguintechinc.waddles.giveaway-classic").select().first()
+        assert row.app_id == "penguintechinc.waddles.giveaway-classic"
+        assert row.feature == "giveaway"
         assert row.is_default is True
-        assert row.incompatible_with == ["waddles.bot.giveaway.legacy"]
+        assert row.incompatible_with == ["penguintechinc.waddles.legacy"]
         assert row.platform_compatibility["min_version"] == "3.0.0"
         assert row.status == "active"  # default applied
 
@@ -222,10 +222,10 @@ class TestAppCatalogCRUD:
         `app_catalog.stages` at all.
         """
         db.app_catalog.insert(
-            app_id="waddles.bot.discord.default",
+            app_id="penguintechinc.waddles.discord",
             manifest_version="1.0.0",
             module="bot",
-            feature="waddles.bot.discord",
+            feature="discord",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
@@ -237,21 +237,21 @@ class TestAppCatalogCRUD:
             },
         )
         db.commit()
-        row = db(db.app_catalog.app_id == "waddles.bot.discord.default").select().first()
+        row = db(db.app_catalog.app_id == "penguintechinc.waddles.discord").select().first()
         assert row.stages["action"]["entrypoint"] == "builtin_handlers.discord_send_action:send_message"
 
     def test_stages_defaults_to_empty_dict(self, db):
         db.app_catalog.insert(
-            app_id="waddles.core.demo.no-stages",
+            app_id="penguintechinc.waddles.no-stages",
             manifest_version="1.0.0",
             module="core",
-            feature="waddles.core.demo",
+            feature="demo",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
         )
         db.commit()
-        row = db(db.app_catalog.app_id == "waddles.core.demo.no-stages").select().first()
+        row = db(db.app_catalog.app_id == "penguintechinc.waddles.no-stages").select().first()
         assert row.stages == {}
 
     def test_app_id_is_the_primary_key(self, db):
@@ -259,10 +259,10 @@ class TestAppCatalogCRUD:
         re-inserting the same app_id must violate the PK, not silently
         create a second row."""
         db.app_catalog.insert(
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             manifest_version="1.0.0",
             module="bot",
-            feature="waddles.bot.giveaway",
+            feature="giveaway",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
@@ -270,10 +270,10 @@ class TestAppCatalogCRUD:
         db.commit()
         with pytest.raises(sqlite3.IntegrityError):
             db.app_catalog.insert(
-                app_id="waddles.bot.giveaway.giveaway-classic",
+                app_id="penguintechinc.waddles.giveaway-classic",
                 manifest_version="2.0.0",
                 module="bot",
-                feature="waddles.bot.giveaway",
+                feature="giveaway",
                 provider="builtin",
                 execution_model="native",
                 platform_compatibility={},
@@ -284,10 +284,10 @@ class TestAppTenantAvailabilityCRUD:
     def test_insert_and_unique_constraint(self, db):
         tenant = db.tenants.insert(slug="acme")
         db.app_catalog.insert(
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             manifest_version="1.0.0",
             module="bot",
-            feature="waddles.bot.giveaway",
+            feature="giveaway",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
@@ -295,7 +295,7 @@ class TestAppTenantAvailabilityCRUD:
         db.commit()
         db.app_tenant_availability.insert(
             tenant_id=tenant,
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             available=True,
             config_defaults={"max_entries": 100},
         )
@@ -308,7 +308,7 @@ class TestAppTenantAvailabilityCRUD:
         with pytest.raises(sqlite3.IntegrityError):
             db.app_tenant_availability.insert(
                 tenant_id=tenant,
-                app_id="waddles.bot.giveaway.giveaway-classic",
+                app_id="penguintechinc.waddles.giveaway-classic",
                 available=False,
             )
 
@@ -318,10 +318,10 @@ class TestAppActivationsCRUD:
         tenant = db.tenants.insert(slug="acme")
         community = db.communities.insert(tenant_id=tenant, name="c1")
         db.app_catalog.insert(
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             manifest_version="1.0.0",
             module="bot",
-            feature="waddles.bot.giveaway",
+            feature="giveaway",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
@@ -330,7 +330,7 @@ class TestAppActivationsCRUD:
         db.app_activations.insert(
             community_id=community,
             tenant_id=tenant,
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             enabled=True,
             config={"window_seconds": 60},
         )
@@ -345,7 +345,7 @@ class TestAppActivationsCRUD:
             db.app_activations.insert(
                 community_id=community,
                 tenant_id=tenant,
-                app_id="waddles.bot.giveaway.giveaway-classic",
+                app_id="penguintechinc.waddles.giveaway-classic",
                 enabled=False,
             )
 
@@ -360,30 +360,30 @@ class TestInitAppBundleTablesAgainstMigratedSchema:
         tenant = dal.tenants.insert(slug="acme")
         community = dal.communities.insert(tenant_id=tenant, name="c1")
         dal.app_catalog.insert(
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             manifest_version="1.0.0",
             module="bot",
-            feature="waddles.bot.giveaway",
+            feature="giveaway",
             provider="builtin",
             execution_model="native",
             platform_compatibility={"tested_with": "v3.0.x"},
         )
         dal.app_tenant_availability.insert(
-            tenant_id=tenant, app_id="waddles.bot.giveaway.giveaway-classic", available=True
+            tenant_id=tenant, app_id="penguintechinc.waddles.giveaway-classic", available=True
         )
         dal.app_activations.insert(
             community_id=community,
             tenant_id=tenant,
-            app_id="waddles.bot.giveaway.giveaway-classic",
+            app_id="penguintechinc.waddles.giveaway-classic",
             enabled=True,
         )
         dal.commit()
 
-        catalog_row = dal(dal.app_catalog.app_id == "waddles.bot.giveaway.giveaway-classic").select().first()
+        catalog_row = dal(dal.app_catalog.app_id == "penguintechinc.waddles.giveaway-classic").select().first()
         avail_row = dal(dal.app_tenant_availability.tenant_id == tenant).select().first()
         activation_row = dal(dal.app_activations.community_id == community).select().first()
 
-        assert catalog_row.feature == "waddles.bot.giveaway"
+        assert catalog_row.feature == "giveaway"
         assert avail_row.available is True
         assert activation_row.enabled is True
         # activated ⊆ available ⊆ installed -- all three rows reference the

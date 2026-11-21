@@ -37,10 +37,10 @@ INSERT INTO app_catalog (
     status,
     stages
 ) VALUES (
-    'waddles.social.welcome.default',
+    'penguintechinc.waddles.welcome-pipeline',
     '1.0.0',
     'social',
-    'waddles.social.welcome',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
@@ -69,7 +69,7 @@ ON CONFLICT (app_id) DO NOTHING;
 -- The 'global' tenant is the reserved pseudo-tenant containing per-environment
 -- defaults and test fixtures.
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.social.welcome.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.welcome-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

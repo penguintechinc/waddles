@@ -1047,7 +1047,7 @@ mod tests {
         let mut h = Sha256::new();
         h.update(ECHO);
         let manifest = VerifiedManifest::new(
-            "waddles.core.test.connector-limiter",
+            "penguintechinc.waddles.test-connector-limiter",
             format!("sha256:{:x}", h.finalize()),
             WitWorld::Connector,
             std::collections::HashSet::new(),
@@ -1091,7 +1091,7 @@ mod tests {
         use sha2::{Digest, Sha256};
 
         const ECHO: &[u8] = include_bytes!("../tests/fixtures/echo_connector.wasm");
-        let app_id = "waddles.core.test.connector-metrics";
+        let app_id = "penguintechinc.waddles.test-connector-metrics";
         let cfg = CliConfig::try_parse_from([
             "bundle-executor",
             "--stage-host-api-addr",
@@ -1180,7 +1180,7 @@ mod tests {
         use sha2::{Digest, Sha256};
 
         const TOOLS: &[u8] = include_bytes!("../tests/fixtures/connector_tools_fixture.wasm");
-        let app_id = "waddles.core.test.connector-hang";
+        let app_id = "penguintechinc.waddles.test-connector-hang";
         let cfg = CliConfig::try_parse_from([
             "bundle-executor",
             "--stage-host-api-addr",
@@ -1221,7 +1221,7 @@ mod tests {
             Duration::from_secs(10),
             host.call_tool_with_deadline(
                 "relay".into(),
-                br#"{"target":"waddles.core.other","tool":"x","args":{}}"#.to_vec(),
+                br#"{"target":"penguintechinc.waddles.other","tool":"x","args":{}}"#.to_vec(),
                 Some(300),
             ),
         )

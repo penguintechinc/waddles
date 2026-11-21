@@ -17,7 +17,7 @@ REPORT_DIR="${REPORT_DIR:-/tmp/old-id-scan-report}"
 VENV="${SWEEP_VENV:-/tmp/sweep-venv}"
 K=(kubectl --context "$KCTX" -n "$NS")
 mkdir -p "$REPORT_DIR"
-RE='(^|[^a-z0-9.])waddles\.(core\.(example|app|service|integration|community)|integrations\.superpenguin)'
+RE='(^|[^a-z0-9.])waddles\.(core\.(example|app|service|integration|community)|integrations\.superpenguin|(bot|community|social|streaming|marketing)\.[a-z0-9_-]+\.default)'
 PF_PID=""
 trap 'if [[ -n "$PF_PID" ]]; then kill "$PF_PID" 2>/dev/null || true; fi' EXIT
 rc=0
@@ -30,6 +30,16 @@ DB_COLS="$(wc -l < "$REPORT_DIR/db.txt")"
 DB_ROWS="$(awk -F= '{s+=$NF} END{print s+0}' "$REPORT_DIR/db.txt")"
 echo "db:      columns_examined=$DB_DENOM columns_with_old_ids=$DB_COLS rows_matching=$DB_ROWS"
 head -8 "$REPORT_DIR/db.txt" | sed 's/^/           /'
+
+# Structural live-DB assertion: every catalog app_id must be <org>.<repo>.<name> (new shape),
+# no default/example/demo segment; denominator must be > 0 (zero rows examined = FAIL).
+for T in app_catalog app_tenant_availability; do
+  ROWS="$("$HERE/lib/psql-ro.sh" "select count(*) from $T")"
+  BAD="$("$HERE/lib/psql-ro.sh" "select count(*) from $T where app_id !~ '^(penguintechinc\\.waddles|psychoboy\\.penguintwitchbot)\\.[a-z0-9-]+\$' or app_id ~ '\\.(.*-)?(default|example|demo)(-|\$)'")"
+  echo "db-shape: $T rows_examined=$ROWS bad_shape=$BAD"
+  [[ "$ROWS" -gt 0 ]] || { echo "FAIL: db-shape: $T has zero rows" >&2; exit 2; }
+  [[ "$BAD" -eq 0 ]] || rc=1
+done
 
 # ---- 2. Valkey (SCAN only) ---------------------------------------------------
 # Password stays inside the pod (REDISCLI_AUTH from the pod's own env).

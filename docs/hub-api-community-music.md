@@ -1,6 +1,6 @@
 # hub-api: `GET /api/v1/communities/{community_id}/music`
 
-Member-facing read of a community's music queue page. Reads the `waddles.core.service.music-requests`
+Member-facing read of a community's music queue page. Reads the `penguintechinc.waddles.music-requests`
 bundle's db-v2 tables (`requests`, `history`, `settings`, `artist_plays`, `song_plays`) from the
 **read replica** (primary only when no replica is configured). Code:
 `hub_api/blueprints/v1/community_music.py`, `hub_api/services/community_music_service.py`.
@@ -27,10 +27,10 @@ Response (`MusicPageDTO`):
 }
 ```
 
-`history` = last 5, `top_*` = top 5 by plays. `ai_dj.enabled` = DJ bundle `waddles.core.example.dj`
+`history` = last 5, `top_*` = top 5 by plays. `ai_dj.enabled` = DJ bundle `penguintechinc.waddles.dj`
 active for the community (`app_active_versions`, community or tenant-wide) AND `settings.ai_dj_on = 1`.
 `dmca_safe` = `settings.dmca_safe = 1`.
 
 Known blocker: `derive_v2_table_identity` rejects `-`, so the contract app id
-`waddles.core.service.music-requests` cannot get physical tables until the id (or the derive
+`penguintechinc.waddles.music-requests` cannot get physical tables until the id (or the derive
 sanitiser) changes; `test_contract_app_id_derives` is a strict xfail that flips when fixed.

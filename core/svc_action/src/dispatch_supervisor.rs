@@ -515,18 +515,18 @@ mod tests {
             community_id: 3,
             tenant_slug: "acme".to_string(),
             community_name: Some("main".to_string()),
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
         };
         let (grant, stream) = target_grant(&t);
 
         // The exact key `bundle_active_set`/`penguin_spine::scope`'s own
         // fixtures use for this (tenant, community, app_id) triple.
         let writer_key = penguin_spine::Scope::new("acme".to_string(), Some("main".to_string()))
-            .action_stream("waddles.bot.commands.default");
+            .action_stream("penguintechinc.waddles.fixture-bot-commands-default");
         assert_eq!(stream, writer_key);
         assert_eq!(
             stream,
-            "waddles:t:acme:c:main:app:waddles.bot.commands.default:action"
+            "waddles:t:acme:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action"
         );
         assert_eq!(grant.stream, stream);
     }

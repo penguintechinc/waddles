@@ -176,16 +176,27 @@ mod tests {
 
     #[test]
     fn authorize_kv_grants_when_the_app_declares_storage_kv() {
-        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
-        let snapshot = snapshot_granting("waddles.bot.a");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
+        let snapshot = snapshot_granting("penguintechinc.waddles.fixture-bot-a");
         assert_eq!(authorize_kv(&scope, &snapshot), Ok(()));
     }
 
     #[test]
     fn authorize_kv_denies_when_the_app_never_declared_storage_kv() {
-        let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.a");
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         let snapshot = CapabilitySnapshot::new();
-        snapshot.update("waddles.bot.a", ["context".to_string(), "log".to_string()]);
+        snapshot.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            ["context".to_string(), "log".to_string()],
+        );
         let err = authorize_kv(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");
     }
@@ -193,7 +204,7 @@ mod tests {
     #[test]
     fn authorize_kv_denies_an_app_id_the_snapshot_has_never_seen() {
         let scope = KvScope::new("acme", Some("main".to_string()), "waddles.bot.unknown");
-        let snapshot = snapshot_granting("waddles.bot.a");
+        let snapshot = snapshot_granting("penguintechinc.waddles.fixture-bot-a");
         let err = authorize_kv(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");
     }
@@ -202,7 +213,7 @@ mod tests {
     fn authorize_kv_denies_against_a_completely_empty_snapshot() {
         // The legacy env-driven path's exact shape: no active-set row, no
         // consent record, so the snapshot is never populated at all.
-        let scope = KvScope::new("acme", None, "waddles.bot.a");
+        let scope = KvScope::new("acme", None, "penguintechinc.waddles.fixture-bot-a");
         let snapshot = CapabilitySnapshot::new();
         let err = authorize_kv(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");

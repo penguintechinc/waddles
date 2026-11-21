@@ -26,8 +26,8 @@ const auth = vi.mocked(useAuth);
 const api = vi.mocked(bundleAvailabilityApi);
 
 const ROWS: BundleAvailability[] = [
-  { appId: 'waddles.core.ping', tenantId: 1, available: true, pinnedVersionId: 12, version: '1.2.0', updatedAt: '2026-03-04T10:30:00Z' },
-  { appId: 'waddles.core.pong', tenantId: 1, available: false, pinnedVersionId: null, updatedAt: null },
+  { appId: 'penguintechinc.waddles.ping', tenantId: 1, available: true, pinnedVersionId: 12, version: '1.2.0', updatedAt: '2026-03-04T10:30:00Z' },
+  { appId: 'penguintechinc.waddles.pong', tenantId: 1, available: false, pinnedVersionId: null, updatedAt: null },
 ];
 
 function wrapper({ children }: { children: ReactNode }) {
@@ -93,12 +93,12 @@ describe('TenantBundleCatalog listing', () => {
 
     const table = await screen.findByTestId('bundle-availability-table');
     expect(api.list).toHaveBeenCalledWith('acme');
-    const ping = within(within(table).getByText('waddles.core.ping').closest('tr') as HTMLElement);
+    const ping = within(within(table).getByText('penguintechinc.waddles.ping').closest('tr') as HTMLElement);
     expect(ping.getByText('Available')).toBeInTheDocument();
     expect(ping.getByText('1.2.0')).toBeInTheDocument();
     expect(ping.getByText(new Date('2026-03-04T10:30:00Z').toLocaleString())).toBeInTheDocument();
 
-    const pong = within(within(table).getByText('waddles.core.pong').closest('tr') as HTMLElement);
+    const pong = within(within(table).getByText('penguintechinc.waddles.pong').closest('tr') as HTMLElement);
     expect(pong.getByText('Unavailable')).toBeInTheDocument();
     expect(pong.getAllByText('—')).toHaveLength(2);
   });
@@ -155,10 +155,10 @@ describe('TenantBundleCatalog make-available form', () => {
     mount();
     await screen.findByTestId('bundle-availability-table');
     const input = screen.getByLabelText('App ID');
-    fireEvent.change(input, { target: { value: '  waddles.core.new ' } });
+    fireEvent.change(input, { target: { value: '  penguintechinc.waddles.new ' } });
     fireEvent.click(screen.getByRole('button', { name: 'Make bundle available' }));
 
-    await waitFor(() => expect(api.enable).toHaveBeenCalledWith('acme', { appId: 'waddles.core.new' }));
+    await waitFor(() => expect(api.enable).toHaveBeenCalledWith('acme', { appId: 'penguintechinc.waddles.new' }));
     await waitFor(() => expect(input).toHaveValue(''));
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });
@@ -196,9 +196,9 @@ describe('TenantBundleCatalog toggles', () => {
   it('disables an available bundle', async () => {
     mount();
     await screen.findByTestId('bundle-availability-table');
-    fireEvent.click(screen.getByRole('button', { name: 'Disable waddles.core.ping' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disable penguintechinc.waddles.ping' }));
 
-    await waitFor(() => expect(api.disable).toHaveBeenCalledWith('acme', 'waddles.core.ping'));
+    await waitFor(() => expect(api.disable).toHaveBeenCalledWith('acme', 'penguintechinc.waddles.ping'));
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
     expect(api.enable).not.toHaveBeenCalled();
   });
@@ -206,9 +206,9 @@ describe('TenantBundleCatalog toggles', () => {
   it('enables an unavailable bundle', async () => {
     mount();
     await screen.findByTestId('bundle-availability-table');
-    fireEvent.click(screen.getByRole('button', { name: 'Enable waddles.core.pong' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Enable penguintechinc.waddles.pong' }));
 
-    await waitFor(() => expect(api.enable).toHaveBeenCalledWith('acme', { appId: 'waddles.core.pong' }));
+    await waitFor(() => expect(api.enable).toHaveBeenCalledWith('acme', { appId: 'penguintechinc.waddles.pong' }));
     expect(api.disable).not.toHaveBeenCalled();
   });
 
@@ -217,10 +217,10 @@ describe('TenantBundleCatalog toggles', () => {
     api.disable.mockReturnValue(new Promise((resolve) => { release = resolve; }));
     mount();
     await screen.findByTestId('bundle-availability-table');
-    fireEvent.click(screen.getByRole('button', { name: 'Disable waddles.core.ping' }));
+    fireEvent.click(screen.getByRole('button', { name: 'Disable penguintechinc.waddles.ping' }));
 
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable waddles.core.pong' })).toBeDisabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable penguintechinc.waddles.pong' })).toBeDisabled());
     release({ success: true, message: 'ok' });
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable waddles.core.pong' })).toBeEnabled());
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Enable penguintechinc.waddles.pong' })).toBeEnabled());
   });
 });

@@ -371,9 +371,9 @@ Configured modes combine as **AND** — with the HMAC signature and with each ot
 | Current hook (`core/svc_process/runner.py`) | Becomes |
 |---|---|
 | Content-moderation gate (`services/moderation_gate.py`), which no community may opt out of | **Rust built-in**, runs before the bundle call |
-| Moderation-enforcement routing (stamp + synthetic enqueue to `waddles.community.moderation.default`'s `:action`) | **Rust built-in**, runs after the gate |
+| Moderation-enforcement routing (stamp + synthetic enqueue to `penguintechinc.waddles.moderation-pipeline`'s `:action`) | **Rust built-in**, runs after the gate |
 | Cross-app routing via `PROCESS_TARGET_APP_ID_KEY` (`_target_app_id`) | **Rust built-in** of the enqueue step — the reserved key is popped off the payload before enqueue, exactly as today |
-| `bot_process` command dispatch | **Bundle** (`waddles.bot.commands.default`) |
+| `bot_process` command dispatch | **Bundle** (`penguintechinc.waddles.fixture-bot-commands-default`) |
 | Raid auto-shoutout (`_maybe_shoutout_raid`, flag `waddles.bot.shoutout`) | **Bundle** |
 | Live ON/OFF status recording (`_maybe_live_status`, flag `waddles.streaming.live_status`) | **Bundle** |
 | Activity-feed emission (`live_activity_events`) | **Bundle** |
@@ -725,7 +725,7 @@ A bundle's process output goes **only** to its own action stream, read by exactl
 **The one cross-bundle path is `_target_app_id`, and it is now a declared capability.** A process bundle that wants to route an event to another app must list that app in its manifest:
 
 ```yaml
-routes_to: ["waddles.community.forums.default"]
+routes_to: ["penguintechinc.waddles.forums-pipeline"]
 ```
 
 | Rule | Behaviour |
@@ -846,7 +846,7 @@ The queue-crossing shape is unchanged from `libs/flask_core/flask_core/stream_pi
   "schema_version": 2,
   "tenant": "global",
   "community": null,
-  "app_id": "waddles.bot.commands.default",
+  "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
   "stage": "process",
   "event": { "...PlatformEvent..." },
   "ts": "2026-09-14T12:00:00.123Z",
@@ -915,10 +915,10 @@ One JSON object per `XADD` onto the `waddles:dlq:{stage}` stream, carried in a s
   "stage": "process",
   "key": "waddles:t:global:c:_tenant:src:twitch:tw-channelA:events",
   "entry_id": "1757851200000-0",
-  "group": "waddles.bot.commands.default",
+  "group": "penguintechinc.waddles.fixture-bot-commands-default",
   "tenant": "global",
   "community": null,
-  "app_id": "waddles.bot.commands.default",
+  "app_id": "penguintechinc.waddles.fixture-bot-commands-default",
   "workstream_id": "8f14e45f-ceea-467e-adde-3fb5c9752730",
   "artifact_digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
   "consumer_id": "svc-process-7d9c4f",

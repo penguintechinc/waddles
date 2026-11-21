@@ -2,7 +2,7 @@
 
 `!remember <text>` / `!memories [@user]` / `!forget <id|all>` -- per-user remembered facts.
 **Per-user, self-managed, public read, 20-item cap.** First-party (`provider: builtin`,
-`app_id: waddles.core.example.memories`), kv-only, WASI component.
+`app_id: penguintechinc.waddles.memories`), kv-only, WASI component.
 
 | | |
 |---|---|

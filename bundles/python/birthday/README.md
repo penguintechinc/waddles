@@ -1,7 +1,7 @@
 # birthday (Python)
 
 `!birthday` -- per-user birthdays, **month-day only, no year; set is self-only**. First-party
-(`provider: builtin`, `app_id: waddles.core.example.birthday`), kv-only, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.birthday`), kv-only, WASI component.
 
 | | |
 |---|---|

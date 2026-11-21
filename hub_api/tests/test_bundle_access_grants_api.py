@@ -14,14 +14,14 @@ from blueprints.v1.bundle_permissions import BLUEPRINTS
 from tests.community_ids import install_community_ids, public_id
 from tests.conftest import make_token, make_user_token, make_user_token_with_roles
 
-_APP_ID = "waddles.socials.music.default"
+_APP_ID = "penguintechinc.waddles.music"
 _VERSION = "3.0.0"
 _MANIFEST = {
     "schema_version": 2,
     "app_id": _APP_ID,
     "name": "Music Station",
     "version": _VERSION,
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",

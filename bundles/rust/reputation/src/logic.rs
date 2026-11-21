@@ -5,7 +5,7 @@
 //! host capability) and FLOOR ENFORCEMENT (soft/hard community floors and the
 //! tenant floor) -- floors are admin limits, not scoring logic. It holds NO
 //! scoring weights and no event->delta mapping: the caller (the default
-//! first-party logic bundle `waddles.core.app.reputation-accrual`, or a
+//! first-party logic bundle `penguintechinc.waddles.reputation-accrual`, or a
 //! third-party replacement) names the delta, and the host bounds it.
 //!
 //! Every tool is a pure function over three seams -- [`RepHost`] (the

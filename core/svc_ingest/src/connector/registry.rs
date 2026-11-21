@@ -185,7 +185,7 @@ mod tests {
     use super::*;
 
     fn pinned(platform: &str) -> PinnedConnector {
-        PinnedConnector::new(platform, "waddles.core.example.echo", "sha256:aa", 4096)
+        PinnedConnector::new(platform, "penguintechinc.waddles.echo", "sha256:aa", 4096)
     }
 
     #[test]

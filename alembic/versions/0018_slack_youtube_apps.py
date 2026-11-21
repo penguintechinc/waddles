@@ -10,7 +10,7 @@ subscribes either app_id's own `:action` key, mirroring the exact
 routability gap `0014_wave1a_bundle_seeds`/`0016_moderation_enforce_app`/
 `0017_loyalty_shoutout_apps` each close for their own app_ids.
 
-Both `stages` blobs mirror the live `waddles.bot.discord.default` row's
+Both `stages` blobs mirror the live `penguintechinc.waddles.discord-pipeline` row's
 own key shape (verified via `kubectl exec` psql, read-only: `ingest` uses
 `entrypoint`/`consumes`/`config`/`spec`, `action` uses `entrypoint`/
 `config`/`spec` -- discord's own row carries no `communication_model` key
@@ -53,8 +53,8 @@ down_revision = "0017_loyalty_shoutout_apps"
 branch_labels = None
 depends_on = None
 
-SLACK_APP_ID = "waddles.bot.slack.default"
-YOUTUBE_APP_ID = "waddles.bot.youtube.default"
+SLACK_APP_ID = "penguintechinc.waddles.slack-pipeline"
+YOUTUBE_APP_ID = "penguintechinc.waddles.youtube-pipeline"
 TENANT_SLUG = "global"
 
 
@@ -77,7 +77,7 @@ def upgrade() -> None:
             '{SLACK_APP_ID}',
             '1.0.0',
             'bot',
-            'waddles.bot.slack',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -117,7 +117,7 @@ def upgrade() -> None:
         """
     )
 
-    # `waddles.bot.youtube.default` -- if a catalog row already exists for
+    # `penguintechinc.waddles.youtube-pipeline` -- if a catalog row already exists for
     # this app_id (none does live, verified above), this upsert folds the
     # ingest+action entrypoints into it rather than inserting a duplicate.
     op.execute(
@@ -130,7 +130,7 @@ def upgrade() -> None:
             '{YOUTUBE_APP_ID}',
             '1.0.0',
             'bot',
-            'waddles.bot.youtube',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,

@@ -1,9 +1,8 @@
 # Compiler/SDK-facing manifest; hub-manifest.yaml is what hub-api installs. Keep both in lockstep.
 schema_version: 2
-app_id: waddles.core.example.twitch-clips
+app_id: penguintechinc.waddles.twitch-clips
 name: Twitch Clips Bundle (Rust)
-version: 1.0.3
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc
@@ -50,15 +49,15 @@ permissions:
 - id: identity.resolve
   justification: Resolve the verified chat actor to a community UUID for per-user cooldown keys; never
     a handle
-- id: tool.call:waddles.core.service.twitch:twitch.clip.create
+- id: tool.call:penguintechinc.waddles.twitch:twitch.clip.create
   justification: Create a Twitch clip of the live stream; broadcaster is pinned host-side
   params:
     write: true
-- id: tool.call:waddles.core.service.twitch:twitch.clip.get
+- id: tool.call:penguintechinc.waddles.twitch:twitch.clip.get
   justification: Poll a just-created clip until Twitch finishes processing it
   params:
     write: false
-- id: tool.call:waddles.core.service.twitch:twitch.clip.list
+- id: tool.call:penguintechinc.waddles.twitch:twitch.clip.list
   justification: List the channel's recent clips for !clips
   params:
     write: false
@@ -66,13 +65,13 @@ routes_to: []
 requested_tools:
 - tool: twitch.clip.create
   access: write
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: twitch.clip.get
   access: read
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 - tool: twitch.clip.list
   access: read
-  target_app_id: waddles.core.service.twitch
+  target_app_id: penguintechinc.waddles.twitch
 community_config_schema: &id002
   type: object
   properties:

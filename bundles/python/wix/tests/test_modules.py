@@ -28,7 +28,7 @@ from waddle_sdk.flask_core.stream_pipeline import PlatformEvent
 from app import transform as _app_transform
 
 WIX_EVENT = "bbbbbbbb-1111-2222-3333-444444444444"
-SERVICE = "waddles.core.service.discord"
+SERVICE = "penguintechinc.waddles.discord"
 
 
 class ToolError_NotGranted:  # mirrors the WIT variant class name the SDK classifies on
@@ -81,7 +81,7 @@ def _wix(
     payload = {"time_source": src, **payload}
     ev = PlatformEvent("wix", kind, actor, payload, when)  # type: ignore[arg-type]
     with bundle_context(
-        tenant="t", community="c1", app_id="waddles.core.integration.wix"
+        tenant="t", community="c1", app_id="penguintechinc.waddles.wix-event-sync"
     ):
         assert _run(_app_transform(ev)) is None
 

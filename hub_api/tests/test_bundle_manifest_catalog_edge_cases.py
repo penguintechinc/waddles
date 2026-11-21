@@ -19,10 +19,10 @@ from services.bundle_manifest_v2 import (
 
 _BASE = {
     "schema_version": 2,
-    "app_id": "waddles.socials.edge.default",
+    "app_id": "penguintechinc.waddles.edge",
     "name": "Edge",
     "version": "1.0.0",
-    "feature": "waddles.socials.edge",
+    "feature": "edge",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",

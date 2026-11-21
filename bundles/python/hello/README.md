@@ -1,4 +1,4 @@
-# hello bundle (`waddles.core.example.hello`)
+# hello bundle (`penguintechinc.waddles.hello`)
 
 `!hello` (aliases `!hi`/`!hey`) -> a friendly greeting. Python/WASM component modeled on `bundles/python/boop`.
 

@@ -1,7 +1,7 @@
 # kiss (Python)
 
 `!kiss [@user]` -- a lighthearted flavor-text reply: the caller blows a kiss to someone. First-party
-(`provider: builtin`, `app_id: waddles.core.example.kiss`), stateless relay, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.kiss`), stateless relay, WASI component.
 
 | | |
 |---|---|

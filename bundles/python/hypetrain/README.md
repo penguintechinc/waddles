@@ -3,7 +3,7 @@
 `!hypetrain` -- a shared chat hype/combo meter. Chat activity builds one combo counter for the
 whole community inside a short time window; the bundle announces milestones ("Hype x10!") and the
 meter resets after a stretch of silence. First-party (`provider: builtin`,
-`app_id: waddles.core.example.hypetrain`), **kv-only**, per community, activation-gated (no
+`app_id: penguintechinc.waddles.hypetrain`), **kv-only**, per community, activation-gated (no
 feature flag -- the installed -> enabled -> activated check is the only gate).
 
 ## Behavior

@@ -1469,7 +1469,7 @@ dependencies = [
 [[package]]
 name = "penguin-bundle-host"
 version = "0.6.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=96a5065f1d379ea0cfc7c7716c6eab628138330a#96a5065f1d379ea0cfc7c7716c6eab628138330a"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=dcfbadac813d7203e6f1764c363aee21ebd20c1c#dcfbadac813d7203e6f1764c363aee21ebd20c1c"
 dependencies = [
  "regex",
  "serde",
@@ -1959,7 +1959,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8050abb251097357e24aff63ba2c52a6309ecb7d23a5474023df960a02694d8"
 dependencies = [
  "annotate-snippets",
- "base64 0.23.1",
+ "base64 0.22.1",
  "encoding_rs_io",
  "granit-parser",
  "nohash-hasher",

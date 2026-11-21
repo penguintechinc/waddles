@@ -1,10 +1,9 @@
 schema_version: 2
-app_id: waddles.core.example.customcommand
+app_id: penguintechinc.waddles.customcommand
 name: Custom Command Bundle (Python)
 # 1.0.0: new bundle -- see src/app.py's module docstring. Activation-gated only (no feature flag).
 # 1.0.3: RESERVED_NAMES now covers every bundle command added since 1.0.0 (ban, rep, twitch, youtube, superpenguin-*, ...) so a custom command can no longer shadow one.
-version: 1.0.5
-feature: waddles.core.example
+version: 1.0.6
 module: core
 provider: builtin
 author: github:penguintechinc

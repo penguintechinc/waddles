@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.chat
+app_id: penguintechinc.waddles.chat
 name: Chat History Bundle (Python)
 # 1.0.0: initial port of core/svc_process/builtin_handlers/community_chat_process.py's two read-only
 # commands (chat-history, channels) into a WASM-component App Bundle -- feature/bundle-chat.
@@ -12,7 +12,6 @@ name: Chat History Bundle (Python)
 # https://github.com/penguintechinc/waddles/issues/678
 # 1.0.2: activation-gated only -- removed the in-bundle waddles.command-chat feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
 version: 1.0.4
-feature: waddles.core.example
 module: core
 provider: builtin
 author: github:penguintechinc

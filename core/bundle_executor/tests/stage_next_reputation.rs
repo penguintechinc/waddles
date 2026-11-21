@@ -20,7 +20,7 @@ use bundle_executor::manifest::{VerifiedManifest, WitWorld};
 use common::{run_one, test_config, StageAnswer, TARGET_USER};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/reputation_fixture.wasm");
-const APP_ID: &str = "waddles.test.reputation-fixture";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-reputation-fixture";
 
 async fn run(
     event_type: &'static str,

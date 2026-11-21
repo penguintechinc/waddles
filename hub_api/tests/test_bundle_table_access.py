@@ -33,10 +33,10 @@ _ENTRY = {
 }
 _RAW = {
     "schema_version": 2,
-    "app_id": "waddles.core.role_sync.default",
+    "app_id": "penguintechinc.waddles.role-sync",
     "name": "Role sync",
     "version": "1.0.0",
-    "feature": "waddles.core.role_sync",
+    "feature": "role_sync",
     "module": "core",
     "provider": "builtin",
     "author": "github:penguintechinc",

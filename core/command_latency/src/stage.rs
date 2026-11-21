@@ -351,7 +351,7 @@ mod tests {
             report_confirmed(
                 Kind::User,
                 Some(&ts),
-                "waddles.core.example.ping",
+                "penguintechinc.waddles.ping",
                 7,
                 9,
                 Outcome::Ok,

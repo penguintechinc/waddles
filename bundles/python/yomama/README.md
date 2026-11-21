@@ -1,7 +1,7 @@
 # yomama (Python)
 
 `!yomama [@user]` -- a classic 'yo mama' joke, from a built-in static list of original, SFW, light-hearted lines.
-First-party (`provider: builtin`, `app_id: waddles.core.example.yomama`), stateless, WASI component.
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.yomama`), stateless, WASI component.
 
 | | |
 |---|---|

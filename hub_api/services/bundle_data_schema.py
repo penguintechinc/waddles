@@ -27,12 +27,13 @@ against SQL injection by itself; :mod:`bundle_data_ddl` is what enforces
 
 from __future__ import annotations
 
-import hashlib
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
+
+from services.bundle_app_id import bundle_storage_key
 
 # ---------------------------------------------------------------------------
 # Errors
@@ -617,8 +618,6 @@ def validate_table_declaration(raw: Mapping[str, Any], *, provider: str) -> Tabl
 APP_CORE_SCHEMA = "app_core"
 APP_COMMUNITY_SCHEMA = "app_community"
 
-_SANITIZED_CHARSET_RE = re.compile(r"\A[a-z0-9_]+\Z")
-
 
 @dataclass(slots=True, frozen=True)
 class TableIdentity:
@@ -639,13 +638,14 @@ def derive_table_identity(app_id: str, *, provider: str) -> TableIdentity:
 
     Schema is chosen **server-side from `provider`**, never from anything
     the manifest itself claims (§3.4) -- `builtin` (first-party
-    `waddles.core.*`) -> `app_core`, everything else -> `app_community`.
+    `penguintechinc.waddles.*`) -> `app_core`, everything else -> `app_community`.
 
-    Table name is `app_id`, lower-cased with `.` mapped to `_`; any other
-    character outside `[a-z0-9_]` is **rejected**, not silently dropped.
-    If the result would exceed Postgres's 63-byte `NAMEDATALEN`, it is
-    truncated and given an 8-hex-char `sha256(app_id)` suffix so two
-    truncated names can never collide on their shared prefix alone.
+    Table name is `bundle_storage_key(app_id)` -- the ONE injective derivation shared with Rust
+    (`bundle_capability_gate::resource::bundle_storage_key`, golden vectors in
+    `testdata/bundle_app_id/vectors.json`): a readable sanitised prefix plus the first 16 hex
+    chars of `sha256(app_id)`, always <= 63 bytes. Because the suffix hashes the EXACT app_id,
+    `acme.bot.kv-store` and `acme.bot_kv.store` can never share a table. `app_id_owners` carries a
+    UNIQUE constraint on the stored key as the database-level backstop.
     """
     if provider not in ("builtin", "thirdparty"):
         raise TableDeclarationError(
@@ -657,32 +657,4 @@ def derive_table_identity(app_id: str, *, provider: str) -> TableIdentity:
         )
 
     schema = APP_CORE_SCHEMA if provider == "builtin" else APP_COMMUNITY_SCHEMA
-
-    sanitized = app_id.lower().replace(".", "_")
-    if not _SANITIZED_CHARSET_RE.fullmatch(sanitized):
-        raise TableDeclarationError(
-            REASON_INVALID_TABLE_IDENTITY,
-            f"app_id {app_id!r} contains characters outside [a-z0-9_.] after lower-casing",
-        )
-    if not sanitized[0].isalpha():
-        raise TableDeclarationError(
-            REASON_INVALID_TABLE_IDENTITY, f"app_id {app_id!r} must start with a letter"
-        )
-    # `__` is reserved: every db v2 physical table name contains it (see
-    # `bundle_data_v2.derive_v2_table_identity`), so a v1 name can never equal a
-    # v2 name -- one bundle can neither squat nor, via teardown, drop the other
-    # family's table.
-    if "__" in sanitized:
-        raise TableDeclarationError(
-            REASON_INVALID_TABLE_IDENTITY,
-            f"app_id {app_id!r} normalizes to a name containing '__', which is reserved",
-        )
-
-    if len(sanitized) <= POSTGRES_IDENTIFIER_MAX_LEN:
-        table = sanitized
-    else:
-        digest = hashlib.sha256(app_id.encode("utf-8")).hexdigest()[:TABLE_NAME_HASH_SUFFIX_LEN]
-        keep = POSTGRES_IDENTIFIER_MAX_LEN - TABLE_NAME_HASH_SUFFIX_LEN - 1  # 1 for the separator
-        table = f"{sanitized[:keep]}_{digest}"
-
-    return TableIdentity(schema=schema, table=table)
+    return TableIdentity(schema=schema, table=bundle_storage_key(app_id))

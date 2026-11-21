@@ -1,4 +1,4 @@
-# Kick platform service bundle (`waddles.core.service.kick`)
+# Kick platform service bundle (`penguintechinc.waddles.kick`)
 
 A `kind: service` Rust WASM component on `world connector-tools`. It holds **no secret, no raw
 target and no transport code**: the host owns the sockets, webhook signature verification, secret

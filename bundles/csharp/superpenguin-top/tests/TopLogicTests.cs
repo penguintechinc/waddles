@@ -25,7 +25,7 @@ public class TopLogicTests
         var reply = w.Say(new TopLogic(), Carol, "!top10", "m1");
 
         Assert.Equal($"Top 10 in stars: 1. {{user:{Alice}}} 12,345, 2. {{user:{Bob}}} 7", reply);
-        Assert.Equal(("waddles.core.service.economy", "points_leaders", "{\"limit\":10}", (string?)null), Assert.Single(w.Tools.Calls.Where(c => c.Tool == "points_leaders")));
+        Assert.Equal(("penguintechinc.waddles.economy", "points_leaders", "{\"limit\":10}", (string?)null), Assert.Single(w.Tools.Calls.Where(c => c.Tool == "points_leaders")));
     }
 
     [Fact]

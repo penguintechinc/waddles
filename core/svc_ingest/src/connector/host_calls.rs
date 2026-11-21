@@ -108,29 +108,29 @@ impl Connector {
 pub const CONNECTORS: &[Connector] = &[
     Connector {
         platform: "twitch",
-        app_id: "waddles.core.service.twitch",
+        app_id: "penguintechinc.waddles.twitch",
         grants: &[Grant::PiiRead, Grant::FlagsRead, Grant::PlatformLog],
     },
     Connector {
         platform: "discord",
-        app_id: "waddles.core.service.discord",
+        app_id: "penguintechinc.waddles.discord",
         grants: &[Grant::PiiRead, Grant::PlatformLog],
     },
     Connector {
         platform: "youtube",
-        app_id: "waddles.core.service.youtube",
+        app_id: "penguintechinc.waddles.youtube",
         grants: &[Grant::PiiRead],
     },
     Connector {
         platform: "wix",
-        app_id: "waddles.core.service.wix",
+        app_id: "penguintechinc.waddles.wix",
         // Events-only since #1264: the manifest declares no `connector.pii.read`, so the
         // host honors no grants (least privilege; the manifest is the source of truth).
         grants: &[],
     },
     Connector {
         platform: "spectrum",
-        app_id: "waddles.core.service.spectrum",
+        app_id: "penguintechinc.waddles.spectrum",
         grants: &[Grant::PiiRead],
     },
 ];
@@ -1213,9 +1213,9 @@ mod tests {
         }
     }
 
-    const TWITCH: &str = "waddles.core.service.twitch";
-    const DISCORD: &str = "waddles.core.service.discord";
-    const YOUTUBE: &str = "waddles.core.service.youtube";
+    const TWITCH: &str = "penguintechinc.waddles.twitch";
+    const DISCORD: &str = "penguintechinc.waddles.discord";
+    const YOUTUBE: &str = "penguintechinc.waddles.youtube";
 
     fn lookup(app: &str, conn: Option<&str>, tenant: &str, platform: &str) -> HostCallBody {
         call(
@@ -1398,7 +1398,7 @@ mod tests {
         );
         assert_eq!(
             h.handle(&lookup(
-                "waddles.core.service.rogue",
+                "penguintechinc.waddles.rogue",
                 Some("11"),
                 "9",
                 "twitch"
@@ -2442,8 +2442,8 @@ mod tests {
         );
         assert_eq!(
             h.handle_from(
-                &flag_call("waddles.core.service.nope", "enabled", "x"),
-                &build_origin("waddles.core.service.nope"),
+                &flag_call("penguintechinc.waddles.nope", "enabled", "x"),
+                &build_origin("penguintechinc.waddles.nope"),
             )
             .await
             .unwrap_err(),

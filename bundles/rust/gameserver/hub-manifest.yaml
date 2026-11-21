@@ -4,10 +4,9 @@
 # The network capability (`gameserver-net`) is NOT yet a catalog permission/WIT import -- see README "Needs from S0";
 # until it lands every network tool fails loud with target-unavailable.
 schema_version: 2
-app_id: waddles.core.service.gameserver
+app_id: penguintechinc.waddles.gameserver
 name: Game Server Service Bundle (Rust)
-version: 1.0.2
-feature: waddles.core.service
+version: 1.0.3
 module: core
 provider: builtin
 author: github:penguintechinc

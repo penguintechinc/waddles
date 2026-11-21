@@ -39,7 +39,7 @@ GUARD = StageGuard()
 
 async def _transform_in_context(event: PlatformEvent) -> PlatformEvent | None:
     """The real `transform` entry point, inside the bundle context the host binds around it."""
-    with bundle_context(tenant="t", community=COMM, app_id="waddles.core.example.jackpot"):
+    with bundle_context(tenant="t", community=COMM, app_id="penguintechinc.waddles.jackpot"):
         return await app.transform(event)
 
 
@@ -146,7 +146,7 @@ def _env(command: str, arg: str | None = None, msg_id: str | None = None) -> Sta
     return StageEnvelope(
         tenant="t",
         community=COMM,
-        app_id="waddles.core.example.jackpot",
+        app_id="penguintechinc.waddles.jackpot",
         stage="action",
         event=PlatformEvent("twitch", "chat.message", "viewer-1", payload, _now_stamp()),
         ts="2026-10-21T00:00:00Z",
@@ -449,7 +449,7 @@ def _say_as(host: _Host, actor: str | None, arg: str | None = None) -> str:
     env = StageEnvelope(
         tenant="t",
         community=COMM,
-        app_id="waddles.core.example.jackpot",
+        app_id="penguintechinc.waddles.jackpot",
         stage="action",
         event=PlatformEvent("twitch", "chat.message", actor, payload, _now_stamp()),
         ts="2026-10-21T00:00:00Z",
@@ -912,7 +912,7 @@ def _action_envelope(event: PlatformEvent) -> StageEnvelope:
     return StageEnvelope(
         tenant="t",
         community=COMM,
-        app_id="waddles.core.example.jackpot",
+        app_id="penguintechinc.waddles.jackpot",
         stage="action",
         event=event,
         ts="2026-10-21T00:00:00Z",

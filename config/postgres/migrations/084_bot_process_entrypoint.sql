@@ -1,8 +1,8 @@
 -- Migration 084: flip the process-stage entrypoint from the echo demo bundle
 -- to the real command+keyword bot for both bot apps.
 --
--- Migration 083 seeded `waddles.bot.discord.default` and
--- `waddles.bot.twitch.default` with `stages.process.entrypoint =
+-- Migration 083 seeded `penguintechinc.waddles.discord-pipeline` and
+-- `penguintechinc.waddles.twitch-pipeline` with `stages.process.entrypoint =
 -- "bundles.echo_process:transform"` (071's demo uppercase round-trip --
 -- explicitly "no connector-specific process bundle exists yet for the demo"
 -- at the time). `core/svc_process/bundles/bot_process.py` is that real
@@ -21,7 +21,7 @@
 -- this directory.
 --
 -- `bundles.echo_process:transform` itself is NOT deleted or altered by
--- this migration -- migration 071's own `waddles.core.demo.echo` app_id
+-- this migration -- migration 071's own `penguintechinc.waddles.echo-pipeline` app_id
 -- keeps referencing it unchanged, so it remains a valid, live demo/test
 -- bundle.
 --
@@ -42,5 +42,5 @@ SET stages = jsonb_set(
     '{process,entrypoint}',
     '"bundles.bot_process:transform"'::jsonb
 )
-WHERE app_id IN ('waddles.bot.discord.default', 'waddles.bot.twitch.default')
+WHERE app_id IN ('penguintechinc.waddles.discord-pipeline', 'penguintechinc.waddles.twitch-pipeline')
     AND stages -> 'process' ->> 'entrypoint' = 'bundles.echo_process:transform';

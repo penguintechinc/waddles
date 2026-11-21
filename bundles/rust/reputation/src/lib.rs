@@ -184,10 +184,10 @@ impl Platform for WasmPlatform {
         flags::enabled(key, false)
     }
 
-    /// Calls `waddles.core.service.<platform>`'s `<platform>.moderation.ban`
+    /// Calls `penguintechinc.waddles.<platform>`'s `<platform>.moderation.ban`
     /// tool; only a stable error code is returned.
     fn ban(&self, platform: &str, user: &str, reason: &str, key: &str) -> Result<(), String> {
-        let target = format!("waddles.core.service.{platform}");
+        let target = format!("penguintechinc.waddles.{platform}");
         let tool_name = format!("{platform}.moderation.ban");
         let args = serde_json::json!({ "user": user, "reason": reason }).to_string();
         tool::invoke(&target, &tool_name, args.as_bytes(), Some(key))

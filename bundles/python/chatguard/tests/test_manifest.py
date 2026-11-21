@@ -30,16 +30,16 @@ EXPECTED_PERMISSIONS = {
     *{
         f"tool.call:{app}:{name}"
         for app, name in (
-            ("waddles.core.service.twitch", "twitch.moderation.ban"),
-            ("waddles.core.service.twitch", "twitch.moderation.timeout"),
-            ("waddles.core.service.twitch", "twitch.moderation.unban"),
-            ("waddles.core.service.discord", "discord.moderation.kick"),
-            ("waddles.core.service.discord", "discord.moderation.ban"),
-            ("waddles.core.service.discord", "discord.moderation.unban"),
-            ("waddles.core.service.discord", "discord.moderation.timeout"),
-            ("waddles.core.service.discord", "discord.moderation.untimeout"),
-            ("waddles.core.service.youtube", "youtube.chat.ban"),
-            ("waddles.core.service.youtube", "youtube.chat.unban"),
+            ("penguintechinc.waddles.twitch", "twitch.moderation.ban"),
+            ("penguintechinc.waddles.twitch", "twitch.moderation.timeout"),
+            ("penguintechinc.waddles.twitch", "twitch.moderation.unban"),
+            ("penguintechinc.waddles.discord", "discord.moderation.kick"),
+            ("penguintechinc.waddles.discord", "discord.moderation.ban"),
+            ("penguintechinc.waddles.discord", "discord.moderation.unban"),
+            ("penguintechinc.waddles.discord", "discord.moderation.timeout"),
+            ("penguintechinc.waddles.discord", "discord.moderation.untimeout"),
+            ("penguintechinc.waddles.youtube", "youtube.chat.ban"),
+            ("penguintechinc.waddles.youtube", "youtube.chat.unban"),
         )
     },
 }
@@ -119,7 +119,7 @@ def test_both_manifest_files_agree_on_identity_and_version() -> None:
     a, b = (_load(m) for m in MANIFESTS)
     for field in ("app_id", "version", "name", "feature", "module", "provider"):
         assert a[field] == b[field], field
-    assert a["app_id"] == "waddles.core.example.chatguard"
+    assert a["app_id"] == "penguintechinc.waddles.chatguard"
 
 
 @pytest.mark.parametrize("manifest", MANIFESTS)

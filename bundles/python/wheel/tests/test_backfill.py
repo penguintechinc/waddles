@@ -137,7 +137,7 @@ def test_missing_badge_fields_entirely_are_denied_and_logged_at_debug(
     fake_host: Any, verb: str
 ) -> None:
     _seed_options(fake_host, "comm-1", ["tacos"])
-    with bundle_context(tenant="t", community="comm-1", app_id="waddles.core.example.wheel"):
+    with bundle_context(tenant="t", community="comm-1", app_id="penguintechinc.waddles.wheel"):
         result = _run(transform(_no_role_event(f"!wheel {verb}")))
     assert _reply_text(result) == _PERMISSION_DENIED_MSG
     assert _stored_options(fake_host, "comm-1") == ["tacos"]

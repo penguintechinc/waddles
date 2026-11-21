@@ -23,7 +23,7 @@ public class SharedSourcesTests
             ? $"{{\"text\":\"{text}\"}}"
             : $"{{\"text\":\"{text}\",\"channel_id\":\"{channelId}\"}}";
         return new StageEnvelopeInfo(
-            "tenant-1", null, "waddles.integrations.superpenguin.test", "action",
+            "tenant-1", null, "psychoboy.penguintwitchbot.test", "action",
             new PlatformEventInfo(platform, "chat.message", "user-1", replyJson, "2026-09-28T00:00:00.000Z"),
             "2026-09-28T00:00:00.000Z", null, null);
     }

@@ -45,7 +45,7 @@ pub struct HubBindingFeed<R: ConnectionResolve, P: ConnectorProfile> { /* resolv
 // connector_runtime/plan.rs
 pub trait ConnectorProfile: Send + Sync {
     fn platform(&self) -> &'static str;                 // "twitch" | "discord" | "youtube"
-    fn app_id(&self) -> &'static str;                   // waddles.core.service.<p>
+    fn app_id(&self) -> &'static str;                   // penguintechinc.waddles.<p>
     fn provider(&self) -> &'static str;                 // hub-api provider name
     fn capability(&self) -> &'static str;               // "chat_ingest"
     fn plan(&self, b: &BindingSummary, env: &RuntimeEnv) -> Result<Vec<DesiredConnection>, PlanError>;

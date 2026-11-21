@@ -1,4 +1,4 @@
-# mock bundle (`waddles.core.example.mock`)
+# mock bundle (`penguintechinc.waddles.mock`)
 
 `!mock <text>` -> mOcKs the text in aLtErNaTiNg case (letters alternate lower/UPPER, starting lower). Python/WASM component modeled on `bundles/python/echo`.
 

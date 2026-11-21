@@ -1,9 +1,8 @@
-# hub-api install manifest (bundle_manifest_v2, schema_version 2) for waddles.core.example.riddle.
+# hub-api install manifest (bundle_manifest_v2, schema_version 2) for penguintechinc.waddles.riddle.
 schema_version: 2
-app_id: waddles.core.example.riddle
+app_id: penguintechinc.waddles.riddle
 name: Riddle Bundle (Python)
-version: 1.0.3
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc

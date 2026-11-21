@@ -11,10 +11,10 @@ from flask_core.app_manifest import (
 import pytest
 
 _BASE: dict[str, object] = {
-    "app_id": "waddles.bot.discord.gateway",
+    "app_id": "penguintechinc.waddles.gateway",
     "name": "Discord Gateway Ingest",
     "version": "1.0.0",
-    "feature": "waddles.bot.discord",
+    "feature": "discord",
     "module": "bot",
     "provider": "builtin",
 }
@@ -34,22 +34,22 @@ def test_absent_kind_never_inferred_service(module: str) -> None:
     data = {
         **_BASE,
         "module": module,
-        "feature": f"waddles.{module}.x",
-        "app_id": f"waddles.{module}.x.y",
+        "feature": "x",
+        "app_id": f"penguintechinc.waddles.x-{module}",
     }
     assert parse_manifest(data).kind == "app"
 
 
 def test_core_namespace_and_integrations_module_default_app() -> None:
-    core = {**_BASE, "app_id": "waddles.core.x.y", "feature": "waddles.core.x"}
+    core = {**_BASE, "app_id": "penguintechinc.waddles.y", "feature": "x"}
     assert parse_manifest(core).kind == "app"
     assert (
         parse_manifest(
             {
                 **_BASE,
                 "module": "integrations",
-                "feature": "waddles.integrations.x",
-                "app_id": "waddles.integrations.x.y",
+                "feature": "x",
+                "app_id": "acmecorp.widgets.y",
             }
         ).kind
         == "app"
@@ -60,3 +60,28 @@ def test_invalid_kind_rejected() -> None:
     with pytest.raises(ManifestError) as exc_info:
         parse_manifest({**_BASE, "kind": "plugin"})
     assert exc_info.value.reason == REASON_INVALID_KIND
+
+
+@pytest.mark.parametrize(
+    "app_id",
+    [
+        "waddles.bot.discord.gateway",
+        "penguintechinc.waddles",
+        "penguintechinc.waddles.a.b",
+        "Penguintechinc.waddles.x",
+    ],
+)
+def test_app_id_must_be_three_lowercase_segments(app_id: str) -> None:
+    with pytest.raises(ManifestError) as exc_info:
+        parse_manifest({**_BASE, "app_id": app_id})
+    assert exc_info.value.reason == "not_namespaced"
+
+
+def test_feature_is_optional_and_unrelated_to_app_id() -> None:
+    no_feature = {k: v for k, v in _BASE.items() if k != "feature"}
+    assert parse_manifest(no_feature).feature == "penguintechinc.waddles"
+    assert parse_manifest({**_BASE, "feature": "anything.descriptive"}).feature == (
+        "anything.descriptive"
+    )
+    with pytest.raises(ManifestError):
+        parse_manifest({**_BASE, "feature": "Not Valid"})

@@ -1,7 +1,7 @@
 # counter (Python)
 
 `!counter` -- generic named counters per community (deaths, wins, fails ...). First-party
-(`provider: builtin`, `app_id: waddles.core.example.counter`), kv-only, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.counter`), kv-only, WASI component.
 Idea-inspired by the counter features of popular chat bots (concepts only, no code or branding
 shared). Distinct from `count`, whose counters are bare `!<name>` commands: this is one `!counter`
 namespace, so it never claims arbitrary `!` words and costs 0 kv ops for any other message.

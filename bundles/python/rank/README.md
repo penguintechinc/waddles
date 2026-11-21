@@ -1,7 +1,7 @@
 # rank (Python)
 
 `!rank` -- a community-scoped chat XP/level ledger. Community-scoped fun/engagement content,
-first-party (`provider: builtin`, `app_id: waddles.core.example.rank`), **inspired by**
+first-party (`provider: builtin`, `app_id: penguintechinc.waddles.rank`), **inspired by**
 superpenguintv (Psychoboy)'s [PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot)
 chat rank feature -- not a literal port. No original source code or text is reused; the command
 grammar, data model, level formula, optimistic-concurrency update loop, and leaderboard rendering
@@ -174,4 +174,4 @@ amount-parsing edges, PII-free-log regression and `_entry_wiring` checks.
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.rank`, batch 3).
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.rank`, batch 3).

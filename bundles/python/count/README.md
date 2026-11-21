@@ -2,7 +2,7 @@
 
 `!count` -- dynamic, per-community named counters. `!count add die` creates a counter; once it
 exists, `!die` is a live command (read / `add` / `sub` / `set`). First-party
-(`provider: builtin`, `app_id: waddles.core.example.count`), kv-only, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.count`), kv-only, WASI component.
 
 | | |
 |---|---|

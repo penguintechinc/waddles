@@ -515,7 +515,7 @@ mod tests {
         .expect("serializable fixture")
     }
 
-    const APP_ID: &str = "waddles.test.signing";
+    const APP_ID: &str = "penguintechinc.waddles.fixture-test-signing";
     const VERSION: &str = "1";
     const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
     const APPROVAL_ID: i64 = 42;
@@ -998,13 +998,18 @@ mod tests {
     /// self-consistency within its own language).
     #[test]
     fn signing_payload_matches_the_cross_language_golden_vector() {
-        let payload = signing_payload("waddles.core.example.ping", "1.2.3", "sha256:deadbeef", 42)
-            .expect("valid golden-vector fixture");
+        let payload = signing_payload(
+            "penguintechinc.waddles.ping",
+            "1.2.3",
+            "sha256:deadbeef",
+            42,
+        )
+        .expect("valid golden-vector fixture");
         // Computed independently in Python against the exact same field values -- see
         // hub_api/tests/test_bundle_signing_service.py's own copy of this constant.
-        let expected_hex = "776164646c65732d62756e646c652d7369672d763100000019776164646c65\
-732e636f72652e6578616d706c652e70696e6700000005312e322e330000000f7368613235363a6465616462\
-656566000000000000002a";
+        let expected_hex = "776164646c65732d62756e646c652d7369672d76310000001b70656e677569\
+6e74656368696e632e776164646c65732e70696e6700000005312e322e3300\
+00000f7368613235363a6465616462656566000000000000002a";
         let expected = hex_decode(expected_hex);
         assert_eq!(payload, expected);
     }

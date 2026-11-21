@@ -100,7 +100,7 @@ const REPUTATION_OVERRIDE_SCOPE: &str = "community:admin";
 /// The first-party reputation SERVICE bundle: when it is the origin of the
 /// call chain (chain length 1) its activity writes are core internals and are
 /// exempt from the logic-bundle exclusivity check.
-const REPUTATION_SERVICE_APP_ID: &str = "waddles.core.service.reputation";
+const REPUTATION_SERVICE_APP_ID: &str = "penguintechinc.waddles.reputation";
 /// Scope a HUMAN-originated moderation-class reputation call must hold (admins
 /// hold it too: the role mapping is cumulative).
 const REPUTATION_MODERATE_SCOPE: &str = "community:moderate";
@@ -3400,7 +3400,7 @@ impl<K: KvBackend> StageCapabilities<K> {
     /// Fail-loud order as the other reputation handlers: (1) argument parsing;
     /// (2) a real community; (3) the core-only rule for the ops whose
     /// permission is first-party-only (`history`, the tenant reads, moderation
-    /// writes): a non-`waddles.core.` app is refused `forbidden` BEFORE the
+    /// writes): a non-`penguintechinc.waddles.` app is refused `forbidden` BEFORE the
     /// gate; (4) the idempotency ordinal of a mutating op (before the gate);
     /// (5) the gate; (6) wiring/flag; (7) the store. The reason CLASS is fixed
     /// by the op (`apply` = activity under `reputation.community.write`,
@@ -3578,7 +3578,7 @@ impl<K: KvBackend> StageCapabilities<K> {
                 ..
             }
         );
-        if core_only && !self.app_id.starts_with("waddles.core.") {
+        if core_only && !self.app_id.starts_with("penguintechinc.waddles.") {
             return Err(denied(
                 "forbidden",
                 "this reputation operation is restricted to first-party core bundles",
@@ -4843,7 +4843,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 0,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: 0,
             },
             bundle_capability_gate::GrantSet {
@@ -4919,7 +4919,7 @@ mod tests {
         };
         let src = Arc::new(StaticConfigSource::new());
         src.set(
-            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
+            ConfigKey::new(10, 7, "penguintechinc.waddles.fixture-bot-commands-default"),
             3,
             r#"{"x":1}"#,
         );
@@ -4948,7 +4948,7 @@ mod tests {
         };
         let src = Arc::new(StaticConfigSource::new());
         src.set(
-            ConfigKey::new(10, 7, "waddles.bot.commands.default"),
+            ConfigKey::new(10, 7, "penguintechinc.waddles.fixture-bot-commands-default"),
             3,
             r#"{"default_duration_minutes":45}"#,
         );
@@ -5141,7 +5141,7 @@ mod tests {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -5151,7 +5151,7 @@ mod tests {
     }
 
     /// A [`StageCapabilities`] whose `egress` catalog declares exactly one
-    /// `(host, methods)` entry for `waddles.bot.commands.default`, gated by
+    /// `(host, methods)` entry for `penguintechinc.waddles.fixture-bot-commands-default`, gated by
     /// `gate`.
     fn caps_with_egress_rule_and_gate(
         host: &str,
@@ -5160,7 +5160,7 @@ mod tests {
     ) -> StageCapabilities {
         let catalog = HttpEgressCatalog::new();
         catalog.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             EgressRuleRow::from_legacy_patterns(
                 vec![(
                     host.to_string(),
@@ -5180,7 +5180,7 @@ mod tests {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -5190,7 +5190,7 @@ mod tests {
     }
 
     /// A [`StageCapabilities`] whose `egress` catalog declares exactly one
-    /// `(host, methods)` entry for `waddles.bot.commands.default`, gated by
+    /// `(host, methods)` entry for `penguintechinc.waddles.fixture-bot-commands-default`, gated by
     /// [`permissive_gate`] (same rationale as [`caps`]).
     fn caps_with_egress_rule(host: &str, methods: &[&str]) -> StageCapabilities {
         caps_with_egress_rule_and_gate(host, methods, permissive_gate())
@@ -5209,7 +5209,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 0,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: 0,
             },
             bundle_capability_gate::GrantSet {
@@ -5240,7 +5240,7 @@ mod tests {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -5253,7 +5253,7 @@ mod tests {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -5266,7 +5266,7 @@ mod tests {
         )
     }
 
-    /// Grants `storage.kv` to `"waddles.bot.commands.default"` -- the
+    /// Grants `storage.kv` to `"penguintechinc.waddles.fixture-bot-commands-default"` -- the
     /// `app_id` every `caps()`/`call()` helper in this module uses -- so
     /// every existing `kv_*` test below (testing `handle_kv`'s argument
     /// parsing/error mapping, not the gate itself) is unaffected by the
@@ -5274,7 +5274,7 @@ mod tests {
     /// `kv_call_is_denied_when_storage_kv_is_undeclared` below is the one
     /// test exercising an ungranted app.
     fn caps_with_kv() -> StageCapabilities<FakeKvBackend> {
-        caps_with_kv_and_capabilities(&["waddles.bot.commands.default"])
+        caps_with_kv_and_capabilities(&["penguintechinc.waddles.fixture-bot-commands-default"])
     }
 
     fn caps_with_kv_and_capabilities(granted_app_ids: &[&str]) -> StageCapabilities<FakeKvBackend> {
@@ -5288,7 +5288,7 @@ mod tests {
         StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -5308,7 +5308,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 7,
                 community_id: 3,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version,
             },
             bundle_capability_gate::GrantSet {
@@ -5339,13 +5339,13 @@ mod tests {
     {
         let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
         kv_capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
         );
         let caps = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             7,
             3,
             42,
@@ -5371,7 +5371,7 @@ mod tests {
         let caps = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             7,
             3,
             999,
@@ -5412,7 +5412,7 @@ mod tests {
             GrantScopeKey {
                 tenant_id: 7,
                 community_id: 3,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: grant_version,
             },
             GrantSet {
@@ -5435,7 +5435,7 @@ mod tests {
         let caps: StageCapabilities<FakeKvBackend> = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             7,
             3,
             caps_version,
@@ -5600,7 +5600,7 @@ mod tests {
 
     fn call(capability: CapabilityKind, op: &str, args: serde_json::Value) -> HostCallBody {
         HostCallBody {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             capability,
             op: op.to_string(),
             args,
@@ -5750,7 +5750,7 @@ mod tests {
     async fn db_capability_denies_no_table_when_flag_on_but_unprovisioned() {
         let capabilities = caps().with_db(mock_db_wiring(true));
         capabilities.db.as_ref().unwrap().capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             ["storage.tables".to_string()],
         );
         let err = capabilities
@@ -5793,7 +5793,7 @@ mod tests {
         // than falling through to `unknown_op`.
         let capabilities = caps().with_db(mock_db_wiring(true));
         capabilities.db.as_ref().unwrap().capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             ["storage.tables".to_string()],
         );
         let err = capabilities
@@ -5882,7 +5882,7 @@ mod tests {
         // test above, rather than `invalid_args`).
         let capabilities = caps().with_db(mock_db_wiring(true));
         capabilities.db.as_ref().unwrap().capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             ["storage.tables".to_string()],
         );
         let err = capabilities
@@ -6090,7 +6090,10 @@ mod tests {
             .expect("context succeeds");
         assert_eq!(result["tenant"], "acme");
         assert_eq!(result["community"], "main");
-        assert_eq!(result["app_id"], "waddles.bot.commands.default");
+        assert_eq!(
+            result["app_id"],
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
     }
 
     #[tokio::test]
@@ -6234,7 +6237,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let catalog = HttpEgressCatalog::new();
         catalog.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             EgressRuleRow::from_legacy_patterns(
                 vec![("93.184.216.34".to_string(), vec!["GET".to_string()])],
                 None,
@@ -6251,7 +6254,7 @@ mod tests {
         let caps: StageCapabilities = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -6315,7 +6318,7 @@ mod tests {
         let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
         let catalog = HttpEgressCatalog::new();
         catalog.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             EgressRuleRow::from_legacy_patterns(
                 vec![("93.184.216.34".to_string(), vec!["POST".to_string()])],
                 None,
@@ -6335,7 +6338,7 @@ mod tests {
         let caps: StageCapabilities = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -6470,7 +6473,8 @@ mod tests {
 
     #[tokio::test]
     async fn kv_call_succeeds_when_storage_kv_is_declared() {
-        let c = caps_with_kv_and_capabilities(&["waddles.bot.commands.default"]);
+        let c =
+            caps_with_kv_and_capabilities(&["penguintechinc.waddles.fixture-bot-commands-default"]);
         c.handle(call(
             CapabilityKind::Kv,
             "set",
@@ -6677,7 +6681,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 0,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: 0,
             },
             bundle_capability_gate::GrantSet {
@@ -6700,7 +6704,7 @@ mod tests {
         let caps = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,
@@ -6730,7 +6734,7 @@ mod tests {
         let key = bundle_capability_gate::GrantScopeKey {
             tenant_id: 0,
             community_id: 0,
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             app_version: 0,
         };
         let loader = Arc::new(bundle_capability_gate::InMemoryGrantLoader::new());
@@ -6757,13 +6761,13 @@ mod tests {
         ));
         let kv_capabilities = bundle_host_kv::CapabilitySnapshot::new();
         kv_capabilities.update(
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             [bundle_host_kv::authorize::KV_PERMISSION_ID.to_string()],
         );
         let caps = StageCapabilities::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             0,
             0,
             0,

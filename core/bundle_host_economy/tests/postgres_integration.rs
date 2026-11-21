@@ -34,7 +34,7 @@ use docker_container::{start_container, DockerContainer};
 const POSTGRES_IMAGE: &str = "postgres:17.6-bookworm";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const ECONOMY_PASSWORD: &str = "waddles_economy_runtime_test_pw";
-const APP_ID: &str = "waddles.core.test-economy";
+const APP_ID: &str = "penguintechinc.waddles.test-economy";
 const SHIPPED_DDL: &str = include_str!("../../../scripts/db/bundle_economy_store.sql");
 /// Alembic 0052's DDL, applied after the store DDL exactly as the migration
 /// chain does.
@@ -988,7 +988,11 @@ async fn the_per_scope_cap_binds_across_users_and_is_per_app_and_per_community()
     );
     // A different APP of the SAME community shares the budget (per-community
     // caps, user decision 2026-10-30: never Nx for N apps)...
-    let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other-economy-app");
+    let other_app = scope_of(
+        TENANT,
+        COMMUNITY,
+        "penguintechinc.waddles.other-economy-app",
+    );
     assert_eq!(
         f.store
             .wager(&other_app, f.alice, 20, 0, 50, MAX_SUPPLY, c, &key())
@@ -1543,7 +1547,7 @@ async fn keys_are_scoped_per_app() {
     let f = fixture().await;
     fund(&f, f.alice, 100).await;
     let k = key_of("evt-6:wager:0");
-    let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other-game");
+    let other_app = scope_of(TENANT, COMMUNITY, "penguintechinc.waddles.other-game");
     assert_eq!(
         f.store
             .wager(&scope(), f.alice, 10, 0, 50, MAX_SUPPLY, caps(), &k)
@@ -1762,7 +1766,7 @@ async fn the_per_scope_mint_cap_binds_across_users_on_the_payout() {
         .await
         .is_ok());
     // Another app in the same community shares the mint budget (per-community).
-    let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other-game");
+    let other_app = scope_of(TENANT, COMMUNITY, "penguintechinc.waddles.other-game");
     assert_eq!(
         f.store
             .wager(&other_app, f.bob, 1, 30, 50, MAX_SUPPLY, c, &key())
@@ -1955,7 +1959,7 @@ async fn credit_is_bound_by_the_durable_24h_mint_caps() {
         Err(EconomyError::ScopeQuotaExceeded { cap: 80 })
     );
     // A different app of the same community shares the window (per-community).
-    let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other");
+    let other_app = scope_of(TENANT, COMMUNITY, "penguintechinc.waddles.other");
     assert_eq!(
         f.store
             .credit(&other_app, f.alice, 1, 100, MAX_SUPPLY, c, &key())
@@ -1993,7 +1997,7 @@ async fn credit_is_bound_by_the_community_supply_cap_across_apps() {
         Ok(10)
     );
     // At the ceiling: another APP minting is refused too (supply is per community).
-    let other_app = scope_of(TENANT, COMMUNITY, "waddles.core.other");
+    let other_app = scope_of(TENANT, COMMUNITY, "penguintechinc.waddles.other");
     assert_eq!(
         f.store
             .credit(&other_app, f.bob, 1, 100, 100, caps(), &key())
@@ -2022,9 +2026,9 @@ async fn concurrent_mints_from_two_apps_never_exceed_the_supply_cap() {
         let store = Arc::clone(&store);
         let user = if i % 2 == 0 { f.alice } else { f.bob };
         let app = if i % 3 == 0 {
-            "waddles.core.a"
+            "penguintechinc.waddles.a"
         } else {
-            "waddles.core.b"
+            "penguintechinc.waddles.b"
         };
         tasks.push(tokio::spawn(async move {
             store
@@ -3016,8 +3020,8 @@ async fn credit_batch_credit_and_exchange_share_one_mint_window() {
 async fn two_apps_in_one_community_share_one_daily_cap() {
     let f = fixture().await;
     let (a, b) = (
-        scope_of(TENANT, COMMUNITY, "waddles.core.app-a"),
-        scope_of(TENANT, COMMUNITY, "waddles.core.app-b"),
+        scope_of(TENANT, COMMUNITY, "penguintechinc.waddles.app-a"),
+        scope_of(TENANT, COMMUNITY, "penguintechinc.waddles.app-b"),
     );
     // mint window (per user)
     let c = caps_of(50, 10_000);
@@ -3075,7 +3079,11 @@ async fn two_apps_in_one_community_share_one_daily_cap() {
         ),
     )
     .await;
-    let other = scope_of(OTHER_TENANT, OTHER_COMMUNITY, "waddles.core.app-a");
+    let other = scope_of(
+        OTHER_TENANT,
+        OTHER_COMMUNITY,
+        "penguintechinc.waddles.app-a",
+    );
     assert!(f
         .store
         .credit(

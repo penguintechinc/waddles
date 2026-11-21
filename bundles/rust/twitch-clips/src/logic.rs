@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use waddle_sdk::tool::ToolError;
 
 /// App id of the Twitch platform service bundle that owns the clip tools.
-pub const TWITCH_SERVICE: &str = "waddles.core.service.twitch";
+pub const TWITCH_SERVICE: &str = "penguintechinc.waddles.twitch";
 /// Tool: Helix `POST /clips` (broadcaster pinned host-side).
 pub const TOOL_CREATE: &str = "twitch.clip.create";
 /// Tool: Helix `GET /clips?id=` (empty Helix data => `ready:false`).
