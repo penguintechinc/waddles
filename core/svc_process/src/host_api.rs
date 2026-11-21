@@ -1793,7 +1793,7 @@ mod tests {
             Duration::from_millis(50),
             conn.invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app.x".to_string(),
+                    app_id: "penguintechinc.waddles.test-app-x".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::ToolCall,
                     payload: serde_json::json!({}),

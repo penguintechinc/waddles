@@ -1854,7 +1854,7 @@ async def test_core_transaction_commits_two_independent_statements_together(inst
 
 async def test_seed_data_present_via_the_pydal_fixture(bundle_install_db: Any) -> None:
     dal = bundle_install_db.dal
-    row = dal(dal.app_catalog.app_id == "waddles.socials.music.default").select().first()
+    row = dal(dal.app_catalog.app_id == "penguintechinc.waddles.socials-music").select().first()
     assert row is not None
     assert row.status == "active"
 ```
@@ -2014,7 +2014,7 @@ def test_app_versions_non_writer_roles_cannot_insert(pg_conn: object) -> None:
             with pytest.raises(psycopg2.errors.InsufficientPrivilege):
                 cur.execute(
                     "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                    "VALUES ('waddles.test.x.default', '0.0.1', 'python', 'source')"
+                    "VALUES ('penguintechinc.waddles.test-x', '0.0.1', 'python', 'source')"
                 )
             cur.execute("RESET ROLE")
             cur.execute("ROLLBACK")
@@ -2028,13 +2028,13 @@ def test_app_versions_writer_roles_can_insert_and_are_audited(pg_conn: object) -
             cur.execute(f"SET ROLE {role}")
             cur.execute(
                 "INSERT INTO app_versions (app_id, version, language, artifact_kind, artifact_digest) "
-                "VALUES ('waddles.test.x.default', %s, 'python', 'source', %s)",
+                "VALUES ('penguintechinc.waddles.test-x', %s, 'python', 'source', %s)",
                 (f"0.0.{role}", f"sha256:{'a' * 64}"),
             )
             cur.execute("RESET ROLE")
             cur.execute(
                 "SELECT db_role FROM app_versions_audit_log "
-                "WHERE app_id = 'waddles.test.x.default' AND operation = 'INSERT' "
+                "WHERE app_id = 'penguintechinc.waddles.test-x' AND operation = 'INSERT' "
                 "ORDER BY id DESC LIMIT 1"
             )
             audited_role = cur.fetchone()[0]
@@ -2286,7 +2286,7 @@ from services.bundle_manifest_v2 import ManifestV2Error, parse_bundle_manifest_v
 
 _VALID_MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.socials-music",
     "name": "Music Station Song Request",
     "version": "3.0.0",
     "feature": "waddles.socials.music",
@@ -2320,7 +2320,7 @@ def _parse(overrides: dict, **kwargs):
 
 def test_valid_manifest_parses() -> None:
     manifest = _parse({})
-    assert manifest.app_id == "waddles.socials.music.default"
+    assert manifest.app_id == "penguintechinc.waddles.socials-music"
     assert manifest.consumes[0].platform == "twitch"
 
 
@@ -2738,13 +2738,13 @@ async def test_stage_upload_writes_manifest_and_source() -> None:
     mock_client = MagicMock()
     with patch("services.bundle_storage_service._client", return_value=mock_client):
         staged = await stage_upload(
-            "waddles.socials.music.default", "3.0.0",
+            "penguintechinc.waddles.socials-music", "3.0.0",
             manifest_bytes=b"schema_version: 2\n",
             source_bytes=b"fake-tarball-bytes",
             component_bytes=None,
         )
-    assert staged.manifest_key == "staging/waddles.socials.music.default/3.0.0/manifest.yaml"
-    assert staged.source_key == "staging/waddles.socials.music.default/3.0.0/source.tar.zst"
+    assert staged.manifest_key == "staging/penguintechinc.waddles.socials-music/3.0.0/manifest.yaml"
+    assert staged.source_key == "staging/penguintechinc.waddles.socials-music/3.0.0/source.tar.zst"
     assert staged.component_key is None
     assert mock_client.put_object.call_count == 2
     for call in mock_client.put_object.call_args_list:
@@ -2755,12 +2755,12 @@ async def test_stage_upload_writes_component_for_prebuilt() -> None:
     mock_client = MagicMock()
     with patch("services.bundle_storage_service._client", return_value=mock_client):
         staged = await stage_upload(
-            "waddles.socials.music.default", "3.0.0",
+            "penguintechinc.waddles.socials-music", "3.0.0",
             manifest_bytes=b"schema_version: 2\n",
             source_bytes=None,
             component_bytes=b"fake-wasm-bytes",
         )
-    assert staged.component_key == "staging/waddles.socials.music.default/3.0.0/component.wasm"
+    assert staged.component_key == "staging/penguintechinc.waddles.socials-music/3.0.0/component.wasm"
     assert staged.source_key is None
 
 
@@ -2770,7 +2770,7 @@ async def test_fetch_object_sha256_hashes_the_downloaded_bytes() -> None:
     mock_client = MagicMock()
     mock_client.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=body))}
     with patch("services.bundle_storage_service._client", return_value=mock_client):
-        digest = await fetch_object_sha256("bundles/waddles.socials.music.default/3.0.0/deadbeef.wasm")
+        digest = await fetch_object_sha256("bundles/penguintechinc.waddles.socials-music/3.0.0/deadbeef.wasm")
     assert digest == expected
     mock_client.get_object.assert_called_once()
 
@@ -2779,7 +2779,7 @@ async def test_fetch_sidecar_json_parses_the_downloaded_object() -> None:
     from services.bundle_storage_service import fetch_sidecar_json
 
     sidecar_bytes = (
-        b'{"schema_version": 1, "app_id": "waddles.socials.music.default", '
+        b'{"schema_version": 1, "app_id": "penguintechinc.waddles.socials-music", '
         b'"version": "3.0.1", "digest": "sha256:' + b"a" * 64 + b'", "size_bytes": 2048, '
         b'"language": "python", "artifact_kind": "source", "scan_status": "scanned", '
         b'"wit_world": "waddle:bundle/stage@1.0.0", "built_at": "2026-09-14T12:00:00.000Z", '
@@ -2788,7 +2788,7 @@ async def test_fetch_sidecar_json_parses_the_downloaded_object() -> None:
     mock_client = MagicMock()
     mock_client.get_object.return_value = {"Body": MagicMock(read=MagicMock(return_value=sidecar_bytes))}
     with patch("services.bundle_storage_service._client", return_value=mock_client):
-        sidecar = await fetch_sidecar_json("bundles/waddles.socials.music.default/3.0.1/deadbeef.json")
+        sidecar = await fetch_sidecar_json("bundles/penguintechinc.waddles.socials-music/3.0.1/deadbeef.json")
     assert sidecar["built_at"] == "2026-09-14T12:00:00.000Z"
     assert sidecar["scan_status"] == "scanned"
     assert sidecar["size_bytes"] == 2048
@@ -2994,8 +2994,8 @@ from services.bundle_storage_service import StagedUpload
 from services.compiler_job_service import build_job_spec, create_compiler_job
 
 _STAGED = StagedUpload(
-    manifest_key="staging/waddles.socials.music.default/3.0.0/manifest.yaml",
-    source_key="staging/waddles.socials.music.default/3.0.0/source.tar.zst",
+    manifest_key="staging/penguintechinc.waddles.socials-music/3.0.0/manifest.yaml",
+    source_key="staging/penguintechinc.waddles.socials-music/3.0.0/source.tar.zst",
     component_key=None,
 )
 _VALIDATION_CONTEXT = {
@@ -3017,7 +3017,7 @@ def _publisher_container(spec: dict) -> dict:
 def test_build_job_spec_sets_gvisor_runtime_class(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SANDBOX_RUNTIME_CLASS_NAME", "runsc")
     spec = build_job_spec(
-        app_id="waddles.socials.music.default", version="3.0.0", artifact_kind="source",
+        app_id="penguintechinc.waddles.socials-music", version="3.0.0", artifact_kind="source",
         language="python", staged=_STAGED, validation_context=_VALIDATION_CONTEXT, callback_token="tok",
     )
     assert spec["spec"]["template"]["spec"]["runtimeClassName"] == "runsc"
@@ -3025,7 +3025,7 @@ def test_build_job_spec_sets_gvisor_runtime_class(monkeypatch: pytest.MonkeyPatc
 
 def test_build_job_spec_network_policy_relevant_fields() -> None:
     spec = build_job_spec(
-        app_id="waddles.socials.music.default", version="3.0.0", artifact_kind="source",
+        app_id="penguintechinc.waddles.socials-music", version="3.0.0", artifact_kind="source",
         language="python", staged=_STAGED, validation_context=_VALIDATION_CONTEXT, callback_token="tok",
     )
     for container in (_build_container(spec), _publisher_container(spec)):
@@ -3040,7 +3040,7 @@ def test_build_job_spec_network_policy_relevant_fields() -> None:
 def test_build_container_carries_no_credential_or_callback_secret(monkeypatch: pytest.MonkeyPatch) -> None:
     """D27: the untrusted build initContainer holds zero credentials -- the whole point of the split."""
     spec = build_job_spec(
-        app_id="waddles.socials.music.default", version="3.0.0", artifact_kind="source",
+        app_id="penguintechinc.waddles.socials-music", version="3.0.0", artifact_kind="source",
         language="python", staged=_STAGED, validation_context=_VALIDATION_CONTEXT, callback_token="tok",
     )
     build_env_names = {e["name"] for e in _build_container(spec)["env"]}
@@ -3058,7 +3058,7 @@ def test_build_container_carries_no_credential_or_callback_secret(monkeypatch: p
 
 def test_publisher_container_carries_every_credential_env_var() -> None:
     spec = build_job_spec(
-        app_id="waddles.socials.music.default", version="3.0.0", artifact_kind="source",
+        app_id="penguintechinc.waddles.socials-music", version="3.0.0", artifact_kind="source",
         language="python", staged=_STAGED, validation_context=_VALIDATION_CONTEXT, callback_token="tok",
     )
     container = _publisher_container(spec)
@@ -3076,7 +3076,7 @@ def test_publisher_container_carries_every_credential_env_var() -> None:
 
 def test_build_job_spec_names_the_job_deterministically() -> None:
     spec = build_job_spec(
-        app_id="waddles.socials.music.default", version="3.0.0", artifact_kind="source",
+        app_id="penguintechinc.waddles.socials-music", version="3.0.0", artifact_kind="source",
         language="python", staged=_STAGED, validation_context=_VALIDATION_CONTEXT, callback_token="tok",
     )
     name = spec["metadata"]["name"]
@@ -3091,7 +3091,7 @@ async def test_create_compiler_job_creates_source_secret_then_job_then_owns_it()
     )
     mock_core_api = MagicMock()
     job_name = await create_compiler_job(
-        mock_batch_api, mock_core_api, namespace="waddles", app_id="waddles.socials.music.default",
+        mock_batch_api, mock_core_api, namespace="waddles", app_id="penguintechinc.waddles.socials-music",
         version="3.0.0", artifact_kind="source", language="python", staged=_STAGED,
         manifest_bytes=b"schema_version: 2\n", source_bytes=b"fake-tarball-bytes", component_bytes=None,
         validation_context=_VALIDATION_CONTEXT, callback_token="tok",
@@ -3466,7 +3466,7 @@ from services.errors import ApiError
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.socials-music",
     "name": "Music Station Song Request",
     "version": "3.0.1",
     "feature": "waddles.socials.music",
@@ -3504,7 +3504,7 @@ async def test_create_version_happy_path(install_dal: Any) -> None:
         )
         row = await create_version(
             install_dal,
-            tenant_id=1, app_id="waddles.socials.music.default", requested_by=1,
+            tenant_id=1, app_id="penguintechinc.waddles.socials-music", requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=b"fake-tarball", component_bytes=None,
             batch_api=_mock_batch_api(), core_api=_mock_core_api(), namespace="waddles",
@@ -3518,13 +3518,13 @@ async def test_create_version_happy_path(install_dal: Any) -> None:
 async def test_create_version_rejects_duplicate(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status=STATUS_UPLOADED,
         created_at=now, updated_at=now,
     )
     with pytest.raises(ApiError) as exc:
         await create_version(
-            install_dal, tenant_id=1, app_id="waddles.socials.music.default", requested_by=1,
+            install_dal, tenant_id=1, app_id="penguintechinc.waddles.socials-music", requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=b"x", component_bytes=None,
             batch_api=_mock_batch_api(), core_api=_mock_core_api(), namespace="waddles",
@@ -3538,7 +3538,7 @@ async def test_create_version_rejects_bad_manifest(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await create_version(
             install_dal, tenant_id=1,
-            app_id="waddles.socials.music.default", requested_by=1,
+            app_id="penguintechinc.waddles.socials-music", requested_by=1,
             manifest_bytes=yaml.safe_dump(bad_manifest).encode(),
             source_bytes=b"x", component_bytes=None,
             batch_api=_mock_batch_api(), core_api=_mock_core_api(), namespace="waddles",
@@ -3552,7 +3552,7 @@ async def test_create_version_rejects_oversize_source(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await create_version(
             install_dal, tenant_id=1,
-            app_id="waddles.socials.music.default", requested_by=1,
+            app_id="penguintechinc.waddles.socials-music", requested_by=1,
             manifest_bytes=yaml.safe_dump(_MANIFEST).encode(),
             source_bytes=b"x" * (16_777_216 + 1), component_bytes=None,
             batch_api=_mock_batch_api(), core_api=_mock_core_api(), namespace="waddles",
@@ -3567,7 +3567,7 @@ async def test_create_version_rejects_prebuilt_when_disallowed(install_dal: Any)
     with pytest.raises(ApiError) as exc:
         await create_version(
             install_dal, tenant_id=1,
-            app_id="waddles.socials.music.default", requested_by=1,
+            app_id="penguintechinc.waddles.socials-music", requested_by=1,
             manifest_bytes=yaml.safe_dump(prebuilt_manifest).encode(),
             source_bytes=None, component_bytes=b"x",
             batch_api=_mock_batch_api(), core_api=_mock_core_api(), namespace="waddles",
@@ -3579,23 +3579,23 @@ async def test_create_version_rejects_prebuilt_when_disallowed(install_dal: Any)
 
 async def test_get_version_not_found_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
-        await get_version(install_dal, app_id="waddles.x.y.default", version="1.0.0")
+        await get_version(install_dal, app_id="penguintechinc.waddles.x-y", version="1.0.0")
     assert exc.value.status_code == 404
 
 
 async def test_list_versions_returns_all_versions_for_app_id(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="1.0.0", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="1.0.0", tenant_id=1,
         artifact_kind="source", language="python", status=STATUS_UPLOADED,
         created_at=now, updated_at=now,
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="2.0.0", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="2.0.0", tenant_id=1,
         artifact_kind="source", language="python", status=STATUS_UPLOADED,
         created_at=now, updated_at=now,
     )
-    rows = await list_versions(install_dal, app_id="waddles.socials.music.default")
+    rows = await list_versions(install_dal, app_id="penguintechinc.waddles.socials-music")
     assert {r.version for r in rows} == {"1.0.0", "2.0.0"}
 ```
 
@@ -3823,7 +3823,7 @@ from tests.conftest import make_token
 
 _MANIFEST_YAML = b"""
 schema_version: 2
-app_id: waddles.socials.music.default
+app_id: penguintechinc.waddles.socials-music
 name: Music Station Song Request
 version: 3.0.1
 feature: waddles.socials.music
@@ -3855,7 +3855,7 @@ async def test_post_version_requires_platform_admin_scope(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions",
         headers={"Authorization": f"Bearer {token}"},
         files={"manifest": (_MANIFEST_YAML, "bundle.yaml")},
         form={},
@@ -3876,7 +3876,7 @@ async def test_post_version_happy_path(app: Quart) -> None:
     ):
         client = app.test_client()
         response = await client.post(
-            "/api/v1/apps/waddles.socials.music.default/versions",
+            "/api/v1/apps/penguintechinc.waddles.socials-music/versions",
             headers={"Authorization": f"Bearer {token}"},
             files={"manifest": (_MANIFEST_YAML, "bundle.yaml"), "source": (b"fake-tarball", "source.tar.zst")},
         )
@@ -3890,7 +3890,7 @@ async def test_get_version_returns_404_for_unknown_version(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/9.9.9",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/9.9.9",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 404
@@ -4311,14 +4311,14 @@ _WRONG_DIGEST = "sha256:" + "b" * 64
 async def _seed_upload(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="COMPILING",
         created_at=now, updated_at=now,
     )
 
 
 _SIDECAR = {
-    "schema_version": 1, "app_id": "waddles.socials.music.default", "version": "3.0.1",
+    "schema_version": 1, "app_id": "penguintechinc.waddles.socials-music", "version": "3.0.1",
     "digest": _DIGEST, "size_bytes": 2048, "language": "python", "artifact_kind": "source",
     "scan_status": "scanned", "wit_world": "waddle:bundle/stage@1.0.0",
     "built_at": "2026-09-14T12:00:00.000Z", "builder": "bundle-compiler@1.0.0", "signature": "ZmFrZQ==",
@@ -4330,14 +4330,14 @@ async def test_matching_digest_is_accepted_when_publisher_already_wrote_the_row(
 ) -> None:
     await _seed_upload(install_dal)
     await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1",
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1",
         artifact_digest=_DIGEST, language="python", artifact_kind="source",
         scan_status="scanned",
     )
 
     with patch("services.bundle_artifact_service.fetch_object_sha256", return_value=_DIGEST):
         result = await record_artifact_notification(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
             claimed_digest=_DIGEST, component_key="bundles/x/3.0.1/aaa.wasm",
             sidecar_key="bundles/x/3.0.1/aaa.json",
             cwasm_digest=None, wasmtime_abi=None, collector=None,
@@ -4346,7 +4346,7 @@ async def test_matching_digest_is_accepted_when_publisher_already_wrote_the_row(
     assert result.artifact_digest == _DIGEST
 
     upload = (
-        await install_dal(install_dal.app_version_uploads.app_id == "waddles.socials.music.default").select()
+        await install_dal(install_dal.app_version_uploads.app_id == "penguintechinc.waddles.socials-music").select()
     ).first()
     assert upload.status == "PUBLISHED"
     assert upload.app_version_id == result.id
@@ -4360,7 +4360,7 @@ async def test_missing_row_is_inserted_as_a_fallback_after_verification(install_
         patch("services.bundle_artifact_service.fetch_sidecar_json", return_value=_SIDECAR),
     ):
         result = await record_artifact_notification(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
             claimed_digest=_DIGEST, component_key="bundles/x/3.0.1/aaa.wasm",
             sidecar_key="bundles/x/3.0.1/aaa.json",
             cwasm_digest="sha256:" + "c" * 64, wasmtime_abi="wasmtime-30", collector="drc",
@@ -4383,7 +4383,7 @@ async def test_digest_mismatch_is_refused_and_audited(install_dal: Any) -> None:
     with patch("services.bundle_artifact_service.fetch_object_sha256", return_value=_WRONG_DIGEST):
         with pytest.raises(ApiError) as exc:
             await record_artifact_notification(
-                install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+                install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
                 claimed_digest=_DIGEST, component_key="bundles/x/3.0.1/aaa.wasm",
                 sidecar_key="bundles/x/3.0.1/aaa.json",
                 cwasm_digest=None, wasmtime_abi=None, collector=None,
@@ -4393,7 +4393,7 @@ async def test_digest_mismatch_is_refused_and_audited(install_dal: Any) -> None:
     assert exc.value.code == "digest_mismatch"
     count_rows = await raw_sql_rows(
         install_dal, "SELECT COUNT(*) AS n FROM app_versions WHERE app_id = :a",
-        {"a": "waddles.socials.music.default"},
+        {"a": "penguintechinc.waddles.socials-music"},
     )
     assert count_rows.first()["n"] == 0
 
@@ -4416,7 +4416,7 @@ async def test_unknown_version_upload_raises_404(install_dal: Any) -> None:
     with patch("services.bundle_artifact_service.fetch_object_sha256", return_value=_DIGEST):
         with pytest.raises(ApiError) as exc:
             await record_artifact_notification(
-                install_dal, app_id="waddles.unknown.x.default", version="1.0.0",
+                install_dal, app_id="penguintechinc.waddles.unknown-x", version="1.0.0",
                 claimed_digest=_DIGEST, component_key="bundles/x/1.0.0/aaa.wasm",
                 sidecar_key="bundles/x/1.0.0/aaa.json",
                 cwasm_digest=None, wasmtime_abi=None, collector=None,
@@ -4613,12 +4613,12 @@ async def test_record_rejection_sets_status_and_reason(install_dal: Any) -> None
     await _seed_upload(install_dal)
 
     await record_rejection(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
         reason="scan_failed",
     )
 
     row = (
-        await install_dal(install_dal.app_version_uploads.app_id == "waddles.socials.music.default").select()
+        await install_dal(install_dal.app_version_uploads.app_id == "penguintechinc.waddles.socials-music").select()
     ).first()
     assert row.status == "REJECTED"
     assert row.reject_reason == "scan_failed"
@@ -4627,7 +4627,7 @@ async def test_record_rejection_sets_status_and_reason(install_dal: Any) -> None
 async def test_record_rejection_unknown_version_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await record_rejection(
-            install_dal, app_id="waddles.unknown.x.default", version="1.0.0", reason="scan_failed"
+            install_dal, app_id="penguintechinc.waddles.unknown-x", version="1.0.0", reason="scan_failed"
         )
     assert exc.value.status_code == 404
 ```
@@ -4718,7 +4718,7 @@ _DIGEST = "sha256:" + "a" * 64
 async def app(install_dal: Any) -> Quart:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="COMPILING",
         created_at=now, updated_at=now,
     )
@@ -4733,7 +4733,7 @@ async def test_artifact_callback_requires_bundles_artifact_scope(app: Quart) -> 
     token = make_token(scope="")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/bundles/waddles.socials.music.default/versions/3.0.1/artifact",
+        "/api/v1/bundles/penguintechinc.waddles.socials-music/versions/3.0.1/artifact",
         headers={"Authorization": f"Bearer {token}"},
         json={
             "artifact_digest": _DIGEST, "component_key": "bundles/x/3.0.1/aaa.wasm",
@@ -4748,7 +4748,7 @@ async def test_artifact_callback_requires_bundles_artifact_scope(app: Quart) -> 
 async def test_artifact_callback_happy_path(app: Quart) -> None:
     token = make_token(scope="bundles:artifact")
     sidecar = {
-        "schema_version": 1, "app_id": "waddles.socials.music.default", "version": "3.0.1",
+        "schema_version": 1, "app_id": "penguintechinc.waddles.socials-music", "version": "3.0.1",
         "digest": _DIGEST, "size_bytes": 1, "language": "python", "artifact_kind": "source",
         "scan_status": "scanned", "wit_world": "waddle:bundle/stage@1.0.0",
         "built_at": "2026-09-14T12:00:00.000Z", "builder": "bundle-compiler@1.0.0", "signature": "ZmFrZQ==",
@@ -4759,7 +4759,7 @@ async def test_artifact_callback_happy_path(app: Quart) -> None:
     ):
         client = app.test_client()
         response = await client.post(
-            "/api/v1/bundles/waddles.socials.music.default/versions/3.0.1/artifact",
+            "/api/v1/bundles/penguintechinc.waddles.socials-music/versions/3.0.1/artifact",
             headers={"Authorization": f"Bearer {token}"},
             json={
                 "artifact_digest": _DIGEST, "component_key": "bundles/x/3.0.1/aaa.wasm",
@@ -4777,7 +4777,7 @@ async def test_rejected_callback_happy_path(app: Quart) -> None:
     token = make_token(scope="bundles:artifact")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/bundles/waddles.socials.music.default/versions/3.0.1/rejected",
+        "/api/v1/bundles/penguintechinc.waddles.socials-music/versions/3.0.1/rejected",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "scan_failed"},
     )
@@ -4985,7 +4985,7 @@ _DIGEST_V2 = "sha256:" + "2" * 64
 
 async def _insert_version(install_dal: Any, version: str, digest: str | None) -> int:
     return await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version=version, artifact_digest=digest,
+        app_id="penguintechinc.waddles.socials-music", version=version, artifact_digest=digest,
         language="python", artifact_kind="source", scan_status="scanned",
     )
 
@@ -4995,7 +4995,7 @@ async def test_activate_version_refuses_an_unverified_digest(install_dal: Any) -
     with pytest.raises(ApiError) as exc:
         await activate_version(
             install_dal, tenant_id=1, community_id=None,
-            app_id="waddles.socials.music.default", version="9.9.9", activated_by=1,
+            app_id="penguintechinc.waddles.socials-music", version="9.9.9", activated_by=1,
         )
     assert exc.value.status_code == 409
     assert exc.value.code == "digest_not_verified"
@@ -5004,13 +5004,13 @@ async def test_activate_version_refuses_an_unverified_digest(install_dal: Any) -
 async def test_activate_version_with_null_digest_row_is_also_refused(install_dal: Any) -> None:
     """A row exists but its digest is still NULL (upload accepted, never published) -- also refused."""
     await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="0.0.1", artifact_digest=None,
+        app_id="penguintechinc.waddles.socials-music", version="0.0.1", artifact_digest=None,
         language="python", artifact_kind="source", scan_status="not_scanned",
     )
     with pytest.raises(ApiError) as exc:
         await activate_version(
             install_dal, tenant_id=1, community_id=None,
-            app_id="waddles.socials.music.default", version="0.0.1", activated_by=1,
+            app_id="penguintechinc.waddles.socials-music", version="0.0.1", activated_by=1,
         )
     assert exc.value.code == "digest_not_verified"
 
@@ -5020,18 +5020,18 @@ async def test_activate_version_tenant_wide_succeeds_and_is_readable(install_dal
 
     await activate_version(
         install_dal, tenant_id=1, community_id=None,
-        app_id="waddles.socials.music.default", version="1.0.0", activated_by=1,
+        app_id="penguintechinc.waddles.socials-music", version="1.0.0", activated_by=1,
     )
 
     active = await get_active_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default"
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music"
     )
     assert active is not None
     assert active.artifact_digest == _DIGEST_V1
 
     row = (
         await install_dal(
-            (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+            (install_dal.app_active_versions.app_id == "penguintechinc.waddles.socials-music")
             & (install_dal.app_active_versions.tenant_id == 1)
             & (install_dal.app_active_versions.community_id == TENANT_WIDE_COMMUNITY_ID)
         ).select()
@@ -5046,20 +5046,20 @@ async def test_rollback_is_activate_version_pointed_at_an_older_version(install_
 
     await activate_version(
         install_dal, tenant_id=1, community_id=None,
-        app_id="waddles.socials.music.default", version="2.0.0", activated_by=1,
+        app_id="penguintechinc.waddles.socials-music", version="2.0.0", activated_by=1,
     )
     await activate_version(
         install_dal, tenant_id=1, community_id=None,
-        app_id="waddles.socials.music.default", version="1.0.0", activated_by=1,
+        app_id="penguintechinc.waddles.socials-music", version="1.0.0", activated_by=1,
     )
 
     active = await get_active_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default"
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music"
     )
     assert active.artifact_digest == _DIGEST_V1
 
     count = await install_dal(
-        (install_dal.app_active_versions.app_id == "waddles.socials.music.default")
+        (install_dal.app_active_versions.app_id == "penguintechinc.waddles.socials-music")
         & (install_dal.app_active_versions.tenant_id == 1)
     ).count()
     assert count == 1  # upsert, not a second row
@@ -5067,7 +5067,7 @@ async def test_rollback_is_activate_version_pointed_at_an_older_version(install_
 
 async def test_get_active_version_returns_none_when_nothing_activated(install_dal: Any) -> None:
     active = await get_active_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default"
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music"
     )
     assert active is None
 
@@ -5078,18 +5078,18 @@ async def test_community_scoped_and_tenant_wide_are_independent(install_dal: Any
 
     await activate_version(
         install_dal, tenant_id=1, community_id=None,
-        app_id="waddles.socials.music.default", version="1.0.0", activated_by=1,
+        app_id="penguintechinc.waddles.socials-music", version="1.0.0", activated_by=1,
     )
     await activate_version(
         install_dal, tenant_id=1, community_id=1,
-        app_id="waddles.socials.music.default", version="2.0.0", activated_by=1,
+        app_id="penguintechinc.waddles.socials-music", version="2.0.0", activated_by=1,
     )
 
     tenant_wide = await get_active_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default"
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music"
     )
     community_scoped = await get_active_version(
-        install_dal, tenant_id=1, community_id=1, app_id="waddles.socials.music.default"
+        install_dal, tenant_id=1, community_id=1, app_id="penguintechinc.waddles.socials-music"
     )
     assert tenant_wide.artifact_digest == _DIGEST_V1
     assert community_scoped.artifact_digest == _DIGEST_V2
@@ -5241,7 +5241,7 @@ async def test_activate_refuses_unverified_digest(app: Quart) -> None:
     token = make_token(scope="platform:admin", tenant="acme-corp")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/9.9.9/activate",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/9.9.9/activate",
         headers={"Authorization": f"Bearer {token}"},
         json={"communityId": None},
     )
@@ -5253,14 +5253,14 @@ async def test_activate_refuses_unverified_digest(app: Quart) -> None:
 async def test_activate_happy_path(app: Quart) -> None:
     install_dal = app.config["install_dal"]
     await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1",
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1",
         artifact_digest="sha256:" + "a" * 64, language="python", artifact_kind="source",
         scan_status="scanned",
     )
     token = make_token(scope="platform:admin", tenant="acme-corp")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/activate",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/activate",
         headers={"Authorization": f"Bearer {token}"},
         json={"communityId": None},
     )
@@ -5375,7 +5375,7 @@ from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, EgressRul
 from services.permission_summary_service import build_permission_summary, canonical_json, permission_hash
 
 _MANIFEST = BundleManifestV2(
-    schema_version=2, app_id="waddles.socials.music.default", name="Music Station",
+    schema_version=2, app_id="penguintechinc.waddles.socials-music", name="Music Station",
     version="3.0.0", feature="waddles.socials.music", module="socials", provider="builtin",
     language="python", artifact="source", execution_model="native", is_default=True,
     stages={"process": {}}, egress=(EgressRule(host="api.spotify.com", methods=("GET", "POST")),),
@@ -5578,7 +5578,7 @@ from services.bundle_approval_service import (
 from services.errors import ApiError
 
 _MANIFEST = {
-    "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+    "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
     "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
     "provider": "builtin", "language": "python", "artifact": "source",
     "stages": {
@@ -5606,10 +5606,10 @@ async def _seed_published(install_dal: Any, *, manifest: dict = _MANIFEST) -> No
 async def test_get_permission_summary_is_deterministic(install_dal: Any) -> None:
     await _seed_published(install_dal)
     summary1, hash1 = await get_permission_summary(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1"
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1"
     )
     summary2, hash2 = await get_permission_summary(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1"
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1"
     )
     assert summary1 == summary2
     assert hash1 == hash2
@@ -5617,14 +5617,14 @@ async def test_get_permission_summary_is_deterministic(install_dal: Any) -> None
 
 async def test_get_permission_summary_unknown_version_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
-        await get_permission_summary(install_dal, app_id="waddles.x.y.default", version="1.0.0")
+        await get_permission_summary(install_dal, app_id="penguintechinc.waddles.x-y", version="1.0.0")
     assert exc.value.status_code == 404
 
 
 async def test_approve_version_records_a_row(install_dal: Any) -> None:
     await _seed_published(install_dal)
     row = await approve_version(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
         tenant_id=1, community_id=None, approved_by=1,
     )
     assert row.approved_by == 1
@@ -5634,13 +5634,13 @@ async def test_approve_version_records_a_row(install_dal: Any) -> None:
 async def test_approve_version_not_published_is_refused(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="0.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="0.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="COMPILING",
         manifest_json=_MANIFEST, created_at=now, updated_at=now,
     )
     with pytest.raises(ApiError) as exc:
         await approve_version(
-            install_dal, app_id="waddles.socials.music.default", version="0.0.1",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="0.0.1",
             tenant_id=1, community_id=None, approved_by=1,
         )
     assert exc.value.code == "version_not_published"
@@ -5650,7 +5650,7 @@ async def test_approve_version_headless_hash_mismatch_fails_closed(install_dal: 
     await _seed_published(install_dal)
     with pytest.raises(ApiError) as exc:
         await approve_version(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
             tenant_id=1, community_id=None, approved_by=1,
             expected_permission_hash="sha256:" + "0" * 64,
         )
@@ -5661,13 +5661,13 @@ async def test_approve_version_headless_hash_mismatch_fails_closed(install_dal: 
 async def test_approve_version_supersedes_the_previous_current_approval(install_dal: Any) -> None:
     await _seed_published(install_dal)
     first = await approve_version(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
         tenant_id=1, community_id=None, approved_by=1,
     )
     newer_manifest = {**_MANIFEST, "version": "3.0.2"}
     await _seed_published(install_dal, manifest=newer_manifest)
     second = await approve_version(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.2",
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.2",
         tenant_id=1, community_id=None, approved_by=1,
     )
     refreshed_first = (
@@ -5701,7 +5701,7 @@ def test_classify_diff_initial_with_no_previous() -> None:
 async def test_deny_version_sets_rejected(install_dal: Any) -> None:
     await _seed_published(install_dal)
     await deny_version(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
         reason="egress host not acceptable",
     )
     row = (
@@ -5950,7 +5950,7 @@ from services.bundle_db_role_service import bundle_role_name, create_bundle_role
 
 
 def test_bundle_role_name_replaces_dots_and_dashes() -> None:
-    assert bundle_role_name("waddles.socials.music-station.default") == "bundle_waddles_socials_music_station_default"
+    assert bundle_role_name("penguintechinc.waddles.socials-music-station") == "bundle_waddles_socials_music_station_default"
 
 
 async def test_create_bundle_role_issues_idempotent_create_and_grants() -> None:
@@ -5959,7 +5959,7 @@ async def test_create_bundle_role_issues_idempotent_create_and_grants() -> None:
     mock_engine.begin.return_value.__enter__.return_value = mock_conn
 
     role_name = await create_bundle_role(
-        mock_engine, app_id="waddles.socials.music.default", tables=["music_queue", "music_history"]
+        mock_engine, app_id="penguintechinc.waddles.socials-music", tables=["music_queue", "music_history"]
     )
     assert role_name == "bundle_waddles_socials_music_default"
 
@@ -5975,7 +5975,7 @@ async def test_create_bundle_role_issues_idempotent_create_and_grants() -> None:
 async def test_create_bundle_role_rejects_a_reserved_table_name() -> None:
     mock_engine = MagicMock()
     with pytest.raises(ValueError, match="reserved"):
-        await create_bundle_role(mock_engine, app_id="waddles.socials.music.default", tables=["users"])
+        await create_bundle_role(mock_engine, app_id="penguintechinc.waddles.socials-music", tables=["users"])
 
 
 async def test_drop_bundle_role_revokes_then_drops() -> None:
@@ -5983,7 +5983,7 @@ async def test_drop_bundle_role_revokes_then_drops() -> None:
     mock_engine = MagicMock()
     mock_engine.begin.return_value.__enter__.return_value = mock_conn
 
-    await drop_bundle_role(mock_engine, app_id="waddles.socials.music.default")
+    await drop_bundle_role(mock_engine, app_id="penguintechinc.waddles.socials-music")
 
     executed_sql = " ".join(str(call.args[0]) for call in mock_conn.execute.call_args_list)
     assert "REVOKE ALL" in executed_sql
@@ -6132,17 +6132,17 @@ async def test_approve_version_creates_the_bundle_role_when_engine_given(install
     with patch("services.bundle_approval_service.create_bundle_role", new_callable=AsyncMock) as mock_create:
         mock_create.return_value = "bundle_waddles_socials_music_default"
         await approve_version(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
             tenant_id=1, community_id=None, approved_by=1, db_engine=mock_engine,
         )
-    mock_create.assert_called_once_with(mock_engine, app_id="waddles.socials.music.default", tables=["music_queue"])
+    mock_create.assert_called_once_with(mock_engine, app_id="penguintechinc.waddles.socials-music", tables=["music_queue"])
 
 
 async def test_approve_version_skips_role_creation_without_an_engine(install_dal: Any) -> None:
     await _seed_published(install_dal)
     with patch("services.bundle_approval_service.create_bundle_role", new_callable=AsyncMock) as mock_create:
         await approve_version(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
             tenant_id=1, community_id=None, approved_by=1,
         )
     mock_create.assert_not_called()
@@ -6277,7 +6277,7 @@ from blueprints.v1.bundle_approvals import BLUEPRINTS
 from tests.conftest import make_token
 
 _MANIFEST = {
-    "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+    "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
     "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
     "provider": "builtin", "language": "python", "artifact": "source",
     "stages": {"process": {"entry": "x:y", "consumes": [{"platform": "twitch", "event_types": ["chat.message"]}]}},
@@ -6288,11 +6288,11 @@ _MANIFEST = {
 async def app(install_dal: Any) -> Quart:
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
         language="python", artifact_kind="source", scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json=_MANIFEST, app_version_id=version_id,
         created_at=now, updated_at=now,
@@ -6308,7 +6308,7 @@ async def test_get_permissions_requires_platform_admin(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -6318,7 +6318,7 @@ async def test_get_permissions_happy_path(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
@@ -6330,7 +6330,7 @@ async def test_approve_mismatched_hash_fails_closed(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"communityId": None, "permissionHash": "sha256:" + "0" * 64},
     )
@@ -6343,7 +6343,7 @@ async def test_approve_without_a_hash_succeeds_interactively(app: Quart) -> None
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/approve",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/approve",
         headers={"Authorization": f"Bearer {token}"},
         json={"communityId": None, "permissionHash": None},
     )
@@ -6354,7 +6354,7 @@ async def test_deny_happy_path(app: Quart) -> None:
     token = make_token(scope="platform:admin")
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/deny",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/deny",
         headers={"Authorization": f"Bearer {token}"},
         json={"reason": "egress host not acceptable"},
     )
@@ -8153,7 +8153,7 @@ async def test_resolve_exact_source_id_rule(install_dal: Any) -> None:
 
     grants = await resolve_grants_for_scope(
         install_dal, mock_valkey, tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         consumes=(ConsumeRule(platform="twitch", source_id="tw-channelA", event_types=("chat.message",), filters={}),),
         granted_by=1,
     )
@@ -8170,7 +8170,7 @@ async def test_resolve_platform_wide_rule_grants_every_matching_source(install_d
 
     grants = await resolve_grants_for_scope(
         install_dal, mock_valkey, tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         consumes=(ConsumeRule(platform="twitch", source_id=None, event_types=("chat.message",), filters={}),),
         granted_by=1,
     )
@@ -8184,11 +8184,11 @@ async def test_resolution_is_idempotent(install_dal: Any) -> None:
 
     await resolve_grants_for_scope(
         install_dal, mock_valkey, tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default", consumes=consumes, granted_by=1,
+        app_id="penguintechinc.waddles.socials-music", consumes=consumes, granted_by=1,
     )
     grants = await resolve_grants_for_scope(
         install_dal, mock_valkey, tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default", consumes=consumes, granted_by=1,
+        app_id="penguintechinc.waddles.socials-music", consumes=consumes, granted_by=1,
     )
     assert len(grants) == 1  # not duplicated on a second call
 
@@ -8198,14 +8198,14 @@ async def test_revoke_grant_destroys_group_and_audits(install_dal: Any) -> None:
     mock_valkey = AsyncMock()
     grants = await resolve_grants_for_scope(
         install_dal, mock_valkey, tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         consumes=(ConsumeRule(platform="twitch", source_id="tw-channelA", event_types=("chat.message",), filters={}),),
         granted_by=1,
     )
-    await revoke_grant(install_dal, mock_valkey, app_id="waddles.socials.music.default", grant_id=grants[0].id, actor_id=1)
+    await revoke_grant(install_dal, mock_valkey, app_id="penguintechinc.waddles.socials-music", grant_id=grants[0].id, actor_id=1)
 
     mock_valkey.xgroup_destroy.assert_called_once()
-    remaining = await list_grants(install_dal, app_id="waddles.socials.music.default", tenant_id=1, community_id=None)
+    remaining = await list_grants(install_dal, app_id="penguintechinc.waddles.socials-music", tenant_id=1, community_id=None)
     assert remaining == []
     audit_rows = await raw_sql_rows(
         install_dal, "SELECT id FROM audit_log WHERE action = :a", {"a": "app_stream_grant_revoked"}
@@ -8218,13 +8218,13 @@ async def test_revoke_already_revoked_grant_raises_404(install_dal: Any) -> None
     mock_valkey = AsyncMock()
     grants = await resolve_grants_for_scope(
         install_dal, mock_valkey, tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         consumes=(ConsumeRule(platform="twitch", source_id="tw-channelA", event_types=("chat.message",), filters={}),),
         granted_by=1,
     )
-    await revoke_grant(install_dal, mock_valkey, app_id="waddles.socials.music.default", grant_id=grants[0].id, actor_id=1)
+    await revoke_grant(install_dal, mock_valkey, app_id="penguintechinc.waddles.socials-music", grant_id=grants[0].id, actor_id=1)
     with pytest.raises(ApiError) as exc:
-        await revoke_grant(install_dal, mock_valkey, app_id="waddles.socials.music.default", grant_id=grants[0].id, actor_id=1)
+        await revoke_grant(install_dal, mock_valkey, app_id="penguintechinc.waddles.socials-music", grant_id=grants[0].id, actor_id=1)
     assert exc.value.status_code == 404
 
 
@@ -8234,7 +8234,7 @@ async def test_revoke_all_grants_for_scope_tears_down_everything(install_dal: An
     mock_valkey = AsyncMock()
     await resolve_grants_for_scope(
         install_dal, mock_valkey, tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         consumes=(
             ConsumeRule(platform="twitch", source_id=None, event_types=("chat.message",), filters={}),
             ConsumeRule(platform="discord", source_id=None, event_types=("chat.message",), filters={}),
@@ -8242,9 +8242,9 @@ async def test_revoke_all_grants_for_scope_tears_down_everything(install_dal: An
         granted_by=1,
     )
     await revoke_all_grants_for_scope(
-        install_dal, mock_valkey, app_id="waddles.socials.music.default", tenant_id=1, community_id=None
+        install_dal, mock_valkey, app_id="penguintechinc.waddles.socials-music", tenant_id=1, community_id=None
     )
-    remaining = await list_grants(install_dal, app_id="waddles.socials.music.default", tenant_id=1, community_id=None)
+    remaining = await list_grants(install_dal, app_id="penguintechinc.waddles.socials-music", tenant_id=1, community_id=None)
     assert remaining == []
     assert mock_valkey.xgroup_destroy.call_count == 2
 ```
@@ -8451,7 +8451,7 @@ from services.errors import ApiError
 from services.marketplace_lifecycle_service import activate_bundle, deactivate_bundle
 
 _MANIFEST = {
-    "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+    "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
     "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
     "provider": "builtin", "language": "python", "artifact": "source",
     "stages": {"process": {"entry": "x:y", "consumes": [{"platform": "twitch", "event_types": ["chat.message"]}]}},
@@ -8461,20 +8461,20 @@ _MANIFEST = {
 async def _seed_approved_version(install_dal: Any) -> None:
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
         language="python", artifact_kind="source", scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json=_MANIFEST, app_version_id=version_id, created_at=now, updated_at=now,
     )
     await activate_version(
-        install_dal, tenant_id=1, community_id=1, app_id="waddles.socials.music.default",
+        install_dal, tenant_id=1, community_id=1, app_id="penguintechinc.waddles.socials-music",
         version="3.0.1", activated_by=1,
     )
     await approve_version(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1",
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.1",
         tenant_id=1, community_id=1, approved_by=1,
     )
 
@@ -8484,7 +8484,7 @@ async def test_activate_bundle_without_valkey_client_behaves_exactly_as_before(b
     async_dal = bundle_install_db
     dal = async_dal.dal
     row = await activate_bundle(
-        async_dal, dal, community_id=1, tenant_id=1, app_id="waddles.socials.music.default",
+        async_dal, dal, community_id=1, tenant_id=1, app_id="penguintechinc.waddles.socials-music",
         config=None, activated_by=1,
     )
     assert row is not None
@@ -8498,7 +8498,7 @@ async def test_activate_bundle_with_no_active_version_skips_gating(
     dal = async_dal.dal
     mock_valkey = AsyncMock()
     row = await activate_bundle(
-        async_dal, dal, community_id=1, tenant_id=1, app_id="waddles.socials.music.default",
+        async_dal, dal, community_id=1, tenant_id=1, app_id="penguintechinc.waddles.socials-music",
         config=None, activated_by=1, valkey_client=mock_valkey, install_dal=install_dal,
         tenant_slug="acme-corp", community_slug="acme-community",
     )
@@ -8513,22 +8513,22 @@ async def test_activate_bundle_refuses_when_active_version_is_unapproved(
     dal = async_dal.dal
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
         language="python", artifact_kind="source", scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json=_MANIFEST, app_version_id=version_id, created_at=now, updated_at=now,
     )
     await activate_version(
-        install_dal, tenant_id=1, community_id=1, app_id="waddles.socials.music.default",
+        install_dal, tenant_id=1, community_id=1, app_id="penguintechinc.waddles.socials-music",
         version="3.0.1", activated_by=1,
     )
     mock_valkey = AsyncMock()
     with pytest.raises(ApiError) as exc:
         await activate_bundle(
-            async_dal, dal, community_id=1, tenant_id=1, app_id="waddles.socials.music.default",
+            async_dal, dal, community_id=1, tenant_id=1, app_id="penguintechinc.waddles.socials-music",
             config=None, activated_by=1, valkey_client=mock_valkey, install_dal=install_dal,
             tenant_slug="acme-corp", community_slug="acme-community",
         )
@@ -8546,7 +8546,7 @@ async def test_activate_bundle_resolves_grants_when_approved(bundle_install_db: 
     )
     mock_valkey = AsyncMock()
     await activate_bundle(
-        async_dal, dal, community_id=1, tenant_id=1, app_id="waddles.socials.music.default",
+        async_dal, dal, community_id=1, tenant_id=1, app_id="penguintechinc.waddles.socials-music",
         config=None, activated_by=1, valkey_client=mock_valkey, install_dal=install_dal,
         tenant_slug="acme-corp", community_slug="acme-community",
     )
@@ -8565,12 +8565,12 @@ async def test_deactivate_bundle_revokes_grants_when_valkey_client_given(
     )
     mock_valkey = AsyncMock()
     await activate_bundle(
-        async_dal, dal, community_id=1, tenant_id=1, app_id="waddles.socials.music.default",
+        async_dal, dal, community_id=1, tenant_id=1, app_id="penguintechinc.waddles.socials-music",
         config=None, activated_by=1, valkey_client=mock_valkey, install_dal=install_dal,
         tenant_slug="acme-corp", community_slug="acme-community",
     )
     await deactivate_bundle(
-        async_dal, dal, community_id=1, app_id="waddles.socials.music.default",
+        async_dal, dal, community_id=1, app_id="penguintechinc.waddles.socials-music",
         valkey_client=mock_valkey, install_dal=install_dal,
     )
     mock_valkey.xgroup_destroy.assert_called_once()
@@ -8836,7 +8836,7 @@ from blueprints.v1.bundle_grants import BLUEPRINTS
 from tests.conftest import TENANT_SLUG, make_token
 
 _MANIFEST = {
-    "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+    "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
     "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
     "provider": "builtin", "language": "python", "artifact": "source",
     "stages": {"process": {"entry": "x:y", "consumes": [{"platform": "twitch", "event_types": ["chat.message"]}]}},
@@ -8851,11 +8851,11 @@ async def app(install_dal: Any) -> Quart:
         label="Twitch #channelA", enabled=True,
     )
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
         language="python", artifact_kind="source", scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json=_MANIFEST, app_version_id=version_id, created_at=now, updated_at=now,
     )
@@ -8870,7 +8870,7 @@ async def test_resolve_requires_tenant_admin(app: Quart) -> None:
     token = make_token(scope="", tenant=TENANT_SLUG)
     client = app.test_client()
     response = await client.post(
-        "/api/v1/apps/waddles.socials.music.default/grants/resolve",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/grants/resolve",
         headers={"Authorization": f"Bearer {token}"}, json={"communityId": None},
     )
     assert response.status_code == 403
@@ -8881,7 +8881,7 @@ async def test_resolve_and_list_round_trip(app: Quart) -> None:
     from services.bundle_activation_service import activate_version
 
     await activate_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default",
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music",
         version="3.0.1", activated_by=1,
     )
     token = make_token(scope="tenant:admin", tenant=TENANT_SLUG)
@@ -8889,13 +8889,13 @@ async def test_resolve_and_list_round_trip(app: Quart) -> None:
     with patch("blueprints.v1.bundle_grants.build_client", return_value=mock_valkey):
         client = app.test_client()
         resolve_response = await client.post(
-            "/api/v1/apps/waddles.socials.music.default/grants/resolve",
+            "/api/v1/apps/penguintechinc.waddles.socials-music/grants/resolve",
             headers={"Authorization": f"Bearer {token}"}, json={"communityId": None},
         )
         assert resolve_response.status_code == 200
 
         list_response = await client.get(
-            "/api/v1/apps/waddles.socials.music.default/grants",
+            "/api/v1/apps/penguintechinc.waddles.socials-music/grants",
             headers={"Authorization": f"Bearer {token}"},
         )
     body = await list_response.get_json()
@@ -8908,7 +8908,7 @@ async def test_delete_grant_revokes_it(app: Quart) -> None:
     from services.bundle_activation_service import activate_version
 
     await activate_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default",
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music",
         version="3.0.1", activated_by=1,
     )
     token = make_token(scope="tenant:admin", tenant=TENANT_SLUG)
@@ -8916,16 +8916,16 @@ async def test_delete_grant_revokes_it(app: Quart) -> None:
     with patch("blueprints.v1.bundle_grants.build_client", return_value=mock_valkey):
         client = app.test_client()
         await client.post(
-            "/api/v1/apps/waddles.socials.music.default/grants/resolve",
+            "/api/v1/apps/penguintechinc.waddles.socials-music/grants/resolve",
             headers={"Authorization": f"Bearer {token}"}, json={"communityId": None},
         )
         list_response = await client.get(
-            "/api/v1/apps/waddles.socials.music.default/grants",
+            "/api/v1/apps/penguintechinc.waddles.socials-music/grants",
             headers={"Authorization": f"Bearer {token}"},
         )
         grant_id = (await list_response.get_json())["grants"][0]["grantId"]
         delete_response = await client.delete(
-            f"/api/v1/apps/waddles.socials.music.default/grants/{grant_id}",
+            f"/api/v1/apps/penguintechinc.waddles.socials-music/grants/{grant_id}",
             headers={"Authorization": f"Bearer {token}"},
         )
     assert delete_response.status_code == 200
@@ -9156,7 +9156,7 @@ from services.stream_grant_service import resolve_grants_for_scope
 from services.bundle_manifest_v2 import ConsumeRule
 
 _MANIFEST = {
-    "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+    "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
     "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
     "provider": "builtin", "language": "python", "artifact": "source",
     "stages": {
@@ -9168,18 +9168,18 @@ _MANIFEST = {
 async def _seed_active(dal: Any, install_dal: Any) -> None:
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
         language="python", artifact_kind="source", scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json=_MANIFEST, app_version_id=version_id, created_at=now, updated_at=now,
     )
-    dal.app_tenant_availability.insert(tenant_id=1, app_id="waddles.socials.music.default", available=True)
+    dal.app_tenant_availability.insert(tenant_id=1, app_id="penguintechinc.waddles.socials-music", available=True)
     dal.commit()
     await activate_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default",
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music",
         version="3.0.1", activated_by=1,
     )
 
@@ -9196,7 +9196,7 @@ async def test_process_row_includes_digest_and_grants_when_active(
     )
     await resolve_grants_for_scope(
         install_dal, AsyncMock(), tenant_id=1, tenant_slug="acme", community_id=None, community_slug=None,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         consumes=(ConsumeRule(platform="twitch", source_id=None, event_types=("chat.message",), filters={}),),
         granted_by=1,
     )
@@ -9204,7 +9204,7 @@ async def test_process_row_includes_digest_and_grants_when_active(
     rows = await list_bundles_for_stage(
         async_dal, dal, tenant_id=1, community_id=None, stage="process", install_dal=install_dal
     )
-    row = next(r for r in rows if r.app_id == "waddles.socials.music.default")
+    row = next(r for r in rows if r.app_id == "penguintechinc.waddles.socials-music")
     assert row.artifact_digest == "sha256:" + "a" * 64
     assert row.artifact_version == "3.0.1"
     assert row.language == "python"
@@ -9225,28 +9225,28 @@ async def test_action_stage_row_has_no_grants_field_populated(
     action_manifest = {**_MANIFEST, "stages": {"action": {"entry": "x:y"}}}
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", artifact_digest="sha256:" + "b" * 64,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", artifact_digest="sha256:" + "b" * 64,
         language="python", artifact_kind="source", scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json=action_manifest, app_version_id=version_id, created_at=now, updated_at=now,
     )
     await activate_version(
-        install_dal, tenant_id=1, community_id=None, app_id="waddles.socials.music.default",
+        install_dal, tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-music",
         version="3.0.1", activated_by=1,
     )
-    dal(dal.app_catalog.app_id == "waddles.socials.music.default").update(
+    dal(dal.app_catalog.app_id == "penguintechinc.waddles.socials-music").update(
         stages={"action": {"entrypoint": "x:y", "config": {}, "spec": {}}}
     )
-    dal.app_tenant_availability.insert(tenant_id=1, app_id="waddles.socials.music.default", available=True)
+    dal.app_tenant_availability.insert(tenant_id=1, app_id="penguintechinc.waddles.socials-music", available=True)
     dal.commit()
 
     rows = await list_bundles_for_stage(
         async_dal, dal, tenant_id=1, community_id=None, stage="action", install_dal=install_dal
     )
-    row = next(r for r in rows if r.app_id == "waddles.socials.music.default")
+    row = next(r for r in rows if r.app_id == "penguintechinc.waddles.socials-music")
     assert row.grants == []
     assert row.artifact_digest == "sha256:" + "b" * 64
 
@@ -9256,13 +9256,13 @@ async def test_no_active_version_leaves_digest_fields_none(
 ) -> None:
     async_dal = bundle_install_db
     dal = async_dal.dal
-    dal.app_tenant_availability.insert(tenant_id=1, app_id="waddles.socials.music.default", available=True)
+    dal.app_tenant_availability.insert(tenant_id=1, app_id="penguintechinc.waddles.socials-music", available=True)
     dal.commit()
 
     rows = await list_bundles_for_stage(
         async_dal, dal, tenant_id=1, community_id=None, stage="process", install_dal=install_dal
     )
-    row = next((r for r in rows if r.app_id == "waddles.socials.music.default"), None)
+    row = next((r for r in rows if r.app_id == "penguintechinc.waddles.socials-music"), None)
     if row is not None:  # the seed app_catalog row has no "process" stage data, may legitimately be absent
         assert row.artifact_digest is None
 
@@ -9271,11 +9271,11 @@ async def test_omitting_install_dal_skips_enrichment_entirely(bundle_install_db:
     """Decision #12/R52: the pre-existing v1 blueprint call site passes no install_dal at all."""
     async_dal = bundle_install_db
     dal = async_dal.dal
-    dal.app_tenant_availability.insert(tenant_id=1, app_id="waddles.socials.music.default", available=True)
+    dal.app_tenant_availability.insert(tenant_id=1, app_id="penguintechinc.waddles.socials-music", available=True)
     dal.commit()
 
     rows = await list_bundles_for_stage(async_dal, dal, tenant_id=1, community_id=None, stage="process")
-    row = next((r for r in rows if r.app_id == "waddles.socials.music.default"), None)
+    row = next((r for r in rows if r.app_id == "penguintechinc.waddles.socials-music"), None)
     if row is not None:
         assert row.artifact_digest is None
         assert row.grants == []
@@ -9615,7 +9615,7 @@ from services.stream_grant_service import resolve_grants_for_scope
 from tests.conftest import TENANT_SLUG, make_token
 
 _MANIFEST = {
-    "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+    "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
     "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
     "provider": "builtin", "language": "python", "artifact": "source",
     "egress": [{"host": "api.spotify.com", "methods": ["GET", "POST"]}],
@@ -9635,11 +9635,11 @@ _MANIFEST = {
 @pytest.fixture
 async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     dal = bundle_install_db.dal
-    dal(dal.app_catalog.app_id == "waddles.socials.music.default").update(
+    dal(dal.app_catalog.app_id == "penguintechinc.waddles.socials-music").update(
         stages={"process": {"entrypoint": "bundles.social_music_process:transform",
                             "config": {"command_prefix": "!"}, "spec": {"required_config": []}}}
     )
-    dal.app_tenant_availability.insert(tenant_id=1, app_id="waddles.socials.music.default", available=True)
+    dal.app_tenant_availability.insert(tenant_id=1, app_id="penguintechinc.waddles.socials-music", available=True)
     dal.commit()
     now = datetime.now(UTC)
     await install_dal.ingest_sources.async_insert(
@@ -9647,11 +9647,11 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         label="Twitch #channelA", enabled=True,
     )
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", artifact_digest="sha256:" + "a" * 64,
         language="python", artifact_kind="source", scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json=_MANIFEST, app_version_id=version_id, created_at=now, updated_at=now,
     )
@@ -9668,11 +9668,11 @@ async def _activate_and_grant(app: Quart) -> None:
     install_dal = app.config["install_dal"]
     await activate_version(
         install_dal, tenant_id=1, community_id=None,
-        app_id="waddles.socials.music.default", version="3.0.1", activated_by=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", activated_by=1,
     )
     await resolve_grants_for_scope(
         install_dal, AsyncMock(), tenant_id=1, tenant_slug=TENANT_SLUG, community_id=None,
-        community_slug=None, app_id="waddles.socials.music.default",
+        community_slug=None, app_id="penguintechinc.waddles.socials-music",
         consumes=(ConsumeRule(platform="twitch", source_id=None, event_types=("chat.message",), filters={}),),
         granted_by=1,
     )
@@ -9697,7 +9697,7 @@ async def test_v2_returns_digest_manifest_and_grants(app: Quart) -> None:
     assert response.status_code == 200
     body = await response.get_json()
     assert body["meta"]["version"] == 2
-    row = next(b for b in body["bundles"] if b["appId"] == "waddles.socials.music.default")
+    row = next(b for b in body["bundles"] if b["appId"] == "penguintechinc.waddles.socials-music")
     assert row["artifactDigest"] == "sha256:" + "a" * 64
     assert row["artifactVersion"] == "3.0.1"
     assert row["artifactKind"] == "source"
@@ -9718,7 +9718,7 @@ async def test_v2_null_digest_row_is_still_returned(app: Quart) -> None:
         "/api/v1/distribution/v2/bundles?stage=process", headers={"Authorization": f"Bearer {token}"}
     )
     body = await response.get_json()
-    row = next(b for b in body["bundles"] if b["appId"] == "waddles.socials.music.default")
+    row = next(b for b in body["bundles"] if b["appId"] == "penguintechinc.waddles.socials-music")
     assert row["artifactDigest"] is None
     assert row["grants"] == []
     assert row["manifest"] == {}
@@ -9765,7 +9765,7 @@ async def test_v2_etag_changes_when_a_grant_is_revoked(app: Quart) -> None:
     before = await client.get(
         "/api/v1/distribution/v2/bundles?stage=process", headers={"Authorization": f"Bearer {token}"}
     )
-    await install_dal(install_dal.app_stream_grants.app_id == "waddles.socials.music.default").update(
+    await install_dal(install_dal.app_stream_grants.app_id == "penguintechinc.waddles.socials-music").update(
         revoked_at=datetime.now(UTC)
     )
     after = await client.get(
@@ -10515,7 +10515,7 @@ from services.bundle_trip_reenable_service import trip_reenable
 from services.errors import ApiError
 from tests.conftest import TENANT_SLUG, make_user_token
 
-_APP = "waddles.socials.music.default"
+_APP = "penguintechinc.waddles.socials-music"
 _DIGEST_A = "sha256:" + "a" * 64
 _DIGEST_B = "sha256:" + "b" * 64
 
@@ -10920,7 +10920,7 @@ from services.bundle_role_cleanup_job import (
 )
 from services.marketplace_lifecycle_service import uninstall_bundle
 
-_APP = "waddles.socials.music.default"
+_APP = "penguintechinc.waddles.socials-music"
 
 
 def _seed_second_app(dal: Any, app_id: str) -> None:
@@ -11011,7 +11011,7 @@ async def test_sweep_drops_a_bundle_that_was_never_approved_or_activated(
 ) -> None:
     async_dal = bundle_install_db
     dal = async_dal.dal
-    _seed_second_app(dal, "waddles.socials.second.default")
+    _seed_second_app(dal, "penguintechinc.waddles.socials-second")
     dal.commit()
     with patch("services.bundle_role_cleanup_job.drop_bundle_role", new_callable=AsyncMock) as mock_drop:
         result = await sweep_orphan_bundle_roles(async_dal, dal, install_dal, object())
@@ -11538,9 +11538,9 @@ async def test_gate_runs_after_scope_so_an_unscoped_caller_still_gets_403_scope(
 
 
 _GATED_ROUTES: list[tuple[str, str, str, dict[str, Any]]] = [
-    ("blueprints.v1.bundle_versions", "POST", "/api/v1/apps/waddles.socials.music.default/trip-reenable",
+    ("blueprints.v1.bundle_versions", "POST", "/api/v1/apps/penguintechinc.waddles.socials-music/trip-reenable",
      {"version": "3.0.1", "communityId": None}),
-    ("blueprints.v1.bundle_grants", "POST", "/api/v1/apps/waddles.socials.music.default/grants/resolve",
+    ("blueprints.v1.bundle_grants", "POST", "/api/v1/apps/penguintechinc.waddles.socials-music/grants/resolve",
      {"communityId": None}),
     ("blueprints.v1.ingest_sources", "POST", f"/api/v1/tenant/{TENANT_SLUG}/ingest-sources",
      {"communityId": None, "platform": "twitch", "sourceId": "tw-x", "label": "X", "mapping": None}),
@@ -11907,14 +11907,14 @@ async def test_bundle_span_emits_a_span_and_a_duration_histogram(otel_sink: Any)
     from services.bundle_telemetry import bundle_span
 
     exporter, reader = otel_sink
-    async with bundle_span("hub.bundle.create_version", app_id="waddles.socials.music.default"):
+    async with bundle_span("hub.bundle.create_version", app_id="penguintechinc.waddles.socials-music"):
         pass
 
     spans = exporter.get_finished_spans()
     print(f"telemetry check: span records received = {len(spans)}")
     assert len(spans) >= 1, "zero spans received -- FAIL, not a pass"
     assert spans[0].name == "hub.bundle.create_version"
-    assert spans[0].attributes["app_id"] == "waddles.socials.music.default"
+    assert spans[0].attributes["app_id"] == "penguintechinc.waddles.socials-music"
 
     points = _histogram_points(reader, "waddles_hub_bundle_operation_duration_ms")
     print(f"telemetry check: histogram data points received = {len(points)}")
@@ -11945,7 +11945,7 @@ async def test_counters_emit_data_points(otel_sink: Any) -> None:
     _, reader = otel_sink
     record_version_upload(result="accepted", language="python", artifact_kind="source")
     record_approval(decision="approved")
-    record_grants_resolved(app_id="waddles.socials.music.default", count=2)
+    record_grants_resolved(app_id="penguintechinc.waddles.socials-music", count=2)
     record_artifact_callback(result="verified")
 
     names = _metric_names(reader)
@@ -13311,14 +13311,14 @@ async def test_consent_view_shows_the_mode_without_changing_the_permission_hash(
     await _seed(install_dal)
     now = datetime.now(UTC)
     manifest = {
-        "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+        "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
         "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
         "provider": "builtin", "language": "python", "artifact": "source",
         "stages": {"process": {"entry": "x:y",
                                "consumes": [{"platform": "twitch", "event_types": ["chat.message"]}]}},
     }
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED", manifest_json=manifest,
         created_at=now, updated_at=now,
     )
@@ -13327,7 +13327,7 @@ async def test_consent_view_shows_the_mode_without_changing_the_permission_hash(
     token = make_user_token(user_id=1, scope="platform:admin", tenant=TENANT_SLUG)
     client = app.test_client()
     before = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     body_before = await before.get_json()
@@ -13342,7 +13342,7 @@ async def test_consent_view_shows_the_mode_without_changing_the_permission_hash(
         auth={"origin_suffixes": ["twitch.tv", "eventsub.twitch.tv"]}, actor_id=1,
     )
     after = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     body_after = await after.get_json()
@@ -13356,10 +13356,10 @@ async def test_consent_view_never_echoes_a_secret(bundle_install_db: Any, instal
     await _seed(install_dal)
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED",
         manifest_json={
-            "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+            "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
             "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
             "provider": "builtin", "language": "python", "artifact": "source",
             "stages": {"process": {"entry": "x:y",
@@ -13370,7 +13370,7 @@ async def test_consent_view_never_echoes_a_secret(bundle_install_db: Any, instal
     app = _app(bundle_install_db, install_dal, "blueprints.v1.bundle_approvals")
     token = make_user_token(user_id=1, scope="platform:admin", tenant=TENANT_SLUG)
     response = await app.test_client().get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert _BEARER not in (await response.get_data()).decode()
@@ -14949,21 +14949,21 @@ async def test_consent_screen_carries_a_workstream_id_without_moving_the_hash(
     )
     now = datetime.now(UTC)
     manifest = {
-        "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+        "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
         "version": "3.0.1", "feature": "waddles.socials.music", "module": "socials",
         "provider": "builtin", "language": "python", "artifact": "source",
         "stages": {"process": {"entry": "x:y",
                                "consumes": [{"platform": "twitch", "event_types": ["chat.message"]}]}},
     }
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.1", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.1", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED", manifest_json=manifest,
         created_at=now, updated_at=now,
     )
     app = _app(bundle_install_db, install_dal, "blueprints.v1.bundle_approvals")
     token = make_user_token(user_id=1, scope="platform:admin", tenant=TENANT_SLUG)
     response = await app.test_client().get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1/permissions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1/permissions",
         headers={"Authorization": f"Bearer {token}"},
     )
     body = await response.get_json()
@@ -15105,7 +15105,7 @@ Append to `hub_api/tests/test_bundle_approval_service.py` (add `from datetime im
 ```python
 async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: list[str]) -> None:
     manifest = {
-        "schema_version": 2, "app_id": "waddles.socials.music.default", "name": "Music Station",
+        "schema_version": 2, "app_id": "penguintechinc.waddles.socials-music", "name": "Music Station",
         "version": "3.0.2", "feature": "waddles.socials.music", "module": "socials",
         "provider": "builtin", "language": "python", "artifact": "source",
         "routes_to": routes_to,
@@ -15113,17 +15113,17 @@ async def _seed_uploaded_version_with_routes_to(install_dal: Any, *, routes_to: 
     }
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default", version="3.0.2", tenant_id=1,
+        app_id="penguintechinc.waddles.socials-music", version="3.0.2", tenant_id=1,
         artifact_kind="source", language="python", status="PUBLISHED", manifest_json=manifest,
         created_at=now, updated_at=now,
     )
 
 
 async def test_approve_version_refuses_a_routes_to_target_that_does_not_exist(install_dal: Any) -> None:
-    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["waddles.nope.default"])
+    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["penguintechinc.waddles.nope"])
     with pytest.raises(ApiError) as excinfo:
         await approve_version(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.2",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.2",
             tenant_id=1, community_id=None, approved_by=1,
         )
     assert excinfo.value.status_code == 422
@@ -15136,7 +15136,7 @@ async def test_approve_version_refuses_a_cross_tenant_routes_to_target(
     dal = bundle_install_db.dal
     other_tenant_id = dal.tenants.insert(slug="other-corp", display_name="Other Corp", is_active=True)
     dal.app_catalog.insert(
-        app_id="waddles.socials.forums.default", name="Forums", manifest_version="3.0.0",
+        app_id="penguintechinc.waddles.socials-forums", name="Forums", manifest_version="3.0.0",
         module="socials", feature="waddles.socials.forums", provider="builtin",
         execution_model="native", is_default=False,
         platform_compatibility={"tested_with": "3.0.0", "min_version": None, "max_version": None},
@@ -15144,14 +15144,14 @@ async def test_approve_version_refuses_a_cross_tenant_routes_to_target(
     )
     dal.commit()
     await install_dal.app_install_approvals.async_insert(
-        tenant_id=other_tenant_id, community_id=None, app_id="waddles.socials.forums.default",
+        tenant_id=other_tenant_id, community_id=None, app_id="penguintechinc.waddles.socials-forums",
         version="1.0.0", permission_hash="sha256:" + "b" * 64, summary_json={}, approved_by=1,
         approved_at=datetime.now(UTC),
     )
-    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["waddles.socials.forums.default"])
+    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["penguintechinc.waddles.socials-forums"])
     with pytest.raises(ApiError) as excinfo:
         await approve_version(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.2",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.2",
             tenant_id=1, community_id=None, approved_by=1,
         )
     assert excinfo.value.status_code == 422
@@ -15163,7 +15163,7 @@ async def test_approve_version_allows_a_same_tenant_routes_to_target(
 ) -> None:
     dal = bundle_install_db.dal
     dal.app_catalog.insert(
-        app_id="waddles.socials.forums.default", name="Forums", manifest_version="3.0.0",
+        app_id="penguintechinc.waddles.socials-forums", name="Forums", manifest_version="3.0.0",
         module="socials", feature="waddles.socials.forums", provider="builtin",
         execution_model="native", is_default=False,
         platform_compatibility={"tested_with": "3.0.0", "min_version": None, "max_version": None},
@@ -15171,25 +15171,25 @@ async def test_approve_version_allows_a_same_tenant_routes_to_target(
     )
     dal.commit()
     await install_dal.app_install_approvals.async_insert(
-        tenant_id=1, community_id=None, app_id="waddles.socials.forums.default",
+        tenant_id=1, community_id=None, app_id="penguintechinc.waddles.socials-forums",
         version="1.0.0", permission_hash="sha256:" + "b" * 64, summary_json={}, approved_by=1,
         approved_at=datetime.now(UTC),
     )
-    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["waddles.socials.forums.default"])
+    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["penguintechinc.waddles.socials-forums"])
     result = await approve_version(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.2",
+        install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.2",
         tenant_id=1, community_id=None, approved_by=1,
     )
-    assert result.app_id == "waddles.socials.music.default"
+    assert result.app_id == "penguintechinc.waddles.socials-music"
 
 
 async def test_approve_version_audits_a_routes_to_refusal(install_dal: Any) -> None:
     from services.bundle_install_dal import raw_sql_rows
 
-    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["waddles.nope.default"])
+    await _seed_uploaded_version_with_routes_to(install_dal, routes_to=["penguintechinc.waddles.nope"])
     with pytest.raises(ApiError):
         await approve_version(
-            install_dal, app_id="waddles.socials.music.default", version="3.0.2",
+            install_dal, app_id="penguintechinc.waddles.socials-music", version="3.0.2",
             tenant_id=1, community_id=None, approved_by=1,
         )
     audit_rows = await raw_sql_rows(
@@ -15202,7 +15202,7 @@ async def test_approve_version_audits_a_routes_to_refusal(install_dal: Any) -> N
     details = audit_row["details"]
     if isinstance(details, str):
         details = json.loads(details)
-    assert details["target_app_id"] == "waddles.nope.default"
+    assert details["target_app_id"] == "penguintechinc.waddles.nope"
     assert details["reason"] == "routes_to_target_not_found"
 ```
 
@@ -15382,9 +15382,9 @@ def test_parse_usage_entry_decodes_byte_fields() -> None:
 
 
 def test_parse_usage_entry_parses_a_real_community_id() -> None:
-    delta = parse_usage_entry(_entry(community_id="7", app_id="waddles.socials.music.default"))
+    delta = parse_usage_entry(_entry(community_id="7", app_id="penguintechinc.waddles.socials-music"))
     assert delta.community_id == 7
-    assert delta.app_id == "waddles.socials.music.default"
+    assert delta.app_id == "penguintechinc.waddles.socials-music"
 
 
 def test_parse_usage_entry_parses_media_minutes_for_streaming() -> None:
@@ -15458,12 +15458,12 @@ async def test_run_usage_aggregation_batch_groups_two_different_workstreams_sepa
     redis_client.xreadgroup.return_value = [
         (USAGE_STREAM, [
             (b"3-1", {b"tenant_id": b"1", b"community_id": b"_tenant", b"workstream_id": b"ws-a",
-                      b"stage": b"process", b"app_id": b"waddles.socials.music.default",
+                      b"stage": b"process", b"app_id": b"penguintechinc.waddles.socials-music",
                       b"hour": b"2026-09-14T11:00:00+00:00", b"events": b"1", b"invocations": b"1",
                       b"host_calls": b"0", b"actions_delivered": b"0", b"fuel_ms": b"10",
                       b"outbound_bytes": b"0"}),
             (b"3-2", {b"tenant_id": b"1", b"community_id": b"_tenant", b"workstream_id": b"ws-b",
-                      b"stage": b"process", b"app_id": b"waddles.socials.music.default",
+                      b"stage": b"process", b"app_id": b"penguintechinc.waddles.socials-music",
                       b"hour": b"2026-09-14T11:00:00+00:00", b"events": b"1", b"invocations": b"1",
                       b"host_calls": b"0", b"actions_delivered": b"0", b"fuel_ms": b"20",
                       b"outbound_bytes": b"0"}),

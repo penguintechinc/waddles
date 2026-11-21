@@ -27,6 +27,7 @@ from blueprints.v1.admin import admin_bp
 from services import community_reputation_service as reputation_svc
 from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 OTHER_TENANT_SLUG = "other-tenant"
 
@@ -218,7 +219,7 @@ class TestMembers:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["pagination"]["total"] == 1
-        assert body["members"][0]["userId"] == "42"
+        assert body["members"][0]["userId"] == uid(42)
         assert body["members"][0]["reputation"]["score"] == 600
 
     async def test_update_member_role_success(self, client: Any, admin_db: Any) -> None:
@@ -226,7 +227,7 @@ class TestMembers:
         self._seed_role(admin_db, community_id, "moderator", 2, ["community:manage_channels"])
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
             json={"role": "moderator"},
         )
@@ -239,7 +240,7 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
             json={"role": "moderator"},
         )
@@ -251,7 +252,7 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
             json={"role": "not-a-role"},
         )
@@ -261,7 +262,7 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="community-owner")
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
             json={"role": "member"},
         )
@@ -291,7 +292,7 @@ class TestMembers:
         # Caller (user_id=1) is not a member of this community at all --
         # cannot promote someone to an admin-kind role.
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(user_id=1),
             json={"role": "community-admin"},
         )
@@ -322,13 +323,13 @@ class TestMembers:
         )
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         by_mod = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(user_id=7),
             json={"role": "community-admin"},
         )
         assert by_mod.status_code == 403
         by_admin = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(user_id=8),
             json={"role": "community-admin"},
         )
@@ -359,13 +360,13 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         headers = _headers(user_id=7, scope="community:admin")
         denied = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=headers,
             json={"role": "vip"},
         )
         assert denied.status_code == 403
         removed = await client.delete(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
             headers=headers,
             json={"reason": "spam"},
         )
@@ -382,13 +383,13 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         headers = _headers(user_id=9, scope="community:admin")
         removed = await client.delete(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
             headers=headers,
             json={},
         )
         assert removed.status_code == 403
         adjusted = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=headers,
             json={"amount": 5},
         )
@@ -430,26 +431,26 @@ class TestMembers:
         )
         mod = _headers(user_id=7, scope="community:admin")
         removed = await client.delete(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
             headers=mod,
             json={"reason": "x"},
         )
         assert removed.status_code == 403
         adjusted = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=mod,
             json={"amount": 5},
         )
         assert adjusted.status_code == 403
         demoted = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=mod,
             json={"role": "member"},
         )
         assert demoted.status_code == 403
         # An admin-kind caller may still act on another admin.
         allowed = await client.delete(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
             headers=_headers(user_id=8, scope="community:admin"),
             json={"reason": "x"},
         )
@@ -458,7 +459,7 @@ class TestMembers:
     async def test_update_member_role_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/9999/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(9999)}/role",
             headers=_headers(),
             json={"role": "moderator"},
         )
@@ -469,7 +470,7 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
         _seed_admin_actor(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=_headers(),
             json={"amount": 50, "reason": "helpful"},
         )
@@ -493,7 +494,7 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
         _seed_admin_actor(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=_headers(),
             json={"setTo": 900},
         )
@@ -508,7 +509,7 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
         _seed_admin_actor(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=_headers(),
             json={"amount": 0},
         )
@@ -518,7 +519,7 @@ class TestMembers:
         community_id = _seed_community(admin_db, member_count=2)
         _seed_member(admin_db, community_id=community_id, user_id=42)
         response = await client.delete(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
             headers=_headers(),
             json={"reason": "spam"},
         )
@@ -528,7 +529,7 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="community-owner")
         response = await client.delete(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/42",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
             headers=_headers(),
             json={},
         )
@@ -537,7 +538,7 @@ class TestMembers:
     async def test_remove_member_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.delete(
-            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/9999",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(9999)}",
             headers=_headers(),
             json={},
         )

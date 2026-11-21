@@ -17,7 +17,7 @@ from dataclasses import asdict
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, Response, current_app, request
 
 from services.community_common import community_in_tenant, feature_not_enabled
 from services.community_raffle import (
@@ -25,16 +25,20 @@ from services.community_raffle import (
     VALID_EVENT_TYPES,
     delete_customization,
     get_customizations,
+    read_sound,
     store_sound,
     upsert_customization,
 )
-from services.route_guards import community_admin_guard
+from services.route_guards import community_admin_guard, community_member_guard
 
 raffle_bp = Blueprint("v1_community_raffle", __name__, url_prefix="/api/v1/admin")
 
 #: Two-gate Feature flag -- `libs/community_module/features.py`'s
 #: `community.raffles` Feature contract, Professional tier.
 FEATURE_COMMUNITY_RAFFLES = "waddles.community.raffles"
+
+#: Allowance for multipart boundaries/headers on top of the 2MB file cap (early-reject check).
+_MULTIPART_OVERHEAD_BYTES = 64 * 1024
 
 _INVALID_EVENT_TYPE_MESSAGE = (
     f"Invalid event type. Must be one of: {', '.join(sorted(VALID_EVENT_TYPES))}"
@@ -95,7 +99,7 @@ async def delete_route(community_id: int, event_type: str) -> tuple[dict[str, ob
     """`DELETE /api/v1/admin/<id>/raffle-customization/<eventType>`."""
     if not _tenant_ok(community_id):
         return {"success": False, "error": {"message": "Community not found"}}, 404
-    result = delete_customization(current_app.config["dal"], community_id, event_type)
+    result = await delete_customization(current_app.config["dal"], community_id, event_type)
     if result is None:
         return {"success": False, "error": {"message": _INVALID_EVENT_TYPE_MESSAGE}}, 400
     return {"success": True}, 200
@@ -110,6 +114,11 @@ async def upload_route(community_id: int, event_type: str) -> tuple[dict[str, ob
     if not _tenant_ok(community_id):
         return {"success": False, "error": {"message": "Community not found"}}, 404
 
+    # Reject an oversized body BEFORE parsing the multipart form (which buffers it in memory).
+    declared = request.content_length
+    if declared is not None and declared > MAX_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES:
+        return {"success": False, "error": {"message": "File exceeds 2MB limit"}}, 400
+
     files = await request.files
     upload = files.get("sound")
     if upload is None:
@@ -119,13 +128,40 @@ async def upload_route(community_id: int, event_type: str) -> tuple[dict[str, ob
     if len(data) > MAX_FILE_SIZE_BYTES:
         return {"success": False, "error": {"message": "File exceeds 2MB limit"}}, 400
 
-    dto, err = store_sound(
+    dto, err = await store_sound(
         current_app.config["dal"], community_id, event_type, upload.filename or "", len(data), data
     )
     if err:
         return {"success": False, "error": {"message": err}}, 400
     assert dto is not None  # nosec B101 -- store_sound: dto is None only when err is set
     return {"success": True, "customization": asdict(dto)}, 200
+
+
+@raffle_bp.route("/<cuuid:community_id>/raffle-customization/<event_type>/sound", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.raffle:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
+async def sound_route(
+    community_id: int, event_type: str
+) -> Response | tuple[dict[str, object], int]:
+    """`GET /api/v1/admin/<id>/raffle-customization/<eventType>/sound` -- stream the stored sound.
+
+    Replaces the old public `/uploads/raffle-sounds/...` path: bytes come from the object store
+    through hub-api, so only an active member of THIS community (tenant-checked) can fetch them.
+    """
+    if not _tenant_ok(community_id):
+        return {"success": False, "error": {"message": "Community not found"}}, 404
+    if event_type not in VALID_EVENT_TYPES:
+        return {"success": False, "error": {"message": _INVALID_EVENT_TYPE_MESSAGE}}, 400
+    result = await read_sound(current_app.config["dal"], community_id, event_type)
+    if result is None:
+        return {"success": False, "error": {"message": "Sound not found"}}, 404
+    data, content_type = result
+    return Response(
+        data,
+        mimetype=content_type,
+        headers={"Cache-Control": "private, max-age=300", "X-Content-Type-Options": "nosniff"},
+    )
 
 
 BLUEPRINTS: list[Blueprint] = [raffle_bp]

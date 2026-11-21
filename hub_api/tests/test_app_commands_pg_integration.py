@@ -129,7 +129,7 @@ async def test_seed_then_activate_registers_inferred_rows_with_fk_enforced(
     """Activation writes inferred rows; the real FK rejects a row for an unknown app_id."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
-    app_id = f"waddles.socials.fk{run_id}.default"
+    app_id = f"penguintechinc.waddles.socials-fk{run_id}"
     await _publish(pg_dal, tenant_id, app_id)
 
     result = await _activate(pg_dal, tenant_id, community_id, app_id)
@@ -147,7 +147,7 @@ async def test_seed_then_activate_registers_inferred_rows_with_fk_enforced(
                 table.insert().values(
                     tenant_id=tenant_id,
                     community_id=community_id,
-                    app_id=f"waddles.socials.unknown{run_id}.default",
+                    app_id=f"penguintechinc.waddles.socials-unknown{run_id}",
                     command="ghost",
                     command_types=1,
                     platforms=["twitch"],
@@ -162,8 +162,8 @@ async def test_two_bundles_same_verb_first_registered_wins_on_real_pg(
     """Warning names the first app; deactivate + reactivate the first re-queues it behind."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
-    first = f"waddles.socials.first{run_id}.default"
-    second = f"waddles.socials.second{run_id}.default"
+    first = f"penguintechinc.waddles.socials-first{run_id}"
+    second = f"penguintechinc.waddles.socials-second{run_id}"
     await _publish(pg_dal, tenant_id, first)
     await _publish(pg_dal, tenant_id, second)
 
@@ -212,7 +212,7 @@ async def test_same_version_reactivation_on_real_pg(pg_dal: Any, run_id: int) ->
     """Deactivate then re-activate the SAME version -- must work, currently IntegrityError."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
-    app_id = f"waddles.socials.again{run_id}.default"
+    app_id = f"penguintechinc.waddles.socials-again{run_id}"
     await _publish(pg_dal, tenant_id, app_id)
     await _activate(pg_dal, tenant_id, community_id, app_id)
     await deactivate_for_community(
@@ -229,8 +229,8 @@ async def test_tenant_wide_and_community_rows_coexist(
     """A tenant-wide (scope 0) owner and a community activation conflict across scope."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
-    wide = f"waddles.socials.wide{run_id}.default"
-    scoped = f"waddles.socials.scoped{run_id}.default"
+    wide = f"penguintechinc.waddles.socials-wide{run_id}"
+    scoped = f"penguintechinc.waddles.socials-scoped{run_id}"
     await _publish(pg_dal, tenant_id, wide)
     await _publish(pg_dal, tenant_id, scoped)
 
@@ -263,8 +263,8 @@ async def test_concurrent_activations_never_produce_two_owners(
     """
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
-    app_a = f"waddles.socials.racea{run_id}.default"
-    app_b = f"waddles.socials.raceb{run_id}.default"
+    app_a = f"penguintechinc.waddles.socials-racea{run_id}"
+    app_b = f"penguintechinc.waddles.socials-raceb{run_id}"
     await _publish(pg_dal, tenant_id, app_a)
     await _publish(pg_dal, tenant_id, app_b)
 
@@ -299,7 +299,7 @@ async def test_backfill_on_real_pg_is_idempotent(pg_dal: Any, run_id: int) -> No
     """Active rows with no registry rows -> backfill twice -> same rows, same registered_at."""
     tenant_id = await _tenant(pg_dal, run_id)
     community_id = await _community(pg_dal, tenant_id, f"c-{run_id}")
-    app_id = f"waddles.socials.fill{run_id}.default"
+    app_id = f"penguintechinc.waddles.socials-fill{run_id}"
     await _publish(pg_dal, tenant_id, app_id)
     await _activate(pg_dal, tenant_id, community_id, app_id)
     async with pg_dal.engine.begin() as conn:  # simulate the pre-registry state

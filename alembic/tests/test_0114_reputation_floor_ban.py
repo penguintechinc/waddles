@@ -1015,7 +1015,7 @@ class TestEraseSubject:
         _q(pg_db, "ALTER ROLE hub_api LOGIN PASSWORD %s", (_LOGIN_PW,))
         # The grant block is conditional on the role existing at apply time: re-apply the scripts
         # in migration order (0114, then the later floor-ban scripts that redefine its functions;
-        # `claim` changed its return type in 0138, so it is dropped before the replay).
+        # `claim` changed its return type in 0140, so it is dropped before the replay).
         _q(pg_db, "DROP FUNCTION IF EXISTS reputation_floor_ban_claim(int, int)")
         for name in (
             "bundle_reputation_floor_ban.sql",

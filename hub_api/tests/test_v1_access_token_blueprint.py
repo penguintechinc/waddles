@@ -26,6 +26,10 @@ from quart_schema import QuartSchema
 from blueprints.v1.access_token import community_tokens_bp, user_tokens_bp
 from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
+# Handler-behaviour contract tests use a bare token; the real CAT guards are proven (no bypass)
+# by `tests/test_authz_sweep_c.py`.
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")
+
 
 @pytest.fixture
 def app(support_token_db: Any) -> Quart:

@@ -33,6 +33,7 @@ from services.global_identity import (
     revoke_global_admin_sync,
 )
 from tests.conftest import TENANT_SLUG, make_user_token, seed_super_admin
+from tests.user_ids import uid
 
 KILL_SWITCH = free_tier_caps.FLAG_DISABLE_FREE_TIER_CAPS
 
@@ -144,7 +145,7 @@ def _seed_user(admin_db: Any, email: str) -> int:
 
 async def _grant(client: Any, user_id: int, *, caller: int = 1) -> Any:
     return await client.post(
-        f"/api/v1/superadmin/users/{user_id}/super-admin-role",
+        f"/api/v1/superadmin/users/{uid(user_id)}/super-admin-role",
         headers=_headers(caller),
         json={"grant": True},
     )

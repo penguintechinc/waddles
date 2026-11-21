@@ -118,7 +118,7 @@ async def test_system_seeded_app_id_cannot_be_taken_over_by_a_vendor() -> None:
         pytest.param("penguintechinc.waddles.x", id="first-party-namespace"),
         pytest.param("penguintechinc.other.x", id="reserved-org-other-repo"),
         pytest.param("penguintechinc.waddles.discord-invite", id="first-party-hyphenated"),
-        pytest.param("waddles.core.x", id="legacy-waddles-org"),
+        pytest.param("penguintechinc.waddles.x", id="legacy-waddles-org"),
         pytest.param("psychoboy.penguintwitchbot.roll", id="platform-hosted-port"),
         pytest.param("psychoboy.anything.x", id="platform-hosted-org-any-repo"),
         pytest.param("acmecorp.widgets", id="two-segments"),

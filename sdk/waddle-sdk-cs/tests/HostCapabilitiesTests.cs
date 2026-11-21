@@ -45,7 +45,7 @@ public class HostCapabilitiesTests
     {
         var host = new FakeWaddleHost();
         Assert.Equal("tenant-1", host.Context.Tenant);
-        Assert.Equal("waddles.test.app", host.Context.AppId);
+        Assert.Equal("penguintechinc.waddles.test-app", host.Context.AppId);
     }
 
     [Fact]

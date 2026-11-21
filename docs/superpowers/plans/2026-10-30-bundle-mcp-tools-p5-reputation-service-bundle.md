@@ -1,5 +1,7 @@
 # Bundle MCP-Tools P5 — Reputation Service Bundle (migrate logic → WASM) Implementation Plan
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (standing default). Steps use checkbox (`- [ ]`) syntax.
 > **DEPENDS ON P3b merged** (`tool-provider` export + `tool.invoke` + SDK). Finalize Tasks 3-4 against the merged P3b API.
 
@@ -14,7 +16,7 @@
 ## Global Constraints
 
 - **Atomic score ops stay in the host cap** — the bundle calls `reputation` ops; one atomic host-cap call per mutation. Advisory lock + `FOR UPDATE` + 24h |delta| cap + per-scope cap preserved (`postgres.rs:112-258`).
-- **Community-scoped only** — reputation scores are keyed `(community_id, user)`. The cross-community/tenant FICO score is a SEPARATE legacy system (`core/reputation_module`, Python gRPC `reputation_tenant.score`) — a tenant-wide reputation bundle is OUT OF SCOPE for P5 (flag as a follow-up; it needs new tenant-scope host ops that don't exist).
+- **Community-scoped only** — reputation scores are keyed `(community_id, user)`. The cross-community/tenant FICO score is a SEPARATE legacy system (core/reputation_module, Python gRPC `reputation_tenant.score`) — a tenant-wide reputation bundle is OUT OF SCOPE for P5 (flag as a follow-up; it needs new tenant-scope host ops that don't exist).
 - **WIT additive-only** — add funcs to `interface reputation` (`stage.wit:355`); don't change existing signatures.
 - **Role `waddles_bundle_reputation`** (alembic 0050); tables `bundle_reputation_scores`/`bundle_reputation_adjustments`.
 - **kind: service, always-on, trusted_source** — `seed_core_bundles.py`, `bundles/core-bundles.yaml` `wit_world: stage-tools`.

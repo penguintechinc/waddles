@@ -1,6 +1,6 @@
 """Lift an automated floor ban (`bundle_reputation_floor_bans`) so the user regains normal access.
 
-The outbox row of a reversed ban moves to the terminal LIFTED status (8, alembic 0137) with
+The outbox row of a reversed ban moves to the terminal LIFTED status (8, alembic 0139) with
 `lifted_at` / `lifted_by` (the acting admin's hub UUID). Every ban CHECK reads
 `ban_suppression.FLOOR_BAN_ACTIVE_STATUSES`, which excludes LIFTED, so a lifted user is treated
 exactly as if never banned; a later ban (a fresh enqueue) is enforced again. hub-api holds no

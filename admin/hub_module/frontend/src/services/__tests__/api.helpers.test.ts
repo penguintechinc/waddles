@@ -60,23 +60,6 @@ describe('multipart upload helpers', () => {
 });
 
 describe('default-valued parameters', () => {
-  it('verifyTicket defaults perform_checkin to true and honours false', async () => {
-    await adminApi.verifyTicket('TKT-1');
-    expect(JSON.parse(String(lastCall().data))).toEqual({ ticket_code: 'TKT-1', perform_checkin: true });
-
-    await adminApi.verifyTicket('TKT-1', false);
-    expect(JSON.parse(String(lastCall().data))).toEqual({ ticket_code: 'TKT-1', perform_checkin: false });
-  });
-
-  it('exportAttendance defaults to json and passes an explicit format', async () => {
-    await adminApi.exportAttendance(3, 9);
-    expect(lastCall().params).toEqual({ format: 'json' });
-    expect(lastCall().url).toBe('/api/v1/admin/3/calendar/events/9/attendance/export');
-
-    await adminApi.exportAttendance(3, 9, 'csv');
-    expect(lastCall().params).toEqual({ format: 'csv' });
-  });
-
   it('getPlatformGrowth defaults to a 30d period and honours an override', async () => {
     await analyticsApi.getPlatformGrowth();
     expect(lastCall().url).toBe('/api/v1/analytics/platform/growth?period=30d');

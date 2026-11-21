@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
@@ -181,10 +181,14 @@ class SaveConsentPreferencesDTO:
 
 @dataclass(slots=True, frozen=True)
 class SaveConsentRequest:
-    """Request DTO for `POST /api/v1/cookie`."""
+    """Request DTO for `POST /api/v1/cookie`.
+
+    `consentMethod` is a closed enum -- exactly the values the webui's `CookieConsentContext` sends
+    (`admin_dsar` is written server-side only, never via this endpoint); anything else is 400.
+    """
 
     preferences: SaveConsentPreferencesDTO = field(default_factory=SaveConsentPreferencesDTO)
-    consentMethod: str = "banner"
+    consentMethod: Literal["banner", "preferences", "do_not_sell"] = "banner"
 
 
 @dataclass(slots=True, frozen=True)

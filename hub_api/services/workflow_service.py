@@ -2,9 +2,9 @@
 
 `workflowController.js` is almost entirely a reverse-proxy to the
 standalone `workflow-core` service (`proxyRequest()`, port 8070) --
-mirrors `services/event_calendar_proxy.py`'s `EventCalendarProxyClient`
-(same `async with httpx.AsyncClient(...)` per-call pattern, same
-`ProxyResult(ok, status_code, body)` shape). Two pieces of REAL,
+an async client
+(`async with httpx.AsyncClient(...)` per call, `ProxyResult(ok, status_code,
+body)`). Two pieces of REAL,
 hub-api-owned logic ride along with the proxying, both ported here:
 
 1. `validate_license()` -- `workflowController.js::validateLicense()`,
@@ -60,10 +60,7 @@ _WORKFLOW_REQUIRED_TIER = TIER_NAME_PREMIUM
 
 @dataclass(slots=True, frozen=True)
 class ProxyResult:
-    """Outcome of one proxied call to `workflow-core`.
-
-    Mirrors `services.event_calendar_proxy.ProxyResult`.
-    """
+    """Outcome of one proxied call to `workflow-core`."""
 
     ok: bool
     status_code: int

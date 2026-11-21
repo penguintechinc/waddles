@@ -145,6 +145,10 @@ async def test_bot_connection(
     except (ValueError, OSError) as exc:
         # The bearer is NOT sent anywhere: a mis-set URL is a loud 503, never a leak.
         logger.error("credential_manager.untrusted_origin reason=%s", exc)
+        # An unset URL is a deployment gap (no credential manager configured), not an untrusted
+        # origin -- say so, or operators chase a trust problem that does not exist.
+        if isinstance(exc, UntrustedOriginError) and "not configured" in str(exc):
+            raise _unavailable("credential manager is not configured on this deployment") from exc
         raise _unavailable("untrusted credential manager origin") from exc
     url = f"{cfg.base_url}/api/v1/credentials/{platform}/test"
     try:

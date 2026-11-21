@@ -43,6 +43,42 @@ PARAM = re.compile(r"\{([^}]+)\}")
 # 402 = licence gate (Professional+/Enterprise feature), an expected refusal.
 VALIDATION_OK = {400, 401, 402, 403, 404, 405, 409, 413, 415, 422, 429}
 
+# Routes where an EMPTY body ({}) is a legitimate success, so a 2xx on the must-fail probe is
+# correct and not "accepted bad input". Keep this list explicit and commented -- every entry needs
+# a reason, and nothing is allowed in just because it happened to return 200 once.
+EMPTY_BODY_OK_ROUTES = {
+    # Partial update: every field is optional and omitted ones keep their stored value, so an
+    # empty body is a valid no-change merge (see UpdatePreferencesRequest in cookie_consent.py).
+    ("PATCH", "/api/v1/cookie/preferences"),
+}
+
+
+class _NoRedirect(urllib.request.HTTPRedirectHandler):
+    """Surface 3xx responses as `HTTPError` instead of silently following them."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: D102
+        return None
+
+
+def classify_must_fail(method: str, route: str, status: int, location: str = "") -> tuple[str, str]:
+    """Classify the response to a must-fail probe (bogus ids + empty body) as (class, why).
+
+    The probe is sent WITHOUT following redirects: a redirect to an error page used to be followed
+    into a 200 and misreported as "accepted". A 3xx whose Location carries `error=` is a correct
+    rejection; any other 3xx is a real acceptance and fails.
+    """
+    if status >= 500 or status == 0:
+        return "FAIL", f"HTTP {status}"
+    if 300 <= status < 400:
+        if "error=" in location:
+            return "PASS", f"{status} redirect to an error page"
+        return "FAIL", f"{status}: must-fail request was redirected to a non-error URL"
+    if status in VALIDATION_OK:
+        return "PASS", ""
+    if 200 <= status < 300 and (method, route) in EMPTY_BODY_OK_ROUTES:
+        return "PASS", f"{status} empty body is a legitimate success for this route"
+    return "FAIL", f"{status}: must-fail request was accepted"
+
 
 class Client:
     """Throttled JSON client with 429 backoff and bearer auth."""
@@ -57,9 +93,19 @@ class Client:
         # Unverified TLS is honoured ONLY for loopback (kubectl port-forward to a self-signed pod cert).
         loopback = re.match(r"https?://(localhost|127\.0\.0\.1)(:|/|$)", self.base) is not None
         self.ctx = ssl._create_unverified_context() if (insecure and loopback) else None
+        handlers: list = [urllib.request.HTTPSHandler(context=self.ctx)] if self.ctx else []
+        self._follow = urllib.request.build_opener(*handlers)
+        self._no_follow = urllib.request.build_opener(_NoRedirect, *handlers)
+        self.last_location = ""  # Location header of the last 3xx (only set when not following)
 
-    def call(self, method: str, path: str, body: bytes | None = None, ctype: str | None = None):
-        """Return (status, latency_ms, body_text); retries 429 up to 3 times."""
+    def call(self, method: str, path: str, body: bytes | None = None, ctype: str | None = None,
+             follow_redirects: bool = True):
+        """Return (status, latency_ms, body_text); retries 429 up to 3 times.
+
+        `follow_redirects=False` is used for must-fail probes: a 3xx is returned as-is and its
+        Location lands in `self.last_location`.
+        """
+        opener = self._follow if follow_redirects else self._no_follow
         for attempt in range(6):
             wait = self.gap - (time.monotonic() - self.last)
             if wait > 0:
@@ -73,11 +119,13 @@ class Client:
             if self.token:
                 req.add_header("Authorization", f"Bearer {self.token}")
             t0 = time.monotonic()
+            self.last_location = ""
             try:
-                with urllib.request.urlopen(req, timeout=30, context=self.ctx) as r:
+                with opener.open(req, timeout=30) as r:
                     status, text, hdrs = r.status, r.read(2_000_000).decode("utf-8", "replace"), r.headers
             except urllib.error.HTTPError as e:
                 status, text, hdrs = e.code, e.read(2_000_000).decode("utf-8", "replace"), e.headers
+                self.last_location = e.headers.get("Location", "") if 300 <= e.code < 400 else ""
             except Exception as e:  # network/timeout -> status 0, reported as FAIL
                 status, text, hdrs = 0, f"{type(e).__name__}: {e}", {}
             self.dead = self.dead + 1 if status == 0 else 0
@@ -153,7 +201,7 @@ def main() -> int:
     base = os.environ.get("BASE_URL", "https://waddles-alpha.penguintech.cloud:8443")
     email = os.environ.get("HUB_TEST_EMAIL", "")
     pw = os.environ.get("HUB_TEST_PASS") or os.environ.get("INITIAL_ADMIN_PASSWORD", "")
-    community = os.environ.get("COMMUNITY_ID", "15959481-f9f1-47ce-be48-d975a6832d08")
+    community = os.environ.get("COMMUNITY_ID", "")  # empty -> discovered after login (never a stale hard-coded id)
     if not (email and pw):
         print("FAIL: HUB_TEST_EMAIL and HUB_TEST_PASS (or INITIAL_ADMIN_PASSWORD) must be set", file=sys.stderr)
         return 2
@@ -184,6 +232,17 @@ def main() -> int:
         print(f"FAIL: admin login returned HTTP {st}", file=sys.stderr)
         return 2
 
+    if not community:
+        # A hard-coded id goes stale when alpha is wiped, which turns every community route into
+        # a bogus 404 "contract" failure; use a community the API itself lists.
+        st_c, _, txt_c = cli.call("GET", "/api/v1/public/communities")
+        try:
+            community = str(json.loads(txt_c)["communities"][0]["id"]) if st_c == 200 else ""
+        except (KeyError, IndexError, ValueError, TypeError):
+            community = ""
+        if not community:
+            print(f"FAIL: no COMMUNITY_ID set and none discoverable (HTTP {st_c})", file=sys.stderr)
+            return 2
     ids: dict[str, list[str]] = defaultdict(list)
     ids["community_id"].append(community)
     results: list[dict] = []
@@ -230,14 +289,13 @@ def main() -> int:
         path = PARAM.sub(lambda m: vals[m.group(1)], o["path"])
         has_body = "requestBody" in o["op"]
         body = b"{}" if has_body else None
-        st, ms, text = cli.call(o["method"], path, body, "application/json" if has_body else None)
+        st, ms, text = cli.call(
+            o["method"], path, body, "application/json" if has_body else None, follow_redirects=False
+        )
         row = {"method": o["method"], "route": o["path"], "status": st, "ms": round(ms), "probe": "bogus-ids+empty-body"}
-        if st >= 500 or st == 0:
-            row["class"], row["why"] = "FAIL", f"HTTP {st}: {text[:120]}"
-        elif st in VALIDATION_OK:
-            row["class"] = "PASS"
-        else:
-            row["class"], row["why"] = "FAIL", f"{st}: must-fail request was accepted"
+        row["class"], why = classify_must_fail(o["method"], o["path"], st, cli.last_location)
+        if why:
+            row["why"] = f"{why}: {text[:120]}" if row["class"] == "FAIL" and st >= 500 else why
         scan(row, text)
         results.append(row)
 
@@ -301,6 +359,9 @@ def main() -> int:
         missing_code = sorted(f"{m} {p}" for m, p in specset - code)
 
     cnt = Counter(r["class"] for r in results)
+    if not any(r["class"] != "SKIPPED" for r in results):
+        print("FAIL: sweep examined 0 routes (every operation was skipped or none ran)", file=sys.stderr)
+        return 2
     groups: dict[str, list[dict]] = defaultdict(list)
     for r in results:
         if r["class"] == "FAIL":

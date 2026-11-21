@@ -102,7 +102,7 @@ mod tests {
 
     #[test]
     fn owner_validation() {
-        assert!(validate_owner("waddles.harness.media").is_ok());
+        assert!(validate_owner("penguintechinc.waddles.harness-media").is_ok());
         for o in [
             "", "A", "a/b", "a..b", ".a", "a b", "a.b", "a.b.c.d", "a.b_c.d",
         ] {

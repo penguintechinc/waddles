@@ -342,7 +342,7 @@ mod tests {
         }
         assert!(is_core_namespace("penguintechinc.waddles.x"));
         for bad in [
-            "waddles.core.x",
+            "penguintechinc-waddles.x",
             "penguintechinc.waddles.",
             "penguintechinc.waddles.a.b",
             "penguintechinc.waddles.-x",

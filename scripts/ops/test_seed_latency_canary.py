@@ -95,18 +95,18 @@ def test_rerun_is_idempotent_and_deactivates_denied_bundles() -> None:
     hub = FakeHub(
         active=[
             mod.PING_APP_ID,
-            "waddles.fun.loyalty",
-            "waddles.fun.jackpot",
+            "penguintechinc.waddles.fun-loyalty",
+            "penguintechinc.waddles.fun-jackpot",
             "penguintechinc.waddles.economy",
-            "waddles.fun.roll",
+            "penguintechinc.waddles.fun-roll",
         ],
         community=True,
     )
     res = mod.seed(hub, GUILD, dry_run=False)
     assert res.community_id == UUID_11 and not res.created and not res.ping_activated
-    assert set(res.deactivated) == {"waddles.fun.loyalty", "waddles.fun.jackpot"}
+    assert set(res.deactivated) == {"penguintechinc.waddles.fun-loyalty", "penguintechinc.waddles.fun-jackpot"}
     assert sorted(hub.active) == sorted(
-        [mod.PING_APP_ID, "penguintechinc.waddles.economy", "waddles.fun.roll"]
+        [mod.PING_APP_ID, "penguintechinc.waddles.economy", "penguintechinc.waddles.fun-roll"]
     )
     again = mod.seed(hub, GUILD, dry_run=False)
     assert again.deactivated == () and not any(m == "POST" for m, _ in hub.calls[-4:])

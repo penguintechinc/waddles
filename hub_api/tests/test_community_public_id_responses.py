@@ -86,3 +86,16 @@ def test_sync_twin_maps_and_fails_loud(dal: Any) -> None:
     with pytest.raises(RuntimeError, match="missing public_id"):
         lookup_public_ids_sync(dal, ids)
     assert lookup_public_ids_sync(dal, []) == {}
+
+
+@pytest.mark.asyncio
+async def test_lookup_public_id_of_unknown_sentinel_is_a_404_not_a_500(dal: Any) -> None:
+    """regression: alpha 500s `community -1 has no public_id` on a well-formed unknown UUID."""
+    from services.community_public_id import UNKNOWN_COMMUNITY_ID, lookup_public_id
+    from services.errors import ApiError
+
+    app = _app(dal)
+    async with app.app_context():
+        with pytest.raises(ApiError) as exc:
+            await lookup_public_id(UNKNOWN_COMMUNITY_ID)
+    assert exc.value.status_code == 404

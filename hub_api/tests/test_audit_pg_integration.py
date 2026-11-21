@@ -243,7 +243,7 @@ async def test_bundle_audit_writes_the_legacy_row_and_the_chain_on_real_postgres
             actor_id=seeded["users"][0][0],
             action="app_installed_globally",
             target_type="app_global_installs",
-            target_id="waddles.core.ping@1.0.0",
+            target_id="penguintechinc.waddles.ping@1.0.0",
             details={"tenant_id": seeded["tenant_id"], "install_source": "system:core-seeder"},
         )
     finally:
@@ -251,7 +251,8 @@ async def test_bundle_audit_writes_the_legacy_row_and_the_chain_on_real_postgres
     legacy = _sql(
         pg,
         "SELECT user_id, action, created_at IS NOT NULL FROM audit_log "
-        "WHERE action = 'app_installed_globally' AND target_id = 'waddles.core.ping@1.0.0'",
+        "WHERE action = 'app_installed_globally' "
+        "AND target_id = 'penguintechinc.waddles.ping@1.0.0'",
     )
     assert legacy == [(seeded["users"][0][0], "app_installed_globally", True)]
     chain = _sql(

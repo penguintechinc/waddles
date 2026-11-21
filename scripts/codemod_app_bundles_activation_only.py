@@ -359,7 +359,7 @@ def _edit_manifests(name: str, do_drop: bool, result: BundleResult, bump: bool =
 
     cat = _read(CATALOG)
     row = re.compile(
-        r"(- app_id: waddles\.core\.example\." + re.escape(name) + r"\n    version: )\"([^\"]+)\""
+        r"(- app_id: penguintechinc\.waddles\." + re.escape(name) + r"\n    version: )\"([^\"]+)\""
     )
     found = row.findall(cat) if bump else []
     if len(found) == 1 and found[0][1] != old:

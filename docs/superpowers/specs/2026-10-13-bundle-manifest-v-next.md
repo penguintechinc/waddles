@@ -336,7 +336,7 @@ Ordering note: transport verbs depend on (a) B0 (merged), (b) `network` parse + 
 ## 7. Subsystem: `kind: app | service`
 
 ### 7.1 Current state
-No discriminator exists in any parser or manifest (verified: no `kind` key in `bundle_manifest_v2.py`, `app_manifest.py`, or any `bundle.yaml`/`hub-manifest.yaml`; `module`/`provider`/`is_default` are unrelated). "Service-like" behavior is inferred ad hoc (`waddles.core.*` namespace, `connector` WIT world).
+No discriminator exists in any parser or manifest (verified: no `kind` key in `bundle_manifest_v2.py`, `app_manifest.py`, or any `bundle.yaml`/`hub-manifest.yaml`; `module`/`provider`/`is_default` are unrelated). "Service-like" behavior is inferred ad hoc (`penguintechinc.waddles.*` namespace, `connector` WIT world).
 
 ### 7.2 Target
 - `kind` is **REQUIRED** on every manifest (schema v3); values exactly `app` or `service`; anything else ⇒ `invalid_kind`. All 79 existing bundles migrate to `kind: app` in F3.
@@ -349,7 +349,7 @@ No discriminator exists in any parser or manifest (verified: no `kind` key in `b
 | May declare `transport` / `connector.*` permissions | No (refused) | Yes |
 | May declare `requires` | Yes (targets must be `service`) | No (refused — `requires_not_allowed_for_service`) |
 | Valid `requires` target | No | Yes |
-| Approval path | Normal 3-tier consent | Global-approval-only, first-party `waddles.core.*` for v3.0 (connector spec §3.2); vendor services deferred |
+| Approval path | Normal 3-tier consent | Global-approval-only, first-party `penguintechinc.waddles.*` for v3.0 (connector spec §3.2); vendor services deferred |
 | WIT world | `waddle:bundle` stage worlds | `waddle:connector` world(s) |
 | `network.ingress` expected non-empty | rarely | typically (webhook-family services) |
 
@@ -401,7 +401,7 @@ Discord/Twitch/Slack/Kick/YouTube service bundles (connector spec §5/§6 order)
 - **Fail-closed:** missing `network` or `kind` ⇒ refuse; no catalog row ⇒ deny; unsatisfied `requires` ⇒ 422; PSL unavailable ⇒ refuse to validate; ingress with no declared source match ⇒ reject before any parse; a service-bundle guard that cannot determine dependents ⇒ block the destructive action (409/500), never proceed.
 - **Fail-loud:** seeder aborts on missing dependency/malformed network (and defensive cycle tripwire); dual-manifest mismatch is a hard error; denials are counted with bounded labels and logged at WARN/ERROR with type+message (never swallowed into `extra`-only fields).
 - **PII-free:** manifests and denial telemetry carry app ids, rule families and reason codes only — no user identifiers, request URLs with queries, headers or bodies; raw source IPs appear only in the ingress denial *debug* log, never as metric labels or in spans' attributes beyond the bounded reason.
-- **Vendor-tier stricter than first-party:** for non-`waddles.core.*` (vendor) bundles — wildcard egress entries and public CIDR entries require explicit admin re-consent shown as dangerous (the `/24` CIDR cap applies to vendors exactly as to first-party — no exception either way); **`kind: service` and `transport`/`connector.*` are not available to vendors in v3.0** (connector spec §3.2); `network.ingress` for a vendor app is limited to an operator-defined allowlist; a vendor `network.egress` may not be broader than a tenant-level egress denylist allows (existing tenant denylist, penguin-libs rule V21, applies to wildcard coverage too — a wildcard that *covers* a denylisted host is rejected, not just an exact match).
+- **Vendor-tier stricter than first-party:** for non-`penguintechinc.waddles.*` (vendor) bundles — wildcard egress entries and public CIDR entries require explicit admin re-consent shown as dangerous (the `/24` CIDR cap applies to vendors exactly as to first-party — no exception either way); **`kind: service` and `transport`/`connector.*` are not available to vendors in v3.0** (connector spec §3.2); `network.ingress` for a vendor app is limited to an operator-defined allowlist; a vendor `network.egress` may not be broader than a tenant-level egress denylist allows (existing tenant denylist, penguin-libs rule V21, applies to wildcard coverage too — a wildcard that *covers* a denylisted host is rejected, not just an exact match).
 
 ---
 

@@ -6,7 +6,7 @@
 
 **What changed:**
 
-- Extracted `TranslationService`, `TranslationPreprocessor`, and all `translation_providers/` from `processing/router_module/` into a dedicated standalone microservice
+- Extracted `TranslationService`, `TranslationPreprocessor`, and all `translation_providers/` from processing/router_module into a dedicated standalone microservice
 - Added gRPC interface (port 50033) for router hot-path calls — replaces direct in-process Python call
 - Added REST interface (port 8033) for health checks, admin cache management, and language detection
 - Router now calls translate via gRPC stub (`proto_clients/translate_interaction_pb2_grpc.py`)

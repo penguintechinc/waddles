@@ -33,7 +33,7 @@ The Security Core Module is the central security enforcement point for communiti
 
 | Item | Value |
 |---|---|
-| Source | `core/security_core_module/` |
+| Source | core/security_core_module |
 | Language | Python |
 | Port | 8041 |
 | Maintained by | Penguin Tech Inc |
