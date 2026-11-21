@@ -685,7 +685,7 @@ mod tests {
         let registry = prometheus::Registry::new();
         let denied_total = register_egress_metrics(&registry);
         denied_total
-            .with_label_values(&["waddles.a.b.c", "host_not_declared"])
+            .with_label_values(&["penguintechinc.waddles.a-b-c", "host_not_declared"])
             .inc();
         let rendered = render_metrics(&registry).expect("registry with metrics must encode");
         assert!(rendered.contains("svc_action_egress_denied_total"));

@@ -24,7 +24,7 @@ from services.app_source_binding_service import (
 )
 from services.bundle_manifest_v2 import BundleManifestV2, ConsumeRule, Limits
 
-_APP_ID = "waddles.socials.music.default"
+_APP_ID = "penguintechinc.waddles.socials-music"
 
 
 def _manifest(*platforms: str) -> BundleManifestV2:

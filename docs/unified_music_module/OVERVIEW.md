@@ -34,7 +34,7 @@ The Unified Music Module provides a single, cohesive music experience across mul
 
 | Item | Value |
 |---|---|
-| Source | `core/unified_music_module/` |
+| Source | core/unified_music_module |
 | Language | Python |
 | Port | 8051 |
 | Maintained by | Penguin Tech Inc |

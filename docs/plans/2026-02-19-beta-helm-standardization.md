@@ -1,5 +1,7 @@
 # Beta Helm Standardization + Translate Fix Implementation Plan
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Clean-slate redeploy beta cluster using Helm only, add `interactive-translate` to the Helm chart, set beta replicas to 1 per module, restore the kustomize beta overlay, and document the Helm/kustomize split by environment.
@@ -486,7 +488,7 @@ Find the `## Prerequisites` heading and insert before it:
 | Environment | Tool | Config Path |
 |---|---|---|
 | **Beta** (`dal2-beta`) | **Helm** | `k8s/helm/waddlebot/values-beta.yaml` |
-| **Alpha** (local/minikube) | **Kustomize** | `k8s/kustomize/overlays/alpha/` |
+| **Alpha** (local/minikube) | **Kustomize** | k8s/kustomize/overlays/alpha |
 
 **Rule:** Do not mix tools within an environment. Running both Helm and kustomize against the same namespace creates duplicate resources with different name prefixes (`waddlebot-*` vs unprefixed), exhausts node pod limits, and makes rollback ambiguous.
 

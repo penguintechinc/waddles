@@ -600,23 +600,23 @@ class TestDeclarations:
 
     def test_tool_needs_a_scope(self) -> None:
         with pytest.raises(ValueError, match="at least one required scope"):
-            ToolSpec(name="x.y", required_scopes=(), flag="waddles.x.y")
+            ToolSpec(name="x.y", required_scopes=(), flag="penguintechinc.waddles.x-y")
 
     def test_side_effecting_tool_must_ship_behind_a_flag(self) -> None:
         with pytest.raises(ValueError, match="must declare a feature flag"):
             ToolSpec(name="x.y", required_scopes=("a:b",))
-        ToolSpec(name="x.y", required_scopes=("a:b",), flag="waddles.x.y")
+        ToolSpec(name="x.y", required_scopes=("a:b",), flag="penguintechinc.waddles.x-y")
         ToolSpec(name="x.y", required_scopes=("a:b",), side_effects=False)  # read-only: ok
 
     @pytest.mark.parametrize("scope", ["*", "*:read", "admin", "a:*", "A:b", "a b:c"])
     def test_tool_scopes_must_be_concrete_resource_action(self, scope: str) -> None:
         with pytest.raises(ValueError, match="resource:action"):
-            ToolSpec(name="x.y", required_scopes=(scope,), flag="waddles.x.y")
+            ToolSpec(name="x.y", required_scopes=(scope,), flag="penguintechinc.waddles.x-y")
 
     @pytest.mark.parametrize("name", ["", "Bad", "1x", "a b", "x" * 80])
     def test_tool_names_are_validated(self, name: str) -> None:
         with pytest.raises(ValueError, match="tool name"):
-            ToolSpec(name=name, required_scopes=("a:b",), flag="waddles.x.y")
+            ToolSpec(name=name, required_scopes=("a:b",), flag="penguintechinc.waddles.x-y")
 
     def test_duplicate_parameters_are_rejected(self) -> None:
         with pytest.raises(ValueError, match="duplicate parameters"):
@@ -624,7 +624,7 @@ class TestDeclarations:
                 name="x.y",
                 required_scopes=("a:b",),
                 parameters=(ToolParam("q"), ToolParam("q")),
-                flag="waddles.x.y",
+                flag="penguintechinc.waddles.x-y",
             )
 
     @pytest.mark.parametrize("name", ["tenant_id", "user_id", "scopes", "roles", "community_id"])
@@ -641,7 +641,7 @@ class TestDeclarations:
             ToolParam("ok", pattern="(")
 
     def test_registry_rejects_duplicates_and_is_immutable(self) -> None:
-        spec = ToolSpec(name="x.y", required_scopes=("a:b",), flag="waddles.x.y")
+        spec = ToolSpec(name="x.y", required_scopes=("a:b",), flag="penguintechinc.waddles.x-y")
         with pytest.raises(ValueError, match="duplicate tool"):
             ToolRegistry([spec, spec])
         registry = ToolRegistry([spec])

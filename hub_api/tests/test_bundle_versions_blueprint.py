@@ -396,13 +396,13 @@ async def test_get_version_without_scope_is_403(app: Quart) -> None:
     admin = make_token(scope="platform:admin", user_id="1")
     client = app.test_client()
     await client.post(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions",
         headers={"Authorization": f"Bearer {admin}"},
         files=_upload_files(),
     )
     plain = make_user_token(user_id=7, scope="")
     response = await client.get(
-        "/api/v1/apps/waddles.socials.music.default/versions/3.0.1",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1",
         headers={"Authorization": f"Bearer {plain}"},
     )
     assert response.status_code == 403
@@ -411,7 +411,7 @@ async def test_get_version_without_scope_is_403(app: Quart) -> None:
 async def test_list_versions_without_scope_is_403(app: Quart) -> None:
     plain = make_user_token(user_id=7, scope="")
     response = await app.test_client().get(
-        "/api/v1/apps/waddles.socials.music.default/versions",
+        "/api/v1/apps/penguintechinc.waddles.socials-music/versions",
         headers={"Authorization": f"Bearer {plain}"},
     )
     assert response.status_code == 403
@@ -419,8 +419,8 @@ async def test_list_versions_without_scope_is_403(app: Quart) -> None:
 
 async def test_versions_read_unauthenticated_is_401(app: Quart) -> None:
     client = app.test_client()
-    listing = await client.get("/api/v1/apps/waddles.socials.music.default/versions")
-    one = await client.get("/api/v1/apps/waddles.socials.music.default/versions/3.0.1")
+    listing = await client.get("/api/v1/apps/penguintechinc.waddles.socials-music/versions")
+    one = await client.get("/api/v1/apps/penguintechinc.waddles.socials-music/versions/3.0.1")
     assert listing.status_code == 401
     assert one.status_code == 401
 

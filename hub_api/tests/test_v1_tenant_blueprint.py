@@ -33,6 +33,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.tenant import tenant_bp
 from services import branding_service
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import row_uuid, uid
 
 OTHER_TENANT_SLUG = "other-tenant"
 
@@ -321,7 +322,7 @@ class TestTenantAdmins:
         add_response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-admin"},
+            json={"userId": uid(user_id), "role": "tenant-admin"},
         )
         assert add_response.status_code == 200
 
@@ -330,7 +331,7 @@ class TestTenantAdmins:
         )
         body = await list_response.get_json()
         assert len(body["admins"]) == 1
-        assert body["admins"][0]["userId"] == user_id
+        assert body["admins"][0]["userId"] == row_uuid(tenant_admin_db, user_id)
         assert body["admins"][0]["role"] == "tenant-admin"
 
     async def test_add_admin_invalid_role_is_400(self, client: Any, tenant_admin_db: Any) -> None:
@@ -338,7 +339,7 @@ class TestTenantAdmins:
         response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "not-a-real-role"},
+            json={"userId": uid(user_id), "role": "not-a-real-role"},
         )
         assert response.status_code == 400
 
@@ -346,7 +347,7 @@ class TestTenantAdmins:
         response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": 9999, "role": "tenant-admin"},
+            json={"userId": uid(9999), "role": "tenant-admin"},
         )
         assert response.status_code == 404
 
@@ -355,10 +356,10 @@ class TestTenantAdmins:
         await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-admin"},
+            json={"userId": uid(user_id), "role": "tenant-admin"},
         )
         response = await client.delete(
-            f"/api/v1/tenant/{TENANT_SLUG}/admins/{user_id}", headers=_admin_headers()
+            f"/api/v1/tenant/{TENANT_SLUG}/admins/{uid(user_id)}", headers=_admin_headers()
         )
         assert response.status_code == 200
 
@@ -373,12 +374,12 @@ class TestTenantAdmins:
         await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-admin"},
+            json={"userId": uid(user_id), "role": "tenant-admin"},
         )
         second_response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-owner"},
+            json={"userId": uid(user_id), "role": "tenant-owner"},
         )
         assert second_response.status_code == 200
 
@@ -391,6 +392,6 @@ class TestTenantAdmins:
 
     async def test_remove_admin_not_found_is_404(self, client: Any) -> None:
         response = await client.delete(
-            f"/api/v1/tenant/{TENANT_SLUG}/admins/9999", headers=_admin_headers()
+            f"/api/v1/tenant/{TENANT_SLUG}/admins/{uid(9999)}", headers=_admin_headers()
         )
         assert response.status_code == 404

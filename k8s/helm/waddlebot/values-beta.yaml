@@ -270,14 +270,6 @@ ingress:
 
 
 
-        # SECURITY: routed through hub-api, NOT calendar-interaction directly
-        # -- hub-api's scope-gated event_calendar_bp + EventCalendarProxyClient
-        # are the only legitimate JWT-validators/setters of the
-        # X-User-Context/X-API-Key headers calendar_interaction_module trusts
-        # (live authz bypass, fixed 2026-10).
-        - path: /api/v1/calendar
-          pathType: Prefix
-          service: hub-api-v3
 
         - path: /api/v1/marketplace
           pathType: Prefix
@@ -343,11 +335,6 @@ httproute:
       service: "waddlebot-hub-api-v3"
       timeoutSeconds: 3600
     - path: /api/v1/signup-settings
-      service: "waddlebot-hub-api-v3"
-      timeoutSeconds: 3600
-    # SECURITY: routed through hub-api, NOT waddlebot-interactive-productivity
-    # directly (live authz bypass, fixed 2026-10) -- see matching comment above.
-    - path: /api/v1/calendar
       service: "waddlebot-hub-api-v3"
       timeoutSeconds: 3600
     - path: /api/v1/marketplace

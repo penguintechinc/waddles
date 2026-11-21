@@ -198,6 +198,8 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
         for d in docs
         if d["kind"] == "Secret"
         and (d.get("stringData") or {}).get("VALKEY_KV_PASSWORD")
+        # per-service ACL user Secrets (test_valkey_acl_render.py) also carry this key name
+        and "-valkey-user-" not in d["metadata"]["name"]
     ]
     assert len(kv) == 1 and kv[0]["metadata"]["name"].endswith("-valkey-kv")
     pw = kv[0]["stringData"]["VALKEY_KV_PASSWORD"]
@@ -206,9 +208,14 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
     scanned = referrers = 0
     for d in docs:
         if d["kind"] == "Secret":
-            assert d is kv[0] or not any(
-                k.startswith("VALKEY_KV_") for k in (d.get("stringData") or {})
-            ), d["metadata"]["name"]
+            data = d.get("stringData") or {}
+            name = d["metadata"]["name"]
+            # The server-only probe Secret and the per-service ACL user Secrets
+            # (test_valkey_acl_render.py) own their OWN VALKEY_KV_* passwords, never this one.
+            if name.endswith("-valkey-kv-server") or "-valkey-user-" in name:
+                assert pw not in data.values(), name
+                continue
+            assert d is kv[0] or not any(k.startswith("VALKEY_KV_") for k in data), name
             continue
         blob = yaml.safe_dump(d)
         assert pw not in blob and _acl_sha256(pw) not in blob, d["metadata"]["name"]
@@ -239,10 +246,13 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
             ]
         if kv_name in refs:
             referrers += 1
+            # hub-api: GDPR erasure of per-user bundle kv (erasure_external.py) -- the
+            # kv instance is where that data lives (regression: it scanned durable).
             assert d["metadata"]["name"] in (
                 "valkey-kv",
                 "w-waddlebot-svc-action-rust",
                 "w-waddlebot-svc-process-rust",
+                "w-waddlebot-hub-api-v3",
             ) or d["metadata"]["name"].endswith(_RUST), d["metadata"]["name"]
             assert not any(
                 f.get("secretRef", {}).get("name") == kv_name
@@ -250,8 +260,8 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
                 for f in c.get("envFrom", [])
             )
     assert scanned > 10, f"examined only {scanned} workloads"
-    assert referrers == 3, (
-        f"expected valkey-kv + 2 rust pods to reference the kv Secret, got {referrers}"
+    assert referrers == 4, (
+        f"expected valkey-kv + 2 rust pods + hub-api to reference the kv Secret, got {referrers}"
     )
 
 
@@ -364,3 +374,29 @@ def test_beta_tier_without_certs_generates_them_at_runtime():
     valkey = [v for k, v in secrets.items() if k.endswith("valkey-tls")]
     assert len(valkey) == 1, sorted(secrets)
     assert {"ca.crt", "tls.crt", "tls.key"} <= set(valkey[0]["data"])
+
+
+@pytest.mark.parametrize(
+    ("values", "extra", "secret", "url_key", "pw_key"),
+    [
+        ("values-alpha.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "VALKEY_KV_PASSWORD"),
+        ("values-beta.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "VALKEY_KV_PASSWORD"),
+        ("values-local.yaml", (), "w-waddlebot-secrets", "REDIS_URL", "REDIS_PASSWORD"),
+    ],
+)
+def test_hub_api_erasure_reads_bundle_kv_from_the_kv_instance(values, extra, secret, url_key, pw_key):
+    """regression: GDPR erasure scanned the DURABLE Valkey (VALKEY_URL) for `bundlekv:*`, which lives
+    on valkey-kv, and silently erased nothing. hub-api must get VALKEY_KV_URL/VALKEY_KV_PASSWORD from
+    the instance that actually holds bundle kv (kv secret when enabled, cache fallback otherwise)."""
+    docs = _docs(values, extra)
+    hub = [
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "w-waddlebot-hub-api-v3"
+    ]
+    assert len(hub) == 1
+    env = {e["name"]: e for e in hub[0]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["VALKEY_KV_URL"]["valueFrom"]["secretKeyRef"] == {"name": secret, "key": url_key}
+    assert env["VALKEY_KV_PASSWORD"]["valueFrom"]["secretKeyRef"] == {"name": secret, "key": pw_key}
+    durable_key = env.get("VALKEY_URL", {}).get("valueFrom", {}).get("secretKeyRef", {}).get("key", "")
+    assert "VALKEY_KV" not in durable_key

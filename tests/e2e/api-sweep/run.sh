@@ -6,7 +6,7 @@ set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/../../.." && pwd)"
 # shellcheck source=../lib/access.sh
-source "$HERE/../lib/access.sh"
+SWEEP_ACCESS_LAZY=1 source "$HERE/../lib/access.sh"
 VENV="${SWEEP_VENV:-/tmp/sweep-venv}"
 REPORT_DIR="${REPORT_DIR:-/tmp/api-sweep-report}"
 export REPORT_DIR

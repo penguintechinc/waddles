@@ -102,8 +102,10 @@ from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_async_dal, reads_from_replica
 from services.route_guards import platform_analytics_guard
+from services.user_public_id import use_user_public_ids
 
 analytics_bp = Blueprint("v1_analytics", __name__, url_prefix="/api/v1/analytics")
+use_user_public_ids(analytics_bp)
 
 #: Scenario 4 -- pre-existing scope name (security.md SCOPE_BUNDLES table's
 #: own `maintainer -> analytics:read` entry); see module docstring.
@@ -189,7 +191,9 @@ async def get_my_reputation() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@analytics_bp.route("/community/<cuuid:community_id>/members/<int:user_id>/stats", methods=["GET"])
+@analytics_bp.route(
+    "/community/<cuuid:community_id>/members/<uuuid:user_id>/stats", methods=["GET"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]
 async def get_member_stats(community_id: int, user_id: int) -> Any:
@@ -206,7 +210,7 @@ async def get_member_stats(community_id: int, user_id: int) -> Any:
 
 
 @analytics_bp.route(
-    "/community/<cuuid:community_id>/members/<int:user_id>/reputation", methods=["GET"]
+    "/community/<cuuid:community_id>/members/<uuuid:user_id>/reputation", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]
@@ -297,7 +301,7 @@ async def get_platform_community_health() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@analytics_bp.route("/admin/users/<int:user_id>/stats", methods=["GET"])
+@analytics_bp.route("/admin/users/<uuuid:user_id>/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_USERS_ADMIN)  # type: ignore[misc]
 async def get_admin_user_stats(user_id: int) -> Any:
@@ -306,7 +310,7 @@ async def get_admin_user_stats(user_id: int) -> Any:
     return await svc.user_self_stats(_proxy_client, user_id, caller_id, _caller_role(request))
 
 
-@analytics_bp.route("/admin/users/<int:user_id>/reputation", methods=["GET"])
+@analytics_bp.route("/admin/users/<uuuid:user_id>/reputation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_USERS_ADMIN)  # type: ignore[misc]
 async def get_admin_user_reputation(user_id: int) -> Any:

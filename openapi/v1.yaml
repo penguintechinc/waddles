@@ -429,7 +429,7 @@ components:
           title: Targettype
         userId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Userid
       required:
@@ -3793,8 +3793,10 @@ components:
           - type: 'null'
           title: Platformuserid
         userId:
+          anyOf:
+          - type: string
+          - type: 'null'
           title: Userid
-          type: string
       required:
       - userId
       - displayName
@@ -6026,7 +6028,7 @@ components:
           type: string
         userId:
           title: Userid
-          type: integer
+          type: string
       required:
       - userId
       - displayName
@@ -6553,7 +6555,7 @@ components:
           title: Emailverified
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           default: true
           title: Isactive
@@ -7325,13 +7327,6 @@ paths:
                 type: object
           description: Response DTO for `GET /api/v1/admin/bundle-versions`.
       summary: Cross-app bundle-version upload rows, newest first (default `?status=pending`).
-  /api/v1/admin/calendar/verify-ticket:
-    post:
-      operationId: post_adm_verify_ticket
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
   /api/v1/admin/platform-secrets/:
     get:
       description: ''
@@ -8298,603 +8293,6 @@ paths:
           description: Undocumented response
       summary: Rotate the view key behind every browser-source URL (one credential
         per community).
-  /api/v1/admin/{community_id}/calendar/events:
-    get:
-      operationId: get_adm_list_events
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    post:
-      operationId: post_adm_create_event
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}:
-    delete:
-      operationId: delete_adm_delete_event
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    get:
-      operationId: get_adm_get_event
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    put:
-      operationId: put_adm_update_event
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/admins:
-    get:
-      operationId: get_adm_list_event_admins
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    post:
-      operationId: post_adm_assign_event_admin
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/admins/{admin_id}:
-    delete:
-      operationId: delete_adm_revoke_event_admin
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: admin_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    put:
-      operationId: put_adm_update_event_admin
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: admin_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/approve:
-    post:
-      operationId: post_adm_approve_event
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/attendance:
-    get:
-      operationId: get_adm_attendance_stats
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/attendance/export:
-    get:
-      operationId: get_adm_export_attendance
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/attendees:
-    get:
-      operationId: get_adm_attendees
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/check-in:
-    post:
-      operationId: post_adm_check_in
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/check-in-log:
-    get:
-      operationId: get_adm_check_in_log
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/my-permissions:
-    get:
-      operationId: get_adm_my_permissions
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/reject:
-    post:
-      operationId: post_adm_reject_event
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/rsvp:
-    delete:
-      operationId: delete_adm_rsvp_cancel
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    post:
-      operationId: post_adm_rsvp_create
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/rsvp-counts:
-    get:
-      operationId: get_adm_rsvp_counts
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/ticket-types:
-    get:
-      operationId: get_adm_list_ticket_types
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    post:
-      operationId: post_adm_create_ticket_type
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/ticket-types/{type_id}:
-    delete:
-      operationId: delete_adm_delete_ticket_type
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: type_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    put:
-      operationId: put_adm_update_ticket_type
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: type_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/ticketing/disable:
-    post:
-      operationId: post_adm_disable_ticketing
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/ticketing/enable:
-    post:
-      operationId: post_adm_enable_ticketing
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/tickets:
-    get:
-      operationId: get_adm_list_tickets
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    post:
-      operationId: post_adm_create_ticket
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/tickets/{ticket_id}:
-    get:
-      operationId: get_adm_get_ticket
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: ticket_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/tickets/{ticket_id}/cancel:
-    post:
-      operationId: post_adm_cancel_ticket
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: ticket_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/tickets/{ticket_id}/transfer:
-    post:
-      operationId: post_adm_transfer_ticket
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: ticket_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/admin/{community_id}/calendar/events/{event_id}/tickets/{ticket_id}/undo-check-in:
-    post:
-      operationId: post_adm_undo_check_in
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: event_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: ticket_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
   /api/v1/admin/{community_id}/calls/rooms:
     get:
       description: ''
@@ -9627,94 +9025,6 @@ paths:
                 type: object
           description: Response DTO for connected-platforms.
       summary: Get connected platforms aggregate for a community.
-  /api/v1/admin/{community_id}/forms:
-    get:
-      description: ''
-      operationId: get_list_forms
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/forms`.'
-    post:
-      description: ''
-      operationId: post_create_form
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/admin/<id>/forms`.'
-  /api/v1/admin/{community_id}/forms/{form_id}:
-    delete:
-      description: ''
-      operationId: delete_delete_form
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: form_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`DELETE /api/v1/admin/<id>/forms/<formId>`.'
-    get:
-      description: ''
-      operationId: get_get_form
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: form_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/forms/<formId>`.'
-  /api/v1/admin/{community_id}/forms/{form_id}/submissions:
-    get:
-      description: ''
-      operationId: get_form_submissions
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: form_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/forms/<formId>/submissions`.'
   /api/v1/admin/{community_id}/interaction/channels:
     get:
       description: ''
@@ -10424,21 +9734,23 @@ paths:
         default:
           description: Undocumented response
       summary: '`GET /api/v1/admin/<id>/loyalty/stats`.'
-  /api/v1/admin/{community_id}/loyalty/user/{platform_user_id}/balance:
+  /api/v1/admin/{community_id}/loyalty/user/{user_uuid}/balance:
     put:
       description: '
 
-        `platform_user_id` replaces the pre-MVP `<int:user_id>` (hub identity)
+        The path carries the member''s PUBLIC UUID (`community_members.user_uuid`),
+        never a raw
 
-        path segment: `loyalty_balances` is keyed by `(community_id, platform,
+        platform handle. It is resolved server-side to the `(platform, platform_user_id)`
+        row WITHIN
 
-        platform_user_id)`, not a `hub_users.id` -- see
+        this community: `loyalty_balances` is keyed by `(community_id, platform, platform_user_id)`.
 
-        `services/schema.py::bind_loyalty_tables()`. `platform` is required in
+        `platform` is required in the body (one UUID can span linked platform accounts);
+        an unknown
 
-        the body since one path segment can''t disambiguate it; `delta` may be
-
-        negative (removal).'
+        or foreign member (or one without that platform) is a 404. `delta` may be
+        negative.'
       operationId: put_adjust_balance
       parameters:
       - in: path
@@ -10448,15 +9760,15 @@ paths:
           format: uuid
           type: string
       - in: path
-        name: platform_user_id
+        name: user_uuid
         required: true
         schema:
           type: string
       responses:
         default:
           description: Undocumented response
-      summary: '`PUT /api/v1/admin/<id>/loyalty/user/<platformUserId>/balance` --
-        admin add/remove points.'
+      summary: '`PUT /api/v1/admin/<id>/loyalty/user/<memberUuid>/balance` -- admin
+        add/remove points.'
   /api/v1/admin/{community_id}/loyalty/wipe:
     post:
       description: ''
@@ -10672,7 +9984,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -10722,7 +10035,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -10768,7 +10082,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -11582,74 +10897,6 @@ paths:
           description: Undocumented response
       summary: List widgets the community may place (enabled bundles + registered
         widgets).
-  /api/v1/admin/{community_id}/polls:
-    get:
-      description: ''
-      operationId: get_list_polls
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/polls`.'
-    post:
-      description: ''
-      operationId: post_create_poll
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`POST /api/v1/admin/<id>/polls`.'
-  /api/v1/admin/{community_id}/polls/{poll_id}:
-    delete:
-      description: ''
-      operationId: delete_delete_poll
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: poll_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`DELETE /api/v1/admin/<id>/polls/<pollId>`.'
-    get:
-      description: ''
-      operationId: get_get_poll
-      parameters:
-      - in: path
-        name: community_id
-        required: true
-        schema:
-          format: uuid
-          type: string
-      - in: path
-        name: poll_id
-        required: true
-        schema:
-          type: integer
-      responses:
-        default:
-          description: Undocumented response
-      summary: '`GET /api/v1/admin/<id>/polls/<pollId>`.'
   /api/v1/admin/{community_id}/profile:
     put:
       description: ''
@@ -11770,6 +11017,33 @@ paths:
         default:
           description: Undocumented response
       summary: '`PUT /api/v1/admin/<id>/raffle-customization/<eventType>`.'
+  /api/v1/admin/{community_id}/raffle-customization/{event_type}/sound:
+    get:
+      description: '
+
+        Replaces the old public `/uploads/raffle-sounds/...` path: bytes come from
+        the object store
+
+        through hub-api, so only an active member of THIS community (tenant-checked)
+        can fetch them.'
+      operationId: get_sound_route
+      parameters:
+      - in: path
+        name: community_id
+        required: true
+        schema:
+          format: uuid
+          type: string
+      - in: path
+        name: event_type
+        required: true
+        schema:
+          type: string
+      responses:
+        default:
+          description: Undocumented response
+      summary: '`GET /api/v1/admin/<id>/raffle-customization/<eventType>/sound` --
+        stream the stored sound.'
   /api/v1/admin/{community_id}/raffle-customization/{event_type}/upload:
     post:
       description: ''
@@ -12785,7 +12059,7 @@ paths:
                 title: HistoryResponse
                 type: object
           description: Reputation ledger entries, newest first.
-      summary: Reputation ledger, newest first (`?userId=` hub user id, `?limit=`,
+      summary: Reputation ledger, newest first (`?userId=` hub user UUID, `?limit=`,
         `?offset=`).
   /api/v1/admin/{community_id}/reputation/soft-bans:
     get:
@@ -12835,7 +12109,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -12870,7 +12145,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -14466,7 +13742,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -14480,7 +13757,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -14500,7 +13778,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -14520,7 +13799,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -17190,254 +16470,6 @@ paths:
         default:
           description: Undocumented response
       summary: Verify email.
-  /api/v1/calendar/availability/settings:
-    get:
-      operationId: get_cal_get_availability_settings
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-    put:
-      operationId: put_cal_update_availability_settings
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/availability/weekly:
-    get:
-      operationId: get_cal_get_weekly_availability
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-    put:
-      operationId: put_cal_update_weekly_availability
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/availability/{user_id}/slots:
-    get:
-      operationId: get_cal_available_slots
-      parameters:
-      - in: path
-        name: user_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/book/{slug}:
-    post:
-      operationId: post_cal_create_booking
-      parameters:
-      - in: path
-        name: slug
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/book/{slug}/slots:
-    get:
-      operationId: get_cal_booking_slots
-      parameters:
-      - in: path
-        name: slug
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/booking-pages:
-    get:
-      operationId: get_cal_list_booking_pages
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-    post:
-      operationId: post_cal_create_booking_page
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/booking-pages/{id}:
-    delete:
-      operationId: delete_cal_delete_booking_page
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    get:
-      operationId: get_cal_get_booking_page
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    put:
-      operationId: put_cal_update_booking_page
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/booking-pages/{page_id}/best-slots:
-    get:
-      operationId: get_cal_best_slots
-      parameters:
-      - in: path
-        name: page_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/booking-pages/{page_id}/group-availability:
-    get:
-      operationId: get_cal_group_availability
-      parameters:
-      - in: path
-        name: page_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/booking-pages/{page_id}/members:
-    get:
-      operationId: get_cal_group_members
-      parameters:
-      - in: path
-        name: page_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    post:
-      operationId: post_cal_add_group_member
-      parameters:
-      - in: path
-        name: page_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/booking-pages/{page_id}/members/{user_id}:
-    delete:
-      operationId: delete_cal_remove_group_member
-      parameters:
-      - in: path
-        name: page_id
-        required: true
-        schema:
-          type: string
-      - in: path
-        name: user_id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/bookings/{uuid}:
-    delete:
-      operationId: delete_cal_cancel_booking
-      parameters:
-      - in: path
-        name: uuid
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-    get:
-      operationId: get_cal_get_booking
-      parameters:
-      - in: path
-        name: uuid
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/my-bookings:
-    get:
-      operationId: get_cal_my_bookings
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/oauth/calendars:
-    get:
-      operationId: get_cal_connected_calendars
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/oauth/calendars/{id}:
-    delete:
-      operationId: delete_cal_disconnect_calendar
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/oauth/calendars/{id}/sync:
-    post:
-      operationId: post_cal_sync_calendar
-      parameters:
-      - in: path
-        name: id
-        required: true
-        schema:
-          type: string
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/oauth/google/auth-url:
-    get:
-      operationId: get_cal_google_auth_url
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
-  /api/v1/calendar/oauth/microsoft/auth-url:
-    get:
-      operationId: get_cal_microsoft_auth_url
-      parameters: []
-      responses:
-        default:
-          description: Undocumented response
   /api/v1/captcha/challenge:
     get:
       description: ''
@@ -20352,10 +19384,21 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for `POST /api/v1/cookie`.
+              description: 'Request DTO for `POST /api/v1/cookie`.
+
+
+                `consentMethod` is a closed enum -- exactly the values the webui''s
+                `CookieConsentContext` sends
+
+                (`admin_dsar` is written server-side only, never via this endpoint);
+                anything else is 400.'
               properties:
                 consentMethod:
                   default: banner
+                  enum:
+                  - banner
+                  - preferences
+                  - do_not_sell
                   title: Consentmethod
                   type: string
                 preferences:
@@ -23591,7 +22634,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -23634,7 +22678,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         default:
           description: Undocumented response
@@ -23648,7 +22693,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -23656,11 +22702,13 @@ paths:
               description: Request DTO for update user role.
               properties:
                 role:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
+                  enum:
+                  - platform-admin
+                  - support
                   title: Role
+                  type: string
+              required:
+              - role
               title: UpdateUserRoleRequest
               type: object
       responses:
@@ -25582,7 +24630,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25611,7 +24660,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25639,7 +24689,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -25673,7 +24724,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -25700,7 +24752,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25731,7 +24784,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25769,7 +24823,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25824,7 +24879,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -25857,7 +24913,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: session_id
         required: true
@@ -25916,7 +24973,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -25959,7 +25017,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -26002,7 +25061,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -26611,8 +25671,9 @@ paths:
                   title: Role
                   type: string
                 userId:
+                  format: uuid
                   title: Userid
-                  type: integer
+                  type: string
               required:
               - userId
               title: AddTenantAdminRequest
@@ -27920,7 +26981,8 @@ paths:
         name: user_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:

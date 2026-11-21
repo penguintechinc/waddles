@@ -81,6 +81,7 @@ jobs:
             scripts/ci/**
             scripts/backfill_bundle_author.py
             scripts/gen-music-manifest-tools.py
+            scripts/gen-superpenguin-manifests.py
             wit/**
             core/bundle_executor/**
             core/svc_process/**

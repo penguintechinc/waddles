@@ -32,7 +32,7 @@
 
 1. **Malicious repo:** traversal/symlink-escape/zip-bomb/huge-file/deep-path/manifest claiming `penguintechinc.*` or another source's prefix; hostile `bundle.yaml`; dependency manifests naming denylisted packages. Reviewer confirms each is a hard reject with a logged reason and a test.
 2. **DNS rebind / SSRF:** pre-check passes then host resolves internal; clone must be impossible except through the egress-proxy allowlist (network policy denies direct git egress from hub). Reviewer verifies the policy, not just the Python check.
-3. **Namespace shadowing:** `core.*` valid iff `source.is_builtin`; externals forced to `waddles.integrations.src-{short}.{app}`; cross-source collision impossible; SYSTEM install asserts `is_builtin`; seeder-only permission grants stay builtin-only.
+3. **Namespace shadowing:** `core.*` valid iff `source.is_builtin`; externals forced to `penguintechinc.waddles.src-{short}-{app}`; cross-source collision impossible; SYSTEM install asserts `is_builtin`; seeder-only permission grants stay builtin-only.
 4. **Oversized/hostile build:** sandbox caps (CPU/mem/ephemeral-storage, `activeDeadlineSeconds`, source+output size, single componentized `.wasm`), unvendored deps fail loud, no egress.
 5. **Unapproved auto-update:** a new commit must never move `pinned_commit_sha`, never reach INSTALLED, never replace the running approved version; force-push behind the pin sets `error`; changing `git_url`/`build_mode` voids the sandbox ack; a same-version/different-digest is refused.
 
@@ -48,7 +48,7 @@
 
 **Interfaces:**
 - Produces: `class BuildMode(IntEnum): PREBUILT=1, SANDBOX=2, BUILTIN_IMAGE=3`; `class SourceStatus(IntEnum): PENDING_SCAN, ACTIVE, NEEDS_APPROVAL, DISABLED, ERROR`; `@dataclass(slots=True, frozen=True) SourceRecord(public_id, name, is_builtin, git_url, ref, pinned_commit_sha, build_mode, publisher_key_fingerprint, publisher_public_key, sandbox_ack_*, status, last_scanned_at, last_scan_error, pending_commit_sha, created_by, ...)`; `async create_source(...) / get_source(public_id) / list_sources() / disable_source(public_id)`.
-- Table per design 4.1; CHECK constraints: builtin row has NULL `git_url`; `build_mode=SANDBOX` requires ack columns non-null; `build_mode=PREBUILT` requires publisher key columns; `pinned_commit_sha` ~ `^[0-9a-f]{40}$`; https-only `git_url`; exactly one `is_builtin` (partial unique index). Seed the builtin sentinel row in the migration. `source_id` nullable FK on `app_versions` + `app_catalog`, backfill `waddles.core.*` rows to the builtin row. Audit trigger mirroring `app_versions_audit_log` (`069_app_bundle_tiers.sql:21-58`, alembic `0023`). Builtin immutable: trigger/guard blocks update of url/mode and delete.
+- Table per design 4.1; CHECK constraints: builtin row has NULL `git_url`; `build_mode=SANDBOX` requires ack columns non-null; `build_mode=PREBUILT` requires publisher key columns; `pinned_commit_sha` ~ `^[0-9a-f]{40}$`; https-only `git_url`; exactly one `is_builtin` (partial unique index). Seed the builtin sentinel row in the migration. `source_id` nullable FK on `app_versions` + `app_catalog`, backfill `penguintechinc.waddles.*` rows to the builtin row. Audit trigger mirroring `app_versions_audit_log` (`069_app_bundle_tiers.sql:21-58`, alembic `0023`). Builtin immutable: trigger/guard blocks update of url/mode and delete.
 
 - [ ] **Step 1: Failing tests** - migration up/down on a fresh DB AND on an existing DB with pre-populated `app_versions` rows (backfill assertion; existing-DB recipe from #806); single-head assertion; CHECK constraint rejections (non-https, bad SHA, sandbox without ack, prebuilt without key, second builtin); builtin delete/edit refused; audit row written on insert/update.
 - [ ] **Step 2:** Run, confirm failures.
@@ -70,7 +70,7 @@
 - Consumes: `SourceRecord` (Task 1). Produces: `enforce_source_namespace(*, app_id: str, source: SourceRecord) -> None` raising on `core.*` for non-builtin, on another source's prefix, or on a non-`src-{short}` feature segment; `short = first 12 hex of public_id`, collision-checked at source creation.
 - Existing seeder tests (~1700 lines) must stay green unchanged.
 
-- [ ] **Step 1: Failing tests** - external claiming `waddles.core.x.y` rejected; claiming `src-<other>` rejected; builtin accepts `core.*`; external cannot be installed with SYSTEM actor; `_APP_ID_RE` unchanged (regression test).
+- [ ] **Step 1: Failing tests** - external claiming `penguintechinc.waddles.x-y` rejected; claiming `src-<other>` rejected; builtin accepts `core.*`; external cannot be installed with SYSTEM actor; `_APP_ID_RE` unchanged (regression test).
 - [ ] **Step 2-5:** run failing, implement, pass (run the full existing seeder suite), commit.
 
 ---

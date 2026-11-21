@@ -58,9 +58,11 @@ def test_parse_usage_entry_decodes_byte_fields() -> None:
 
 
 def test_parse_usage_entry_parses_a_real_community_id() -> None:
-    delta = parse_usage_entry(_entry(community_id="7", app_id="waddles.socials.music.default"))
+    delta = parse_usage_entry(
+        _entry(community_id="7", app_id="penguintechinc.waddles.socials-music")
+    )
     assert delta.community_id == 7
-    assert delta.app_id == "waddles.socials.music.default"
+    assert delta.app_id == "penguintechinc.waddles.socials-music"
 
 
 def test_parse_usage_entry_parses_media_minutes_for_streaming() -> None:
@@ -178,7 +180,7 @@ async def test_run_usage_aggregation_batch_groups_two_different_workstreams_sepa
                         b"community_id": b"_tenant",
                         b"workstream_id": b"ws-a",
                         b"stage": b"process",
-                        b"app_id": b"waddles.socials.music.default",
+                        b"app_id": b"penguintechinc.waddles.socials-music",
                         b"hour": b"2026-09-14T11:00:00+00:00",
                         b"events": b"1",
                         b"invocations": b"1",
@@ -195,7 +197,7 @@ async def test_run_usage_aggregation_batch_groups_two_different_workstreams_sepa
                         b"community_id": b"_tenant",
                         b"workstream_id": b"ws-b",
                         b"stage": b"process",
-                        b"app_id": b"waddles.socials.music.default",
+                        b"app_id": b"penguintechinc.waddles.socials-music",
                         b"hour": b"2026-09-14T11:00:00+00:00",
                         b"events": b"1",
                         b"invocations": b"1",

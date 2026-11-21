@@ -46,7 +46,7 @@ invalid = [
     "a/b.c.d",
     "a.b.c%41",
     "ü.b.c",
-    "waddles.core.x.y",
+    "penguintechinc.waddles.x.y",
     "a" * 50 + "." + "b" * 50 + "." + "c" * 50,
 ]
 core_yes = [
@@ -57,7 +57,7 @@ core_yes = [
 ]
 core_no = [
     "",
-    "waddles.core.x",
+    "penguintechinc-waddles.x",
     "penguintechinc.waddles.",
     "penguintechinc.waddles.a.b",
     "penguintechinc.waddles.-x",

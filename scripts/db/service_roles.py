@@ -120,7 +120,6 @@ REPO_CREDENTIAL_ROLES = (
     "youtube_action",
     "ai_interaction",
     "alias_interaction",
-    "calendar_interaction",
     "inventory_interaction",
     "loyalty_interaction",
     "memories_interaction",

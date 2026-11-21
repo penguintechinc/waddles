@@ -70,7 +70,7 @@ public class WaddleProcessStageTests
 public class WaddleActionStageTests
 {
     private static StageEnvelopeInfo EnvelopeFor(string platform, string? channelId) => new(
-        "tenant-1", null, "waddles.test.app", "action",
+        "tenant-1", null, "penguintechinc.waddles.test-app", "action",
         new PlatformEventInfo(platform, "chat.message", "user-1",
             System.Text.Json.JsonSerializer.Serialize(new ChatReplyPayload("pong", channelId), WaddleSdkJsonContext.Default.ChatReplyPayload),
             "2026-09-28T00:00:00.000Z"),

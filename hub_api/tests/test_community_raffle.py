@@ -40,6 +40,31 @@ def _feature_enabled_default_on(monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(raffle_module, "feature_enabled", AsyncMock(return_value=True))
 
 
+MP3_BYTES = b"ID3\x03\x00\x00\x00\x00\x00\x00" + b"\x01" * 40
+
+
+@pytest.fixture
+def bucket(monkeypatch: pytest.MonkeyPatch) -> dict[str, tuple[bytes, str]]:
+    """In-memory assets bucket behind `storage_service`'s private-object helpers."""
+    import services.community_raffle as raffle_svc
+
+    store: dict[str, tuple[bytes, str]] = {}
+
+    async def put(key: str, data: bytes, content_type: str) -> None:
+        store[key] = (data, content_type)
+
+    async def get(key: str) -> bytes | None:
+        return store[key][0] if key in store else None
+
+    async def delete(key: str) -> None:
+        store.pop(key, None)
+
+    monkeypatch.setattr(raffle_svc.storage_service, "put_private_object", put)
+    monkeypatch.setattr(raffle_svc.storage_service, "get_private_object", get)
+    monkeypatch.setattr(raffle_svc.storage_service, "delete_private_object", delete)
+    return store
+
+
 def _admin(community_db: Any, community_id: int) -> str:
     """Admin URL prefix carrying the community's public UUID."""
     return f"/api/v1/admin/{public_id(community_db[0], community_id)}"
@@ -187,23 +212,95 @@ class TestUpload:
         assert response.status_code == 400
         assert "2MB" in (await response.get_json())["error"]["message"]
 
-    async def test_upload_success(
-        self, client: Any, auth_headers: Any, community_db: Any, tmp_path: Any, monkeypatch: Any
+    async def test_upload_rejects_oversized_content_length_before_parsing(
+        self, client: Any, auth_headers: Any, community_db: Any, bucket: dict[str, Any]
     ) -> None:
-        import services.community_raffle as raffle_svc
+        _, community_id = community_db
+        response = await client.post(
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
+            headers={**auth_headers(scope="community.raffle:write"), "Content-Length": "9999999"},
+            data=b"x",
+        )
+        assert response.status_code == 400
+        assert "2MB" in (await response.get_json())["error"]["message"]
+        assert bucket == {}
 
-        monkeypatch.setattr(raffle_svc, "_UPLOAD_BASE_DIR", str(tmp_path))
+    async def test_sound_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
+        from tests.community_ids import UNKNOWN_PUBLIC_ID
+
+        response = await client.get(
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/raffle-customization/raffle_start/sound",
+            headers=auth_headers(scope="community.raffle:read"),
+        )
+        assert response.status_code == 404
+
+    async def test_upload_rejects_renamed_non_audio_file(
+        self, client: Any, auth_headers: Any, community_db: Any, bucket: dict[str, Any]
+    ) -> None:
+        """regression: a renamed executable (`.mp3` extension, MZ magic) must be a 400."""
+        _, community_id = community_db
+        response = await client.post(
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
+            headers=auth_headers(scope="community.raffle:write"),
+            files={"sound": FileStorage(BytesIO(b"MZ\x90\x00" + b"\x00" * 60), filename="x.mp3")},
+        )
+        assert response.status_code == 400
+        assert "not a supported audio type" in (await response.get_json())["error"]["message"]
+        assert bucket == {}
+
+    async def test_upload_success_then_stream_back(
+        self, client: Any, auth_headers: Any, community_db: Any, bucket: dict[str, Any]
+    ) -> None:
         _, community_id = community_db
 
         response = await client.post(
             f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
             headers=auth_headers(scope="community.raffle:write"),
-            files={"sound": FileStorage(BytesIO(b"real-ish-audio-bytes"), filename="clip.mp3")},
+            files={"sound": FileStorage(BytesIO(MP3_BYTES), filename="clip.mp3")},
         )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["success"] is True
         assert body["customization"]["sound_format"] == "mp3"
+        sound_url = body["customization"]["sound_url"]
+        assert sound_url.endswith("/raffle-customization/raffle_start/sound")
+        assert len(bucket) == 1
+
+        played = await client.get(sound_url, headers=auth_headers(scope="community.raffle:read"))
+        assert played.status_code == 200
+        assert played.mimetype == "audio/mpeg"
+        assert played.headers["X-Content-Type-Options"] == "nosniff"
+        assert await played.get_data() == MP3_BYTES
+
+    async def test_sound_404_when_none_stored(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        _, community_id = community_db
+        response = await client.get(
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/sound",
+            headers=auth_headers(scope="community.raffle:read"),
+        )
+        assert response.status_code == 404
+
+    async def test_sound_invalid_event_type_is_400(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        _, community_id = community_db
+        response = await client.get(
+            f"{_admin(community_db, community_id)}/raffle-customization/bogus/sound",
+            headers=auth_headers(scope="community.raffle:read"),
+        )
+        assert response.status_code == 400
+
+    async def test_sound_requires_read_scope(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        _, community_id = community_db
+        response = await client.get(
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/sound",
+            headers=auth_headers(scope="community.polls:read"),
+        )
+        assert response.status_code == 403
 
 
 #: Every JSON response read here must carry community ids as UUID strings (conftest guard).

@@ -21,6 +21,7 @@ from quart_schema import QuartSchema
 
 from services import db_routing
 from services.db_routing import get_read_dals, reset_fallback_warning
+from services.global_identity import SYSTEM_TENANT_SLUG
 from services.schema import bind_auth_tables
 from tests.conftest import TENANT_SLUG
 
@@ -141,6 +142,9 @@ class TestSplitRoutes:
         platform_db.dal.audit_log.insert(
             user_id=1, action="PRIMARY_ONLY", created_at=datetime.now(UTC)
         )
+        # The platform group is operator-only (`require_system_tenant`): the caller carries the
+        # reserved `system` tenant claim, which must exist in the authz (primary) DB.
+        platform_db.dal.tenants.insert(slug=SYSTEM_TENANT_SLUG, display_name="System")
         platform_db.dal.commit()
         replica = _file_dal(tmp_path, "replica.db", (bind_platform_tables,))
         replica.audit_log.insert(user_id=2, action="REPLICA_ONLY", created_at=datetime.now(UTC))
@@ -154,10 +158,21 @@ class TestSplitRoutes:
         token = make_user_token(
             user_id=1,
             scope="*:read *:write *:admin *:delete settings:write users:admin",
-            tenant=TENANT_SLUG,
+            tenant=SYSTEM_TENANT_SLUG,
         )
         headers = {"Authorization": f"Bearer {token}"}
+        tenant_token = make_user_token(
+            user_id=1,
+            scope="*:read *:write *:admin *:delete settings:write users:admin",
+            tenant=TENANT_SLUG,
+        )
         client = app.test_client()
+
+        # Companion: the same admin scope under a non-system tenant is refused outright.
+        denied = await client.get(
+            "/api/v1/platform/audit-log", headers={"Authorization": f"Bearer {tenant_token}"}
+        )
+        assert denied.status_code == 403
 
         platform_db.read_dal = replica
         try:

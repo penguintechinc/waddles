@@ -17,8 +17,8 @@ import pytest
 from services.app_command_backfill import BackfillResult, backfill_active_commands
 from services.app_command_service import command_owner
 
-_A = "waddles.core.alpha.default"
-_B = "waddles.core.beta.default"
+_A = "penguintechinc.waddles.alpha"
+_B = "penguintechinc.waddles.beta"
 _T0 = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
 _T1 = datetime(2026, 10, 2, 12, 0, tzinfo=UTC)
 _T2 = datetime(2026, 10, 3, 12, 0, tzinfo=UTC)

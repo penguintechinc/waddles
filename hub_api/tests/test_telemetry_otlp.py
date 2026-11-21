@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 import time
 from typing import Any
 
@@ -219,6 +220,28 @@ async def test_dead_exporter_never_breaks_startup_latency_or_memory(
     monkeypatch: pytest.MonkeyPatch, client_for: Any, caplog: pytest.LogCaptureFixture
 ) -> None:
     queue_cap = 64
+    request_thread = threading.get_ident()
+    export_threads: list[int] = []
+    export_seen = threading.Event()
+
+    def _record_export(original: Any) -> Any:
+        """Wrap an exporter's `export` to log which thread ran it, then defer to the real one."""
+
+        def wrapper(self: Any, *args: Any, **kwargs: Any) -> Any:
+            export_threads.append(threading.get_ident())
+            export_seen.set()
+            return original(self, *args, **kwargs)
+
+        return wrapper
+
+    monkeypatch.setattr(
+        telemetry._ScrubbingSpanExporter,
+        "export",
+        _record_export(telemetry._ScrubbingSpanExporter.export),
+    )
+    monkeypatch.setattr(
+        telemetry.OTLPLogExporter, "export", _record_export(telemetry.OTLPLogExporter.export)
+    )
     _enable(
         monkeypatch,
         f"http://127.0.0.1:{_free_port()}",
@@ -249,8 +272,17 @@ async def test_dead_exporter_never_breaks_startup_latency_or_memory(
         )
         assert span_q.maxlen == queue_cap and len(span_q) <= queue_cap
         assert log_q.maxlen == queue_cap and len(log_q) <= queue_cap
-        assert max(latencies) < 2.0, "a dead collector slowed a request"
-        assert sum(latencies) / len(latencies) < 0.25
+        # Deterministic proof the dead collector is off the request path: every export attempt
+        # ran on a background worker thread, never the thread serving requests. Wait (bounded) for
+        # at least one attempt so the check cannot pass vacuously.
+        await asyncio.to_thread(export_seen.wait, 10.0)
+        assert export_threads, "no export attempted: dead-exporter path not exercised"
+        assert request_thread not in export_threads, "an export ran on the request thread"
+        # Latency is a coarse sanity bound only: the median is robust to a single CI scheduler
+        # stall (the old absolute max<2s flaked on loaded runners), while a collector that truly
+        # blocked requests (connect timeout 500ms each) would push the median far past this.
+        median = sorted(latencies)[len(latencies) // 2]
+        assert median < 0.25, f"a dead collector slowed requests (median {median * 1000:.0f}ms)"
         s = time.monotonic()
         finished = await runtime.shutdown(3.0)
         shutdown_seconds = time.monotonic() - s

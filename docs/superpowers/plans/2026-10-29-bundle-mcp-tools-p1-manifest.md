@@ -4,7 +4,7 @@
 
 **Goal:** Add `kind: app|service` and the MCP-like **exported-tools** (service bundles) and **requested-tools** (app + service bundles) manifest blocks, with validation enforcing the invocation matrix — the foundation every later MCP-tools phase builds on.
 
-**Architecture:** Additive fields on the existing `BundleManifestV2` (hub-api) and `flask_core.AppManifest` parsers, each a new `_require`-validated defaulted-tail field + dedicated `parse_*` helper, mirroring `parse_permission_declarations`. `kind` is inferred from the `waddles.core.*` namespace heuristic when absent (back-compat) and explicit when present. A denormalized `app_catalog.kind` **alembic** column is listing convenience; `manifest_json` stays source of truth. No new RPC/host behavior here — just the typed, validated surface.
+**Architecture:** Additive fields on the existing `BundleManifestV2` (hub-api) and `flask_core.AppManifest` parsers, each a new `_require`-validated defaulted-tail field + dedicated `parse_*` helper, mirroring `parse_permission_declarations`. `kind` is inferred from the `penguintechinc.waddles.*` namespace heuristic when absent (back-compat) and explicit when present. A denormalized `app_catalog.kind` **alembic** column is listing convenience; `manifest_json` stays source of truth. No new RPC/host behavior here — just the typed, validated surface.
 
 **Tech Stack:** Python 3.13, `@dataclass(slots=True, frozen=True)`, pytest (mypy --strict, ≥90% cov), alembic.
 
@@ -38,7 +38,7 @@
 - Test: `hub_api/tests/test_bundle_manifest_v2.py`
 
 **Interfaces:**
-- Produces: `BundleManifestV2.kind: str` (`"app"|"service"`); `_infer_kind(app_id: str, module: str) -> str` (namespace heuristic: `waddles.core.*` / connector/economy/reputation modules → `"service"`, else `"app"`).
+- Produces: `BundleManifestV2.kind: str` (`"app"|"service"`); `_infer_kind(app_id: str, module: str) -> str` (namespace heuristic: `penguintechinc.waddles.*` / connector/economy/reputation modules → `"service"`, else `"app"`).
 
 - [ ] **Step 1: Write failing tests** — in `test_bundle_manifest_v2.py`: `test_kind_explicit_service` (`_parse({"kind":"service"}).kind == "service"`); `test_kind_defaults_inferred` (`_parse({}).kind` equals `_infer_kind(_VALID_MANIFEST["app_id"], _VALID_MANIFEST["module"])`); `test_kind_invalid` (`_parse({"kind":"widget"})` raises `ManifestV2Error`, `exc.value.reason == "invalid_kind"`).
 - [ ] **Step 2: Run** `pytest hub_api/tests/test_bundle_manifest_v2.py -k kind -v` → FAIL (`kind` not a field).

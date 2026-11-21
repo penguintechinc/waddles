@@ -131,6 +131,25 @@ class TestSaveConsent:
         assert body["data"]["consentId"] is not None
         assert "waddlebot_consent_id" in response.headers.get("Set-Cookie", "")
 
+    @pytest.mark.parametrize("method", ["banner", "preferences", "do_not_sell"])
+    async def test_consent_method_enum_values_accepted(self, client: Any, method: str) -> None:
+        """Exactly the values the webui's CookieConsentContext sends are accepted."""
+        response = await client.post(
+            "/api/v1/cookie",
+            json={"preferences": {"functional": True}, "consentMethod": method},
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize("method", ["admin_dsar", "x" * 5000, "<script>", "", None, 7])
+    async def test_consent_method_outside_enum_is_400(self, client: Any, method: Any) -> None:
+        """`consentMethod` is a closed enum: free text (even server-only `admin_dsar`) is 400."""
+        response = await client.post(
+            "/api/v1/cookie",
+            json={"preferences": {"functional": True}, "consentMethod": method},
+        )
+        assert response.status_code == 400
+        assert "waddlebot_consent_id" not in response.headers.get("Set-Cookie", "")
+
     async def test_gpc_overrides_marketing_true_in_request_body(self, client: Any) -> None:
         response = await client.post(
             "/api/v1/cookie",

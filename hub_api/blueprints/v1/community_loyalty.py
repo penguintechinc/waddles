@@ -29,6 +29,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any, cast
+from uuid import UUID
 
 from flask_core.api_utils import error_response
 from flask_core.auth import DEFAULT_TENANT_SLUG
@@ -215,19 +216,18 @@ async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
 # ===== Admin: balance adjustment =====
 
 
-@loyalty_bp.route("/<cuuid:community_id>/loyalty/user/<platform_user_id>/balance", methods=["PUT"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/user/<uuid:user_uuid>/balance", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:admin")  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
-async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict[str, Any], int]:
-    """`PUT /api/v1/admin/<id>/loyalty/user/<platformUserId>/balance` -- admin add/remove points.
+async def adjust_balance(community_id: int, user_uuid: UUID) -> tuple[dict[str, Any], int]:
+    """`PUT /api/v1/admin/<id>/loyalty/user/<memberUuid>/balance` -- admin add/remove points.
 
-    `platform_user_id` replaces the pre-MVP `<int:user_id>` (hub identity)
-    path segment: `loyalty_balances` is keyed by `(community_id, platform,
-    platform_user_id)`, not a `hub_users.id` -- see
-    `services/schema.py::bind_loyalty_tables()`. `platform` is required in
-    the body since one path segment can't disambiguate it; `delta` may be
-    negative (removal).
+    The path carries the member's PUBLIC UUID (`community_members.user_uuid`), never a raw
+    platform handle. It is resolved server-side to the `(platform, platform_user_id)` row WITHIN
+    this community: `loyalty_balances` is keyed by `(community_id, platform, platform_user_id)`.
+    `platform` is required in the body (one UUID can span linked platform accounts); an unknown
+    or foreign member (or one without that platform) is a 404. `delta` may be negative.
     """
     if not _tenant_ok(community_id):
         return _err(not_found("Community not found"))
@@ -241,6 +241,11 @@ async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict
         return _err(bad_request("platform (string) and delta (int) are required"))
 
     async_dal, dal = _dal()
+    platform_user_id = loyalty_svc.resolve_member_identity(
+        dal, community_id=community_id, user_uuid=str(user_uuid), platform=platform
+    )
+    if platform_user_id is None:
+        return _err(not_found("Member not found"))
     try:
         actor_id = get_current_user_id(request)
         balance = await loyalty_svc.adjust(

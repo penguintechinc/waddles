@@ -1,5 +1,7 @@
 # SuperPenguinTV Fishing Game — Port to Waddles C# App Bundles
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 **Status:** DESIGN — not started. **Author credit:** original game design and implementation by **superpenguintv**
 (MIT license, ported with permission). **Source:** `PenguinTwitchBot/Bot/Commands/Fishing/` (~21 files, C#/.NET,
 EF Core + SignalR overlay). **Target:** Waddles WASM app bundles (`waddle:bundle@1.0.0`, C# via `componentize-dotnet`),
@@ -166,12 +168,12 @@ small.
 
 | Bundle (`app_id`) | Owns | Depends on | Ports from |
 |---|---|---|---|
-| `waddles.integrations.superpenguin.fishing-core` | Casts, catch math, gold ledger, inventory, sell | nothing (foundation) | `FishingCalculations`, `FishingRarityWeightProfiles`, `FishingRarityThresholdRules`, `FishingValueRules`, `FishingGameplayService`, `FishingInventoryService`, `FishingInventorySellRules`, `FishingTierComparisonRules` |
-| `waddles.integrations.superpenguin.fishing-shop` | Shop catalog, item generation, dynamic pricing/tiers, boost application data | reads fishing-core's `data.tables` (own role, cross-bundle read needs a shared/exported table or an event, not a raw cross-bundle DB grant — see §3) | `FishingShopService`, `FishingShopItemGenerator` |
-| `waddles.integrations.superpenguin.fishing-tournaments` | Tournament lifecycle, standings, reward settlement, leaderboards | fishing-core's catch events (`process-stage` consumes fishing-core's `platform-event`, or both read the same `fish_catches` table if co-owned — see §3 open question) | `FishingTournamentScheduler`, `FishingService` tournament methods, `FishingTournamentStanding`, `FishingTournamentRewardStanding`, `FishingLeaderboardService` |
-| `waddles.integrations.superpenguin.fishing-admin` *(optional, cut-able from MVP)* | Fish-type/settings CRUD, `AnalyzeGameBalance`/`SimulateFishing` reports, help-page data | reads fishing-core + fishing-shop tables | `FishingAnalyticsService`, `FishingHelpDataService`, fish-type/settings CRUD from `FishingService` |
+| `psychoboy.penguintwitchbot.fishing-core` | Casts, catch math, gold ledger, inventory, sell | nothing (foundation) | `FishingCalculations`, `FishingRarityWeightProfiles`, `FishingRarityThresholdRules`, `FishingValueRules`, `FishingGameplayService`, `FishingInventoryService`, `FishingInventorySellRules`, `FishingTierComparisonRules` |
+| `psychoboy.penguintwitchbot.fishing-shop` | Shop catalog, item generation, dynamic pricing/tiers, boost application data | reads fishing-core's `data.tables` (own role, cross-bundle read needs a shared/exported table or an event, not a raw cross-bundle DB grant — see §3) | `FishingShopService`, `FishingShopItemGenerator` |
+| `psychoboy.penguintwitchbot.fishing-tournaments` | Tournament lifecycle, standings, reward settlement, leaderboards | fishing-core's catch events (`process-stage` consumes fishing-core's `platform-event`, or both read the same `fish_catches` table if co-owned — see §3 open question) | `FishingTournamentScheduler`, `FishingService` tournament methods, `FishingTournamentStanding`, `FishingTournamentRewardStanding`, `FishingLeaderboardService` |
+| `psychoboy.penguintwitchbot.fishing-admin` *(optional, cut-able from MVP)* | Fish-type/settings CRUD, `AnalyzeGameBalance`/`SimulateFishing` reports, help-page data | reads fishing-core + fishing-shop tables | `FishingAnalyticsService`, `FishingHelpDataService`, fish-type/settings CRUD from `FishingService` |
 
-All four share `feature: waddles.integrations.superpenguin` (module `integrations`, matches
+All four share `feature: penguintechinc.waddles.integrations-superpenguin` (module `integrations`, matches
 `libs/flask_core/flask_core/app_manifest.py:71` `KNOWN_MODULES`) and `provider: thirdparty` — the closest existing
 manifest field to crediting an external author (§7 proposes the actual attribution fields, which don't exist yet).
 
@@ -268,7 +270,7 @@ Read: `action/interactive/loyalty_interaction_module/services/currency_service.p
 and `core/svc_action/src/capabilities.rs`) has exactly 8 variants — `Context, Http, Kv, Db, Relay, Flags, Log,
 Clock` — one per `stage.wit` import. There is no `Loyalty`/`Points`/`Currency` kind, and `stage.wit` declares no such
 interface. The v1.1 design doc adds `moderation` and `db.execute-batch` but nothing for currency either. The
-existing loyalty system (`action/interactive/loyalty_interaction_module`'s `CurrencyService`) is Python, called
+existing loyalty system (action/interactive/loyalty_interaction_module's `CurrencyService`) is Python, called
 in-process by the **native** (non-WASM) `core/svc_process/builtin_handlers/community_loyalty_process.py` — a different,
 legacy bundle mechanism from the WASM component model fishing will use, with no host-capability bridge between them.
 

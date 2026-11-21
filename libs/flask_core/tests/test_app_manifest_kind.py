@@ -65,7 +65,7 @@ def test_invalid_kind_rejected() -> None:
 @pytest.mark.parametrize(
     "app_id",
     [
-        "waddles.bot.discord.gateway",
+        "penguintechinc.waddles.bot.discord",
         "penguintechinc.waddles",
         "penguintechinc.waddles.a.b",
         "Penguintechinc.waddles.x",

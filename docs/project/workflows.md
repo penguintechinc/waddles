@@ -152,11 +152,6 @@ Response modules that execute commands and user interactions:
   - Item tracking and trading
   - Persistence layer
 
-- **calendar_interaction_module** (port 8009)
-  - Event scheduling and management
-  - Approval workflows
-  - Recurring event support
-
 - **memories_interaction_module** (port 8014)
   - Quote and memory storage
   - Reminder management

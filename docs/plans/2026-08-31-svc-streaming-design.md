@@ -1,5 +1,7 @@
 # svc-streaming (RTC + Stream-Forward / Transcode) — Design Specification
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Status: **DRAFT — for review, not implementation.** Extends
 `docs/plans/2026-08-26-v3-scbm-apps-design.md` (Modules/Features/Apps, seven→eight
 container topology), `docs/plans/2026-08-31-app-bundle-sdk-design.md` (pipeline, isolation
@@ -153,8 +155,8 @@ from "how do we detect" to "surface what's already detected":
 
 | Platform | Receiver (Python/Quart) | Live-state already implemented today | Connected-channel model |
 |---|---|---|---|
-| **Twitch** | `trigger/receiver/twitch_module` | **PUSH, done** — `eventsub_handler.py:215-236` already emits `stream_online` (with `stream_type`/`started_at`) and `stream_offline` from `stream.online`/`stream.offline` EventSub events; HMAC-verified (`:90`) | `community_servers` table → community map, Redis-cached (`channel_manager.py:41-63`) |
-| **YouTube Live** | `trigger/receiver/youtube_live_module` | **PUSH + POLL, done** — WebSub/PubSubHubbub callback detects live streams (`webhook_handler.py:5-6,32`); `youtube_client.get_live_broadcasts()` searches `eventType=live` (`youtube_client.py:141-178`) as the poll path | runtime registration `POST /api/v1/channels/register` (`app.py:107-152`) — no persistent table |
+| **Twitch** | trigger/receiver/twitch_module | **PUSH, done** — `eventsub_handler.py:215-236` already emits `stream_online` (with `stream_type`/`started_at`) and `stream_offline` from `stream.online`/`stream.offline` EventSub events; HMAC-verified (`:90`) | `community_servers` table → community map, Redis-cached (`channel_manager.py:41-63`) |
+| **YouTube Live** | trigger/receiver/youtube_live_module | **PUSH + POLL, done** — WebSub/PubSubHubbub callback detects live streams (`webhook_handler.py:5-6,32`); `youtube_client.get_live_broadcasts()` searches `eventType=live` (`youtube_client.py:141-178`) as the poll path | runtime registration `POST /api/v1/channels/register` (`app.py:107-152`) — no persistent table |
 
 **Recommendation:** do **not** build new detection. Add a thin **live-status projection** in
 the hub-api control plane that these receivers write to (they already have the events —
@@ -210,8 +212,8 @@ engine itself is §8.1.
 
 | Legacy component | Language today | What it actually is | Absorbed as |
 |---|---|---|---|
-| `core/module_rtc` (+ `svc-rtc.yaml`) | **Go 1.24** (`go.mod:1-3`); `cmd/server/main.go:19`; **LiveKit** control plane (`go.mod:8-11`), HTTP-only, LiveKit SFU is external; rooms/join-JWT/mute/kick/raise-hand (`internal/services/room_service.go:53-178`, `call_features.go:32-106`); optional MinIO recording | RTC capability (#7) — control plane **rewritten in Rust**; LiveKit stays external (or §8.1) |
-| `core/video_proxy_module` | **Python/Quart** (`app.py:68`, hypercorn); control plane over external **MarchProxy** RTMP relay (`README.md:3,27`; `MARCHPROXY_GRPC_HOST/PORT`, `config.py:39-40`) — MarchProxy does the real RTMP ingest + x265/AV1/x264 transcode + fan-out | INGEST/FORWARD/RECORD/TRANSCODE control (#1,3,4,5,6) — control plane **rewritten in Rust**; MarchProxy stays external (or §8.1) |
+| core/module_rtc (+ `svc-rtc.yaml`) | **Go 1.24** (`go.mod:1-3`); `cmd/server/main.go:19`; **LiveKit** control plane (`go.mod:8-11`), HTTP-only, LiveKit SFU is external; rooms/join-JWT/mute/kick/raise-hand (`internal/services/room_service.go:53-178`, `call_features.go:32-106`); optional MinIO recording | RTC capability (#7) — control plane **rewritten in Rust**; LiveKit stays external (or §8.1) |
+| core/video_proxy_module | **Python/Quart** (`app.py:68`, hypercorn); control plane over external **MarchProxy** RTMP relay (`README.md:3,27`; `MARCHPROXY_GRPC_HOST/PORT`, `config.py:39-40`) — MarchProxy does the real RTMP ingest + x265/AV1/x264 transcode + fan-out | INGEST/FORWARD/RECORD/TRANSCODE control (#1,3,4,5,6) — control plane **rewritten in Rust**; MarchProxy stays external (or §8.1) |
 
 **There is nothing to "port" for the actual media path** — no first-party ingest/transcode/
 SFU code exists to translate Go→Rust. The Go→Rust work is confined to the two **control
@@ -329,8 +331,8 @@ DB account (read-only on the read replica for routing reads, §3; `backend.md` D
 | Today | Becomes |
 |---|---|
 | **No first-party media engine** — external MarchProxy (RTMP/AV1 transcode) + external LiveKit (SFU); no HLS/RTMP/AV1/ffmpeg code in-repo | Consolidated Rust control plane; first-party media engine is the §8.1 fork (build vs keep external) |
-| `core/module_rtc` — Go 1.24 **LiveKit control plane** (`go.mod:8-11`, `main.go:19`), HTTP-only, skeleton chart | RTC control in Rust `svc-streaming` (§6); Go service retired |
-| `core/video_proxy_module` — Python/Quart **control plane over external MarchProxy** (`README.md:3`); limits in `license_service.py:11-23` | INGEST/FORWARD/RECORD/TRANSCODE control in Rust `svc-streaming` (§6) |
+| core/module_rtc — Go 1.24 **LiveKit control plane** (`go.mod:8-11`, `main.go:19`), HTTP-only, skeleton chart | RTC control in Rust `svc-streaming` (§6); Go service retired |
+| core/video_proxy_module — Python/Quart **control plane over external MarchProxy** (`README.md:3`); limits in `license_service.py:11-23` | INGEST/FORWARD/RECORD/TRANSCODE control in Rust `svc-streaming` (§6) |
 | `k8s/helm/waddlebot/templates/svc-rtc.yaml` — skeleton, `goRuntimeImage`, `modules.social.enabled`, no UDP (`svc-rtc.yaml:5-49`) | `svc-streaming` chart — Rust image, `modules.streaming.enabled`; media ports/UDP only if §8.1 = build (§7) |
 | Catalog keys `social.rtc`, `video_proxy.streaming`, `video_proxy.premium_limits` (`.PLAN:52-62`) | `streaming.rtc/ingest/forward/premium_limits` + new `display/record/transcode` (§2, §6) |
 | Twitch `stream.online/offline` **already emitted** (`eventsub_handler.py:215-236`) but nothing consumes it for a live-streams UI | consumed by the live-status projection → `svc-presentation` aggregation (§4) |

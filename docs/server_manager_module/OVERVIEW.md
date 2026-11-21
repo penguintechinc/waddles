@@ -10,7 +10,7 @@ Credentials stored by the hub backend are AES-256-GCM encrypted (encrypted in No
 
 | Property | Value |
 |----------|-------|
-| **Source Path** | `action/interactive/server_manager_interaction_module/` |
+| **Source Path** | action/interactive/server_manager_interaction_module |
 | **Language** | Python 3.12 |
 | **Framework** | Quart (async Python web framework) |
 | **Module Port** | 8098 |

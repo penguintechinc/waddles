@@ -1,5 +1,7 @@
 # Target bundle catalog: hub-api = site foreman, consumer features = bundles
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Status: DRAFT spec (2026-11-07), docs only. Read against `origin/release/v3.0.X` @ `10286de0e`. Calendar internals live in PR #1099 (`docs/superpowers/specs/2026-11-07-calendar-app-bundle.md`) -- referenced, NOT duplicated; this spec only adds the per-platform event-tool contract (s7).
 
 ## 1. Principles (locked)
@@ -14,16 +16,16 @@ Status: DRAFT spec (2026-11-07), docs only. Read against `origin/release/v3.0.X`
 
 | Area | Where today | Size / note |
 |---|---|---|
-| Events | `hub_api/blueprints/v1/{event.py 446, event_discord_sync.py 273}`; `action/interactive/calendar_interaction_module` (15 services); `bundles/python/event` (kv) | detail in #1099 |
+| Events | `hub_api/blueprints/v1/{event.py 446, event_discord_sync.py 273}`; action/interactive/calendar_interaction_module (15 services); `bundles/python/event` (kv) | detail in #1099 |
 | Music | `blueprints/v1/{music.py 352, community_music_queue.py 967, public_music_queue.py 181}`; `services/music_service.py 399`; `services/music_providers/{youtube.py 792, spotify.py 202}`; `core/unified_music_module/services/*` (~2.9k LOC incl. radio_player 929, unified_queue 646); `action/interactive/{youtube_music,spotify}_interaction_module` (thin: 59/57 LOC, spotify oauth_service only); `bundles/python/music` (!sr request queue, no playback); `core/svc_presentation/src/overlay/render/music.rs` (Music Station overlay) | no SoundCloud anywhere |
-| Calls/voice/video | `blueprints/v1/calls.py 493` + `services/calls_proxy.py 162` -> `core/module_rtc` (**Go**, 5 .go files; rooms, lock, kick, mute-all, raised hands, `/interact/voice/rooms`); `core/svc_streaming/src/{rtc,ingest/whip.rs,egress/whep.rs}` already hold the Rust WebRTC stack | Go phase-out: REPLACE module_rtc, never extend |
+| Calls/voice/video | `blueprints/v1/calls.py 493` + `services/calls_proxy.py 162` -> core/module_rtc (**Go**, 5 .go files; rooms, lock, kick, mute-all, raised hands, `/interact/voice/rooms`); `core/svc_streaming/src/{rtc,ingest/whip.rs,egress/whep.rs}` already hold the Rust WebRTC stack | Go phase-out: REPLACE module_rtc, never extend |
 | Game servers | `bp bot.py` rcon routes (servers CRUD/test/command/kick/ban/channels/move/message/log/policy/enforce/access-log/info/status/players); `services/bot_rcon.py 507`; `action/interactive/{server_manager 485,server_status 276}_interaction_module` (+encryption/enforcement/provider/rcon/status services) | credentials encrypted in module |
 | Live status | `blueprints/v1/{live_activity.py 88,live_status.py 185}`; `services/{live_activity 196,live_status_service 105}` | reads platform live state |
 | Overlay admin | `blueprints/v1/overlay.py 305` (browser-sources, overlay cfg/rotate/stats) | platform config for svc-presentation: stays hub-api (admin of a host service), NOT a consumer feature -- see Q4 |
-| AI | `core/ai_researcher_module` (~11.5k LOC; blueprints build/clip_researcher/event_lookup/game/patch/price/tech; helm `ai-researcher` values.yaml:2466 + kustomize + CI build); `action/interactive/ai_interaction_module` (chat, ollama/waddleai providers, `proactive_chat_service`, `chatter_rate_limiter`, `prompt_safety`); hub-api `bot.py` ai-chatter + ai-knowledge routes, `services/{bot_ai_chatter 116,bot_ai_knowledge 976}`; `bundles/python/memories`; `action/interactive/memories_interaction_module` | knowledge docs live in hub-api tables |
-| Welcome | `action/interactive/welcome_interaction_module` (`/welcome/check`, `ai_client_service`); `bundles/python/greeter` (keyword responder -- NOT welcome; stays) | |
-| Clip | `action/interactive/clip_interaction_module` (create/bookmark/list/reels/overlay; `twitch_clip_service`) | |
-| Shoutout | `bot.py` shoutout routes + `bundles/python/shoutout`, `action/interactive/shoutout_interaction_module` | out of scope, listed for completeness (Q5) |
+| AI | core/ai_researcher_module (~11.5k LOC; blueprints build/clip_researcher/event_lookup/game/patch/price/tech; helm `ai-researcher` values.yaml:2466 + kustomize + CI build); action/interactive/ai_interaction_module (chat, ollama/waddleai providers, `proactive_chat_service`, `chatter_rate_limiter`, `prompt_safety`); hub-api `bot.py` ai-chatter + ai-knowledge routes, `services/{bot_ai_chatter 116,bot_ai_knowledge 976}`; `bundles/python/memories`; action/interactive/memories_interaction_module | knowledge docs live in hub-api tables |
+| Welcome | action/interactive/welcome_interaction_module (`/welcome/check`, `ai_client_service`); `bundles/python/greeter` (keyword responder -- NOT welcome; stays) | |
+| Clip | action/interactive/clip_interaction_module (create/bookmark/list/reels/overlay; `twitch_clip_service`) | |
+| Shoutout | `bot.py` shoutout routes + `bundles/python/shoutout`, action/interactive/shoutout_interaction_module | out of scope, listed for completeness (Q5) |
 | Platform bundles (Rust) | `discord` (tools: `discord.scheduled_event.{create,update,cancel,delete}`, `discord.member.roles.{add,remove,set}`, `discord.roles.list`); `twitch` (tools: `get_chatters`, `get_followers`, `get_subscriptions` -- `tools.rs:120`; **no** schedule/clip/live tool); `youtube` (templates only: poll, chat send, search; **no** tool surface); `wix` (inbound-only webhook connector, "no egress, no tools" -- `bundles/rust/wix/README.md`; #1054 generic Wix integration + #1073 webhook ingest merged) | tool surfaces to add in s7/s8 |
 | Streaming | `core/svc_streaming`: WHIP ingest `ingest/whip.rs` (573 LOC), WHEP fan-out `egress/whep.rs` (514), `rtc/{pc_factory,fanout,ingest_auth,rtp_leg,sdp_writer,config,metrics}.rs` (~1.3k), `egress/{relay 729,hls,record,discord_voice}`; pipeline `supervisor.rs` 1940 LOC (real, `StubSupervisor` remains at :684) | built on **`webrtc`-rs =0.21.1** (`Cargo.toml:84`), NOT str0m; no ring buffer yet; `rtc/mod.rs` documents unproven real-browser RTP delivery |
 
@@ -43,13 +45,13 @@ Kind: S = service bundle (owns tools), A = app bundle (invokes), P = platform se
 | `music-youtube` | P/S | Rust | `music.youtube.{search,track,playlist.items,queue.add,playback}` | -- | `music_providers/youtube.py`, `youtube_music_interaction_module` | v3.0 |
 | `music-spotify` | P/S | Rust | `music.spotify.{search,track,queue.add,playback}` | -- | `music_providers/spotify.py`, `spotify_interaction_module` | v3.0 |
 | `music-soundcloud` | P/S | Rust | `music.soundcloud.{search,track,stream_url}` | -- | (new) | v3.1 |
-| `dj` | A | Rust | (admin actions; queue read for Music Station) | `music.*.*`, `ai.complete`, `ai.classify`, `chat.send` | `music.py`, `community_music_queue.py`, `public_music_queue.py`, `music_service.py`, `core/unified_music_module`, `bundles/python/music` | v3.0 (static+requests) / v3.1 (AI DJ, auto-remove) |
+| `dj` | A | Rust | (admin actions; queue read for Music Station) | `music.*.*`, `ai.complete`, `ai.classify`, `chat.send` | `music.py`, `community_music_queue.py`, `public_music_queue.py`, `music_service.py`, core/unified_music_module, `bundles/python/music` | v3.0 (static+requests) / v3.1 (AI DJ, auto-remove) |
 | `ai` | S | Rust | `ai.complete`, `ai.classify`, `ai.embed`, `ai.rag.{ingest,search,delete}`, `ai.memory.{put,search,forget}` | host WaddleAI/BYOK | `ai_interaction_module` providers, `bot_ai_knowledge.py`, `bot_ai_chatter.py`, `memories_interaction_module`, `bundles/python/memories`, `ai_researcher_module` model plumbing | v3.0 (complete/classify/rag) / v3.1 (memory) |
 | `ai-teammates` | A | Rust | (admin actions) | `ai.*`, `chat.send`, `*.live.channels` (opt) | `ai_researcher_module`, `welcome_interaction_module`, `ai_interaction_module/proactive_chat_service`, `bot.py` ai-* routes | v3.0 Researcher+Receptionist / v3.1 Producer+DJ teammate |
 | `clip` | S (on svc-streaming) | Rust | `clip.capture` (last N<=30s from stream ring buffer), `clip.get`, `clip.list`, `clip.delete`, `clip.share_url` (signed, host-minted) | host `svc_streaming` ring-buffer seam, bundle object storage | `clip_interaction_module/clip_service` (capture/reels backend) | v3.1 |
 | `clip-manager` | A | Rust | (admin actions; chat `!clip`) | `clip.*`, `chat.send` | `clip_interaction_module` (bookmark/list/manage/share/delete, permissions via scopes `clips:request|manage|delete`) | v3.1 |
 | `twitch-clips` | A | Rust | (admin actions; chat `!clip`) | `twitch.clip.{create,get,list}`, `chat.send` | `clip_interaction_module` Twitch clip create/list + `twitch_clip_service` | v3.0 |
-| `webrtc` | S | Rust | Signaling/policy: `whip.{endpoint_create,endpoint_revoke,list}` (ingest tokens), `whep.{endpoint_create,endpoint_revoke,list}` (playback), `room.{create,close,list,get,lock,unlock}`, `participant.{token_issue,token_revoke,kick,mute}`, `track.{publish_route,subscribe_route}`, `relay.{create,close}` (pass-through proxy), `recording.{start,stop}`, `stats.get` | host `svc_streaming` seam (existing `ingest/whip.rs`, `egress/whep.rs`, `rtc/*`); TURN/ICE host config | `calls_proxy.py`, `core/module_rtc` (Go); WHIP/WHEP control surface of svc-streaming | v3.0 minimal (whip/whep endpoint + room token) / v3.1 full |
+| `webrtc` | S | Rust | Signaling/policy: `whip.{endpoint_create,endpoint_revoke,list}` (ingest tokens), `whep.{endpoint_create,endpoint_revoke,list}` (playback), `room.{create,close,list,get,lock,unlock}`, `participant.{token_issue,token_revoke,kick,mute}`, `track.{publish_route,subscribe_route}`, `relay.{create,close}` (pass-through proxy), `recording.{start,stop}`, `stats.get` | host `svc_streaming` seam (existing `ingest/whip.rs`, `egress/whep.rs`, `rtc/*`); TURN/ICE host config | `calls_proxy.py`, core/module_rtc (Go); WHIP/WHEP control surface of svc-streaming | v3.0 minimal (whip/whep endpoint + room token) / v3.1 full |
 | `rooms` | A | Rust | (admin actions) | `webrtc.*`, `discord.voice.*` (opt), `chat.send`; event link is data (UUID), no app->app call | `calls.py`, `/interact/voice` | v3.1 |
 | `game-servers` | A | Rust | (admin actions) | `gameserver.*`, `chat.send` | `bot.py` rcon routes, `bot_rcon.py`, `server_manager`/`server_status` modules | v3.1 |
 | `gameserver` | S | Rust | `gameserver.{status,players,command,kick,ban,message,move}` (RCON/Source/Minecraft/etc. per provider) | host secret store (rcon creds) | provider/rcon/enforcement services | v3.1 |
@@ -159,7 +161,7 @@ How existing code is exposed (no rewrite, no media in guests):
 - `webrtc` owns: endpoint/token lifecycle (JWT/opaque tokens <=1h, signed host-side), room lifecycle, participant token issue/revoke (room+role claims), track routing, relay, recording hooks, stats. TURN/ICE secrets never returned to guests (tokens embed server-minted ICE creds).
 - `rooms` owns the nuances: room/stream <-> event mapping (UUID only), virtual rooms (breakout/stage/green room = child rooms, parent id + type enum), membership/role access (scopes `rooms:join|speak|moderate`, never role names), schedule windows (auto-open/close from event time), capacity.
 - Calendar tie: `rooms` and `calendar` never call each other (app->app forbidden); link is data (event `public_id` set via admin action or `!rooms link <event>`); Q12 asks about a host event-changed seam.
-- Go phase-out: `core/module_rtc` (Go) is replaced, not extended; `svc_streaming/src/rtc` (Rust) is the base.
+- Go phase-out: core/module_rtc (Go) is replaced, not extended; `svc_streaming/src/rtc` (Rust) is the base.
 
 ## 8. Live channels tool + Clip
 
@@ -235,13 +237,13 @@ Status legend: C = covered by target bundle (design), M = missing/needs explicit
 | Delete PR | Removes | Gate |
 |---|---|---|
 | D1 (calendar) | per #1099 s12 | calendar ACTIVATED on alpha + migration verified |
-| D2 (music) | `music.py`, `community_music_queue.py`, `public_music_queue.py`, `services/music_service.py`, `services/music_providers/`, `core/unified_music_module`, `youtube_music`/`spotify` modules, `bundles/python/music`, music routes' helm/httproute entries; webui music pages repointed to generic bundle-admin | dj+music-* parity C incl. data migration verified |
+| D2 (music) | `music.py`, `community_music_queue.py`, `public_music_queue.py`, `services/music_service.py`, services/music_providers, core/unified_music_module, `youtube_music`/`spotify` modules, `bundles/python/music`, music routes' helm/httproute entries; webui music pages repointed to generic bundle-admin | dj+music-* parity C incl. data migration verified |
 | D3 (live) | `live_activity.py`, `live_status.py`, their services | live-now + 3 tools live |
-| D4 (calls) | `calls.py`, `calls_proxy.py`, `core/module_rtc/` (whole Go module) + its helm/CI/httproute entries | webrtc (full) + rooms (v3.1); no Go left behind |
+| D4 (calls) | `calls.py`, `calls_proxy.py`, core/module_rtc (whole Go module) + its helm/CI/httproute entries | webrtc (full) + rooms (v3.1); no Go left behind |
 | D5 (gameserver) | rcon block in `bot.py`, `bot_rcon.py`, `server_manager`, `server_status` modules | game-servers (v3.1) |
-| D6 (ai) | `bot_ai_*.py`, ai routes in `bot.py`, `ai_interaction_module`, `welcome_interaction_module`, `memories_*`, `bundles/python/memories`, `core/ai_researcher_module` + helm `ai-researcher` (values.yaml:2466, templates/core/ai-researcher.yaml, kustomize, `build-ai-researcher.yml`, httproute, `service-roles.yaml` entry) | s9 all C incl. researcher audit |
+| D6 (ai) | `bot_ai_*.py`, ai routes in `bot.py`, `ai_interaction_module`, `welcome_interaction_module`, `memories_*`, `bundles/python/memories`, core/ai_researcher_module + helm `ai-researcher` (values.yaml:2466, templates/core/ai-researcher.yaml, kustomize, `build-ai-researcher.yml`, httproute, `service-roles.yaml` entry) | s9 all C incl. researcher audit |
 | D7a (twitch clips) | Twitch parts of `clip_interaction_module` | twitch-clips live |
-| D7b (clip module remainder) | `action/interactive/clip_interaction_module/` | `clip` + `clip-manager` parity C (v3.1) |
+| D7b (clip module remainder) | action/interactive/clip_interaction_module | `clip` + `clip-manager` parity C (v3.1) |
 
 Each D-PR: delete code + tests + helm/CI/DB-role refs; drop tables only a release after soak (dual SQL + Alembic chain caveat per #1099 s11).
 
