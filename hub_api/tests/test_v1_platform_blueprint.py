@@ -26,6 +26,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.platform import platform_bp
+from services.global_identity import SYSTEM_TENANT_SLUG
 from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 from tests.user_ids import uid
@@ -33,6 +34,9 @@ from tests.user_ids import uid
 
 @pytest.fixture
 def app(platform_db: Any) -> Quart:
+    # The platform group is operator-only: callers carry the reserved `system` tenant claim.
+    platform_db.dal.tenants.insert(slug=SYSTEM_TENANT_SLUG, display_name="System", is_active=True)
+    platform_db.dal.commit()
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     install_community_ids(quart_app, platform_db.dal)
@@ -47,16 +51,28 @@ def client(app: Quart) -> Any:
     return app.test_client()
 
 
-def _admin_headers(*, user_id: int = 1) -> dict[str, str]:
+def _admin_headers(*, user_id: int = 1, tenant: str = SYSTEM_TENANT_SLUG) -> dict[str, str]:
     # global:admin bundle -- SCOPE_BUNDLES["global"]["admin"] includes the
     # `*:admin` wildcard, which flask_core.authz._scope_covers's own rule
     # (resource `*` + exact action match) satisfies `platform:admin`.
     token = make_user_token(
         user_id=user_id,
         scope="*:read *:write *:admin *:delete settings:write users:admin",
-        tenant=TENANT_SLUG,
+        tenant=tenant,
     )
     return {"Authorization": f"Bearer {token}"}
+
+
+def _seed_hub_user(platform_db: Any, user_id: int, *, bootstrap: bool = False) -> None:
+    """Insert a `hub_users` row at exactly `user_id` (the role/deactivate routes 404 without it)."""
+    for n in range(1, user_id + 1):
+        if platform_db.dal(platform_db.dal.hub_users.id == n).count():
+            continue
+        new_id = platform_db.dal.hub_users.insert(
+            username=f"u{n}", is_bootstrap=bootstrap and n == user_id
+        )
+        assert new_id == n
+    platform_db.dal.commit()
 
 
 def _seed_member(
@@ -182,6 +198,7 @@ class TestUsers:
     async def test_update_user_role_grants_platform_admin(
         self, client: Any, platform_db: Any
     ) -> None:
+        _seed_hub_user(platform_db, 7)
         response = await client.put(
             f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
@@ -200,7 +217,10 @@ class TestUsers:
         assert row.role == "platform-admin"
         assert row.is_active is True
 
-    async def test_update_user_role_invalid_role_is_400(self, client: Any) -> None:
+    async def test_update_user_role_invalid_role_is_400(
+        self, client: Any, platform_db: Any
+    ) -> None:
+        _seed_hub_user(platform_db, 7)
         response = await client.put(
             f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
@@ -208,10 +228,54 @@ class TestUsers:
         )
         assert response.status_code == 400
 
+    @pytest.mark.parametrize("body", [{}, {"role": None}, {"role": ""}])
+    async def test_update_user_role_requires_explicit_role(
+        self, client: Any, platform_db: Any, body: dict[str, Any]
+    ) -> None:
+        """Empty body / null / empty role is 400 -- never a silent no-op 200."""
+        _seed_hub_user(platform_db, 7)
+        response = await client.put(
+            f"/api/v1/platform/users/{uid(7)}/role", headers=_admin_headers(), json=body
+        )
+        assert response.status_code == 400
+        rows = await platform_db.select_async(
+            platform_db.dal(platform_db.dal.platform_admins.user_id == 7)
+        )
+        assert len(rows) == 0
+
+    async def test_update_user_role_unknown_user_is_404(
+        self, client: Any, platform_db: Any
+    ) -> None:
+        response = await client.put(
+            f"/api/v1/platform/users/{uid(9999)}/role",
+            headers=_admin_headers(),
+            json={"role": "support"},
+        )
+        assert response.status_code == 404
+        rows = await platform_db.select_async(
+            platform_db.dal(platform_db.dal.platform_admins.user_id == 9999)
+        )
+        assert len(rows) == 0
+
+    async def test_update_user_role_refuses_bootstrap_platform_account(
+        self, client: Any, platform_db: Any
+    ) -> None:
+        """Demotion goes through `guard_platform_account` like every other path."""
+        _seed_hub_user(platform_db, 3, bootstrap=True)
+        response = await client.put(
+            f"/api/v1/platform/users/{uid(3)}/role",
+            headers=_admin_headers(),
+            json={"role": "support"},
+        )
+        assert response.status_code == 403
+        body = await response.get_json()
+        assert body["error"]["code"] == "PLATFORM_ACCOUNT_PROTECTED"
+
     async def test_update_user_role_re_grant_updates_existing_row(
         self, client: Any, platform_db: Any
     ) -> None:
         """Second grant call hits the UPDATE-existing-row branch, not the INSERT branch."""
+        _seed_hub_user(platform_db, 7)
         first = await client.put(
             f"/api/v1/platform/users/{uid(7)}/role",
             headers=_admin_headers(),
@@ -230,23 +294,8 @@ class TestUsers:
         assert len(rows) == 1
         assert rows.first().role == "platform-admin"
 
-    async def test_update_user_role_clear_deactivates(self, client: Any, platform_db: Any) -> None:
-        grant = await client.put(
-            f"/api/v1/platform/users/{uid(7)}/role",
-            headers=_admin_headers(),
-            json={"role": "platform-admin"},
-        )
-        assert grant.status_code == 200
-        clear = await client.put(
-            f"/api/v1/platform/users/{uid(7)}/role", headers=_admin_headers(), json={"role": None}
-        )
-        assert clear.status_code == 200
-        rows = await platform_db.select_async(
-            platform_db.dal(platform_db.dal.platform_admins.user_id == 7)
-        )
-        assert rows.first().is_active is False
-
     async def test_deactivate_user(self, client: Any, platform_db: Any) -> None:
+        _seed_hub_user(platform_db, 7)
         community_id = _seed_community(platform_db)
         _seed_member(platform_db, community_id=community_id, user_id="7")
 
@@ -258,6 +307,41 @@ class TestUsers:
             platform_db.dal(platform_db.dal.community_members.user_id == "7")
         )
         assert rows.first().is_active is False
+
+    async def test_deactivate_unknown_user_is_404(self, client: Any) -> None:
+        response = await client.delete(
+            f"/api/v1/platform/users/{uid(9999)}", headers=_admin_headers(), json={"reason": "spam"}
+        )
+        assert response.status_code == 404
+
+
+class TestSystemTenantGuard:
+    """The platform group is operator-only: a non-`system` tenant is refused even with the scope."""
+
+    @pytest.mark.parametrize(
+        ("method", "path", "body"),
+        [
+            ("GET", "/api/v1/platform/users", None),
+            ("PUT", f"/api/v1/platform/users/{uid(7)}/role", {"role": "support"}),
+            ("DELETE", f"/api/v1/platform/users/{uid(7)}", {"reason": "x"}),
+            ("GET", "/api/v1/platform/stats", None),
+        ],
+    )
+    async def test_non_system_tenant_is_403(
+        self, client: Any, platform_db: Any, method: str, path: str, body: Any
+    ) -> None:
+        _seed_hub_user(platform_db, 7)
+        response = await client.open(
+            path, method=method, headers=_admin_headers(tenant=TENANT_SLUG), json=body
+        )
+        assert response.status_code == 403
+        assert (await response.get_json())["error"]["message"] == (
+            "Operator action requires the system tenant"
+        )
+        rows = await platform_db.select_async(
+            platform_db.dal(platform_db.dal.platform_admins.user_id == 7)
+        )
+        assert len(rows) == 0
 
 
 class TestCommunities:

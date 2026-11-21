@@ -120,6 +120,9 @@ class LeaderboardEntryDTO:
     platform: str
     platform_user_id: str
     balance: int
+    #: The member's public UUID (`community_members.user_uuid`) -- the only id admin write routes
+    #: accept in a URL. `None` when the member row has no resolved UUID.
+    user_uuid: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -698,12 +701,53 @@ async def leaderboard(
         orderby=~dal.loyalty_balances.balance,
         limitby=(0, clamped_limit),
     )
+    uuids = _member_uuid_map(dal, community_id, rows)
     return [
         LeaderboardEntryDTO(
-            platform=row.platform, platform_user_id=row.platform_user_id, balance=int(row.balance)
+            platform=row.platform,
+            platform_user_id=row.platform_user_id,
+            balance=int(row.balance),
+            user_uuid=uuids.get((row.platform, row.platform_user_id)),
         )
         for row in rows
     ]
+
+
+def _member_uuid_map(dal: Any, community_id: int, rows: Any) -> dict[tuple[str, str], str]:
+    """`(platform, platform_user_id) -> user_uuid` for the leaderboard rows' members."""
+    pairs = {(row.platform, row.platform_user_id) for row in rows}
+    if not pairs:
+        return {}
+    members = dal.community_members
+    found = dal(members.community_id == community_id).select(
+        members.platform, members.platform_user_id, members.user_uuid
+    )
+    return {
+        (m.platform, m.platform_user_id): str(m.user_uuid)
+        for m in found
+        if m.user_uuid and (m.platform, m.platform_user_id) in pairs
+    }
+
+
+def resolve_member_identity(
+    dal: Any, *, community_id: int, user_uuid: str, platform: str
+) -> str | None:
+    """`platform_user_id` of the member `user_uuid` ON `platform` in THIS community, else `None`.
+
+    Scoped by `community_id`, so an unknown UUID and a UUID that belongs to another community
+    are indistinguishable to the caller (both 404) -- never an existence oracle.
+    """
+    members = dal.community_members
+    row = (
+        dal(
+            (members.community_id == community_id)
+            & (members.user_uuid == user_uuid)
+            & (members.platform == platform)
+        )
+        .select(members.platform_user_id)
+        .first()
+    )
+    return str(row.platform_user_id) if row is not None else None
 
 
 # ---------------------------------------------------------------------------

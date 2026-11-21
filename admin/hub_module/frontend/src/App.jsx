@@ -94,8 +94,6 @@ const AdminVendorReview = lazy(() => import('./pages/admin/AdminVendorReview'));
 const AdminLiveStreams = lazy(() => import('./pages/admin/AdminLiveStreams'));
 const AdminCommunityCalls = lazy(() => import('./pages/admin/AdminCommunityCalls'));
 const TownHall = lazy(() => import('./pages/community/TownHall'));
-const AdminPolls = lazy(() => import('./pages/admin/AdminPolls'));
-const AdminForms = lazy(() => import('./pages/admin/AdminForms'));
 const AdminSupportDashboard = lazy(() => import('./pages/admin/AdminSupportDashboard'));
 const AdminSupportTicketDetail = lazy(() => import('./pages/admin/AdminSupportTicketDetail'));
 const AdminJoinRequests = lazy(() => import('./pages/admin/AdminJoinRequests'));
@@ -401,8 +399,6 @@ function App() {
         <Route path="/admin/:communityId/music/radio" element={<AdminRadioStations />} />
         <Route path="/admin/:communityId/live-streaming" element={<AdminLiveStreams />} />
         <Route path="/admin/:communityId/calls" element={<AdminCommunityCalls />} />
-        <Route path="/admin/:communityId/polls" element={<AdminPolls />} />
-        <Route path="/admin/:communityId/forms" element={<AdminForms />} />
         <Route path="/admin/:communityId/support" element={<AdminSupportDashboard />} />
         <Route path="/admin/:communityId/support/tickets/:ticketId" element={<AdminSupportTicketDetail />} />
         <Route path="/admin/:communityId/join-requests" element={<AdminJoinRequests />} />

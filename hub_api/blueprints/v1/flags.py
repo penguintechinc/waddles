@@ -14,7 +14,7 @@ flag this service knows about" -- a server-internal kill-switch
 (`{product}.disable-{mechanism}`, critical-rules.md "Core platform
 mechanisms") must never reach a client, and resolving the many
 community-scoped flags (`waddles.community.*`, `waddles.streaming.*` etc.,
-see `blueprints/v1/community_polls.py` and siblings) here would need a
+see `blueprints/v1/community_chat.py` and siblings) here would need a
 `community_id` this tenant-wide endpoint doesn't take -- those stay
 resolved inline by their own blueprint, same as today. Add a new
 client-visible flag by appending its key here; no other wiring needed.
