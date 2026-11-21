@@ -387,20 +387,20 @@ def _floor_user(
     """A community with a hard floor of 400 and one scored user; returns (tid, cid, user)."""
     tid, cid = _setup(db, slug)
     user = str(uuid.uuid4())
-    extra = "" if drop is None else f", lift_rearm_drop = {int(drop)}"
     _q(
         db,
         "INSERT INTO bundle_reputation_policy (tenant_id, community_id, hard_ban_enabled, "
         "hard_ban_floor) VALUES (%s, %s, true, 400)",
         (tid, cid),
     )
-    if extra:
+    if drop is not None:
+        # 0139: the re-arm drop is ONE tenant-admin knob, not a per-community column.
         _q(
             db,
-            "UPDATE bundle_reputation_policy SET "
-            + extra[2:]
-            + " WHERE community_id = %s",
-            (cid,),
+            "INSERT INTO bundle_reputation_tenant_policy (tenant_id, lift_rearm_drop) "
+            "VALUES (%s, %s) ON CONFLICT (tenant_id) DO UPDATE SET "
+            "lift_rearm_drop = EXCLUDED.lift_rearm_drop",
+            (tid, int(drop)),
         )
     _q(
         db,
@@ -768,7 +768,9 @@ class TestRoundTrip:
             "('action', 'source_ban_id', 'lift_origin', 'score_at_lift')",
         )
         assert cols == []
-        assert _status(pg_db, rid) == 8, "the 0137 lift state survives a 0138 downgrade"
+        assert _status(pg_db, rid) == 8, (
+            "the 0137 lift state survives a 0138/0139 downgrade"
+        )
         alembic_cli("upgrade", "head", dsn=pg_db.dsn)
         claimed = _q(pg_db, "SELECT r_action FROM reputation_floor_ban_claim(1, 120)")
         assert isinstance(claimed, list), "claim works again after the re-upgrade"

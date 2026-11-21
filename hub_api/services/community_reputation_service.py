@@ -78,6 +78,12 @@ DEFAULT_AT_RISK_THRESHOLD = 600
 DEFAULT_TENANT_AUTO_BAN_FLOOR = 350
 DEFAULT_TENANT_AT_RISK_THRESHOLD = 450
 
+#: Re-arm drop after a ban lift (alembic 0138): a score this far below the score at lift is a
+#: NEW offence and bans again. Default = one maximal activity step; tenant-admin tunable.
+DEFAULT_LIFT_REARM_DROP = 5
+MIN_LIFT_REARM_DROP = 1
+MAX_LIFT_REARM_DROP = 100
+
 #: Hard ceiling for list endpoints -- matches `services/pagination.py::DEFAULT_MAX_PAGE_SIZE`.
 _MAX_LIMIT = 100
 
@@ -586,11 +592,13 @@ async def _tenant_policy(async_dal: Any, dal: Any, *, tenant_id: int) -> dict[st
         pol.tenant_auto_ban_enabled,
         pol.tenant_auto_ban_floor,
         pol.tenant_at_risk_threshold,
+        pol.lift_rearm_drop,
         pol.updated_at,
     )
     row = rows.first() if rows else None
     if row is None:
         return {
+            "lift_rearm_drop": DEFAULT_LIFT_REARM_DROP,
             "tenant_auto_ban_enabled": False,
             "tenant_auto_ban_floor": DEFAULT_TENANT_AUTO_BAN_FLOOR,
             "tenant_at_risk_threshold": DEFAULT_TENANT_AT_RISK_THRESHOLD,
@@ -600,6 +608,7 @@ async def _tenant_policy(async_dal: Any, dal: Any, *, tenant_id: int) -> dict[st
         "tenant_auto_ban_enabled": bool(row.tenant_auto_ban_enabled),
         "tenant_auto_ban_floor": int(row.tenant_auto_ban_floor),
         "tenant_at_risk_threshold": int(row.tenant_at_risk_threshold),
+        "lift_rearm_drop": int(row.lift_rearm_drop or DEFAULT_LIFT_REARM_DROP),
         "updated_at": row.updated_at,
     }
 
@@ -620,10 +629,18 @@ async def set_tenant_config(
     auto_ban_enabled: bool | None,
     auto_ban_floor: int | None,
     at_risk_threshold: int | None,
+    lift_rearm_drop: int | None = None,
 ) -> dict[str, Any]:
     """Validate + upsert the tenant policy (tenant admins only -- enforced by the route)."""
     _ensure_reputation_tables(dal)
     current = await _tenant_policy(async_dal, dal, tenant_id=tenant_id)
+    drop = current["lift_rearm_drop"] if lift_rearm_drop is None else lift_rearm_drop
+    if isinstance(drop, bool) or not isinstance(drop, int):
+        raise bad_request("Invalid lift re-arm drop: must be an integer")
+    if not MIN_LIFT_REARM_DROP <= drop <= MAX_LIFT_REARM_DROP:
+        raise bad_request(
+            f"Invalid lift re-arm drop: must be within {MIN_LIFT_REARM_DROP}-{MAX_LIFT_REARM_DROP}"
+        )
     floor = current["tenant_auto_ban_floor"] if auto_ban_floor is None else auto_ban_floor
     at_risk = (
         current["tenant_at_risk_threshold"] if at_risk_threshold is None else at_risk_threshold
@@ -637,6 +654,7 @@ async def set_tenant_config(
         "tenant_auto_ban_enabled": enabled,
         "tenant_auto_ban_floor": floor,
         "tenant_at_risk_threshold": at_risk,
+        "lift_rearm_drop": drop,
         "updated_at": datetime.now(UTC),
     }
     exists = await async_dal.select_async(dal(pol.tenant_id == tenant_id), pol.tenant_id)

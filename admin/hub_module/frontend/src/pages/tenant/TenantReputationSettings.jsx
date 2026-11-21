@@ -5,7 +5,7 @@ import { Alert, Button, Card, CardBody, LoadingState, PageHeader, SwitchField, T
 import { validateTenantPolicy, serverErrorMessage } from '../../lib/reputationPolicy';
 
 /**
- * Tenant reputation settings: tenant-wide auto-ban toggle, floor and at-risk threshold.
+ * Tenant reputation settings: tenant-wide auto-ban toggle, floor, at-risk threshold and ban-lift re-arm drop.
  * Thin view over GET/PUT /api/v1/tenant/:slug/reputation/config; the server is authoritative.
  */
 function TenantReputationSettings() {
@@ -27,6 +27,7 @@ function TenantReputationSettings() {
         enabled: !!d.tenantAutoBanEnabled,
         floor: String(d.tenantAutoBanFloor ?? 350),
         atRisk: String(d.tenantAtRiskThreshold ?? 450),
+        liftRearmDrop: String(d.liftRearmDrop ?? 5),
       });
     } catch (err) {
       setLoadError({ status: err?.response?.status, message: serverErrorMessage(err, 'Failed to load reputation settings') });
@@ -50,6 +51,7 @@ function TenantReputationSettings() {
         tenantAutoBanEnabled: form.enabled,
         tenantAutoBanFloor: Number(form.floor),
         tenantAtRiskThreshold: Number(form.atRisk),
+        liftRearmDrop: Number(form.liftRearmDrop),
       });
       setSaved(true);
     } catch (err) {
@@ -106,6 +108,16 @@ function TenantReputationSettings() {
                 onChange={set('atRisk')}
                 hint="Members below this score are flagged as at risk."
                 error={errors.atRisk}
+              />
+              <TextField
+                label="Re-arm drop after a ban lift"
+                type="number"
+                min={1}
+                max={100}
+                value={form.liftRearmDrop}
+                onChange={set('liftRearmDrop')}
+                hint="After a ban is lifted, a score this many points below the score at lift counts as a new offence and bans again (1-100, default 5)."
+                error={errors.liftRearmDrop}
               />
               {saveError && (
                 <div data-testid="rep-save-error"><Alert tone="danger">
