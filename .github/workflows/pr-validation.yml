@@ -90,6 +90,13 @@ jobs:
       - name: ci-gate fetch retry tests
         run: bash scripts/ci/tests/test_ci_gate_fetch.sh
 
+      # Bundle app_id hard cutover: every app_id-bearing field is `<org>.<repo>.<name>`, and no tracked
+      # text file (docs and fixtures included) may exceed its old-id baseline. Unscoped on purpose --
+      # the sweep reads every tracked file, so any path-filter would leave a hole. Stdlib only
+      # (no `make` on dal2-alpha-ci); prints its denominators and fails on zero examined.
+      - name: Bundle app_id guard (check-app-ids)
+        run: python3 -I scripts/ci/check_app_ids.py
+
   no-stubs-gate:
     name: No stubs / no silent fallbacks (check-no-stubs)
     # bare dal2-alpha-ci image has no `make` (and sudo is blocked): stays on hosted ubuntu-latest until a custom runner image bakes it in
@@ -168,6 +175,11 @@ jobs:
       # examined; zero examined or any violation fails, and the negative test runs first.
       - name: check-pii-egress
         run: make check-pii-egress
+
+      # A cache-mounted install (RUN --mount=type=cache) must be hash/lock verified -- a shared build
+      # cache is a poisoning vector. Prints dockerfiles + cache-mounted steps examined.
+      - name: check-dockerfile-cache-mounts
+        run: make check-dockerfile-cache-mounts
 
   python-unit:
     name: Python unit tests
@@ -304,6 +316,12 @@ jobs:
               - 'alembic.ini'
               - 'alembic/tests/**'
               - 'scripts/ci/alembic_prior_base_revision.py'
+            drift:
+              - 'alembic/versions/**'
+              - 'alembic/env.py'
+              - 'alembic/tests/pg_docker.py'
+              - 'hub_api/**'
+              - 'scripts/audit_schema_drift.py'
 
       # Always runs (pure Python, no Postgres/alembic/flask_core needed) --
       # this is also what the "Unit test alembic_prior_base_revision.py"
@@ -345,7 +363,7 @@ jobs:
       # dev venv used for verification had it pre-installed from unrelated
       # prior work, masking the gap.
       - name: Install migration dependencies
-        if: steps.changes.outputs.any == 'true'
+        if: steps.changes.outputs.any == 'true' || steps.changes.outputs.drift == 'true'
         run: |
           set -euo pipefail
           pip install --disable-pip-version-check --require-hashes -r hub_api/requirements.txt
@@ -359,6 +377,16 @@ jobs:
           # xdist-safe: pg_docker.py names each container per os.getpid() (unique
           # per worker) and allocates an OS-assigned free port per container.
           pip install --require-hashes --no-deps -r scripts/ci/tests/requirements-xdist.txt
+
+      # Code-vs-DB drift: every pydal Field under hub_api/ must exist in a FRESH replay of the whole
+      # migration chain (throwaway docker Postgres, `alembic upgrade head` -- what a new deploy gets).
+      # Exit 1 on any missing table/column, 2 on zero examined; prints both denominators.
+      - name: Schema drift audit (hub_api pydal vs fresh-replayed Postgres)
+        if: steps.changes.outputs.drift == 'true'
+        run: |
+          set -euo pipefail
+          docker info --format '{{.ServerVersion}}'
+          python3 scripts/audit_schema_drift.py
 
       # Legacy `config/postgres/migrations/NNN_*.sql` files reach an EXISTING database only
       # through an Alembic bridge (0001_baseline replays them on a fresh DB only). This proves
@@ -836,6 +864,11 @@ jobs:
       - name: Helm hook-phase gate (DB-dependent Jobs never pre-install)
         run: make check-helm-hook-phases
 
+      # Dead values keys / never-included helpers. Runs its own planted-violation unit tests first,
+      # prints keys/templates/helpers examined; intentional keeps need a reasoned allowlist entry.
+      - name: Chart values audit (no dead values keys / unused helpers)
+        run: make audit-chart-values
+
       # #1382 -- a service-leaf Certificate whose SAN falls outside the internal CA's
       # permitted X.509 nameConstraint subtrees is rejected by rustls-webpki (which checks
       # EVERY SAN, not just the dialled name), crashlooping the consumer and blocking
@@ -922,6 +955,17 @@ jobs:
             --kube-version 1.30.0 \
           | python3 scripts/ci/check-seeder-valkey-tls-wiring.py
 
+      # #508/#509 -- hub-api publishes bundles to the bucket in its ConfigMap's BUNDLE_BUCKET_NAME;
+      # every svc-bundles-executor workload must read the SAME bucket and the SeaweedFS hub-api
+      # identity must hold Read/Write/List on it, else publish "succeeds" and the executor 404s.
+      - name: helm template + bundle bucket wiring check (alpha)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-alpha.yaml \
+            --kube-version 1.30.0 \
+          | python3 scripts/ci/check-bundle-bucket-wiring.py
+
       # values-beta.yaml pins global.deploymentTier=production, which requires every
       # generated secret to be supplied explicitly (or already present on a live
       # cluster via `lookup`) -- neither is available to an offline `helm template` in
@@ -960,6 +1004,15 @@ jobs:
             --kube-version 1.30.0 \
             --set global.deploymentTier=alpha \
           | python3 scripts/ci/check-helm-rendered-manifest-invariants.py
+
+      - name: helm template + bundle bucket wiring check (beta topology)
+        run: |
+          set -euo pipefail
+          helm template waddlebot k8s/helm/waddlebot \
+            --values k8s/helm/waddlebot/values-beta.yaml \
+            --kube-version 1.30.0 \
+            --set global.deploymentTier=alpha \
+          | python3 scripts/ci/check-bundle-bucket-wiring.py
 
       # fix/alpha-deploy-context-allowlist -- KUBE_CONTEXT=dal2-beta (or any
       # context outside local-alpha/microk8s) must be rejected by
