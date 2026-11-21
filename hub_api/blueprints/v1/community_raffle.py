@@ -37,6 +37,9 @@ raffle_bp = Blueprint("v1_community_raffle", __name__, url_prefix="/api/v1/admin
 #: `community.raffles` Feature contract, Professional tier.
 FEATURE_COMMUNITY_RAFFLES = "waddles.community.raffles"
 
+#: Allowance for multipart boundaries/headers on top of the 2MB file cap (early-reject check).
+_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+
 _INVALID_EVENT_TYPE_MESSAGE = (
     f"Invalid event type. Must be one of: {', '.join(sorted(VALID_EVENT_TYPES))}"
 )
@@ -111,6 +114,11 @@ async def upload_route(community_id: int, event_type: str) -> tuple[dict[str, ob
     if not _tenant_ok(community_id):
         return {"success": False, "error": {"message": "Community not found"}}, 404
 
+    # Reject an oversized body BEFORE parsing the multipart form (which buffers it in memory).
+    declared = request.content_length
+    if declared is not None and declared > MAX_FILE_SIZE_BYTES + _MULTIPART_OVERHEAD_BYTES:
+        return {"success": False, "error": {"message": "File exceeds 2MB limit"}}, 400
+
     files = await request.files
     upload = files.get("sound")
     if upload is None:
@@ -141,6 +149,8 @@ async def sound_route(
     Replaces the old public `/uploads/raffle-sounds/...` path: bytes come from the object store
     through hub-api, so only an active member of THIS community (tenant-checked) can fetch them.
     """
+    if not _tenant_ok(community_id):
+        return {"success": False, "error": {"message": "Community not found"}}, 404
     if event_type not in VALID_EVENT_TYPES:
         return {"success": False, "error": {"message": _INVALID_EVENT_TYPE_MESSAGE}}, 400
     result = await read_sound(current_app.config["dal"], community_id, event_type)

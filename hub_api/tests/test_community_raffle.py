@@ -212,6 +212,28 @@ class TestUpload:
         assert response.status_code == 400
         assert "2MB" in (await response.get_json())["error"]["message"]
 
+    async def test_upload_rejects_oversized_content_length_before_parsing(
+        self, client: Any, auth_headers: Any, community_db: Any, bucket: dict[str, Any]
+    ) -> None:
+        _, community_id = community_db
+        response = await client.post(
+            f"{_admin(community_db, community_id)}/raffle-customization/raffle_start/upload",
+            headers={**auth_headers(scope="community.raffle:write"), "Content-Length": "9999999"},
+            data=b"x",
+        )
+        assert response.status_code == 400
+        assert "2MB" in (await response.get_json())["error"]["message"]
+        assert bucket == {}
+
+    async def test_sound_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
+        from tests.community_ids import UNKNOWN_PUBLIC_ID
+
+        response = await client.get(
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/raffle-customization/raffle_start/sound",
+            headers=auth_headers(scope="community.raffle:read"),
+        )
+        assert response.status_code == 404
+
     async def test_upload_rejects_renamed_non_audio_file(
         self, client: Any, auth_headers: Any, community_db: Any, bucket: dict[str, Any]
     ) -> None:

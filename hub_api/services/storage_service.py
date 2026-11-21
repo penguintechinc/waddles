@@ -31,6 +31,7 @@ from typing import Any
 
 import boto3
 from botocore.client import Config as BotoConfig
+from botocore.exceptions import ClientError
 from flask_core.safe_logging import describe_exc, log_exc_safe
 
 from services.object_storage_kms import get_object_storage_sse
@@ -154,8 +155,8 @@ async def get_private_object(key: str) -> bytes | None:
         client = _client()
         try:
             resp = client.get_object(Bucket=_bucket(), Key=key)
-        except Exception as exc:  # noqa: BLE001 -- botocore raises ClientError, not a typed 404
-            if "NoSuchKey" in str(exc) or "404" in str(exc):
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") in {"404", "NoSuchKey"}:
                 logger.debug("private object not found: %s", describe_exc(exc))
                 return None
             log_exc_safe(logger, logging.ERROR, "private object read failed", exc)

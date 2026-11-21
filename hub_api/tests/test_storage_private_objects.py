@@ -6,6 +6,7 @@ from io import BytesIO
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
+from botocore.exceptions import ClientError
 
 from services import storage_service
 
@@ -37,16 +38,20 @@ async def test_get_private_object_returns_bytes() -> None:
 
 async def test_get_private_object_missing_key_is_none() -> None:
     client = MagicMock()
-    client.get_object.side_effect = RuntimeError("An error occurred (NoSuchKey)")
+    client.get_object.side_effect = ClientError(
+        {"Error": {"Code": "NoSuchKey", "Message": "x"}}, "GetObject"
+    )
     with patch("services.storage_service._client", return_value=client):
         assert await storage_service.get_private_object("k") is None
 
 
 async def test_get_private_object_other_error_propagates() -> None:
     client = MagicMock()
-    client.get_object.side_effect = RuntimeError("AccessDenied")
+    client.get_object.side_effect = ClientError(
+        {"Error": {"Code": "AccessDenied", "Message": "path 404 mentioned"}}, "GetObject"
+    )
     with patch("services.storage_service._client", return_value=client):
-        with pytest.raises(RuntimeError):
+        with pytest.raises(ClientError):
             await storage_service.get_private_object("k")
 
 
