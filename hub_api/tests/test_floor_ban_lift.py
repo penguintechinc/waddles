@@ -179,10 +179,10 @@ def _url(db: Any, user: int = MEMBER) -> str:
     return f"/api/v1/admin/{public_id(db.async_dal, db.community_id)}/reputation/floor-bans/{uuid_}"
 
 
-def _h(user: int) -> dict[str, str]:
-    return {
-        "Authorization": f"Bearer {make_user_token(user_id=user, scope='', tenant=TENANT_SLUG)}"
-    }
+def _h(user: int, *, scope: str = "tenant:admin") -> dict[str, str]:
+    """A bearer for `user`; the default carries the tenant-admin scope (a claim, not proof)."""
+    token = make_user_token(user_id=user, scope=scope, tenant=TENANT_SLUG)
+    return {"Authorization": f"Bearer {token}"}
 
 
 class TestFloorBanLift:
@@ -239,6 +239,23 @@ class TestFloorBanLift:
         assert _allowed(db, MEMBER)
         assert not _allowed(db, ADMIN)
 
+    async def test_tenant_admin_scope_claim_without_the_db_row_is_refused(
+        self, client: Any, db: Any
+    ) -> None:
+        """Keyed deny test: the `tenant:admin` claim alone is not proof (no `tenant_admins` row)."""
+        _ban(db)
+        resp = await client.delete(_url(db), headers=_h(MEMBER, scope="tenant:admin"))
+        assert resp.status_code == 403
+        assert not _allowed(db)
+
+    async def test_missing_tenant_admin_scope_is_refused_even_for_a_tenant_admin(
+        self, client: Any, db: Any
+    ) -> None:
+        _ban(db)
+        resp = await client.delete(_url(db), headers=_h(TENANT_ADMIN, scope=""))
+        assert resp.status_code == 403
+        assert not _allowed(db)
+
     @pytest.mark.parametrize("caller", (MEMBER, ADMIN))
     async def test_non_tenant_admin_is_refused_and_ban_stays(
         self, client: Any, db: Any, caller: int
@@ -280,14 +297,22 @@ class TestFloorBanLift:
         assert (await client.delete(_url(db), headers=_h(TENANT_ADMIN))).status_code == 404
         assert _allowed(db)
 
-    async def test_cross_tenant_admin_is_404_and_ban_stays(self, client: Any, db: Any) -> None:
-        db.dal.tenants.insert(slug="other-tenant", display_name="Other", is_active=True)
+    async def test_cross_tenant_admin_is_refused_and_ban_stays(self, client: Any, db: Any) -> None:
+        """An admin of ANOTHER tenant is refused and never touches this tenant's ban.
+
+        Without a `tenant_admins` row there the guard answers 403; with one, the foreign community
+        is a 404.
+        """
+        other = db.dal.tenants.insert(slug="other-tenant", display_name="Other", is_active=True)
         db.dal.commit()
         _ban(db)
         headers = {
             "Authorization": "Bearer "
-            + make_user_token(user_id=TENANT_ADMIN, scope="", tenant="other-tenant")
+            + make_user_token(user_id=TENANT_ADMIN, scope="tenant:admin", tenant="other-tenant")
         }
+        assert (await client.delete(_url(db), headers=headers)).status_code == 403
+        db.dal.tenant_admins.insert(user_id=TENANT_ADMIN, tenant_id=other)
+        db.dal.commit()
         assert (await client.delete(_url(db), headers=headers)).status_code == 404
         assert not _allowed(db)
 
