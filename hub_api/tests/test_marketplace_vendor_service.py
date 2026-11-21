@@ -75,18 +75,26 @@ class TestDashboardRevenueBreakdown:
         )
         seller = vendor.get_vendor_profile(dal, 1)
         dal.vendor_payments.insert(
-            seller_id=seller["id"], module_id=module["id"], amount_cents=300, status="completed"
+            seller_id=seller["id"],
+            module_id=_num(dal, module),
+            amount_cents=300,
+            status="completed",
         )
         dal.vendor_payments.insert(
-            seller_id=seller["id"], module_id=module["id"], amount_cents=200, status="pending"
+            seller_id=seller["id"], module_id=_num(dal, module), amount_cents=200, status="pending"
         )
         dal.commit()
 
         dashboard = vendor.get_vendor_dashboard(dal, 1)
-        assert dashboard["revenueBreakdown"][0]["moduleId"] == module["id"]
+        assert dashboard["revenueBreakdown"][0]["moduleId"] == module["id"]  # public UUID
         assert dashboard["revenueBreakdown"][0]["revenue"] == 500
         assert dashboard["stats"]["totalRevenue"] == 300
         assert dashboard["stats"]["expectedRevenue"] == 200
+
+
+def _num(dal: Any, module: dict[str, Any]) -> int:
+    """Numeric `marketplace_modules.id` behind a module DTO's public-UUID `id`."""
+    return int(dal(dal.marketplace_modules.public_id == module["id"]).select().first().id)
 
 
 class TestCreateVendorModuleValidation:
@@ -152,7 +160,7 @@ class TestUpdateVendorModuleEdgeCases:
                 "webhookSecret": "s3cret",
             },
         )
-        result = vendor.update_vendor_module(dal, 1, module["id"], {})
+        result = vendor.update_vendor_module(dal, 1, _num(dal, module), {})
         assert result == {"success": True}
 
     def test_ssrf_guard_on_webhook_url_update(self, dal: Any) -> None:
@@ -168,7 +176,7 @@ class TestUpdateVendorModuleEdgeCases:
         )
         with pytest.raises(ApiError):
             vendor.update_vendor_module(
-                dal, 1, module["id"], {"webhookUrl": "http://169.254.169.254/latest"}
+                dal, 1, _num(dal, module), {"webhookUrl": "http://169.254.169.254/latest"}
             )
 
 

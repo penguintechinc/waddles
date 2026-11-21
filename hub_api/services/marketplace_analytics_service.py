@@ -223,7 +223,7 @@ def get_discount_code_performance(dal: Any, user_id: int) -> dict[str, Any]:
             expired_count += 1
         result_codes.append(
             {
-                "id": code.id,
+                "id": str(code.public_id),
                 "code": code.code,
                 "discountType": code.discount_type,
                 "discountValue": code.discount_value,
@@ -274,19 +274,22 @@ def get_community_drilldown(
     offset = (page - 1) * limit
     page_rows = rows[offset : offset + limit]
 
-    module_names = {
-        m.id: m.name
-        for m in dal(dal.marketplace_modules.id.belongs(module_ids)).select(
-            dal.marketplace_modules.id, dal.marketplace_modules.name
+    module_rows = list(
+        dal(dal.marketplace_modules.id.belongs(module_ids)).select(
+            dal.marketplace_modules.id,
+            dal.marketplace_modules.name,
+            dal.marketplace_modules.public_id,
         )
-    }
+    )
+    module_names = {m.id: m.name for m in module_rows}
+    module_uuids = {m.id: str(m.public_id) for m in module_rows}
     public_ids = lookup_public_ids_sync(dal, (r.community_id for r in page_rows))
     return {
         "rows": [
             {
                 "installationId": r.id,
                 "communityId": public_ids[int(r.community_id)],
-                "moduleId": r.module_id,
+                "moduleId": module_uuids.get(r.module_id),
                 "moduleName": module_names.get(r.module_id),
                 "status": r.status,
                 "installedAt": r.installed_at.isoformat() if r.installed_at else None,
