@@ -2,14 +2,14 @@
 # Marketing screenshot run: preflight, pinned Playwright install, capture,
 # artifact cleanup (pass or fail). Invoked by `make screenshots`.
 #
-# Env: BASE_URL (default http://localhost:8060), SCREENSHOT_EMAIL /
+# Env: BASE_URL (default http://localhost:8080), SCREENSHOT_EMAIL /
 #      SCREENSHOT_PASSWORD (or ADMIN_EMAIL / ADMIN_PASSWORD), COMMUNITY_ID,
 #      TENANT_SLUG, OUT_DIR, STRICT_EMPTY=1.
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TOOL_DIR="${ROOT}/tests/screenshots"
-export BASE_URL="${BASE_URL:-http://localhost:8060}"
+export BASE_URL="${BASE_URL:-http://localhost:8080}"
 export PLAYWRIGHT_OUTPUT_DIR="/tmp/playwright-waddles"
 
 # Per-repo Playwright scratch dir; removed on exit whether the run passed or failed.

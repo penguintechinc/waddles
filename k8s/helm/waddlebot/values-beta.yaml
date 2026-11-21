@@ -230,53 +230,43 @@ ingress:
   hosts:
     - host: waddlebot.penguintech.cloud
       paths: &api-paths
+        # hub-api-v3 paths omit `port`: they inherit pipeline.hubApi.port (the chart fails a mismatch).
         # WebSocket
         - path: /socket.io
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
 
         # Hub API routes
         - path: /api/v1/public
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/auth
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/user
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/community
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/communities
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/admin
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/platform
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/superadmin
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/cookie
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
         - path: /api/v1/signup-settings
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
 
 
 
@@ -288,12 +278,10 @@ ingress:
         - path: /api/v1/calendar
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
 
         - path: /api/v1/marketplace
           pathType: Prefix
           service: hub-api-v3
-          port: 8060
 
 
 
@@ -322,60 +310,48 @@ httproute:
     - "waddlebot.penguintech.cloud"
     - "waddles.penguintech.cloud"
   rules:
+    # hub-api-v3 rules omit `port`: they inherit pipeline.hubApi.port (the chart fails a mismatch).
     # WebSocket + Hub API routes (3600s timeout for long-lived WS connections)
     - path: /socket.io
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/public
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/auth
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/user
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/community
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/communities
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/admin
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/platform
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/superadmin
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/cookie
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/signup-settings
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     # SECURITY: routed through hub-api, NOT waddlebot-interactive-productivity
     # directly (live authz bypass, fixed 2026-10) -- see matching comment above.
     - path: /api/v1/calendar
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     - path: /api/v1/marketplace
       service: "waddlebot-hub-api-v3"
-      port: 8060
       timeoutSeconds: 3600
     # Frontend catch-all (must be last)
     - path: /

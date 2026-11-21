@@ -87,7 +87,7 @@ case "$MODULE" in
     NET_ARGS=(--network "$NET")
     ;;
   hub-webui)
-    echo "HUB_API_URL=http://127.0.0.1:8060" > "$APP_ENV"
+    echo "HUB_API_URL=http://127.0.0.1:8204" > "$APP_ENV"
     ;;
 esac
 

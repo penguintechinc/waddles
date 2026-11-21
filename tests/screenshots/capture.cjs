@@ -15,7 +15,7 @@ const path = require('path');
 const { chromium } = require('playwright');
 const { buildPages } = require('./pages.cjs');
 
-const BASE_URL = (process.env.BASE_URL || 'http://localhost:8060').replace(/\/+$/, '');
+const BASE_URL = (process.env.BASE_URL || 'http://localhost:8080').replace(/\/+$/, '');
 const EMAIL = process.env.SCREENSHOT_EMAIL || process.env.ADMIN_EMAIL || '';
 const PASSWORD = process.env.SCREENSHOT_PASSWORD || process.env.ADMIN_PASSWORD || '';
 const COMMUNITY_ID = process.env.COMMUNITY_ID || '9001';

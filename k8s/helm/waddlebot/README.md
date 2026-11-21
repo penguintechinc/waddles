@@ -99,8 +99,8 @@ ingress:
         - path: /
           pathType: Prefix
           backend:
-            service: hub
-            port: 8060
+            service: hub-webui-v3
+            port: 8080
   tls:
     - secretName: waddlebot-tls
       hosts:
@@ -331,7 +331,7 @@ MinIO's own KMS backend configuration.
 | `admin.hub.enabled` | Enable hub module | `true` |
 | `admin.hub.image` | Hub image name | `waddlebot-hub` |
 | `admin.hub.tag` | Hub image tag | `latest` |
-| `admin.hub.port` | Hub port | `8060` |
+| `pipeline.hubApi.port` | hub-api HTTP port (Service, containerPort, routes) | `8204` |
 | `admin.hub.replicas` | Number of replicas | `2` |
 
 ### Core Modules
@@ -770,7 +770,7 @@ kubectl exec -it -n waddlebot <pod-name> -- curl http://router:8000/health
 
 3. Port forward for direct access:
 ```bash
-kubectl port-forward -n waddlebot svc/waddlebot-hub 8060:8060
+kubectl port-forward -n waddlebot svc/waddlebot-hub-api-v3 8204:8204
 ```
 
 ### Storage issues
@@ -877,7 +877,7 @@ curl http://localhost:8000/metrics
 kubectl exec -it -n waddlebot <router-pod> -- curl http://localhost:8000/health
 
 # Hub health
-kubectl exec -it -n waddlebot <hub-pod> -- curl http://localhost:8060/health
+kubectl exec -it -n waddlebot <hub-pod> -- curl http://localhost:8204/health
 ```
 
 ## Production Best Practices

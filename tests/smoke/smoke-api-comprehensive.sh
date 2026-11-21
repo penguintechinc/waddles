@@ -3,7 +3,7 @@
 # Tests all major API endpoints across all route files
 #
 # Usage: ./tests/smoke/smoke-api-comprehensive.sh [BASE_URL] [ALB_HOST]
-#   BASE_URL defaults to http://localhost:8060 for local testing
+#   BASE_URL defaults to http://localhost:8204 for local testing
 #   For beta: ./tests/smoke/smoke-api-comprehensive.sh https://waddlebot.penguintech.io dal2.penguintech.io
 #   ALB_HOST (optional) - ALB DNS name to bypass Cloudflare
 #
@@ -18,7 +18,7 @@
 set -e
 
 # Configuration
-BASE_URL="${1:-http://localhost:8060}"
+BASE_URL="${1:-http://localhost:8204}"
 ALB_HOST="${ALB_HOST:-${2}}"
 TIMEOUT=5
 PASSED=0
