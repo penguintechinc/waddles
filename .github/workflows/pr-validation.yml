@@ -828,6 +828,14 @@ jobs:
       - name: wait-for-hub-api gate (every non-hub-api workload waits for hub-api)
         run: make check-wait-for-hub-api
 
+      # fresh-install hook ordering (alpha 2026-10-01): no DB-dependent Job may be a pre-install hook
+      # (in-chart Postgres only exists after the pre-install phase), and db-migrate must be exactly
+      # post-install,pre-upgrade. Previously reachable only via `make test-helm-matrix` (never run by
+      # CI). Fails on zero Jobs examined; tests/test_helm_hook_phases_gate.py (pytest step above)
+      # proves a planted DB-dependent pre-install hook fails it.
+      - name: Helm hook-phase gate (DB-dependent Jobs never pre-install)
+        run: make check-helm-hook-phases
+
       # #1382 -- a service-leaf Certificate whose SAN falls outside the internal CA's
       # permitted X.509 nameConstraint subtrees is rejected by rustls-webpki (which checks
       # EVERY SAN, not just the dialled name), crashlooping the consumer and blocking
