@@ -11,7 +11,8 @@ fails when the RENDERED ACL (not the values) drifts back towards a wide grant:
    grant, key patterns `~`/`%R~`/`%W~`/`%RW~` with a specific literal prefix (never `~*`,
    `allkeys`, a leading wildcard or a whole namespace such as `waddles:*` / `waddles:t:*`), commands starting at `-@all`
    and never `+@all`/`allcommands`/`+@dangerous`/`+@admin`/FLUSHALL/FLUSHDB/KEYS/ACL/CONFIG
-   (only `+config|get`), never `nopass`.
+   (only `+config|get`), never `nopass`. ACL selectors `(...)` may only grant consumer-group
+   admin (XGROUP CREATE/DESTROY, XINFO GROUPS/STREAM) and are exempt from the ownership matrix.
 2. `admin` (full access) only on valkey-durable (replication masteruser); `probe` = PING only;
    `default` either `reset` (off) or the TRANSITIONAL legacy user, tolerated only while the
    StatefulSet carries `valkey.waddles/legacy-default-user: "true"` (reported as a warning).
@@ -20,7 +21,10 @@ fails when the RENDERED ACL (not the values) drifts back towards a wide grant:
 4. Bundle executor workloads carry no Valkey credential at all (no VALKEY_*/REDIS_* env, no
    reference to a valkey Secret, no envFrom of the shared app Secret).
 
-`--require-executor` additionally fails when no executor workload is rendered (CI passes it for the
+5. Client wiring: every container holding a Valkey password authenticates as its OWN user
+   (`-valkey-user-<name>` + matching VALKEY_USERNAME / VALKEY_KV_USERNAME), never the shared one.
+
+`--require-clients` fails when zero client credentials are examined; `--require-executor` additionally fails when no executor workload is rendered (CI passes it for the
 alpha/beta topologies, which deploy executors). Zero ACL users examined is a FAILURE, never a pass (critical-rules.md Verification Integrity).
 """
 
@@ -60,6 +64,15 @@ FORBIDDEN_COMMANDS = {
 }
 TOO_WIDE_PREFIXES = {"", "waddles:", "waddles.", "waddles:t:", "bundle:", "keys:"}
 KEY_RE = re.compile(r"^(~|%R~|%W~|%RW~)(.+)$")
+# The ONLY commands an ACL selector `(keys commands)` may grant on keys the user does not own:
+# consumer-group provisioning (hub-api / the seeder create groups on spine streams).
+SELECTOR_COMMANDS = {
+    "-@all",
+    "+xgroup|create",
+    "+xgroup|destroy",
+    "+xinfo|groups",
+    "+xinfo|stream",
+}
 
 # Protected sample keys -> (instance, users allowed to hold ANY pattern matching them).
 OWNERSHIP: list[tuple[str, str, set[str]]] = [
@@ -154,6 +167,24 @@ def check_service_user(inst: str, name: str, rules: list[str]) -> list[str]:
             errs.append(
                 f"{where}: key pattern {k!r} is a wide grant (no specific literal prefix)"
             )
+    for sel in (r for r in rules if r.startswith("(")):
+        parts = sel.strip("()").split()
+        skeys = [p for p in parts if KEY_RE.match(p)]
+        scmds = [p for p in parts if not KEY_RE.match(p)]
+        if not skeys or not scmds or scmds[0] != "-@all":
+            errs.append(f"{where}: selector {sel!r} must be `(keys... -@all +cmd...)`")
+        for p in skeys:
+            lit = literal_prefix(KEY_RE.match(p).group(2))  # type: ignore[union-attr]
+            if lit == "" or (
+                lit in TOO_WIDE_PREFIXES
+                and KEY_RE.match(p).group(2)[len(lit) :].strip("*") == ""
+            ):  # type: ignore[union-attr]
+                errs.append(f"{where}: selector key {p!r} is a wide grant")
+        bad = [c for c in scmds if c.lower() not in SELECTOR_COMMANDS]
+        if bad:
+            errs.append(
+                f"{where}: selector {sel!r} grants {bad} -- only consumer-group admin is allowed in a selector"
+            )
     cmds = [r for r in rules if r[:1] in "+-" or r in ("allcommands", "nocommands")]
     if not cmds or cmds[0] != "-@all":
         errs.append(f"{where}: command rules must start with -@all, got {cmds[:1]}")
@@ -204,6 +235,64 @@ def check_executors(docs: list[dict[str, Any]]) -> tuple[int, list[str]]:
                         f"executor {name}: envFrom Secret {sref!r} (may carry Valkey creds)"
                     )
     return seen, errs
+
+
+def _pod(d: dict[str, Any]) -> dict[str, Any] | None:
+    """Pod spec of a workload (CronJob one level deeper), else None."""
+    kind = d.get("kind")
+    if kind == "CronJob":
+        return d["spec"]["jobTemplate"]["spec"]["template"]["spec"]
+    if kind in {"Deployment", "StatefulSet", "DaemonSet", "Job"}:
+        return d["spec"]["template"]["spec"]
+    return None
+
+
+def check_client_wiring(
+    docs: list[dict[str, Any]], users: dict[str, dict[str, list[str]]]
+) -> tuple[int, list[str]]:
+    """Every client that holds a Valkey password must hold ITS OWN ACL user's password + username.
+
+    For each instance that has ACL users (and therefore `default` reset): a container reading
+    VALKEY_PASSWORD / VALKEY_KV_PASSWORD must take it from `-valkey-user-<name>` with
+    VALKEY_USERNAME / VALKEY_KV_USERNAME = <name>, and <name> must be a rendered user on that
+    instance. Reading the legacy shared password (`-secrets`/VALKEY_DURABLE_PASSWORD,
+    `-valkey-kv`/VALKEY_KV_PASSWORD) is a failure. The Valkey server pods are exempt.
+    """
+    errs: list[str] = []
+    clients = 0
+    pairs = (
+        ("VALKEY_PASSWORD", "VALKEY_USERNAME", "durable", "VALKEY_DURABLE_PASSWORD"),
+        ("VALKEY_KV_PASSWORD", "VALKEY_KV_USERNAME", "kv", "VALKEY_KV_PASSWORD"),
+    )
+    for d in docs:
+        pod = _pod(d)
+        if pod is None or d["metadata"]["name"] in INSTANCES:
+            continue
+        for c in pod.get("containers", []) + pod.get("initContainers", []):
+            env = {e["name"]: e for e in c.get("env", []) or []}
+            for pw_var, user_var, inst, legacy_key in pairs:
+                if inst not in users or pw_var not in env:
+                    continue
+                ref = (env[pw_var].get("valueFrom") or {}).get("secretKeyRef") or {}
+                if ref.get("key") != legacy_key:
+                    continue  # e.g. the cache-instance fallback (REDIS_PASSWORD): no ACL users there
+                where = f"{d['metadata']['name']}/{c['name']}"
+                clients += 1
+                name = (env.get(user_var) or {}).get("value", "")
+                if "-valkey-user-" not in ref.get("name", ""):
+                    errs.append(
+                        f"{where}: {pw_var} reads the shared legacy password ({ref.get('name')}/{legacy_key}) -- use its own ACL user"
+                    )
+                    continue
+                if not name or not ref["name"].endswith(f"-valkey-user-{name}"):
+                    errs.append(
+                        f"{where}: {user_var}={name!r} does not match its password Secret {ref['name']!r}"
+                    )
+                elif name not in users[inst]:
+                    errs.append(
+                        f"{where}: {user_var}={name!r} has no ACL user on {inst}"
+                    )
+    return clients, errs
 
 
 def main() -> int:
@@ -282,6 +371,11 @@ def main() -> int:
                     f"{inst}/{name}: pattern(s) {hits} reach protected key {key!r} (allowed: {sorted(allowed) or 'nobody'})"
                 )
 
+    n_clients, wiring_errs = check_client_wiring(docs, by_inst)
+    errs.extend(wiring_errs)
+    if "--require-clients" in sys.argv[1:] and n_clients == 0:
+        errs.append("--require-clients: zero Valkey client containers examined")
+
     n_exec, exec_errs = check_executors(docs)
     errs.extend(exec_errs)
     if n_exec == 0 and "--require-executor" in sys.argv[1:]:
@@ -293,7 +387,8 @@ def main() -> int:
         print(f"WARN: {w}")
     print(
         f"examined: {examined} service ACL users across {len(by_inst)} instance(s), "
-        f"{checked_samples} protected-key ownership samples, {n_exec} executor workload(s)"
+        f"{checked_samples} protected-key ownership samples, {n_clients} client credential(s), "
+        f"{n_exec} executor workload(s)"
     )
     if errs:
         for e in errs:

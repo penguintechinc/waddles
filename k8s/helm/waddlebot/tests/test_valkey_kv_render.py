@@ -118,12 +118,15 @@ def test_kv_stateful_exception_marker():
 def test_kv_acl_allow_list_probe_works_no_dangerous():
     """+config|get must come AFTER -@dangerous (CONFIG GET is @dangerous); nothing broader is
     granted."""
+    # The bundle `kv` host (svc-process) authenticates as its OWN ACL user, rendered from
+    # infrastructure.valkeyAcl.kvBaseCommands; `default` is `reset` (test_valkey_acl_render.py).
     cmd = _cmd(_docs("values-alpha.yaml"))
-    line = [ln for ln in cmd.splitlines() if "--user default" in ln]
+    assert "--user default reset" in cmd
+    line = [ln for ln in cmd.splitlines() if "--user svc-process reset on" in ln]
     assert len(line) == 1
     rules = [
         r.strip("'\"")
-        for r in line[0].split("--user default on", 1)[1].split()
+        for r in line[0].split("--user svc-process reset on", 1)[1].split()
         if r.strip("'\"")[:1] in "+-"
     ]
     assert rules[0] == "-@all", rules
@@ -260,8 +263,10 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
                 for f in c.get("envFrom", [])
             )
     assert scanned > 10, f"examined only {scanned} workloads"
-    assert referrers == 4, (
-        f"expected valkey-kv + 2 rust pods + hub-api to reference the kv Secret, got {referrers}"
+    # Clients read only the credential-free URL from the kv Secret (each password comes from its
+    # OWN -valkey-user-<name> Secret); the server no longer reads the legacy shared password.
+    assert referrers == 3, (
+        f"expected 2 rust pods + hub-api to reference the kv Secret (URL only), got {referrers}"
     )
 
 
@@ -377,17 +382,17 @@ def test_beta_tier_without_certs_generates_them_at_runtime():
 
 
 @pytest.mark.parametrize(
-    ("values", "extra", "secret", "url_key", "pw_key"),
+    ("values", "extra", "secret", "url_key", "pw_secret", "pw_key"),
     [
-        ("values-alpha.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "VALKEY_KV_PASSWORD"),
-        ("values-beta.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "VALKEY_KV_PASSWORD"),
-        ("values-local.yaml", (), "w-waddlebot-secrets", "REDIS_URL", "REDIS_PASSWORD"),
+        ("values-alpha.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "w-waddlebot-valkey-user-hub-api", "VALKEY_KV_PASSWORD"),
+        ("values-beta.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "w-waddlebot-valkey-user-hub-api", "VALKEY_KV_PASSWORD"),
+        ("values-local.yaml", (), "w-waddlebot-secrets", "REDIS_URL", "w-waddlebot-secrets", "REDIS_PASSWORD"),
     ],
 )
-def test_hub_api_erasure_reads_bundle_kv_from_the_kv_instance(values, extra, secret, url_key, pw_key):
+def test_hub_api_erasure_reads_bundle_kv_from_the_kv_instance(values, extra, secret, url_key, pw_secret, pw_key):
     """regression: GDPR erasure scanned the DURABLE Valkey (VALKEY_URL) for `bundlekv:*`, which lives
-    on valkey-kv, and silently erased nothing. hub-api must get VALKEY_KV_URL/VALKEY_KV_PASSWORD from
-    the instance that actually holds bundle kv (kv secret when enabled, cache fallback otherwise)."""
+    on valkey-kv, and silently erased nothing. hub-api must get VALKEY_KV_URL from the instance that
+    actually holds bundle kv, authenticating as its OWN ACL user when kv is enabled."""
     docs = _docs(values, extra)
     hub = [
         d
@@ -397,6 +402,8 @@ def test_hub_api_erasure_reads_bundle_kv_from_the_kv_instance(values, extra, sec
     assert len(hub) == 1
     env = {e["name"]: e for e in hub[0]["spec"]["template"]["spec"]["containers"][0]["env"]}
     assert env["VALKEY_KV_URL"]["valueFrom"]["secretKeyRef"] == {"name": secret, "key": url_key}
-    assert env["VALKEY_KV_PASSWORD"]["valueFrom"]["secretKeyRef"] == {"name": secret, "key": pw_key}
+    assert env["VALKEY_KV_PASSWORD"]["valueFrom"]["secretKeyRef"] == {"name": pw_secret, "key": pw_key}
+    if pw_secret.endswith("-valkey-user-hub-api"):
+        assert env["VALKEY_KV_USERNAME"]["value"] == "hub-api"
     durable_key = env.get("VALKEY_URL", {}).get("valueFrom", {}).get("secretKeyRef", {}).get("key", "")
     assert "VALKEY_KV" not in durable_key
