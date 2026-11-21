@@ -3331,6 +3331,11 @@ serviceJwt:
         # connector identity.lookup and the Discord-native unban sync (platform_unban.rs).
         # Granted to svc-process too; hub-api authorizes by scope.
         - "identity:ephemeral:mint"
+        # Twitch EventSub `channel.unban` verifier (core/svc_ingest/src/twitch_unban.rs): reads the
+        # per-subscription webhook secret AND the owning tenant/community/connection of a callback
+        # key from hub-api (GET /api/v1/internal/eventsub/secret/<callback_key>). Granted to this
+        # identity alone: the secret never reaches a bundle.
+        - "eventsub:secret-read"
         # feature/bundle-host-scheduling -- scheduled bundle reconcile: svc-ingest polls
         # BundleScheduleService.ListBundleSchedules over internal gRPC (hub_api/grpc_internal/bundle_schedule_servicer.py) for the
         # active (tenant, community, app) scopes to tick. Granted to this identity alone; hub-api

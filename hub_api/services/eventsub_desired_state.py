@@ -66,7 +66,11 @@ _COUNT_KEYS: Final = ("created", "marked_delete", "removed", "marked_stale", "re
 
 
 class EventSubType(IntEnum):
-    """The seven EventSub types the Rust Twitch intake handles (bundles/rust/twitch eventsub.rs)."""
+    """The EventSub types hub-api keeps subscriptions for.
+
+    The seven the Rust Twitch intake handles (bundles/rust/twitch eventsub.rs), plus
+    ``channel.unban`` for the Twitch-native unban -> Waddles lift sync (svc-ingest).
+    """
 
     CHANNEL_FOLLOW = 1
     CHANNEL_SUBSCRIBE = 2
@@ -75,6 +79,7 @@ class EventSubType(IntEnum):
     CHANNEL_RAID = 5
     STREAM_ONLINE = 6
     STREAM_OFFLINE = 7
+    CHANNEL_UNBAN = 8
 
 
 #: code -> (Twitch type string, Twitch subscription version). ``channel.follow`` is v2 (v1 is
@@ -87,7 +92,13 @@ EVENTSUB_TYPES: Final[dict[EventSubType, tuple[str, int]]] = {
     EventSubType.CHANNEL_RAID: ("channel.raid", 1),
     EventSubType.STREAM_ONLINE: ("stream.online", 1),
     EventSubType.STREAM_OFFLINE: ("stream.offline", 1),
+    EventSubType.CHANNEL_UNBAN: ("channel.unban", 1),
 }
+
+#: Types desired for EVERY eligible connection regardless of bundle ``consumes`` rules: platform
+#: sync is a core mechanism (a Twitch-side unban must lift the matching Waddles floor ban), not an
+#: app feature. svc-ingest consumes it directly; no bundle sees the event.
+CORE_TYPES: Final[frozenset[EventSubType]] = frozenset({EventSubType.CHANNEL_UNBAN})
 
 
 class SubStatus(IntEnum):
@@ -417,8 +428,8 @@ async def sync_community(
     Runs in the caller's transaction; returns per-kind transition counts.
     """
     counts = dict.fromkeys(_COUNT_KEYS, 0)
-    types = await _desired_types(conn, tenant_id, community_id)
     conns = await _eligible_connections(conn, tenant_id, community_id)
+    types = (await _desired_types(conn, tenant_id, community_id)) | CORE_TYPES
     desired = {(c, int(t)) for c in conns for t in types}
     existing = (
         await conn.execute(
