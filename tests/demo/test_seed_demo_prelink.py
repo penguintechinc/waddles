@@ -325,7 +325,14 @@ def test_missing_community_and_baseline_fail_loud(
     with pytest.raises(seed_mod.SeedError, match="does not exist"):
         seed_mod.seed(conn, seed_mod.load_config({**_ENV, "DEMO_COMMUNITY_ID": "99"}))
     with pytest.raises(seed_mod.SeedError, match="baseline role"):
-        seed_mod.seed(conn, seed_mod.load_config({**_ENV, "DEMO_BASELINE_ROLE": "vip"}))
+        seed_mod.seed(
+            conn,
+            # "vip" has no community_roles row in the fixture; the community role must differ
+            # from it or load_config rejects the pair before the missing-baseline check runs.
+            seed_mod.load_config(
+                {**_ENV, "DEMO_BASELINE_ROLE": "vip", "DEMO_COMMUNITY_ROLE": "member"}
+            ),
+        )
 
 
 @pytest.mark.parametrize(

@@ -19500,10 +19500,21 @@ paths:
         content:
           application/json:
             schema:
-              description: Request DTO for `POST /api/v1/cookie`.
+              description: 'Request DTO for `POST /api/v1/cookie`.
+
+
+                `consentMethod` is a closed enum -- exactly the values the webui''s
+                `CookieConsentContext` sends
+
+                (`admin_dsar` is written server-side only, never via this endpoint);
+                anything else is 400.'
               properties:
                 consentMethod:
                   default: banner
+                  enum:
+                  - banner
+                  - preferences
+                  - do_not_sell
                   title: Consentmethod
                   type: string
                 preferences:
@@ -22804,11 +22815,13 @@ paths:
               description: Request DTO for update user role.
               properties:
                 role:
-                  anyOf:
-                  - type: string
-                  - type: 'null'
-                  default: null
+                  enum:
+                  - platform-admin
+                  - support
                   title: Role
+                  type: string
+              required:
+              - role
               title: UpdateUserRoleRequest
               type: object
       responses:
