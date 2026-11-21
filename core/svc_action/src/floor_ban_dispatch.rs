@@ -34,6 +34,11 @@ use crate::capabilities::{FloorBanCommand, FloorSendError, FloorSendFailure};
 use crate::flags::FeatureFlag;
 use crate::stage_metrics::StageMetrics;
 
+/// Outbox `action` code: deliver a `mod.ban`.
+pub const ACTION_BAN: i16 = 1;
+/// Outbox `action` code: deliver a `mod.unban` (a lift of a delivered ban).
+pub const ACTION_UNBAN: i16 = 2;
+
 /// Rows claimed (leased) per sweep.
 pub const CLAIM_BATCH: u32 = 20;
 /// Lease length of a claimed row; an in-flight row is reclaimable only after it expires.
@@ -71,6 +76,9 @@ pub struct ClaimedFloorBan {
     pub attempt: i32,
     /// The lease token: only this value may complete the row.
     pub lease: Uuid,
+    /// What to deliver: [`ACTION_BAN`] (`mod.ban`) or [`ACTION_UNBAN`] (`mod.unban`, enqueued by
+    /// a Waddles lift of a delivered ban; same outbox, lease, retry and dead-letter path).
+    pub action: i16,
 }
 
 /// A row reaped as DEAD (attempts exhausted).
@@ -154,6 +162,24 @@ pub trait FloorBanStore: Send + Sync {
     ) -> StoreFuture<'a, Completed>;
 }
 
+/// The platform -> Waddles half of the ban-lift sync: lifts the Waddles floor ban (and clears the
+/// soft ban) that matches a platform-side unban. NEVER enqueues an unban back (no echo), is scoped
+/// to the tenant + community the HOST derived from the verified binding (never an event field),
+/// and is idempotent: with nothing in force it changes nothing. Only COMMUNITY-scope bans
+/// are lifted (tenant-scope bans lift only through the tenant-admin path), the soft-ban clear
+/// is platform-scoped, and `source_app` (the calling bundle) is recorded on the ban + ledger.
+pub trait UnbanSync: Send + Sync {
+    /// Returns `(floor bans lifted, soft bans cleared)`.
+    fn lift_from_platform<'a>(
+        &'a self,
+        tenant_id: i32,
+        community_id: i32,
+        platform: &'a str,
+        user: Uuid,
+        source_app: &'a str,
+    ) -> StoreFuture<'a, (i32, i32)>;
+}
+
 /// Emits one leased row's outbound command and waits for the sender's confirmation.
 pub trait FloorBanSender: Send + Sync {
     /// `Ok(op_id)` ONLY on a confirmed ack.
@@ -218,12 +244,14 @@ fn note(metrics: &StageMetrics, result: &'static str, row: &ClaimedFloorBan, cod
             floor_ban_id = row.id,
             community_id = row.community_id,
             code,
-            "ALERT floor ban DEAD: attempts exhausted without a sender confirmation"
+            "ALERT floor ban DEAD: attempts exhausted without a sender confirmation \
+             (an UNBAN row means a lifted user is STILL banned on the platform)"
         ),
         "failed" => tracing::warn!(
             floor_ban_id = row.id,
             community_id = row.community_id,
             attempt = row.attempt,
+            unban = row.action == ACTION_UNBAN,
             code,
             "floor ban delivery failed; retry scheduled"
         ),
@@ -342,6 +370,7 @@ async fn process_one<S: FloorBanStore, T: FloorBanSender>(
         user: row.user,
         platform: row.platform.clone(),
         attempt: row.attempt,
+        unban: row.action == ACTION_UNBAN,
     };
     match sender.send(&cmd).await {
         Ok(op_id) => finish(store, metrics, &row, Completion::Done, Some(&op_id), "").await,
@@ -503,6 +532,43 @@ fn stmt(sql: &str, values: Vec<Value>) -> Statement {
     Statement::from_sql_and_values(DbBackend::Postgres, sql, values)
 }
 
+impl UnbanSync for PgFloorBanStore {
+    fn lift_from_platform<'a>(
+        &'a self,
+        tenant_id: i32,
+        community_id: i32,
+        platform: &'a str,
+        user: Uuid,
+        source_app: &'a str,
+    ) -> StoreFuture<'a, (i32, i32)> {
+        Box::pin(async move {
+            let rows = self
+                .conn
+                .query_all_raw(stmt(
+                    "SELECT r_lifted, r_soft_cleared FROM \
+                     reputation_floor_ban_lift_from_platform($1::bigint, $2::bigint, $3::text, $4::uuid, $5::text)",
+                    vec![
+                        Value::BigInt(Some(i64::from(tenant_id))),
+                        Value::BigInt(Some(i64::from(community_id))),
+                        Value::String(Some(platform.to_string())),
+                        Value::Uuid(Some(user)),
+                        Value::String(Some(source_app.to_string())),
+                    ],
+                ))
+                .await
+                .map_err(|e| e.to_string())?;
+            let row = rows.first().ok_or_else(|| {
+                "reputation_floor_ban_lift_from_platform returned no row".to_string()
+            })?;
+            let err = |e: sea_orm::DbErr| e.to_string();
+            Ok((
+                row.try_get("", "r_lifted").map_err(err)?,
+                row.try_get("", "r_soft_cleared").map_err(err)?,
+            ))
+        })
+    }
+}
+
 impl FloorBanStore for PgFloorBanStore {
     fn reap(&self, limit: u32) -> StoreFuture<'_, Vec<DeadFloorBan>> {
         Box::pin(async move {
@@ -532,7 +598,7 @@ impl FloorBanStore for PgFloorBanStore {
                 .conn
                 .query_all_raw(stmt(
                     "SELECT r_id, r_tenant_id, r_community_id, r_user_uuid, r_scope, r_platform, \
-                     r_attempt, r_lease_token FROM reputation_floor_ban_claim($1::int, $2::int)",
+                     r_attempt, r_lease_token, r_action FROM reputation_floor_ban_claim($1::int, $2::int)",
                     vec![
                         Value::Int(Some(i32::try_from(limit).unwrap_or(20))),
                         Value::Int(Some(i32::try_from(lease_seconds).unwrap_or(120))),
@@ -552,6 +618,7 @@ impl FloorBanStore for PgFloorBanStore {
                         platform: r.try_get("", "r_platform").map_err(err)?,
                         attempt: r.try_get("", "r_attempt").map_err(err)?,
                         lease: r.try_get("", "r_lease_token").map_err(err)?,
+                        action: r.try_get("", "r_action").map_err(err)?,
                     })
                 })
                 .collect()

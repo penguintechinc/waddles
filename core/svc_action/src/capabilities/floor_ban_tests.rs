@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use super::super::super::tests::{test_pin_keys, FakeRelayQueue};
-use super::super::super::{outbound_relay_queue_key, StageCapabilities};
+use super::super::super::{outbound_relay_queue_key, InvokeScope, StageCapabilities};
 use super::super::super::{FloorBanCommand, FloorSendError, FloorSendFailure};
 use super::{build, mod_tools, rig_for, Rig, COMMUNITY_ID, TENANT_ID, UUID_A, UUID_B, UUID_C};
 use crate::pin_sig::PinFields;
@@ -19,6 +19,7 @@ fn cmd(user: &str) -> FloorBanCommand {
         user: user.parse().unwrap(),
         platform: "discord".to_string(),
         attempt: 2,
+        unban: false,
     }
 }
 
@@ -202,4 +203,155 @@ async fn a_platform_with_no_outbound_ban_path_is_closed_for_good() {
         FloorSendError::Permanent("invalid_scope".into())
     );
     assert!(c.relay_queue.pushed.lock().unwrap().is_empty());
+}
+
+/// `(tenant, community, platform, user, calling app)` of one platform-originated lift.
+type LiftCall = (i32, i32, String, uuid::Uuid, String);
+
+/// Records every platform-originated lift the hook asks for.
+#[derive(Default)]
+struct FakeUnbanSync {
+    calls: std::sync::Mutex<Vec<LiftCall>>,
+    fail: bool,
+}
+
+impl crate::floor_ban_dispatch::UnbanSync for FakeUnbanSync {
+    fn lift_from_platform<'a>(
+        &'a self,
+        tenant_id: i32,
+        community_id: i32,
+        platform: &'a str,
+        user: uuid::Uuid,
+        source_app: &'a str,
+    ) -> crate::floor_ban_dispatch::StoreFuture<'a, (i32, i32)> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push((
+                tenant_id,
+                community_id,
+                platform.to_string(),
+                user,
+                source_app.to_string(),
+            ));
+            if self.fail {
+                Err("db down".to_string())
+            } else {
+                Ok((1, 0))
+            }
+        })
+    }
+}
+
+#[tokio::test]
+async fn an_unban_row_becomes_a_signed_mod_unban_with_its_own_op_id_prefix() {
+    let c = build(
+        rig_for("discord"),
+        mod_tools("discord", "mod.unban"),
+        FakeRelayQueue::with_live_drain(),
+    )
+    .with_discord_ack_timeout(std::time::Duration::from_millis(60));
+    let mut unban = cmd(UUID_B);
+    unban.unban = true;
+    let op_id = c.emit_floor_ban(&unban).await.expect("confirmed");
+    let pushed = c.relay_queue.pushed.lock().unwrap().clone();
+    assert_eq!(pushed.len(), 1, "exactly one outbound command");
+    let env: Value = serde_json::from_str(&pushed[0].1).unwrap();
+    assert_eq!(env["op"], "mod.unban");
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(op_id.starts_with("fu-42-2-"), "{op_id}");
+}
+
+fn caller_scope(app_id: &str) -> InvokeScope {
+    InvokeScope {
+        tenant: TENANT_ID.to_string(),
+        community: Some(COMMUNITY_ID.to_string()),
+        app_id: app_id.to_string(),
+        tenant_id: TENANT_ID,
+        community_id: COMMUNITY_ID,
+        app_version: 1,
+        ..super::super::super::tests::scope()
+    }
+}
+
+const CHATGUARD: &str = "penguintechinc.waddles.chatguard";
+
+#[tokio::test]
+async fn an_allowlisted_core_bundles_confirmed_unban_lifts_only_its_own_tenant_and_community() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    let sync = std::sync::Arc::new(FakeUnbanSync::default());
+    c.set_unban_sync(sync.clone());
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
+        .await;
+    assert_eq!(
+        sync.calls.lock().unwrap().clone(),
+        vec![(
+            TENANT_ID,
+            COMMUNITY_ID,
+            "discord".to_string(),
+            UUID_B.parse().unwrap(),
+            CHATGUARD.to_string()
+        )],
+        "tenant and community come from the invoke scope, the calling app is recorded"
+    );
+    assert!(
+        c.relay_queue.pushed.lock().unwrap().is_empty(),
+        "a sync-originated lift must not send a platform unban back"
+    );
+    // A malformed user token never reaches the store.
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", "not-a-uuid")
+        .await;
+    assert_eq!(sync.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_vendor_bundles_confirmed_unban_lifts_nothing_in_waddles() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    let sync = std::sync::Arc::new(FakeUnbanSync::default());
+    c.set_unban_sync(sync.clone());
+    // A third-party (non-core) bundle, and a core-namespace bundle that is NOT allowlisted: the
+    // platform unban already went out, but neither may lift a Waddles ban without the permission.
+    for app in [
+        "acme.vendor.modbot",
+        "penguintechinc.waddles.fixture-test-app-caller",
+    ] {
+        assert!(!c.may_sync_lift(&caller_scope(app)), "{app}");
+        c.sync_confirmed_unban(&caller_scope(app), "discord", UUID_B)
+            .await;
+    }
+    assert!(sync.calls.lock().unwrap().is_empty(), "nothing was lifted");
+}
+
+#[tokio::test]
+async fn a_bundle_holding_the_per_action_permission_may_lift() {
+    let mut c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    c.gate = super::gate(&[(
+        "acme.vendor.modbot",
+        1,
+        vec!["reputation.floor_ban.lift".to_string()],
+    )]);
+    let sync = std::sync::Arc::new(FakeUnbanSync::default());
+    c.set_unban_sync(sync.clone());
+    assert!(c.may_sync_lift(&caller_scope("acme.vendor.modbot")));
+    c.sync_confirmed_unban(&caller_scope("acme.vendor.modbot"), "discord", UUID_B)
+        .await;
+    assert_eq!(sync.calls.lock().unwrap().len(), 1);
+    // The grant is per app: another vendor bundle in the same community still lifts nothing.
+    assert!(!c.may_sync_lift(&caller_scope("acme.vendor.other")));
+}
+
+#[tokio::test]
+async fn a_failed_platform_lift_is_logged_loudly_and_never_panics() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    c.set_unban_sync(std::sync::Arc::new(FakeUnbanSync {
+        fail: true,
+        ..FakeUnbanSync::default()
+    }));
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
+        .await;
+}
+
+#[tokio::test]
+async fn without_an_installed_sync_a_confirmed_unban_changes_nothing() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
+        .await;
 }

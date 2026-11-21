@@ -1062,7 +1062,9 @@ impl PostgresReputationStore {
     /// Validates an already-SQL-form floor-ban key (see [`floor_sql_key`]); never re-escapes, so a
     /// key claimed back from `floor_ban_due` round-trips unchanged.
     fn floor_key(key: &str) -> Result<String, ReputationError> {
+        // `unban:` is the reserved namespace of platform-unban outbox rows: never a ban key.
         let ok = !key.is_empty()
+            && !key.starts_with("unban:")
             && key.len() <= crate::MAX_IDEMPOTENCY_KEY_LEN
             && key
                 .bytes()
@@ -1237,5 +1239,20 @@ pub async fn run_membership_refresh(
             }
         }
         tokio::time::sleep(interval).await;
+    }
+}
+
+#[cfg(test)]
+mod floor_key_namespace_tests {
+    use super::PostgresReputationStore;
+
+    #[test]
+    fn the_unban_prefix_is_reserved_and_never_a_ban_key() {
+        for bad in ["unban:7", "unban:", "unban:evt1:hard"] {
+            assert!(PostgresReputationStore::floor_key(bad).is_err(), "{bad}");
+        }
+        for ok in ["evt1:hard", "x-unban:1", "unbanned:1"] {
+            assert_eq!(PostgresReputationStore::floor_key(ok).unwrap(), ok);
+        }
     }
 }

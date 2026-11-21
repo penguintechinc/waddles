@@ -1013,8 +1013,18 @@ class TestEraseSubject:
         if not _q(pg_db, "SELECT 1 FROM pg_roles WHERE rolname = 'hub_api'"):
             _q(pg_db, "CREATE ROLE hub_api")
         _q(pg_db, "ALTER ROLE hub_api LOGIN PASSWORD %s", (_LOGIN_PW,))
-        # The grant block is conditional on the role existing at apply time: re-apply the script.
-        _q(pg_db, _SQL_SCRIPT.read_text(encoding="utf-8"))
+        # The grant block is conditional on the role existing at apply time: re-apply the scripts
+        # in migration order (0114, then the later floor-ban scripts that redefine its functions;
+        # `claim` changed its return type in 0140, so it is dropped before the replay).
+        _q(pg_db, "DROP FUNCTION IF EXISTS reputation_floor_ban_claim(int, int)")
+        for name in (
+            "bundle_reputation_floor_ban.sql",
+            "bundle_reputation_floor_ban_lift.sql",
+            "bundle_reputation_floor_ban_platform_sync.sql",
+        ):
+            script = _SQL_SCRIPT.parent / name
+            if script.exists():
+                _q(pg_db, script.read_text(encoding="utf-8"))
 
     def _row(
         self,
