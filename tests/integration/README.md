@@ -37,7 +37,7 @@ REDIS_HOST=localhost
 REDIS_PORT=6379
 
 # WebSocket
-WS_URL=ws://localhost:8060
+WS_URL=ws://localhost:8204
 
 # Test token for authenticated WS
 TEST_TOKEN=your-test-token

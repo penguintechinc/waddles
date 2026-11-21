@@ -34,7 +34,7 @@ npm run test:watch
 
 Tests use the following environment variables:
 
-- `API_BASE_URL` - API endpoint (default: http://localhost:8060)
+- `API_BASE_URL` - API endpoint (default: http://localhost:8204)
 - `SILENT_TESTS` - Suppress console output (default: false)
 
 ### Local Testing
