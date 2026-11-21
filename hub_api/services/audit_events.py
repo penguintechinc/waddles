@@ -418,10 +418,10 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/roles"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<puuid:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<puuid:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
     # --- user administration ---
@@ -672,7 +672,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("PUT", f"{_ADM}/music/settings"),
             ("POST", f"{_ADM}/music/radio-stations"),
-            ("DELETE", f"{_ADM}/music/radio-stations/<int:station_id>"),
+            ("DELETE", f"{_ADM}/music/radio-stations/<puuid:station_id>"),
         ),
     ),
     (
@@ -704,16 +704,19 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("POST", "/api/v1/admin/<cuuid:community_id>/temp-password"),
             ("PUT", "/api/v1/admin/<cuuid:community_id>/modules/<int:module_id>/config"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/channels"),
-            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>"),
-            ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>"),
-            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/forum/posts/<int:post_id>"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>"),
             (
                 "DELETE",
-                "/api/v1/admin/<cuuid:community_id>/interaction/forum/replies/<int:reply_id>",
+                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>",
+            ),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/forum/posts/<puuid:post_id>"),
+            (
+                "DELETE",
+                "/api/v1/admin/<cuuid:community_id>/interaction/forum/replies/<puuid:reply_id>",
             ),
             (
                 "PUT",
-                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>/permissions",
+                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>/permissions",
             ),
         ),
     ),
@@ -801,7 +804,7 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/validate"): _R_OPS,
     (
         "POST",
-        "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments",
+        "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<puuid:ticket_id>/comments",
     ): _R_USAGE,
     ("POST", "/api/v1/admin/<cuuid:community_id>/support/submit"): _R_USAGE,
     ("POST", "/api/v1/community/<cuuid:community_id>/ai/completions"): _R_USAGE,

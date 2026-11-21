@@ -131,9 +131,17 @@ class TestInteractionsAndForumsGateOnDistinctFlags:
         gate = AsyncMock(return_value=False)
         monkeypatch.setattr(interaction_module, "feature_enabled", gate)
         dal, community_id = community_db
+        channel_row = dal.hub_channels.insert(community_id=community_id, name="f")
+        dal.commit()
+        channel = str(dal.hub_channels[channel_row].public_id)
 
         response = await client.get(
-            cpath(dal, "/api/v1/community/{community_id}/interact/forum/1/posts", community_id),
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel,
+            ),
             headers=auth_headers(scope="community.interaction:read"),
         )
 
