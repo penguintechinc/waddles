@@ -40,7 +40,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
@@ -55,6 +55,7 @@ from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+from services.system_tenant_guard import require_system_tenant
 
 platform_bp = Blueprint("v1_platform", __name__, url_prefix="/api/v1/platform")
 
@@ -149,7 +150,7 @@ class GetUserResponse:
 class UpdateUserRoleRequest:
     """Request DTO for update user role."""
 
-    role: str | None = None
+    role: Literal["platform-admin", "support"]
 
 
 @dataclass(slots=True, frozen=True)
@@ -331,6 +332,7 @@ class PlatformStatsResponse:
 @platform_bp.route("/users", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_response(ListUsersResponse)
 async def list_users() -> ListUsersResponse:
     """List users."""
@@ -365,6 +367,7 @@ async def list_users() -> ListUsersResponse:
 @platform_bp.route("/users/<int:user_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 # NOT @validate_response -- `user: PlatformUserDetailDTO` is a nested
 # dataclass field; jsonify_dto() is the established workaround (see
 # services/dto_response.py's module docstring).
@@ -411,6 +414,7 @@ async def get_user(user_id: int) -> tuple[Any, int]:
 @platform_bp.route("/users/<int:user_id>/role", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_request(UpdateUserRoleRequest)
 @validate_response(MessageResponse)
 async def update_user_role(
@@ -419,7 +423,13 @@ async def update_user_role(
     """Update user role."""
     async_dal, dal = _dal()
     try:
-        await svc.update_user_role(async_dal, dal, user_id=user_id, role=data.role)
+        await svc.update_user_role(
+            async_dal,
+            dal,
+            user_id=user_id,
+            role=data.role,
+            actor_id=get_current_user_id(request),
+        )
     except ApiError as exc:
         return _err(exc)
     return MessageResponse(success=True, message="User role updated")
@@ -428,6 +438,7 @@ async def update_user_role(
 @platform_bp.route("/users/<int:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_request(DeactivateUserRequest)
 @validate_response(MessageResponse)
 async def deactivate_user(
@@ -453,6 +464,7 @@ async def deactivate_user(
 @platform_bp.route("/communities", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_response(ListCommunitiesResponse)
 async def list_communities() -> ListCommunitiesResponse:
     """List communities."""
@@ -491,6 +503,7 @@ async def list_communities() -> ListCommunitiesResponse:
 @platform_bp.route("/communities/<cuuid:community_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 # NOT @validate_response -- nested `community: CommunityDetailDTO` +
 # nested `owner: CommunityOwnerDTO`; see services/dto_response.py.
 async def get_community(community_id: int) -> tuple[Any, int]:
@@ -532,6 +545,7 @@ async def get_community(community_id: int) -> tuple[Any, int]:
 @platform_bp.route("/communities/<cuuid:community_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_request(UpdateCommunityRequest)
 @validate_response(MessageResponse)
 async def update_community(
@@ -557,6 +571,7 @@ async def update_community(
 @platform_bp.route("/communities/<cuuid:community_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_request(DeactivateUserRequest)
 @validate_response(MessageResponse)
 async def deactivate_community(
@@ -581,6 +596,7 @@ async def deactivate_community(
 @platform_bp.route("/health", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_response(SystemHealthResponse, 200)
 @validate_response(SystemHealthResponse, 503)
 async def get_system_health() -> tuple[SystemHealthResponse, int]:
@@ -598,6 +614,7 @@ async def get_system_health() -> tuple[SystemHealthResponse, int]:
 @platform_bp.route("/audit-log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_response(AuditLogResponse)
 @reads_from_replica("platform.get_audit_log")
 async def get_audit_log() -> AuditLogResponse:
@@ -636,6 +653,7 @@ async def get_audit_log() -> AuditLogResponse:
 @platform_bp.route("/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
+@require_system_tenant  # type: ignore[misc]
 @validate_response(PlatformStatsResponse)
 @reads_from_replica("platform.get_stats")
 async def get_stats() -> PlatformStatsResponse:
