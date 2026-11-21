@@ -143,14 +143,6 @@ $$;
 
 DO $$
 BEGIN
-    IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'calendar_interaction') THEN
-        CREATE ROLE calendar_interaction WITH LOGIN PASSWORD 'mod_calendar_interaction_dev_changeme';
-    END IF;
-END
-$$;
-
-DO $$
-BEGIN
     IF NOT EXISTS (SELECT FROM pg_catalog.pg_roles WHERE rolname = 'inventory_interaction') THEN
         CREATE ROLE inventory_interaction WITH LOGIN PASSWORD 'mod_inventory_interaction_dev_changeme';
     END IF;
@@ -417,9 +409,6 @@ GRANT USAGE ON SCHEMA public TO ai_interaction;
 
 GRANT CONNECT ON DATABASE waddlebot TO alias_interaction;
 GRANT USAGE ON SCHEMA public TO alias_interaction;
-
-GRANT CONNECT ON DATABASE waddlebot TO calendar_interaction;
-GRANT USAGE ON SCHEMA public TO calendar_interaction;
 
 GRANT CONNECT ON DATABASE waddlebot TO inventory_interaction;
 GRANT USAGE ON SCHEMA public TO inventory_interaction;

@@ -3273,27 +3273,6 @@ def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
 
-def bind_calendar_child_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Bind the id/ownership columns of the legacy event child tables (read-only here).
-
-    `calendar_tickets`, `calendar_ticket_types` and `calendar_event_admins` belong to the retired
-    `calendar_interaction_module` (legacy SQL 024). hub-api maps ONLY `event_id` (+ the ticket
-    uuid) so the Event proxy can prove a child id in a URL belongs to the URL's event before it
-    forwards the call; it never writes these tables. Idempotent per DAL.
-    """
-    if "calendar_tickets" in dal.tables:
-        return
-    for name in ("calendar_ticket_types", "calendar_event_admins"):
-        dal.define_table(name, Field("event_id", "integer", notnull=True), migrate=migrate)
-    dal.define_table(
-        "calendar_tickets",
-        Field("event_id", "integer", notnull=True),
-        Field("ticket_uuid", "string", length=36),
-        Field("ticket_code", "string", length=64),
-        migrate=migrate,
-    )
-
-
 def bind_stream_keys_tables(dal: Any, *, migrate: bool = False) -> None:
     """Bind the stream-key/destination tables (svc-streaming `streaming_configs` + 0077).
 

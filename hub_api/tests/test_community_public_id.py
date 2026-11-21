@@ -226,17 +226,6 @@ class TestRealAppRouteFamilies:
         ]
         assert all("/internal" in o for o in offenders), offenders
 
-    def test_event_proxy_rules_use_the_converter_and_downstream_stays_numeric(
-        self, app: Quart
-    ) -> None:
-        from blueprints.v1 import event
-
-        route = next(r for r in event.ALL_ROUTES if r.name == "adm_list_events")
-        assert "{community_id}" in route.downstream_template
-        rules = [r.rule for r in app.url_map.iter_rules() if r.endpoint.endswith("adm_list_events")]
-        assert rules
-        assert all("<cuuid:community_id>" in r for r in rules)
-
 
 def _load_codemod() -> Any:
     spec = importlib.util.spec_from_file_location(
