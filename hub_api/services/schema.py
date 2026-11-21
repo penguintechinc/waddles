@@ -1435,6 +1435,7 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("status", "integer", notnull=True),
             Field("lifted_at", "datetime"),
             Field("lifted_by", "string", length=36),
+            Field("action", "integer", default=1),
             migrate=migrate,
         )
     if "bundle_reputation_tenant_scores" not in dal.tables:

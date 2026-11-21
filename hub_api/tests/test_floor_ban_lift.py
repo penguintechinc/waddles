@@ -137,7 +137,7 @@ def client(db: Any) -> Any:
     return app.test_client()
 
 
-def _ban(db: Any, *, status: int = 2, user: int = MEMBER, key: int = 0) -> None:
+def _ban(db: Any, *, status: int = 2, user: int = MEMBER, key: int = 0, action: int = 1) -> None:
     """A tenant floor-ban outbox row for user `user` (banned in another community of the tenant)."""
     db.dal.bundle_reputation_floor_bans.insert(
         tenant_id=db.tenant_id,
@@ -145,6 +145,7 @@ def _ban(db: Any, *, status: int = 2, user: int = MEMBER, key: int = 0) -> None:
         user_uuid=_uuid(user),
         platform="discord",
         status=status,
+        action=action,
     )
     db.dal.commit()
 
@@ -295,6 +296,19 @@ class TestFloorBanLift:
         monkeypatch.setattr(floor_ban_lift, "get_meter", lambda: 1 / 0)
         monkeypatch.setattr(floor_ban_lift, "_COUNTER", None)
         floor_ban_lift._emit("lifted")
+
+
+class TestUnbanDeliveryRowsNeverDeny:
+    @pytest.mark.parametrize("status", (1, 2, 3, 4, 5, 7))
+    def test_an_unban_row_in_any_status_does_not_deny(self, db: Any, status: int) -> None:
+        """Rows with action 2 (alembic 0138) are platform UNBAN deliveries: they restore access."""
+        _ban(db, status=status, action=2)
+        assert _allowed(db)
+
+    def test_a_ban_row_still_denies_next_to_an_unban_row(self, db: Any) -> None:
+        _ban(db, status=2, action=2)
+        _ban(db, status=2, action=1, key=1)
+        assert not _allowed(db)
 
 
 class TestSoftBanLiftAndExpiry:

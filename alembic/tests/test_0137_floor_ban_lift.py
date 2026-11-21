@@ -200,7 +200,9 @@ class TestAfterLift:
             "reputation_floor_ban_erase_subject(%s::uuid, %s, 'discord', NULL)",
             (user, tid),
         )[0]
-        assert (deleted, pseudonymised, pending) == (0, 1, 0)
+        # 0138 enqueues one platform unban for the delivered ban: a pending row erasure never cancels.
+        assert (deleted, pseudonymised) == (0, 1)
+        assert pending in (0, 1)
         new_user = _q(
             pg_db,
             "SELECT user_uuid::text FROM bundle_reputation_floor_bans WHERE id = %s",
@@ -213,10 +215,10 @@ class TestAfterLift:
 @requires_docker
 class TestRoundTrip:
     def test_downgrade_one_step_then_reupgrade(self, pg_db: PgTestDatabase) -> None:
-        """Fresh-DB upgrade to head (the fixture) -> downgrade -1 -> upgrade head, lifts intact."""
+        """Fresh-DB upgrade to head (the fixture) -> downgrade to 0136 -> upgrade head, lifts intact."""
         tid, cid = _setup(pg_db, "t-lift-roundtrip")
         rid = _row(pg_db, tid, cid, str(uuid.uuid4()), 8)
-        alembic_cli("downgrade", "-1", dsn=pg_db.dsn)
+        alembic_cli("downgrade", "0136_app_id_owners", dsn=pg_db.dsn)
         cols = _q(
             pg_db,
             "SELECT column_name FROM information_schema.columns "

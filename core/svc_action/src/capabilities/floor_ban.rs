@@ -47,6 +47,8 @@ pub struct FloorBanCommand {
     pub platform: String,
     /// Which attempt this is (1-based); part of the sender op id.
     pub attempt: i32,
+    /// Deliver `mod.unban` instead of `mod.ban` (a Waddles lift of a delivered ban).
+    pub unban: bool,
 }
 
 /// Why a delivery did not complete, with a stable machine code (`^[a-z_]{1,64}$`).
@@ -109,10 +111,70 @@ fn failure_of(r: &bundle_tool_call::ToolRefusal) -> FloorSendFailure {
 /// The sender op id: carries the outbox row id and attempt (the correlation) plus a nonce, in the
 /// sender's safe alphabet and length (`[A-Za-z0-9_-]{1,64}`).
 fn op_id_of(cmd: &FloorBanCommand) -> String {
-    format!("fb-{}-{}-{}", cmd.id, cmd.attempt, Uuid::new_v4().simple())
+    let prefix = if cmd.unban { "fu" } else { "fb" };
+    format!(
+        "{prefix}-{}-{}-{}",
+        cmd.id,
+        cmd.attempt,
+        Uuid::new_v4().simple()
+    )
 }
 
 impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
+    /// Installs the platform -> Waddles unban sync (once; a second call is ignored).
+    pub fn set_unban_sync(&self, sync: std::sync::Arc<dyn crate::floor_ban_dispatch::UnbanSync>) {
+        let _ = self.unban_sync.set(sync);
+    }
+
+    /// After the sender CONFIRMED a platform `mod.unban` (chatguard `!unban`, any bundle unban),
+    /// lifts the matching Waddles floor ban and soft ban in THIS tenant + community (taken from
+    /// the invoke scope, never the event). No unban is enqueued back (no echo), a sync failure is
+    /// an ERROR log + metric but never fails the already-confirmed platform unban, and nothing but
+    /// the numeric tenant/community and counts is logged.
+    pub(crate) async fn sync_confirmed_unban(
+        &self,
+        tenant_id: i32,
+        community_id: i32,
+        platform: &str,
+        user_uuid: &str,
+    ) {
+        let Some(sync) = self.unban_sync.get() else {
+            return;
+        };
+        let Ok(user) = user_uuid.parse::<Uuid>() else {
+            return;
+        };
+        match sync
+            .lift_from_platform(tenant_id, community_id, platform, user)
+            .await
+        {
+            Ok((lifted, soft)) => {
+                self.stage_metrics
+                    .record_floor_ban_dispatch(if lifted + soft > 0 {
+                        "platform_lift"
+                    } else {
+                        "platform_lift_none"
+                    });
+                tracing::info!(
+                    tenant_id,
+                    community_id,
+                    platform,
+                    lifted,
+                    soft_cleared = soft,
+                    "platform unban confirmed; matching Waddles ban lifted (no echo)"
+                );
+            }
+            Err(e) => {
+                self.stage_metrics
+                    .record_floor_ban_dispatch("platform_lift_error");
+                tracing::error!(
+                    tenant_id, community_id, platform, error = %e,
+                    "ALERT platform unban confirmed but the Waddles floor ban could NOT be lifted"
+                );
+            }
+        }
+    }
+
     /// Emits the signed outbound `mod.ban` command for one floor-ban outbox row and waits for the
     /// sender's confirmation. `Ok(op_id)` ONLY on a confirmed ack; every other outcome is a typed
     /// [`FloorSendFailure`] (silence until the deadline is `relay_unconfirmed`, never success).
@@ -127,7 +189,8 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         if !FLOOR_BAN_PLATFORMS.contains(&platform) {
             return Err(FloorSendFailure::permanent("platform_not_supported"));
         }
-        let Some(op) = bundle_capability_gate::platform_ops::registered(platform, "mod.ban") else {
+        let op_name = if cmd.unban { "mod.unban" } else { "mod.ban" };
+        let Some(op) = bundle_capability_gate::platform_ops::registered(platform, op_name) else {
             return Err(FloorSendFailure::permanent("platform_not_supported"));
         };
         let relay_op = RelayOp::Registered(op);
@@ -189,9 +252,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             .detokenize_user(&scope, platform, &uuid)
             .await
             .map_err(|r| failure_of(&r))?;
-        self.refuse_protected_target(&scope, platform, "mod.ban", &platform_id)
-            .await
-            .map_err(|r| failure_of(&r))?;
+        if !cmd.unban {
+            self.refuse_protected_target(&scope, platform, "mod.ban", &platform_id)
+                .await
+                .map_err(|r| failure_of(&r))?;
+        }
 
         let op_id = op_id_of(cmd);
         let exp_ms = now_epoch_ms().saturating_add(
@@ -219,7 +284,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             .map_err(|_| FloorSendFailure::retry("relay_unavailable", Some(op_id.clone())))?;
         tracing::info!(
             floor_ban_id = cmd.id, attempt = cmd.attempt, community_id = cmd.community_id,
-            platform, op_id = %op_id, "floor ban command queued for the sender"
+            platform, op_id = %op_id, unban = cmd.unban, "floor command queued for the sender"
         );
         self.await_platform_ack(&scope, platform, relay_op, &op_id)
             .await
