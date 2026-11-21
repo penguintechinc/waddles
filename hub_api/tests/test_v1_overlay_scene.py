@@ -136,18 +136,20 @@ def _url(overlay_db: Any, community_id: int, suffix: str = "") -> str:
 class TestWidgets:
     async def test_lists_enabled_bundle_widgets(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
-        _activate_bundle(overlay_db, cid, "waddles.core.overlay.alerts", [WIDGET])
+        _activate_bundle(overlay_db, cid, "penguintechinc.waddles.overlay-alerts", [WIDGET])
         res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         assert res.status_code == 200
         widgets = (await res.get_json())["widgets"]
         assert [w["widget_id"] for w in widgets] == ["alerts.stream.event_box"]
-        assert widgets[0]["bundle_app_id"] == "waddles.core.overlay.alerts"
+        assert widgets[0]["bundle_app_id"] == "penguintechinc.waddles.overlay-alerts"
 
     async def test_disabled_bundle_is_not_listed(self, client: Any, overlay_db: Any) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
-        _activate_bundle(overlay_db, cid, "waddles.core.overlay.alerts", [WIDGET])
+        _activate_bundle(overlay_db, cid, "penguintechinc.waddles.overlay-alerts", [WIDGET])
         dal = overlay_db.dal
-        dal(dal.app_activations.app_id == "waddles.core.overlay.alerts").update(enabled=False)
+        dal(dal.app_activations.app_id == "penguintechinc.waddles.overlay-alerts").update(
+            enabled=False
+        )
         dal.commit()
         res = await client.get(_url(overlay_db, cid, "/widgets"), headers=headers)
         assert (await res.get_json())["widgets"] == []
@@ -315,16 +317,19 @@ class TestLayout:
         self, client: Any, overlay_db: Any
     ) -> None:
         headers, cid, _ = _owner_headers(overlay_db)
-        _activate_bundle(overlay_db, cid, "waddles.core.overlay.alerts", [WIDGET])
+        _activate_bundle(overlay_db, cid, "penguintechinc.waddles.overlay-alerts", [WIDGET])
         add = await client.post(
             _url(overlay_db, cid, "/layout/components"),
             headers=headers,
-            json={"bundle_app_id": "waddles.core.overlay.alerts", "widget_id": WIDGET["widget_id"]},
+            json={
+                "bundle_app_id": "penguintechinc.waddles.overlay-alerts",
+                "widget_id": WIDGET["widget_id"],
+            },
         )
         assert add.status_code == 201
         comp = (await add.get_json())["component"]
         assert (comp["x"], comp["y"], comp["width"], comp["height"]) == (660, 120, 600, 220)
-        assert comp["bundle_app_id"] == "waddles.core.overlay.alerts"
+        assert comp["bundle_app_id"] == "penguintechinc.waddles.overlay-alerts"
         assert comp["output_kind"] == "sanitized_html"
         assert comp["visible"] is True
 

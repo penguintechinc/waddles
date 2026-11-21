@@ -5,8 +5,8 @@ get` entirely (no real network I/O in route-level tests) -- which means the
 actual `httpx` call, header construction, and success/failure/timeout
 branching inside `get()` itself is exercised nowhere else. This file closes
 that gap with `httpx.MockTransport` (real `httpx` request/response objects,
-no real socket), mirroring `tests/test_event_calendar_proxy.py`'s own
-pattern for `EventCalendarProxyClient`.
+no real socket), using the same pattern as
+the other proxy-client tests.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ def _patch_transport(
 ) -> None:
     """Force every `httpx.AsyncClient` built inside `analytics_proxy.py` onto a mock transport.
 
-    Same technique `test_event_calendar_proxy.py::_patch_transport` uses --
+    Same technique the other proxy-client tests use --
     patch the class's own `__init__` for one test (auto-reverted by
     `monkeypatch`) rather than adding a test-only constructor seam to
     production code.

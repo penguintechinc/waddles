@@ -970,7 +970,7 @@ One file per bundle, at the root of the source tarball (Tier 1) or uploaded alon
 
 ```yaml
 schema_version: 2
-app_id: waddles.socials.music.default
+app_id: penguintechinc.waddles.socials-music
 name: Music Station Song Request
 version: 3.0.0
 feature: waddles.socials.music
@@ -1031,7 +1031,7 @@ config_schema:
     default: "!"
 
 compatible_with: []
-incompatible_with: ["waddles.socials.music.legacy"]
+incompatible_with: ["penguintechinc.waddles.socials-music-legacy"]
 
 platform_compatibility:
   tested_with: "3.0.0"
@@ -1461,7 +1461,7 @@ A `hello` reporting `runtime: "runc"` is refused with `error.code = "UNSANDBOXED
 {
   "bundles": [
     {
-      "appId": "waddles.socials.music.default",
+      "appId": "penguintechinc.waddles.socials-music",
       "communityId": 42,
       "entrypoint": "bundles.social_music_process:transform",
       "spec": {"required_config": []},
@@ -1981,7 +1981,7 @@ Everything below runs in the **publisher** container (§4.6) — never in the bu
 ```json
 {
   "schema_version": 1,
-  "app_id": "waddles.socials.music.default",
+  "app_id": "penguintechinc.waddles.socials-music",
   "version": "3.0.0",
   "digest": "sha256:9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08",
   "size_bytes": 2148231,

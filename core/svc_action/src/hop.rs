@@ -303,7 +303,7 @@ mod tests {
     fn app_id_not_matching_the_scoped_reader_is_rejected() {
         let ring = ring();
         let env = valid_envelope(mac_for(&ring, "k1"), "k1");
-        let err = verify_hop(&ring, &env, KEY, "waddles.other.app.default").unwrap_err();
+        let err = verify_hop(&ring, &env, KEY, "penguintechinc.waddles.other-app").unwrap_err();
         assert_eq!(err.as_metric_reason(), "grant_scope_mismatch");
     }
 

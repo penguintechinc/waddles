@@ -147,7 +147,7 @@ mod tests {
         })));
         let catalog = Arc::new(BundleCatalog::new());
         catalog.update(vec![BundleRow {
-            app_id: "waddles.socials.discord.default".to_string(),
+            app_id: "penguintechinc.waddles.socials-discord".to_string(),
             version: "1.0.0".to_string(),
             artifact_digest: Some("sha256:00".to_string()),
             component_key: "k".to_string(),
@@ -167,13 +167,13 @@ mod tests {
         );
 
         let row = catalog
-            .get("waddles.socials.discord.default")
+            .get("penguintechinc.waddles.socials-discord")
             .expect("row was just inserted");
         let webhook_url = crate::senders::discord_webhook_url_from_config(&row.config_json)
             .expect("this bundle's activation config carries discord_webhook_url");
         let args = crate::senders::discord_webhook_args(&webhook_url, "hello from waddles");
         let result = guard
-            .send("waddles.socials.discord.default", &args)
+            .send("penguintechinc.waddles.socials-discord", &args)
             .await
             .expect("discord webhook send reaches the transport");
         assert_eq!(result["status"], 204);
@@ -191,7 +191,7 @@ mod tests {
         // body) -- exercised by a second send with nothing left queued,
         // distinct from the explicit 204 queued above.
         let result2 = guard
-            .send("waddles.socials.discord.default", &args)
+            .send("penguintechinc.waddles.socials-discord", &args)
             .await
             .expect("default un-queued response still succeeds");
         assert_eq!(result2["status"], 200);

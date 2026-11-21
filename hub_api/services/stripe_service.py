@@ -1,6 +1,6 @@
 """Stripe REST client -- port of `stripeService.js` via `httpx` (no `stripe` SDK dependency).
 
-`requirements.in` already pins `httpx` for `EventCalendarProxyClient`/Bot
+`requirements.in` already pins `httpx` for the proxy clients/Bot
 module outbound calls; this module reuses that same dependency rather than
 adding the `stripe` PyPI package (per this port's instruction: use an
 already-pinned dependency, don't add a new one without calling it out --

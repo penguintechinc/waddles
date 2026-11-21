@@ -776,13 +776,13 @@ def _event(text: str) -> PlatformEvent:
 
 class TestTransform:
     async def test_first_roll_reports_count_one(self) -> None:
-        with bundle_context(tenant="acme-corp", community="42", app_id="waddles.demo.dice.default"):
+        with bundle_context(tenant="acme-corp", community="42", app_id="penguintechinc.waddles.demo-dice"):
             result = await transform(_event("!roll20"))
         assert result is not None
         assert "#1" in result.payload["text"]
 
     async def test_second_roll_increments(self) -> None:
-        with bundle_context(tenant="acme-corp", community="42", app_id="waddles.demo.dice.default"):
+        with bundle_context(tenant="acme-corp", community="42", app_id="penguintechinc.waddles.demo-dice"):
             await transform(_event("!roll20"))
             result = await transform(_event("!roll20"))
         assert result is not None

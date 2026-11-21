@@ -7,8 +7,8 @@ Manages the per-community browser-source overlay token
 design.md`). Every function here assumes its caller (`blueprints/v1/
 overlay.py`) has already run `services.community_access.
 require_community_admin()` -- this module has no authz of its own, same
-division of responsibility `auth_service.py`/`event_calendar_proxy.py`
-already establish (blueprint owns auth + HTTP shape, service owns the
+division of responsibility `auth_service.py`
+already establishes (blueprint owns auth + HTTP shape, service owns the
 query).
 
 Write-through to `overlay_view_credentials`: svc-presentation does NOT read

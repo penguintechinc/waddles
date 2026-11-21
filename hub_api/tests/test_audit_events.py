@@ -141,13 +141,16 @@ class TestEventValidation:
             _event(target_id="bob@example.com")
         with pytest.raises(AuditValidationError):
             _event(tenant_slug="has space")
-        assert _event(target_id="waddles.core.ping@1.2.3").target_id == "waddles.core.ping@1.2.3"
+        assert (
+            _event(target_id="penguintechinc.waddles.ping@1.2.3").target_id
+            == "penguintechinc.waddles.ping@1.2.3"
+        )
 
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
             ("tenant:3:app.id", True),
-            ("waddles.core.ping@1.0.0", True),
+            ("penguintechinc.waddles.ping@1.0.0", True),
             ("app@2.0.0-rc.1", True),
             ("bob@example.com", False),
             ("bob@1password.com", False),

@@ -3,8 +3,7 @@
 Standalone Quart app registering only `analytics_bp` (PORTING.md test
 pattern), `community_db` fixture for tenant/membership-scoped Scenario 2
 routes, `AsyncMock`-stubbed `AnalyticsCoreProxyClient.get` (no real network
-I/O, same technique `test_event_blueprint.py::proxy_stub` uses against
-`EventCalendarProxyClient.request`).
+I/O).
 
 Fail-first proof (executed, not narrated) for the two SECURITY fixes this
 module's own docstring documents:

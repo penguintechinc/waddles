@@ -55,8 +55,8 @@ def test_table_constraints_and_downgrade() -> None:
                 tenant = cur.fetchone()[0]
                 cur.execute("INSERT INTO communities (tenant_id, name) VALUES (%s, 'c') RETURNING id", (tenant,)) if _has_tenant_col(cur) else cur.execute("INSERT INTO communities (name) VALUES ('c') RETURNING id")
                 community = cur.fetchone()[0]
-                cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.a.b.c')")
-                row = (tenant, community, "waddles.a.b.c")
+                cur.execute("INSERT INTO app_catalog (app_id) VALUES ('penguintechinc.waddles.a-b-c')")
+                row = (tenant, community, "penguintechinc.waddles.a-b-c")
                 sql = (
                     "INSERT INTO bundle_community_config "
                     "(tenant_id, community_id, app_id, version, config, schema_sha256) "
@@ -68,7 +68,7 @@ def test_table_constraints_and_downgrade() -> None:
                 with pytest.raises(psycopg2.errors.CheckViolation):
                     cur.execute(sql, (*row, 0, "a" * 64))
                 with pytest.raises(psycopg2.errors.ForeignKeyViolation):
-                    cur.execute(sql, (tenant, community, "waddles.no.such.app", 1, "a" * 64))
+                    cur.execute(sql, (tenant, community, "penguintechinc.waddles.no-such-app", 1, "a" * 64))
             alembic_cli("downgrade", _PREVIOUS, dsn=db.dsn)
             with conn.cursor() as cur:
                 cur.execute("SELECT to_regclass('bundle_community_config')")
