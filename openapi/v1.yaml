@@ -26904,6 +26904,9 @@ paths:
               schema:
                 description: Tenant reputation policy.
                 properties:
+                  liftRearmDrop:
+                    title: Liftrearmdrop
+                    type: integer
                   success:
                     title: Success
                     type: boolean
@@ -26926,6 +26929,7 @@ paths:
                 - tenantAutoBanEnabled
                 - tenantAutoBanFloor
                 - tenantAtRiskThreshold
+                - liftRearmDrop
                 - updatedAt
                 title: TenantReputationConfigResponse
                 type: object
@@ -26944,9 +26948,21 @@ paths:
         content:
           application/json:
             schema:
-              description: PUT body -- only supplied fields change; 300 <= floor <
-                atRiskThreshold <= 850.
+              description: 'PUT body -- only supplied fields change; 300 <= floor
+                < atRiskThreshold <= 850.
+
+
+                `liftRearmDrop` (1-100): how far below the score recorded at a ban
+                lift a NEW low must fall
+
+                for the floor to ban again (default 5).'
               properties:
+                liftRearmDrop:
+                  anyOf:
+                  - type: integer
+                  - type: 'null'
+                  default: null
+                  title: Liftrearmdrop
                 tenantAtRiskThreshold:
                   anyOf:
                   - type: integer
@@ -26974,6 +26990,9 @@ paths:
               schema:
                 description: Tenant reputation policy.
                 properties:
+                  liftRearmDrop:
+                    title: Liftrearmdrop
+                    type: integer
                   success:
                     title: Success
                     type: boolean
@@ -26996,6 +27015,7 @@ paths:
                 - tenantAutoBanEnabled
                 - tenantAutoBanFloor
                 - tenantAtRiskThreshold
+                - liftRearmDrop
                 - updatedAt
                 title: TenantReputationConfigResponse
                 type: object
