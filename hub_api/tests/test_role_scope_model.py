@@ -98,9 +98,14 @@ async def _put(client: Any, path: str, headers: dict[str, str], body: dict[str, 
     )
 
 
-def _url(dal: Any, community_id: int, role_id: int | None = None) -> str:
+def _url(dal: Any, community_id: int, role_id: int | str | None = None) -> str:
+    """Roles URL; a numeric seeded id is addressed by its public UUID (a UUID passes through)."""
     base = cpath(dal, "/api/v1/admin/{community_id}/interaction/roles", community_id)
-    return base if role_id is None else f"{base}/{role_id}"
+    if role_id is None:
+        return base
+    if isinstance(role_id, int):
+        role_id = str(dal.community_roles[role_id].public_id)
+    return f"{base}/{role_id}"
 
 
 class TestRegistry:
