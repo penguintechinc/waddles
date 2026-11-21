@@ -44,8 +44,12 @@ class _Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    communities: list[dict[str, Any]] = [{"id": 7}]
+
     def do_POST(self) -> None:  # noqa: N802, D102
-        if self.path == "/api/v1/auth/login":
+        if self.path == "/api/v1/public/communities":
+            self._send(200, json.dumps({"communities": self.communities}).encode())
+        elif self.path == "/api/v1/auth/login":
             self._send(200, json.dumps({"token": "t"}).encode())
         elif self.path == "/redir-error":
             self._send(302, location="/dashboard/settings?error=link_failed")
@@ -61,6 +65,21 @@ class _Handler(BaseHTTPRequestHandler):
 def stub_server() -> Any:
     """Run the stub on a loopback port; yields its base URL."""
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()
+
+
+@pytest.fixture
+def stub_server_no_communities() -> Any:
+    """Stub whose community listing is empty, so sweep discovery has nothing to find."""
+
+    class _Empty(_Handler):
+        communities: list[dict[str, Any]] = []
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Empty)
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}"
@@ -125,14 +144,17 @@ class TestClientRedirects:
         assert status == 200
 
 
-def _run_sweep(spec: dict[str, Any], base: str, tmp_path: Path) -> subprocess.CompletedProcess[str]:
+def _run_sweep(
+    spec: dict[str, Any], base: str, tmp_path: Path, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[str]:
     spec_file = tmp_path / "spec.yaml"
     spec_file.write_text(json.dumps(spec))  # JSON is valid YAML
     env = {
-        **os.environ,
+        **{k: v for k, v in os.environ.items() if k != "COMMUNITY_ID"},
         "BASE_URL": base,
         "HUB_TEST_EMAIL": "a@example.com",
         "HUB_TEST_PASS": "pw",
+        **(extra_env or {}),
     }
     return subprocess.run(  # noqa: S603
         [
@@ -168,6 +190,22 @@ class TestZeroRoutes:
         result = _run_sweep(spec, stub_server, tmp_path)
         assert result.returncode == 0, result.stderr
         assert '"examined": 1' in result.stdout
+
+    def test_community_discovery_failure_is_a_loud_fail(
+        self, stub_server_no_communities: str, tmp_path: Path
+    ) -> None:
+        """No COMMUNITY_ID and an empty community listing must fail, never run with no community."""
+        spec = {"paths": {"/api/v1/things": {"get": {"responses": {"200": {}}}}}}
+        result = _run_sweep(spec, stub_server_no_communities, tmp_path)
+        assert result.returncode == 2
+        assert "none discoverable" in result.stderr
+
+    def test_explicit_community_id_skips_discovery(
+        self, stub_server_no_communities: str, tmp_path: Path
+    ) -> None:
+        spec = {"paths": {"/api/v1/things": {"get": {"responses": {"200": {}}}}}}
+        result = _run_sweep(spec, stub_server_no_communities, tmp_path, {"COMMUNITY_ID": "9"})
+        assert result.returncode == 0, result.stderr
 
 
 def _bash(snippet: str, env: dict[str, str]) -> subprocess.CompletedProcess[str]:
