@@ -239,6 +239,48 @@ class TestObservedTimeBound:
         )[0][0]
         assert float(age) < 30, "re-arming from status 6 must stamp armed_at = now()"
 
+    def test_a_reban_after_a_lift_restamps_armed_at_and_a_stale_unban_does_not_lift_it(
+        self, pg_db: PgTestDatabase
+    ) -> None:
+        """Lift (8) then re-arm through 8->1 and 8->5: a stale unban must not lift either."""
+        for rearm_status in (1, 5):
+            tid = _tenant(pg_db, f"t-obs-8to{rearm_status}")
+            cid = _community(pg_db, tid, f"c-obs-8to{rearm_status}")
+            rid = _ban(pg_db, tid, cid, str(uuid.uuid4()), status=8)
+            _q(
+                pg_db,
+                "UPDATE bundle_reputation_floor_bans SET armed_at = NOW() - interval '1 hour' "
+                "WHERE id = %s",
+                (rid,),
+            )
+            stale_ms = int(
+                float(_q(pg_db, "SELECT extract(epoch FROM NOW() - interval '1 minute')")[0][0])
+                * 1000
+            )
+            _q(
+                pg_db,
+                "UPDATE bundle_reputation_floor_bans SET status = %s WHERE id = %s",
+                (rearm_status, rid),
+            )
+            age = _q(
+                pg_db,
+                "SELECT extract(epoch FROM NOW() - armed_at) FROM bundle_reputation_floor_bans "
+                "WHERE id = %s",
+                (rid,),
+            )[0][0]
+            assert float(age) < 30, f"8 -> {rearm_status} must stamp armed_at = now()"
+            user = _q(
+                pg_db, "SELECT user_uuid FROM bundle_reputation_floor_bans WHERE id = %s", (rid,)
+            )[0][0]
+            lifted = _q(
+                pg_db,
+                "SELECT r_lifted FROM reputation_floor_ban_lift_from_platform("
+                "%s, %s, 'discord', %s::uuid, %s, %s)",
+                (tid, cid, str(user), _SRC, stale_ms),
+            )[0][0]
+            assert lifted == 0, "an unban observed before the re-arm must not lift it"
+            assert _status(pg_db, rid) == rearm_status
+
     def test_observed_time_and_source_app_are_mandatory(self, pg_db: PgTestDatabase) -> None:
         tid = _tenant(pg_db, "t-obs-2")
         cid = _community(pg_db, tid, "c-obs-2")

@@ -19,12 +19,21 @@
 //! and counted (`svc_ingest_platform_unban_rejected_total{reason}`), never forwarded. The signed
 //! event carries the connection id and tenant so svc-action re-binds them under the signature.
 //!
+//! **Replay safety (RESUME).** Discord replays missed dispatches after a RESUME, so a
+//! `GUILD_BAN_REMOVE` from before a gap can arrive AFTER a re-ban. Two independent guards: (a) a
+//! per-connection timeline stamps every frame replayed between a HELLO and the following
+//! READY/RESUMED with the time of the last frame seen BEFORE the disconnect (never "now"), so the
+//! observed-time bound in SQL spares any ban armed after the gap; (b) before forwarding, Discord's
+//! CURRENT state is read (`GET /guilds/{id}/bans/{user}` must be 404): a user who is banned again,
+//! or a state that cannot be read, is dropped (counted), never lifted on a guess.
+//!
 //! **Keys.** Events are Ed25519-signed with a dedicated key held only here; svc-action holds the
 //! PUBLIC half and so cannot mint one; no bundle has either. The raw Discord user id never leaves
 //! this module (only the tokenized UUID is on the wire) and logs carry numeric ids and fixed
 //! reason codes only. The tap never alters the frame's fate: it always answers `Pass`.
 
-use std::sync::{Arc, LazyLock};
+use std::collections::HashMap;
+use std::sync::{Arc, LazyLock, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use base64::engine::general_purpose::STANDARD as B64;
@@ -34,10 +43,12 @@ use serde::Serialize;
 use uuid::Uuid;
 
 use crate::commands_reconcile::BoxFut;
+use crate::config::Secret;
 use crate::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
 use crate::connector_runtime::scoped::ScopeLookup;
-use crate::discord_rest::is_snowflake;
+use crate::discord_rest::{is_snowflake, DiscordRestClient, DEFAULT_API_BASE};
 use crate::interaction_tap::{FrameBinding, FrameTap, TapVerdict};
+use crate::outbound_creds_discord::DiscordCredentialSource;
 use crate::scope_resolver::Unresolved;
 
 /// Valkey list the verified events are pushed onto (consumed by svc-action).
@@ -329,12 +340,163 @@ fn now_ms() -> u64 {
         .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
 }
 
+/// A live connection is considered gap-free while frames keep arriving within this many ms.
+/// What a gateway frame means for the replay timeline.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FrameKind {
+    /// Gateway HELLO (op 10): a (re)connect handshake begins.
+    Hello,
+    /// READY or RESUMED dispatch: any replay is over.
+    ReplayDone,
+    /// Anything else.
+    Other,
+}
+
+/// Classifies a frame. The byte pre-check is only a cheap filter (message text can contain these
+/// strings); the verdict comes from the frame's real top-level `op` / `t`.
+fn classify(bytes: &[u8]) -> FrameKind {
+    let has = |needle: &[u8]| bytes.windows(needle.len()).any(|w| w == needle);
+    if !(has(b"\"op\":10") || has(b"RESUMED") || has(b"READY")) {
+        return FrameKind::Other;
+    }
+    let Ok(v) = serde_json::from_slice::<serde_json::Value>(bytes) else {
+        return FrameKind::Other;
+    };
+    match (
+        v.get("op").and_then(serde_json::Value::as_u64),
+        v.get("t").and_then(serde_json::Value::as_str),
+    ) {
+        (Some(10), _) => FrameKind::Hello,
+        (Some(0), Some("READY" | "RESUMED")) => FrameKind::ReplayDone,
+        _ => FrameKind::Other,
+    }
+}
+
+/// Per-connection replay timeline: when did the connection last see a frame, and is a replay
+/// (HELLO .. READY/RESUMED) in progress.
+#[derive(Default)]
+struct Timeline {
+    last_seen_ms: u64,
+    /// `Some(t)` between a HELLO and the next READY/RESUMED: `t` is the last frame time before
+    /// the disconnect.
+    replay_floor_ms: Option<u64>,
+}
+
+/// Tracks the replay timeline of every gateway connection (keyed by connection id).
+pub struct Timelines {
+    started_ms: u64,
+    by_conn: Mutex<HashMap<i64, Timeline>>,
+}
+
+impl Timelines {
+    fn new(started_ms: u64) -> Self {
+        Self {
+            started_ms,
+            by_conn: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Records a frame at `now`; returns the observed time to stamp on a `GUILD_BAN_REMOVE`
+    /// carried by THIS frame: the pre-disconnect floor while a replay is in progress, else `now`.
+    fn on_frame(&self, connection_id: i64, kind: FrameKind, now: u64) -> u64 {
+        let Ok(mut map) = self.by_conn.lock() else {
+            // A poisoned lock must not stamp "now": fall back to process start (most conservative).
+            return self.started_ms;
+        };
+        let t = map.entry(connection_id).or_insert_with(|| Timeline {
+            last_seen_ms: self.started_ms,
+            replay_floor_ms: None,
+        });
+        match kind {
+            FrameKind::Hello => t.replay_floor_ms = Some(t.last_seen_ms),
+            FrameKind::ReplayDone => t.replay_floor_ms = None,
+            FrameKind::Other => {}
+        }
+        let observed = t.replay_floor_ms.unwrap_or(now);
+        t.last_seen_ms = now;
+        observed
+    }
+}
+
+/// Discord's CURRENT ban state of a user.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BanState {
+    /// Banned right now: a replayed unban is stale.
+    Banned,
+    /// Not banned right now.
+    NotBanned,
+}
+
+/// Reads Discord's live ban state with the connection's own bot credential.
+pub trait BanStateCheck: Send + Sync {
+    /// `Err(reason)` (a fixed code) when the state cannot be read.
+    fn check<'a>(
+        &'a self,
+        community_id: i64,
+        guild_id: &'a str,
+        user_id: &'a str,
+    ) -> BoxFut<'a, Result<BanState, &'static str>>;
+}
+
+/// Production [`BanStateCheck`]: the community's bot token from hub-api, `GET /guilds/{g}/bans/{u}`.
+pub struct RestBanCheck<C: DiscordCredentialSource + 'static> {
+    creds: C,
+    api_base: String,
+}
+
+impl<C: DiscordCredentialSource + 'static> RestBanCheck<C> {
+    /// Builds the check against the real Discord API.
+    #[must_use]
+    pub fn new(creds: C) -> Self {
+        Self::with_api_base(creds, DEFAULT_API_BASE.to_owned())
+    }
+
+    /// Explicit API base (tests point it at a local fake Discord).
+    #[must_use]
+    pub fn with_api_base(creds: C, api_base: String) -> Self {
+        Self { creds, api_base }
+    }
+}
+
+impl<C: DiscordCredentialSource + 'static> BanStateCheck for RestBanCheck<C> {
+    fn check<'a>(
+        &'a self,
+        community_id: i64,
+        guild_id: &'a str,
+        user_id: &'a str,
+    ) -> BoxFut<'a, Result<BanState, &'static str>> {
+        Box::pin(async move {
+            let binding = self
+                .creds
+                .binding(Some(community_id))
+                .await
+                .map_err(|_| "credential_unavailable")?;
+            if binding.guild_id != guild_id {
+                return Err("guild_mismatch");
+            }
+            let client = DiscordRestClient::new(
+                Secret::new(binding.bot_token.expose()),
+                self.api_base.clone(),
+            )
+            .map_err(|_| "client_unavailable")?;
+            match client.is_banned(guild_id, user_id).await {
+                Ok(true) => Ok(BanState::Banned),
+                Ok(false) => Ok(BanState::NotBanned),
+                Err(_) => Err("state_unreadable"),
+            }
+        })
+    }
+}
+
 /// The gateway tap that turns `GUILD_BAN_REMOVE` into a signed platform-unban event.
 pub struct UnbanTap {
     scope: Arc<dyn ScopeLookup>,
     tokenizer: Arc<dyn IdentityTokenizer>,
     sink: Arc<dyn UnbanSink>,
     signer: Option<Signer>,
+    ban_check: Arc<dyn BanStateCheck>,
+    timelines: Timelines,
+    clock: fn() -> u64,
 }
 
 impl UnbanTap {
@@ -346,16 +508,39 @@ impl UnbanTap {
         tokenizer: Arc<dyn IdentityTokenizer>,
         sink: Arc<dyn UnbanSink>,
         signer: Option<Signer>,
+        ban_check: Arc<dyn BanStateCheck>,
+    ) -> Self {
+        Self::with_clock(scope, tokenizer, sink, signer, ban_check, now_ms)
+    }
+
+    /// [`Self::new`] with an explicit clock (tests drive the replay timeline with it).
+    #[must_use]
+    pub fn with_clock(
+        scope: Arc<dyn ScopeLookup>,
+        tokenizer: Arc<dyn IdentityTokenizer>,
+        sink: Arc<dyn UnbanSink>,
+        signer: Option<Signer>,
+        ban_check: Arc<dyn BanStateCheck>,
+        clock: fn() -> u64,
     ) -> Self {
         Self {
             scope,
             tokenizer,
             sink,
             signer,
+            ban_check,
+            timelines: Timelines::new(clock()),
+            clock,
         }
     }
 
-    async fn handle(&self, ev: BanRemoved, binding: Option<&FrameBinding>, observed_ms: u64) {
+    async fn handle(
+        &self,
+        ev: BanRemoved,
+        binding: Option<&FrameBinding>,
+        received_ms: u64,
+        observed_ms: u64,
+    ) {
         note("received", "-");
         // 1. Bound to the connection it arrived on -- before any lookup, so a hostile frame costs
         //    no hub-api call and no tokenization.
@@ -383,6 +568,17 @@ impl UnbanTap {
             Err(Unresolved::Transient) => return ignored("scope_unavailable"),
             Err(_) => return ignored("scope_invalid"),
         }
+        // 3. Confirm against Discord's CURRENT state: a replayed unban for a user who is banned
+        //    again (or whose state cannot be read) must not lift anything.
+        match self
+            .ban_check
+            .check(binding.community_id, &ev.guild_id, &ev.user_id)
+            .await
+        {
+            Ok(BanState::NotBanned) => {}
+            Ok(BanState::Banned) => return ignored("rebanned"),
+            Err(_) => return ignored("ban_state_unavailable"),
+        }
         let call = CallScope {
             platform: PLATFORM,
             community_id: binding.community_id,
@@ -406,7 +602,8 @@ impl UnbanTap {
             return ignored("no_signing_key");
         };
         let event_id = Uuid::new_v4().to_string();
-        let exp_ms = observed_ms.saturating_add(EVENT_TTL_MS);
+        // Freshness runs from RECEIPT (a replayed event's observed time can be long past).
+        let exp_ms = received_ms.saturating_add(EVENT_TTL_MS);
         let msg = signing_bytes(
             &event_id,
             binding.tenant_id,
@@ -471,11 +668,16 @@ impl FrameTap for UnbanTap {
             if platform != PLATFORM {
                 return TapVerdict::Pass;
             }
-            // Host receipt time at the gateway: dispatches carry no timestamp of their own.
-            let observed_ms = now_ms();
+            // Host receipt time at the gateway: dispatches carry no timestamp of their own. During a
+            // RESUME replay the OBSERVED time is the last frame seen before the disconnect.
+            let received_ms = (self.clock)();
+            let observed_ms = binding.map_or(received_ms, |b| {
+                self.timelines
+                    .on_frame(b.connection_id, classify(bytes), received_ms)
+            });
             match parse_ban_removed(bytes) {
                 Ok(None) => {}
-                Ok(Some(ev)) => self.handle(ev, binding, observed_ms).await,
+                Ok(Some(ev)) => self.handle(ev, binding, received_ms, observed_ms).await,
                 Err(Malformed) => {
                     note("received", "-");
                     ignored("malformed");
@@ -620,6 +822,18 @@ mod tests {
             Box::pin(async move { self.0.clone() })
         }
     }
+    struct FixedBan(Result<BanState, &'static str>);
+    impl BanStateCheck for FixedBan {
+        fn check<'a>(
+            &'a self,
+            community_id: i64,
+            guild_id: &'a str,
+            user_id: &'a str,
+        ) -> BoxFut<'a, Result<BanState, &'static str>> {
+            assert_eq!((community_id, guild_id, user_id), (9, GUILD, USER));
+            Box::pin(async move { self.0 })
+        }
+    }
     #[derive(Default)]
     struct Collect(Mutex<Vec<String>>);
     impl UnbanSink for Collect {
@@ -647,9 +861,106 @@ mod tests {
                 Arc::new(FixedTok(tok)),
                 sink.clone(),
                 signer,
+                Arc::new(FixedBan(Ok(BanState::NotBanned))),
             ),
             sink,
         )
+    }
+
+    fn hello() -> Vec<u8> {
+        br#"{"op":10,"d":{"heartbeat_interval":41250}}"#.to_vec()
+    }
+    fn dispatch(t: &str) -> Vec<u8> {
+        format!(r#"{{"op":0,"t":"{t}","d":{{}}}}"#).into_bytes()
+    }
+
+    #[test]
+    fn classify_uses_the_real_op_and_type_not_message_text() {
+        assert_eq!(classify(&hello()), FrameKind::Hello);
+        assert_eq!(classify(&dispatch("RESUMED")), FrameKind::ReplayDone);
+        assert_eq!(classify(&dispatch("READY")), FrameKind::ReplayDone);
+        assert_eq!(classify(&dispatch("MESSAGE_CREATE")), FrameKind::Other);
+        // Attacker-controlled text containing the markers is NOT a handshake frame.
+        let spoof = br#"{"op":0,"t":"MESSAGE_CREATE","d":{"content":"\"op\":10 RESUMED READY"}}"#;
+        assert_eq!(classify(spoof), FrameKind::Other);
+        assert_eq!(classify(b"not json READY"), FrameKind::Other);
+    }
+
+    #[test]
+    fn a_replayed_frame_is_stamped_with_the_last_time_seen_before_the_disconnect() {
+        let tl = Timelines::new(100);
+        // Live traffic: observed is "now".
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 1_000), 1_000);
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 2_000), 2_000);
+        // Disconnect, reconnect at 90_000: HELLO then replayed frames.
+        assert_eq!(tl.on_frame(1, FrameKind::Hello, 90_000), 2_000);
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 90_010), 2_000);
+        // RESUMED ends the replay; later frames are live again.
+        assert_eq!(tl.on_frame(1, FrameKind::ReplayDone, 90_020), 90_020);
+        assert_eq!(tl.on_frame(1, FrameKind::Other, 95_000), 95_000);
+        // Connections are independent.
+        assert_eq!(tl.on_frame(2, FrameKind::Other, 96_000), 96_000);
+    }
+
+    #[test]
+    fn the_first_hello_of_a_process_floors_at_process_start() {
+        let tl = Timelines::new(500);
+        assert_eq!(tl.on_frame(3, FrameKind::Hello, 9_000), 500);
+    }
+
+    fn fixed_clock() -> u64 {
+        5_000_000
+    }
+
+    #[tokio::test]
+    async fn a_ban_remove_replayed_after_resume_carries_the_pre_disconnect_observed_time() {
+        let sink = Arc::new(Collect::default());
+        let t = UnbanTap::with_clock(
+            Arc::new(Pairing(Ok(()))),
+            Arc::new(FixedTok(Ok(UUID.into()))),
+            sink.clone(),
+            Some(signer()),
+            Arc::new(FixedBan(Ok(BanState::NotBanned))),
+            fixed_clock,
+        );
+        let b = conn();
+        // Process start (clock) = 5_000_000; a HELLO opens a replay window, then the replayed unban.
+        t.on_frame_bound("discord", Some(&b), &hello()).await;
+        t.on_frame_bound("discord", Some(&b), &frame("GUILD_BAN_REMOVE", GUILD, USER))
+            .await;
+        let out = sink.0.lock().unwrap();
+        assert_eq!(out.len(), 1);
+        let v: serde_json::Value = serde_json::from_str(&out[0]).unwrap();
+        // Floor = the last-seen time before the disconnect (process start here), NOT receipt.
+        assert_eq!(v["observed_ms"], 5_000_000);
+        // Freshness runs from receipt, so the event is still verifiable.
+        assert_eq!(v["exp_ms"], 5_000_000 + EVENT_TTL_MS);
+    }
+
+    #[tokio::test]
+    async fn an_unban_for_a_user_banned_again_or_unreadable_is_dropped_and_counted() {
+        for (state, reason) in [
+            (Ok(BanState::Banned), "rebanned"),
+            (Err("state_unreadable"), "ban_state_unavailable"),
+        ] {
+            let sink = Arc::new(Collect::default());
+            let t = UnbanTap::new(
+                Arc::new(Pairing(Ok(()))),
+                Arc::new(FixedTok(Ok(UUID.into()))),
+                sink.clone(),
+                Some(signer()),
+                Arc::new(FixedBan(state)),
+            );
+            let before = count("ignored", reason);
+            let b = conn();
+            t.on_frame_bound("discord", Some(&b), &frame("GUILD_BAN_REMOVE", GUILD, USER))
+                .await;
+            assert!(count("ignored", reason) > before, "{reason} counted");
+            assert!(
+                sink.0.lock().unwrap().is_empty(),
+                "{reason}: nothing forwarded"
+            );
+        }
     }
 
     #[test]

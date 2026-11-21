@@ -17,7 +17,9 @@ use svc_ingest::commands_reconcile::BoxFut;
 use svc_ingest::connector::host_calls::{CallScope, IdentityTokenizer, TokenizeError};
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
 use svc_ingest::interaction_tap::{FrameBinding, FrameTap};
-use svc_ingest::platform_unban::{self, Signer, UnbanTap, ValkeySink, EVENTS_LIST};
+use svc_ingest::platform_unban::{
+    self, BanState, BanStateCheck, Signer, UnbanTap, ValkeySink, EVENTS_LIST,
+};
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 #[allow(dead_code)]
 #[path = "../../test_support/tests/docker_container.rs"]
@@ -48,6 +50,18 @@ impl ScopeLookup for Pairing {
                 _ => Err(Unresolved::NotFound),
             }
         })
+    }
+}
+
+struct NotBanned;
+impl BanStateCheck for NotBanned {
+    fn check<'a>(
+        &'a self,
+        _: i64,
+        _: &'a str,
+        _: &'a str,
+    ) -> BoxFut<'a, Result<BanState, &'static str>> {
+        Box::pin(async { Ok(BanState::NotBanned) })
     }
 }
 
@@ -111,6 +125,7 @@ async fn bound_gateway_forwards_one_signed_event_and_everything_else_is_dropped(
         Arc::new(Tok),
         Arc::new(ValkeySink::new(conn_mgr.clone())),
         Some(Signer::from_seed("k1", &[7u8; 32]).unwrap()),
+        Arc::new(NotBanned),
     );
 
     // Unpaired guild (the connection is bound to it, but no pairing): ignored + metric.

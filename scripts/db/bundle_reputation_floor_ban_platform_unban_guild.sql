@@ -24,7 +24,7 @@ CREATE OR REPLACE FUNCTION reputation_floor_ban_set_armed_at() RETURNS trigger
 LANGUAGE plpgsql SET search_path = public, pg_temp
 AS $ta$
 BEGIN
-    IF NEW.status IN (1, 5) AND OLD.status = 6 THEN
+    IF NEW.status IN (1, 2, 3, 4, 5, 7) AND OLD.status NOT IN (1, 2, 3, 4, 5, 7) THEN
         NEW.armed_at := NOW();
     END IF;
     RETURN NEW;

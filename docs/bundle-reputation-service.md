@@ -133,6 +133,7 @@ re-join. A confirmed ban with no suppression code (no linked identity on that pl
   `svc_ingest_platform_unban_total{outcome=ignored,reason}`). svc-action (`core/svc_action/src/platform_unban.rs`)
   `BRPOP`s it, verifies the signature with the PUBLIC key (it can verify, never mint), freshness (5 min) and single use,
   then calls `reputation_floor_ban_lift_from_platform_guild` (alembic 0140) under the fixed source
+  Replay safety: frames replayed after a gateway RESUME carry the pre-disconnect observed time, and svc-ingest confirms Discord's current state (`GET /guilds/{id}/bans/{user}` = 404) before forwarding; a user banned again, or an unreadable state, is dropped (`ignored{reason=rebanned|ban_state_unavailable}`).
   `system:discord-gateway` (counted on `waddles_floor_ban_dispatch_total{result=gateway_unban_*}`). That function lifts in
   EVERY community of the signed tenant linked to the guild (approved `community_servers`, else the legacy primary
   server); a guild claimed by two tenants lifts nothing and a lift never crosses tenants. **Time bound**: only bans
