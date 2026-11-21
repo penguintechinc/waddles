@@ -58,6 +58,7 @@ async def get_poll(community_id: int, poll_id: int) -> tuple[dict[str, object], 
 @polls_bp.route("/<cuuid:community_id>/polls", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.polls:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def create_poll(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/polls`."""
     ctx = get_tenant_context(request)
@@ -71,6 +72,7 @@ async def create_poll(community_id: int) -> tuple[dict[str, object], int]:
 @polls_bp.route("/<cuuid:community_id>/polls/<int:poll_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.polls:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_poll(community_id: int, poll_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/polls/<pollId>`."""
     ctx = get_tenant_context(request)

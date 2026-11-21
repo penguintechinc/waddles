@@ -58,6 +58,7 @@ async def get_form(community_id: int, form_id: int) -> tuple[dict[str, object], 
 @forms_bp.route("/<cuuid:community_id>/forms", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def create_form(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/forms`."""
     ctx = get_tenant_context(request)
@@ -71,6 +72,7 @@ async def create_form(community_id: int) -> tuple[dict[str, object], int]:
 @forms_bp.route("/<cuuid:community_id>/forms/<int:form_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.forms:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_form(community_id: int, form_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/forms/<formId>`."""
     ctx = get_tenant_context(request)
