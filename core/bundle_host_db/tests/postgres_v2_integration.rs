@@ -27,8 +27,8 @@ const POSTGRES_IMAGE: &str = "postgres:17.6-bookworm";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const RUNTIME_PASSWORD: &str = "waddles_bundle_runtime_test_pw";
 const RUNTIME_ROLE: &str = "waddles_bundle_runtime";
-const APP: &str = "waddles.cal.test";
-const OTHER_APP: &str = "waddles.other.test";
+const APP: &str = "penguintechinc.waddles.cal-test";
+const OTHER_APP: &str = "penguintechinc.waddles.other-test";
 
 async fn start() -> (DockerContainer, String) {
     let container = start_container(
@@ -860,7 +860,7 @@ async fn db_v2_against_real_postgres() {
     admin
         .execute_unprepared(
             "INSERT INTO bundle_data.table_registry (app_id, logical_name, schema_kind, physical_table, columns, indexes) VALUES \
-             ('waddles.cal.test','events','community','calapp__events', \
+             ('penguintechinc.waddles.cal-test','events','community','calapp__events', \
               '[{\"name\":\"title\",\"type\":\"text\"},{\"name\":\"start_at\",\"type\":\"timestamptz\"}]', \
               '[{\"columns\":[{\"name\":\"start_at\"}],\"unique\":false}]')",
         )

@@ -23,7 +23,6 @@ vi.mock('../../services/api', () => {
   return {
     default: api,
     adminApi: group(),
-    calendarApi: group(),
     inventoryApi: group(),
     interactionApi: group(),
     channelPermissionsApi: group(),
@@ -38,12 +37,8 @@ import LoyaltySettings from '../admin/LoyaltySettings';
 import LoyaltyLeaderboard from '../admin/LoyaltyLeaderboard';
 import AdminRaffleCustomization from '../admin/AdminRaffleCustomization';
 import AdminInventory from '../admin/AdminInventory';
-import AdminCalendarEvents from '../admin/AdminCalendarEvents';
 import AdminInteractionChannels from '../admin/AdminInteractionChannels';
 import AdminStreamOverlays from '../admin/AdminStreamOverlays';
-import BookingPages from '../calendar/BookingPages';
-import MyBookings from '../calendar/MyBookings';
-import CalendarSettings from '../calendar/CalendarSettings';
 
 const licensed402 = () => ({
   response: {
@@ -57,12 +52,8 @@ const PAGES = [
   ['LoyaltyLeaderboard', LoyaltyLeaderboard],
   ['AdminRaffleCustomization', AdminRaffleCustomization],
   ['AdminInventory', AdminInventory],
-  ['AdminCalendarEvents', AdminCalendarEvents],
   ['AdminInteractionChannels', AdminInteractionChannels],
   ['AdminStreamOverlays', AdminStreamOverlays],
-  ['BookingPages', BookingPages],
-  ['MyBookings', MyBookings],
-  ['CalendarSettings', CalendarSettings],
 ];
 
 function renderPage(Page) {

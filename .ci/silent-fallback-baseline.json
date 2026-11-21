@@ -2433,12 +2433,6 @@
       "line_hash": "a4987afa8cc12232"
     },
     {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/services/event_calendar_proxy.py",
-      "line": 123,
-      "line_hash": "3d78e09561c756bf"
-    },
-    {
       "rule_id": "python-bare-except-pass",
       "path": "hub_api/services/marketplace_lifecycle_service.py",
       "line": 106,

@@ -52,7 +52,7 @@ def _backfill_module() -> Any:
 
 async def _publish_and_activate(pg_dal: Any, run_id: int, permissions: list[Any]) -> str:
     """Real GLOBAL install + tenant availability + community activation; returns the app id."""
-    app_id = f"waddles.socials.kvcap{run_id}.default"
+    app_id = f"penguintechinc.waddles.socials-kvcap{run_id}"
     async with pg_dal.engine.begin() as conn:
         tenant_id = int(
             (

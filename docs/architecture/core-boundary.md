@@ -34,7 +34,7 @@ All platform plumbing — receivers, actions, interaction commands, and the rout
 - **Triggers** `trigger/receiver/*` (8): discord, googlechat, kick_flask, mattermost, slack, teams, twitch, youtube_live (+ `platform_base` shim)
 - **Actions** `action/pushing/*` (10): discord, gcp_functions, googlechat, lambda, mattermost, openwhisk, slack, teams, twitch, youtube
 - **Interactions** `action/interactive/*` (Bot subset): ai, clip, server_manager, server_status *(deprecated)*
-- **From `core/`**: `ai_researcher_module` (standalone AI assistant), `labels_core_module` (only `calendar_interaction` consumes it — fails the 2-Module test despite the `_core_` name), `unified_music_module` (song-request provider library, dormant)
+- **From `core/`**: `ai_researcher_module` (standalone AI assistant), `labels_core_module` (its only consumer, the old calendar module, is gone, so it fails the 2-Module test despite the `_core_` name), `unified_music_module` (song-request provider library, dormant)
 - **Router command half** (`processing/router_module`): `command_processor.py`, `command_registry.py`, `emote_service.py`, `emote_providers/*`, `context_service.py`, `grpc_clients.py`, `controllers/router.py`, `controllers/admin.py`
 
 ### Social

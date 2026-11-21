@@ -143,48 +143,6 @@ inventory_activity (
 
 ---
 
-### Calendar Interaction Module (`action/interactive/calendar_interaction_module_flask/`)
-
-**Purpose**: Event management system with approval workflows, recurring events, and label-based auto-approval
-
-**Key Features**:
-- **Event Management**: Complete event lifecycle management with CRUD operations
-- **Approval Workflow**: Events require approval by community admins/moderators unless user has 'event-autoapprove' label
-- **Recurring Events**: Support for daily, weekly, monthly, and yearly recurring events
-- **Attendee Management**: Users can join/leave events with capacity limits
-- **Event Reminders**: Automatic reminder system (1 day, 1 hour, 15 minutes before)
-- **Label Integration**: Integrates with labels_core_module for permission checking
-
-**Command List**:
-- `!calendar create "Event Title" "YYYY-MM-DD HH:MM" [description] [location] [max_attendees]` - Create new event
-- `!calendar list [pending|approved|rejected]` - List events by status
-- `!calendar join <event_id>` - Join an event
-- `!calendar leave <event_id>` - Leave an event
-- `!calendar approve <event_id>` - Approve pending event (admin/moderator only)
-- `!calendar reject <event_id> "reason"` - Reject pending event (admin/moderator only)
-- `!calendar cancel <event_id>` - Cancel event (creator only)
-
-**Database Schema**:
-```sql
-events (
-    id, community_id, entity_id, title, description, event_date, end_date,
-    location, max_attendees, created_by, created_by_name, status,
-    approved_by, approved_by_name, approved_at, rejection_reason,
-    attendees, tags, is_recurring, recurring_pattern, recurring_end_date,
-    notification_sent, created_at, updated_at
-)
-
-event_attendees (
-    id, event_id, user_id, user_name, status, joined_at
-)
-
-event_reminders (
-    id, event_id, reminder_time, reminder_type, message, sent, created_at
-)
-```
-
----
-
 ### Memories Interaction Module (`action/interactive/memories_interaction_module_flask/`)
 
 **Purpose**: Community memory management system for quotes, reminders, and URLs with label-based permissions

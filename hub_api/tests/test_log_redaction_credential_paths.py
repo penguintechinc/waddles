@@ -139,7 +139,9 @@ class TestStorageService:
         caplog.set_level(logging.DEBUG)
 
         with pytest.raises(ClientError):
-            await storage_service.read_bundle_sidecar("waddles.x.y", "1.0.0", "abc123")
+            await storage_service.read_bundle_sidecar(
+                "penguintechinc.waddles.x-y", "1.0.0", "abc123"
+            )
 
         text = _all_log_text(caplog)
         assert SENTINEL not in text
@@ -156,7 +158,12 @@ class TestStorageService:
         monkeypatch.setattr(storage_service, "_client", lambda: client)
         caplog.set_level(logging.DEBUG)
 
-        assert await storage_service.read_bundle_sidecar("waddles.x.y", "1.0.0", "abc123") is None
+        assert (
+            await storage_service.read_bundle_sidecar(
+                "penguintechinc.waddles.x-y", "1.0.0", "abc123"
+            )
+            is None
+        )
 
         text = _all_log_text(caplog)
         assert SENTINEL not in text

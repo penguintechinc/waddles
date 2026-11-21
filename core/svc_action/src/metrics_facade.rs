@@ -258,14 +258,14 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             metrics::counter!(
                 "waddles_bundle_capability_denied_total",
-                "app_id" => "waddles.test.facade",
+                "app_id" => "penguintechinc.waddles.test-facade",
                 "permission" => "storage.kv",
                 "reason" => "not_granted",
             )
             .increment(1);
             metrics::counter!(
                 "waddles_bundle_capability_denied_total",
-                "app_id" => "waddles.test.facade",
+                "app_id" => "penguintechinc.waddles.test-facade",
                 "permission" => "storage.kv",
                 "reason" => "not_granted",
             )
@@ -275,7 +275,7 @@ mod tests {
             h.count(
                 "waddles_bundle_capability_denied_total",
                 &[
-                    ("app_id", "waddles.test.facade"),
+                    ("app_id", "penguintechinc.waddles.test-facade"),
                     ("permission", "storage.kv"),
                     ("reason", "not_granted"),
                 ]
@@ -361,7 +361,7 @@ mod tests {
             for i in 0..50 {
                 metrics::counter!(
                     "waddles_bundle_capability_denied_total",
-                    "app_id" => "waddles.test.hostile",
+                    "app_id" => "penguintechinc.waddles.test-hostile",
                     "permission" => format!("net.http.fqdn:host-{i}.example"),
                     "reason" => "not_granted",
                 )

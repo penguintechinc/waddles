@@ -1,9 +1,9 @@
 /**
- * Request-contract tests for the user, analytics, stream, workflow, calendar, inventory, token, auth, interaction, RCON, tenant, role and bundle helper groups in `services/api.js`.
+ * Request-contract tests for the user, analytics, stream, workflow, inventory, token, auth, interaction, RCON, tenant, role and bundle helper groups in `services/api.js`.
  */
 import { afterAll, describe, it } from 'vitest';
 
-import api, { userApi, analyticsApi, streamApi, workflowApi, calendarApi, inventoryApi, tokenApi, userOAuthApi, passkeyApi, interactionApi, rconApi, tenantApi, rolesApi, channelPermissionsApi, superadminTenantApi, bundleApi, bundleAdminApi } from '../api';
+import api, { userApi, analyticsApi, streamApi, workflowApi, inventoryApi, tokenApi, userOAuthApi, passkeyApi, interactionApi, rconApi, tenantApi, rolesApi, channelPermissionsApi, superadminTenantApi, bundleApi, bundleAdminApi } from '../api';
 import { assertContractRow, recordRequests, type ContractRow } from '../../test/apiContract';
 
 const rec = recordRequests(api);
@@ -60,34 +60,6 @@ const WORKFLOWAPI_ROWS: readonly ContractRow[] = [
   ['createWebhook(communityId, workflowId, data)', 'POST /api/v1/admin/{communityId}/workflows/{workflowId}/webhooks', { body: '@data' }],
   ['deleteWebhook(communityId, workflowId, webhookId)', 'DELETE /api/v1/admin/{communityId}/workflows/{workflowId}/webhooks/{webhookId}'],
   ['regenerateWebhookSecret(communityId, workflowId, webhookId)', 'POST /api/v1/admin/{communityId}/workflows/{workflowId}/webhooks/{webhookId}/regenerate'],
-];
-
-const CALENDARAPI_ROWS: readonly ContractRow[] = [
-  ['getGoogleAuthUrl()', 'GET /api/v1/calendar/oauth/google/auth-url'],
-  ['getMicrosoftAuthUrl()', 'GET /api/v1/calendar/oauth/microsoft/auth-url'],
-  ['getConnectedCalendars()', 'GET /api/v1/calendar/oauth/calendars'],
-  ['syncCalendar(id)', 'POST /api/v1/calendar/oauth/calendars/{id}/sync'],
-  ['disconnectCalendar(id)', 'DELETE /api/v1/calendar/oauth/calendars/{id}'],
-  ['getAvailabilitySettings()', 'GET /api/v1/calendar/availability/settings'],
-  ['updateAvailabilitySettings(data)', 'PUT /api/v1/calendar/availability/settings', { body: '@data' }],
-  ['getWeeklyAvailability()', 'GET /api/v1/calendar/availability/weekly'],
-  ['updateWeeklyAvailability(data)', 'PUT /api/v1/calendar/availability/weekly', { body: '@data' }],
-  ['getAvailableSlots(userId, date, duration)', 'GET /api/v1/calendar/availability/{userId}/slots', { params: { date: '@date', duration: '@duration' } }],
-  ['createBookingPage(data)', 'POST /api/v1/calendar/booking-pages', { body: '@data' }],
-  ['getBookingPages()', 'GET /api/v1/calendar/booking-pages'],
-  ['getBookingPage(idOrSlug)', 'GET /api/v1/calendar/booking-pages/{idOrSlug}'],
-  ['updateBookingPage(id, data)', 'PUT /api/v1/calendar/booking-pages/{id}', { body: '@data' }],
-  ['deleteBookingPage(id)', 'DELETE /api/v1/calendar/booking-pages/{id}'],
-  ['getBookingSlots(slug, date)', 'GET /api/v1/calendar/book/{slug}/slots', { params: { date: '@date' } }],
-  ['createBooking(slug, data)', 'POST /api/v1/calendar/book/{slug}', { body: '@data' }],
-  ['getBooking(uuid)', 'GET /api/v1/calendar/bookings/{uuid}'],
-  ['cancelBooking(uuid)', 'DELETE /api/v1/calendar/bookings/{uuid}'],
-  ['getMyBookings(params)', 'GET /api/v1/calendar/my-bookings'],
-  ['addGroupMember(pageId, data)', 'POST /api/v1/calendar/booking-pages/{pageId}/members', { body: '@data' }],
-  ['removeGroupMember(pageId, userId)', 'DELETE /api/v1/calendar/booking-pages/{pageId}/members/{userId}'],
-  ['getGroupMembers(pageId)', 'GET /api/v1/calendar/booking-pages/{pageId}/members'],
-  ['getGroupAvailability(pageId, date)', 'GET /api/v1/calendar/booking-pages/{pageId}/group-availability', { params: { date: '@date' } }],
-  ['getBestSlots(pageId, start, end, limit)', 'GET /api/v1/calendar/booking-pages/{pageId}/best-slots', { params: { start: '@start', end: '@end', limit: '@limit' } }],
 ];
 
 const INVENTORYAPI_ROWS: readonly ContractRow[] = [
@@ -235,12 +207,6 @@ describe('streamApi request contract', () => {
 describe('workflowApi request contract', () => {
   for (const row of WORKFLOWAPI_ROWS) {
     it(row[0], () => assertContractRow(workflowApi, row, rec.calls));
-  }
-});
-
-describe('calendarApi request contract', () => {
-  for (const row of CALENDARAPI_ROWS) {
-    it(row[0], () => assertContractRow(calendarApi, row, rec.calls));
   }
 });
 

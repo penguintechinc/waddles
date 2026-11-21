@@ -135,15 +135,6 @@ scrape_configs:
           tier: 'action'
           module_type: 'interactive'
 
-  - job_name: 'calendar-interaction'
-    metrics_path: '/metrics'
-    static_configs:
-      - targets: ['calendar-interaction:8009']
-        labels:
-          service: 'calendar-interaction'
-          tier: 'action'
-          module_type: 'interactive'
-
   - job_name: 'memories-interaction'
     metrics_path: '/metrics'
     static_configs:

@@ -2270,7 +2270,7 @@ mod tests {
         let scope = crate::capabilities::InvokeScope {
             tenant: "acme".to_string(),
             community: None,
-            app_id: "waddles.test.app.x".to_string(),
+            app_id: "penguintechinc.waddles.test-app-x".to_string(),
             origin_channel_id: None,
             origin_platform: None,
             origin_guild_id: None,
@@ -2286,7 +2286,7 @@ mod tests {
             std::time::Duration::from_millis(50),
             conn.invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app.x".to_string(),
+                    app_id: "penguintechinc.waddles.test-app-x".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::ToolCall,
                     payload: serde_json::json!({}),

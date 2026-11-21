@@ -199,7 +199,7 @@ class TestAttributionMetadata:
             license="MIT",
             sourceUrl="https://github.com/acme/waddles-bundle",
             homepageUrl="https://acme.example.com",
-            alternativeTo=["waddles.bot.shoutout.builtin"],
+            alternativeTo=["penguintechinc.waddles.bot-shoutout-builtin"],
             notice="Portions (c) Acme Corp, under MIT.",
             category="alternatives",
         )
@@ -221,7 +221,7 @@ class TestAttributionMetadata:
         assert bundle["licenseReviewRequired"] is False
         assert bundle["sourceUrl"] == "https://github.com/acme/waddles-bundle"
         assert bundle["homepageUrl"] == "https://acme.example.com"
-        assert bundle["alternativeTo"] == ["waddles.bot.shoutout.builtin"]
+        assert bundle["alternativeTo"] == ["penguintechinc.waddles.bot-shoutout-builtin"]
         assert bundle["notice"] == "Portions (c) Acme Corp, under MIT."
         assert bundle["category"] == "alternatives"
 
@@ -402,7 +402,7 @@ class TestInstallUninstall:
 
     async def test_uninstall_unknown_is_404(self, client: Any) -> None:
         response = await client.delete(
-            "/api/v1/marketplace/bundles/waddles.bot.shoutout.nope",
+            "/api/v1/marketplace/bundles/penguintechinc.waddles.bot-shoutout-nope",
             headers=_platform_admin_headers(),
         )
         assert response.status_code == 404
@@ -742,7 +742,7 @@ class TestEnsureRegisteredDirect:
 
     async def test_unknown_app_id_raises_not_found(self, lifecycle_db: Any) -> None:
         with pytest.raises(ApiError) as exc_info:
-            await ensure_registered(lifecycle_db.dal, "waddles.bot.shoutout.nope")
+            await ensure_registered(lifecycle_db.dal, "penguintechinc.waddles.bot-shoutout-nope")
         assert exc_info.value.status_code == 404
 
 
