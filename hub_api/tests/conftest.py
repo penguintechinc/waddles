@@ -1004,14 +1004,12 @@ def community_db(tenant_db: Any, monkeypatch: Any) -> Any:
     """
     from services.community_common import ensure_community_tables
     from services.community_relay import _ensure_relay_tables
-    from services.schema import bind_engagement_ownership_tables
 
     monkeypatch.setenv("SERVICE_API_KEY", SERVICE_API_KEY)
 
     dal = tenant_db
     ensure_community_tables(dal, migrate=True)
     _ensure_relay_tables(dal, migrate=True)
-    bind_engagement_ownership_tables(dal, migrate=True)
 
     # `hub_user_identities` is a Core/Identity table (000_create_base_schema.sql),
     # not owned by the Community-module port -- `_find_hub_user_id` (community_

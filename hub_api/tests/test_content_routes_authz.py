@@ -1,9 +1,9 @@
 """Community content write/admin routes need PER-COMMUNITY admin standing (real guards).
 
-announcements, loyalty, polls, forms, raffle-customization and the activity leaderboard-config
+announcements, loyalty, raffle-customization and the activity leaderboard-config
 were authorized only by a tenant-wide token scope (`community.<x>:write`/`:admin`) plus the tenant
 fence. The `maintainer` bundle carries `*:write`, so a maintainer of community A could write to
-community B of the same tenant. Every such route now carries `@community_admin_guard`; all 20 are
+community B of the same tenant. Every such route now carries `@community_admin_guard`; all 16 are
 admin-only (definitions, config, moderation, balance/wipe) -- none is member-facing by design
 (member actions such as voting, submitting a form or earning loyalty points go through the
 service-key `/internal` routes and core-engagement, not these admin routes).
@@ -16,7 +16,6 @@ These tests run the REAL guards (no `bypass_route_guards`, no patched standing) 
 * a foreign-tenant community is 404 (same as `route_guards`), never 403;
 * the maintainer is NOT refused on A (positive control: the guard is not a blanket deny);
 * a child id (announcement) belonging to community B is not reachable through A's URL;
-* polls/forms proxies are bound to the URL community, never body/query.
 """
 
 from __future__ import annotations
@@ -32,14 +31,10 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 import blueprints.v1.community_announcements as announcements_module
-import blueprints.v1.community_forms as forms_module
-import blueprints.v1.community_polls as polls_module
 import blueprints.v1.community_raffle as raffle_module
 from blueprints.v1.community_activity import activity_admin_bp
 from blueprints.v1.community_announcements import announcements_bp
-from blueprints.v1.community_forms import forms_bp
 from blueprints.v1.community_loyalty import loyalty_bp
-from blueprints.v1.community_polls import polls_bp
 from blueprints.v1.community_raffle import raffle_bp
 from services.community_announcements import create_announcement, get_announcement
 from services.community_common import ensure_community_tables
@@ -52,8 +47,6 @@ MAINTAINER_A, MEMBER_B = 81, 82
 BLUEPRINTS = (
     announcements_bp,
     loyalty_bp,
-    polls_bp,
-    forms_bp,
     raffle_bp,
     activity_admin_bp,
 )
@@ -86,8 +79,8 @@ ANNOUNCEMENT_ROUTES = [p for p in ROUTES if "announcement_id" in p.values[1]]
 
 
 def test_every_content_write_route_is_admin_guarded() -> None:
-    """Static proof next to the behavioural one: all 20 routes carry the admin guard."""
-    assert len(ROUTES) == 20, f"expected 20 write/admin community routes, found {len(ROUTES)}"
+    """Static proof next to the behavioural one: all 16 routes carry the admin guard."""
+    assert len(ROUTES) == 16, f"expected 16 write/admin community routes, found {len(ROUTES)}"
     wrong = [p.id for p in ROUTES if p.values[3] != "admin"]
     assert wrong == [], f"content write routes without the community admin guard: {wrong}"
 
@@ -95,7 +88,7 @@ def test_every_content_write_route_is_admin_guarded() -> None:
 @pytest.fixture(autouse=True)
 def _flags_on(monkeypatch: pytest.MonkeyPatch) -> None:
     """Feature flags ON so an allowed caller reaches the handler (the guard runs before it)."""
-    for module in (announcements_module, polls_module, forms_module, raffle_module):
+    for module in (announcements_module, raffle_module):
         monkeypatch.setattr(module, "feature_enabled", AsyncMock(return_value=True))
 
 
@@ -263,27 +256,3 @@ async def test_raffle_delete_only_touches_the_url_community(
     )
     assert response.status_code == 200
     assert dal(dal.community_raffle_sounds.community_id == worlds.b).count() == 1
-
-
-@pytest.mark.parametrize("which", ["polls", "forms"])
-async def test_poll_and_form_proxies_bind_the_url_community(
-    client: Any, worlds: SimpleNamespace, monkeypatch: pytest.MonkeyPatch, which: str
-) -> None:
-    """The community forwarded upstream is the URL's, not the body's `community_id`."""
-    from services import community_engagement_proxy as proxy
-
-    worlds.dal.community_polls.insert(id=7, community_id=worlds.a)
-    worlds.dal.community_forms.insert(id=7, community_id=worlds.a)
-    worlds.dal.commit()
-    create = AsyncMock(return_value=({"success": True}, 201))
-    delete = AsyncMock(return_value=({"success": True}, 200))
-    monkeypatch.setattr(proxy, f"create_{which[:-1]}", create)
-    monkeypatch.setattr(proxy, f"delete_{which[:-1]}", delete)
-    base = f"/api/v1/admin/{public_id(worlds.dal, worlds.a)}/{which}"
-    token = make_user_token(user_id=MAINTAINER_A, scope=f"*:read community.{which}:write")
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    r1 = await client.post(base, headers=headers, data=json.dumps({"community_id": worlds.b}))
-    r2 = await client.delete(f"{base}/7", headers=headers)
-    assert (r1.status_code, r2.status_code) == (201, 200)
-    assert create.await_args.args[0] == worlds.a
-    assert delete.await_args.args[:2] == (worlds.a, 7)

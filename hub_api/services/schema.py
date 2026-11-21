@@ -3419,20 +3419,6 @@ def _bind_dsar_mail_outbox(dal: Any, *, migrate: bool) -> None:
     )
 
 
-def bind_engagement_ownership_tables(dal: Any, *, migrate: bool = False) -> None:
-    """Bind the ownership columns of `community_polls`/`community_forms` (read-only).
-
-    The engagement tables are owned by the engagement service (`000`/`028` migrations); hub-api
-    binds only `id` + `community_id` so the polls/forms proxy can verify a numeric poll/form id
-    really belongs to the URL's community BEFORE forwarding -- never trusting the downstream
-    service to scope it. Idempotent per-DAL-instance.
-    """
-    if "community_polls" not in dal.tables:
-        dal.define_table("community_polls", Field("community_id", "integer"), migrate=migrate)
-    if "community_forms" not in dal.tables:
-        dal.define_table("community_forms", Field("community_id", "integer"), migrate=migrate)
-
-
 def bind_community_tier_tables(dal: Any, *, migrate: bool = False) -> None:
     """Bind the community-tier ledger + pool cache (alembic 0126). Idempotent.
 
