@@ -58,7 +58,8 @@ def env(tenant_admin_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     dal.commit()
     for name in ("tenant_license_keys", "tenant_license_pools"):
         dal(dal[name]).count()
-    tenant_id = int(dal(dal.tenants.slug == TENANT_SLUG).select().first().id)
+    tenant_row = dal(dal.tenants.slug == TENANT_SLUG).select().first()
+    tenant_id = int(tenant_row.id)
     audit = RecordingAudit()
     import blueprints.v1.superadmin_license_pools as ops_mod
     import blueprints.v1.tenant_license as tl_mod
@@ -80,6 +81,7 @@ def env(tenant_admin_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             "adal": tenant_admin_db,
             "dal": dal,
             "tenant": tenant_id,
+            "tenant_uuid": str(tenant_row.public_id),
             "other": other_id,
             "audit": audit,
         },
@@ -199,7 +201,7 @@ async def test_blob_copied_to_other_tenant_does_not_open(env: Any) -> None:
 
 async def test_operator_pool_put_on_bypass_host_audited(env: Any) -> None:
     c = env.client
-    url = f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/2"
+    url = f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools/2"
     r = await c.put(url, headers=_ops(BYPASS_HOST), json={"limit": 7})
     body = await r.get_json()
     assert r.status_code == 200, body
@@ -219,7 +221,7 @@ async def test_operator_pool_put_on_bypass_host_audited(env: Any) -> None:
     r = await c.put(url, headers=_ops(BYPASS_HOST), json={"limit": None})
     assert [p["limit"] for p in (await r.get_json())["pools"]] == [None]
     r = await c.get(
-        f"/api/v1/superadmin/tenants/{env.tenant}/license-pools", headers=_ops(BYPASS_HOST)
+        f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools", headers=_ops(BYPASS_HOST)
     )
     assert r.status_code == 200
     ev = [e for e in env.audit.events if e.action == "license.tenant_pool_set"]
@@ -228,7 +230,7 @@ async def test_operator_pool_put_on_bypass_host_audited(env: Any) -> None:
 
 async def test_operator_pool_put_conflict_off_bypass_host(env: Any) -> None:
     r = await env.client.put(
-        f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/2",
+        f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools/2",
         headers=_ops("example.com"),
         json={"limit": 3},
     )
@@ -255,7 +257,7 @@ async def test_operator_pool_validation(
     env: Any, tier: int, payload: dict[str, Any], status: int
 ) -> None:
     r = await env.client.put(
-        f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/{tier}",
+        f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools/{tier}",
         headers=_ops(BYPASS_HOST),
         json=payload,
     )
@@ -264,13 +266,13 @@ async def test_operator_pool_validation(
 
 async def test_operator_pool_unknown_tenant_and_scope(env: Any) -> None:
     r = await env.client.put(
-        "/api/v1/superadmin/tenants/99999/license-pools/2",
+        "/api/v1/superadmin/tenants/00000000-0000-4000-8000-0000000000a1/license-pools/2",
         headers=_ops(BYPASS_HOST),
         json={"limit": 1},
     )
     assert r.status_code == 404
     r = await env.client.put(
-        f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/2",
+        f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools/2",
         headers={**_hdr("tenant:admin"), "Host": BYPASS_HOST},
         json={"limit": 1},
     )
@@ -332,7 +334,7 @@ async def test_resolver_feeds_pool_provider_for_real(env: Any, license_server: s
 
 
 async def test_omitted_limit_does_not_wipe_an_existing_pool(env: Any) -> None:
-    url = f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/2"
+    url = f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools/2"
     await env.client.put(url, headers=_ops(BYPASS_HOST), json={"limit": 5})
     r = await env.client.put(url, headers=_ops(BYPASS_HOST), json={})
     assert r.status_code == 400
@@ -343,7 +345,7 @@ async def test_operator_put_refused_when_license_server_and_tenant_key_are_set(
     env: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Defense in depth: a (spoofed-host) bypass cannot override a license-server pool."""
-    url = f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/2"
+    url = f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools/2"
     monkeypatch.setenv("LICENSE_SERVER_URL", "https://license.example.test")
     await svc.set_tenant_license_key(
         env.adal, env.dal, tenant_id=env.tenant, license_key=KEY_A, actor=None
@@ -370,7 +372,7 @@ async def test_operator_put_refused_when_license_server_and_tenant_key_are_set(
 )
 async def test_spoofed_host_cannot_write_operator_pools(env: Any, spoof: str) -> None:
     r = await env.client.put(
-        f"/api/v1/superadmin/tenants/{env.tenant}/license-pools/2",
+        f"/api/v1/superadmin/tenants/{env.tenant_uuid}/license-pools/2",
         headers=_ops(spoof),
         json={"limit": 3},
     )
