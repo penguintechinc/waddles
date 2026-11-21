@@ -174,6 +174,22 @@ def _actor_uuid(dal: Any, actor_user_id: int | None) -> str | None:
     return str(row.uuid) if row is not None and row.uuid else None
 
 
+def _lock_guild(dal: Any, discord_guild_id: str) -> None:
+    """Serialize claim/release for one guild on a transaction-scoped Postgres advisory lock.
+
+    Without it a same-tenant claim ("owner == me, fine") can interleave with the last-pairing
+    release (which deletes that very claim) and leave a pairing with no claim row. Both functions
+    take the lock FIRST, inside the caller's transaction, so it is held until the pairing
+    insert/delete commits or rolls back. sqlite (tests) has a single writer, so it is a no-op.
+    """
+    if _is_sqlite(dal):
+        return
+    dal.executesql(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        placeholders=["discord_guild_tenants:" + discord_guild_id],
+    )
+
+
 def claim_guild_for_tenant(
     dal: Any, *, tenant_id: int, discord_guild_id: str, actor_user_id: int | None = None
 ) -> bool:
@@ -186,6 +202,7 @@ def claim_guild_for_tenant(
     raises `conflict()` (409). NO commit -- the caller's transaction owns it, so a failed pairing
     insert rolls the claim back with it.
     """
+    _lock_guild(dal, discord_guild_id)
     qmark = "?" if _is_sqlite(dal) else "%s"
     uuid_cast = "" if _is_sqlite(dal) else "::uuid"
     # Only the driver placeholder token is interpolated; every value is bound.
@@ -219,8 +236,11 @@ def release_unused_guild_claim(dal: Any, *, tenant_id: int, discord_guild_id: st
     """Free `tenant_id`'s claim on the guild once its LAST pairing for it is gone.
 
     A guarded `DELETE ... WHERE NOT EXISTS`: a no-op while any community of that tenant still has
-    a pairing for the guild. NO commit (the caller's transaction owns it).
+    a pairing for the guild. NO commit (the caller's transaction owns it). Takes the same
+    per-guild advisory lock as the claim, so it never deletes a claim a concurrent same-tenant
+    pairing is relying on.
     """
+    _lock_guild(dal, discord_guild_id)
     qmark = "?" if _is_sqlite(dal) else "%s"
     release_sql = (
         "DELETE FROM discord_guild_tenants "  # noqa: S608  # nosec B608

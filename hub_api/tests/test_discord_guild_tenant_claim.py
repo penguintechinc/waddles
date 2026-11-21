@@ -154,3 +154,24 @@ def test_release_never_touches_another_guild_or_tenant(guild_pairing_db: Any) ->
     assert _claims(dal, OTHER_GUILD) == [tenant_id]
     assert _claims(dal, "323456789012345678") == [other_tenant]
     assert kept.id != gone.id
+
+
+def test_claim_and_release_take_the_per_guild_advisory_lock_first() -> None:
+    """On Postgres both functions lock the guild BEFORE touching `discord_guild_tenants`."""
+    calls: list[str] = []
+
+    class FakeDal:
+        _dbname = "postgres"
+
+        def executesql(self, sql: str, placeholders: list[Any] | None = None) -> list[Any]:
+            calls.append(sql)
+            return [(1,)] if sql.startswith("INSERT") else []
+
+        def __getattr__(self, name: str) -> Any:
+            raise AssertionError(name)
+
+    dal = FakeDal()
+    pairing_svc.claim_guild_for_tenant(dal, tenant_id=1, discord_guild_id=GUILD)
+    pairing_svc.release_unused_guild_claim(dal, tenant_id=1, discord_guild_id=GUILD)
+    assert [c.split()[0] for c in calls] == ["SELECT", "INSERT", "SELECT", "DELETE"]
+    assert "pg_advisory_xact_lock" in calls[0] and "pg_advisory_xact_lock" in calls[2]
