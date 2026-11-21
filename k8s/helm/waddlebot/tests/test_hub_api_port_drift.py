@@ -1,6 +1,6 @@
 """Drift guard: every hub-api port reference matches the chart's `pipeline.hubApi.port`.
 
-# regression: stale Node-era hub port (8060) left in beta routes, CI smoke, the vite dev proxy and test scripts
+# regression: stale Node-era hub port left in beta routes, CI smoke, the vite dev proxy and test scripts
 
 hub-api (Python/Quart, hub_api/Dockerfile) has one canonical HTTP port: `pipeline.hubApi.port` in
 values.yaml, which renders its Service port and containerPort. This test asserts that (a) the image,
