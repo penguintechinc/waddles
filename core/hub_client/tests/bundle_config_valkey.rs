@@ -73,12 +73,12 @@ impl Drop for Valkey {
 async fn version_key_set_makes_cache_reload_against_real_valkey() {
     let valkey = Valkey::start();
     let mut conn = valkey.connect().await;
-    let key = ConfigKey::new(7, 42, "waddles.socials.demo.default");
+    let key = ConfigKey::new(7, 42, "penguintechinc.waddles.socials-demo");
 
     // Wire format must match hub-api's `version_key()` (python: waddles:bundle_config:v:T:C:APP).
     assert_eq!(
         version_key(&key),
-        "waddles:bundle_config:v:7:42:waddles.socials.demo.default"
+        "waddles:bundle_config:v:7:42:penguintechinc.waddles.socials-demo"
     );
 
     let source = Arc::new(StaticConfigSource::new());

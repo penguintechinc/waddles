@@ -39,7 +39,7 @@ async fn put_encodes_the_body_and_decodes_the_object_info() {
 
 #[tokio::test]
 async fn put_refuses_an_oversized_key_or_body_before_the_wire() {
-    let mut st = ExecState::new(None, "waddles.test.app".to_string(), 1);
+    let mut st = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
     let opts = || object_storage::PutOptions {
         content_type: "x/y".into(),
         tags: vec![],
@@ -182,7 +182,7 @@ async fn delete_and_tag_ops_send_their_args_and_surface_refusals() {
         .unwrap_err();
     assert!(matches!(e, object_storage::Error::NotGranted));
 
-    let mut st = ExecState::new(None, "waddles.test.app".to_string(), 1);
+    let mut st = ExecState::new(None, "penguintechinc.waddles.test-app".to_string(), 1);
     let e = object_storage::Host::tag_add(&mut st, None, "k".into(), "c".repeat(1025))
         .await
         .unwrap_err();

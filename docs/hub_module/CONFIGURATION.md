@@ -55,7 +55,6 @@ ROUTER_API_URL=http://router:8000
 REPUTATION_API_URL=http://reputation:8021
 LABELS_API_URL=http://labels-core:8023
 INVENTORY_API_URL=http://inventory:8024
-CALENDAR_API_URL=http://calendar:8030
 MEMORIES_API_URL=http://memories:8031
 BROWSER_SOURCE_API_URL=http://browser-source:8027
 LOYALTY_API_URL=http://loyalty-interaction:8032
@@ -131,7 +130,6 @@ export const config = {
     reputation: process.env.REPUTATION_API_URL || 'http://reputation:8021',
     labels: process.env.LABELS_API_URL || 'http://labels-core:8023',
     inventory: process.env.INVENTORY_API_URL || 'http://inventory:8024',
-    calendar: process.env.CALENDAR_API_URL || 'http://calendar:8030',
     memories: process.env.MEMORIES_API_URL || 'http://memories:8031',
     browserSource: process.env.BROWSER_SOURCE_API_URL || 'http://browser-source:8027',
     loyalty: process.env.LOYALTY_API_URL || 'http://loyalty-interaction:8032',
@@ -501,7 +499,6 @@ The hub module integrates with other Waddles services:
 | Reputation | `REPUTATION_API_URL` | `http://reputation:8021` |
 | Labels | `LABELS_API_URL` | `http://labels-core:8023` |
 | Inventory | `INVENTORY_API_URL` | `http://inventory:8024` |
-| Calendar | `CALENDAR_API_URL` | `http://calendar:8030` |
 | Memories | `MEMORIES_API_URL` | `http://memories:8031` |
 | Browser Source | `BROWSER_SOURCE_API_URL` | `http://browser-source:8027` |
 | Loyalty | `LOYALTY_API_URL` | `http://loyalty-interaction:8032` |

@@ -216,22 +216,22 @@ _ROWS: dict[str, dict | None] = {
         },
     },
     # A module this migration does not own (e.g. a WASI bundle's own `bundles` package).
-    "waddles.core.example.foreign": {
+    "penguintechinc.waddles.foreign": {
         "process": {"entrypoint": "bundles.not_a_builtin_module:transform"},
     },
     # A look-alike that merely starts with an owned name: the trailing `:` must pin it.
-    "waddles.core.example.lookalike": {
+    "penguintechinc.waddles.lookalike": {
         "process": {"entrypoint": "bundles.bot_process_v2:transform"},
     },
     # Already in the new form (e.g. seeded by a post-rename migration): must be a no-op.
-    "waddles.bot.discord.already_new": {
+    "penguintechinc.waddles.bot-discord-already-new": {
         "ingest": {"entrypoint": "builtin_handlers.discord_ingest:normalize"},
     },
     # Presentation-style stage with no script entrypoint, JSON-null entrypoint, empty and NULL.
-    "waddles.core.example.presentation": {"presentation": {"html_entrypoint": "overlay.html"}},
-    "waddles.core.example.null_entry": {"process": {"entrypoint": None}},
-    "waddles.core.example.empty": {},
-    "waddles.core.example.null_stages": None,
+    "penguintechinc.waddles.presentation": {"presentation": {"html_entrypoint": "overlay.html"}},
+    "penguintechinc.waddles.null-entry": {"process": {"entrypoint": None}},
+    "penguintechinc.waddles.empty": {},
+    "penguintechinc.waddles.null-stages": None,
 }
 
 _EXPECTED_AFTER_UPGRADE = {
@@ -351,7 +351,7 @@ class TestAgainstRealPostgres:
         # module in the new form); every other row must round-trip exactly.
         expected = {
             **_ROWS,
-            "waddles.bot.discord.already_new": {
+            "penguintechinc.waddles.bot-discord-already-new": {
                 "ingest": {"entrypoint": "bundles.discord_ingest:normalize"}
             },
         }
@@ -370,14 +370,14 @@ class TestAgainstRealPostgres:
                 }
                 cur.execute(
                     "INSERT INTO app_catalog (app_id, stages) VALUES (%s, %s::jsonb)",
-                    (f"waddles.core.example.m{index}", json.dumps(stages)),
+                    (f"penguintechinc.waddles.m{index}", json.dumps(stages)),
                 )
         rows_before = _snapshot(conn)
         assert len(rows_before) == len(migration._MODULES)
         _run(conn, "upgrade", migration)
         rewritten = 0
         for index, module in enumerate(migration._MODULES):
-            stages = _snapshot(conn)[f"waddles.core.example.m{index}"]
+            stages = _snapshot(conn)[f"penguintechinc.waddles.m{index}"]
             assert stages is not None
             for stage in ("ingest", "process", "action"):
                 assert stages[stage]["entrypoint"] == f"builtin_handlers.{module}:fn"

@@ -24,6 +24,9 @@ on:
       - 'scripts/ci/data-plane-parity.sh'
       - 'scripts/ci/gen-connector-parity-expected.py'
       - 'scripts/ci/tests/test_gen_connector_parity_expected.py'
+      - 'core/bundle_executor/**'
+      - 'wit/waddle-connector/**'
+      - 'scripts/ci/connector-parity.sh'
       - '.github/workflows/data-plane-parity.yml'
   pull_request:
     branches: [main, 'release/**']
@@ -116,3 +119,83 @@ jobs:
         run: make test-data-plane-parity
         env:
           PYTHON_BIN: python3
+
+  # Connector golden-payload parity harness (P6b, `make test-connector-parity`). Separate path gate:
+  # it exercises core/bundle_executor's connector host, which the oracle job above never builds.
+  # Without PARITY_CONNECTOR_WASM it is the harness self-check (fixture component) plus the
+  # corpus/expected denominator check per platform -- every platform must report examined>0.
+  connector-changes:
+    name: Detect connector-parity changes
+    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      match: ${{ steps.paths.outputs.match }}
+    steps:
+      - name: Checkout (change classifier only)
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+          fetch-depth: 2
+          sparse-checkout: |
+            scripts/ci
+            .github/actions
+      - name: Classify changed paths
+        id: paths
+        uses: ./.github/actions/changed-paths
+        with:
+          area: rust
+          globs: |
+            tests/data_plane_parity/**
+            core/bundle_executor/**
+            wit/waddle-connector/**
+            scripts/ci/connector-parity.sh
+            scripts/ci/gen-connector-parity-expected.py
+            .github/workflows/data-plane-parity.yml
+
+  connector-parity:
+    needs: connector-changes
+    if: ${{ !cancelled() && (needs.connector-changes.result != 'success' || needs.connector-changes.outputs.match == 'true') }}
+    name: Connector golden-payload parity (harness self-check, all platforms)
+    # bare dal2-alpha-ci image has no cc/cmake (aws-lc-sys/ring) and sudo is blocked: hosted, like the parity job above
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405  # v6.2.0
+        with:
+          python-version: '3.13'
+
+      - name: Setup build deps (C toolchain, cmake, protoc)
+        uses: ./.github/actions/setup-build-deps
+        with:
+          packages: 'cmake build-essential protobuf-compiler'
+      - name: Install Rust 1.97.1
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87  # stable branch snapshot
+        with:
+          toolchain: "1.97.1"
+
+      - name: Cache cargo registry + git + targets
+        uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            core/bundle_executor/target
+          key: cargo-connector-parity-1.97.1-${{ runner.os }}-${{ hashFiles('core/bundle_executor/Cargo.lock') }}
+          restore-keys: |
+            cargo-connector-parity-1.97.1-${{ runner.os }}-
+
+      - name: Connector parity (twitch, discord, youtube)
+        run: |
+          set -euo pipefail
+          for platform in twitch discord youtube; do
+            make test-connector-parity PLATFORM="$platform"
+          done

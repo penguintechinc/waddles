@@ -156,6 +156,105 @@ def _ensure_tables(dal: Any) -> None:
     bind_guild_pairing_tables(dal)
 
 
+def _is_sqlite(dal: Any) -> bool:
+    return getattr(dal, "_dbname", "") == "sqlite"
+
+
+def _now_param(dal: Any) -> str:
+    """UTC "now" as a bound parameter (sqlite's timestamp converter wants `YYYY-MM-DD HH:MM:SS`)."""
+    now = datetime.now(UTC)
+    return now.strftime("%Y-%m-%d %H:%M:%S.%f") if _is_sqlite(dal) else now.isoformat()
+
+
+def _actor_uuid(dal: Any, actor_user_id: int | None) -> str | None:
+    """The actor's `hub_users.uuid` token (never a name), or None when unknown/unsupported."""
+    if actor_user_id is None or "uuid" not in dal.hub_users.fields:
+        return None
+    row = dal(dal.hub_users.id == actor_user_id).select(dal.hub_users.uuid).first()
+    return str(row.uuid) if row is not None and row.uuid else None
+
+
+def _lock_guild(dal: Any, discord_guild_id: str) -> None:
+    """Serialize claim/release for one guild on a transaction-scoped Postgres advisory lock.
+
+    Without it a same-tenant claim ("owner == me, fine") can interleave with the last-pairing
+    release (which deletes that very claim) and leave a pairing with no claim row. Both functions
+    take the lock FIRST, inside the caller's transaction, so it is held until the pairing
+    insert/delete commits or rolls back. sqlite (tests) has a single writer, so it is a no-op.
+    """
+    if _is_sqlite(dal):
+        return
+    dal.executesql(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        placeholders=["discord_guild_tenants:" + discord_guild_id],
+    )
+
+
+def claim_guild_for_tenant(
+    dal: Any, *, tenant_id: int, discord_guild_id: str, actor_user_id: int | None = None
+) -> bool:
+    """Atomically claim `discord_guild_id` for `tenant_id` (a guild belongs to ONE tenant).
+
+    One `INSERT ... ON CONFLICT DO NOTHING RETURNING` on `discord_guild_tenants` (alembic 0137,
+    guild id is the PRIMARY KEY): of two tenants racing for a fresh guild exactly one row is
+    inserted. Returns True when THIS call inserted it, False when the same tenant already held
+    it (N:M between that tenant's communities stays legal). A claim held by a DIFFERENT tenant
+    raises `conflict()` (409). NO commit -- the caller's transaction owns it, so a failed pairing
+    insert rolls the claim back with it.
+    """
+    _lock_guild(dal, discord_guild_id)
+    qmark = "?" if _is_sqlite(dal) else "%s"
+    uuid_cast = "" if _is_sqlite(dal) else "::uuid"
+    # Only the driver placeholder token is interpolated; every value is bound.
+    claim_sql = (
+        "INSERT INTO discord_guild_tenants "  # noqa: S608  # nosec B608
+        "(discord_guild_id, tenant_id, claimed_at, claimed_by_uuid) "
+        f"VALUES ({qmark}, {qmark}, {qmark}, {qmark}{uuid_cast}) "
+        "ON CONFLICT DO NOTHING RETURNING tenant_id"
+    )
+    rows = dal.executesql(
+        claim_sql,
+        placeholders=[
+            discord_guild_id,
+            int(tenant_id),
+            _now_param(dal),
+            _actor_uuid(dal, actor_user_id),
+        ],
+    )
+    if rows:
+        return True
+    owner = dal(dal.discord_guild_tenants.discord_guild_id == discord_guild_id).select().first()
+    if owner is not None and int(owner.tenant_id) == int(tenant_id):
+        return False
+    logger.warning(
+        "guild claim refused: guild already belongs to another tenant tenant_id=%s", tenant_id
+    )
+    raise conflict("This Discord server is already linked to a different tenant")
+
+
+def release_unused_guild_claim(dal: Any, *, tenant_id: int, discord_guild_id: str) -> None:
+    """Free `tenant_id`'s claim on the guild once its LAST pairing for it is gone.
+
+    A guarded `DELETE ... WHERE NOT EXISTS`: a no-op while any community of that tenant still has
+    a pairing for the guild. NO commit (the caller's transaction owns it). Takes the same
+    per-guild advisory lock as the claim, so it never deletes a claim a concurrent same-tenant
+    pairing is relying on.
+    """
+    _lock_guild(dal, discord_guild_id)
+    qmark = "?" if _is_sqlite(dal) else "%s"
+    release_sql = (
+        "DELETE FROM discord_guild_tenants "  # noqa: S608  # nosec B608
+        f"WHERE discord_guild_id = {qmark} AND tenant_id = {qmark} "
+        "AND NOT EXISTS (SELECT 1 FROM guild_tenant_pairings p "
+        "JOIN communities c ON c.id = p.community_id "
+        f"WHERE p.discord_guild_id = {qmark} AND c.tenant_id = {qmark})"
+    )
+    dal.executesql(
+        release_sql,
+        placeholders=[discord_guild_id, int(tenant_id), discord_guild_id, int(tenant_id)],
+    )
+
+
 def _validate_discord_guild_id(value: str) -> str:
     value = (value or "").strip()
     if not value or not value.isdigit() or len(value) > _MAX_EXTERNAL_ID_LEN:
@@ -306,7 +405,9 @@ def create_pairing(
     Raises `conflict()` if this `(community_id, discord_guild_id)` pair
     already has a pairing -- `UNIQUE (community_id, discord_guild_id)` in
     migration 0034 is the production backstop, this check is the clear,
-    typed error path.
+    typed error path. Raises `conflict()` (409) when the guild already
+    belongs to a DIFFERENT tenant (`discord_guild_tenants`, migration 0137);
+    several communities of the SAME tenant may still pair one guild.
     """
     discord_guild_id = _validate_discord_guild_id(discord_guild_id)
     direction = _validate_direction(direction)
@@ -324,6 +425,14 @@ def create_pairing(
             raise conflict(
                 f"community {community_id} is already paired with guild {discord_guild_id}"
             )
+
+        tenant_id = community_tenant_id(dal, community_id)
+        if tenant_id is None:
+            raise not_found("Community not found")
+        # A guild belongs to exactly one tenant: atomic claim, rolled back with a failed insert.
+        claim_guild_for_tenant(
+            dal, tenant_id=tenant_id, discord_guild_id=discord_guild_id, actor_user_id=actor_user_id
+        )
 
         now = datetime.now(UTC)
         row_id = t.insert(
@@ -433,6 +542,11 @@ def delete_pairing(dal: Any, community_id: int, pairing_id: int) -> bool:
                 dal(dal.discord_role_mirror_grants.mapping_id == mapping_id).delete()
                 dal(m.id == mapping_id).delete()
         dal(t.id == pairing_id).delete()
+        tenant_id = community_tenant_id(dal, community_id)
+        if tenant_id is not None:
+            release_unused_guild_claim(
+                dal, tenant_id=tenant_id, discord_guild_id=existing.discord_guild_id
+            )
         dal.commit()
     except Exception:
         dal.rollback()

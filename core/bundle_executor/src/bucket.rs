@@ -802,8 +802,8 @@ mod tests {
     #[test]
     fn uri_encode_leaves_unreserved_characters_and_slashes_untouched() {
         assert_eq!(
-            uri_encode("bundles/waddles.test.app/1/abc-DEF_123~.wasm"),
-            "bundles/waddles.test.app/1/abc-DEF_123~.wasm"
+            uri_encode("bundles/penguintechinc.waddles.test-app/1/abc-DEF_123~.wasm"),
+            "bundles/penguintechinc.waddles.test-app/1/abc-DEF_123~.wasm"
         );
     }
 
@@ -949,7 +949,7 @@ mod tests {
             // expected request line and a well-formed SigV4 Authorization
             // header, proving this isn't just "any GET succeeds".
             assert!(request.starts_with(
-                "GET /waddles-bundles/bundles/waddles.test.app/1/abc.wasm HTTP/1.1\r\n"
+                "GET /waddles-bundles/bundles/penguintechinc.waddles.test-app/1/abc.wasm HTTP/1.1\r\n"
             ));
             assert!(request
                 .contains("Authorization: AWS4-HMAC-SHA256 Credential=AKIAIOSFODNN7EXAMPLE/"));
@@ -971,7 +971,11 @@ mod tests {
         });
 
         let config = test_bucket_config(&format!("http://{addr}"));
-        let fetched = get_object(&config, "bundles/waddles.test.app/1/abc.wasm").await?;
+        let fetched = get_object(
+            &config,
+            "bundles/penguintechinc.waddles.test-app/1/abc.wasm",
+        )
+        .await?;
         assert_eq!(fetched, body);
 
         server.await?;

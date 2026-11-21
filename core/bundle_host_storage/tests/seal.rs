@@ -17,7 +17,7 @@ use bundle_host_storage::{
 use bytes::Bytes;
 use zeroize::Zeroizing;
 
-const APP: &str = "waddles.harness.media";
+const APP: &str = "penguintechinc.waddles.harness-media";
 const PLAIN: &[u8] = b"top secret clip metadata";
 
 struct Keys {

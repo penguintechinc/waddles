@@ -705,7 +705,7 @@ mod tests {
         let scope = ReputationScope {
             tenant_id: 1,
             community_id: 10,
-            app_id: "waddles.test.app".to_string(),
+            app_id: "penguintechinc.waddles.test-app".to_string(),
         };
         let user = uuid::Uuid::nil();
         let key = IdempotencyKey::new("k:1").unwrap();

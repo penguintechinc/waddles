@@ -81,6 +81,13 @@ run_files "go=true rust=false python=false node=false docs_only=false" \
   tools/foo/main.go
 run_files "helm=true rust=false python=false docs_only=false" \
   k8s/helm/waddlebot/values.yaml
+# chart gate scripts live outside k8s/ but must still run the helm-chart-lint job
+run_files "helm=true python=true docs_only=false" \
+  scripts/check_helm_hook_phases.py
+run_files "helm=true python=true docs_only=false" \
+  scripts/ci/check-bundle-bucket-wiring.py
+run_files "helm=true docs_only=false" \
+  scripts/ci/audit-chart-values/allowlist.txt
 
 # ---- docs never mask code in a mixed change ---------------------------------
 run_files "python=true docs_only=false any_code=true rust=false" \

@@ -104,7 +104,7 @@ class TestComputeOnce:
         assert await job.compute_once() == 0
 
     async def test_advances_past_a_committed_row(self, pg_db: Any, dal: AsyncDB) -> None:
-        version_id = _seed_app_version(pg_db, "waddles.job.committed")
+        version_id = _seed_app_version(pg_db, "penguintechinc.waddles.job-committed")
         job = BundleActiveSetWatermarkJob(dal)
         safe_seq = await job.compute_once()
         with psycopg2.connect(pg_db.dsn) as conn:
@@ -124,10 +124,14 @@ class TestComputeOnce:
         in_flight.autocommit = False
         try:
             with in_flight.cursor() as cur:
-                cur.execute("INSERT INTO app_catalog (app_id) VALUES ('waddles.job.inflight')")
+                cur.execute(
+                    "INSERT INTO app_catalog (app_id) "
+                    "VALUES ('penguintechinc.waddles.job-inflight')"
+                )
                 cur.execute(
                     "INSERT INTO app_versions (app_id, version, language, artifact_kind) "
-                    "VALUES ('waddles.job.inflight', '1.0.0', 'rust', 'prebuilt') RETURNING id"
+                    "VALUES ('penguintechinc.waddles.job-inflight', '1.0.0', 'rust', "
+                    "'prebuilt') RETURNING id"
                 )
                 in_flight_version_id = _one(cur)
                 # Not committed yet -- under read-committed isolation only
@@ -151,7 +155,7 @@ class TestComputeOnce:
             in_flight.close()
 
     async def test_publishes_to_the_watermark_row(self, pg_db: Any, dal: AsyncDB) -> None:
-        _seed_app_version(pg_db, "waddles.job.publish")
+        _seed_app_version(pg_db, "penguintechinc.waddles.job-publish")
         job = BundleActiveSetWatermarkJob(dal)
         safe_seq = await job.compute_once()
         with psycopg2.connect(pg_db.dsn) as conn:
@@ -167,8 +171,8 @@ class TestPruneOnce:
     async def test_prunes_only_rows_past_the_retention_window(
         self, pg_db: Any, dal: AsyncDB
     ) -> None:
-        old_id = _seed_app_version(pg_db, "waddles.job.old")
-        fresh_id = _seed_app_version(pg_db, "waddles.job.fresh")
+        old_id = _seed_app_version(pg_db, "penguintechinc.waddles.job-old")
+        fresh_id = _seed_app_version(pg_db, "penguintechinc.waddles.job-fresh")
         with psycopg2.connect(pg_db.dsn) as conn:
             conn.autocommit = True
             with conn.cursor() as cur:
@@ -232,8 +236,8 @@ class TestConcurrentReplicas:
         # hub-api replicas, sharing the same underlying database (each
         # over its own AsyncDB pool, matching how two real processes
         # would each hold their own connection pool against one primary).
-        _seed_app_version(pg_db, "waddles.job.concurrent-a")
-        _seed_app_version(pg_db, "waddles.job.concurrent-b")
+        _seed_app_version(pg_db, "penguintechinc.waddles.job-concurrent-a")
+        _seed_app_version(pg_db, "penguintechinc.waddles.job-concurrent-b")
 
         pydal_style_dsn = pg_db.dsn.replace("postgresql://", "postgres://")
         replica_a_dal = await build_install_dal(pydal_style_dsn, pool_size=2)
@@ -285,7 +289,7 @@ class TestMonotonicGuard:
     async def test_compute_once_never_regresses_an_already_higher_watermark(
         self, pg_db: Any, dal: AsyncDB
     ) -> None:
-        _seed_app_version(pg_db, "waddles.job.regression-guard")
+        _seed_app_version(pg_db, "penguintechinc.waddles.job-regression-guard")
         job = BundleActiveSetWatermarkJob(dal)
         real_safe_seq = await job.compute_once()
 
@@ -316,7 +320,7 @@ class TestStartStopLifecycle:
     async def test_start_ticks_at_least_once_then_stop_cancels_cleanly(
         self, pg_db: Any, dal: AsyncDB
     ) -> None:
-        _seed_app_version(pg_db, "waddles.job.lifecycle")
+        _seed_app_version(pg_db, "penguintechinc.waddles.job-lifecycle")
         job = BundleActiveSetWatermarkJob(dal, WatermarkJobConfig(tick_seconds=0.05))
         job.start()
         try:

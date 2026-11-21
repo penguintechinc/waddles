@@ -23,7 +23,7 @@ fn scope() -> InvokeScope {
     HostInvokeScopeBuilder::new()
         .tenant_id(7)
         .community_id(3)
-        .app_id("waddles.test.economy")
+        .app_id("penguintechinc.waddles.test-economy")
         .app_version(1)
         .tenant_tier(TenantTier::Free)
         .build()
