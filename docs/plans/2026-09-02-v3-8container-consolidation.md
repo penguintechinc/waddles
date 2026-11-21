@@ -1,5 +1,7 @@
 # v3 Container Consolidation Program Roadmap
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 **Status:** Committed roadmap. **Scope:** the legacy connector/module → App Bundle port —
 the largest remaining body of work in the v3 re-architecture.
 
@@ -32,8 +34,8 @@ Bundles** (or, for the 5 persistent-socket receivers, as supervised tasks inside
 
 **Current state (verified 2026-09-02, `release/v3.0.X`):**
 
-- **52 legacy connector/module source directories** across `trigger/receiver/`,
-  `action/pushing/`, `action/interactive/`, `core/*_module`, `processing/router_module`,
+- **52 legacy connector/module source directories** across trigger/receiver,
+  action/pushing, action/interactive, `core/*_module`, processing/router_module,
   `admin/{hub,marketplace}_module` (full inventory: §2).
 - **26 of those are live Helm Deployments today** carrying real traffic
   (`grep -rl "kind: Deployment" k8s/helm/waddlebot/templates/{collectors,core,interactive,pushing}`
@@ -64,7 +66,7 @@ Bundles** (or, for the 5 persistent-socket receivers, as supervised tasks inside
 | 8 | `svc-streaming` | RTC + HLS/RTMP/AV1 control plane, fronts external LiveKit/MarchProxy | Real Dockerfile, newest (2026-09-01); `svc-rtc` absorption not yet done | `core/svc_streaming/`, `docs/plans/2026-08-31-svc-streaming-design.md` |
 | 9 | **`svc-gateway`** (new, decided this doc) | Persistent inbound sockets — Discord Gateway, Slack Socket Mode, Twitch IRC, Kick Pusher WS, Mattermost WS — supervised long-lived tasks, fans events onto per-bundle `:ingest` Valkey keys via `resolve_apps` | **Does not exist yet** — net-new work, this roadmap's Wave 0–1 | §5 |
 
-`svc-rtc` (Go/LiveKit, `core/module_rtc`) remains a 10th, standalone container — its planned
+`svc-rtc` (Go/LiveKit, core/module_rtc) remains a 10th, standalone container — its planned
 absorption into `svc-streaming` is tracked separately (`docs/ARCHITECTURE.md:41-43`) and is
 not part of this roadmap's 9-container target.
 
@@ -77,8 +79,8 @@ not part of this roadmap's 9-container target.
 | Receivers | **8** | `trigger/receiver/*` | `discord_module`, `googlechat_module`, `kick_module_flask`, `mattermost_module`, `slack_module`, `teams_module`, `twitch_module`, `youtube_live_module` (+ `platform_base.py`, a shared shim, not a container) |
 | Pushing (outbound) | **10** | `action/pushing/*_action_module` | `discord`, `gcp_functions`, `googlechat`, `lambda`, `mattermost`, `openwhisk`, `slack`, `teams`, `twitch`, `youtube` |
 | Interactive | **17** | `action/interactive/*` | `ai_interaction_module`, `alias_interaction_module`, `calendar_interaction_module`, `clip_interaction_module`, `inventory_interaction_module`, `lfg_interaction_module`, `loyalty_interaction_module`, `memories_interaction_module`, `presence_module`, `quote_interaction_module`, `server_manager_interaction_module`, `server_status_interaction_module` (deprecated), `shoutout_interaction_module`, `spotify_interaction_module`, `translate_interaction_module`, `welcome_interaction_module`, `youtube_music_interaction_module` |
-| Core modules | **13** (`*_module` glob) **+ 1** (`module_rtc`, different naming, doesn't match the glob) = **14** | `core/*_module`, `core/module_rtc` | `ai_researcher_module`, `analytics_core_module`, `browser_source_core_module`, `community_module`, `credential_manager_module`, `engagement_module`, `identity_core_module`, `labels_core_module`, `reputation_module`, `security_core_module`, `unified_music_module`, `video_proxy_module`, `workflow_core_module`, `module_rtc` |
-| Router | **1** | `processing/router_module` | event bus + command dispatch |
+| Core modules | **13** (`*_module` glob) **+ 1** (`module_rtc`, different naming, doesn't match the glob) = **14** | `core/*_module`, core/module_rtc | `ai_researcher_module`, `analytics_core_module`, `browser_source_core_module`, `community_module`, `credential_manager_module`, `engagement_module`, `identity_core_module`, `labels_core_module`, `reputation_module`, `security_core_module`, `unified_music_module`, `video_proxy_module`, `workflow_core_module`, `module_rtc` |
+| Router | **1** | processing/router_module | event bus + command dispatch |
 | Admin | **2** | `admin/*_module` | `hub_module` (incl. `Dockerfile.webui`), `marketplace_module` |
 | **Total legacy source dirs** | **52** (53 incl. `module_rtc`) | — | 8+10+17+14+1+2 |
 | Infra (out of scope) | 12 template files (5 top-level + 7 PostHog subcomponents) | `k8s/helm/waddlebot/templates/infrastructure/` | `minio`, `ollama`, `postgres`, `qdrant`, `redis` + PostHog `{clickhouse,kafka,postgres,redis,web,worker,secret}` — managed dependencies, not connector/module code |
@@ -91,7 +93,7 @@ Deployments live in Helm today) and **52** (legacy source directories, most of w
 of the 10 pushing modules). Neither is "45." This roadmap uses the verified 52-directory /
 26-Deployment split throughout and does not force a reconciliation to the original estimate.
 
-`action/interactive` has 17 confirmed directories, but `docs/architecture/core-boundary.md:34-45`
+action/interactive has 17 confirmed directories, but `docs/architecture/core-boundary.md:34-45`
 only enumerates 16 (4 Bot + 12 Social) — it's missing `welcome_interaction_module`. Flagged
 for a Wave 4 ownership call (§6), not resolved here.
 
@@ -108,88 +110,88 @@ connection task inside `svc-gateway`, not a pipeline-stage bundle at all.
 
 | Legacy module | Evidence of persistent connection | Becomes |
 |---|---|---|
-| `trigger/receiver/discord_module` | `services/discord_bot.py:49` — `discord.Bot(intents=intents)`, a live Gateway client | Gateway task |
-| `trigger/receiver/slack_module` (socket-mode path only) | `app.py:73-74` — `if Config.USE_SOCKET_MODE: asyncio.create_task(slack_bolt.start_socket_mode())` | Gateway task |
-| `trigger/receiver/twitch_module` (IRC path only) | `app.py` docstring: "Quart Application with TwitchIO IRC Bot"; `"Twitch IRC bot started"` | Gateway task |
-| `trigger/receiver/kick_module_flask` | `services/chat_client.py:3,23` — "Real-time chat integration using Pusher WebSocket... KICK uses Pusher for its WebSocket-based chat system" | Gateway task |
-| `trigger/receiver/mattermost_module` | `services/mattermost_bot.py:56-94` — `_websocket_listener()`, `asyncio.create_task(self._websocket_listener())` | Gateway task |
+| trigger/receiver/discord_module | `services/discord_bot.py:49` — `discord.Bot(intents=intents)`, a live Gateway client | Gateway task |
+| trigger/receiver/slack_module (socket-mode path only) | `app.py:73-74` — `if Config.USE_SOCKET_MODE: asyncio.create_task(slack_bolt.start_socket_mode())` | Gateway task |
+| trigger/receiver/twitch_module (IRC path only) | `app.py` docstring: "Quart Application with TwitchIO IRC Bot"; `"Twitch IRC bot started"` | Gateway task |
+| trigger/receiver/kick_module_flask | `services/chat_client.py:3,23` — "Real-time chat integration using Pusher WebSocket... KICK uses Pusher for its WebSocket-based chat system" | Gateway task |
+| trigger/receiver/mattermost_module | `services/mattermost_bot.py:56-94` — `_websocket_listener()`, `asyncio.create_task(self._websocket_listener())` | Gateway task |
 
 ### → `svc-ingest` (3 receivers + generic webhook handling — confirmed webhook/poll-based)
 
 | Legacy module | Evidence | Becomes |
 |---|---|---|
-| `trigger/receiver/googlechat_module` | `app.py` — Quart `Blueprint`/`request`-based webhook handler, no socket/gateway pattern found | Bundle (`ingest`) |
-| `trigger/receiver/teams_module` | `app.py:107-130` — "Teams Bot Framework webhook" | Bundle (`ingest`) |
-| `trigger/receiver/youtube_live_module` | `app.py:6,58` — `ChatPoller` (interval poll) + `WebhookHandler` (PubSubHubbub) | Bundle (`ingest`) |
+| trigger/receiver/googlechat_module | `app.py` — Quart `Blueprint`/`request`-based webhook handler, no socket/gateway pattern found | Bundle (`ingest`) |
+| trigger/receiver/teams_module | `app.py:107-130` — "Teams Bot Framework webhook" | Bundle (`ingest`) |
+| trigger/receiver/youtube_live_module | `app.py:6,58` — `ChatPoller` (interval poll) + `WebhookHandler` (PubSubHubbub) | Bundle (`ingest`) |
 | `pushing/trigger-webhooks.yaml` (generic inbound webhooks, `PIPELINE_MAPPING.md:23`) | Already mapped by existing skeleton work | Fold (generic webhook receipt) |
 | `pushing/trigger-streaming.yaml` (`PIPELINE_MAPPING.md:24`) | Already mapped | Fold |
-| `trigger/receiver/twitch_module` (EventSub webhook path, if used instead of/alongside IRC) | Open sub-decision — see §6 W0 | Bundle or fold, TBD |
+| trigger/receiver/twitch_module (EventSub webhook path, if used instead of/alongside IRC) | Open sub-decision — see §6 W0 | Bundle or fold, TBD |
 
 ### → `svc-action` (10 pushing + 17 interactive = 27 modules)
 
 | Legacy module | Becomes |
 |---|---|
 | `action/pushing/{discord,gcp_functions,googlechat,lambda,mattermost,openwhisk,slack,teams,twitch,youtube}_action_module` (10) | Bundle (`action`, `target_type` per platform) |
-| `action/interactive/ai_interaction_module` | Bundle |
-| `action/interactive/alias_interaction_module` | Bundle |
-| `action/interactive/calendar_interaction_module` | Bundle |
-| `action/interactive/clip_interaction_module` | Bundle |
-| `action/interactive/inventory_interaction_module` | Bundle |
-| `action/interactive/lfg_interaction_module` | Bundle |
-| `action/interactive/loyalty_interaction_module` | Bundle |
-| `action/interactive/memories_interaction_module` | Bundle |
-| `action/interactive/presence_module` | Bundle |
-| `action/interactive/quote_interaction_module` | Bundle |
-| `action/interactive/server_manager_interaction_module` | Bundle |
-| `action/interactive/server_status_interaction_module` | **Deprecated** — candidate for drop, not port (confirm in Wave 4) |
-| `action/interactive/shoutout_interaction_module` | Bundle |
-| `action/interactive/spotify_interaction_module` | Bundle |
-| `action/interactive/translate_interaction_module` | Bundle |
-| `action/interactive/welcome_interaction_module` | Bundle |
-| `action/interactive/youtube_music_interaction_module` | Bundle |
-| `core/ai_researcher_module` (standalone AI assistant, Bot-owned per `core-boundary.md:37`) | Bundle |
-| `core/labels_core_module` (Bot-owned, single consumer per `core-boundary.md:37,63`) | Bundle |
-| `processing/router_module` — command-dispatch half (`command_processor.py`, `command_registry.py`, `emote_service.py`, `controllers/router.py`, `controllers/admin.py`; `core-boundary.md:38`) | Fold |
+| action/interactive/ai_interaction_module | Bundle |
+| action/interactive/alias_interaction_module | Bundle |
+| action/interactive/calendar_interaction_module | Bundle |
+| action/interactive/clip_interaction_module | Bundle |
+| action/interactive/inventory_interaction_module | Bundle |
+| action/interactive/lfg_interaction_module | Bundle |
+| action/interactive/loyalty_interaction_module | Bundle |
+| action/interactive/memories_interaction_module | Bundle |
+| action/interactive/presence_module | Bundle |
+| action/interactive/quote_interaction_module | Bundle |
+| action/interactive/server_manager_interaction_module | Bundle |
+| action/interactive/server_status_interaction_module | **Deprecated** — candidate for drop, not port (confirm in Wave 4) |
+| action/interactive/shoutout_interaction_module | Bundle |
+| action/interactive/spotify_interaction_module | Bundle |
+| action/interactive/translate_interaction_module | Bundle |
+| action/interactive/welcome_interaction_module | Bundle |
+| action/interactive/youtube_music_interaction_module | Bundle |
+| core/ai_researcher_module (standalone AI assistant, Bot-owned per `core-boundary.md:37`) | Bundle |
+| core/labels_core_module (Bot-owned, single consumer per `core-boundary.md:37,63`) | Bundle |
+| processing/router_module — command-dispatch half (`command_processor.py`, `command_registry.py`, `emote_service.py`, `controllers/router.py`, `controllers/admin.py`; `core-boundary.md:38`) | Fold |
 
 ### → `svc-core` (7 modules — none exist as `svc-core` app code yet, §4/§6 W0)
 
 | Legacy module | Becomes |
 |---|---|
-| `core/identity_core_module` | Fold |
-| `core/security_core_module` | Fold |
-| `core/credential_manager_module` | Fold |
-| `core/community_module` (tenancy — the community entity) | Fold |
-| `core/reputation_module` | Fold |
-| `core/analytics_core_module` | Fold |
-| `core/workflow_core_module` | Fold |
-| `processing/router_module` — event-bus half (`cache_manager`, `session_manager`, `rate_limiter`, `StreamPipeline` wiring; `core-boundary.md:69`) | Fold (already partly extracted as `flask_core.stream_pipeline` library) |
+| core/identity_core_module | Fold |
+| core/security_core_module | Fold |
+| core/credential_manager_module | Fold |
+| core/community_module (tenancy — the community entity) | Fold |
+| core/reputation_module | Fold |
+| core/analytics_core_module | Fold |
+| core/workflow_core_module | Fold |
+| processing/router_module — event-bus half (`cache_manager`, `session_manager`, `rate_limiter`, `StreamPipeline` wiring; `core-boundary.md:69`) | Fold (already partly extracted as `flask_core.stream_pipeline` library) |
 
 ### → `hub-api` (2 admin modules + 1 core module)
 
 | Legacy module | Becomes |
 |---|---|
 | `admin/hub_module` | Fold — part of the separately-tracked 39K-LOC Node→Quart P1 port |
-| `admin/marketplace_module` | Fold — same P1 port |
-| `core/engagement_module` (forms/polls, Marketing-seeded, hub-only consumer; `core-boundary.md:49`) | Fold |
+| admin/marketplace_module | Fold — same P1 port |
+| core/engagement_module (forms/polls, Marketing-seeded, hub-only consumer; `core-boundary.md:49`) | Fold |
 
 ### → `svc-presentation` (1 module)
 
 | Legacy module | Becomes |
 |---|---|
-| `core/browser_source_core_module` (OBS overlay surface) | Fold |
+| core/browser_source_core_module (OBS overlay surface) | Fold |
 
 ### → `svc-streaming` / `svc-rtc` (2 modules, absorption target)
 
 | Legacy module | Becomes |
 |---|---|
-| `core/video_proxy_module` (RTMP simulcast, fronts external MarchProxy) | Fold |
-| `core/module_rtc` (Go WebRTC/SFU, fronts external LiveKit) | Stays `svc-rtc` short-term; folds into `svc-streaming` on its own absorption timeline (`docs/plans/2026-08-31-svc-streaming-design.md`) — not this roadmap's dependency |
+| core/video_proxy_module (RTMP simulcast, fronts external MarchProxy) | Fold |
+| core/module_rtc (Go WebRTC/SFU, fronts external LiveKit) | Stays `svc-rtc` short-term; folds into `svc-streaming` on its own absorption timeline (`docs/plans/2026-08-31-svc-streaming-design.md`) — not this roadmap's dependency |
 
 ### Undetermined (1 module)
 
 | Legacy module | Note |
 |---|---|
-| `core/unified_music_module` (song-request provider library, described as "dormant" in `core-boundary.md:37`) | Likely folds into Music Station / `svc-presentation` per program-plan P5, but P5's own scope for it isn't finalized (`docs/plans/2026-08-31-v3-sccembs-program-plan.md:356,420-438` — Music Station has 12 open decisions). Out of this roadmap's critical path; revisit at Wave 6. |
+| core/unified_music_module (song-request provider library, described as "dormant" in `core-boundary.md:37`) | Likely folds into Music Station / `svc-presentation` per program-plan P5, but P5's own scope for it isn't finalized (`docs/plans/2026-08-31-v3-sccembs-program-plan.md:356,420-438` — Music Station has 12 open decisions). Out of this roadmap's critical path; revisit at Wave 6. |
 
 **Tally check:** 5 (svc-gateway) + 6 (svc-ingest: 3 receivers + 2 folds + 1 open) + 27
 (svc-action: 10 pushing + 17 interactive) + 2 (svc-action: ai_researcher, labels) + 1
@@ -230,7 +232,7 @@ The bundle **rails** are real and complete. The bundle **inventory** is almost e
   penguintechinc.waddles.echo-pipeline` with `ingest`/`process` entrypoints
   (`core/svc_ingest/builtin_handlers/echo_ingest.py`, `core/svc_process/builtin_handlers/echo_process.py`) —
   no `action` stage. Grepped every migration for `entrypoint`: 071 is the only one.
-- **`svc-action` ships zero bundles** — no `core/svc_action/builtin_handlers/` directory exists at all
+- **`svc-action` ships zero bundles** — no core/svc_action/builtin_handlers directory exists at all
   (unlike `svc_ingest`/`svc_process`, which each have one).
 - **The Bot module's "default Apps" are metadata-only manifests.**
   `libs/bot_module/features.py:107-152` defines 4 dicts (shoutout, commands, connectors,
@@ -383,7 +385,7 @@ depends on it.
 
 `identity_core_module`, `security_core_module`, `credential_manager_module`,
 `community_module`, `reputation_module`, `analytics_core_module`, `workflow_core_module`,
-plus `processing/router_module`'s event-bus half (`cache_manager`, `session_manager`,
+plus processing/router_module's event-bus half (`cache_manager`, `session_manager`,
 `rate_limiter`, `StreamPipeline` wiring).
 
 **Dependencies:** Wave 0's `svc-core` gRPC skeleton. This is the **highest-risk wave in the
@@ -460,7 +462,7 @@ dependency + risk, per its mandate.
   `svc-streaming` (`svc-rtc` may remain a 10th standalone container per its own absorption
   timeline — not blocking).
 - **All 52 legacy source directories deleted** — `trigger/receiver/*`, `action/pushing/*`,
-  `action/interactive/*`, `core/*_module` (excl. the 9 new `svc_*` dirs), `processing/router_module`,
+  `action/interactive/*`, `core/*_module` (excl. the 9 new `svc_*` dirs), processing/router_module,
   `admin/{hub,marketplace}_module` — no dual-topology compatibility layer retained (this is a
   major-version, clean-cutover program).
 - **All 26 legacy Helm Deployments removed** from `k8s/helm/waddlebot/templates/`

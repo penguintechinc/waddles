@@ -1,5 +1,7 @@
 # Per-Community Music Station — Design Specification
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Status: **DRAFT — for review, not implementation.** Extends
 `docs/plans/2026-08-26-v3-scbm-apps-design.md` (Modules/Features/Apps, container topology)
 and `docs/plans/2026-08-31-app-bundle-sdk-design.md` (App Bundle SDK: the
@@ -49,12 +51,12 @@ places, none of them bundle-shaped yet:
 
 | Location | What it is | Network surface |
 |---|---|---|
-| `action/interactive/spotify_interaction_module` | Dedicated per-community Spotify OAuth token lifecycle service (`docs/spotify_interaction_module/OVERVIEW.md:9-17`) | Quart, own REST API |
-| `action/interactive/youtube_music_interaction_module` | Same, for YouTube Music (`docs/youtube_music_interaction_module/OVERVIEW.md`) | Quart, port 8025 |
-| `core/unified_music_module` | Providers (Spotify/YouTube/SoundCloud), `UnifiedQueue`, `ModeController`, `MusicPlayer`, `RadioPlayer` | **none — no `app.py`, library-only** |
-| `core/browser_source_core_module` | Serves overlay HTML incl. `templates/music-player-overlay.html` and `templates/music-overlay.html`; caption WebSocket | Quart + gRPC + WebSocket |
+| action/interactive/spotify_interaction_module | Dedicated per-community Spotify OAuth token lifecycle service (`docs/spotify_interaction_module/OVERVIEW.md:9-17`) | Quart, own REST API |
+| action/interactive/youtube_music_interaction_module | Same, for YouTube Music (`docs/youtube_music_interaction_module/OVERVIEW.md`) | Quart, port 8025 |
+| core/unified_music_module | Providers (Spotify/YouTube/SoundCloud), `UnifiedQueue`, `ModeController`, `MusicPlayer`, `RadioPlayer` | **none — no `app.py`, library-only** |
+| core/browser_source_core_module | Serves overlay HTML incl. `templates/music-player-overlay.html` and `templates/music-overlay.html`; caption WebSocket | Quart + gRPC + WebSocket |
 
-`core/unified_music_module` has no entrypoint of its own — it is imported as a library and
+core/unified_music_module has no entrypoint of its own — it is imported as a library and
 *pushes* HTTP notifications outward (`mode_controller.py:450`, `music_player.py:497`) to
 endpoints (`/api/v1/internal/mode-change`, `/api/v1/internal/now-playing`) that **do not
 exist** in `browser_source_core_module/app.py` today (its only `/internal/*` route is

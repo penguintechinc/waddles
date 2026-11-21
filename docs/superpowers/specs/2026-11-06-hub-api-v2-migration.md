@@ -1,5 +1,7 @@
 # hub-api v2 migration (spec only)
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 Status: DRAFT for user review. No code changes. Decision (user): finish the current `/api/v1` fixes
 this release; migrate hub-api to `/api/v2/...` **after** this release (v3.0.X). v1 stays frozen
 and serving throughout.
@@ -16,7 +18,7 @@ What accumulated in v1 (all measured or cited from the webui audit, not guessed)
 |---|---|
 | Community scope baked into the path, 3 spellings | `/api/v1/admin/{community_id}/...` (214 ops), `/api/v1/community/{community_id}/...` (23), `/api/v1/communities/{community_id}/...` (27), bare `/api/v1/{community_id}/github-sync\|join-requests` (7) |
 | Audience-prefixed trees instead of resources | same resource lives under `admin/`, `community/`, `public/`, `internal/`, `superadmin/` (e.g. music: `admin/.../music`, `public/.../music-station`, `internal/music`) |
-| Path stutter | `/api/v1/marketplace/admin/marketplace/*` (14 ops), `marketplace/public/vendor/modules`; vendor paths split across `marketplace/vendor`, `admin/vendor`, `/vendor/*` |
+| Path stutter | `/api/v1/marketplace/admin/marketplace/*` (14 ops), `marketplace/public/vendor/modules`; vendor paths split across `marketplace/vendor`, admin/vendor, `/vendor/*` |
 | Unprefixed / wrong legacy paths in the webui | gap-check: 34 calls omit `/api/v1` (e.g. `/ai-knowledge/*`, `/admin/vendor/requests`, `/vendor/analytics/export`) and hit the SPA fallback; 114 of 550 UI calls have no backend route |
 | Numeric PKs outward | path params: `community_id` integer on 254 ops, `user_id` integer on 23, `server_id`/`module_id`/`announcement_id`/`ticket_id`/`channel_id` integer; only ~8 ops use `public_id`. Violates "UUID across boundaries" (IDOR enumeration) |
 | Same param, two types | `community_id` is `string` on 52 ops and `integer` on 254; `ticket_id` is both |
@@ -62,7 +64,7 @@ client -> ingress (/api/v1/*, /api/v2/*) -> hub-api (one process)
                                             `- services/*       (shared domain layer, one source of truth)
 ```
 
-- **Mounting:** reuse `routers/_discovery.py`; v2 modules drop into `blueprints/v2/<domain>.py` (`BLUEPRINTS`, full `/api/v2/...` prefix). No shared-file edits. Rename the current `core/platform/default` exemplar into the first domain or delete it once `/api/v2/platform` lands.
+- **Mounting:** reuse `routers/_discovery.py`; v2 modules drop into `blueprints/v2/<domain>.py` (`BLUEPRINTS`, full `/api/v2/...` prefix). No shared-file edits. Rename the current core/platform/default exemplar into the first domain or delete it once `/api/v2/platform` lands.
 - **Shared service layer:** v2 handlers call the same `services/*_service.py` functions v1 calls; business logic and the tenant filter at the ORM layer are never forked. New logic lands in the service layer first; v1 handlers become adapters (map numeric id/old shape <-> service DTO). Divergent behaviour = bug.
 - **ID bridge:** service layer gains `resolve_public_id(kind, uuid) -> pk` and the inverse; v1 keeps numeric ids, v2 never sees them. Needs `public_id` columns where missing (alembic, additive, backfilled) -- first-phase prerequisite per entity.
 - **Deprecation:** once a domain's v2 is flagged ON and has a consumer cutover, v1 responses for that domain add `Deprecation: true`, `Link: <.../v2/...>; rel="successor-version"`, and `Sunset: <date>` (>=2 releases out, never before all consumers are cut over). Metric `hubapi_v1_requests_total{route}` (template label) drives the decision; sunset only at zero traffic for 30 days.
