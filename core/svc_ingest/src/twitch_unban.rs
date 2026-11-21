@@ -191,7 +191,15 @@ pub struct CachedLedger<L> {
     negative_ttl: Duration,
     max: usize,
     map: std::sync::Mutex<std::collections::HashMap<String, Cached>>,
+    /// Per-key gate so concurrent fresh reads of one key coalesce into a single hub-api call.
+    flights: std::sync::Mutex<std::collections::HashMap<String, Arc<tokio::sync::Mutex<()>>>>,
+    /// Last time a key's cache entry was evicted for a rotation retry (rate-limits eviction).
+    evicted: std::sync::Mutex<std::collections::HashMap<String, std::time::Instant>>,
 }
+
+/// Minimum spacing between rotation-retry evictions of the same key: a flood of forged
+/// signatures on a known key costs at most one extra hub-api read per this interval.
+pub const EVICT_MIN_INTERVAL: Duration = Duration::from_secs(5);
 
 impl<L: SubscriptionLedger> CachedLedger<L> {
     /// Wraps `inner` with the standard TTLs and bound.
@@ -209,6 +217,8 @@ impl<L: SubscriptionLedger> CachedLedger<L> {
             negative_ttl,
             max: max.max(1),
             map: std::sync::Mutex::default(),
+            flights: std::sync::Mutex::default(),
+            evicted: std::sync::Mutex::default(),
         }
     }
 
@@ -221,6 +231,21 @@ impl<L: SubscriptionLedger> CachedLedger<L> {
             self.negative_ttl
         };
         if c.at.elapsed() >= ttl {
+            return None;
+        }
+        Some(c.entry.as_ref().map(|(sec, t, co, cn)| LedgerEntry {
+            secret: SecretString::new(sec.clone()),
+            tenant_id: *t,
+            community_id: *co,
+            connection_id: *cn,
+        }))
+    }
+
+    /// The stored answer for `key` when it was stored at or after `since`.
+    fn stored_since(&self, key: &str, since: std::time::Instant) -> Option<Option<LedgerEntry>> {
+        let map = self.map.lock().ok()?;
+        let c = map.get(key)?;
+        if c.at < since {
             return None;
         }
         Some(c.entry.as_ref().map(|(sec, t, co, cn)| LedgerEntry {
@@ -279,15 +304,43 @@ impl<L: SubscriptionLedger> SubscriptionLedger for CachedLedger<L> {
         callback_key: &'a str,
     ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
         Box::pin(async move {
+            // Single-flight: callers that queue behind an in-progress read of this key reuse its
+            // result when it finished after they asked (so it is at least as fresh as theirs).
+            let asked = std::time::Instant::now();
+            let gate = {
+                let mut flights = self.flights.lock().map_err(|_| LedgerError::Unavailable)?;
+                if flights.len() >= self.max && !flights.contains_key(callback_key) {
+                    flights.retain(|_, g| Arc::strong_count(g) > 1);
+                }
+                Arc::clone(flights.entry(callback_key.to_string()).or_default())
+            };
+            let _held = gate.lock().await;
+            if let Some(hit) = self.stored_since(callback_key, asked) {
+                return Ok(hit);
+            }
             let found = self.inner.lookup_fresh(callback_key).await?;
-            // Refresh the cache with what hub-api just said (ordinary events benefit, and a
-            // revoked row stops being served from memory).
+            // Refresh the cache with what hub-api just said (a revoked row stops being served).
             self.store(callback_key, found.as_ref());
             Ok(found)
         })
     }
 
     fn invalidate(&self, callback_key: &str) {
+        if let Ok(mut ev) = self.evicted.lock() {
+            if ev.len() >= self.max {
+                ev.retain(|_, t| t.elapsed() < EVICT_MIN_INTERVAL);
+                if ev.len() >= self.max {
+                    ev.clear();
+                }
+            }
+            if ev
+                .get(callback_key)
+                .is_some_and(|t| t.elapsed() < EVICT_MIN_INTERVAL)
+            {
+                return;
+            }
+            ev.insert(callback_key.to_string(), std::time::Instant::now());
+        }
         if let Ok(mut map) = self.map.lock() {
             map.remove(callback_key);
         }

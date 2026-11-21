@@ -619,11 +619,12 @@ where
     // knows is verified with ITS secret and nothing else, and yields the tenant/community/
     // connection the delivery is bound to. A ledger outage degrades to the legacy resolver for
     // ordinary events; an unban is never honoured without a ledger entry.
-    // `channel.unban` is authorized from the CURRENT ledger row only (never a cached one), so a
-    // revoked, rotated or rebound subscription cannot authorize one within the cache TTL.
+    // The first lookup is the normal CACHED one (negative cache included) so an unauthenticated
+    // caller cannot force hub-api reads. A `channel.unban` that then VERIFIES is re-checked
+    // against the CURRENT ledger row below, before it is deduped or forwarded.
     let is_unban = is_unban_notification(headers.message_type, body);
     let mut ledger_entry = match unban {
-        Some(u) => match u.ledger_entry(callback_key, is_unban).await {
+        Some(u) => match u.ledger_entry(callback_key, false).await {
             Ok(entry) => entry,
             Err(_) => {
                 tracing::warn!(
@@ -659,7 +660,7 @@ where
         // A cached ledger secret may be stale after a rotation: evict it and re-read ONCE before
         // rejecting. The retry only ever uses the ledger's current secret for this same key.
         let mut recovered = false;
-        if let (Some(u), Some(_), false) = (unban, &ledger_entry, is_unban) {
+        if let (Some(u), Some(_)) = (unban, &ledger_entry) {
             u.invalidate_ledger(callback_key);
             if let Ok(Some(fresh)) = u.ledger_entry(callback_key, false).await {
                 if verify_signature(
@@ -685,6 +686,41 @@ where
         metrics.record_eventsub_verification("replay_rejected");
         tracing::warn!(callback_key, timestamp, "eventsub.replay_window_exceeded");
         return Err(EventSubError::VerificationFailed);
+    }
+
+    // An HMAC-verified `channel.unban` is authorized from the CURRENT ledger row only: a
+    // subscription revoked, rotated or rebound within the cache TTL must not authorize it. The
+    // fresh read is single-flight per key; the HMAC is re-verified against the fresh secret.
+    // Done before dedup so a failed read (5xx) is redelivered rather than swallowed as a dup.
+    if let (true, Some(u), Some(_)) = (is_unban, unban, &ledger_entry) {
+        match u.ledger_entry(callback_key, true).await {
+            Ok(Some(fresh))
+                if verify_signature(
+                    fresh.secret.expose(),
+                    message_id,
+                    timestamp,
+                    body,
+                    signature,
+                ) =>
+            {
+                ledger_entry = Some(fresh);
+            }
+            Ok(Some(_)) => {
+                metrics.record_eventsub_verification("bad_signature");
+                tracing::warn!(callback_key, "eventsub.unban_secret_rotated_mismatch");
+                return Err(EventSubError::VerificationFailed);
+            }
+            // Revoked/removed: refuse (counted by the unbound path below).
+            Ok(None) => ledger_entry = None,
+            Err(_) => {
+                tracing::warn!(
+                    key_tag = %crate::twitch_unban::key_tag(callback_key),
+                    "eventsub.ledger_unavailable"
+                );
+                metrics.record_eventsub_verification("ledger_unavailable");
+                return Err(EventSubError::LedgerUnavailable);
+            }
+        }
     }
 
     metrics.record_eventsub_verification("ok");
@@ -2206,6 +2242,127 @@ mod tests {
             sink.0.lock().unwrap().len(),
             1,
             "revoked subscription forwards nothing"
+        );
+    }
+
+    /// Ledger double counting cached-path vs fresh reads; the row is mutable.
+    struct Counted {
+        row: std::sync::Mutex<Option<&'static str>>,
+        plain: std::sync::atomic::AtomicUsize,
+        fresh: std::sync::atomic::AtomicUsize,
+    }
+    fn entry_of(secret: Option<&'static str>) -> Option<LedgerEntry> {
+        secret.map(|s| LedgerEntry {
+            secret: connection_resolver::SecretString::new(s.to_string()),
+            tenant_id: 7,
+            community_id: 9,
+            connection_id: 33,
+        })
+    }
+    impl SubscriptionLedger for Arc<Counted> {
+        fn lookup<'a>(
+            &'a self,
+            _k: &'a str,
+        ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+            self.plain.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let r = entry_of(*self.row.lock().unwrap());
+            Box::pin(async move { Ok(r) })
+        }
+        fn lookup_fresh<'a>(
+            &'a self,
+            _k: &'a str,
+        ) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
+            self.fresh.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let r = entry_of(*self.row.lock().unwrap());
+            Box::pin(async move { Ok(r) })
+        }
+    }
+
+    fn counted_rig() -> (TwitchUnban, Arc<Sink>, Arc<Counted>) {
+        let inner = Arc::new(Counted {
+            row: std::sync::Mutex::new(Some(LEDGER_SECRET)),
+            plain: std::sync::atomic::AtomicUsize::new(0),
+            fresh: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let sink = Arc::new(Sink::default());
+        let u = TwitchUnban::new(
+            Arc::new(crate::twitch_unban::CachedLedger::new(Arc::clone(&inner))),
+            Arc::new(Bound(vec![((7, 9, 33), "alice")])),
+            Arc::new(Bans(false)),
+            Arc::new(Tok),
+            Arc::clone(&sink) as Arc<dyn UnbanSink>,
+            Some(Signer::from_seed("k1", &[7u8; 32]).unwrap()),
+        );
+        (u, sink, inner)
+    }
+
+    #[tokio::test]
+    async fn forged_or_unsigned_unbans_trigger_zero_fresh_reads() {
+        let (u, sink, inner) = counted_rig();
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        for i in 0..10 {
+            let id = format!("m-f{i}");
+            let sig = sign("not-the-secret", &id, &ts, &body);
+            let h = headers(&id, &ts, &sig, "notification");
+            let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+            assert!(matches!(r, Err(EventSubError::VerificationFailed)), "{r:?}");
+        }
+        // Unsigned.
+        let h = headers("m-u", &ts, "", "notification");
+        let _ = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert_eq!(
+            inner.fresh.load(std::sync::atomic::Ordering::SeqCst),
+            0,
+            "an unauthenticated request never reaches the fresh read"
+        );
+        assert!(
+            inner.plain.load(std::sync::atomic::Ordering::SeqCst) <= 2,
+            "and costs at most the cached lookup plus one rate-limited eviction retry"
+        );
+        assert!(sink.0.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_verified_unban_with_a_live_fresh_row_lifts_after_one_fresh_read() {
+        let (u, sink, inner) = counted_rig();
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        let sig = sign(LEDGER_SECRET, "m-ok", &ts, &body);
+        let h = headers("m-ok", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+        assert_eq!(inner.fresh.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn a_verified_unban_after_revocation_or_rotation_inside_the_ttl_is_refused() {
+        let (u, sink, inner) = counted_rig();
+        let body = unban_body("141", "alice");
+        let ts = now_ts();
+        // Prime the cache with a live, verified unban.
+        let sig = sign(LEDGER_SECRET, "m-1", &ts, &body);
+        let h = headers("m-1", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Ok(EventSubResponse::Ack)), "{r:?}");
+        assert_eq!(sink.0.lock().unwrap().len(), 1);
+        // Rotated at hub-api: the cached secret still verifies the old signature, but the
+        // fresh row does not -> refused, nothing forwarded.
+        *inner.row.lock().unwrap() = Some("rotated-secret-zzz");
+        let sig = sign(LEDGER_SECRET, "m-2", &ts, &body);
+        let h = headers("m-2", &ts, &sig, "notification");
+        let r = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert!(matches!(r, Err(EventSubError::VerificationFailed)), "{r:?}");
+        // Revoked: the fresh row is gone -> refused (acked as unbound), nothing forwarded.
+        *inner.row.lock().unwrap() = None;
+        let sig = sign(LEDGER_SECRET, "m-3", &ts, &body);
+        let h = headers("m-3", &ts, &sig, "notification");
+        let _ = call_unban(&u, &global(), &FakeDedup::default(), UNBAN_KEY, &h, &body).await;
+        assert_eq!(
+            sink.0.lock().unwrap().len(),
+            1,
+            "nothing forwarded after rotation or revoke"
         );
     }
 }

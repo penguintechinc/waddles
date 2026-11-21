@@ -566,6 +566,7 @@ struct CountingLedger {
     hits: std::sync::atomic::AtomicUsize,
     secret: Mutex<Option<&'static str>>,
     down: std::sync::atomic::AtomicBool,
+    delay_ms: std::sync::atomic::AtomicU64,
 }
 
 impl CountingLedger {
@@ -574,6 +575,7 @@ impl CountingLedger {
             hits: std::sync::atomic::AtomicUsize::new(0),
             secret: Mutex::new(secret),
             down: std::sync::atomic::AtomicBool::new(false),
+            delay_ms: std::sync::atomic::AtomicU64::new(0),
         })
     }
     fn hits(&self) -> usize {
@@ -585,6 +587,10 @@ impl SubscriptionLedger for Arc<CountingLedger> {
     fn lookup<'a>(&'a self, _key: &'a str) -> BoxFut<'a, Result<Option<LedgerEntry>, LedgerError>> {
         Box::pin(async move {
             self.hits.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let d = self.delay_ms.load(std::sync::atomic::Ordering::SeqCst);
+            if d > 0 {
+                tokio::time::sleep(Duration::from_millis(d)).await;
+            }
             if self.down.load(std::sync::atomic::Ordering::SeqCst) {
                 return Err(LedgerError::Unavailable);
             }
@@ -796,5 +802,48 @@ async fn identity_is_the_stored_numeric_id_a_renamed_channel_matches_a_mismatch_
     assert!(
         r.bans.1.lock().unwrap().is_empty(),
         "no Helix call without an identity"
+    );
+}
+
+#[tokio::test]
+async fn concurrent_fresh_reads_of_one_key_are_a_single_hub_call() {
+    let inner = CountingLedger::new(Some("secret-1"));
+    inner
+        .delay_ms
+        .store(60, std::sync::atomic::Ordering::SeqCst);
+    let cache = Arc::new(CachedLedger::new(Arc::clone(&inner)));
+    let mut tasks = Vec::new();
+    for _ in 0..8 {
+        let c = Arc::clone(&cache);
+        tasks.push(tokio::spawn(async move {
+            c.lookup_fresh("key-12345678").await.unwrap().is_some()
+        }));
+    }
+    for t in tasks {
+        assert!(t.await.unwrap());
+    }
+    assert_eq!(
+        inner.hits(),
+        1,
+        "eight concurrent fresh reads coalesce into one"
+    );
+    // A later fresh read is a new read (never served from the old one).
+    cache.lookup_fresh("key-12345678").await.unwrap();
+    assert_eq!(inner.hits(), 2);
+}
+
+#[tokio::test]
+async fn forged_signatures_cannot_force_repeated_eviction_refetches() {
+    let inner = CountingLedger::new(Some("secret-1"));
+    let cache = CachedLedger::new(Arc::clone(&inner));
+    cache.lookup("key-12345678").await.unwrap();
+    for _ in 0..20 {
+        cache.invalidate("key-12345678");
+        cache.lookup("key-12345678").await.unwrap();
+    }
+    assert!(
+        inner.hits() <= 2,
+        "20 forged-signature retries cost at most one extra hub read, got {}",
+        inner.hits()
     );
 }
