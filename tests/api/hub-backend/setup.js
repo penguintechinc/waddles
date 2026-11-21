@@ -7,7 +7,7 @@ const nock = require('nock');
 
 // Test configuration
 global.TEST_CONFIG = {
-  API_BASE_URL: process.env.API_BASE_URL || 'http://localhost:8060',
+  API_BASE_URL: process.env.API_BASE_URL || 'http://localhost:8204',
   TEST_TIMEOUT: 10000,
 
   // Test user credentials

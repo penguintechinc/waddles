@@ -20,6 +20,11 @@ from services.errors import ApiError
 from tests.conftest import insert_global_admin
 
 
+def _row(dal: Any, dto: Any) -> int:
+    """Numeric `vendor_discount_codes.id` behind a DTO's public-UUID `id`."""
+    return int(dal(dal.vendor_discount_codes.public_id == dto.id).select().first().id)
+
+
 @pytest.fixture
 def seeded(marketplace_billing_db: Any) -> tuple[Any, int, int]:
     return marketplace_billing_db
@@ -165,7 +170,8 @@ class TestModuleSubscriptions:
         assert new_id > 0
         rows = svc.list_community_subscriptions(dal, community_id)
         assert len(rows) == 1
-        assert rows[0].moduleId == module_id
+        public = str(dal.hub_modules[module_id].public_id)
+        assert rows[0].moduleId == public and rows[0].id == public
         assert rows[0].isEnabled is True
 
     def test_subscribe_unpublished_module_raises_404(self, seeded: Any) -> None:
@@ -384,7 +390,7 @@ class TestDiscountCodes:
             max_uses=None,
             description=None,
         )
-        updated = svc.update_discount_code(dal, vendor_id, dto.id, {})
+        updated = svc.update_discount_code(dal, vendor_id, _row(dal, dto), {})
         assert updated.discountValue == dto.discountValue
 
     def test_update_invalid_new_value_raises(self, seeded: Any) -> None:
@@ -403,7 +409,7 @@ class TestDiscountCodes:
             description=None,
         )
         with pytest.raises(ApiError):
-            svc.update_discount_code(dal, vendor_id, dto.id, {"discountValue": -5})
+            svc.update_discount_code(dal, vendor_id, _row(dal, dto), {"discountValue": -5})
 
     def test_delete_deactivates(self, seeded: Any) -> None:
         dal, _t, _c = seeded
@@ -420,7 +426,7 @@ class TestDiscountCodes:
             max_uses=None,
             description=None,
         )
-        deleted = svc.delete_discount_code(dal, vendor_id, dto.id)
+        deleted = svc.delete_discount_code(dal, vendor_id, _row(dal, dto))
         assert deleted.isActive is False
 
     def _module(self, dal: Any, seller_id: int, slug: str = "m1") -> int:
@@ -506,7 +512,7 @@ class TestDiscountCodes:
             max_uses=None,
             description=None,
         )
-        result = svc.redeem_discount_code(dal, dto.id, community_id, 1)
+        result = svc.redeem_discount_code(dal, _row(dal, dto), community_id, 1)
         assert result.discountedPriceCents == 0
         assert result.originalPriceCents == 500  # base price, 0 members -> no overage
 
@@ -525,7 +531,7 @@ class TestDiscountCodes:
             max_uses=None,
             description=None,
         )
-        result = svc.redeem_discount_code(dal, dto.id, community_id, 1)
+        result = svc.redeem_discount_code(dal, _row(dal, dto), community_id, 1)
         assert result.discountedPriceCents == 500 - 200
 
     def test_redeem_unknown_code_raises_409(self, seeded: Any) -> None:

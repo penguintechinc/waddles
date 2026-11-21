@@ -55,6 +55,7 @@ from flask_core.bundle_author import author_view
 
 from services.errors import bad_request
 from services.marketplace_author import AuthorDTO, to_author_dto
+from services.marketplace_public_ids import public_ids_for
 
 _MAX_LIMIT = 100
 
@@ -133,7 +134,8 @@ class CatalogEntry:
     """One `marketplace_catalog` row -- camelCase DTO matching `formatCatalogEntry()`."""
 
     source: str
-    sourceId: int | None
+    #: Public UUID of the backing module row (`None` for bundle rows, keyed by `sourceRef`).
+    sourceId: str | None
     sourceRef: str | None
     vendorKey: str | None
     vendorName: str | None
@@ -321,8 +323,25 @@ def _vendor_repo_filters(query: Any, catalog: Any, vendor: str | None, repo: str
     return query
 
 
+#: Catalog `source` -> the table whose `public_id` is the entry's public `sourceId`.
+SOURCE_TABLES: dict[str, str] = {"core": "hub_modules", "marketplace": "marketplace_modules"}
+
+
+def source_public_ids(dal: Any, rows: Any) -> dict[tuple[str, int], str]:
+    """`(source, numeric source_id) -> public UUID` for `rows`, one query per source table."""
+    out: dict[tuple[str, int], str] = {}
+    for source, table in SOURCE_TABLES.items():
+        ids = [int(r.source_id) for r in rows if r.source == source and r.source_id is not None]
+        for numeric, public in public_ids_for(dal, table, ids).items():
+            out[(source, numeric)] = public
+    return out
+
+
 def _to_catalog_entry(
-    row: Any, installed_core: dict[int, bool], installed_marketplace: dict[int, bool]
+    row: Any,
+    installed_core: dict[int, bool],
+    installed_marketplace: dict[int, bool],
+    source_uuids: dict[tuple[str, int], str],
 ) -> CatalogEntry:
     is_installed: bool | None = None
     is_enabled: bool | None = None
@@ -336,7 +355,9 @@ def _to_catalog_entry(
     vendor_key, vendor_name = _vendor_of(row)
     return CatalogEntry(
         source=row.source,
-        sourceId=row.source_id,
+        sourceId=(
+            source_uuids[(row.source, int(row.source_id))] if row.source_id is not None else None
+        ),
         sourceRef=row.source_ref,
         vendorKey=vendor_key,
         vendorName=vendor_name,
@@ -411,9 +432,12 @@ def get_catalog(
         dal, community_id, core_ids, marketplace_ids
     )
 
+    source_uuids = source_public_ids(dal, rows)
     return CatalogListResponse(
         success=True,
-        modules=[_to_catalog_entry(r, installed_core, installed_marketplace) for r in rows],
+        modules=[
+            _to_catalog_entry(r, installed_core, installed_marketplace, source_uuids) for r in rows
+        ],
         pagination=CatalogPagination(
             page=page, limit=limit, total=total, totalPages=-(-total // limit) if limit else 0
         ),
@@ -437,7 +461,9 @@ def get_catalog_entry(
         [source_id] if source == "core" else [],
         [source_id] if source == "marketplace" else [],
     )
-    return _to_catalog_entry(row, installed_core, installed_marketplace)
+    return _to_catalog_entry(
+        row, installed_core, installed_marketplace, source_public_ids(dal, [row])
+    )
 
 
 def get_catalog_bundle_entry(
@@ -450,7 +476,7 @@ def get_catalog_bundle_entry(
     row = dal(query).select(limitby=(0, 1)).first()
     if row is None:
         return None
-    return _to_catalog_entry(row, {}, {})
+    return _to_catalog_entry(row, {}, {}, {})
 
 
 def get_vendors(dal: Any, request: Any) -> VendorsResponse:
@@ -542,4 +568,5 @@ def get_featured(dal: Any, request: Any, community_id: int | None) -> list[Catal
     installed_core, installed_marketplace = _install_status_maps(
         dal, community_id, core_ids, marketplace_ids
     )
-    return [_to_catalog_entry(r, installed_core, installed_marketplace) for r in rows]
+    source_uuids = source_public_ids(dal, rows)
+    return [_to_catalog_entry(r, installed_core, installed_marketplace, source_uuids) for r in rows]

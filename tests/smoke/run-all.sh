@@ -71,7 +71,7 @@ if [ "$ENV" = "local" ]; then
         "cd '$PROJECT_ROOT' && bash tests/alpha-smoke-test.sh"
 
     run_test "API Smoke Test (Comprehensive)" \
-        "cd '$SCRIPT_DIR' && bash smoke-api-comprehensive.sh http://localhost:8060"
+        "cd '$SCRIPT_DIR' && bash smoke-api-comprehensive.sh http://localhost:8204"
 
     # Install playwright if needed
     if [ ! -d "$SCRIPT_DIR/node_modules" ]; then

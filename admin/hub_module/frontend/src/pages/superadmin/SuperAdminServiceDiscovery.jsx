@@ -748,7 +748,7 @@ function getMockServices() {
       description: 'Central admin dashboard',
       category: 'admin',
       status: 'healthy',
-      url: 'localhost:8060',
+      url: 'localhost:8204',
       healthEndpoint: '/api/v1/health',
       responseTime: 125,
       uptime: 99.8,
