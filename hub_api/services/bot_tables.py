@@ -33,6 +33,7 @@ live routes actually use.
 
 from __future__ import annotations
 
+import uuid as _uuid
 from datetime import datetime
 from typing import Any
 
@@ -78,6 +79,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("platform_username", "string", length=255, notnull=True),
         dal.Field("added_by", "reference hub_users"),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     dal.define_table(
@@ -114,6 +116,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("created_at", "datetime", default=datetime.utcnow),
         dal.Field("updated_at", "datetime", default=datetime.utcnow, update=datetime.utcnow),
         dal.Field("deleted_at", "datetime"),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     dal.define_table(
@@ -176,6 +179,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("index_errors", "text"),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
         dal.Field("updated_at", "datetime", default=datetime.utcnow, update=datetime.utcnow),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     dal.define_table(
@@ -188,6 +192,7 @@ def bind_bot_tables(dal: Any) -> None:
         dal.Field("feedback", "string", length=20),
         dal.Field("is_auto_posted", "boolean", default=False),
         dal.Field("created_at", "datetime", default=datetime.utcnow),
+        dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=False,
     )
     # `ai_knowledge_chunks.embedding` (pgvector `vector(384)`) is written

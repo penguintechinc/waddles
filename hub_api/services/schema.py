@@ -267,6 +267,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("expires_at", "datetime"),
         Field("revoked_at", "datetime"),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -358,6 +359,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("device_name", "string", length=100),
         Field("created_at", "datetime"),
         Field("last_used_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -463,6 +465,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("role_kind", "integer", default=0),
         Field("priority", "integer", default=0),
         Field("base_claims", "json"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -480,6 +483,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reviewed_by", "integer"),
         Field("reviewed_at", "datetime"),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -568,6 +572,7 @@ def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("is_active", "boolean", default=True),
             Field("form_fields", "json"),
             Field("created_at", "datetime"),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -589,6 +594,7 @@ def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("resolved_at", "datetime"),
             Field("created_at", "datetime"),
             Field("updated_at", "datetime"),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -634,6 +640,7 @@ def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("last_used_at", "datetime"),
             Field("expires_at", "datetime"),
             Field("is_revoked", "boolean", notnull=True, default=False),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -966,6 +973,7 @@ def bind_streaming_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_by", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1018,6 +1026,7 @@ def bind_community_authz_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("base_claims", "json"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1117,6 +1126,7 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("status", "string", length=50),
         Field("priority", "string", length=50),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1539,6 +1549,7 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("config_schema", "json", default={}),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1626,6 +1637,7 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("cancel_at_period_end", "boolean", default=False),
         Field("subscribed_at", "datetime"),
         Field("canceled_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1655,6 +1667,7 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("description", "text"),
         Field("created_at", "datetime", notnull=True),
         Field("updated_at", "datetime", notnull=True),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1944,6 +1957,7 @@ def bind_admin_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("base_claims", "json"),
             Field("created_at", "datetime"),
             Field("updated_at", "datetime"),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -2200,6 +2214,7 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         Field("deleted_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -2214,6 +2229,7 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reviewed_by", "integer"),
         Field("reviewed_at", "datetime"),
         Field("review_notes", "text"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -2276,6 +2292,7 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reviewed_by", "integer"),
         Field("is_verified", "boolean", default=False),
         Field("requires_special_review", "boolean", default=False),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -3130,6 +3147,7 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -3157,6 +3175,7 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("discord_role_id", "string", length=255, notnull=True),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -3174,6 +3193,7 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("last_skipped_not_member", "integer", notnull=True, default=0),
         Field("last_error", "string", length=80),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
     dal.define_table(
