@@ -547,8 +547,8 @@ class TestBroadcast:
 class TestPostToPlatformDirect:
     """`_post_to_platform` itself -- real `httpx.AsyncClient` mocked, the.
 
-    actual I/O boundary (see `test_community_engagement_proxy.py`'s
-    module docstring for the same rationale).
+    actual I/O boundary (`writing-python-tests`: mock external
+    I/O, not the unit under test).
     """
 
     async def test_unknown_platform_returns_error(self) -> None:

@@ -39,7 +39,6 @@ import {
   HeartIcon,
   CubeIcon,
   InboxStackIcon,
-  ClipboardDocumentListIcon,
   UserPlusIcon,
   AcademicCapIcon,
   LinkIcon,
@@ -83,8 +82,6 @@ function AdminLayout() {
           label: 'Engagement',
           icon: HeartIcon,
           items: [
-            { to: `/admin/${communityId}/polls`, icon: ClipboardDocumentListIcon, label: 'Polls' },
-            { to: `/admin/${communityId}/forms`, icon: DocumentTextIcon, label: 'Forms' },
             { to: `/admin/${communityId}/shoutouts`, icon: SpeakerWaveIcon, label: 'Shoutouts' },
             { to: `/admin/${communityId}/leaderboard`, icon: TrophyIcon, label: 'Leaderboards' },
           ],

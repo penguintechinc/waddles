@@ -116,6 +116,7 @@ def _community_routes(app: Quart) -> list[tuple[str, str]]:
         path = path.replace("<int:role_id>", "1").replace("<int:post_id>", "1")
         path = path.replace("<int:reply_id>", "1").replace("<event_type>", "raffle_start")
         path = path.replace("<int:queue_id>", "1")
+        path = path.replace("<uuid:user_uuid>", "33333333-3333-4333-8333-333333333333")
         # v1_community_tokens (support/access-token port group) -- CAT routes.
         path = path.replace("<int:token_id>", "1")
         for method in rule.methods or set():

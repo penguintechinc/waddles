@@ -1805,12 +1805,6 @@
     {
       "rule_id": "python-silent-except-return-default",
       "path": "hub_api/blueprints/v1/platform.py",
-      "line": 433,
-      "line_hash": "27c3745cf1a69a97"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/blueprints/v1/platform.py",
       "line": 450,
       "line_hash": "e56478c434a8be56"
     },
@@ -2389,12 +2383,6 @@
       "path": "hub_api/services/community_announcements.py",
       "line": 382,
       "line_hash": "cfbf05a5c676ab33"
-    },
-    {
-      "rule_id": "python-silent-except-return-default",
-      "path": "hub_api/services/community_engagement_proxy.py",
-      "line": 38,
-      "line_hash": "95347ef4fa0e0c1d"
     },
     {
       "rule_id": "python-silent-except-return-default",
