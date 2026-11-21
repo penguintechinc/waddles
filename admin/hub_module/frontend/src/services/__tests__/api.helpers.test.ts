@@ -49,11 +49,11 @@ describe('multipart upload helpers', () => {
     const fd = new FormData();
     fd.append('manifest', 'name: demo');
 
-    await bundleApi.createVersion('waddles.integrations.vendor/42', fd);
+    await bundleApi.createVersion('acme.widgets/42', fd);
 
     const sent = lastCall();
     expect(sent.method).toBe('post');
-    expect(sent.url).toBe('/api/v1/apps/waddles.integrations.vendor%2F42/versions');
+    expect(sent.url).toBe('/api/v1/apps/acme.widgets%2F42/versions');
     expect(sent.data).toBe(fd);
     expect(sent.headers.get('Content-Type')).toBe('multipart/form-data');
   });

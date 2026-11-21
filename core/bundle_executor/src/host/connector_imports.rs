@@ -587,7 +587,11 @@ mod identity_scope_tests {
     }
 
     fn state_with(bridge: Arc<HostBridge>) -> ExecState {
-        ExecState::new(Some(bridge), "waddles.core.connector.test".to_string(), 7)
+        ExecState::new(
+            Some(bridge),
+            "penguintechinc.waddles.connector-test".to_string(),
+            7,
+        )
     }
 
     fn uuid_key() -> identity::IdentityKey {
@@ -817,7 +821,8 @@ mod identity_scope_tests {
 
     #[tokio::test]
     async fn lookup_without_a_bridge_fails_closed() {
-        let mut state = ExecState::new(None, "waddles.core.connector.test".to_string(), 7);
+        let mut state =
+            ExecState::new(None, "penguintechinc.waddles.connector-test".to_string(), 7);
 
         let err = identity::Host::lookup(&mut state, uuid_key())
             .await

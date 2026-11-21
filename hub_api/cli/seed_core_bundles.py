@@ -1,4 +1,4 @@
-"""Core-bundle seeder -- activates first-party `waddles.core.*` App Bundles at deploy time.
+"""Core-bundle seeder -- activates first-party `penguintechinc.waddles.*` App Bundles at deploy.
 
 Run as `python3 -m cli.seed_core_bundles` from hub-api's own `/app` WORKDIR (mirrors this
 repo's existing top-level-module convention -- `hub_api/conftest.py` inserts `hub_api/` itself
@@ -12,7 +12,7 @@ from_env()`).
 **Why this exists.** `services/bundle_approval_service.py::approve_version()` is otherwise
 reachable only through `blueprints/v1/bundle_approvals.py::post_approve`, gated on
 `@require_scope("platform:admin")` (Justin's 2026-09-27 vendor-separation ruling: a vendor
-SUBMITS, only a GLOBAL ADMIN APPROVES). First-party `waddles.core.*` bundles need a way to
+SUBMITS, only a GLOBAL ADMIN APPROVES). First-party `penguintechinc.waddles.*` bundles need a way to
 activate with zero human involvement at deploy time -- this module is that path, reusing
 `approve_version()`/`create_version()`/`process_prebuilt_component()` unchanged (their own new
 `approval_source`/nullable `approved_by`/`requested_by` parameters exist for exactly this
@@ -21,7 +21,7 @@ already own.
 
 **HARD GUARD** (`_guard_core_namespace`, called first thing in `seed_one()`, before any DB
 write): every `app_id` this module ever touches MUST fall under
-`services.vendor_bundle_authz.CORE_NAMESPACE_PREFIX` ("waddles.core."). A catalog entry outside
+`vendor_bundle_authz.CORE_NAMESPACE_PREFIX` ("penguintechinc.waddles."). A catalog entry outside
 that namespace is refused with a non-zero exit for that bundle -- vendor bundles must never be
 seedable, no matter what a (compromised or mistaken) catalog file says.
 
@@ -75,7 +75,9 @@ from penguin_dal import AsyncDB
 
 from config import HubAPIConfig
 from services import app_command_backfill, connector_publish_service, vendor_bundle_authz
+from services.app_id_ownership import claim_app_id
 from services.app_source_binding_service import TENANT_WIDE_COMMUNITY_SENTINEL
+from services.bundle_app_id import is_core_namespace, is_valid_app_id
 from services.bundle_approval_service import (
     activate_for_community,
     activate_tenant_wide,
@@ -145,10 +147,9 @@ _TENANT_SLUGS_OVERRIDE_ENV = "CORE_BUNDLES_TENANT_SLUGS"
 _PLATFORM_CONNECTIONS_ENV = "CORE_BUNDLES_PLATFORM_CONNECTIONS"
 
 #: Strict lowercase-alnum-dot-hyphen charset for a well-formed dotted app_id -- the segment
-#: shape every real `waddles.core.*` app_id already uses (`bundle_manifest_v2._APP_ID_RE`'s
+#: shape every real first-party app_id already uses (`bundle_manifest_v2._APP_ID_RE`s
 #: own `[a-z0-9][a-z0-9_-]*` segments, minus underscores: no legitimate core app_id has ever
 #: used one). Deliberately ASCII-only -- see `_guard_core_namespace()`'s own docstring.
-_APP_ID_CHARSET_RE = re.compile(r"^[a-z0-9]+(\.[a-z0-9-]+)+$")
 
 #: Catalog `language` values whose artifact is a deterministic COMPILED build (cargo-component /
 #: .NET / Go). The byte-identical digest check (`app_versions` immutable per version string) is
@@ -187,7 +188,7 @@ def normalize_language(language: str) -> str:
 #: need a human to intervene before the row they describe can ever resolve itself.
 RECOVERABLE_API_ERROR_CODES = frozenset({"digest_conflict"})
 
-#: Env var: how old (seconds) an orphaned `waddles.core.*` `app_version_uploads` row's own
+#: Env var: how old (seconds) an orphaned `penguintechinc.waddles.*` `app_version_uploads` row's own
 #: `status_changed_at` must be before `_recover_stalled_core_upload()` resets it, rather than
 #: deferring to the generic `stalled_core_bundle_upload` fail-loud path below.
 #:
@@ -476,7 +477,7 @@ def _resolve_activation_targets(entry: CatalogEntry) -> tuple[ActivationTarget, 
 
 
 def _guard_core_namespace(app_id: str) -> None:
-    """Refuse an `app_id` outside the reserved `waddles.core.*` namespace (see module docstring).
+    """Refuse an app_id outside the reserved `penguintechinc.waddles.*` namespace (see module doc).
 
     Hardened against lookalike/homoglyph app_ids (security review, 2026-09-27): two checks run
     BEFORE the prefix comparison itself, so a crafted app_id can never reach that comparison in
@@ -484,26 +485,26 @@ def _guard_core_namespace(app_id: str) -> None:
 
       1. NFKC-normalizing `app_id` must be a no-op. A confusable character that NFKC folds
          toward a different byte sequence (e.g. a fullwidth or ligature form of an ASCII
-         letter) would otherwise let an app_id LOOK different from `waddles.core.*` to this
+         letter) would otherwise let an app_id LOOK different from the core prefix to this
          raw `.startswith()` check while a downstream consumer using normalized/collated
          comparison (a DB index, a case/width-insensitive lookup) could treat it as the same
          string -- rejecting any app_id normalization would actually change closes that gap
          outright, independent of what any downstream consumer happens to do.
       2. `_APP_ID_CHARSET_RE` requires plain ASCII lowercase/digits/dot/hyphen -- the exact
-         segment shape every real `waddles.core.*` app_id already uses. This independently
+         segment shape every real `penguintechinc.waddles.*` app_id already uses. This independently
          rejects every non-ASCII homoglyph (Cyrillic/Greek lookalikes, etc.) that NFKC leaves
          untouched (NFKC does not fold across scripts), plus malformed shapes (empty segments,
          uppercase, leading/trailing/consecutive dots) a bare prefix check would not catch.
 
-    `"waddles.corex.*"` (a near-miss, not a homoglyph) is refused by the prefix check itself,
+    `"penguintechinc.waddlesx.*"` (a near-miss) is refused by the prefix check itself,
     same as before -- covered here only for the charset/normalization checks' own scope.
     """
-    if unicodedata.normalize("NFKC", app_id) != app_id or not _APP_ID_CHARSET_RE.match(app_id):
+    if unicodedata.normalize("NFKC", app_id) != app_id or not is_valid_app_id(app_id):
         raise CoreBundleSeederError(
-            f"refusing to seed {app_id!r}: not a well-formed lowercase dotted app_id "
-            "(ASCII a-z0-9.- only, NFKC-normalization must be a no-op)"
+            f"refusing to seed {app_id!r}: not a well-formed '<org>.<repo>.<name>' app_id "
+            "(ASCII [a-z0-9-] segments only, NFKC-normalization must be a no-op)"
         )
-    if not app_id.startswith(vendor_bundle_authz.CORE_NAMESPACE_PREFIX):
+    if not is_core_namespace(app_id):
         raise CoreBundleSeederError(
             f"refusing to seed {app_id!r}: core-bundle-seeder only seeds "
             f"{vendor_bundle_authz.CORE_NAMESPACE_PREFIX}* app_ids -- a vendor bundle must go "
@@ -607,7 +608,7 @@ async def _ensure_app_catalog_row(install_dal: AsyncDB, manifest: BundleManifest
     """Idempotent `app_catalog` upsert -- the FK target `app_version_uploads`/`app_versions` need.
 
     Mirrors `config/postgres/migrations/071_app_catalog_stages.sql`'s own seeded
-    `waddles.core.demo.echo` row (`INSERT ... ON CONFLICT (app_id) DO NOTHING`) -- done here in
+    `penguintechinc.waddles.echo-pipeline` row (`INSERT ... ON CONFLICT DO NOTHING`) -- done in
     Python (existence-check then insert) so a new core bundle only needs a
     `bundles/core-bundles.yaml` entry, not a hand-written SQL migration per bundle.
 
@@ -841,7 +842,7 @@ async def _resolve_or_publish_version(
         # process_prebuilt_component() published it. Resuming from an arbitrary mid-FSM
         # state is still out of scope (see module docstring's idempotency note) -- but
         # unlike a vendor upload, THIS namespace is guaranteed single-writer (the HARD
-        # GUARD in seed_one() ensures only this seeder ever touches waddles.core.* rows,
+        # GUARD in seed_one() ensures only this seeder ever touches penguintechinc.waddles.* rows,
         # and this process is single-shot/non-concurrent -- see
         # `_recover_stalled_core_upload()`'s own docstring), so a genuinely orphaned row
         # left by an earlier crashed run is self-healed here instead of requiring a
@@ -1099,6 +1100,10 @@ async def seed_one(
     its own client.
     """
     _guard_core_namespace(entry.app_id)
+    # Record the seeded id in `app_id_owners` (owner NULL = system actor) on EVERY run, including
+    # reseeds that skip `create_version`: idempotent for the same app_id, and a storage key already
+    # held by a DIFFERENT app_id fails loudly (409) instead of sharing that namespace.
+    await claim_app_id(install_dal, app_id=entry.app_id, owner_id=None, enforce_owner=False)
 
     manifest_bytes = (bundles_dir / entry.manifest_path).read_bytes()
     component_bytes = (bundles_dir / entry.artifact_path).read_bytes()
@@ -1538,7 +1543,7 @@ async def reconcile_removed_core_bundles(
     Requirement (Justin): "uninstall should delete them just like install adds them, otherwise
     our scale will get out of sync" -- the Rust data plane (`core/bundle_active_set/src/
     query.rs::read_active_set()`) reads `app_active_versions` directly on every hub-api replica,
-    so a `waddles.core.*` bundle removed from `bundles/core-bundles.yaml` must have its row
+    so a core bundle removed from `bundles/core-bundles.yaml` must have its row
     actually DELETED here, the same way `seed_one()` above INSERTs it on the way in -- a row
     left behind drifts horizontally-scaled replicas (and the data plane) out of sync with each
     other.

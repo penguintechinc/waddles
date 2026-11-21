@@ -37,7 +37,7 @@ use penguin_bundle_host::wire::{
 use sha2::{Digest, Sha256};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/csping.wasm");
-const APP_ID: &str = "waddles.core.example.csping";
+const APP_ID: &str = "penguintechinc.waddles.csping";
 
 /// Hands back the committed `csping.wasm` bytes regardless of key -- there
 /// is exactly one bundle in this test, same pattern as

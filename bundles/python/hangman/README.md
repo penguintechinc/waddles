@@ -2,7 +2,7 @@
 
 `!hangman` -- a per-community hangman word-guessing game. One active game per community; any
 chatter can `guess`. First-party, net-new Waddles content (`provider: builtin`,
-`app_id: waddles.core.example.hangman`) -- not a port of any external project, so there is no
+`app_id: penguintechinc.waddles.hangman`) -- not a port of any external project, so there is no
 third-party attribution to carry.
 
 Structurally a sibling of `bundles/python/first`: `transform` only recognizes the command and
@@ -111,5 +111,5 @@ ruff check .
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.hangman`, activation target
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.hangman`, activation target
 `global`); the command stays dark until `waddles.command-hangman` is turned on.

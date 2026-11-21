@@ -183,7 +183,7 @@ Multi-row ops derive per-row ledger keys `<key>:m<i>` (rows in uuid order, so a 
 
 The economy SERVICE bundle is an I/O layer; **game rules live in app bundles**. Its
 tools are broad (the service holds `economy.credit`/`debit`/`admin_adjust`/`pot.pay`),
-so an APP bundle that merely holds `tool.call:waddles.core.service.economy:<tool>`
+so an APP bundle that merely holds `tool.call:penguintechinc.waddles.economy:<tool>`
 must NOT be able to mint or pull anyone's funds. When the economy host call is made
 by the service on behalf of an app (`tool.invoke` hop; the host derives the calling
 app from the call plan -- never from args), the stage additionally requires the

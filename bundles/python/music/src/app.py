@@ -1,7 +1,7 @@
 """`!sr`, `!music`/`!queue`, `!songqueue`/`!sq` over the shared music-requests service.
 
 The song-request queue, now-playing state and history live in ONE service bundle
-(`waddles.core.service.music-requests`); this app is only the chat front end. It owns no queue:
+(`penguintechinc.waddles.music-requests`); this app is only the chat front end. It owns no queue:
 every command is a tool call (`waddle_sdk.tool.invoke`) made in the process stage, where the host
 resolves the verified actor from the triggering event. The action stage relays the reply and
 publishes the overlay surfaces from the service state the process stage fetched.
@@ -40,7 +40,7 @@ from waddle_sdk.flask_core.stream_pipeline import PlatformEvent, StageEnvelope
 from waddle_sdk.safe_text import guard_leading_command, sanitize_user_text
 
 #: The shared queue service every command delegates to.
-SERVICE = "waddles.core.service.music-requests"
+SERVICE = "penguintechinc.waddles.music-requests"
 
 _REQUEST_HEADS = frozenset({"!sr", "!songrequest"})
 _QUEUE_HEADS = frozenset({"!music", "!queue"})
@@ -66,8 +66,8 @@ _DISPLAY_MAX = 60
 _HISTORY_LIMIT = 5
 
 #: Overlay surfaces this bundle owns (`bundles/contracts/surfaces.v1.json` `public_track` shape).
-_SURFACE_NOW_PLAYING = "waddles.core.example.music.now_playing"
-_SURFACE_QUEUE = "waddles.core.example.music.queue"
+_SURFACE_NOW_PLAYING = "penguintechinc.waddles.music.now_playing"
+_SURFACE_QUEUE = "penguintechinc.waddles.music.queue"
 _SURFACE_QUEUE_MAX = 50
 
 #: kv keys. Legacy keys are only ever read once, to migrate; no ':' anywhere.

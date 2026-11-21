@@ -1,4 +1,4 @@
-# clap bundle (`waddles.core.example.clap`)
+# clap bundle (`penguintechinc.waddles.clap`)
 
 `!clap <text>` -> puts a clap between each word (hello world -> hello clap world clap). Python/WASM component modeled on `bundles/python/echo`.
 

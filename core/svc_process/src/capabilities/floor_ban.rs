@@ -4,7 +4,7 @@
 //!
 //! # Why an outbox
 //!
-//! The platform service bundle (`waddles.core.service.discord`, ...) is a connector-tools bundle
+//! The platform service bundle (`penguintechinc.waddles.discord`, ...) is a connector-tools bundle
 //! that does not run on this (process) stage, and cross-stage tool calls are unsupported, so a
 //! nested `tool.invoke` can never reach Discord. Instead this stage RECORDS the verified intent in
 //! the floor-ban outbox (`reputation_floor_ban_enqueue`), and the ACTION stage
@@ -18,7 +18,7 @@
 //! input; every failure falls through to the ordinary human-actor path, which refuses a caller
 //! without `community:moderate`):
 //!
-//! * the call is `<platform>.moderation.ban` on `waddles.core.service.<platform>` with a floor
+//! * the call is `<platform>.moderation.ban` on `penguintechinc.waddles.<platform>` with a floor
 //!   reason (`community_hard_floor` / `tenant_floor`) for a platform the action stage can deliver;
 //! * the calling app is the first-party reputation SERVICE, reached as exactly the chain
 //!   `[logic, service]`, where `logic` is the tenant's active reputation-logic app;
@@ -48,7 +48,7 @@ use super::{StageCapabilities, ToolContext, REPUTATION_MODERATE_SCOPE, REPUTATIO
 /// Communities enqueued concurrently by one tenant-floor fan-out.
 const FLOOR_BAN_CONCURRENCY: usize = 4;
 /// Prefix of the platform service bundle's app id.
-const SERVICE_PREFIX: &str = "waddles.core.service.";
+const SERVICE_PREFIX: &str = "penguintechinc.waddles.";
 /// Platforms whose floor ban the ACTION stage can deliver (`svc_action::floor_ban_dispatch`
 /// serves the same set). Anything else is refused loudly up front, never queued to die.
 pub(super) const FLOOR_BAN_PLATFORMS: &[&str] = &["discord"];

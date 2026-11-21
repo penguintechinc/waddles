@@ -29,7 +29,7 @@ use svc_action::egress::{EgressGuard, EgressLimits};
 use svc_action::flags::{boxed, StaticFlag};
 use svc_action::usage::UsageBatcher;
 
-const APP_ID: &str = "waddles.telemetry.test";
+const APP_ID: &str = "penguintechinc.waddles.fixture-telemetry-test";
 const ORIGIN_CHANNEL: &str = "123456789012345678";
 const BUNDLE_CHANNEL: &str = "999999999999999999";
 

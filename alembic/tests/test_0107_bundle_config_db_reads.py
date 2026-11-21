@@ -68,7 +68,7 @@ _MIGRATION_0132 = (
 _RUST_SOURCE = REPO_ROOT / "core" / "bundle_config_db" / "src" / "lib.rs"
 _PRIOR = "0106_backfill_kv_capability"
 _ROLES = ("waddles_svc_process", "waddles_svc_action")
-APP = "waddles.core.app.calendar"
+APP = "penguintechinc.waddles.calendar"
 
 #: The statement's `$n` placeholders are bound through a server-side PREPARE.
 _PREPARE = "PREPARE bundle_cfg(bigint[], bigint[], text[]) AS "
@@ -323,7 +323,7 @@ def test_role_runs_the_reader_statement_and_nothing_else(
             8020,
             APP,
         ),  # ANOTHER tenant's community id: tenant 801's own defaults only
-        (801, 8010, "waddles.core.app.inactive"),  # not active: absent
+        (801, 8010, "penguintechinc.waddles.inactive"),  # not active: absent
     ]
     rows = {
         (r[0], r[1], r[2]): (r[3], json.loads(r[4]))

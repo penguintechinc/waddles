@@ -2,7 +2,7 @@
 
 `!bingo` -- a per-community **chat bingo**: classic 5x5 B-I-N-G-O cards (numbers 1-75), a mod
 calls numbers, the first viewer to complete a row, column or diagonal wins the round.
-First-party (`provider: builtin`, `app_id: waddles.core.example.bingo`), kv-only, WASI component.
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.bingo`), kv-only, WASI component.
 Original Waddles content.
 
 | | |

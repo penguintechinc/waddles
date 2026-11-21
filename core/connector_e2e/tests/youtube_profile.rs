@@ -261,7 +261,7 @@ async fn rig() -> Rig {
     let executor = Arc::new(Executor::new(&cfg, NoSource).unwrap());
     let digest = digest_of(WASM);
     let manifest = VerifiedManifest::new(
-        "waddles.core.service.youtube",
+        "penguintechinc.waddles.youtube",
         digest.clone(),
         WitWorld::ConnectorTools,
         HashSet::from([PERM_CONNECTOR_PII_READ.to_string()]),
@@ -280,7 +280,7 @@ async fn rig() -> Rig {
     registry
         .register(PinnedConnector::new(
             "youtube".to_owned(),
-            "waddles.core.service.youtube".to_owned(),
+            "penguintechinc.waddles.youtube".to_owned(),
             digest,
             262_144,
         ))

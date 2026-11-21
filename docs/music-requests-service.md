@@ -1,8 +1,8 @@
-# Music requests service (`waddles.core.service.music-requests`)
+# Music requests service (`penguintechinc.waddles.music-requests`)
 
 ONE song-request queue per community, owned by a `kind: service` bundle (Rust, world `stage-tools`).
-`waddles.core.example.music` (Python app) is the user-facing core: `!sr`/`!songrequest`/`!music`/`!queue`/`!songqueue`.
-`waddles.core.example.dj` (Rust app) is an OPTIONAL layer on top: it never owns a queue or the request commands;
+`penguintechinc.waddles.music` (Python app) is the user-facing core: `!sr`/`!songrequest`/`!music`/`!queue`/`!songqueue`.
+`penguintechinc.waddles.dj` (Rust app) is an OPTIONAL layer on top: it never owns a queue or the request commands;
 it reads/adds through this service's tools. Music works fully with DJ absent or off.
 
 ## Storage (db-v2 tables declared in the manifest `data.schema`; community-scoped by the host)
@@ -63,7 +63,7 @@ The actor is read ONLY from the host-injected `__ctx` (never from args).
 
 `GET /api/v1/communities/{id}/music` (community members; replica read; flag `waddles.music.queue-page` default OFF):
 `{now_playing, queue:[{title,artist,source_url,duration_ms,kind}], history:[last 5 {title,artist,source_url,duration_ms,played_at}], ai_dj:{enabled}}`
-where `ai_dj.enabled` = DJ bundle (`waddles.core.example.dj`) active for the community AND `settings.ai_dj_on = 1`.
+where `ai_dj.enabled` = DJ bundle (`penguintechinc.waddles.dj`) active for the community AND `settings.ai_dj_on = 1`.
 NO requester identity anywhere. Webui page `/community/:communityId/music`.
 
 ## Platform context

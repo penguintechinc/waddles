@@ -181,7 +181,7 @@ mod tests {
         assert_eq!(normalise_op("get_versioned"), "get_versioned");
         assert_eq!(normalise_op("../../etc/passwd"), "other");
         record_quota_rejection("increment", "key_count");
-        record_authorize_denied("waddles.bot.a", KV_PERMISSION_ID);
+        record_authorize_denied("penguintechinc.waddles.fixture-bot-a", KV_PERMISSION_ID);
         record_maxmemory_policy_violation("allkeys-lru");
     }
 }

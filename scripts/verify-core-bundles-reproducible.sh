@@ -1,18 +1,18 @@
 #!/usr/bin/env bash
 # Verifies bundles/Dockerfile.core-bundles's Rust example-bundle artifact --
-# waddles.core.example.ping (bundle-ping stage) -- is byte-reproducible: two
+# penguintechinc.waddles.ping (bundle-ping stage) -- is byte-reproducible: two
 # independent `--no-cache` builds of the FULL core-bundles image, each from a clean docker
 # build cache, must produce the exact same sha256 for ping.wasm.
 #
 # Why this exists: the core-bundle-seeder Job got a 409 digest_conflict against the alpha DB
 # because the Rust build was not reproducible -- three different sha256 digests existed for
-# the same nominal waddles.core.example.ping@1.0.0 artifact across a manual onboarding, a live
+# the same nominal penguintechinc.waddles.ping@1.0.0 artifact across a manual onboarding, a live
 # pipeline env, and a CI-built image. bundles/Dockerfile.core-bundles pins
 # SOURCE_DATE_EPOCH/CARGO_INCREMENTAL/RUSTFLAGS remap-path-prefix/codegen-units/strip in the
 # rust-bundle-base stage to close that gap (see that file's own comment block for what each
 # pin closes).
 #
-# waddles.core.example.pyping (python-bundles-builder stage, componentize-py) is INTENTIONALLY
+# penguintechinc.waddles.pyping (python-bundles-builder stage, componentize-py) is INTENTIONALLY
 # EXCLUDED from this gate -- it is NOT currently reproducible even with
 # PYTHONHASHSEED/SOURCE_DATE_EPOCH/TZ/LC_ALL pinned (suspected CPython/componentize-py
 # "wizening" heap-snapshot sensitivity to ASLR-driven memory addresses, not a hash-seed issue;
@@ -94,19 +94,19 @@ check_artifact() {
   fi
 }
 
-# Rust artifact only -- waddles.core.example.pyping is excluded, see the file-header comment
+# Rust artifact only -- penguintechinc.waddles.pyping is excluded, see the file-header comment
 # and https://github.com/penguintechinc/waddles/issues/521. Not a silent skip: the exclusion
 # is named explicitly here and the zero-denominator guard below still fails closed if this
 # ever ends up comparing nothing.
-check_artifact "waddles.core.example.ping" "/core-bundles/ping.wasm"
+check_artifact "penguintechinc.waddles.ping" "/core-bundles/ping.wasm"
 # P6b platform connectors (Rust, connector-tools world) share the ping builder's pinned toolchain
 # and reproducible-build ENV, so they are held to the same byte-identical bar.
-check_artifact "waddles.core.service.twitch" "/core-bundles/twitch.wasm"
-check_artifact "waddles.core.service.discord" "/core-bundles/discord-connector.wasm"
-check_artifact "waddles.core.service.youtube" "/core-bundles/youtube.wasm"
-check_artifact "waddles.core.service.spectrum" "/core-bundles/spectrum.wasm"
-check_artifact "waddles.core.service.wix" "/core-bundles/wix-connector.wasm"
-check_artifact "waddles.core.app.calendar" "/core-bundles/calendar.wasm"
+check_artifact "penguintechinc.waddles.twitch" "/core-bundles/twitch.wasm"
+check_artifact "penguintechinc.waddles.discord" "/core-bundles/discord-connector.wasm"
+check_artifact "penguintechinc.waddles.youtube" "/core-bundles/youtube.wasm"
+check_artifact "penguintechinc.waddles.spectrum" "/core-bundles/spectrum.wasm"
+check_artifact "penguintechinc.waddles.wix" "/core-bundles/wix-connector.wasm"
+check_artifact "penguintechinc.waddles.calendar" "/core-bundles/calendar.wasm"
 
 # critical-rules.md Verification Integrity: zero items examined is a FAILURE, not a pass --
 # a check that silently compared nothing must not report green.

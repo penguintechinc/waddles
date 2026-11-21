@@ -1,7 +1,7 @@
 # dadjoke (Python)
 
 `!dadjoke` -- a random family-friendly dad joke from a built-in pool of 14 plus the community's
-own custom jokes. First-party (`provider: builtin`, `app_id: waddles.core.example.dadjoke`),
+own custom jokes. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.dadjoke`),
 kv-only, WASI component. Built-in jokes are original to Waddles; structural twin of `joke`
 with a distinct bank.
 

@@ -22,7 +22,7 @@ async fn rig() -> (WireRig, WireTemplateBuilder) {
     let rig = WireRig::start(
         vec![RigConnector {
             platform: PLATFORM.to_string(),
-            app_id: "waddles.core.test.connector-tools".to_string(),
+            app_id: "penguintechinc.waddles.test-connector-tools".to_string(),
             wasm: TOOLS_WASM,
             world: WitWorld::ConnectorTools,
         }],

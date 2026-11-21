@@ -17,10 +17,10 @@ from services.bundle_manifest_v2 import (
 
 _BASE: dict[str, Any] = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station Song Request",
     "version": "3.0.0",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",

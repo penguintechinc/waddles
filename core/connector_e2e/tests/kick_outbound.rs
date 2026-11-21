@@ -118,7 +118,7 @@ async fn rig_with(broadcaster: Option<&str>) -> Rig {
     let wire = WireRig::start_with_permissions(
         vec![RigConnector {
             platform: "kick".into(),
-            app_id: "waddles.core.service.kick".into(),
+            app_id: "penguintechinc.waddles.kick".into(),
             wasm: WASM,
             world: WitWorld::ConnectorTools,
         }],

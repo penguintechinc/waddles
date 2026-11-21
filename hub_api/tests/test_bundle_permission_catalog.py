@@ -264,7 +264,7 @@ def test_net_http_private_ip_unaffected_outside_cluster_cidrs(cluster_cidrs: Non
 
 # --- bundle-MCP-tools P2: tool.call mirror (Rust Risk::Dangerous) ---
 
-_TOOL_TARGET = "waddles.economy.wallet.default"
+_TOOL_TARGET = "penguintechinc.waddles.wallet"
 
 
 @pytest.mark.parametrize("tool", ["get_balance", "a", "wallet.transfer_v2", "a" * 64])
@@ -286,12 +286,12 @@ def test_tool_call_is_dangerous_with_family(tool: str) -> None:
         f"tool.call:{_TOOL_TARGET}:" + "a" * 65,
         f"tool.call:{_TOOL_TARGET}:get\n",
         f"tool.call:{_TOOL_TARGET}:get:extra",
-        "tool.call:waddles.a.b:get",
-        "tool.call:waddles.a.b.c.d:get",
+        "tool.call:acmecorp.widgets:get",
+        "tool.call:acmecorp.widgets.c.d:get",
         "tool.call:other.a.b.c:get",
-        "tool.call:waddles.A.b.c:get",
-        "tool.call:waddles.a.b.c%3Ad:get",
-        "tool.call:waddles.a.b.-c:get",
+        "tool.call:acmecorp.Widgets.x:get",
+        "tool.call:acmecorp.widgets.c%3Ad:get",
+        "tool.call:acmecorp.widgets.-c:get",
     ],
 )
 def test_malformed_tool_call_is_unknown(pid: str) -> None:

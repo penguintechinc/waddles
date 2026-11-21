@@ -15,10 +15,10 @@ from tests.conftest import TENANT_SLUG, make_token
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",
@@ -31,7 +31,7 @@ _MANIFEST = {
 async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         artifact_digest="sha256:" + "a" * 64,
         language="python",
@@ -39,7 +39,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -78,7 +78,7 @@ async def test_enable_requires_tenant_admin(app: Quart) -> None:
     response = await client.post(
         f"/api/v1/apps/tenant/{TENANT_SLUG}/availability",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 403
 
@@ -89,21 +89,21 @@ async def test_enable_requires_a_current_global_install(app: Quart) -> None:
     response = await client.post(
         f"/api/v1/apps/tenant/{TENANT_SLUG}/availability",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 409
 
 
 async def test_enable_happy_path(app: Quart, install_dal: Any) -> None:
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     token = make_token(scope="tenant:admin", user_id="1")
     client = app.test_client()
     response = await client.post(
         f"/api/v1/apps/tenant/{TENANT_SLUG}/availability",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 201
     listing = await client.get(
@@ -111,7 +111,7 @@ async def test_enable_happy_path(app: Quart, install_dal: Any) -> None:
         headers={"Authorization": f"Bearer {token}"},
     )
     body = await listing.get_json()
-    assert body["bundles"][0]["appId"] == "waddles.socials.music.default"
+    assert body["bundles"][0]["appId"] == "penguintechinc.waddles.music"
     assert body["bundles"][0]["available"] is True
     assert body["bundles"][0]["version"] == "3.0.1"
 
@@ -120,7 +120,7 @@ async def test_disable_requires_tenant_admin(app: Quart) -> None:
     token = make_token(scope="")
     client = app.test_client()
     response = await client.delete(
-        f"/api/v1/apps/tenant/{TENANT_SLUG}/availability/waddles.socials.music.default",
+        f"/api/v1/apps/tenant/{TENANT_SLUG}/availability/penguintechinc.waddles.music",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 403
@@ -130,7 +130,7 @@ async def test_disable_unknown_is_404(app: Quart) -> None:
     token = make_token(scope="tenant:admin", user_id="1")
     client = app.test_client()
     response = await client.delete(
-        f"/api/v1/apps/tenant/{TENANT_SLUG}/availability/waddles.socials.music.default",
+        f"/api/v1/apps/tenant/{TENANT_SLUG}/availability/penguintechinc.waddles.music",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 404
@@ -138,17 +138,17 @@ async def test_disable_unknown_is_404(app: Quart) -> None:
 
 async def test_disable_happy_path(app: Quart, install_dal: Any) -> None:
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     token = make_token(scope="tenant:admin", user_id="1")
     client = app.test_client()
     await client.post(
         f"/api/v1/apps/tenant/{TENANT_SLUG}/availability",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     response = await client.delete(
-        f"/api/v1/apps/tenant/{TENANT_SLUG}/availability/waddles.socials.music.default",
+        f"/api/v1/apps/tenant/{TENANT_SLUG}/availability/penguintechinc.waddles.music",
         headers={"Authorization": f"Bearer {token}"},
     )
     assert response.status_code == 200
@@ -160,6 +160,6 @@ async def test_cross_tenant_slug_is_403(app: Quart) -> None:
     response = await client.post(
         "/api/v1/apps/tenant/some-other-tenant/availability",
         headers={"Authorization": f"Bearer {token}"},
-        json={"appId": "waddles.socials.music.default"},
+        json={"appId": "penguintechinc.waddles.music"},
     )
     assert response.status_code == 403

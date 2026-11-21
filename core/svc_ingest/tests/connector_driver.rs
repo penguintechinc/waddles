@@ -219,7 +219,7 @@ fn registry(max_frame_bytes: usize, limits: EventLimits) -> Arc<ConnectorRegistr
     let mut r = ConnectorRegistry::new();
     let mut pinned = PinnedConnector::new(
         PLATFORM,
-        "waddles.core.example.echo",
+        "penguintechinc.waddles.echo",
         "sha256:aa",
         max_frame_bytes,
     );

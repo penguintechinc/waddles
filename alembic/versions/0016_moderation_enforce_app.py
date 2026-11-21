@@ -24,7 +24,7 @@ _bundle`'s own action-only precedent (ported by `0014_wave1a_bundle_seeds`).
 `app_tenant_availability` INSERT (unlike music, which needed a follow-up
 `0010_music_bot_token_ref` migration because `0009` never set it) --
 reuses the same shared Discord bot connection/secret (`DISCORD_BOT_TOKEN`)
-already live for `waddles.bot.discord.default`/`waddles.social.music.
+already live for `penguintechinc.waddles.discord-pipeline`/`waddles.social.music.
 default`'s own `global`-tenant rows, since `moderation_enforce_action.py`'s
 Discord warn/timeout calls are sent by that same bot, not a per-community
 one.
@@ -49,7 +49,7 @@ down_revision = "0015_loyalty_core_tables"
 branch_labels = None
 depends_on = None
 
-APP_ID = "waddles.community.moderation.default"
+APP_ID = "penguintechinc.waddles.moderation-pipeline"
 TENANT_SLUG = "global"
 BOT_TOKEN_REF = "DISCORD_BOT_TOKEN"
 

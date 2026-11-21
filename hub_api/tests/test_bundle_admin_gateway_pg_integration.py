@@ -47,10 +47,10 @@ REPO = Path(__file__).resolve().parents[2]
 _SEQ = itertools.count(1)
 _RING = tt.parse_key_ring("k1:" + "ef" * 16, "k1")
 _USER = "0b1e2f30-0000-4000-8000-000000000001"
-APP = "waddles.socials.demo.default"
-REP = "waddles.core.service.reputation"
+APP = "penguintechinc.waddles.demo"
+REP = "penguintechinc.waddles.reputation"
 #: Service bundles the reputation manifest requests `<platform>.moderation.ban` from.
-_BAN_TARGETS = tuple(f"waddles.core.service.{p}" for p in ("twitch", "discord", "youtube"))
+_BAN_TARGETS = tuple(f"penguintechinc.waddles.{p}" for p in ("twitch", "discord", "youtube"))
 
 ADMIN = CommunityMembership(
     "admin", frozenset({"community:manage_members", "bundles.admin:admin"}), True, False
@@ -115,7 +115,7 @@ def _demo_manifest() -> dict[str, Any]:
         "app_id": APP,
         "name": "Demo",
         "version": "1.0.0",
-        "feature": "waddles.socials.demo",
+        "feature": "demo",
         "module": "socials",
         "provider": "builtin",
         "language": "python",

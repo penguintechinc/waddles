@@ -2,7 +2,7 @@
 
 `!command` -- generic, per-community custom TEXT commands and (config-only) timers. Mods define
 `!greet` with some text; viewers invoke it. First-party (`provider: builtin`,
-`app_id: waddles.core.example.command`), kv-only, WASI component.
+`app_id: penguintechinc.waddles.command`), kv-only, WASI component.
 
 | | |
 |---|---|

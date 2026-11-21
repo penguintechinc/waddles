@@ -1,7 +1,7 @@
 # love (Python)
 
 `!love <user>` / `!ship <userA> <userB>` -- a fun compatibility-% meter. Community-scoped
-fun content, first-party (`provider: builtin`, `app_id: waddles.core.example.love`). Net-new
+fun content, first-party (`provider: builtin`, `app_id: penguintechinc.waddles.love`). Net-new
 Waddles content -- not a port of, or inspired by, any external project (contrast
 `bundles/python/fish`, which credits a specific inspiration in its own `bundle.yaml`).
 
@@ -172,5 +172,5 @@ ruff check .
 
 ## Activation
 
-Registered in `bundles/core-bundles.yaml` (`waddles.core.example.love`, activation target
+Registered in `bundles/core-bundles.yaml` (`penguintechinc.waddles.love`, activation target
 `global`); the commands stay dark until `waddles.command-love` is turned on.

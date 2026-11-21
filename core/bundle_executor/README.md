@@ -84,7 +84,7 @@ Boot pinning and a SECOND dial loop to svc-ingest's connector host-API listener 
 
 | Env | Meaning |
 |---|---|
-| `CONNECTOR_PIN_DIGEST_{TWITCH,DISCORD,YOUTUBE}` | `sha256:<64hex>`; fetches `connectors/<p>/<digest>.wasm` + signed sidecar `.json`, verifies signature + digest, pins as `waddles.core.service.<p>` (`connector-tools`). Any failure aborts startup naming the platform. Empty = not pinned |
+| `CONNECTOR_PIN_DIGEST_{TWITCH,DISCORD,YOUTUBE}` | `sha256:<64hex>`; fetches `connectors/<p>/<digest>.wasm` + signed sidecar `.json`, verifies signature + digest, pins as `penguintechinc.waddles.service.<p>` (`connector-tools`). Any failure aborts startup naming the platform. Empty = not pinned |
 | `CONNECTOR_HOST_API_ADDR` | `service-dns-name:port` (IP literals refused); unset/empty = no connector dial; requires >=1 pin digest |
 | `CONNECTOR_HOST_API_IDENTITY` | listener SAN to pin (must differ from `HOST_API_STAGE_IDENTITY`) |
 | `CONNECTOR_HOST_API_CLIENT_CERT_FILE` / `_KEY_FILE` | the executor's OWN client identity, SAN = executor only; must not be the stage cert (shares `HOST_API_CA_FILE` for trust) |

@@ -40,7 +40,7 @@ _MIGRATION = (
 _RUST_SOURCE = REPO_ROOT / "core" / "bundle_config_db" / "src" / "labels.rs"
 _PRIOR = "0113_overlay_scene_components"
 _PROC, _ACT = "waddles_svc_process", "waddles_svc_action"
-APP = "waddles.core.app.ping"
+APP = "penguintechinc.waddles.ping"
 
 
 def _load() -> ModuleType:

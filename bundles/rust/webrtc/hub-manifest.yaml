@@ -2,10 +2,9 @@
 # `kind: service` is accepted only via the trusted core-bundle seeder. exported_tools is identical in
 # bundle.yaml (the seeder's agreement check fails on drift).
 schema_version: 2
-app_id: waddles.core.service.webrtc
+app_id: penguintechinc.waddles.webrtc
 name: WebRTC Service Bundle (Rust)
-version: 1.4.1
-feature: waddles.core.service
+version: 1.4.2
 module: core
 provider: builtin
 author: github:penguintechinc

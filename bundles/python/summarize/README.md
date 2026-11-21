@@ -1,4 +1,4 @@
-# summarize (`waddles.core.example.summarize`)
+# summarize (`penguintechinc.waddles.summarize`)
 
 `!summarize <text>` -> a concise summary of the supplied text. Example: `!summarize <a long paragraph>`.
 

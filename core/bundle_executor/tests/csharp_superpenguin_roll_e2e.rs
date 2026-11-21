@@ -25,7 +25,7 @@ use penguin_bundle_host::wire::{
 };
 use sha2::{Digest, Sha256};
 
-const APP_ID: &str = "waddles.integrations.superpenguin.roll";
+const APP_ID: &str = "psychoboy.penguintwitchbot.roll";
 const ACTOR_UUID: &str = "6f1c0a52-9d3e-4b7a-8c10-2e5d7f9a1b34";
 const FLAG_KEY: &str = "waddles.command-superpenguin-roll";
 
@@ -187,7 +187,7 @@ impl StageModel {
                 None => ok(serde_json::json!({ "balance": self.balance_after_wager })),
             },
             (CapabilityKind::Db, "tool.invoke")
-                if args["target"] == "waddles.core.service.media" =>
+                if args["target"] == "penguintechinc.waddles.service-media" =>
             {
                 // The media service exports no `tts_synthesize` yet: the real stage answers target_unavailable.
                 assert_eq!(args["tool"], "tts_synthesize");
@@ -197,7 +197,7 @@ impl StageModel {
                 )
             }
             (CapabilityKind::Db, "tool.invoke") => {
-                assert_eq!(args["target"], "waddles.core.service.economy");
+                assert_eq!(args["target"], "penguintechinc.waddles.economy");
                 let tool = args["tool"].as_str().unwrap();
                 assert!(matches!(
                     tool,
@@ -645,7 +645,7 @@ async fn csharp_port_matrix_executes_commands_and_replays_through_real_executor(
         let wasm = std::fs::read(path).expect("a real built component is required for EVERY port");
         assert!(wasm.len() > 1_000_000);
         let runs = run_for(
-            format!("waddles.integrations.superpenguin.{game}"),
+            format!("psychoboy.penguintwitchbot.{game}"),
             format!("waddles.command-superpenguin-{game}"),
             wasm,
             vec![
@@ -724,7 +724,7 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
 
     // bonustickets: flag-off silence, a paid claim, an identical replay that moves nothing more.
     let runs = run_for(
-        "waddles.integrations.superpenguin.bonustickets".into(),
+        "psychoboy.penguintwitchbot.bonustickets".into(),
         "waddles.command-superpenguin-bonustickets".into(),
         load("bonustickets"),
         vec![
@@ -783,7 +783,7 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
     let redemption_a = redemption.clone();
     let redemption_b = redemption.clone();
     let runs = run_for(
-        "waddles.integrations.superpenguin.channelpoints".into(),
+        "psychoboy.penguintwitchbot.channelpoints".into(),
         "waddles.command-superpenguin-channelpoints".into(),
         load("channelpoints"),
         vec![
@@ -856,7 +856,7 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
 
     // giveaway: flag-off silence, a status reply, a paid entry through the economy tool, identical replays.
     let runs = run_for(
-        "waddles.integrations.superpenguin.giveaway".into(),
+        "psychoboy.penguintwitchbot.giveaway".into(),
         "waddles.command-superpenguin-giveaway".into(),
         load("giveaway"),
         vec![
@@ -901,7 +901,7 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
 
     // wheel: define + list work on kv alone; putting the wheel on the overlay must fail loud (host overlay not implemented).
     let runs = run_for(
-        "waddles.integrations.superpenguin.wheel".into(),
+        "psychoboy.penguintwitchbot.wheel".into(),
         "waddles.command-superpenguin-wheel".into(),
         load("wheel"),
         vec![
@@ -944,7 +944,7 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
 
     // audiocommand: register + list on kv; playing a sound pushes to the overlay and must fail loud.
     let runs = run_for(
-        "waddles.integrations.superpenguin.audiocommand".into(),
+        "psychoboy.penguintwitchbot.audiocommand".into(),
         "waddles.command-superpenguin-audiocommand".into(),
         load("audiocommand"),
         vec![
@@ -982,7 +982,7 @@ async fn csharp_wave4_matrix_executes_awards_redemptions_and_fails_loud_without_
 
     // tts: voices register on kv; with no tts_synthesize tool the refusal is explicit chat text, never a fallback.
     let runs = run_for(
-        "waddles.integrations.superpenguin.tts".into(),
+        "psychoboy.penguintwitchbot.tts".into(),
         "waddles.command-superpenguin-tts".into(),
         load("tts"),
         vec![

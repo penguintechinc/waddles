@@ -1,4 +1,4 @@
-//! Reputation ACCRUAL app bundle (`waddles.core.app.reputation-accrual`).
+//! Reputation ACCRUAL app bundle (`penguintechinc.waddles.reputation-accrual`).
 //!
 //! The default reputation LOGIC bundle (`provides: reputation-logic`): it maps
 //! platform events to reputation deltas and applies them through the

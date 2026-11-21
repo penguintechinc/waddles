@@ -1,7 +1,7 @@
 # define (Python, AI-backed)
 
 `!define <term>` -- a concise, family-friendly definition of the term. First-party (`provider: builtin`,
-`app_id: waddles.core.example.define`), stateless, WASI component built against `world stage-next`
+`app_id: penguintechinc.waddles.define`), stateless, WASI component built against `world stage-next`
 (the `ai` import). Modeled on `eightball`.
 
 | | |

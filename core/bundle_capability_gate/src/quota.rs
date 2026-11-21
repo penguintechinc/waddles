@@ -281,7 +281,7 @@ mod tests {
         GrantScopeKey {
             tenant_id: 7,
             community_id: 3,
-            app_id: "waddles.core.example_echo".to_string(),
+            app_id: "penguintechinc.waddles.echo".to_string(),
             app_version: 1,
         }
     }

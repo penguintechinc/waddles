@@ -310,7 +310,7 @@ mod tests {
         };
         let out = invoke_with(
             &f,
-            "waddles.core.economy",
+            "penguintechinc.waddles.economy",
             "adjust",
             &json!({"x": 1}),
             Some("k-1".into()),
@@ -318,7 +318,7 @@ mod tests {
         .unwrap();
         assert_eq!(out, br#"{"n":2}"#);
         let seen = f.seen.lock().unwrap();
-        assert_eq!(seen[0].0, "waddles.core.economy");
+        assert_eq!(seen[0].0, "penguintechinc.waddles.economy");
         assert_eq!(seen[0].1, "adjust");
         assert_eq!(
             serde_json::from_slice::<Value>(&seen[0].2).unwrap(),

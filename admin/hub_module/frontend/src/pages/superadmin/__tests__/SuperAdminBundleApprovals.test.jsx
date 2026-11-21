@@ -25,7 +25,7 @@ vi.mock('../../../services/api', () => ({
 
 const ONE_ROW = {
   versionId: 7,
-  appId: 'waddles.integrations.vendor-42.mybundle',
+  appId: 'acme.widgets.mybundle',
   version: '1.0.0',
   status: 'PUBLISHED',
   requestedBy: 42,
@@ -57,7 +57,7 @@ describe('SuperAdminBundleApprovals', () => {
     render(<SuperAdminBundleApprovals />);
 
     expect(await screen.findAllByTestId('bundle-approvals-row')).toHaveLength(1);
-    expect(screen.getByText('waddles.integrations.vendor-42.mybundle')).toBeInTheDocument();
+    expect(screen.getByText('acme.widgets.mybundle')).toBeInTheDocument();
     expect(bundleAdminApi.listPendingVersions).toHaveBeenCalledWith({
       status: 'pending',
       page: 1,
@@ -147,7 +147,7 @@ describe('SuperAdminBundleApprovals', () => {
     });
 
     expect(bundleApi.getPermissions).toHaveBeenCalledWith(
-      'waddles.integrations.vendor-42.mybundle',
+      'acme.widgets.mybundle',
       '1.0.0',
     );
     expect(await screen.findByTestId('bundle-approvals-summary')).toHaveTextContent('egress');
@@ -174,7 +174,7 @@ describe('SuperAdminBundleApprovals', () => {
     });
 
     expect(bundleApi.approveVersion).toHaveBeenCalledWith(
-      'waddles.integrations.vendor-42.mybundle',
+      'acme.widgets.mybundle',
       '1.0.0',
       { permissionHash: 'sha256:abc' },
     );
@@ -212,7 +212,7 @@ describe('SuperAdminBundleApprovals', () => {
     });
 
     expect(bundleApi.denyVersion).toHaveBeenCalledWith(
-      'waddles.integrations.vendor-42.mybundle',
+      'acme.widgets.mybundle',
       '1.0.0',
       { reason: 'manifest declares unreviewed egress host' },
     );
@@ -284,7 +284,7 @@ describe('SuperAdminBundleApprovals', () => {
       });
 
       expect(bundleApi.approvePermissions).toHaveBeenCalledWith(
-        'waddles.integrations.vendor-42.mybundle',
+        'acme.widgets.mybundle',
         '1.0.0',
         ['platform.table.write:community_members.role'],
       );
@@ -325,7 +325,7 @@ describe('SuperAdminBundleApprovals', () => {
         fireEvent.click(install);
       });
       expect(bundleApi.approvePermissions).toHaveBeenCalledWith(
-        'waddles.integrations.vendor-42.mybundle',
+        'acme.widgets.mybundle',
         '1.0.0',
         ['storage.read:waddles.harness.media'],
       );

@@ -3,7 +3,7 @@
 C# port of the SuperPenguinTV fishing game from
 [Psychoboy/PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot) `Bot/Commands/Fishing/*`
 (MIT, used with permission; notice verbatim in `bundle.yaml`). Author `github/psychoboy`, collection `superpenguintv`,
-category `alternatives`. App id `waddles.integrations.superpenguin.fishing`. The app owns every game rule; the only
+category `alternatives`. App id `psychoboy.penguintwitchbot.fishing`. The app owns every game rule; the only
 service it calls is the economy service's `adjust_balance` (tournament point rewards).
 
 ## Why one bundle, not three
@@ -85,7 +85,7 @@ Deviations (all deliberate):
 ## Overlay (opt-in, default OFF)
 
 Flag `waddles.superpenguin-fishing-overlay` (default OFF) turns the alert on. When on, every fresh cast registers (once a day) and
-pushes one declarative `alert_box` widget `waddles.integrations.superpenguin.fishing.catch` through the `overlay` import (permission
+pushes one declarative `alert_box` widget `psychoboy.penguintwitchbot.fishing.catch` through the `overlay` import (permission
 `overlay.media`): title = fish or accident, body = stars/weight/gold, `alert.user` = tokenized user uuid (never a name),
 `alert.amount` = gold. Use the "Fishing catch" palette widget or the community's `alert_box` browser-source URL
 (`/overlay/<community>/alert_box`) in OBS.

@@ -38,7 +38,7 @@ All write tools carry stable retry keys, and missing grants fail loudly.
 ## Wave 3: utility and engagement ports
 
 All ten are `stage-next-tools` C# apps scaffolded by `scripts/superpenguin-scaffold/` (host adapter and export shims are the
-`superpenguin-first` boilerplate; manifests and READMEs come from `gen_manifests.py`). Role-gated commands read the host-stamped
+`superpenguin-first` boilerplate; manifests and READMEs come from `gen_penguintwitchbot_manifests.py`). Role-gated commands read the host-stamped
 `is_mod` / `is_broadcaster` payload booleans and fail CLOSED when absent. Full per-bundle deviations are in each bundle's README and
 logic docstring.
 

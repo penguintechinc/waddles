@@ -389,7 +389,7 @@ const MAX_APPLIED_TRACKED: usize = 1024;
 
 /// First-party (core) bundle app ids.
 pub(crate) fn is_first_party(app_id: &str) -> bool {
-    app_id.starts_with("waddles.core.")
+    app_id.starts_with("penguintechinc.waddles.")
 }
 
 /// The ALLOWLIST of event types that are genuinely system-originated (no human
@@ -1982,8 +1982,8 @@ mod system_event_tests {
         let base = InvocationIdentity::new("twitch", Some("1".into()), vec![])
             .with_event_id("e")
             .with_system_originated(true);
-        let core = "waddles.core.app.reputation-accrual";
-        let svc = "waddles.core.service.reputation";
+        let core = "penguintechinc.waddles.reputation-accrual";
+        let svc = "penguintechinc.waddles.reputation";
         assert!(base
             .for_tool_call(Some("k".into()), core, svc)
             .is_system_originated());

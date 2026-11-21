@@ -47,7 +47,7 @@ use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const WASM: &[u8] = include_bytes!("fixtures/spectrum_connector.wasm");
-const APP: &str = "waddles.core.service.spectrum";
+const APP: &str = "penguintechinc.waddles.spectrum";
 const COMMUNITY: &str = "555";
 const OTHER_COMMUNITY: &str = "556";
 

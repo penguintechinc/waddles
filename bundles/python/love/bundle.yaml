@@ -1,11 +1,10 @@
 schema_version: 2
-app_id: waddles.core.example.love
+app_id: penguintechinc.waddles.love
 name: Love/Ship Compatibility Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !love <user> (pair caller+target)/!love list/
 # !ship <userA> <userB>. See src/app.py's own module docstring for full scope.
 # 1.0.3: activation-gated only -- removed the in-bundle waddles.command-love feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.7
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

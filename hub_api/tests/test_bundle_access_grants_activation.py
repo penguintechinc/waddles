@@ -19,10 +19,10 @@ from tests.conftest import make_user_token, make_user_token_with_roles
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",
@@ -37,7 +37,7 @@ _MANIFEST = {
         }
     ],
 }
-_APP = "waddles.socials.music.default"
+_APP = "penguintechinc.waddles.music"
 _IDS = [
     "platform.table.read:community_members.role",
     "platform.table.write:community_members.role",
@@ -91,7 +91,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
 
     now = datetime.now(UTC)
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         artifact_digest="sha256:" + "a" * 64,
         language="python",
@@ -99,7 +99,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         scan_status="scanned",
     )
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -111,7 +111,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         updated_at=now,
     )
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     manifest = await perm_svc.manifest_for_version(install_dal, app_id=_APP, version="3.0.1")
     await perm_svc.record_permission_requests(
@@ -123,7 +123,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
         approved_permissions=frozenset(_IDS),
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.music", updated_by=1
     )
 
     quart_app = Quart(__name__)

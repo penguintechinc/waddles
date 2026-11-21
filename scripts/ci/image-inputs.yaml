@@ -125,6 +125,7 @@ images:
     groups: [ctx-root]
     inputs:
       - core/bundle_executor/**
+      - core/bundle_capability_gate/**
       - core/platform_keys/**
       - wit/**
 
@@ -275,6 +276,8 @@ ignore:
   - .claude/**
   - "**/*.md"
   - LICENSE
+  # Cross-language golden vectors: read only by `cargo test` / pytest, never COPYed into an image.
+  - testdata/**
   - CONTRIBUTORS
   - .FUTURE
   - .version

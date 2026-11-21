@@ -30,7 +30,7 @@
 
 ## Review Focus
 
-1. **Malicious repo:** traversal/symlink-escape/zip-bomb/huge-file/deep-path/manifest claiming `waddles.core.*` or another source's prefix; hostile `bundle.yaml`; dependency manifests naming denylisted packages. Reviewer confirms each is a hard reject with a logged reason and a test.
+1. **Malicious repo:** traversal/symlink-escape/zip-bomb/huge-file/deep-path/manifest claiming `penguintechinc.*` or another source's prefix; hostile `bundle.yaml`; dependency manifests naming denylisted packages. Reviewer confirms each is a hard reject with a logged reason and a test.
 2. **DNS rebind / SSRF:** pre-check passes then host resolves internal; clone must be impossible except through the egress-proxy allowlist (network policy denies direct git egress from hub). Reviewer verifies the policy, not just the Python check.
 3. **Namespace shadowing:** `core.*` valid iff `source.is_builtin`; externals forced to `waddles.integrations.src-{short}.{app}`; cross-source collision impossible; SYSTEM install asserts `is_builtin`; seeder-only permission grants stay builtin-only.
 4. **Oversized/hostile build:** sandbox caps (CPU/mem/ephemeral-storage, `activeDeadlineSeconds`, source+output size, single componentized `.wasm`), unvendored deps fail loud, no egress.

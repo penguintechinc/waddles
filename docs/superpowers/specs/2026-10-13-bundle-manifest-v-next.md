@@ -42,11 +42,11 @@ Annotated `bundle.yaml` (build manifest). The same three fields appear in `hub-m
 
 ```yaml
 schema_version: 3            # BUMPED 2 → 3 (locked): v3 = REQUIRED kind + network, optional requires
-app_id: waddles.core.connector.discord
+app_id: penguintechinc.waddles.discord
 name: Discord Connector
 version: 1.0.0
 kind: service                # NEW. app | service. REQUIRED. (§7)
-feature: waddles.core.connector
+feature: penguintechinc.waddles
 module: core
 provider: builtin
 language: rust
@@ -66,7 +66,7 @@ network:                     # NEW. REQUIRED on EVERY bundle (app + service). Ha
     # [] = no inbound; block missing = validation ERROR
 
 requires:                    # NEW. optional. APP bundles only (kind: app). (§5)
-  - bundle: waddles.core.connector.discord   # a service bundle
+  - bundle: penguintechinc.waddles.discord   # a service bundle
     min_version: 1.2.0       #   SemVer 2.0.0, optional
 
 permissions:                 # existing — structured catalog entries
@@ -262,7 +262,7 @@ The network filter is **not Waddles-specific**. It is extracted to the penguin-l
 
 ### 5.2 Target (locked)
 
-- `requires: [{bundle: <app_id>, min_version?: <SemVer>}]` — a **list of service-bundle dependencies, each with an OPTIONAL minimum version**. **App bundles only** (`kind: app`); a `kind: service` manifest declaring `requires` is refused (`requires_not_allowed_for_service`). `bundle` is a full `app_id` (`waddles.<module>.<feature>.<name>`); `min_version` is SemVer 2.0.0, optional (absent = any active version).
+- `requires: [{bundle: <app_id>, min_version?: <SemVer>}]` — a **list of service-bundle dependencies, each with an OPTIONAL minimum version**. **App bundles only** (`kind: app`); a `kind: service` manifest declaring `requires` is refused (`requires_not_allowed_for_service`). `bundle` is a full `app_id` (`<github-org>.<repo>.<bundle-name>`); `min_version` is SemVer 2.0.0, optional (absent = any active version).
 - **Enforced at activation time** (the moment a bundle would start running for a tenant/community), not install time — availability/install of an app whose service is missing is allowed; *activation* is refused.
 - **Satisfaction rule:** a dependency on service `S` is satisfied for a dependent activating in `(tenant T, community C)` iff `app_active_versions` has a row `(S, T, community_id ∈ {C, 0})` whose version ≥ `min_version`. I.e. **tenant-wide (`community_id = 0`) satisfies community-level deps via `max(scope, tenant)`** (consistent with the tier cascade, `critical-rules.md`). Corollary: a **tenant-wide dependent** (`community_id = 0`) requires the service active **tenant-wide** — a community-scoped service activation does not satisfy a tenant-wide app.
 - **Missing or below-min ⇒ activation BLOCKED: HTTP 422, code `requires_unsatisfied`**, body lists each unmet `{bundle, min_version, found_version|null}`; audited like `routes_to` refusals.

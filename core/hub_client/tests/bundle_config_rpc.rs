@@ -25,7 +25,7 @@ use service_auth::MachineJwtClient;
 use tonic::{Request, Response, Status};
 
 const TOKEN: &str = "machine-jwt-for-bundle-config";
-const APP: &str = "waddles.core.app.calendar";
+const APP: &str = "penguintechinc.waddles.calendar";
 
 /// (version, merged config json) per `(tenant, community, app)` -- the hub's stored truth.
 type Store = Arc<Mutex<HashMap<(i64, i64, String), (i64, String)>>>;

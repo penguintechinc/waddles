@@ -1,5 +1,5 @@
 //! Generic bundle -> presentation path: a bundle publishes structured state to
-//! a contract-declared *surface* (`waddles.core.example.music.now_playing`, `live.channels`, ...);
+//! a contract-declared *surface* (`penguintechinc.waddles.music.now_playing`, `live.channels`, ...);
 //! svc-presentation validates it, caches the last state for replay-on-connect,
 //! and fans it out to subscribed overlays and viewers.
 //!
@@ -277,8 +277,8 @@ mod tests {
     fn embedded_contract_loads_and_declares_the_required_surfaces() {
         let s = svc();
         for id in [
-            "waddles.core.example.music.now_playing",
-            "waddles.core.example.music.queue",
+            "penguintechinc.waddles.music.now_playing",
+            "penguintechinc.waddles.music.queue",
             "live.channels",
             "clip.alert",
             "alert",
@@ -287,7 +287,7 @@ mod tests {
         }
         assert!(s
             .contract
-            .get("waddles.core.example.music.queue")
+            .get("penguintechinc.waddles.music.queue")
             .unwrap()
             .replay());
         assert!(!s.contract.get("clip.alert").unwrap().replay());
@@ -310,19 +310,19 @@ mod tests {
         let f = s
             .process(
                 7,
-                "waddles.core.example.music.now_playing",
+                "penguintechinc.waddles.music.now_playing",
                 body.as_bytes(),
                 Instant::now(),
             )
             .unwrap();
-        assert_eq!(f.surface, "waddles.core.example.music.now_playing");
+        assert_eq!(f.surface, "penguintechinc.waddles.music.now_playing");
         assert!(s
             .hub
-            .replay_for(7, "waddles.core.example.music.now_playing")
+            .replay_for(7, "penguintechinc.waddles.music.now_playing")
             .is_some());
         assert!(s
             .hub
-            .replay_for(8, "waddles.core.example.music.now_playing")
+            .replay_for(8, "penguintechinc.waddles.music.now_playing")
             .is_none());
     }
 
@@ -331,15 +331,15 @@ mod tests {
         let s = svc();
         for (surface, bad) in [
             (
-                "waddles.core.example.music.now_playing",
+                "penguintechinc.waddles.music.now_playing",
                 json!({"now_playing": null}),
             ),
             (
-                "waddles.core.example.music.now_playing",
+                "penguintechinc.waddles.music.now_playing",
                 json!({"now_playing": null, "updated_ms": 1, "html": "<b>"}),
             ),
             (
-                "waddles.core.example.music.queue",
+                "penguintechinc.waddles.music.queue",
                 json!({"queue": "x", "updated_ms": 1}),
             ),
             (
@@ -377,7 +377,7 @@ mod tests {
         assert!(matches!(
             s.process(
                 1,
-                "waddles.core.example.music.queue",
+                "penguintechinc.waddles.music.queue",
                 body.as_bytes(),
                 Instant::now()
             ),
@@ -392,7 +392,7 @@ mod tests {
         assert!(matches!(
             s.process(
                 1,
-                "waddles.core.example.music.now_playing",
+                "penguintechinc.waddles.music.now_playing",
                 &big,
                 Instant::now()
             ),

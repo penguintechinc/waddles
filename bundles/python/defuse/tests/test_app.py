@@ -38,7 +38,7 @@ GUARD = StageGuard()
 
 async def _transform_in_context(event: PlatformEvent) -> PlatformEvent | None:
     """The real `transform` entry point, inside the bundle context the host binds around it."""
-    with bundle_context(tenant="t", community=COMMUNITY, app_id="waddles.core.example.defuse"):
+    with bundle_context(tenant="t", community=COMMUNITY, app_id="penguintechinc.waddles.defuse"):
         return await app.transform(event)
 
 
@@ -137,7 +137,7 @@ def _envelope(command: str, **payload: Any) -> StageEnvelope:
     return StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.defuse",
+        app_id="penguintechinc.waddles.defuse",
         stage="action",
         event=PlatformEvent(
             platform="twitch",
@@ -391,7 +391,7 @@ def _envelope_as(actor: str | None, command: str, **payload: Any) -> StageEnvelo
     return StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.defuse",
+        app_id="penguintechinc.waddles.defuse",
         stage="action",
         event=PlatformEvent(
             platform="twitch",
@@ -888,7 +888,7 @@ def _action_envelope(event: PlatformEvent) -> StageEnvelope:
     return StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.defuse",
+        app_id="penguintechinc.waddles.defuse",
         stage="action",
         event=event,
         ts="2026-10-05T00:00:00.000Z",

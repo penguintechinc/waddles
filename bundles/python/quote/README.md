@@ -1,7 +1,7 @@
 # quote (Python)
 
 `!quote` -- a per-community quote book. DB-backed, first-party (`provider: builtin`,
-`app_id: waddles.core.example.quote`, `author: PenguinTech/waddles`, Apache-2.0), **original
+`app_id: penguintechinc.waddles.quote`, `author: PenguinTech/waddles`, Apache-2.0), **original
 Waddles content**: a strangler extraction of the `!quote` command from the legacy
 `core/svc_process/bundles/social_quote_process.py` monolith module -- not a third-party port, so
 no upstream attribution applies. Ported off the retired `create_dal()` facade onto the structured

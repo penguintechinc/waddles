@@ -88,21 +88,21 @@ class TestBundleContext:
 
     def test_inside_block_returns_bound_values(self, bundle_runtime: Any) -> None:
         with bundle_runtime.bundle_context(
-            tenant="acme-corp", community="42", app_id="waddles.bot.demo.default"
+            tenant="acme-corp", community="42", app_id="penguintechinc.waddles.demo"
         ) as ctx:
             assert ctx.tenant == "acme-corp"
             assert ctx.community == "42"
-            assert ctx.app_id == "waddles.bot.demo.default"
+            assert ctx.app_id == "penguintechinc.waddles.demo"
             fetched = bundle_runtime.get_bundle_context()
             assert fetched.tenant == "acme-corp"
             assert fetched.community == "42"
-            assert fetched.app_id == "waddles.bot.demo.default"
+            assert fetched.app_id == "penguintechinc.waddles.demo"
 
     def test_tenant_wide_activation_allows_none_community(
         self, bundle_runtime: Any
     ) -> None:
         with bundle_runtime.bundle_context(
-            tenant="acme-corp", community=None, app_id="waddles.bot.demo.default"
+            tenant="acme-corp", community=None, app_id="penguintechinc.waddles.demo"
         ):
             assert bundle_runtime.get_bundle_context().community is None
 

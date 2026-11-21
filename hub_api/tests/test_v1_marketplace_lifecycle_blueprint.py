@@ -50,8 +50,8 @@ from tests.conftest import (
     role_kind_fields,
 )
 
-APP_ID_A = "waddles.bot.shoutout.custom-a"
-APP_ID_B = "waddles.bot.shoutout.custom-b"
+APP_ID_A = "acme.widgets.custom-a"
+APP_ID_B = "acme.widgets.custom-b"
 
 
 def _manifest(

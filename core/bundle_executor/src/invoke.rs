@@ -4137,7 +4137,7 @@ mod tests {
         use super::*;
         use crate::signing::signing_payload;
 
-        const APP_ID: &str = "waddles.test.signed-app";
+        const APP_ID: &str = "penguintechinc.waddles.fixture-test-signed-app";
         const VERSION: &str = "1";
         const APPROVAL_ID: i64 = 7;
 
@@ -5238,7 +5238,7 @@ mod tests {
         use crate::metrics::test_support::Harness;
         use crate::signing::signing_payload;
 
-        const APP_ID: &str = "waddles.test.aot-app";
+        const APP_ID: &str = "penguintechinc.waddles.fixture-test-aot-app";
         const VERSION: &str = "1";
         const KEY_ID: &str = "k1";
         const V2_WASM: &[u8] = include_bytes!("../tests/fixtures/stage_v2_fixture.wasm");

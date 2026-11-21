@@ -47,7 +47,7 @@ use crate::connector_runtime::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 /// Platform slug.
 pub const PLATFORM: &str = "kick";
 /// Connector bundle `app_id` (host constant).
-pub const APP_ID: &str = "waddles.core.service.kick";
+pub const APP_ID: &str = "penguintechinc.waddles.kick";
 /// Provider name as hub-api's binding list knows it.
 pub const PROVIDER: &str = "kick";
 /// Capability the binding list is scoped to.

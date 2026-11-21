@@ -187,7 +187,7 @@ class TestDispatch:
         envelope = StageEnvelope(
             tenant=TENANT_ID,
             community=COMMUNITY_ID,
-            app_id="waddles.core.example.chat",
+            app_id="penguintechinc.waddles.chat",
             stage="action",
             event=PlatformEvent(
                 platform="discord",
@@ -212,7 +212,7 @@ class TestDispatch:
         envelope = StageEnvelope(
             tenant=TENANT_ID,
             community=COMMUNITY_ID,
-            app_id="waddles.core.example.chat",
+            app_id="penguintechinc.waddles.chat",
             stage="action",
             event=PlatformEvent(
                 platform="discord",
@@ -230,7 +230,7 @@ class TestDispatch:
         envelope = StageEnvelope(
             tenant=TENANT_ID,
             community=COMMUNITY_ID,
-            app_id="waddles.core.example.chat",
+            app_id="penguintechinc.waddles.chat",
             stage="action",
             event=PlatformEvent(
                 platform="discord",
@@ -291,7 +291,7 @@ class TestRegressionsAndFailLoud:
             envelope = StageEnvelope(
                 tenant=TENANT_ID,
                 community=COMMUNITY_ID,
-                app_id="waddles.core.example.chat",
+                app_id="penguintechinc.waddles.chat",
                 stage="action",
                 event=out,
                 ts="2026-01-01T00:00:00+00:00",
@@ -309,7 +309,7 @@ class TestRegressionsAndFailLoud:
         envelope = StageEnvelope(
             tenant=TENANT_ID,
             community=COMMUNITY_ID,
-            app_id="waddles.core.example.chat",
+            app_id="penguintechinc.waddles.chat",
             stage="action",
             event=PlatformEvent(
                 platform="discord",

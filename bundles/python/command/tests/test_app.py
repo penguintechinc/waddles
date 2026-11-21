@@ -62,7 +62,7 @@ def _envelope(
     return StageEnvelope(
         tenant=tenant,
         community=community,
-        app_id="waddles.core.example.command",
+        app_id="penguintechinc.waddles.command",
         stage="action",
         event=event,
         ts="2026-10-05T00:00:00.000Z",
@@ -115,7 +115,7 @@ def fake_host(monkeypatch: pytest.MonkeyPatch):
 
 def _ctx(community: str | None):
     return bundle_context(
-        tenant="tenant-1", community=community, app_id="waddles.core.example.command"
+        tenant="tenant-1", community=community, app_id="penguintechinc.waddles.command"
     )
 
 

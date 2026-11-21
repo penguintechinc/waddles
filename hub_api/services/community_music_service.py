@@ -1,4 +1,4 @@
-"""Read model for the community music queue page (`waddles.core.service.music-requests`).
+"""Read model for the community music queue page (`penguintechinc.waddles.music-requests`).
 
 The music-requests service bundle owns three db-v2 tables per community
 (`requests`, `history`, `settings` -- see `docs/music-requests-service.md`).
@@ -27,9 +27,9 @@ from services.bundle_install_dal import raw_sql_rows
 logger = logging.getLogger(__name__)
 
 #: The music-requests service bundle whose tables are read here.
-MUSIC_REQUESTS_APP_ID = "waddles.core.service.music-requests"
+MUSIC_REQUESTS_APP_ID = "penguintechinc.waddles.music-requests"
 #: The OPTIONAL AI DJ app layered on top of the music queue.
-DJ_APP_ID = "waddles.core.example.dj"
+DJ_APP_ID = "penguintechinc.waddles.dj"
 #: Physical-table provider passed to `derive_v2_table_identity`.
 _PROVIDER = "builtin"
 

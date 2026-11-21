@@ -1,7 +1,7 @@
 # discord (Python)
 
 `!discord` -- a per-community Discord invite link. Anyone can read it; moderators set/clear it.
-First-party (`provider: builtin`, `app_id: waddles.core.example.discord`), kv-only, WASI component.
+First-party (`provider: builtin`, `app_id: penguintechinc.waddles.discord-invite`), kv-only, WASI component.
 
 | | |
 |---|---|

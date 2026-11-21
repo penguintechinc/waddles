@@ -1,7 +1,7 @@
 {
   "_comment": "Contract fixture for the economy service tool transfer_from (branch feature/economy-transfer-from). Steal codes to this; the C# SDK pins the same wire shape in sdk/waddle-sdk-cs/tests/EconomyServiceClientTests.cs. When the economy service exports the tool, scripts/ci/tests/test_superpenguin_service_boundaries.py checks it against this file.",
   "tool": "transfer_from",
-  "target_app_id": "waddles.core.service.economy",
+  "target_app_id": "penguintechinc.waddles.economy",
   "access": "write",
   "risk": "dangerous",
   "args": {

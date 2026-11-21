@@ -26,9 +26,9 @@ use super::*;
 use crate::capabilities::CapabilityHandler;
 use crate::usage::UsageBatcher;
 
-const APP: &str = "waddles.test.app.caller";
-const SVC: &str = "waddles.core.economy.svc";
-const SVC2: &str = "waddles.core.other.svc";
+const APP: &str = "penguintechinc.waddles.fixture-test-app-caller";
+const SVC: &str = "penguintechinc.waddles.economy-svc";
+const SVC2: &str = "penguintechinc.waddles.other-svc";
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
@@ -104,7 +104,7 @@ fn gate(grants: &[(&str, i64, &str, &str)]) -> Arc<CapabilityGate> {
     // The Discord SERVICE bundle itself holds `moderation.discord` (its manifest permission):
     // host-executed role/event ops require it of the service, not just `tool.call` of the caller.
     by_scope
-        .entry(("waddles.core.service.discord".to_string(), 44))
+        .entry(("penguintechinc.waddles.discord".to_string(), 44))
         .or_default()
         .insert(
             "moderation.discord".to_string(),
@@ -564,7 +564,12 @@ async fn e_depth_three_is_refused_and_depth_two_runs() {
         true,
     )
     .await;
-    let deep = scope_for(APP, APP_VERSION, &["waddles.x.y.z", SVC2, APP], None);
+    let deep = scope_for(
+        APP,
+        APP_VERSION,
+        &["penguintechinc.waddles.fixture-x-y-z", SVC2, APP],
+        None,
+    );
     assert_eq!(
         run(&w, &deep, tool_call(SVC, "get_balance", None))
             .await

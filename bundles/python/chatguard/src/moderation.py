@@ -54,9 +54,9 @@ MOD_COMMANDS: Final = frozenset(
 PLATFORMS: Final = ("twitch", "discord", "youtube", "kick")
 DEFAULT_ALL_PLATFORMS: Final = ("twitch", "discord", "youtube")
 
-TWITCH: Final = "waddles.core.service.twitch"
-DISCORD: Final = "waddles.core.service.discord"
-YOUTUBE: Final = "waddles.core.service.youtube"
+TWITCH: Final = "penguintechinc.waddles.twitch"
+DISCORD: Final = "penguintechinc.waddles.discord"
+YOUTUBE: Final = "penguintechinc.waddles.youtube"
 
 MAX_REASON_CHARS: Final = 200
 MAX_LINE_CHARS: Final = 600

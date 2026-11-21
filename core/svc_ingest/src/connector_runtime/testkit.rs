@@ -136,7 +136,7 @@ impl ConnectorProfile for TestProfile {
         "twitch"
     }
     fn app_id(&self) -> &'static str {
-        "waddles.core.service.twitch"
+        "penguintechinc.waddles.twitch"
     }
     fn provider(&self) -> &'static str {
         "twitchprov"

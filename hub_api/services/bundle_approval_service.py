@@ -13,7 +13,7 @@ older `AppManifest` pipeline (`app_catalog` -> `app_tenant_availability`
      `uninstall_globally()`, THIS module): approve a version into the
      platform catalog (`app_global_installs`, migration 0027). Vendor
      bundles require a human `platform:admin`; first-party
-     `waddles.core.*` bundles use `install_source="system:core-seeder"`
+     `penguintechinc.waddles.*` bundles use `install_source="system:core-seeder"`
      with `installed_by=None` (`hub_api/cli/seed_core_bundles.py`, same
      SYSTEM-actor convention `app_install_approvals.approval_source`,
      migration 0026, already established). NO tenant/community
@@ -223,7 +223,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         app_id=raw["app_id"],
         name=raw["name"],
         version=raw["version"],
-        feature=raw["feature"],
+        feature=raw.get("feature") or raw["app_id"].rsplit(".", 1)[0],
         module=raw["module"],
         provider=raw["provider"],
         language=raw["language"],
@@ -776,7 +776,7 @@ async def install_version_globally(
     (`platform:admin`) for a human-gated vendor install, or through
     `hub_api/cli/seed_core_bundles.py` (`install_source=
     "system:core-seeder"`, `installed_by=None`) for a first-party
-    `waddles.core.*` bundle at deploy time -- no vendor-scoped code path
+    `penguintechinc.waddles.*` bundle at deploy time -- no vendor-scoped code path
     calls this with a SYSTEM `install_source` (guarded in the seeder
     itself, `services.vendor_bundle_authz.CORE_NAMESPACE_PREFIX`).
 
@@ -1018,7 +1018,7 @@ async def _write_approval_and_activate(
 
     `approved_by=None` + `approval_source="system:core-seeder"` is the
     SYSTEM-actor representation `hub_api/cli/seed_core_bundles.py` uses
-    to activate a first-party `waddles.core.*` bundle with no human
+    to activate a first-party `penguintechinc.waddles.*` bundle with no human
     global-admin approval -- `approved_by` is a NULLABLE FK (migration
     0023), so this is a real NULL, never a fake `hub_users` row.
     `approval_source` (migration 0026) defaults to `"human"`, matching
@@ -1831,7 +1831,7 @@ async def deactivate_tenant_wide(
 
     Never wired to any HTTP route (no community-admin or tenant-admin surface can reach this --
     same restriction `activate_tenant_wide()`'s own docstring states) -- today's only caller is
-    `hub_api/cli/seed_core_bundles.py`'s reconcile sweep, uninstalling a `waddles.core.*` bundle
+    `hub_api/cli/seed_core_bundles.py`'s reconcile sweep, uninstalling a core bundle
     dropped from `bundles/core-bundles.yaml`.
     """
     active_table = install_dal.metadata.tables["app_active_versions"]

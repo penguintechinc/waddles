@@ -1,7 +1,7 @@
 # poke (Python)
 
 `!poke [@user]` -- a lighthearted flavor-text reply: the caller pokes someone to get their attention. First-party
-(`provider: builtin`, `app_id: waddles.core.example.poke`), stateless relay, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.poke`), stateless relay, WASI component.
 
 | | |
 |---|---|
