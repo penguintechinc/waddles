@@ -76,7 +76,7 @@ data:
   # DSAR inbox tunables (non-secret). Secrets (DSAR_FINGERPRINT_KEY, captcha secret/HMAC key) come from the Secret.
   DSAR_UNVERIFIED_EXPIRY_HOURS: {{ .Values.config.dsarUnverifiedExpiryHours | default 72 | quote }}
   DSAR_CONTACT_RETENTION_DAYS: {{ .Values.config.dsarContactRetentionDays | default 30 | quote }}
-  DSAR_CAPTCHA_PROVIDER: {{ .Values.config.dsarCaptchaProvider | default "" | quote }}
+  DSAR_CAPTCHA_PROVIDER: {{ .Values.config.dsarCaptchaProvider | default "altcha" | quote }}
   DSAR_CAPTCHA_SITE_KEY: {{ .Values.config.dsarCaptchaSiteKey | default "" | quote }}
   # Provider-reported hostnames accepted for turnstile/recaptcha (comma list). Blank => host of DSAR_VERIFY_URL_BASE; none resolvable => captcha fails closed (503).
   DSAR_CAPTCHA_HOSTNAMES: {{ .Values.config.dsarCaptchaHostnames | default "" | quote }}
