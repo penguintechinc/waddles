@@ -358,6 +358,19 @@ async def authorize_reputation_admin(
     )
 
 
+async def authorize_floor_ban_lift(
+    async_dal: Any, dal: Any, request: Any, *, community_id: int, ctx: TenantContext
+) -> None:
+    """404 unless the community is in the caller's tenant (after the tenant-admin guard passed).
+
+    A floor ban is tenant-wide (it denies in every community of the tenant), so lifting it is a
+    tenant-level act: the route sits behind `tenant_admin_guard` (a community admin, however
+    privileged in one community, cannot reverse it); this only resolves the URL's community.
+    """
+    _ensure_tables(dal)
+    await _require_community(async_dal, dal, community_id=community_id, ctx=ctx)
+
+
 async def adjust_reputation(
     async_dal: Any,
     dal: Any,

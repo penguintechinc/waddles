@@ -8,6 +8,8 @@ hub-api holds no DELETE/UPDATE on the table. Per `(tenant, platform, subject tok
 * deletes refused rows (status 6 -- the floor was never breached, nothing was ever enforced);
 * pseudonymises done rows (status 2 -- a sender-confirmed ban): `user_uuid` is replaced by a one-way
   derivative of the keyed suppression code, so the row no longer names the person; never deleted;
+* pseudonymises lifted rows (status 8 -- a reversed ban) with a random pseudonym: no suppression
+  code is needed, so a lifted ban never blocks an erasure;
 * leaves pending rows (1/3/4/5/7) untouched -- erasure never cancels an unsent ban.
 
 `ban_suppression.collect_active_restrictions` has already turned every done/pending row into an
