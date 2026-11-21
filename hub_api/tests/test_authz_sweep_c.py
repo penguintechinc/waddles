@@ -42,7 +42,11 @@ from services import guild_pairing as pairing_svc
 from services.community_common import ensure_community_tables
 from services.event_calendar_proxy import ProxyResult
 from services.global_identity import ensure_tables as ensure_global_tables
-from services.schema import bind_calendar_sync_tables, bind_support_token_tables
+from services.schema import (
+    bind_calendar_child_tables,
+    bind_calendar_sync_tables,
+    bind_support_token_tables,
+)
 from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import make_user_token, seed_membership
 from tests.route_guard_walker import guard_kind, iter_routes, required_scopes
@@ -53,6 +57,8 @@ ADMIN_A, MEMBER_B, MEMBER_A, ADMIN_B, OUTSIDER, TENANT_ADMIN = 71, 72, 73, 74, 7
 #: Event 11 belongs to community A, event 12 to community B.
 EVENT_A, EVENT_B = 11, 12
 DENIED = (403, 404)
+TICKET_UUID_A = "11111111-1111-4111-8111-111111111111"
+TICKET_UUID_B = "22222222-2222-4222-8222-222222222222"
 
 
 @pytest.fixture
@@ -77,6 +83,16 @@ def world(guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
             event_date=datetime(2030, 1, 1),
             status="scheduled",
         )
+    bind_calendar_child_tables(dal, migrate=True)
+    for table, a_id, b_id in (
+        ("calendar_tickets", 7, 17),
+        ("calendar_ticket_types", 5, 15),
+        ("calendar_event_admins", 8, 18),
+    ):
+        dal[table].insert(id=a_id, event_id=EVENT_A)
+        dal[table].insert(id=b_id, event_id=EVENT_B)
+    dal.calendar_tickets[7] = {"ticket_uuid": TICKET_UUID_A}
+    dal.calendar_tickets[17] = {"ticket_uuid": TICKET_UUID_B}
     dal.commit()
     db = SimpleNamespace(dal=dal)
     seed_membership(db, community_id=a, user_id=ADMIN_A, role="community-admin")
@@ -316,6 +332,49 @@ async def test_event_id_from_another_community_is_404(
     assert response.status_code == 404, f"{method} {rule} -> {response.status_code}"
     assert (await response.get_json())["error"]["message"] == "Event not found"
     world.proxy.assert_not_awaited()
+
+
+#: placeholder -> (id of the child in A's event, id of the same kind of child in B's event)
+_CHILD_PAIRS = {"<ticket_id>": ("7", "17"), "<type_id>": ("5", "15"), "<admin_id>": ("8", "18")}
+_CHILD_ROUTES = [
+    pytest.param(p, placeholder, id=f"{p.id}")
+    for p in ROUTES
+    for placeholder in _CHILD_PAIRS
+    if placeholder in p.values[1]
+]
+
+
+def test_child_routes_cover_every_child_type() -> None:
+    kinds = {placeholder for _p, placeholder in (q.values for q in _CHILD_ROUTES)}
+    assert kinds == set(_CHILD_PAIRS)
+    assert len(_CHILD_ROUTES) == 8  # tickets x4, ticket types x2, event admins x2
+
+
+@pytest.mark.parametrize(("route", "placeholder"), _CHILD_ROUTES)
+async def test_child_id_from_another_event_or_community_is_404(
+    world: Any, route: Any, placeholder: str
+) -> None:
+    """IDOR: A's event + B's ticket / type / admin id -> 404, never proxied; own child proxies."""
+    method, rule, scopes, _kind = route.values
+    own, foreign = _CHILD_PAIRS[placeholder]
+    base = _url(world, rule, world.a).replace(f"/{_CHILD_IDS[placeholder]}", "/@@", 1)
+    for bad in (foreign, "999", "abc", "7;x"):
+        response = await _call(world, method, base.replace("@@", bad), ADMIN_A, scopes)
+        assert response.status_code == 404, f"{method} {rule} child={bad}"
+    world.proxy.assert_not_awaited()
+    ok = await _call(world, method, base.replace("@@", own), ADMIN_A, scopes)
+    assert ok.status_code != 404, f"{method} {rule}: own child must pass"
+    world.proxy.assert_awaited_once()
+
+
+async def test_ticket_uuid_is_checked_against_the_event_too(world: Any) -> None:
+    rule = "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/tickets/<ticket_id>"
+    base = _url(world, rule, world.a).replace("/tickets/7", "/tickets/@@")
+    foreign = await _call(world, "GET", base.replace("@@", TICKET_UUID_B), ADMIN_A, [SCOPE_ADMIN])
+    assert foreign.status_code == 404
+    world.proxy.assert_not_awaited()
+    own = await _call(world, "GET", base.replace("@@", TICKET_UUID_A), ADMIN_A, [SCOPE_ADMIN])
+    assert own.status_code == 200
 
 
 async def test_unknown_and_non_numeric_event_ids_are_404(world: Any) -> None:

@@ -51,6 +51,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
@@ -68,7 +69,7 @@ from services.route_guards import (
     community_member_guard,
     tenant_admin_guard,
 )
-from services.schema import bind_calendar_sync_tables
+from services.schema import bind_calendar_child_tables, bind_calendar_sync_tables
 
 #: Two-gate feature flags (license tier AND PostHog) for the Event module's
 #: two capabilities -- `libs/event_module/features.py`'s
@@ -152,194 +153,494 @@ _IDENTITY_BODY_KEYS: frozenset[str] = frozenset(
 
 _CALENDAR_ROUTES: tuple[ProxyRoute, ...] = (
     # OAuth
-    ProxyRoute("cal_google_auth_url", "/oauth/google/auth-url", "GET",
-               "/api/v1/calendar/oauth/google/auth-url", SCOPE_READ),
-    ProxyRoute("cal_microsoft_auth_url", "/oauth/microsoft/auth-url", "GET",
-               "/api/v1/calendar/oauth/microsoft/auth-url", SCOPE_READ),
-    ProxyRoute("cal_connected_calendars", "/oauth/calendars", "GET",
-               "/api/v1/calendar/oauth/calendars", SCOPE_READ),
-    ProxyRoute("cal_sync_calendar", "/oauth/calendars/<id>/sync", "POST",
-               "/api/v1/calendar/oauth/calendars/{id}/sync", SCOPE_WRITE),
-    ProxyRoute("cal_disconnect_calendar", "/oauth/calendars/<id>", "DELETE",
-               "/api/v1/calendar/oauth/calendars/{id}", SCOPE_WRITE),
+    ProxyRoute(
+        "cal_google_auth_url",
+        "/oauth/google/auth-url",
+        "GET",
+        "/api/v1/calendar/oauth/google/auth-url",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_microsoft_auth_url",
+        "/oauth/microsoft/auth-url",
+        "GET",
+        "/api/v1/calendar/oauth/microsoft/auth-url",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_connected_calendars",
+        "/oauth/calendars",
+        "GET",
+        "/api/v1/calendar/oauth/calendars",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_sync_calendar",
+        "/oauth/calendars/<id>/sync",
+        "POST",
+        "/api/v1/calendar/oauth/calendars/{id}/sync",
+        SCOPE_WRITE,
+    ),
+    ProxyRoute(
+        "cal_disconnect_calendar",
+        "/oauth/calendars/<id>",
+        "DELETE",
+        "/api/v1/calendar/oauth/calendars/{id}",
+        SCOPE_WRITE,
+    ),
     # Availability
-    ProxyRoute("cal_get_availability_settings", "/availability/settings", "GET",
-               "/api/v1/calendar/availability/settings", SCOPE_READ),
-    ProxyRoute("cal_update_availability_settings", "/availability/settings", "PUT",
-               "/api/v1/calendar/availability/settings", SCOPE_WRITE, has_body=True),
-    ProxyRoute("cal_get_weekly_availability", "/availability/weekly", "GET",
-               "/api/v1/calendar/availability/weekly", SCOPE_READ),
-    ProxyRoute("cal_update_weekly_availability", "/availability/weekly", "PUT",
-               "/api/v1/calendar/availability/weekly", SCOPE_WRITE, has_body=True),
-    ProxyRoute("cal_available_slots", "/availability/<user_id>/slots", "GET",
-               "/api/v1/calendar/availability/{user_id}/slots", SCOPE_READ,
-               query_params=("start", "end", "duration")),
+    ProxyRoute(
+        "cal_get_availability_settings",
+        "/availability/settings",
+        "GET",
+        "/api/v1/calendar/availability/settings",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_update_availability_settings",
+        "/availability/settings",
+        "PUT",
+        "/api/v1/calendar/availability/settings",
+        SCOPE_WRITE,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "cal_get_weekly_availability",
+        "/availability/weekly",
+        "GET",
+        "/api/v1/calendar/availability/weekly",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_update_weekly_availability",
+        "/availability/weekly",
+        "PUT",
+        "/api/v1/calendar/availability/weekly",
+        SCOPE_WRITE,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "cal_available_slots",
+        "/availability/<user_id>/slots",
+        "GET",
+        "/api/v1/calendar/availability/{user_id}/slots",
+        SCOPE_READ,
+        query_params=("start", "end", "duration"),
+    ),
     # Booking pages
-    ProxyRoute("cal_create_booking_page", "/booking-pages", "POST",
-               "/api/v1/calendar/booking-pages", SCOPE_WRITE, status_code=201, has_body=True),
-    ProxyRoute("cal_list_booking_pages", "/booking-pages", "GET",
-               "/api/v1/calendar/booking-pages", SCOPE_READ),
-    ProxyRoute("cal_get_booking_page", "/booking-pages/<id>", "GET",
-               "/api/v1/calendar/booking-pages/{id}", SCOPE_READ),
-    ProxyRoute("cal_update_booking_page", "/booking-pages/<id>", "PUT",
-               "/api/v1/calendar/booking-pages/{id}", SCOPE_WRITE, has_body=True),
-    ProxyRoute("cal_delete_booking_page", "/booking-pages/<id>", "DELETE",
-               "/api/v1/calendar/booking-pages/{id}", SCOPE_WRITE),
+    ProxyRoute(
+        "cal_create_booking_page",
+        "/booking-pages",
+        "POST",
+        "/api/v1/calendar/booking-pages",
+        SCOPE_WRITE,
+        status_code=201,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "cal_list_booking_pages",
+        "/booking-pages",
+        "GET",
+        "/api/v1/calendar/booking-pages",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_get_booking_page",
+        "/booking-pages/<id>",
+        "GET",
+        "/api/v1/calendar/booking-pages/{id}",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_update_booking_page",
+        "/booking-pages/<id>",
+        "PUT",
+        "/api/v1/calendar/booking-pages/{id}",
+        SCOPE_WRITE,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "cal_delete_booking_page",
+        "/booking-pages/<id>",
+        "DELETE",
+        "/api/v1/calendar/booking-pages/{id}",
+        SCOPE_WRITE,
+    ),
     # Public booking -- no auth decorator, matches Node's `optionalAuth`.
     # feature_flag=None: no tenant context (tenant_middleware never runs
     # for a scope=None route) to evaluate a gate against.
-    ProxyRoute("cal_booking_slots", "/book/<slug>/slots", "GET",
-               "/api/v1/calendar/book/{slug}/slots", None, query_params=("start", "end"),
-               feature_flag=None),
-    ProxyRoute("cal_create_booking", "/book/<slug>", "POST",
-               "/api/v1/calendar/book/{slug}", None, status_code=201, has_body=True,
-               feature_flag=None),
+    ProxyRoute(
+        "cal_booking_slots",
+        "/book/<slug>/slots",
+        "GET",
+        "/api/v1/calendar/book/{slug}/slots",
+        None,
+        query_params=("start", "end"),
+        feature_flag=None,
+    ),
+    ProxyRoute(
+        "cal_create_booking",
+        "/book/<slug>",
+        "POST",
+        "/api/v1/calendar/book/{slug}",
+        None,
+        status_code=201,
+        has_body=True,
+        feature_flag=None,
+    ),
     # User bookings
-    ProxyRoute("cal_my_bookings", "/my-bookings", "GET",
-               "/api/v1/calendar/my-bookings", SCOPE_READ,
-               query_params=("status", "limit", "offset")),
-    ProxyRoute("cal_get_booking", "/bookings/<uuid>", "GET",
-               "/api/v1/calendar/bookings/{uuid}", SCOPE_READ),
-    ProxyRoute("cal_cancel_booking", "/bookings/<uuid>", "DELETE",
-               "/api/v1/calendar/bookings/{uuid}", SCOPE_WRITE),
+    ProxyRoute(
+        "cal_my_bookings",
+        "/my-bookings",
+        "GET",
+        "/api/v1/calendar/my-bookings",
+        SCOPE_READ,
+        query_params=("status", "limit", "offset"),
+    ),
+    ProxyRoute(
+        "cal_get_booking", "/bookings/<uuid>", "GET", "/api/v1/calendar/bookings/{uuid}", SCOPE_READ
+    ),
+    ProxyRoute(
+        "cal_cancel_booking",
+        "/bookings/<uuid>",
+        "DELETE",
+        "/api/v1/calendar/bookings/{uuid}",
+        SCOPE_WRITE,
+    ),
     # Group scheduling
-    ProxyRoute("cal_add_group_member", "/booking-pages/<page_id>/members", "POST",
-               "/api/v1/calendar/booking-pages/{page_id}/members", SCOPE_WRITE,
-               status_code=201, has_body=True),
-    ProxyRoute("cal_remove_group_member", "/booking-pages/<page_id>/members/<user_id>", "DELETE",
-               "/api/v1/calendar/booking-pages/{page_id}/members/{user_id}", SCOPE_WRITE),
-    ProxyRoute("cal_group_members", "/booking-pages/<page_id>/members", "GET",
-               "/api/v1/calendar/booking-pages/{page_id}/members", SCOPE_READ),
-    ProxyRoute("cal_group_availability", "/booking-pages/<page_id>/group-availability", "GET",
-               "/api/v1/calendar/booking-pages/{page_id}/group-availability", SCOPE_READ,
-               query_params=("start", "end")),
-    ProxyRoute("cal_best_slots", "/booking-pages/<page_id>/best-slots", "GET",
-               "/api/v1/calendar/booking-pages/{page_id}/best-slots", SCOPE_READ,
-               query_params=("start", "end", "duration")),
+    ProxyRoute(
+        "cal_add_group_member",
+        "/booking-pages/<page_id>/members",
+        "POST",
+        "/api/v1/calendar/booking-pages/{page_id}/members",
+        SCOPE_WRITE,
+        status_code=201,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "cal_remove_group_member",
+        "/booking-pages/<page_id>/members/<user_id>",
+        "DELETE",
+        "/api/v1/calendar/booking-pages/{page_id}/members/{user_id}",
+        SCOPE_WRITE,
+    ),
+    ProxyRoute(
+        "cal_group_members",
+        "/booking-pages/<page_id>/members",
+        "GET",
+        "/api/v1/calendar/booking-pages/{page_id}/members",
+        SCOPE_READ,
+    ),
+    ProxyRoute(
+        "cal_group_availability",
+        "/booking-pages/<page_id>/group-availability",
+        "GET",
+        "/api/v1/calendar/booking-pages/{page_id}/group-availability",
+        SCOPE_READ,
+        query_params=("start", "end"),
+    ),
+    ProxyRoute(
+        "cal_best_slots",
+        "/booking-pages/<page_id>/best-slots",
+        "GET",
+        "/api/v1/calendar/booking-pages/{page_id}/best-slots",
+        SCOPE_READ,
+        query_params=("start", "end", "duration"),
+    ),
 )
 
 # calendarAdmin.js + ticketController.js -- /api/v1/admin/* (community admin)
 
 _CALENDAR_ADMIN_ROUTES: tuple[ProxyRoute, ...] = (
     # Calendar events CRUD
-    ProxyRoute("adm_list_events", "/<community_id>/calendar/events", "GET",
-               "/api/v1/calendar/{community_id}/events", SCOPE_ADMIN,
-               query_params=("status", "category", "limit", "offset")),
-    ProxyRoute("adm_create_event", "/<community_id>/calendar/events", "POST",
-               "/api/v1/calendar/{community_id}/events", SCOPE_ADMIN,
-               status_code=201, has_body=True),
-    ProxyRoute("adm_get_event", "/<community_id>/calendar/events/<event_id>", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}", SCOPE_ADMIN),
-    ProxyRoute("adm_update_event", "/<community_id>/calendar/events/<event_id>", "PUT",
-               "/api/v1/calendar/{community_id}/events/{event_id}", SCOPE_ADMIN, has_body=True),
-    ProxyRoute("adm_delete_event", "/<community_id>/calendar/events/<event_id>", "DELETE",
-               "/api/v1/calendar/{community_id}/events/{event_id}", SCOPE_ADMIN),
+    ProxyRoute(
+        "adm_list_events",
+        "/<community_id>/calendar/events",
+        "GET",
+        "/api/v1/calendar/{community_id}/events",
+        SCOPE_ADMIN,
+        query_params=("status", "category", "limit", "offset"),
+    ),
+    ProxyRoute(
+        "adm_create_event",
+        "/<community_id>/calendar/events",
+        "POST",
+        "/api/v1/calendar/{community_id}/events",
+        SCOPE_ADMIN,
+        status_code=201,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "adm_get_event",
+        "/<community_id>/calendar/events/<event_id>",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}",
+        SCOPE_ADMIN,
+    ),
+    ProxyRoute(
+        "adm_update_event",
+        "/<community_id>/calendar/events/<event_id>",
+        "PUT",
+        "/api/v1/calendar/{community_id}/events/{event_id}",
+        SCOPE_ADMIN,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "adm_delete_event",
+        "/<community_id>/calendar/events/<event_id>",
+        "DELETE",
+        "/api/v1/calendar/{community_id}/events/{event_id}",
+        SCOPE_ADMIN,
+    ),
     # Event approval
-    ProxyRoute("adm_approve_event", "/<community_id>/calendar/events/<event_id>/approve", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/approve", SCOPE_ADMIN),
-    ProxyRoute("adm_reject_event", "/<community_id>/calendar/events/<event_id>/reject", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/reject", SCOPE_ADMIN,
-               has_body=True),
+    ProxyRoute(
+        "adm_approve_event",
+        "/<community_id>/calendar/events/<event_id>/approve",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/approve",
+        SCOPE_ADMIN,
+    ),
+    ProxyRoute(
+        "adm_reject_event",
+        "/<community_id>/calendar/events/<event_id>/reject",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/reject",
+        SCOPE_ADMIN,
+        has_body=True,
+    ),
     # RSVPs -- base auth only in Node (no requireCommunityAdmin)
-    ProxyRoute("adm_rsvp_create", "/<community_id>/calendar/events/<event_id>/rsvp", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/rsvp", SCOPE_WRITE,
-               has_body=True, member_guard=True),
-    ProxyRoute("adm_rsvp_cancel", "/<community_id>/calendar/events/<event_id>/rsvp", "DELETE",
-               "/api/v1/calendar/{community_id}/events/{event_id}/rsvp", SCOPE_WRITE,
-               member_guard=True),
-    ProxyRoute("adm_attendees", "/<community_id>/calendar/events/<event_id>/attendees", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}/attendees", SCOPE_ADMIN),
-    ProxyRoute("adm_rsvp_counts", "/<community_id>/calendar/events/<event_id>/rsvp-counts", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}/rsvp-counts", SCOPE_READ,
-               member_guard=True),
+    ProxyRoute(
+        "adm_rsvp_create",
+        "/<community_id>/calendar/events/<event_id>/rsvp",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/rsvp",
+        SCOPE_WRITE,
+        has_body=True,
+        member_guard=True,
+    ),
+    ProxyRoute(
+        "adm_rsvp_cancel",
+        "/<community_id>/calendar/events/<event_id>/rsvp",
+        "DELETE",
+        "/api/v1/calendar/{community_id}/events/{event_id}/rsvp",
+        SCOPE_WRITE,
+        member_guard=True,
+    ),
+    ProxyRoute(
+        "adm_attendees",
+        "/<community_id>/calendar/events/<event_id>/attendees",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/attendees",
+        SCOPE_ADMIN,
+    ),
+    ProxyRoute(
+        "adm_rsvp_counts",
+        "/<community_id>/calendar/events/<event_id>/rsvp-counts",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/rsvp-counts",
+        SCOPE_READ,
+        member_guard=True,
+    ),
     # Ticket types -- ticketController.js -> FEATURE_EVENT_TICKETING
-    ProxyRoute("adm_list_ticket_types",
-               "/<community_id>/calendar/events/<event_id>/ticket-types", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types", SCOPE_ADMIN,
-               feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_create_ticket_type",
-               "/<community_id>/calendar/events/<event_id>/ticket-types", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types", SCOPE_ADMIN,
-               status_code=201, has_body=True, feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_update_ticket_type",
-               "/<community_id>/calendar/events/<event_id>/ticket-types/<type_id>", "PUT",
-               "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types/{type_id}",
-               SCOPE_ADMIN, has_body=True, feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_delete_ticket_type",
-               "/<community_id>/calendar/events/<event_id>/ticket-types/<type_id>", "DELETE",
-               "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types/{type_id}",
-               SCOPE_ADMIN, feature_flag=FEATURE_EVENT_TICKETING),
+    ProxyRoute(
+        "adm_list_ticket_types",
+        "/<community_id>/calendar/events/<event_id>/ticket-types",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types",
+        SCOPE_ADMIN,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_create_ticket_type",
+        "/<community_id>/calendar/events/<event_id>/ticket-types",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types",
+        SCOPE_ADMIN,
+        status_code=201,
+        has_body=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_update_ticket_type",
+        "/<community_id>/calendar/events/<event_id>/ticket-types/<type_id>",
+        "PUT",
+        "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types/{type_id}",
+        SCOPE_ADMIN,
+        has_body=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_delete_ticket_type",
+        "/<community_id>/calendar/events/<event_id>/ticket-types/<type_id>",
+        "DELETE",
+        "/api/v1/calendar/{community_id}/events/{event_id}/ticket-types/{type_id}",
+        SCOPE_ADMIN,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
     # Tickets -- ticketController.js -> FEATURE_EVENT_TICKETING
-    ProxyRoute("adm_list_tickets", "/<community_id>/calendar/events/<event_id>/tickets", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}/tickets", SCOPE_ADMIN,
-               query_params=("status", "is_checked_in", "ticket_type_id", "search",
-                             "limit", "offset"), feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_create_ticket", "/<community_id>/calendar/events/<event_id>/tickets", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/tickets", SCOPE_ADMIN,
-               status_code=201, has_body=True, feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_get_ticket",
-               "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}",
-               SCOPE_ADMIN, feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_cancel_ticket",
-               "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/cancel", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}/cancel",
-               SCOPE_ADMIN, has_body=True, feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_transfer_ticket",
-               "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/transfer", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}/transfer",
-               SCOPE_ADMIN, has_body=True, feature_flag=FEATURE_EVENT_TICKETING),
+    ProxyRoute(
+        "adm_list_tickets",
+        "/<community_id>/calendar/events/<event_id>/tickets",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/tickets",
+        SCOPE_ADMIN,
+        query_params=("status", "is_checked_in", "ticket_type_id", "search", "limit", "offset"),
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_create_ticket",
+        "/<community_id>/calendar/events/<event_id>/tickets",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/tickets",
+        SCOPE_ADMIN,
+        status_code=201,
+        has_body=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_get_ticket",
+        "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}",
+        SCOPE_ADMIN,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_cancel_ticket",
+        "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/cancel",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}/cancel",
+        SCOPE_ADMIN,
+        has_body=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_transfer_ticket",
+        "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/transfer",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}/transfer",
+        SCOPE_ADMIN,
+        has_body=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
     # Check-in -- ticketController.js -> FEATURE_EVENT_TICKETING
-    ProxyRoute("adm_verify_ticket", "/calendar/verify-ticket", "POST",
-               "/api/v1/calendar/verify-ticket", SCOPE_WRITE,
-               has_body=True, attach_client_meta=True, feature_flag=FEATURE_EVENT_TICKETING,
-               tenant_admin_guard=True),
-    ProxyRoute("adm_check_in", "/<community_id>/calendar/events/<event_id>/check-in", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/check-in", SCOPE_ADMIN,
-               has_body=True, attach_client_meta=True, feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_undo_check_in",
-               "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
-               "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}/undo-check-in",
-               SCOPE_ADMIN, has_body=True, feature_flag=FEATURE_EVENT_TICKETING),
+    ProxyRoute(
+        "adm_verify_ticket",
+        "/calendar/verify-ticket",
+        "POST",
+        "/api/v1/calendar/verify-ticket",
+        SCOPE_WRITE,
+        has_body=True,
+        attach_client_meta=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+        tenant_admin_guard=True,
+    ),
+    ProxyRoute(
+        "adm_check_in",
+        "/<community_id>/calendar/events/<event_id>/check-in",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/check-in",
+        SCOPE_ADMIN,
+        has_body=True,
+        attach_client_meta=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_undo_check_in",
+        "/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/tickets/{ticket_id}/undo-check-in",
+        SCOPE_ADMIN,
+        has_body=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
     # Attendance & reporting -- ticketController.js -> FEATURE_EVENT_TICKETING
-    ProxyRoute("adm_attendance_stats", "/<community_id>/calendar/events/<event_id>/attendance",
-               "GET", "/api/v1/calendar/{community_id}/events/{event_id}/attendance", SCOPE_ADMIN,
-               feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_check_in_log", "/<community_id>/calendar/events/<event_id>/check-in-log",
-               "GET", "/api/v1/calendar/{community_id}/events/{event_id}/check-in-log", SCOPE_ADMIN,
-               query_params=("limit", "offset", "success_only"),
-               feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_export_attendance",
-               "/<community_id>/calendar/events/<event_id>/attendance/export", "GET",
-               "/api/v1/calendar/{community_id}/events/{event_id}/attendance/export", SCOPE_ADMIN,
-               query_params=("format",), csv_capable=True, feature_flag=FEATURE_EVENT_TICKETING),
+    ProxyRoute(
+        "adm_attendance_stats",
+        "/<community_id>/calendar/events/<event_id>/attendance",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/attendance",
+        SCOPE_ADMIN,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_check_in_log",
+        "/<community_id>/calendar/events/<event_id>/check-in-log",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/check-in-log",
+        SCOPE_ADMIN,
+        query_params=("limit", "offset", "success_only"),
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_export_attendance",
+        "/<community_id>/calendar/events/<event_id>/attendance/export",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/attendance/export",
+        SCOPE_ADMIN,
+        query_params=("format",),
+        csv_capable=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
     # Event admins
-    ProxyRoute("adm_list_event_admins", "/<community_id>/calendar/events/<event_id>/admins",
-               "GET", "/api/v1/calendar/{community_id}/events/{event_id}/admins", SCOPE_ADMIN),
-    ProxyRoute("adm_assign_event_admin", "/<community_id>/calendar/events/<event_id>/admins",
-               "POST", "/api/v1/calendar/{community_id}/events/{event_id}/admins", SCOPE_ADMIN,
-               status_code=201, has_body=True),
-    ProxyRoute("adm_update_event_admin",
-               "/<community_id>/calendar/events/<event_id>/admins/<admin_id>", "PUT",
-               "/api/v1/calendar/{community_id}/events/{event_id}/admins/{admin_id}", SCOPE_ADMIN,
-               has_body=True),
-    ProxyRoute("adm_revoke_event_admin",
-               "/<community_id>/calendar/events/<event_id>/admins/<admin_id>", "DELETE",
-               "/api/v1/calendar/{community_id}/events/{event_id}/admins/{admin_id}", SCOPE_ADMIN,
-               has_body=True),
-    ProxyRoute("adm_my_permissions", "/<community_id>/calendar/events/<event_id>/my-permissions",
-               "GET", "/api/v1/calendar/{community_id}/events/{event_id}/my-permissions",
-               SCOPE_READ, member_guard=True),
+    ProxyRoute(
+        "adm_list_event_admins",
+        "/<community_id>/calendar/events/<event_id>/admins",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/admins",
+        SCOPE_ADMIN,
+    ),
+    ProxyRoute(
+        "adm_assign_event_admin",
+        "/<community_id>/calendar/events/<event_id>/admins",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/admins",
+        SCOPE_ADMIN,
+        status_code=201,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "adm_update_event_admin",
+        "/<community_id>/calendar/events/<event_id>/admins/<admin_id>",
+        "PUT",
+        "/api/v1/calendar/{community_id}/events/{event_id}/admins/{admin_id}",
+        SCOPE_ADMIN,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "adm_revoke_event_admin",
+        "/<community_id>/calendar/events/<event_id>/admins/<admin_id>",
+        "DELETE",
+        "/api/v1/calendar/{community_id}/events/{event_id}/admins/{admin_id}",
+        SCOPE_ADMIN,
+        has_body=True,
+    ),
+    ProxyRoute(
+        "adm_my_permissions",
+        "/<community_id>/calendar/events/<event_id>/my-permissions",
+        "GET",
+        "/api/v1/calendar/{community_id}/events/{event_id}/my-permissions",
+        SCOPE_READ,
+        member_guard=True,
+    ),
     # Ticketing configuration -- ticketController.js -> FEATURE_EVENT_TICKETING
-    ProxyRoute("adm_enable_ticketing",
-               "/<community_id>/calendar/events/<event_id>/ticketing/enable", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/ticketing/enable", SCOPE_ADMIN,
-               has_body=True, feature_flag=FEATURE_EVENT_TICKETING),
-    ProxyRoute("adm_disable_ticketing",
-               "/<community_id>/calendar/events/<event_id>/ticketing/disable", "POST",
-               "/api/v1/calendar/{community_id}/events/{event_id}/ticketing/disable", SCOPE_ADMIN,
-               feature_flag=FEATURE_EVENT_TICKETING),
+    ProxyRoute(
+        "adm_enable_ticketing",
+        "/<community_id>/calendar/events/<event_id>/ticketing/enable",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/ticketing/enable",
+        SCOPE_ADMIN,
+        has_body=True,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
+    ProxyRoute(
+        "adm_disable_ticketing",
+        "/<community_id>/calendar/events/<event_id>/ticketing/disable",
+        "POST",
+        "/api/v1/calendar/{community_id}/events/{event_id}/ticketing/disable",
+        SCOPE_ADMIN,
+        feature_flag=FEATURE_EVENT_TICKETING,
+    ),
 )
 
 
@@ -407,6 +708,37 @@ def _event_in_community(community_id: int, event_id: str) -> bool:
     return row is not None
 
 
+_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+#: URL placeholder -> the legacy child table whose rows must belong to the URL's event.
+_CHILD_TABLES: dict[str, str] = {
+    "ticket_id": "calendar_tickets",
+    "type_id": "calendar_ticket_types",
+    "admin_id": "calendar_event_admins",
+}
+
+
+def _child_in_event(event_id: int, placeholder: str, child_id: str) -> bool:
+    """True when the child row `child_id` (ticket / ticket type / event admin) is on `event_id`.
+
+    The caller has already proven the event belongs to the URL community, so this closes the
+    chain community -> event -> child. A ticket may be addressed by numeric id or by its uuid;
+    anything unverifiable (malformed, unknown, other event's) is "not found".
+    """
+    dal = current_app.config["dal"]
+    bind_calendar_child_tables(dal)
+    table = dal[_CHILD_TABLES[placeholder]]
+    if child_id.isdigit():
+        match = table.id == int(child_id)
+    elif placeholder == "ticket_id" and _UUID_RE.fullmatch(child_id):
+        match = table.ticket_uuid == child_id.lower()
+    else:
+        return False
+    return dal(match & (table.event_id == event_id)).select(table.id).first() is not None
+
+
 def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
     """Build one Quart view function from a `ProxyRoute` row."""
 
@@ -418,6 +750,11 @@ def _make_handler(route: ProxyRoute) -> Callable[..., Any]:
             and not _event_in_community(community_id, str(path_args["event_id"]))
         ):
             return error_response("Event not found", status_code=404, error_code="NOT_FOUND")
+        for placeholder in _CHILD_TABLES:
+            if placeholder in path_args and not _child_in_event(
+                int(path_args["event_id"]), placeholder, str(path_args[placeholder])
+            ):
+                return error_response("Resource not found", status_code=404, error_code="NOT_FOUND")
         if route.feature_flag is not None:
             ctx = get_tenant_context(request)
             if ctx is None or not await feature_enabled(route.feature_flag, tenant=ctx.tenant_slug):

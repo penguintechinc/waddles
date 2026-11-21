@@ -54,7 +54,7 @@ from blueprints.v1.event import (
 )
 from services.event_calendar_proxy import ProxyResult
 from services.global_identity import ensure_tables as ensure_global_tables
-from services.schema import bind_calendar_sync_tables
+from services.schema import bind_calendar_child_tables, bind_calendar_sync_tables
 from tests.community_ids import install_community_ids, public_id
 
 _PATH_FILL = {
@@ -168,6 +168,13 @@ def app(tenant_db: Any) -> Quart:
     # Event 11 belongs to community 3: event-scoped proxy routes now fence the event id to the
     # URL community (tests/test_authz_sweep_c.py proves the cross-community refusal).
     bind_calendar_sync_tables(tenant_db, migrate=True)
+    bind_calendar_child_tables(tenant_db, migrate=True)
+    for table, row_id in (
+        ("calendar_tickets", 77),
+        ("calendar_ticket_types", 5),
+        ("calendar_event_admins", 8),
+    ):
+        tenant_db[table].insert(id=row_id, event_id=11)
     ensure_global_tables(tenant_db, migrate=True)  # real `tenant_admins` for the tenant-admin guard
     tenant_db.calendar_events.insert(
         id=11, community_id=3, title="t", event_date=datetime(2030, 1, 1), status="scheduled"
