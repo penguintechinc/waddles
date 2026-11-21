@@ -8,7 +8,10 @@ Parses app_id-bearing fields only (never free text, never PostHog flag keys such
 * alembic ``APP_ID = "..."`` and ``*_APP_IDS = (...)`` seed tuples,
 * ``bundles/core-bundles.yaml`` and bundle manifests (``app_id:``),
 * Rust ``const *_APP_ID: &str = "..."``,
-* ``tool.call:<app_id>:<tool>`` grants in manifests / catalogs / seeds.
+* ``tool.call:<app_id>:<tool>`` grants in manifests / catalogs / seeds,
+* the ``feature`` column of seeded ``INSERT INTO app_catalog`` rows: descriptive-only since PR #1481, so a
+  seed must use the new-shape namespace ``<org>.<repo>`` (the manifest default) -- never an old
+  ``waddles.<category>.<name>`` id (hard cutover).
 
 Each id must match ``^(penguintechinc\\.waddles|psychoboy\\.penguintwitchbot)\\.[a-z0-9-]+$`` and its
 name must contain no ``default``/``example``/``demo`` segment. Zero ids examined is a FAILURE.
@@ -24,6 +27,7 @@ from pathlib import Path
 ID_RE = re.compile(
     r"^(penguintechinc\.waddles|psychoboy\.penguintwitchbot)\.[a-z0-9-]+$"
 )
+FEATURE_RE = re.compile(r"^(penguintechinc\.waddles|psychoboy\.penguintwitchbot)$")
 BANNED_SEGMENTS = {"default", "example", "demo"}
 DOTTED_LITERAL = re.compile(r"""['"]([a-z0-9_]+(?:\.[a-z0-9_-]+)+)['"]""")
 INSERT_RE = re.compile(
@@ -46,6 +50,7 @@ SOURCES = (
     "manifest",
     "rust_const",
     "tool_call_grant",
+    "seed_feature",
 )
 
 
@@ -149,6 +154,17 @@ def parse_file(path: Path, rel: str, text: str) -> list[tuple[str, int, str, str
                     lit and "{" not in lit.group(1)
                 ):  # placeholders / bound params are covered by the alembic APP_ID parsers
                     found.append(("sql_insert", _line(text, off), lit.group(1), rel))
+        for m in INSERT_RE.finditer(text):
+            cols = [c.strip().lower() for c in m.group(1).split(",")]
+            if "feature" not in cols or m.group(2).upper() != "VALUES":
+                continue
+            body, off = _first_tuple(text, m.end())
+            vals = _split_top_level(body)
+            idx = cols.index("feature")
+            if idx < len(vals):
+                lit = SQL_LITERAL.match(vals[idx])
+                if lit and "{" not in lit.group(1):
+                    found.append(("seed_feature", _line(text, off), lit.group(1), rel))
     if rel.startswith("alembic/versions/") and rel.endswith(".py"):
         for m in ALEMBIC_APP_ID.finditer(text):
             found.append(("alembic_app_id", _line(text, m.start(1)), m.group(1), rel))
@@ -180,6 +196,13 @@ def parse_file(path: Path, rel: str, text: str) -> list[tuple[str, int, str, str
     return found
 
 
+def validate_feature(feature: str) -> str | None:
+    """Return a reason when a seeded ``feature`` value is not the new-shape ``<org>.<repo>`` namespace."""
+    if not FEATURE_RE.match(feature):
+        return "feature must be the <org>.<repo> namespace (old waddles.<category>.<name> ids are banned)"
+    return None
+
+
 def validate(app_id: str) -> str | None:
     """Return a human-readable reason when ``app_id`` is not a legal new-shape id, else None."""
     if not ID_RE.match(app_id):
@@ -206,7 +229,7 @@ def scan(root: Path) -> tuple[list[tuple[str, int, str, str]], dict[str, int]]:
             continue
         for src, line, app_id, rp in parse_file(path, rel, text):
             denom[src] += 1
-            reason = validate(app_id)
+            reason = validate_feature(app_id) if src == "seed_feature" else validate(app_id)
             if reason:
                 bad.append((rp, line, app_id, f"{src}: {reason}"))
     return bad, denom

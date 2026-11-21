@@ -45,7 +45,7 @@ INSERT INTO app_catalog (
     'penguintechinc.waddles.announcements-pipeline',
     '1.0.0',
     'community',
-    'waddles.community.announcements',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
