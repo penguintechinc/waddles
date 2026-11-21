@@ -389,14 +389,19 @@ jobs:
     needs: [determine-version, detect-changes]
     permissions:
       contents: read
+    # PR / merge_group only. The previous guard also required github.ref ==
+    # main/release/workflow_dispatch, which can never hold on a pull_request or
+    # merge_group event (ref is refs/pull/N/merge or the gh-readonly-queue ref),
+    # so this job -- and its container boot smoke test -- never ran.
+    # Runner stays GitHub-hosted (matrix.runner) on purpose: PR image builds
+    # execute untrusted Dockerfiles, so they remain off dal2alpha until the
+    # Kata-isolated runners (#251) exist (CI Runner Routing exception 2).
     if: >
-      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       (github.event_name == 'pull_request' ||
       github.event_name == 'merge_group') &&
       (needs.detect-changes.outputs.migrations == 'true' ||
       needs.detect-changes.outputs.hub == 'true' ||
-      needs.detect-changes.outputs.libs == 'true' ||
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
+      needs.detect-changes.outputs.libs == 'true')
     strategy:
       fail-fast: false
       # Whole matrix object computed by detect-changes (see that job's

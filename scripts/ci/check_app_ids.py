@@ -12,10 +12,20 @@ Parses app_id-bearing fields only (never free text, never PostHog flag keys such
 
 Each id must match ``^(penguintechinc\\.waddles|psychoboy\\.penguintwitchbot)\\.[a-z0-9-]+$`` and its
 name must contain no ``default``/``example``/``demo`` segment. Zero ids examined is a FAILURE.
+
+Second pass (``sweep``): ANY tracked text file -- test fixtures included -- may not mention an
+old-style id (``waddles.<ns>.<name>``, regex in ``OLD_ID_RE``). The structural parsers above only
+read app_id-bearing fields in specific file kinds, which is how old ids in ``alembic/tests`` fixtures
+slipped through. Excluded: this guard's own pattern, ``scripts/rename/`` (the old->new mapping),
+and the platform PostHog flag keys ``waddles.core.rust-data-plane`` / ``waddles.core.disable-*``.
+Pre-existing debt lives in ``scripts/ci/old_id_baseline.json`` (per-file match counts, many are
+flag keys / proto packages / hostnames); a file may never exceed its baseline count and a file with
+no baseline entry has a budget of zero.
 """
 
 from __future__ import annotations
 
+import json
 import re
 import subprocess
 import sys
@@ -38,6 +48,21 @@ RUST_CONST = re.compile(
     r"""const\s+[A-Z0-9_]*APP_ID\s*:\s*&(?:'static\s+)?str\s*=\s*"([^"{}]*\.[^"{}]*)"\s*;"""
 )
 TOOL_CALL = re.compile(r"""tool\.call:([a-z0-9][a-z0-9._-]*):""")
+
+# Built by concatenation so this file never matches its own pattern.
+OLD_ID_RE = re.compile(
+    r"(?<![a-z0-9.-])" + "waddles" + r"\.(?:core|integrations|social|[a-z]+)\.[a-z][a-z0-9_.-]*"
+)
+FLAG_KEY_RE = re.compile(
+    r"^" + "waddles" + r"\.core\.(?:rust-data-plane$|disable-)"
+)
+SWEEP_SKIP_PREFIXES = (
+    "scripts/ci/check_app_ids.py",
+    "scripts/ci/tests/test_check_app_ids.py",
+    "scripts/ci/old_id_baseline.json",
+    "scripts/rename/",
+)
+BASELINE_REL = "scripts/ci/old_id_baseline.json"
 
 SOURCES = (
     "sql_insert",
@@ -212,13 +237,59 @@ def scan(root: Path) -> tuple[list[tuple[str, int, str, str]], dict[str, int]]:
     return bad, denom
 
 
+def sweep(root: Path) -> dict[str, list[tuple[int, str]]]:
+    """Return {relpath: [(line, token), ...]} for every old-style id mention in tracked text files."""
+    hits: dict[str, list[tuple[int, str]]] = {}
+    for path in _files(root):
+        rel = path.relative_to(root).as_posix()
+        if rel.startswith(SWEEP_SKIP_PREFIXES):
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for m in OLD_ID_RE.finditer(text):
+            tok = m.group(0).rstrip(".")
+            if FLAG_KEY_RE.match(tok):
+                continue
+            hits.setdefault(rel, []).append((_line(text, m.start()), tok))
+    return hits
+
+
+def load_baseline(root: Path) -> dict[str, int]:
+    """Read the per-file pre-existing match budget (empty when absent)."""
+    f = root / BASELINE_REL
+    return json.loads(f.read_text()) if f.is_file() else {}
+
+
+def sweep_violations(
+    hits: dict[str, list[tuple[int, str]]], baseline: dict[str, int]
+) -> list[tuple[str, int, str]]:
+    """Hits beyond each file's baseline budget (budget 0 for unlisted files)."""
+    out: list[tuple[str, int, str]] = []
+    for rel, items in hits.items():
+        budget = baseline.get(rel, 0)
+        if len(items) > budget:
+            out.extend((rel, ln, tok) for ln, tok in items[budget:])
+    return out
+
+
 def main(argv: list[str]) -> int:
     """CLI entry: exit 1 on any violation or a zero denominator in any source family."""
+    write_baseline = "--write-baseline" in argv
+    argv = [a for a in argv if a != "--write-baseline"]
     root = (
         Path(argv[1]).resolve()
         if len(argv) > 1
         else Path(__file__).resolve().parents[2]
     )
+    if write_baseline:
+        hits = sweep(root)
+        (root / BASELINE_REL).write_text(
+            json.dumps({k: len(v) for k, v in sorted(hits.items())}, indent=1) + "\n"
+        )
+        print(f"baseline written: files={len(hits)} matches={sum(map(len, hits.values()))}")
+        return 0
     bad, denom = scan(root)
     total = sum(denom.values())
     print(
@@ -227,6 +298,21 @@ def main(argv: list[str]) -> int:
     )
     for rp, line, app_id, why in bad:
         print(f"  VIOLATION {rp}:{line}: {app_id!r} ({why})")
+    hits = sweep(root)
+    swept = len(_files(root))
+    over = sweep_violations(hits, load_baseline(root))
+    print(
+        f"check_app_ids: sweep files_examined={swept} files_with_old_ids={len(hits)} "
+        f"matches={sum(map(len, hits.values()))} over_baseline={len(over)}"
+    )
+    for rp, line, tok in over:
+        print(f"  OLD-ID {rp}:{line}: {tok!r} (old-style app_id; use penguintechinc.waddles.<name>)")
+    if swept == 0:
+        print("check_app_ids: FAIL sweep examined zero files")
+        return 1
+    if over:
+        print(f"check_app_ids: FAIL {len(over)} old-id mention(s) beyond baseline")
+        return 1
     empty = [k for k, v in denom.items() if v == 0]
     if empty:
         print(f"check_app_ids: FAIL zero ids examined for source(s): {empty}")

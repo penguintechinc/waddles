@@ -63,19 +63,19 @@ class TestDigestNoLongerGloballyUnique:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO app_catalog (app_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                    ("waddles.core.ping",),
+                    ("penguintechinc.waddles.ping",),
                 )
                 # 1.0.2 -> 1.0.3 manifest-only bump, byte-identical wasm.
                 _insert_version(
-                    cur, app_id="waddles.core.ping", version="1.0.2", digest=_SAME_DIGEST
+                    cur, app_id="penguintechinc.waddles.ping", version="1.0.2", digest=_SAME_DIGEST
                 )
                 _insert_version(
-                    cur, app_id="waddles.core.ping", version="1.0.3", digest=_SAME_DIGEST
+                    cur, app_id="penguintechinc.waddles.ping", version="1.0.3", digest=_SAME_DIGEST
                 )
                 cur.execute(
                     "SELECT version FROM app_versions "
                     "WHERE app_id = %s AND artifact_digest = %s ORDER BY version",
-                    ("waddles.core.ping", _SAME_DIGEST),
+                    ("penguintechinc.waddles.ping", _SAME_DIGEST),
                 )
                 assert [r[0] for r in cur.fetchall()] == ["1.0.2", "1.0.3"]
         finally:
@@ -87,26 +87,26 @@ class TestDigestNoLongerGloballyUnique:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO app_catalog (app_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                    ("waddles.core.alpha",),
+                    ("penguintechinc.waddles.alpha",),
                 )
                 cur.execute(
                     "INSERT INTO app_catalog (app_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                    ("waddles.core.beta",),
+                    ("penguintechinc.waddles.beta",),
                 )
                 _insert_version(
-                    cur, app_id="waddles.core.alpha", version="1.0.0", digest=_SAME_DIGEST
+                    cur, app_id="penguintechinc.waddles.alpha", version="1.0.0", digest=_SAME_DIGEST
                 )
                 _insert_version(
-                    cur, app_id="waddles.core.beta", version="1.0.0", digest=_SAME_DIGEST
+                    cur, app_id="penguintechinc.waddles.beta", version="1.0.0", digest=_SAME_DIGEST
                 )
                 cur.execute(
                     "SELECT app_id FROM app_versions "
                     "WHERE artifact_digest = %s AND app_id IN %s ORDER BY app_id",
-                    (_SAME_DIGEST, ("waddles.core.alpha", "waddles.core.beta")),
+                    (_SAME_DIGEST, ("penguintechinc.waddles.alpha", "penguintechinc.waddles.beta")),
                 )
                 assert [r[0] for r in cur.fetchall()] == [
-                    "waddles.core.alpha",
-                    "waddles.core.beta",
+                    "penguintechinc.waddles.alpha",
+                    "penguintechinc.waddles.beta",
                 ]
         finally:
             conn.close()
@@ -118,10 +118,10 @@ class TestDigestNoLongerGloballyUnique:
             with conn.cursor() as cur:
                 cur.execute(
                     "INSERT INTO app_catalog (app_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                    ("waddles.core.dup",),
+                    ("penguintechinc.waddles.dup",),
                 )
                 _insert_version(
-                    cur, app_id="waddles.core.dup", version="1.0.0", digest=_SAME_DIGEST
+                    cur, app_id="penguintechinc.waddles.dup", version="1.0.0", digest=_SAME_DIGEST
                 )
             with (
                 pytest.raises(psycopg2.errors.UniqueViolation),
@@ -129,7 +129,7 @@ class TestDigestNoLongerGloballyUnique:
             ):
                 _insert_version(
                     cur,
-                    app_id="waddles.core.dup",
+                    app_id="penguintechinc.waddles.dup",
                     version="1.0.0",
                     digest="sha256:" + "b" * 64,
                 )
@@ -200,11 +200,11 @@ class TestDowngradeThenUpgrade:
 
                     cur.execute(
                         "INSERT INTO app_catalog (app_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                        ("waddles.core.restored",),
+                        ("penguintechinc.waddles.restored",),
                     )
                     _insert_version(
                         cur,
-                        app_id="waddles.core.restored",
+                        app_id="penguintechinc.waddles.restored",
                         version="1.0.0",
                         digest=_SAME_DIGEST,
                     )
@@ -214,7 +214,7 @@ class TestDowngradeThenUpgrade:
                 ):
                     _insert_version(
                         cur,
-                        app_id="waddles.core.restored",
+                        app_id="penguintechinc.waddles.restored",
                         version="1.0.1",
                         digest=_SAME_DIGEST,
                     )
@@ -247,13 +247,13 @@ class TestDowngradeFailsOnDuplicateDigests:
                 with conn.cursor() as cur:
                     cur.execute(
                         "INSERT INTO app_catalog (app_id) VALUES (%s) ON CONFLICT DO NOTHING",
-                        ("waddles.core.ping",),
+                        ("penguintechinc.waddles.ping",),
                     )
                     _insert_version(
-                        cur, app_id="waddles.core.ping", version="1.0.2", digest=_SAME_DIGEST
+                        cur, app_id="penguintechinc.waddles.ping", version="1.0.2", digest=_SAME_DIGEST
                     )
                     _insert_version(
-                        cur, app_id="waddles.core.ping", version="1.0.3", digest=_SAME_DIGEST
+                        cur, app_id="penguintechinc.waddles.ping", version="1.0.3", digest=_SAME_DIGEST
                     )
             finally:
                 conn.close()
