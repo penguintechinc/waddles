@@ -38,6 +38,7 @@ from services import twitch_install_state as twitch_state
 from services.install_state_binding import ERR_BINDING, ERR_STATE
 from services.oauth_providers import ProviderSpec, TokenResponse
 from tests.community_ids import cpath, install_community_ids
+from tests.conftest import apply_route_guard_bypass
 
 CALLBACK_BASE = "http://localhost:19999"
 
@@ -243,6 +244,9 @@ def _connections_flow(
     prov = connections_module.providers_svc
     monkeypatch.setattr(connections_module, "feature_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(connections_module, "_tenant_ok", lambda _cid: True)
+    # This module proves the OAuth state/cookie binding, not authz (that is
+    # `test_authz_sweep_b_community_routes.py`): admit the caller past `@community_admin_guard`.
+    apply_route_guard_bypass(monkeypatch)
     monkeypatch.setattr(prov, "get_provider", lambda _n: spec)
     monkeypatch.setattr(
         prov, "build_authorize_url", lambda _n, **kw: f"https://x.example/a?state={kw['state']}"
