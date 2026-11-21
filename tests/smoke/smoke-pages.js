@@ -20,7 +20,7 @@
 const { chromium } = require('playwright');
 
 const BASE_URL = process.env.BASE_URL || 'http://localhost:3000';
-const API_URL = process.env.API_URL || BASE_URL.replace(':3000', ':8060');
+const API_URL = process.env.API_URL || BASE_URL.replace(':3000', ':8204');
 const TIMEOUT = 10000; // 10 seconds per page
 
 // Test user credentials (default admin). No hardcoded fallback (CWE-798) --

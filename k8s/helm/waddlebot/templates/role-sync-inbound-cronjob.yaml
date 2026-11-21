@@ -94,16 +94,7 @@ spec:
                   key: CREDENTIAL_ENCRYPTION_KEY
                   optional: true
             {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
-            - name: VALKEY_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "waddlebot.fullname" . }}-secrets
-                  key: VALKEY_DURABLE_URL_TLS_AUTH
-            - name: VALKEY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "waddlebot.fullname" . }}-secrets
-                  key: VALKEY_DURABLE_PASSWORD
+            {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "role-sync-inbound" "url" "auth") | nindent 12 }}
             {{- end }}
             resources:
               {{- toYaml .Values.pipeline.roleSync.resources | nindent 14 }}

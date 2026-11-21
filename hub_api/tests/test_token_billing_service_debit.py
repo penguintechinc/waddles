@@ -22,7 +22,7 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.token_billing import tokens_bp, tokens_internal_bp
-from tests.community_ids import cpath, install_community_ids
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 from tests.conftest import make_user_token
 from tests.test_v1_token_billing_blueprint import (
     _admin_headers,
@@ -72,6 +72,11 @@ def client(app: Quart) -> Any:
     return app.test_client()
 
 
+def _debit_url(db: Any, community_id: int) -> str:
+    """Internal debit URL addressed by the community's public UUID (never the numeric id)."""
+    return DEBIT_PATH.format(cid=public_id(db, community_id))
+
+
 def _svc(issuer: ServiceJwtIssuer, community_id: int, service: str = STREAMING) -> dict[str, str]:
     tok, _ = issuer.issue_with_claims(
         service, SCOPE_TOKEN_DEBIT, ttl_seconds=300, extra_claims={"community": community_id}
@@ -105,7 +110,9 @@ async def test_service_debit_for_active_member_succeeds(
 ) -> None:
     cid = _seeded(token_billing_db)
     _seed_member(token_billing_db, community_id=cid, user_id=2)
-    resp = await client.post(DEBIT_PATH.format(cid=cid), headers=_svc(issuer, cid), json=_body(2))
+    resp = await client.post(
+        _debit_url(token_billing_db, cid), headers=_svc(issuer, cid), json=_body(2)
+    )
     assert resp.status_code == 200
     assert (await resp.get_json())["balance_after"] == 7
     assert _balance(token_billing_db, cid) == 7
@@ -115,7 +122,9 @@ async def test_service_debit_for_non_member_is_403_and_does_not_mutate(
     client: Any, token_billing_db: Any, issuer: ServiceJwtIssuer
 ) -> None:
     cid = _seeded(token_billing_db)
-    resp = await client.post(DEBIT_PATH.format(cid=cid), headers=_svc(issuer, cid), json=_body(99))
+    resp = await client.post(
+        _debit_url(token_billing_db, cid), headers=_svc(issuer, cid), json=_body(99)
+    )
     assert resp.status_code == 403
     assert _balance(token_billing_db, cid) == 10
 
@@ -129,7 +138,9 @@ async def test_service_debit_for_other_tenants_member_is_refused(
     token_billing_db.dal.commit()
     foreign = _seed_community(token_billing_db, tenant_id=other_tenant)
     _seed_member(token_billing_db, community_id=foreign, user_id=5)
-    resp = await client.post(DEBIT_PATH.format(cid=cid), headers=_svc(issuer, cid), json=_body(5))
+    resp = await client.post(
+        _debit_url(token_billing_db, cid), headers=_svc(issuer, cid), json=_body(5)
+    )
     assert resp.status_code == 403
     assert _balance(token_billing_db, cid) == 10
 
@@ -140,7 +151,7 @@ async def test_service_debit_token_bound_to_other_community_is_403(
     cid = _seeded(token_billing_db)
     _seed_member(token_billing_db, community_id=cid, user_id=2)
     resp = await client.post(
-        DEBIT_PATH.format(cid=cid), headers=_svc(issuer, cid + 1), json=_body(2)
+        _debit_url(token_billing_db, cid), headers=_svc(issuer, cid + 1), json=_body(2)
     )
     assert resp.status_code == 403
     assert _balance(token_billing_db, cid) == 10
@@ -153,7 +164,7 @@ async def test_service_debit_other_allow_listed_service_is_403(
     cid = _seeded(token_billing_db)
     _seed_member(token_billing_db, community_id=cid, user_id=2)
     resp = await client.post(
-        DEBIT_PATH.format(cid=cid), headers=_svc(issuer, cid, OTHER_SVC), json=_body(2)
+        _debit_url(token_billing_db, cid), headers=_svc(issuer, cid, OTHER_SVC), json=_body(2)
     )
     assert resp.status_code == 403
     assert _balance(token_billing_db, cid) == 10
@@ -161,7 +172,7 @@ async def test_service_debit_other_allow_listed_service_is_403(
 
 async def test_service_debit_unauthenticated_is_401(client: Any, token_billing_db: Any) -> None:
     cid = _seeded(token_billing_db)
-    resp = await client.post(DEBIT_PATH.format(cid=cid), json=_body(2))
+    resp = await client.post(_debit_url(token_billing_db, cid), json=_body(2))
     assert resp.status_code == 401
 
 
@@ -169,7 +180,7 @@ async def test_service_debit_rejects_a_member_user_jwt(client: Any, token_billin
     """A user JWT (even a member's own) is not a service credential."""
     cid = _seeded(token_billing_db)
     headers = _member_headers(token_billing_db, community_id=cid, user_id=2)
-    resp = await client.post(DEBIT_PATH.format(cid=cid), headers=headers, json=_body(2))
+    resp = await client.post(_debit_url(token_billing_db, cid), headers=headers, json=_body(2))
     assert resp.status_code == 401
     assert _balance(token_billing_db, cid) == 10
 
@@ -180,7 +191,7 @@ async def test_service_debit_insufficient_balance_is_402(
     cid = _seeded(token_billing_db)
     _seed_member(token_billing_db, community_id=cid, user_id=2)
     resp = await client.post(
-        DEBIT_PATH.format(cid=cid), headers=_svc(issuer, cid), json=_body(2, amount=50)
+        _debit_url(token_billing_db, cid), headers=_svc(issuer, cid), json=_body(2, amount=50)
     )
     assert resp.status_code == 402
 
@@ -231,3 +242,43 @@ async def test_admin_with_scope_can_still_debit(client: Any, token_billing_db: A
         json={"product_key": "ai_call", "amount": 1, "reason": "x"},
     )
     assert resp.status_code == 200
+
+
+async def test_service_debit_numeric_or_malformed_path_is_404(
+    client: Any, token_billing_db: Any, issuer: ServiceJwtIssuer
+) -> None:
+    cid = _seeded(token_billing_db)
+    _seed_member(token_billing_db, community_id=cid, user_id=2)
+    for segment in (str(cid), "not-a-uuid", f"{public_id(token_billing_db, cid)}x"):
+        resp = await client.post(
+            DEBIT_PATH.format(cid=segment), headers=_svc(issuer, cid), json=_body(2)
+        )
+        assert resp.status_code == 404, segment
+    assert _balance(token_billing_db, cid) == 10
+
+
+async def test_service_debit_unknown_uuid_never_debits(
+    client: Any, token_billing_db: Any, issuer: ServiceJwtIssuer
+) -> None:
+    """A UUID no community owns resolves to the sentinel id: the community binding refuses it."""
+    cid = _seeded(token_billing_db)
+    _seed_member(token_billing_db, community_id=cid, user_id=2)
+    resp = await client.post(
+        DEBIT_PATH.format(cid=UNKNOWN_PUBLIC_ID), headers=_svc(issuer, cid), json=_body(2)
+    )
+    assert resp.status_code == 403
+    assert _balance(token_billing_db, cid) == 10
+
+
+async def test_service_debit_uuid_resolves_end_to_end(
+    client: Any, token_billing_db: Any, issuer: ServiceJwtIssuer
+) -> None:
+    """The UUID in the path debits exactly the community whose numeric id the token is bound to."""
+    cid = _seeded(token_billing_db)
+    _seed_member(token_billing_db, community_id=cid, user_id=2)
+    resp = await client.post(
+        _debit_url(token_billing_db, cid), headers=_svc(issuer, cid), json=_body(2, amount=4)
+    )
+    assert resp.status_code == 200
+    assert (await resp.get_json())["balance_after"] == 6
+    assert _balance(token_billing_db, cid) == 6

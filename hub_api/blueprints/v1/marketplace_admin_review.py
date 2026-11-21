@@ -43,6 +43,7 @@ from services import marketplace_review_service as review
 from services.community_common import api_error, is_valid_service_key
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.marketplace_public_ids import global_target, marketplace_view_arg_hook
 from services.schema import bind_marketplace_vendor_tables
 
 admin_review_bp = Blueprint(
@@ -57,6 +58,33 @@ def _dal() -> Any:
     dal = current_app.config["dal"]
     bind_marketplace_vendor_tables(dal)
     return dal
+
+
+#: `<puuid:submission_id>` is `marketplace_submissions` on `/submissions/...` and
+#: `vendor_submissions` on `/vendor-submissions/...`; the admin scope is the only fence.
+_submission_hook = marketplace_view_arg_hook(
+    {"submission_id": global_target("marketplace_submissions")}, bind_marketplace_vendor_tables
+)
+_vendor_submission_hook = marketplace_view_arg_hook(
+    {"submission_id": global_target("vendor_submissions")}, bind_marketplace_vendor_tables
+)
+
+
+async def _translate_admin_ids() -> None:
+    """Resolve the route's `submission_id` UUID against the table its path segment names."""
+    rule = request.url_rule.rule if request.url_rule is not None else ""
+    if "/vendor-submissions/<" in rule:
+        await _vendor_submission_hook()
+    elif "/submissions/<" in rule:
+        await _submission_hook()
+
+
+admin_review_bp.before_request(_translate_admin_ids)
+internal_bp.before_request(
+    marketplace_view_arg_hook(
+        {"module_id": global_target("marketplace_modules")}, bind_marketplace_vendor_tables
+    )
+)
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -142,7 +170,7 @@ async def get_submissions() -> tuple[dict[str, Any], int]:
     return {"success": True, **data}, 200
 
 
-@admin_review_bp.route("/submissions/<int:submission_id>/approve", methods=["POST"])
+@admin_review_bp.route("/submissions/<puuid:submission_id>/approve", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace:admin")  # type: ignore[misc]
 async def approve_submission(submission_id: int) -> tuple[dict[str, Any], int]:
@@ -159,7 +187,7 @@ async def approve_submission(submission_id: int) -> tuple[dict[str, Any], int]:
     return {"success": True, "message": "Submission approved"}, 200
 
 
-@admin_review_bp.route("/submissions/<int:submission_id>/reject", methods=["POST"])
+@admin_review_bp.route("/submissions/<puuid:submission_id>/reject", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace:admin")  # type: ignore[misc]
 async def reject_submission(submission_id: int) -> tuple[dict[str, Any], int]:
@@ -219,7 +247,7 @@ async def get_vendor_submissions_for_review() -> tuple[dict[str, Any], int]:
     return {"success": True, "data": data}, 200
 
 
-@admin_review_bp.route("/vendor-submissions/<int:submission_id>", methods=["GET"])
+@admin_review_bp.route("/vendor-submissions/<puuid:submission_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace:admin")  # type: ignore[misc]
 async def get_vendor_submission_details(submission_id: int) -> tuple[dict[str, Any], int]:
@@ -232,7 +260,7 @@ async def get_vendor_submission_details(submission_id: int) -> tuple[dict[str, A
     return {"success": True, "submission": result}, 200
 
 
-@admin_review_bp.route("/vendor-submissions/<int:submission_id>/approve", methods=["POST"])
+@admin_review_bp.route("/vendor-submissions/<puuid:submission_id>/approve", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace:admin")  # type: ignore[misc]
 async def approve_vendor_submission(submission_id: int) -> tuple[dict[str, Any], int]:
@@ -253,7 +281,7 @@ async def approve_vendor_submission(submission_id: int) -> tuple[dict[str, Any],
     }, 200
 
 
-@admin_review_bp.route("/vendor-submissions/<int:submission_id>/reject", methods=["POST"])
+@admin_review_bp.route("/vendor-submissions/<puuid:submission_id>/reject", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace:admin")  # type: ignore[misc]
 async def reject_vendor_submission(submission_id: int) -> tuple[dict[str, Any], int]:
@@ -274,7 +302,7 @@ async def reject_vendor_submission(submission_id: int) -> tuple[dict[str, Any], 
     return {"success": True, "message": "Submission rejected", "submission": result}, 200
 
 
-@admin_review_bp.route("/vendor-submissions/<int:submission_id>/request-info", methods=["POST"])
+@admin_review_bp.route("/vendor-submissions/<puuid:submission_id>/request-info", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace:admin")  # type: ignore[misc]
 async def request_more_info(submission_id: int) -> tuple[dict[str, Any], int]:
@@ -291,7 +319,7 @@ async def request_more_info(submission_id: int) -> tuple[dict[str, Any], int]:
     return {"success": True, "message": "Information request sent to vendor"}, 200
 
 
-@admin_review_bp.route("/vendor-submissions/<int:submission_id>/publish", methods=["POST"])
+@admin_review_bp.route("/vendor-submissions/<puuid:submission_id>/publish", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("marketplace:admin")  # type: ignore[misc]
 async def publish_vendor_module(submission_id: int) -> tuple[dict[str, Any], int]:
@@ -308,7 +336,7 @@ async def publish_vendor_module(submission_id: int) -> tuple[dict[str, Any], int
 # ===== Internal (router-module) integration -- X-Service-Key only =====
 
 
-@internal_bp.route("/commands/<int:community_id>", methods=["GET"])
+@internal_bp.route("/commands/<cuuid:community_id>", methods=["GET"])
 async def get_community_commands(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/internal/marketplace/commands/<communityId>` -- service-to-service only."""
     if not is_valid_service_key(request):
@@ -318,7 +346,7 @@ async def get_community_commands(community_id: int) -> tuple[dict[str, Any], int
     return {"success": True, "commands": result}, 200
 
 
-@internal_bp.route("/execute/<int:module_id>", methods=["POST"])
+@internal_bp.route("/execute/<puuid:module_id>", methods=["POST"])
 async def execute_module_command(module_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/internal/marketplace/execute/<moduleId>` -- service-to-service only."""
     if not is_valid_service_key(request):

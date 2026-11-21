@@ -197,7 +197,7 @@ def get_vendor_modules(dal: Any, user_id: int, *, page: int = 1, limit: int = 25
 
 def _row_to_module_dict(row: Any) -> dict[str, Any]:
     return {
-        "id": row.id,
+        "id": str(row.public_id),
         "name": row.name,
         "slug": row.slug,
         "description": row.description,
@@ -242,6 +242,7 @@ def get_vendor_dashboard(dal: Any, user_id: int) -> dict[str, Any]:
         else []
     )
     module_names = {m.id: m.name for m in modules}
+    module_uuids = {m.id: str(m.public_id) for m in modules}
 
     revenue_by_module: dict[int, int] = {}
     for p in payments:
@@ -261,8 +262,8 @@ def get_vendor_dashboard(dal: Any, user_id: int) -> dict[str, Any]:
         },
         "recentSubmissions": [
             {
-                "id": s.id,
-                "moduleId": s.module_id,
+                "id": str(s.public_id),
+                "moduleId": module_uuids.get(s.module_id),
                 "status": s.status,
                 "submittedAt": s.submitted_at.isoformat() if s.submitted_at else None,
                 "moduleName": module_names.get(s.module_id),
@@ -270,7 +271,7 @@ def get_vendor_dashboard(dal: Any, user_id: int) -> dict[str, Any]:
             for s in recent_submissions
         ],
         "revenueBreakdown": [
-            {"moduleId": mid, "moduleName": module_names.get(mid), "revenue": rev}
+            {"moduleId": module_uuids.get(mid), "moduleName": module_names.get(mid), "revenue": rev}
             for mid, rev in sorted(revenue_by_module.items(), key=lambda kv: -kv[1])
         ],
     }
@@ -354,7 +355,11 @@ def create_vendor_module(dal: Any, user_id: int, data: dict[str, Any]) -> dict[s
         dal.commit()
 
     row = dal.marketplace_modules[module_id]
-    return {"id": row.id, "slug": row.slug, "createdAt": row.created_at.isoformat()}
+    return {
+        "id": str(row.public_id),
+        "slug": row.slug,
+        "createdAt": row.created_at.isoformat(),
+    }
 
 
 def _guard_module_urls(webhook_url: str, api_base_url: str | None) -> None:
@@ -461,7 +466,7 @@ def submit_module_for_review(
     )
     dal(dal.marketplace_modules.id == module.id).update(status="pending", updated_at=now)
     dal.commit()
-    return {"submissionId": submission_id}
+    return {"submissionId": str(dal.marketplace_submissions[submission_id].public_id)}
 
 
 # ---------------------------------------------------------------------------

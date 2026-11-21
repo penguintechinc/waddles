@@ -180,19 +180,20 @@ def test_tls_on_disables_plaintext_listener_and_url():
     )
 
 
-def _default_acl(cmd):
-    line = [ln for ln in cmd.splitlines() if "--user default" in ln]
-    assert len(line) == 1, "expected exactly one default-user ACL line"
+def _user_acl(cmd, user):
+    line = [ln for ln in cmd.splitlines() if f"--user {user} reset on" in ln]
+    assert len(line) == 1, f"expected exactly one {user} ACL line"
     return line[0]
 
 
 def test_acl_default_user_is_allow_list():
-    """Default user = allow-list: -@all first, only the client categories, no
-    admin/dangerous/config."""
+    """Service users (here svc-ingest, durable base allow-list) = -@all first, only the client
+    categories, no admin/dangerous/config; `default` is `reset` (test_valkey_acl_render.py)."""
     cmd = _durable_cmd(_docs("values-alpha.yaml"))
-    acl = _default_acl(cmd)
-    rules = acl.split("--user default on", 1)[1].split()
-    rules = [r for r in rules if r[0] in "+-" and r != "\\"]
+    assert "--user default reset" in cmd
+    acl = _user_acl(cmd, "svc-ingest")
+    rules = acl.split("--user svc-ingest reset on", 1)[1].split()
+    rules = [r.strip("'") for r in rules if r.strip("'")[:1] in "+-" and r != "\\"]
     assert rules[0] == "-@all", rules
     for cat in (
         "+@connection",

@@ -1,15 +1,16 @@
-//! Real-path proof that the kv Valkey ACL the Helm chart ships does NOT block anything
-//! `bundle_host_kv` issues: a real `valkey/valkey` container is started with the EXACT ACL rules
-//! parsed out of `k8s/helm/waddlebot/templates/infrastructure/valkey-kv.yaml` (not a copy), and
-//! every `KvHost` op (plain GET/SET, the Lua `EVALSHA`/`SCRIPT LOAD` scripts, `SCAN`, TTL,
-//! CAS/list) runs against it as the same authenticated `default` user the services use.
+//! Real-path proof that svc-process's OWN kv Valkey ACL user (the one the Helm chart ships in
+//! `infrastructure.valkeyAcl.users.svc-process.kv`) does NOT block anything `bundle_host_kv`
+//! issues. A real `valkey/valkey` container is started exactly the way the chart renders it:
+//! `--user default reset` plus `--user svc-process reset on #<sha256> resetchannels <keys> <cmds>`
+//! with the keys and `kvBaseCommands` parsed out of `k8s/helm/waddlebot/values.yaml` (not a copy).
+//! Every `KvHost` op (plain GET/SET, the Lua scripts, `SCAN`, TTL, CAS/list) then runs over a
+//! connection authenticated as `svc-process` and nobody else.
 //!
-//! Why it exists: when bundle kv calls fail on alpha ("Something went wrong updating the counter
-//! storage") the ACL is the first suspect. The cause that time was elsewhere (a missing
-//! `storage.kv` capability in the install summary), and this file keeps the ACL provably ruled
-//! out -- and fails loudly if a chart ACL edit ever does start denying a command the host needs.
-//! A negative control (`FLUSHALL` must be `NOPERM`) proves the ACL is really enforced, so a green
-//! run cannot be a no-op.
+//! Why it exists: when bundle kv calls fail on alpha the ACL is the first suspect; this keeps it
+//! provably ruled out and fails loudly if a chart ACL edit starts denying a command the host
+//! needs. Negative controls prove the ACL is really enforced, so a green run cannot be a no-op:
+//! `FLUSHALL` is `NOPERM` for svc-process, and an unauthenticated connection gets `NOAUTH`
+//! (`default` is `reset`).
 //!
 //! Requires Docker (the `docker` CLI); CI runs on `ubuntu-latest`. A missing docker is a FAILURE.
 
@@ -26,31 +27,92 @@ use sha2::{Digest, Sha256};
 const VALKEY_IMAGE: &str = "valkey/valkey:8.1.10-alpine";
 /// Throwaway password for the throwaway container only.
 const TEST_PASSWORD: &str = "acl-real-path-test-password";
-/// The chart template the ACL is read from at test time.
-const CHART_TEMPLATE: &str =
-    include_str!("../../../k8s/helm/waddlebot/templates/infrastructure/valkey-kv.yaml");
+/// The chart values the ACL is read from at test time.
+const CHART_VALUES: &str = include_str!("../../../k8s/helm/waddlebot/values.yaml");
+/// The ACL user under test: svc-process's own kv user.
+const KV_USER: &str = "svc-process";
 
-/// The ACL rule tokens that follow the password hash on the chart's `--user default on ...`
-/// line (quotes stripped, exactly as the shell in the pod would pass them).
+/// Indent (leading spaces) of a line.
+fn indent(line: &str) -> usize {
+    line.len() - line.trim_start().len()
+}
+
+/// The `kvBaseCommands` string and `svc-process`'s kv `keys` read out of `values.yaml` with an
+/// explicit line parser (no YAML dependency): asserts every shape it relies on, so a layout
+/// change fails loudly instead of silently testing nothing.
+fn chart_kv_acl() -> (String, Vec<String>) {
+    let lines: Vec<&str> = CHART_VALUES.lines().collect();
+
+    let base = lines
+        .iter()
+        .find_map(|l| l.trim().strip_prefix("kvBaseCommands:"))
+        .expect("values.yaml has infrastructure.valkeyAcl.kvBaseCommands")
+        .trim()
+        .trim_matches('"')
+        .to_string();
+    assert!(
+        base.starts_with("-@all") && base.contains("-@dangerous") && base.contains("+config|get"),
+        "kvBaseCommands is no longer an allow-list with -@dangerous + config|get: {base}"
+    );
+
+    let users_at = lines
+        .iter()
+        .position(|l| l.trim_end() == "    users:")
+        .expect("valkeyAcl.users block");
+    let user_at = users_at
+        + lines[users_at..]
+            .iter()
+            .position(|l| l.trim_end() == format!("      {KV_USER}:"))
+            .expect("svc-process user is configured");
+    let user_end = lines[user_at + 1..]
+        .iter()
+        .position(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#') && indent(l) <= 6)
+        .map_or(lines.len(), |n| user_at + 1 + n);
+    let block = &lines[user_at + 1..user_end];
+
+    let kv_at = block
+        .iter()
+        .position(|l| l.trim_end() == "        kv:")
+        .expect("svc-process has a kv instance block");
+    let mut keys = Vec::new();
+    let mut in_keys = false;
+    for l in &block[kv_at + 1..] {
+        let t = l.trim();
+        if t.is_empty() || t.starts_with('#') {
+            continue;
+        }
+        if indent(l) <= 8 {
+            break; // left the kv block
+        }
+        assert!(
+            !t.starts_with("commands:") && !t.starts_with("selectors:"),
+            "svc-process kv now overrides commands/selectors; extend this test: {t}"
+        );
+        if t == "keys:" {
+            in_keys = true;
+        } else if in_keys {
+            keys.push(
+                t.strip_prefix("- ")
+                    .expect("keys entries are YAML list items")
+                    .trim_matches('"')
+                    .to_string(),
+            );
+        }
+    }
+    assert!(
+        keys.iter().any(|k| k == "~bundlekv:*"),
+        "svc-process kv keys must include ~bundlekv:*: {keys:?}"
+    );
+    (base, keys)
+}
+
+/// The `--user` rule tokens exactly as the chart renders them (after the password hash):
+/// `resetchannels <keys> <kvBaseCommands tokens>`.
 fn chart_acl_rules() -> Vec<String> {
-    let line = CHART_TEMPLATE
-        .lines()
-        .find(|l| l.contains("--user default on"))
-        .expect("chart template has a `--user default on` ACL line");
-    let after = line.split("--user default on").nth(1).unwrap();
-    let mut tokens = after.split_whitespace().filter(|t| *t != "\\");
-    let hash_token = tokens.next().expect("password hash token");
-    assert!(
-        hash_token.contains("APP_HASH"),
-        "unexpected ACL shape: {line}"
-    );
-    let rules: Vec<String> = tokens
-        .map(|t| t.trim_matches('\'').trim_matches('"').to_string())
-        .collect();
-    assert!(
-        rules.iter().any(|r| r == "-@all") && rules.iter().any(|r| r == "-@dangerous"),
-        "chart ACL no longer an allow-list with -@dangerous: {rules:?}"
-    );
+    let (base, keys) = chart_kv_acl();
+    let mut rules = vec!["resetchannels".to_string()];
+    rules.extend(keys);
+    rules.extend(base.split_whitespace().map(str::to_string));
     rules
 }
 
@@ -70,7 +132,7 @@ impl Drop for AclValkey {
     }
 }
 
-/// Starts Valkey with the chart's ACL + `noeviction` (the chart hard-wires it) and waits ready.
+/// Starts Valkey with the chart's rendered ACL (`default reset` + svc-process) + `noeviction` (the chart hard-wires it) and waits ready.
 fn start_acl_valkey() -> AclValkey {
     let name = format!(
         "wtc-kvacl-{}-{}",
@@ -92,6 +154,10 @@ fn start_acl_valkey() -> AclValkey {
         "valkey-server".into(),
         "--user".into(),
         "default".into(),
+        "reset".into(),
+        "--user".into(),
+        KV_USER.into(),
+        "reset".into(),
         "on".into(),
         format!("#{hash}"),
     ];
@@ -116,7 +182,7 @@ fn start_acl_valkey() -> AclValkey {
                 &v.name,
                 "valkey-cli",
                 "--user",
-                "default",
+                KV_USER,
                 "--pass",
                 TEST_PASSWORD,
                 "--no-auth-warning",
@@ -152,11 +218,14 @@ fn start_acl_valkey() -> AclValkey {
 }
 
 async fn connect(v: &AclValkey) -> MultiplexedConnection {
-    redis::Client::open(format!("redis://:{TEST_PASSWORD}@127.0.0.1:{}/", v.port))
-        .expect("client opens")
-        .get_multiplexed_async_connection()
-        .await
-        .expect("authenticated connection")
+    redis::Client::open(format!(
+        "redis://{KV_USER}:{TEST_PASSWORD}@127.0.0.1:{}/",
+        v.port
+    ))
+    .expect("client opens")
+    .get_multiplexed_async_connection()
+    .await
+    .expect("authenticated connection")
 }
 
 fn granted(app_id: &str) -> Arc<CapabilitySnapshot> {
@@ -187,7 +256,24 @@ async fn chart_acl_is_enforced_and_keeps_the_config_get_probe() {
     );
 }
 
-/// Every op `svc_process`/`svc_action` issue through `KvHost`, as the chart-ACL `default` user.
+/// Negative control: `default` is `reset`, so a connection that never authenticates is refused.
+#[tokio::test]
+async fn unauthenticated_connection_gets_noauth() {
+    let v = start_acl_valkey();
+    let client = redis::Client::open(format!("redis://127.0.0.1:{}/", v.port)).expect("client");
+    let mut conn = client
+        .get_multiplexed_async_connection()
+        .await
+        .expect("an unauthenticated connection opens; commands are what get refused");
+    let get: Result<Option<String>, redis::RedisError> = redis::cmd("GET")
+        .arg("bundlekv:x")
+        .query_async(&mut conn)
+        .await;
+    let err = get.expect_err("unauthenticated GET must be refused");
+    assert_eq!(err.code(), Some("NOAUTH"), "expected NOAUTH, got {err}");
+}
+
+/// Every op `svc_process`/`svc_action` issue through `KvHost`, as svc-process's own user.
 #[tokio::test]
 async fn every_kv_host_op_succeeds_under_the_chart_acl() {
     let v = start_acl_valkey();
