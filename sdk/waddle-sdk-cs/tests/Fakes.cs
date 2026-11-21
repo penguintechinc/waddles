@@ -200,7 +200,7 @@ public sealed class FakeClockClient : IClockClient
 /// hand to a <see cref="WaddleProcessStage"/>/<see cref="WaddleActionStage"/> under test.</summary>
 public sealed class FakeWaddleHost : IWaddleHost
 {
-    public BundleContextInfo Context { get; set; } = new("tenant-1", null, "waddles.test.app", "waddles.test", "1.0.0", "msg-1", "{}");
+    public BundleContextInfo Context { get; set; } = new("tenant-1", null, "penguintechinc.waddles.test-app", "waddles.test", "1.0.0", "msg-1", "{}");
     public FakeKvClient KvFake { get; } = new();
     public FakeDbClient DbFake { get; } = new();
     public FakeRelayClient RelayFake { get; } = new();

@@ -2921,7 +2921,7 @@ mod tests {
                 "--metrics-port",
                 "18292",
                 "--process-app-id",
-                "waddles.test.binds-serves-and-stops",
+                "penguintechinc.waddles.test-binds-serves-and-stops",
                 "--hub-api-grpc-endpoint",
                 &format!("http://{hub_addr}"),
                 "--service-jwt-token-endpoint",
@@ -3093,7 +3093,7 @@ mod tests {
         cli.validate().expect("populated denylist passes");
         let catalog = capabilities::HttpEgressCatalog::new();
         catalog.update(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             bundle_host_http::egress::EgressRuleRow {
                 private_ip_grants: vec![("10.244.5.6".to_string(), vec!["GET".to_string()])],
                 ..Default::default()
@@ -3108,7 +3108,7 @@ mod tests {
         .expect("valid config produces a guard");
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.244.5.6/"}),
             )
             .await
@@ -3136,7 +3136,7 @@ mod tests {
         );
         let catalog = capabilities::HttpEgressCatalog::new();
         catalog.update(
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             bundle_host_http::egress::EgressRuleRow {
                 // 10.0.0.9 is outside the cluster denylist above, so only
                 // the instance policy is under test here.
@@ -3153,7 +3153,7 @@ mod tests {
         .expect("valid config produces a guard");
         let err = guard
             .send(
-                "waddles.a.b.c",
+                "penguintechinc.waddles.a-b-c",
                 &serde_json::json!({"method": "GET", "url": "https://10.0.0.9/"}),
             )
             .await

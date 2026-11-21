@@ -592,7 +592,7 @@ mod tests {
             "spiffe://penguintech.io/alpha/svc-process",
             "tenant-a",
             "community-a",
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             DestinationCategory::Fqdn,
             "discord.com",
             443,
@@ -654,7 +654,7 @@ mod tests {
             "spiffe://penguintech.io/alpha/svc-process",
             "tenant-a",
             "community-a",
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             DestinationCategory::Fqdn,
             "discord.com",
             443,
@@ -719,7 +719,7 @@ mod tests {
             "spiffe://penguintech.io/alpha/svc-process",
             "tenant-a",
             "community-a",
-            "waddles.a.b.c",
+            "penguintechinc.waddles.a-b-c",
             category,
             destination,
             port,
@@ -1047,7 +1047,7 @@ mod tests {
         let now = now_secs();
         json!({
             "sub": "spiffe://penguintech.io/alpha/svc-process",
-            "tenant": "tenant-a", "community": "community-a", "app": "waddles.a.b.c",
+            "tenant": "tenant-a", "community": "community-a", "app": "penguintechinc.waddles.a-b-c",
             "category": "fqdn", "destination": "discord.com", "port": 443,
             "jti": "jti-1", "iat": now, "exp": now + 30,
         })

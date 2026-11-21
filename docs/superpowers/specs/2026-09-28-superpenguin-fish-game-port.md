@@ -168,12 +168,12 @@ small.
 
 | Bundle (`app_id`) | Owns | Depends on | Ports from |
 |---|---|---|---|
-| `waddles.integrations.superpenguin.fishing-core` | Casts, catch math, gold ledger, inventory, sell | nothing (foundation) | `FishingCalculations`, `FishingRarityWeightProfiles`, `FishingRarityThresholdRules`, `FishingValueRules`, `FishingGameplayService`, `FishingInventoryService`, `FishingInventorySellRules`, `FishingTierComparisonRules` |
-| `waddles.integrations.superpenguin.fishing-shop` | Shop catalog, item generation, dynamic pricing/tiers, boost application data | reads fishing-core's `data.tables` (own role, cross-bundle read needs a shared/exported table or an event, not a raw cross-bundle DB grant — see §3) | `FishingShopService`, `FishingShopItemGenerator` |
-| `waddles.integrations.superpenguin.fishing-tournaments` | Tournament lifecycle, standings, reward settlement, leaderboards | fishing-core's catch events (`process-stage` consumes fishing-core's `platform-event`, or both read the same `fish_catches` table if co-owned — see §3 open question) | `FishingTournamentScheduler`, `FishingService` tournament methods, `FishingTournamentStanding`, `FishingTournamentRewardStanding`, `FishingLeaderboardService` |
-| `waddles.integrations.superpenguin.fishing-admin` *(optional, cut-able from MVP)* | Fish-type/settings CRUD, `AnalyzeGameBalance`/`SimulateFishing` reports, help-page data | reads fishing-core + fishing-shop tables | `FishingAnalyticsService`, `FishingHelpDataService`, fish-type/settings CRUD from `FishingService` |
+| `psychoboy.penguintwitchbot.fishing-core` | Casts, catch math, gold ledger, inventory, sell | nothing (foundation) | `FishingCalculations`, `FishingRarityWeightProfiles`, `FishingRarityThresholdRules`, `FishingValueRules`, `FishingGameplayService`, `FishingInventoryService`, `FishingInventorySellRules`, `FishingTierComparisonRules` |
+| `psychoboy.penguintwitchbot.fishing-shop` | Shop catalog, item generation, dynamic pricing/tiers, boost application data | reads fishing-core's `data.tables` (own role, cross-bundle read needs a shared/exported table or an event, not a raw cross-bundle DB grant — see §3) | `FishingShopService`, `FishingShopItemGenerator` |
+| `psychoboy.penguintwitchbot.fishing-tournaments` | Tournament lifecycle, standings, reward settlement, leaderboards | fishing-core's catch events (`process-stage` consumes fishing-core's `platform-event`, or both read the same `fish_catches` table if co-owned — see §3 open question) | `FishingTournamentScheduler`, `FishingService` tournament methods, `FishingTournamentStanding`, `FishingTournamentRewardStanding`, `FishingLeaderboardService` |
+| `psychoboy.penguintwitchbot.fishing-admin` *(optional, cut-able from MVP)* | Fish-type/settings CRUD, `AnalyzeGameBalance`/`SimulateFishing` reports, help-page data | reads fishing-core + fishing-shop tables | `FishingAnalyticsService`, `FishingHelpDataService`, fish-type/settings CRUD from `FishingService` |
 
-All four share `feature: waddles.integrations.superpenguin` (module `integrations`, matches
+All four share `feature: penguintechinc.waddles.integrations-superpenguin` (module `integrations`, matches
 `libs/flask_core/flask_core/app_manifest.py:71` `KNOWN_MODULES`) and `provider: thirdparty` — the closest existing
 manifest field to crediting an external author (§7 proposes the actual attribution fields, which don't exist yet).
 

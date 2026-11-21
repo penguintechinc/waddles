@@ -111,6 +111,13 @@ vi.mock('@penguintechinc/react-libs', () => ({
   },
 }));
 
+vi.mock('../../../services/eventSyncApi', () => ({
+  eventSyncApi: {
+    get: vi.fn().mockResolvedValue({ event_sync_enabled: false, pairings_total: 1, pairings_enabled: 0 }),
+    set: vi.fn(),
+  },
+}));
+
 vi.mock('../../../services/roleSyncApi', async () => {
   const actual = await vi.importActual<typeof import('../../../services/roleSyncApi')>(
     '../../../services/roleSyncApi',
@@ -223,6 +230,18 @@ describe('AdminRoleSyncMapping', () => {
     expect(await screen.findByText(/Use/)).toHaveTextContent('Add Discord server');
     expect(screen.queryByText(/under\s*Connections/)).toBeNull();
     expect(screen.getByRole('button', { name: 'Add Discord server' })).toBeInTheDocument();
+  });
+
+  it('mounts the Discord event-sync toggle for a manager and hides it otherwise', async () => {
+    mount();
+    expect(await screen.findByTestId('event-discord-sync')).toBeInTheDocument();
+  });
+
+  it('hides the event-sync toggle when the user cannot manage', async () => {
+    mockedUseAuth.mockReturnValue({ isCommunityAdmin: () => false } as ReturnType<typeof useAuth>);
+    mount();
+    await screen.findByTestId('binding-row-1');
+    expect(screen.queryByTestId('event-discord-sync')).toBeNull();
   });
 
   it('hides the add-server panel when the user cannot manage', async () => {

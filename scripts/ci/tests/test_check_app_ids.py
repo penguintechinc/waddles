@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import sys
 from pathlib import Path
 
@@ -110,60 +109,62 @@ def test_empty_tree_is_a_failure_not_a_pass(tmp_path, capsys):
     assert "zero ids examined" in capsys.readouterr().out
 
 
-def _seeded_baseline(root: Path) -> dict[str, int]:
-    """Seed a legal tree, write its sweep baseline (the seed's PostHog flag key) and return it."""
-    _seed(root)
-    base = {k: len(v) for k, v in guard.sweep(root).items()}
-    _write(root, guard.BASELINE_REL, json.dumps(base))
-    return base
-
-
 def test_sweep_fails_on_old_id_planted_in_alembic_test_fixture(tmp_path, capsys):
     """An old id in a test fixture (outside every structural parser) must fail the guard."""
-    base = _seeded_baseline(tmp_path)
+    _seed(tmp_path)
     _write(tmp_path, "alembic/tests/test_planted.py", f'APP = "{OLD}planted"\n')
     assert guard.main(["x", str(tmp_path)]) == 1
     out = capsys.readouterr().out
     assert "OLD-ID alembic/tests/test_planted.py:1" in out
-    assert "old-id mention(s) beyond baseline" in out
+    assert "old-id mention(s)" in out
 
 
 def test_sweep_fails_on_old_id_planted_in_hub_api_test(tmp_path):
     """Same guarantee for hub_api/tests fixtures and arbitrary text files."""
-    base = _seeded_baseline(tmp_path)
+    _seed(tmp_path)
     _write(tmp_path, "hub_api/tests/test_x.py", f"id = '{OLD}ping'\n")
     _write(tmp_path, "docs/notes.md", f"see {OLD}service.discord\n")
-    over = guard.sweep_violations(guard.sweep(tmp_path), base)
-    assert {r for r, _, _ in over} == {"hub_api/tests/test_x.py", "docs/notes.md"}
+    _write(tmp_path, "docs/more.md", "x " + "waddles" + ".bot.shoutout.default\n")
+    _write(tmp_path, "core/t.rs", 'const A: &str = "' + "waddles" + '.mx.busy";\n')
+    assert {r for r in guard.sweep(tmp_path)} == {
+        "hub_api/tests/test_x.py",
+        "docs/notes.md",
+        "docs/more.md",
+        "core/t.rs",
+    }
 
 
-def test_sweep_ignores_new_ids_and_platform_flag_keys(tmp_path):
-    """New-shape ids and the two platform flag families are not old ids."""
-    base = _seeded_baseline(tmp_path)
-    flag = "waddles" + ".core."
-    _write(
-        tmp_path,
-        "alembic/tests/test_ok.py",
-        f'A = "{GOOD}"\nF1 = "{flag}rust-data-plane"\nF2 = "{flag}disable-db-bundle-config"\n',
+def test_sweep_ignores_new_ids_and_non_app_id_categories(tmp_path):
+    """New ids and the (B)-(E) exclusions (flags, proto packages, hosts, metrics) are not old ids."""
+    _seed(tmp_path)
+    w = "waddles"
+    body = "\n".join(
+        [
+            f'A = "{GOOD}"',
+            f'B1 = "{w}.core.rust-data-plane"',
+            f'B2 = "{w}.core.disable-db-bundle-config"',
+            f'B3 = "{w}.community.polls"',
+            f'C = "{w}.hub.internal.v1.identity_pb2"',
+            f'D = "https://{w}.penguintech.cloud/x"',
+            f'E = "{w}.ai.guard.duration"',
+        ]
     )
-    assert guard.sweep_violations(guard.sweep(tmp_path), base) == []
+    _write(tmp_path, "alembic/tests/test_ok.py", body + "\n")
+    assert guard.sweep(tmp_path) == {}
     assert guard.main(["x", str(tmp_path)]) == 0
 
 
-def test_sweep_baseline_budget_blocks_growth_but_not_existing_debt(tmp_path):
-    """A baselined file passes at its count and fails when one more old id is added."""
-    _write(tmp_path, "docs/a.md", f"{OLD}one\n")
-    hits = guard.sweep(tmp_path)
-    assert guard.sweep_violations(hits, {"docs/a.md": 1}) == []
-    _write(tmp_path, "docs/a.md", f"{OLD}one\n{OLD}two\n")
-    grown = guard.sweep_violations(guard.sweep(tmp_path), {"docs/a.md": 1})
-    assert [(r, ln) for r, ln, _ in grown] == [("docs/a.md", 2)]
+def test_flag_exclusion_does_not_cover_default_or_four_segment_ids(tmp_path):
+    """A flag-shaped namespace with a .default suffix or extra segment is still an old app_id."""
+    _write(tmp_path, "docs/a.md", "waddles" + ".community.polls.default\n" + "waddles" + ".bot.x.y\n")
+    assert [ln for ln, _ in guard.sweep(tmp_path)["docs/a.md"]] == [1, 2]
 
 
-def test_real_repo_sweep_is_within_baseline():
-    """The checked-in tree has no old-id mention beyond scripts/ci/old_id_baseline.json."""
-    assert guard.sweep_violations(guard.sweep(ROOT), guard.load_baseline(ROOT)) == []
-    assert not any(r.startswith("alembic/tests/test_0033") for r in guard.sweep(ROOT))
+def test_real_repo_sweep_has_zero_hits_and_no_baseline_file():
+    """The checked-in tree has zero old-id mentions and no tolerance file."""
+    assert guard.sweep(ROOT) == {}
+    assert not (ROOT / "scripts/ci/old_id_baseline.json").exists()
+
 
 def test_planted_old_style_seed_feature_fails(tmp_path):
     """A seeded app_catalog.feature of the old waddles.<category>.<name> shape must fail the guard."""

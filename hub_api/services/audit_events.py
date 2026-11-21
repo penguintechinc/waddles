@@ -205,7 +205,8 @@ class AuditValidationError(ValueError):
 
 
 #: ``<identifier>@<semver>`` -- how bundle lifecycle events name a versioned artefact
-#: (``waddles.core.ping@1.0.0``). The part after ``@`` must look like a version (digits first,
+#: (``penguintechinc.waddles.ping@1.0.0``). The part after ``@`` must look like a version
+#: (digits first,
 #: no letters-only TLD), so an e-mail address still cannot pass as an identifier.
 _VERSIONED_REF_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9_.\-]{1,100}@\d+(\.\d+){0,3}([\-+][A-Za-z0-9.\-+]{0,30})?$"
@@ -490,7 +491,6 @@ def _ra(category: AuditCategory, action: AuditAction) -> RouteAudit:
 _P = "/api/v1"
 _ADM = "/api/v1/admin/<cuuid:community_id>"
 _ADMS = "/api/v1/admin/<cuuid:community_id>"
-_CAL = "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>"
 _WF = "/api/v1/admin/<cuuid:community_id>/workflows"
 _APPS = "/api/v1/apps/community/<cuuid:community_id>"
 
@@ -590,14 +590,6 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (("PUT", f"{_P}/user/identities/primary"),),
     ),
     (
-        _ra(AuditCategory.ROLE, AuditAction.ROLE_EVENT_ADMIN_CHANGED),
-        (
-            ("POST", f"{_CAL}/admins"),
-            ("PUT", f"{_CAL}/admins/<admin_id>"),
-            ("DELETE", f"{_CAL}/admins/<admin_id>"),
-        ),
-    ),
-    (
         _ra(AuditCategory.ROLE, AuditAction.ROLE_JOIN_REQUEST_DECIDED),
         (
             ("PUT", f"{_ADM}/join-requests/<int:request_id>/approve"),
@@ -692,29 +684,6 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("DELETE", f"{_WF}/<workflow_id>"),
             ("POST", f"{_WF}/<workflow_id>/publish"),
             ("POST", f"{_WF}/<workflow_id>/execute"),
-        ),
-    ),
-    (
-        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_CALENDAR_EVENT_CHANGED),
-        (
-            ("POST", f"{_ADMS}/calendar/events"),
-            ("PUT", _CAL),
-            ("DELETE", _CAL),
-            ("POST", f"{_CAL}/approve"),
-            ("POST", f"{_CAL}/reject"),
-        ),
-    ),
-    (
-        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_TICKETING_CHANGED),
-        (
-            ("POST", f"{_CAL}/ticketing/enable"),
-            ("POST", f"{_CAL}/ticketing/disable"),
-            ("POST", f"{_CAL}/ticket-types"),
-            ("PUT", f"{_CAL}/ticket-types/<type_id>"),
-            ("DELETE", f"{_CAL}/ticket-types/<type_id>"),
-            ("POST", f"{_CAL}/tickets"),
-            ("POST", f"{_CAL}/tickets/<ticket_id>/cancel"),
-            ("POST", f"{_CAL}/tickets/<ticket_id>/transfer"),
         ),
     ),
     (
@@ -813,36 +782,17 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ),
     ("POST", "/api/v1/github-sync/webhook"): _R_PUBLIC,
     ("POST", "/api/v1/marketplace/public/vendor/submit"): _R_PUBLIC,
-    ("POST", "/api/v1/calendar/book/<slug>"): _R_PUBLIC,
-    ("DELETE", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
-    ("POST", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/booking-pages/<page_id>/members/<user_id>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/bookings/<uuid>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/oauth/calendars/<id>"): _R_SELF,
     ("DELETE", "/api/v1/user/profile/avatar"): _R_SELF,
-    ("POST", "/api/v1/calendar/booking-pages"): _R_SELF,
-    ("POST", "/api/v1/calendar/booking-pages/<page_id>/members"): _R_SELF,
-    ("POST", "/api/v1/calendar/oauth/calendars/<id>/sync"): _R_SELF,
     ("POST", "/api/v1/user/profile/avatar"): _R_SELF,
-    ("PUT", "/api/v1/calendar/availability/settings"): _R_SELF,
-    ("PUT", "/api/v1/calendar/availability/weekly"): _R_SELF,
-    ("PUT", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
     ("PUT", "/api/v1/user/profile"): _R_SELF,
     ("POST", "/api/v1/<cuuid:community_id>/join-requests"): _R_SELF,
     ("POST", "/api/v1/<cuuid:community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
-    ("POST", "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/check-in"): _R_OPS,
-    (
-        "POST",
-        "/api/v1/admin/<cuuid:community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
-    ): _R_OPS,
     (
         "POST",
         "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel",
     ): _R_OPS,
     ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/test"): _R_OPS,
     ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/validate"): _R_OPS,
-    ("POST", "/api/v1/admin/calendar/verify-ticket"): _R_OPS,
     (
         "POST",
         "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments",

@@ -3133,6 +3133,18 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
+    #: migration 0137 -- the ONE tenant that may pair a Discord guild (first claim wins).
+    dal.define_table(
+        "discord_guild_tenants",
+        Field("discord_guild_id", "string", length=255, notnull=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("claimed_at", "datetime"),
+        Field("claimed_by_uuid", "string", length=36),
+        #: the table has no surrogate `id`: the guild id IS the primary key.
+        primarykey=["discord_guild_id"],
+        migrate=migrate,
+    )
+
     dal.define_table(
         "community_role_sync_bindings",
         Field("pairing_id", "integer", notnull=True),
@@ -3218,11 +3230,10 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
 def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define `calendar_events` (legacy, read/write subset) + `calendar_event_discord_syncs`.
 
-    **`calendar_events` is NOT owned by this binding** -- it's the
-    `calendar_interaction_module`'s own legacy table (`action/interactive/
-    calendar_interaction_module/services/calendar_service.py::EventInfo`
-    is the full column list; schema predates this port's numbered
-    migration set and is intentionally left alone here). This function
+    **`calendar_events` is NOT owned by this binding** -- it's a
+    legacy table the calendar app bundle writes (config/postgres/migrations/
+    024_add_event_ticketing.sql has the full column list; schema predates
+    this port's numbered migration set and is intentionally left alone here). This function
     maps only the subset `event_discord_sync_service.py` actually reads/
     writes: the full Discord-payload field set (title/description/
     event_date/end_date/timezone/location/status/community_id) plus the

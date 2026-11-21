@@ -426,7 +426,7 @@ mod tests {
                 columns: vec![],
             },
         });
-        let scope = DbScope::new(7, 0, "waddles.bot.unknown");
+        let scope = DbScope::new(7, 0, "penguintechinc.waddles.bot-unknown");
         let schemas = SchemaCache::new();
         let snapshot = CapabilitySnapshot::new();
 
@@ -473,9 +473,9 @@ mod tests {
         });
         let schemas = SchemaCache::new();
         schemas.update("penguintechinc.waddles.fixture-bot-a", sample_schema());
-        let snapshot = granted_snapshot("waddles.bot.b"); // different app granted
+        let snapshot = granted_snapshot("penguintechinc.waddles.bot-b"); // different app granted
 
-        let scope_b = DbScope::new(7, 0, "waddles.bot.b");
+        let scope_b = DbScope::new(7, 0, "penguintechinc.waddles.bot-b");
         let err = host
             .insert(&scope_b, &schemas, &snapshot, vec![])
             .await

@@ -45,7 +45,7 @@ public sealed class WaddleToolException(ToolErrorKind kind, string message) : Ex
 /// </summary>
 public interface IToolClient
 {
-    /// <summary>Invokes <paramref name="tool"/> on <paramref name="target"/> (a 4-segment `waddles.a.b.c` app id).</summary>
+    /// <summary>Invokes <paramref name="tool"/> on <paramref name="target"/> (a 4-segment `penguintechinc.waddles.a-b-c` app id).</summary>
     byte[] Invoke(string target, string tool, byte[] argsJson, string? idempotencyKey);
 }
 
