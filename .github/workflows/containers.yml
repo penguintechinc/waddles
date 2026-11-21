@@ -195,7 +195,7 @@ jobs:
           # name|changed-flag-var|dockerfile|port
           MODULES=(
             "migrations|$MIGRATIONS|./migrations/Dockerfile|0"
-            "hub-api|$HUB|./hub_api/Dockerfile|8060"
+            "hub-api|$HUB|./hub_api/Dockerfile|8204"
             "hub-webui|$HUB|./admin/hub_module/Dockerfile.webui|8080"
           )
 
