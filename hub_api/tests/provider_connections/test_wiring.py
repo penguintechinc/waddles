@@ -67,9 +67,9 @@ async def test_routes_are_discovered_by_the_real_app_factory() -> None:
         ("GET", "/api/v1/connection-providers"),
         ("GET", base),
         ("POST", base),
-        ("GET", f"{base}/<int:connection_id>"),
-        ("PATCH", f"{base}/<int:connection_id>"),
-        ("DELETE", f"{base}/<int:connection_id>"),
+        ("GET", f"{base}/<puuid:connection_id>"),
+        ("PATCH", f"{base}/<puuid:connection_id>"),
+        ("DELETE", f"{base}/<puuid:connection_id>"),
     ):
         assert expected in rules, expected
     # The data-plane reads moved to gRPC: no internal REST route may remain.
@@ -94,7 +94,7 @@ def test_admin_mutations_are_audited_as_admin_actions_and_internal_routes_are_no
     denied = classify_request(
         RequestFacts(
             method="DELETE",
-            rule="/api/v1/communities/<cuuid:community_id>/provider-connections/<int:connection_id>",
+            rule="/api/v1/communities/<cuuid:community_id>/provider-connections/<puuid:connection_id>",
             status_code=403,
             scope_checked=True,
             denied=True,

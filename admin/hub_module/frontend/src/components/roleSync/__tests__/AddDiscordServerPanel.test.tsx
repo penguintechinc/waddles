@@ -20,7 +20,7 @@ vi.mock('../../../services/roleSyncApi', async () => {
 const api = vi.mocked(roleSyncApi);
 
 const PAIRING = {
-  id: 9,
+  id: '9',
   community_id: '0000002a-0000-4000-8000-000000000000',
   discord_guild_id: '777888999',
   direction: 'discord_to_twitch',

@@ -145,7 +145,7 @@ const mockedUseAuth = vi.mocked(useAuth);
 const mockedRoleSyncApi = vi.mocked(roleSyncApi);
 
 const PAIRING: GuildPairing = {
-  id: 7,
+  id: '7',
   community_id: '0000002a-0000-4000-8000-000000000000',
   discord_guild_id: '555000111',
   direction: 'bidirectional',
@@ -158,8 +158,8 @@ const PAIRING: GuildPairing = {
 };
 
 const SUBSCRIBER_BINDING: RoleSyncBinding = {
-  id: 1,
-  pairing_id: 7,
+  id: '1',
+  pairing_id: '7',
   sync_scope: 'subscriber_tier',
   subscriber_tier: 2,
   community_role: null,
@@ -169,8 +169,8 @@ const SUBSCRIBER_BINDING: RoleSyncBinding = {
 };
 
 const COMMUNITY_ROLE_BINDING: RoleSyncBinding = {
-  id: 2,
-  pairing_id: 7,
+  id: '2',
+  pairing_id: '7',
   sync_scope: 'community_role',
   subscriber_tier: null,
   community_role: 'moderator',
@@ -253,7 +253,7 @@ describe('AdminRoleSyncMapping', () => {
   });
 
   it('pairing a 2nd server by ID refetches pairings and reveals mirror roles without reload', async () => {
-    const second = { ...PAIRING, id: 8, discord_guild_id: '777888999' };
+    const second = { ...PAIRING, id: '8', discord_guild_id: '777888999' };
     mockedRoleSyncApi.listPairings.mockResolvedValueOnce([PAIRING]);
     mockedRoleSyncApi.listPairings.mockResolvedValue([PAIRING, second]);
     mockedRoleSyncApi.createPairing.mockResolvedValue(second);
@@ -294,7 +294,7 @@ describe('AdminRoleSyncMapping', () => {
     expect(role).toHaveTextContent('902');
     expect(role).toHaveTextContent('moderator');
     expect(role).toHaveTextContent('Discord → Waddles');
-    expect(mockedRoleSyncApi.listBindings).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7);
+    expect(mockedRoleSyncApi.listBindings).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7');
   });
 
   it('renders the pairing status card with sync state, event sync and mapping count', async () => {
@@ -321,7 +321,7 @@ describe('AdminRoleSyncMapping', () => {
     const box = await screen.findByLabelText('Role sync enabled');
     fireEvent.click(box);
     await waitFor(() =>
-      expect(mockedRoleSyncApi.updatePairing).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7, { sync_enabled: false }),
+      expect(mockedRoleSyncApi.updatePairing).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7', { sync_enabled: false }),
     );
   });
 
@@ -347,7 +347,7 @@ describe('AdminRoleSyncMapping', () => {
   it('creates a community_role binding and refreshes the list', async () => {
     mockedRoleSyncApi.createBinding.mockResolvedValue({
       ...COMMUNITY_ROLE_BINDING,
-      id: 3,
+      id: '3',
       discord_role_id: '903',
       community_role: 'vip',
     });
@@ -374,7 +374,7 @@ describe('AdminRoleSyncMapping', () => {
     });
 
     await waitFor(() =>
-      expect(mockedRoleSyncApi.createBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7, {
+      expect(mockedRoleSyncApi.createBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7', {
         sync_scope: 'community_role',
         discord_role_id: '903',
         community_role: 'vip',
@@ -398,7 +398,7 @@ describe('AdminRoleSyncMapping', () => {
       fireEvent.click(screen.getByText('Delete', { selector: 'button[type="submit"]' }));
     });
 
-    await waitFor(() => expect(mockedRoleSyncApi.deleteBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', 7, 1));
+    await waitFor(() => expect(mockedRoleSyncApi.deleteBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7', '1'));
   });
 
   it('surfaces a create error instead of swallowing it', async () => {

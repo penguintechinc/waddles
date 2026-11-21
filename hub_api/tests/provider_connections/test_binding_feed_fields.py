@@ -25,6 +25,7 @@ from tests.provider_connections.fake_twitch import FakeTwitch
 from tests.provider_connections.support import (
     create_twitch,
     grant_to,
+    numeric_connection_id,
     raw_rows,
     set_column,
 )
@@ -65,7 +66,7 @@ async def _create_discord(dclient: Any, db: Any) -> int:
         data=_create_body(),
     )
     assert response.status_code == 201, await response.get_data(as_text=True)
-    return int((await response.get_json())["connection"]["id"])
+    return await numeric_connection_id(db, (await response.get_json())["connection"]["id"])
 
 
 def _meta(row: dict[str, Any]) -> dict[str, Any]:

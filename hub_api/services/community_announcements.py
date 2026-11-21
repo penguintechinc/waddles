@@ -51,7 +51,7 @@ def _public_id(dal: Any, community_id: int) -> str:
 class Announcement:
     """One `announcements` row, camelCase-in-Node fields kept snake_case here (ruff N815)."""
 
-    id: int
+    id: str
     community_id: str
     title: str
     content: str
@@ -70,7 +70,7 @@ class Announcement:
 def _to_dto(row: Any, public_community_id: str) -> Announcement:
     """Announcement DTO; `community_id` is the community's PUBLIC UUID (never the numeric id)."""
     return Announcement(
-        id=row.id,
+        id=str(row.public_id),
         community_id=public_community_id,
         title=row.title,
         content=row.content,
@@ -450,7 +450,7 @@ class BroadcastRecord:
     """One `announcement_broadcasts` row, for the broadcast-status endpoint."""
 
     id: int
-    announcement_id: int
+    announcement_id: str
     platform: str
     status: str
     broadcast_at: str | None
@@ -458,7 +458,9 @@ class BroadcastRecord:
     error_message: str | None
 
 
-def get_broadcast_status(dal: Any, announcement_id: int) -> list[BroadcastRecord]:
+def get_broadcast_status(
+    dal: Any, announcement_id: int, *, public_id: str
+) -> list[BroadcastRecord]:
     """All broadcast attempts for one announcement, newest first.
 
     `completed_at` has no backing column (Node's own query referenced one
@@ -473,7 +475,7 @@ def get_broadcast_status(dal: Any, announcement_id: int) -> list[BroadcastRecord
     return [
         BroadcastRecord(
             id=r.id,
-            announcement_id=r.announcement_id,
+            announcement_id=public_id,
             platform=r.platform,
             status=r.status,
             broadcast_at=_iso(r.broadcast_at),

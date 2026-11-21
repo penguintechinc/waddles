@@ -18,7 +18,7 @@ from flask_core.service_jwt import ServiceJwtIssuer
 from tests.community_ids import public_id
 from tests.provider_connections.conftest import admin_headers
 from tests.provider_connections.fake_google import APP_CLIENT_ID, FakeGoogle
-from tests.provider_connections.support import raw_rows, set_column
+from tests.provider_connections.support import numeric_connection_id, raw_rows, set_column
 from tests.provider_connections.test_api import _bound
 from tests.provider_connections.test_youtube_flow import (
     INTERNAL,
@@ -108,7 +108,11 @@ async def test_a_tenant_admin_replace_expires_the_old_connections_and_drops_thei
     resolved = await yt_client.post(
         f"{INTERNAL}/communities/{yt_db.seed.community_id}/provider-connections/"
         f"{connection_id}/resolve",
-        headers=_bound(service_issuer, yt_db.seed.community_id, connection_id),
+        headers=_bound(
+            service_issuer,
+            yt_db.seed.community_id,
+            await numeric_connection_id(yt_db, connection_id),
+        ),
     )
     assert resolved.status_code == 409
     assert (await resolved.get_json())["reason"] == "app_replaced"

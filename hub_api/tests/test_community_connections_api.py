@@ -36,7 +36,7 @@ from services.oauth_providers import (
     ProviderSpec,
     TokenResponse,
 )
-from tests.community_ids import cpath, install_community_ids
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 
 CALLBACK_BASE = "http://localhost:19999"
 SERVICE_ID = spiffe_id("alpha", "svc-action")
@@ -657,7 +657,7 @@ class TestInternalGetToken:
         monkeypatch.setattr(connections_module.providers_svc, "refresh_access_token", mock_refresh)
 
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
 
@@ -700,7 +700,7 @@ class TestInternalGetToken:
         )
 
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
 
@@ -723,7 +723,7 @@ class TestInternalGetToken:
             AsyncMock(return_value=None),
         )
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
         assert response.status_code == 404
@@ -750,7 +750,7 @@ class TestInternalGetToken:
         )
 
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
         assert response.status_code == 502
@@ -760,16 +760,23 @@ class TestInternalGetToken:
     async def test_missing_service_key_is_401(self, client: Any, community_db: Any) -> None:
         dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token"
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token"
         )
         assert response.status_code == 401
 
     async def test_unknown_community_is_404(self, client: Any, mint_headers: Any) -> None:
         response = await client.get(
+            f"/api/v1/internal/communities/{UNKNOWN_PUBLIC_ID}/connections/youtube/token",
+            headers=mint_headers(999999),
+        )
+        # An unknown community UUID never equals the token's community binding: refused, never
+        # served (and a numeric id in the path no longer routes at all).
+        assert response.status_code in (403, 404)
+        numeric = await client.get(
             "/api/v1/internal/communities/999999/connections/youtube/token",
             headers=mint_headers(999999),
         )
-        assert response.status_code == 404
+        assert numeric.status_code == 404
 
     async def test_unsupported_provider_is_400(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
@@ -781,7 +788,7 @@ class TestInternalGetToken:
             AsyncMock(side_effect=UnsupportedProvider("unsupported provider 'nope'")),
         )
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/nope/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/nope/token",
             headers=bound_headers,
         )
         assert response.status_code == 400
@@ -797,7 +804,9 @@ class TestInternalGetTokenAuth:
     ) -> None:
         # regression: HIGH-2 -- a valid shared X-Service-Key with NO Bearer must not authenticate.
         dal, community_id = community_db
-        response = await client.get(self.URL.format(cid=community_id), headers=service_key_headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=service_key_headers
+        )
         assert response.status_code == 401
 
     async def test_valid_service_key_plus_bearer_for_other_community_is_403(
@@ -805,7 +814,9 @@ class TestInternalGetTokenAuth:
     ) -> None:
         dal, community_id = community_db
         headers = {**service_key_headers, **mint_headers(community_id + 1)}
-        response = await client.get(self.URL.format(cid=community_id), headers=headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=headers
+        )
         assert response.status_code == 403
 
     async def test_unconfigured_verifier_is_503_not_open(
@@ -813,7 +824,9 @@ class TestInternalGetTokenAuth:
     ) -> None:
         dal, community_id = community_db
         app.config["SERVICE_JWT_VERIFIER"] = None
-        response = await client.get(self.URL.format(cid=community_id), headers=service_key_headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=service_key_headers
+        )
         assert response.status_code == 503
 
     async def test_wrong_scope_is_401(
@@ -829,7 +842,7 @@ class TestInternalGetTokenAuth:
             "system",
         )
         response = await client.get(
-            self.URL.format(cid=community_id),
+            self.URL.format(cid=public_id(dal, community_id)),
             headers=mint_headers(community_id, scope="other:scope"),
         )
         assert response.status_code == 401
@@ -865,7 +878,9 @@ class TestInternalGetTokenAuth:
         monkeypatch.setattr(
             connections_module.connections_svc, "store_refreshed_access_token", AsyncMock()
         )
-        response = await client.get(self.URL.format(cid=community_id), headers=bound_headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=bound_headers
+        )
         assert response.status_code == 200
         assert (await response.get_json())["data"]["access_token"] == "AT_NEW"
 
@@ -885,11 +900,13 @@ class TestInternalGetTokenAuth:
                 )
             ),
         )
-        response = await client.get(self.URL.format(cid=community_id), headers=bound_headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=bound_headers
+        )
         assert response.status_code == 200
         assert response.headers["Cache-Control"] == "no-store"
         # 401s carry it too: nothing under /internal may be cached.
-        denied = await client.get(self.URL.format(cid=community_id))
+        denied = await client.get(self.URL.format(cid=public_id(dal, community_id)))
         assert denied.status_code == 401
         assert denied.headers["Cache-Control"] == "no-store"
 

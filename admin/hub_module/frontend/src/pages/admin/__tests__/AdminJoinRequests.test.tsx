@@ -10,8 +10,11 @@ import { apiClient } from '../../../lib/apiClient';
 import { httpError, mockApiGet, ok, unexpectedUrl } from '../../../test/api';
 import { renderWithProviders } from '../../../test/renderWithProviders';
 
+/** A request's public UUID (the only id the served routes accept). */
+const rid = (n: number) => `0000000${n}-0000-4000-8000-0000000000aa`;
+
 const row = (id: number, over: Record<string, unknown> = {}) => ({
-  id,
+  id: rid(id),
   status: 'pending',
   message: `please ${id}`,
   created_at: '2026-10-20T10:00:00Z',
@@ -55,7 +58,7 @@ describe('AdminJoinRequests', () => {
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Approve applicant1' }));
     await waitFor(() => expect(screen.queryByText('applicant1')).not.toBeInTheDocument());
-    expect(put).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/1/approve');
+    expect(put).toHaveBeenCalledWith(`/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/${rid(1)}/approve`);
     expect(screen.getByText('applicant2')).toBeInTheDocument();
   });
 
@@ -64,7 +67,7 @@ describe('AdminJoinRequests', () => {
     const put = vi.spyOn(apiClient, 'put').mockResolvedValue(ok({ success: true }));
     renderPage();
     fireEvent.click(await screen.findByRole('button', { name: 'Reject applicant4' }));
-    await waitFor(() => expect(put).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/4/reject'));
+    await waitFor(() => expect(put).toHaveBeenCalledWith(`/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/${rid(4)}/reject`));
   });
 
   it('shows the server reason when a decision fails, and lets the admin dismiss it', async () => {

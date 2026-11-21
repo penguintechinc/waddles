@@ -48,11 +48,22 @@ from services.community_inventory_authz import require_inventory_admin, require_
 from services.current_user import get_current_user_id
 from services.errors import ApiError
 from services.pagination import parse_limit
+from services.public_ids import (
+    PublicIdTarget,
+    Scope,
+    build_view_arg_translator,
+    resolve_public_id_sync,
+)
 from services.route_guards import GUARD_ADMIN, mark_guarded
 
 logger = logging.getLogger(__name__)
 
 inventory_bp = Blueprint("v1_community_inventory", __name__, url_prefix="/api/v1/admin")
+
+#: `<puuid:item_id>` -> numeric id inside the URL community (unknown/foreign/malformed -> 404).
+inventory_bp.before_request(
+    build_view_arg_translator({"item_id": PublicIdTarget("inventory_items")})
+)
 
 #: Two-gate Feature flag -- `libs/community_module/features.py`'s
 #: `community.inventory` Feature contract, Professional tier.
@@ -147,7 +158,7 @@ async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"item": asdict(dto)}, 201
 
 
-@inventory_bp.route("/<cuuid:community_id>/inventory/items/<int:item_id>", methods=["PUT"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items/<puuid:item_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
@@ -162,7 +173,7 @@ async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
     return {"item": asdict(dto)}, 200
 
 
-@inventory_bp.route("/<cuuid:community_id>/inventory/items/<int:item_id>", methods=["DELETE"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items/<puuid:item_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
@@ -176,7 +187,7 @@ async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
 
 
 @inventory_bp.route(
-    "/<cuuid:community_id>/inventory/items/<int:item_id>/stock/add", methods=["POST"]
+    "/<cuuid:community_id>/inventory/items/<puuid:item_id>/stock/add", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
@@ -209,7 +220,7 @@ async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, ob
 
 
 @inventory_bp.route(
-    "/<cuuid:community_id>/inventory/items/<int:item_id>/stock/remove", methods=["POST"]
+    "/<cuuid:community_id>/inventory/items/<puuid:item_id>/stock/remove", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
@@ -277,7 +288,17 @@ async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
     denied = await _guard_admin(community_id)
     if denied:
         return denied
-    item_id = request.args.get("item_id", type=int)
+    item_id: int | None = None
+    raw_item = request.args.get("item_id")
+    if raw_item:
+        item_id = resolve_public_id_sync(
+            current_app.config["dal"],
+            "inventory_items",
+            raw_item,
+            scope=Scope(community_id=community_id),
+        )
+        if item_id is None:
+            return {"error": "Item not found"}, 404
     limit = parse_limit(request.args.get("limit"), default=50)
     offset = request.args.get("offset", default=0, type=int)
     log = get_audit_log(
@@ -314,8 +335,8 @@ async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
     if denied:
         return denied
     payload = await request.get_json(force=True, silent=True) or {}
-    item_id = payload.get("item_id")
-    if not item_id:
+    raw_item_id = payload.get("item_id")
+    if not raw_item_id:
         return {"error": "item_id is required"}, 400
     try:
         quantity = int(payload.get("quantity"))  # type: ignore[arg-type]  # TypeError caught below
@@ -323,12 +344,20 @@ async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
         return {"error": "Quantity must be a positive number"}, 400
     if quantity <= 0:
         return {"error": "Quantity must be a positive number"}, 400
+    item_id = resolve_public_id_sync(
+        current_app.config["dal"],
+        "inventory_items",
+        raw_item_id,
+        scope=Scope(community_id=community_id),
+    )
+    if item_id is None:
+        return {"error": "Item not found"}, 404
 
     dto, err = checkout_item(
         current_app.config["dal"],
         community_id,
         int(get_current_user(request)["user_id"]),
-        int(item_id),
+        item_id,
         quantity,
         payload.get("due_date"),
         payload.get("notes"),

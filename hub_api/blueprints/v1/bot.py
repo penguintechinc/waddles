@@ -57,6 +57,14 @@ from services.community_public_id import (
 )
 from services.errors import ApiError
 from services.global_identity import is_global_admin_sync
+from services.public_ids import (
+    PublicIdTarget,
+    Scope,
+    build_view_arg_translator,
+    parse_public_id,
+    resolve_public_id,
+)
+from services.public_ids import lookup_public_ids as lookup_entity_public_ids
 from services.route_guards import (
     GUARD_ADMIN,
     community_admin_guard,
@@ -65,6 +73,21 @@ from services.route_guards import (
 )
 
 bot_bp = Blueprint("v1_bot", __name__, url_prefix="/api/v1/admin")
+
+# `<puuid:...>` path ids -> numeric, BEFORE the handler (the app-level `cuuid` hook already ran).
+# Community-scoped targets resolve inside the URL community only; the ai-knowledge ids carry no
+# URL community, so they resolve globally and `_load_authorized_source` / `_scope_allowed` stay
+# the (unchanged) authz: a foreign or unknown UUID is the same 404 as before.
+bot_bp.before_request(
+    build_view_arg_translator(
+        {
+            "creator_id": PublicIdTarget("shoutout_creators"),
+            "server_id": PublicIdTarget("server_status_configs"),
+            "source_id": PublicIdTarget("ai_knowledge_sources", community_param=None),
+            "suggestion_id": PublicIdTarget("ai_ticket_suggestions", community_param=None),
+        }
+    )
+)
 
 # -- Scope namespace (see module docstring's D5 note) --
 _SHOUTOUT_READ = "bot.shoutout:read"
@@ -409,7 +432,7 @@ async def add_shoutout_creator(data: ShoutoutCreatorRequest, community_id: int) 
     return {"success": True, "creator": dataclasses.asdict(creator)}
 
 
-@bot_bp.route("/<cuuid:community_id>/shoutout/creators/<int:creator_id>", methods=["DELETE"])
+@bot_bp.route("/<cuuid:community_id>/shoutout/creators/<puuid:creator_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SHOUTOUT_WRITE)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -569,9 +592,9 @@ async def update_ai_chatter_config(data: AIChatterConfigRequest, community_id: i
 
 @dataclass(slots=True, frozen=True)
 class KnowledgeSourceDTO:
-    """One knowledge source as exposed over the API: `community_id` is the PUBLIC UUID."""
+    """One knowledge source as exposed over the API: `id`/`community_id` are PUBLIC UUIDs."""
 
-    id: int
+    id: str
     community_id: str | None
     vendor_id: int | None
     module_id: int | None
@@ -589,14 +612,24 @@ class KnowledgeSourceDTO:
     updated_at: str | None
 
 
+async def _entity_uuids(table: str, ids: Any) -> dict[int, str]:
+    """ONE batched numeric -> public UUID lookup for response DTOs (fails loud on a gap)."""
+    wanted = list(ids)
+    if not wanted:
+        return {}
+    return await _to_thread(lookup_entity_public_ids, _dal(), table, wanted)
+
+
 async def _source_dtos(
     sources: list[bot_ai_knowledge.KnowledgeSource],
 ) -> list[KnowledgeSourceDTO]:
     """Map service sources to DTOs with ONE batched public-id lookup (fails loud if missing)."""
     public = await lookup_public_ids(s.community_id for s in sources if s.community_id is not None)
+    source_uuids = await _entity_uuids("ai_knowledge_sources", (s.id for s in sources))
     out: list[KnowledgeSourceDTO] = []
     for src in sources:
         values = {f.name: getattr(src, f.name) for f in dataclasses.fields(src)}
+        values["id"] = source_uuids[src.id]
         cid = values["community_id"]
         values["community_id"] = None if cid is None else public[cid]
         out.append(KnowledgeSourceDTO(**values))
@@ -668,7 +701,7 @@ class ReindexResponse:
 
     success: bool
     message: str
-    sourceId: int
+    sourceId: str
 
 
 @dataclass(slots=True, frozen=True)
@@ -687,7 +720,7 @@ class KnowledgeChunkDTO:
     """Nested response field -- Knowledge Chunk."""
 
     id: int
-    source_id: int
+    source_id: str
     content: str
     source_url: str | None
     source_title: str | None
@@ -723,9 +756,9 @@ class SuggestRequest:
 
 @dataclass(slots=True, frozen=True)
 class TicketSuggestionDTO:
-    """Nested response field -- Ticket Suggestion."""
+    """Nested response field -- Ticket Suggestion; `id` = public UUID."""
 
-    id: int
+    id: str
     ticket_id: int
     suggestion_text: str
     confidence_score: float
@@ -808,7 +841,10 @@ async def _load_authorized_source(source_id: int) -> bool:
     Callers answer 404 (never 403) on False so a foreign source id is
     indistinguishable from a missing one -- no cross-tenant existence oracle.
     """
-    row = await _to_thread(lambda: _dal().ai_knowledge_sources[source_id])
+    # Query form, not `table[id]`: pydal raises KeyError for a negative key, and an unknown/foreign
+    # UUID arrives as the negative `UNKNOWN_ID` sentinel -- it must be the plain 404 miss.
+    dal = _dal()
+    row = await _to_thread(lambda: dal(dal.ai_knowledge_sources.id == source_id).select().first())
     if row is None:
         return False
     if not await _scope_allowed(row.community_id, row.vendor_id):
@@ -920,7 +956,7 @@ async def _index_source_background(dal: Any, source_id: int) -> None:
         )
 
 
-@bot_bp.route("/ai-knowledge/sources/<int:source_id>", methods=["PUT"])
+@bot_bp.route("/ai-knowledge/sources/<puuid:source_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_request(KnowledgeSourceUpdateRequest)
@@ -950,7 +986,7 @@ async def update_knowledge_source(data: KnowledgeSourceUpdateRequest, source_id:
     return KnowledgeSourceResponse(success=True, source=(await _source_dtos([source]))[0])
 
 
-@bot_bp.route("/ai-knowledge/sources/<int:source_id>", methods=["DELETE"])
+@bot_bp.route("/ai-knowledge/sources/<puuid:source_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
@@ -969,7 +1005,7 @@ async def delete_knowledge_source(source_id: int) -> Any:
     return SimpleSuccessResponse(success=True)
 
 
-@bot_bp.route("/ai-knowledge/sources/<int:source_id>/reindex", methods=["POST"])
+@bot_bp.route("/ai-knowledge/sources/<puuid:source_id>/reindex", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_response(ReindexResponse)
@@ -978,12 +1014,14 @@ async def reindex_source(source_id: int) -> Any:
     if not await _load_authorized_source(source_id):
         return _error(_SOURCE_NOT_FOUND, 404, "NOT_FOUND")
     asyncio.create_task(_index_source_background(_dal(), source_id))
-    return ReindexResponse(success=True, message="Reindex started", sourceId=source_id)
+    source_uuid = (await _entity_uuids("ai_knowledge_sources", [source_id]))[source_id]
+    return ReindexResponse(success=True, message="Reindex started", sourceId=source_uuid)
 
 
-def _suggestion_dto(suggestion: bot_ai_knowledge.TicketSuggestion) -> TicketSuggestionDTO:
+async def _suggestion_dto(suggestion: bot_ai_knowledge.TicketSuggestion) -> TicketSuggestionDTO:
+    uuids = await _entity_uuids("ai_ticket_suggestions", [suggestion.id])
     return TicketSuggestionDTO(
-        id=suggestion.id,
+        id=uuids[suggestion.id],
         ticket_id=suggestion.ticket_id,
         suggestion_text=suggestion.suggestion_text,
         confidence_score=suggestion.confidence_score,
@@ -1019,13 +1057,14 @@ async def search_knowledge_base(data: KnowledgeSearchRequest) -> Any:
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         logger.warning("ai-knowledge request refused: status=%s", exc.status)
         return _error(str(exc), exc.status, "BAD_REQUEST")
+    source_uuids = await _entity_uuids("ai_knowledge_sources", {r.source_id for r in results})
     return KnowledgeSearchResponse(
         success=True,
         results=[
             KnowledgeSearchResultDTO(
                 chunk=KnowledgeChunkDTO(
                     id=r.chunk_id,
-                    source_id=r.source_id,
+                    source_id=source_uuids[r.source_id],
                     content=r.content,
                     source_url=r.source_url,
                     source_title=r.source_title,
@@ -1066,10 +1105,10 @@ async def suggest_for_ticket(data: SuggestRequest) -> Any:
             suggestion=None,
             message="No suggestion generated -- knowledge base confidence below threshold",
         )
-    return SuggestResponse(success=True, suggestion=_suggestion_dto(suggestion)), 201
+    return SuggestResponse(success=True, suggestion=await _suggestion_dto(suggestion)), 201
 
 
-@bot_bp.route("/ai-knowledge/suggestions/<int:suggestion_id>/feedback", methods=["POST"])
+@bot_bp.route("/ai-knowledge/suggestions/<puuid:suggestion_id>/feedback", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_AI_KNOWLEDGE_WRITE)  # type: ignore[misc]
 @validate_request(SuggestionFeedbackRequest)
@@ -1098,7 +1137,7 @@ async def submit_suggestion_feedback(data: SuggestionFeedbackRequest, suggestion
     except bot_ai_knowledge.KnowledgeServiceError as exc:
         code = "NOT_FOUND" if exc.status == 404 else "BAD_REQUEST"
         raise ApiError(str(exc), exc.status, code) from exc
-    return SuggestionFeedbackResponse(success=True, suggestion=_suggestion_dto(suggestion))
+    return SuggestionFeedbackResponse(success=True, suggestion=await _suggestion_dto(suggestion))
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -1278,7 +1317,7 @@ async def create_rcon_server(data: ServerCreateRequest, community_id: int) -> An
     return ServerResponse(server=server), 201
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>", methods=["PUT"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1322,7 +1361,7 @@ async def update_rcon_server(data: ServerUpdateRequest, community_id: int, serve
     return ServerResponse(server=server)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>", methods=["DELETE"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1344,7 +1383,7 @@ async def delete_rcon_server(community_id: int, server_id: int) -> Any:
     return MessageResponse(message="Server deleted")
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/test", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/test", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1369,7 +1408,7 @@ async def test_rcon_connection(
         return _error(str(exc), 404, "NOT_FOUND")
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/command", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/command", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1395,7 +1434,7 @@ async def execute_rcon_command(
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/kick", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/kick", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1424,7 +1463,7 @@ async def kick_rcon_player(data: KickPlayerRequest, community_id: int, server_id
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/ban", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/ban", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1454,7 +1493,7 @@ async def ban_rcon_player(data: BanPlayerRequest, community_id: int, server_id: 
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/channels", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1467,7 +1506,7 @@ async def get_rcon_channels(community_id: int, server_id: int) -> Any:
     return await bot_rcon.get_channels(_dal(), community_id, server_id)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/move", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/move", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1491,7 +1530,7 @@ async def move_rcon_user(data: MoveUserRequest, community_id: int, server_id: in
         return _error(str(exc), 400, "BAD_REQUEST")
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/message", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/message", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1532,7 +1571,18 @@ async def get_rcon_command_log(community_id: int) -> Any:
         return denied
     limit = min(200, max(1, _int_arg("limit", 50)))
     offset = max(0, _int_arg("offset", 0))
-    server_id = _int_arg("server_id", 0) or None
+    server_id: int | None = None
+    raw_server = request.args.get("server_id")
+    if raw_server:
+        # The filter is the server's public UUID, resolved inside this community only.
+        server_id = await resolve_public_id(
+            _dal(),
+            "server_status_configs",
+            parse_public_id(raw_server) or "",
+            scope=Scope(community_id=community_id),
+        )
+        if server_id is None:
+            return api_error("Server not found", status_code=404)
     entries = await _to_thread(
         bot_rcon.get_command_log,
         _dal(),
@@ -1544,7 +1594,7 @@ async def get_rcon_command_log(community_id: int) -> Any:
     return CommandLogResponse(log=entries)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/policy", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/policy", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1557,7 +1607,7 @@ async def get_rcon_access_policy(community_id: int, server_id: int) -> Any:
     return await bot_rcon.get_access_policy(_dal(), community_id, server_id)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/policy", methods=["PUT"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/policy", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1576,7 +1626,7 @@ async def update_rcon_access_policy(community_id: int, server_id: int) -> Any:
     return await bot_rcon.update_access_policy(_dal(), community_id, server_id, policy)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/enforce", methods=["POST"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/enforce", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1589,7 +1639,7 @@ async def trigger_rcon_enforcement(community_id: int, server_id: int) -> Any:
     return await bot_rcon.trigger_enforcement(_dal(), community_id, server_id)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/servers/<int:server_id>/access-log", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/servers/<puuid:server_id>/access-log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_ADMIN)  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -1623,7 +1673,7 @@ async def list_rcon_info(community_id: int) -> Any:
     return ServersMemberResponse(servers=servers)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/info/<int:server_id>/status", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/info/<puuid:server_id>/status", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]
@@ -1637,7 +1687,7 @@ async def get_rcon_server_status(community_id: int, server_id: int) -> Any:
     return await bot_rcon.get_server_status(_dal(), community_id, server_id, row=row)
 
 
-@bot_bp.route("/<cuuid:community_id>/rcon/info/<int:server_id>/players", methods=["GET"])
+@bot_bp.route("/<cuuid:community_id>/rcon/info/<puuid:server_id>/players", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SERVER_MANAGER_READ)  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]

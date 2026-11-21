@@ -31,6 +31,7 @@ auto-discovery -- no edit to `routers/v1.py` needed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
@@ -44,13 +45,35 @@ from services.community_common import api_error, community_in_tenant
 from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.db_routing import get_read_dal, reads_from_replica
-from services.errors import ApiError
+from services.errors import ApiError, not_found
+from services.public_ids import (
+    PublicIdTarget,
+    Scope,
+    build_view_arg_translator,
+    lookup_public_ids,
+    resolve_public_id_sync,
+)
 from services.route_guards import community_admin_guard, community_member_guard
+
+logger = logging.getLogger(__name__)
 
 ADMIN_SUPPORT_SCOPE = "community.support:admin"
 
 support_admin_bp = Blueprint("v1_support_admin", __name__, url_prefix="/api/v1/admin")
 support_member_bp = Blueprint("v1_support_member", __name__, url_prefix="/api/v1/admin")
+
+#: `<puuid:...>` -> numeric ids inside the URL community (unknown/foreign/malformed -> 404).
+support_admin_bp.before_request(
+    build_view_arg_translator(
+        {
+            "category_id": PublicIdTarget("support_ticket_categories"),
+            "ticket_id": PublicIdTarget("support_tickets"),
+        }
+    )
+)
+support_member_bp.before_request(
+    build_view_arg_translator({"ticket_id": PublicIdTarget("support_tickets")})
+)
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -95,9 +118,9 @@ def _reporter_identity(dal: Any, user_id: int) -> tuple[str | None, str | None]:
 
 @dataclass(slots=True, frozen=True)
 class CategoryDTO:
-    """One `support_ticket_categories` row."""
+    """One `support_ticket_categories` row; `id` is its public UUID."""
 
-    id: int
+    id: str
     community_id: str
     name: str
     description: str | None
@@ -111,9 +134,9 @@ class CategoryDTO:
 class TicketDTO:
     """One `support_tickets` row, plus its category's name (Node's `LEFT JOIN` column)."""
 
-    id: int
+    id: str
     community_id: str
-    category_id: int | None
+    category_id: str | None
     ticket_number: str
     subject: str
     description: str | None
@@ -135,7 +158,7 @@ class CommentDTO:
     """One `support_ticket_comments` row."""
 
     id: int
-    ticket_id: int
+    ticket_id: str
     author_user_id: int | None
     author_name: str | None
     content: str
@@ -169,7 +192,7 @@ class CreateTicketRequest:
     """Request DTO for `POST /support/submit`."""
 
     subject: str
-    category_id: int | None = None
+    category_id: str | None = None
     description: str | None = None
     priority: str | None = None
     reporter_name: str | None = None
@@ -227,7 +250,7 @@ def _iso(value: Any) -> str | None:
 def _category_dto(row: Any, public_community_id: str) -> CategoryDTO:
     """Category DTO; `community_id` is the community's PUBLIC UUID."""
     return CategoryDTO(
-        id=row.id,
+        id=str(row.public_id),
         community_id=public_community_id,
         name=row.name,
         description=row.description,
@@ -238,12 +261,21 @@ def _category_dto(row: Any, public_community_id: str) -> CategoryDTO:
     )
 
 
-def _ticket_dto(row: Any, category_name: str | None, public_community_id: str) -> TicketDTO:
-    """Ticket DTO; `community_id` is the community's PUBLIC UUID."""
+def _cat_pids(dal: Any, rows: list[Any]) -> dict[int, str]:
+    """Public UUIDs of the categories the given ticket rows reference (one query, no N+1)."""
+    return lookup_public_ids(
+        dal, "support_ticket_categories", {r.category_id for r in rows if r.category_id is not None}
+    )
+
+
+def _ticket_dto(
+    row: Any, category_name: str | None, public_community_id: str, category_pids: dict[int, str]
+) -> TicketDTO:
+    """Ticket DTO; `id`, `community_id` and `category_id` are PUBLIC UUIDs (never numeric ids)."""
     return TicketDTO(
-        id=row.id,
+        id=str(row.public_id),
         community_id=public_community_id,
-        category_id=row.category_id,
+        category_id=category_pids[int(row.category_id)] if row.category_id is not None else None,
         ticket_number=row.ticket_number,
         subject=row.subject,
         description=row.description,
@@ -261,10 +293,11 @@ def _ticket_dto(row: Any, category_name: str | None, public_community_id: str) -
     )
 
 
-def _comment_dto(row: Any) -> CommentDTO:
+def _comment_dto(row: Any, ticket_public_id: str) -> CommentDTO:
+    """Comment DTO; `ticket_id` is the ticket's PUBLIC UUID."""
     return CommentDTO(
         id=row.id,
-        ticket_id=row.ticket_id,
+        ticket_id=ticket_public_id,
         author_user_id=row.author_user_id,
         author_name=row.author_name,
         content=row.content,
@@ -317,7 +350,7 @@ async def create_category(
 
 
 @support_admin_bp.route(
-    "/<cuuid:community_id>/support/categories/<int:category_id>", methods=["PUT"]
+    "/<cuuid:community_id>/support/categories/<puuid:category_id>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -348,7 +381,7 @@ async def update_category(
 
 
 @support_admin_bp.route(
-    "/<cuuid:community_id>/support/categories/<int:category_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/support/categories/<puuid:category_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -381,23 +414,32 @@ async def list_tickets(community_id: int) -> tuple[dict[str, object], int]:
     dal = current_app.config["dal"]
     limit = min(100, max(1, _int_arg("limit", 25)))
     offset = max(0, _int_arg("offset", 0))
+    category_id: int | None = None
+    raw_category = request.args.get("category_id")
+    if raw_category:
+        category_id = resolve_public_id_sync(
+            dal, "support_ticket_categories", raw_category, scope=Scope(community_id=community_id)
+        )
+        if category_id is None:
+            return _err(not_found("Category not found"))
     rows, names, total = svc.list_tickets(
         dal,
         community_id,
         status=request.args.get("status"),
         priority=request.args.get("priority"),
-        category_id=request.args.get("category_id", type=int),
+        category_id=category_id,
         assignee_user_id=request.args.get("assignee_user_id", type=int),
         search=request.args.get("search"),
         limit=limit,
         offset=offset,
     )
     cpid = await lookup_public_id(community_id)
-    tickets = [asdict(_ticket_dto(r, names.get(r.category_id), cpid)) for r in rows]
+    pids = _cat_pids(dal, rows)
+    tickets = [asdict(_ticket_dto(r, names.get(r.category_id), cpid, pids)) for r in rows]
     return {"tickets": tickets, "total": total, "limit": limit, "offset": offset}, 200
 
 
-@support_admin_bp.route("/<cuuid:community_id>/support/tickets/<int:ticket_id>", methods=["GET"])
+@support_admin_bp.route("/<cuuid:community_id>/support/tickets/<puuid:ticket_id>", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
 @community_admin_guard  # type: ignore[misc]
@@ -414,13 +456,13 @@ async def get_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, objec
         return _err(exc)
     cpid = await lookup_public_id(community_id)
     return {
-        "ticket": asdict(_ticket_dto(ticket, category_name, cpid)),
-        "comments": [asdict(_comment_dto(c)) for c in comments],
+        "ticket": asdict(_ticket_dto(ticket, category_name, cpid, _cat_pids(dal, [ticket]))),
+        "comments": [asdict(_comment_dto(c, str(ticket.public_id))) for c in comments],
     }, 200
 
 
 @support_admin_bp.route(
-    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/status", methods=["PUT"]
+    "/<cuuid:community_id>/support/tickets/<puuid:ticket_id>/status", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -438,11 +480,11 @@ async def update_ticket_status(
     except ApiError as exc:
         return _err(exc)
     cpid = await lookup_public_id(community_id)
-    return {"ticket": asdict(_ticket_dto(row, None, cpid))}, 200
+    return {"ticket": asdict(_ticket_dto(row, None, cpid, _cat_pids(dal, [row])))}, 200
 
 
 @support_admin_bp.route(
-    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/assign", methods=["PUT"]
+    "/<cuuid:community_id>/support/tickets/<puuid:ticket_id>/assign", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -460,11 +502,11 @@ async def assign_ticket(
     except ApiError as exc:
         return _err(exc)
     cpid = await lookup_public_id(community_id)
-    return {"ticket": asdict(_ticket_dto(row, None, cpid))}, 200
+    return {"ticket": asdict(_ticket_dto(row, None, cpid, _cat_pids(dal, [row])))}, 200
 
 
 @support_admin_bp.route(
-    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/priority", methods=["PUT"]
+    "/<cuuid:community_id>/support/tickets/<puuid:ticket_id>/priority", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -482,11 +524,11 @@ async def update_ticket_priority(
     except ApiError as exc:
         return _err(exc)
     cpid = await lookup_public_id(community_id)
-    return {"ticket": asdict(_ticket_dto(row, None, cpid))}, 200
+    return {"ticket": asdict(_ticket_dto(row, None, cpid, _cat_pids(dal, [row])))}, 200
 
 
 @support_admin_bp.route(
-    "/<cuuid:community_id>/support/tickets/<int:ticket_id>/comments", methods=["POST"]
+    "/<cuuid:community_id>/support/tickets/<puuid:ticket_id>/comments", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.support:admin")  # type: ignore[misc]
@@ -513,7 +555,8 @@ async def add_comment(
         )
     except ApiError as exc:
         return _err(exc)
-    return {"comment": asdict(_comment_dto(row))}, 201
+    ticket_pid = lookup_public_ids(dal, "support_tickets", [ticket_id])[int(ticket_id)]
+    return {"comment": asdict(_comment_dto(row, ticket_pid))}, 201
 
 
 @support_admin_bp.route("/<cuuid:community_id>/support/stats", methods=["GET"])
@@ -557,11 +600,21 @@ async def submit_ticket(
     dal = current_app.config["dal"]
     user_id = get_current_user_id(request)
     fallback_name, fallback_email = _reporter_identity(dal, user_id)
+    category_id: int | None = None
+    if data.category_id:
+        category_id = resolve_public_id_sync(
+            dal,
+            "support_ticket_categories",
+            data.category_id,
+            scope=Scope(community_id=community_id),
+        )
+        if category_id is None:
+            return _err(not_found("Category not found"))
     try:
         row = svc.create_ticket(
             dal,
             community_id,
-            category_id=data.category_id,
+            category_id=category_id,
             subject=data.subject,
             description=data.description,
             priority=data.priority,
@@ -571,9 +624,10 @@ async def submit_ticket(
             custom_fields=data.custom_fields,
         )
     except ApiError as exc:
+        logger.debug("support ticket create refused: %s code=%s", type(exc).__name__, exc.code)
         return _err(exc)
     cpid = await lookup_public_id(community_id)
-    return {"ticket": asdict(_ticket_dto(row, None, cpid))}, 201
+    return {"ticket": asdict(_ticket_dto(row, None, cpid, _cat_pids(dal, [row])))}, 201
 
 
 @support_member_bp.route("/<cuuid:community_id>/support/my-tickets", methods=["GET"])
@@ -585,11 +639,12 @@ async def get_my_tickets(community_id: int) -> tuple[dict[str, object], int]:
     user_id = get_current_user_id(request)
     pairs = svc.get_my_tickets(dal, community_id, user_id)
     cpid = await lookup_public_id(community_id)
-    return {"tickets": [asdict(_ticket_dto(row, name, cpid)) for row, name in pairs]}, 200
+    pids = _cat_pids(dal, [row for row, _ in pairs])
+    return {"tickets": [asdict(_ticket_dto(row, name, cpid, pids)) for row, name in pairs]}, 200
 
 
 @support_member_bp.route(
-    "/<cuuid:community_id>/support/my-tickets/<int:ticket_id>", methods=["GET"]
+    "/<cuuid:community_id>/support/my-tickets/<puuid:ticket_id>", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]
@@ -609,13 +664,13 @@ async def get_my_ticket(community_id: int, ticket_id: int) -> tuple[dict[str, ob
         return _err(exc)
     cpid = await lookup_public_id(community_id)
     return {
-        "ticket": asdict(_ticket_dto(ticket, category_name, cpid)),
-        "comments": [asdict(_comment_dto(c)) for c in comments],
+        "ticket": asdict(_ticket_dto(ticket, category_name, cpid, _cat_pids(dal, [ticket]))),
+        "comments": [asdict(_comment_dto(c, str(ticket.public_id))) for c in comments],
     }, 200
 
 
 @support_member_bp.route(
-    "/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments", methods=["POST"]
+    "/<cuuid:community_id>/support/my-tickets/<puuid:ticket_id>/comments", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @community_member_guard  # type: ignore[misc]
@@ -643,7 +698,8 @@ async def add_own_comment(
         )
     except ApiError as exc:
         return _err(exc)
-    return {"comment": asdict(_comment_dto(row))}, 201
+    ticket_pid = lookup_public_ids(dal, "support_tickets", [ticket_id])[int(ticket_id)]
+    return {"comment": asdict(_comment_dto(row, ticket_pid))}, 201
 
 
 BLUEPRINTS: list[Blueprint] = [support_admin_bp, support_member_bp]

@@ -93,9 +93,9 @@ class MusicProviderDTO:
 
 @dataclass(slots=True, frozen=True)
 class RadioStationDTO:
-    """Wire DTO for one community radio station."""
+    """Wire DTO for one community radio station; `id` is its public UUID."""
 
-    id: int
+    id: str
     communityId: str
     name: str
     url: str
@@ -158,7 +158,7 @@ def _provider_dto(row: Any, public_community_id: str) -> MusicProviderDTO:
 def _station_dto(row: Any, public_community_id: str) -> RadioStationDTO:
     """Wire DTO; `communityId` is the community's PUBLIC UUID (never the numeric id)."""
     return RadioStationDTO(
-        id=row.id,
+        id=str(row.public_id),
         communityId=public_community_id,
         name=row.name,
         url=row.url,

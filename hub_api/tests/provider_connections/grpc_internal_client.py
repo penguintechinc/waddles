@@ -29,7 +29,7 @@ INTERNAL_PREFIX = "/api/v1/internal/"
 _LIST = "/waddles.hub.internal.v1.ProviderConnectionService/ListBindings"
 _RESOLVE = "/waddles.hub.internal.v1.ProviderConnectionService/ResolveConnection"
 _RESOLVE_URL = re.compile(
-    r"^/api/v1/internal/communities/(?P<community>\d+)/provider-connections/(?P<conn>\d+)/resolve$"
+    r"^/api/v1/internal/communities/(?P<community>\d+)/provider-connections/(?P<conn>[0-9a-fA-F-]+)/resolve$"
 )
 _HTTP_BY_CODE = {
     grpc.StatusCode.UNAUTHENTICATED: 401,
@@ -118,6 +118,26 @@ def _error(err: grpc.aio.AioRpcError) -> InternalResponse:
     return InternalResponse(status, body, detail)
 
 
+async def _numeric_connection_id(app: Any, raw: str) -> int:
+    """Numeric id for a connection ref: a bare number, or the admin API's public UUID.
+
+    The data plane speaks numeric ids over gRPC; the tests now hold the admin API's UUID `id`.
+    An unknown UUID maps to 0 (never a real id) so the servicer answers its normal not-found.
+    """
+    if raw.isdigit():
+        return int(raw)
+    from sqlalchemy import text
+
+    async with app.config["install_dal"].engine.connect() as conn:
+        value = (
+            await conn.execute(
+                text("SELECT id FROM platform_connections WHERE public_id = :p"),
+                {"p": raw.lower()},
+            )
+        ).scalar_one_or_none()
+    return int(value) if value is not None else 0
+
+
 class _VerifierIssuer:
     """Adapts a bare verifier to the `.as_verifier()` shape `build_interceptor_chain` wants."""
 
@@ -184,7 +204,8 @@ class GrpcRoutingClient:
                 match = _RESOLVE_URL.match(parts.path)
                 if method == "POST" and match:
                     request = pb.ResolveConnectionRequest(
-                        community_id=int(match["community"]), connection_id=int(match["conn"])
+                        community_id=int(match["community"]),
+                        connection_id=await _numeric_connection_id(app, match["conn"]),
                     )
                     resolved = await client.call(
                         _RESOLVE, request, pb.ResolveConnectionResponse, token=token

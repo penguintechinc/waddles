@@ -177,7 +177,7 @@ impl Live {
         }
     }
 
-    /// Create one static connection through the admin API; returns its numeric id.
+    /// Create one static connection through the admin API; returns its numeric id (resolved from the public UUID).
     async fn create(
         &self,
         community: i64,
@@ -207,7 +207,46 @@ impl Live {
         assert_eq!(status, 201, "admin create {provider} failed: {text}");
         let body: Value = serde_json::from_str(&text)
             .unwrap_or_else(|e| panic!("create body not JSON ({e}): {text}"));
-        body["connection"]["id"].as_i64().expect("connection id")
+        // The admin API's `id` is the connection's public UUID; the resolver and the SQL
+        // tamper below speak the numeric id, so read it back through Postgres.
+        let public_id = body["connection"]["id"]
+            .as_str()
+            .expect("connection public id");
+        self.numeric_connection_id(public_id)
+    }
+
+    /// Numeric `platform_connections.id` for a public UUID (UUID validated: it is interpolated).
+    fn numeric_connection_id(&self, public_id: &str) -> i64 {
+        assert!(
+            public_id.len() == 36 && public_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "not a UUID: {public_id}"
+        );
+        let sql = format!("SELECT id FROM platform_connections WHERE public_id = '{public_id}'");
+        let out = Command::new("docker")
+            .args([
+                "exec",
+                "-i",
+                &self.pg_container,
+                "psql",
+                "-U",
+                "waddlebot",
+                "-d",
+                "waddlebot",
+                "-tAq",
+                "-c",
+                &sql,
+            ])
+            .output()
+            .expect("docker exec psql");
+        assert!(
+            out.status.success(),
+            "id lookup failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("numeric connection id")
     }
 
     /// Print this test's telemetry counts for the gate script and assert nothing was silent.

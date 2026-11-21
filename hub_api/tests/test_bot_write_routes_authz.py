@@ -84,8 +84,8 @@ def _call(
     url = cpath(
         dal,
         rule.replace("<cuuid:community_id>", "{community_id}")
-        .replace("<int:server_id>", "1")
-        .replace("<int:creator_id>", "1"),
+        .replace("<puuid:server_id>", "00000000-0000-4000-8000-000000000001")
+        .replace("<puuid:creator_id>", "00000000-0000-4000-8000-000000000001"),
         cid,
     )
     token = make_user_token(user_id=uid, scope=" ".join(["*:read", *scopes]))

@@ -14,7 +14,7 @@ without duplicating the HTTP/caching/fallback logic in every consumer.
 Internal route contract (`hub_api/blueprints/v1/...`, built concurrently
 with this module -- mocked in this module's own tests, never called for
 real here):
-`GET {hub_api_url}/api/v1/internal/communities/{community_id}/connections/{provider}/token`
+`GET {hub_api_url}/api/v1/internal/communities/{community_public_id}/connections/{provider}/token`
 (Bearer machine JWT, see Auth below)
 -> 200 `{"status": "success", "data": {"access_token": str, "refresh_token": str|null,
 "expires_at": iso8601|null, "scopes": [str]}, "meta": {...}}` (flat payload also accepted);
@@ -101,7 +101,7 @@ ENV_KEYS: dict[str, tuple[str, str, str]] = {
 _DEFAULT_HUB_API_URL = "http://hub-api:8204"
 _DEFAULT_TIMEOUT_S = 3.0
 #: URL path template, not a secret value.
-_TOKEN_PATH = "/api/v1/internal/communities/{community_id}/connections/{provider}/token"  # noqa: S105
+_TOKEN_PATH = "/api/v1/internal/communities/{community_public_id}/connections/{provider}/token"  # noqa: S105
 #: Machine-JWT bootstrap: path template (relative to the hub-api base URL), scope, and the
 #: projected-ServiceAccount-token file the pod already carries for `service_auth`.
 _MINT_SCOPE = "connections:resolve"
@@ -238,10 +238,14 @@ async def fetch_community_tokens(
     community_id: int,
     provider: str,
     *,
+    community_public_id: str,
     hub_api_url: str | None = None,
     timeout_s: float = _DEFAULT_TIMEOUT_S,
 ) -> CommunityTokens | None:
     """One uncached GET against hub-api's internal Connections token endpoint.
+
+    `community_public_id` is the community's public UUID (URL path); the numeric `community_id`
+    only binds the machine JWT claim and never appears in a URL.
 
     See module docstring for the route/response contract. Never raises --
     every failure mode (network error, non-2xx, malformed JSON, an
@@ -251,7 +255,7 @@ async def fetch_community_tokens(
     and logs at DEBUG instead of WARNING.
     """
     base_url = _resolve_hub_api_url(hub_api_url).rstrip("/")
-    path = _TOKEN_PATH.format(community_id=community_id, provider=provider)
+    path = _TOKEN_PATH.format(community_public_id=community_public_id, provider=provider)
     url = f"{base_url}{path}"
 
     try:
