@@ -83,28 +83,28 @@ async fn free_and_premium_communities_are_gated_end_to_end() {
         );
         assert_eq!(
             fx.scalar(
-                "SELECT presence_s::bigint FROM analytics_fp.member_daily WHERE community_id = 10"
+                "SELECT COALESCE(sum(presence_s), 0)::bigint FROM analytics_fp.member_daily WHERE community_id = 10"
             )
             .await,
             600
         );
         assert_eq!(
             fx.scalar(
-                "SELECT presence_s::bigint FROM analytics_fp.member_daily WHERE community_id = 11"
+                "SELECT COALESCE(sum(presence_s), 0)::bigint FROM analytics_fp.member_daily WHERE community_id = 11"
             )
             .await,
             0
         );
         assert_eq!(
         fx.scalar(
-            "SELECT retention_days::bigint FROM analytics_fp.member_daily WHERE community_id = 10"
+            "SELECT max(retention_days)::bigint FROM analytics_fp.member_daily WHERE community_id = 10"
         )
         .await,
         400
     );
         assert_eq!(
         fx.scalar(
-            "SELECT retention_days::bigint FROM analytics_fp.member_daily WHERE community_id = 11"
+            "SELECT max(retention_days)::bigint FROM analytics_fp.member_daily WHERE community_id = 11"
         )
         .await,
         90
@@ -113,6 +113,45 @@ async fn free_and_premium_communities_are_gated_end_to_end() {
             r.xpending(&stream, "svc_analytics").await.unwrap();
         assert_eq!(pend.count(), 0);
     })
+    .await;
+}
+
+/// regression: flaky `left: 80, right: 600` -- a session straddling UTC midnight is credited to two
+/// `member_daily` rows (80s + 520s) and the old unaggregated scalar read an arbitrary one. Pinned to
+/// a fixed instant so it fails every time if the assertion ever reads a single row again.
+#[tokio::test]
+async fn presence_across_utc_midnight_is_split_by_day_and_sums_to_the_session() {
+    guarded(
+        "presence_across_utc_midnight_is_split_by_day_and_sums_to_the_session",
+        async {
+            let fx = Fixture::new().await;
+            fx.premium(10).await;
+            let stream = unique_stream();
+            let c = consumer(&fx, &stream).await;
+            let midnight_ms = (NOW_S - NOW_S % DAY) * 1000;
+            let (start, end) = (midnight_ms - 520_000, midnight_ms + 80_000);
+            let raws: Vec<Raw> = [(5, start), (6, end)]
+                .into_iter()
+                .enumerate()
+                .map(|(i, (kind, ts))| Raw {
+                    id: format!("{ts}-{i}"),
+                    fields: fields(user(1), kind, 10, ts),
+                })
+                .collect();
+            c.process(raws, end + 1000).await.unwrap();
+            assert_eq!(
+                fx.scalar("SELECT count(*) FROM analytics_fp.member_daily WHERE community_id = 10 AND presence_s > 0")
+                    .await,
+                2,
+                "session straddling UTC midnight is split across two day rows"
+            );
+            assert_eq!(
+                fx.scalar("SELECT COALESCE(sum(presence_s), 0)::bigint FROM analytics_fp.member_daily WHERE community_id = 10")
+                    .await,
+                600
+            );
+        },
+    )
     .await;
 }
 
