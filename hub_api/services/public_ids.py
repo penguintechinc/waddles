@@ -19,6 +19,11 @@ solved this for two entities; this module generalises it to every other entity t
    `UNKNOWN_ID` and flows into the handler's existing not-found path.
 4. `lookup_public_ids` -- ONE-query numeric -> UUID mapping for response DTOs (fails loud).
 
+`uuuid` (`services/user_public_id.py`, hub users) stays a separate converter on purpose: users
+resolve through `hub_users.uuid` (the identity UUID, not a `public_id` column) and its
+`before_request` hook dispatches on the `UserPublicId` marker for the fixed `user_id` param,
+whereas `puuid` carries per-param table/scope targets. Both share the strict UUID shape.
+
 Internal gRPC, DB FKs, data-plane keys and logs stay numeric.
 """
 

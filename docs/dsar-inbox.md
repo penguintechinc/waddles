@@ -54,7 +54,7 @@ While unverified: `act` and the in_progress/completed status changes return `409
 |--------------------------|-----|-------|
 | `turnstile` | `DSAR_CAPTCHA_SITE_KEY`, `DSAR_CAPTCHA_SECRET` | Cloudflare siteverify |
 | `recaptcha` | `DSAR_CAPTCHA_SITE_KEY`, `DSAR_CAPTCHA_SECRET`, optional `DSAR_CAPTCHA_MIN_SCORE` (0.5) | Google siteverify; v3 score enforced |
-| `altcha` | `DSAR_ALTCHA_HMAC_KEY` (>= 32 chars) | self-hosted proof-of-work, **no external call**; challenge from `GET /api/v1/public/privacy-requests/altcha-challenge`, single use |
+| `altcha` (default when unset) | `DSAR_ALTCHA_HMAC_KEY` (>= 32 chars, chart-generated create-if-absent) | self-hosted proof-of-work, **no external call**; challenge from `GET /api/v1/public/privacy-requests/altcha-challenge`, single use |
 
 `DSAR_CAPTCHA_TIMEOUT_SECONDS` (default 5) bounds the outbound call. Provider success is also **bound to this site**: reCAPTCHA v3 (`DSAR_RECAPTCHA_VERSION`, default `v3`) must return `action == DSAR_CAPTCHA_ACTION` (default `dsar_request`), a numeric `score >= DSAR_CAPTCHA_MIN_SCORE` and a `hostname` in `DSAR_CAPTCHA_HOSTNAMES` (comma list; default: host of `DSAR_VERIFY_URL_BASE`; none resolvable -> 503); Turnstile checks `hostname`/`action` when returned (the form sends `action: dsar_request`). Altcha challenges are `sha256(salt+number)` with `salt = <24 hex>?expires=<unix>&` (the trailing `&` is a fixed terminator so no digit of `number` can shift into the salt); the MAC covers salt **and** challenge, expiry is parsed only from that exact signed shape and bounded to now+10 min, and the single-use marker lives at least as long as the signed validity.
 

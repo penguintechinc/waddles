@@ -21,6 +21,7 @@ exists and what it closes off relative to Node's own (bugged) auth chain.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -35,10 +36,12 @@ from services import tenant_service as svc
 from services.errors import ApiError, payment_required
 from services.pagination import parse_limit
 from services.schema import bind_tenant_tables
+from services.user_public_id import lookup_user_id, use_user_public_ids
 
 logger = logging.getLogger(__name__)
 
 tenant_bp = Blueprint("v1_tenant", __name__, url_prefix="/api/v1/tenant")
+use_user_public_ids(tenant_bp)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -204,7 +207,7 @@ class CommunitiesResponse:
 class TenantAdminDTO:
     """Tenant admin DTO."""
 
-    userId: int
+    userId: str
     displayName: str | None
     email: str | None
     role: str
@@ -223,7 +226,7 @@ class TenantAdminsResponse:
 class AddTenantAdminRequest:
     """Request DTO for `POST /<tenant_slug>/admins`."""
 
-    userId: int
+    userId: uuid.UUID
     role: str = "tenant-admin"
 
 
@@ -268,7 +271,7 @@ def _admin_dto(row: Any) -> TenantAdminDTO:
     ta = row.tenant_admins
     user = row.hub_users
     return TenantAdminDTO(
-        userId=ta.user_id,
+        userId=str(user.uuid),
         displayName=user.display_name or user.username,
         email=user.email,
         role=ta.role,
@@ -442,7 +445,7 @@ async def add_tenant_admin(
             async_dal,
             dal,
             tenant_id=tenant_id,
-            user_id=data.userId,
+            user_id=await lookup_user_id(str(data.userId)),
             role=data.role,
             tenant_slug=tenant_slug,  # TARGET tenant (URL), not the caller's
         )
@@ -452,7 +455,7 @@ async def add_tenant_admin(
     return MessageResponse(success=True, message="Tenant admin added")
 
 
-@tenant_bp.route("/<tenant_slug>/admins/<int:user_id>", methods=["DELETE"])
+@tenant_bp.route("/<tenant_slug>/admins/<uuuid:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)

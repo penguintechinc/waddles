@@ -1148,12 +1148,28 @@ class TestCaptchaFailClosed:
     async def test_unconfigured_provider_returns_503_and_stores_nothing(
         self, client: Any, db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
+        # The provider defaults to altcha; its internal HMAC key missing must fail LOUD (503).
         monkeypatch.delenv("DSAR_CAPTCHA_PROVIDER")
+        monkeypatch.delenv("DSAR_ALTCHA_HMAC_KEY")
         response = await _public_submit(client, token="anything")
         assert response.status_code == 503
         assert (await response.get_json())["error"]["code"] == "DSAR_CAPTCHA_UNAVAILABLE"
         assert _rows(db) == []
         assert (await client.get(f"{PUB}/captcha-config")).status_code == 503
+        assert (await client.get(f"{PUB}/altcha-challenge")).status_code == 503
+
+    async def test_unset_provider_defaults_to_altcha_and_serves_a_challenge(
+        self, client: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Chart-generated key present, no DSAR_CAPTCHA_PROVIDER: the form works (every tier)."""
+        monkeypatch.delenv("DSAR_CAPTCHA_PROVIDER")
+        config = await client.get(f"{PUB}/captcha-config")
+        assert config.status_code == 200
+        assert (await config.get_json())["provider"] == "altcha"
+        challenge = await client.get(f"{PUB}/altcha-challenge")
+        assert challenge.status_code == 200
+        body = await challenge.get_json()
+        assert {"algorithm", "challenge", "salt", "signature", "maxnumber"} <= set(body)
 
     @pytest.mark.parametrize("provider", ["turnstile", "recaptcha"])
     @pytest.mark.parametrize("missing", ["DSAR_CAPTCHA_SECRET", "DSAR_CAPTCHA_SITE_KEY"])
@@ -1770,7 +1786,7 @@ class TestResendVerification:
             )
         ).status_code == 400
         body = self._body()
-        monkeypatch.delenv("DSAR_CAPTCHA_PROVIDER")
+        monkeypatch.delenv("DSAR_ALTCHA_HMAC_KEY")
         assert (await client.post(url, json=body)).status_code == 503
         assert len(notifier.sent) == 1
 
