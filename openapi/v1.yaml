@@ -5076,7 +5076,7 @@ components:
           title: Expiresat
         id:
           title: Id
-          type: integer
+          type: string
         isActive:
           title: Isactive
           type: boolean
@@ -24477,7 +24477,8 @@ paths:
         name: tenant_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -24506,7 +24507,8 @@ paths:
         name: tenant_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       requestBody:
         content:
           application/json:
@@ -24589,7 +24591,8 @@ paths:
         name: tenant_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -24610,7 +24613,7 @@ paths:
                     type: boolean
                   tenantId:
                     title: Tenantid
-                    type: integer
+                    type: string
                 required:
                 - success
                 - tenantId
@@ -24629,7 +24632,8 @@ paths:
         name: tenant_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       - in: path
         name: tier_code
         required: true
@@ -24674,7 +24678,7 @@ paths:
                     type: boolean
                   tenantId:
                     title: Tenantid
-                    type: integer
+                    type: string
                 required:
                 - success
                 - tenantId
@@ -25059,7 +25063,8 @@ paths:
         name: session_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:
@@ -27627,7 +27632,8 @@ paths:
         name: credential_id
         required: true
         schema:
-          type: integer
+          format: uuid
+          type: string
       responses:
         '200':
           content:

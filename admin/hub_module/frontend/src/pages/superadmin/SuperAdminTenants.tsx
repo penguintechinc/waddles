@@ -69,7 +69,7 @@ function SuperAdminTenants() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: UpdateTenantPayload }) =>
+    mutationFn: ({ id, data }: { id: string; data: UpdateTenantPayload }) =>
       superTenantApi.update(id, data),
     onSuccess: (_response, variables) => {
       console.debug('[SuperTenants] Update', { tenantId: variables.id });
@@ -83,7 +83,7 @@ function SuperAdminTenants() {
   });
 
   const deactivateMutation = useMutation({
-    mutationFn: (id: number) => superTenantApi.deactivate(id),
+    mutationFn: (id: string) => superTenantApi.deactivate(id),
     onSuccess: (_response, id) => {
       console.debug('[SuperTenants] Deactivate', { tenantId: id });
       setDeactivatingTenant(null);

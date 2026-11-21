@@ -18,7 +18,7 @@ const api = vi.mocked(operatorLicensePoolsApi);
 
 const resp = (over: Partial<OperatorPoolsResponse> = {}): OperatorPoolsResponse => ({
   success: true,
-  tenantId: 5,
+  tenantId: 'aaaaaaaa-0000-4000-8000-000000000005',
   bypassDomain: true,
   pools: [
     { tierCode: 2, limit: 5, source: 'operator_set', observedAt: '2026-11-01T00:00:00Z' },
@@ -29,7 +29,7 @@ const httpErr = (status: number, code?: string, message?: string) => ({
   response: { status, data: { error: { code, message } } },
 });
 
-const mount = () => render(<TenantLicensePools tenantId={5} tenantSlug="acme" onClose={vi.fn()} />);
+const mount = () => render(<TenantLicensePools tenantId="aaaaaaaa-0000-4000-8000-000000000005" tenantSlug="acme" onClose={vi.fn()} />);
 const input = (_tier: number) => screen.getByLabelText(/Premium pool size/) as HTMLInputElement;
 const save = (_tier: number) => fireEvent.click(screen.getByRole('button', { name: 'Save Premium' }));
 
@@ -56,7 +56,7 @@ describe('TenantLicensePools', () => {
     expect(screen.queryByTestId('pool-current-3')).toBeNull();
     expect(screen.getAllByRole('form')).toHaveLength(1);
     expect(screen.queryByText(/Professional|Enterprise/)).toBeNull();
-    expect(api.get).toHaveBeenCalledWith(5);
+    expect(api.get).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000005');
     expect(input(2).value).toBe('5');
     expect(screen.queryByTestId('pools-locked')).toBeNull();
   });
@@ -74,7 +74,7 @@ describe('TenantLicensePools', () => {
     await screen.findByTestId('pool-current-2');
     fireEvent.change(input(2), { target: { value: '9' } });
     save(2);
-    await waitFor(() => expect(api.set).toHaveBeenCalledWith(5, 2, 9));
+    await waitFor(() => expect(api.set).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000005', 2, 9));
     expect(await screen.findByText('Premium pool saved.')).toBeTruthy();
   });
 
@@ -86,7 +86,7 @@ describe('TenantLicensePools', () => {
     fireEvent.click(form.querySelector('button[type=button]') as HTMLButtonElement);
     expect(input(2).value).toBe('-1');
     save(2);
-    await waitFor(() => expect(api.set).toHaveBeenCalledWith(5, 2, -1));
+    await waitFor(() => expect(api.set).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000005', 2, -1));
   });
 
   it('Not licensed sends null', async () => {
@@ -95,7 +95,7 @@ describe('TenantLicensePools', () => {
     await screen.findByTestId('pool-current-2');
     fireEvent.click(screen.getAllByRole('button', { name: 'Not licensed' })[0] as HTMLElement);
     save(2);
-    await waitFor(() => expect(api.set).toHaveBeenCalledWith(5, 2, null));
+    await waitFor(() => expect(api.set).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000005', 2, null));
   });
 
   it('validates input client-side and does not call the API', async () => {

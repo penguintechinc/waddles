@@ -9,7 +9,7 @@
   cannot override it -> 409 `POOL_OPERATOR_SET_NOT_ALLOWED`.
 
 `limit`: `null` = not licensed, `-1` = unlimited, `>= 0` = slots. Tenants are keyed by numeric id
-exactly like the neighbouring `/superadmin/tenants/<int:tenant_id>` routes. Scope `tenants:admin`
+exactly like the neighbouring `/superadmin/tenants/<puuid:tenant_id>` routes. Scope `tenants:admin`
 (the `global:admin` bundle's `*:admin`), same as those routes.
 """
 
@@ -41,12 +41,16 @@ from services.audit_http import get_service as get_audit_service
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, not_found
 from services.pool_provider import license_server_configured, request_is_bypass_domain
+from services.public_ids import PublicIdTarget, build_view_arg_translator, lookup_public_ids
 from services.system_tenant_guard import require_system_tenant
 
 logger = logging.getLogger(__name__)
 
 superadmin_license_pools_bp = Blueprint(
     "v1_superadmin_license_pools", __name__, url_prefix="/api/v1/superadmin"
+)
+superadmin_license_pools_bp.before_request(
+    build_view_arg_translator({"tenant_id": PublicIdTarget("tenants", community_param=None)})
 )
 
 _SCOPE = "tenants:admin"
@@ -77,7 +81,7 @@ class PoolsResponse:
     """Response DTO for the pool GET and PUT."""
 
     success: bool
-    tenantId: int
+    tenantId: str
     pools: list[PoolDTO]
     bypassDomain: bool
 
@@ -111,6 +115,16 @@ async def _tenant_exists(async_dal: Any, dal: Any, tenant_id: int) -> bool:
     return bool(await asyncio.get_running_loop().run_in_executor(async_dal.executor, _job))
 
 
+async def _tenant_public_id(async_dal: Any, dal: Any, tenant_id: int) -> str:
+    """The tenant's public UUID (the only tenant id a response or audit target may carry)."""
+    import asyncio
+
+    def _job() -> str:
+        return lookup_public_ids(dal, "tenants", [tenant_id])[tenant_id]
+
+    return str(await asyncio.get_running_loop().run_in_executor(async_dal.executor, _job))
+
+
 async def _read(async_dal: Any, dal: Any, tenant_id: int) -> PoolsResponse:
     store = pools.PoolStore(async_dal, dal)
     out: list[PoolDTO] = []
@@ -126,11 +140,14 @@ async def _read(async_dal: Any, dal: Any, tenant_id: int) -> PoolsResponse:
                 )
             )
     return PoolsResponse(
-        success=True, tenantId=tenant_id, pools=out, bypassDomain=_on_bypass_domain()
+        success=True,
+        tenantId=await _tenant_public_id(async_dal, dal, tenant_id),
+        pools=out,
+        bypassDomain=_on_bypass_domain(),
     )
 
 
-@superadmin_license_pools_bp.route("/tenants/<int:tenant_id>/license-pools", methods=["GET"])
+@superadmin_license_pools_bp.route("/tenants/<puuid:tenant_id>/license-pools", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SCOPE)  # type: ignore[misc]
 @require_system_tenant  # type: ignore[misc]
@@ -144,7 +161,7 @@ async def get_license_pools(tenant_id: int) -> PoolsResponse | tuple[dict[str, o
 
 
 @superadmin_license_pools_bp.route(
-    "/tenants/<int:tenant_id>/license-pools/<int:tier_code>", methods=["PUT"]
+    "/tenants/<puuid:tenant_id>/license-pools/<int:tier_code>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(_SCOPE)  # type: ignore[misc]
@@ -201,7 +218,7 @@ async def put_license_pool(
                 actor_user_id=actor,
                 tenant_id=tenant_id,
                 target_type="tenant_license_pool",
-                target_id=str(tenant_id),
+                target_id=await _tenant_public_id(async_dal, dal, tenant_id),
                 details={"tier_code": tier_code, "limit": limit},
             ),
         )

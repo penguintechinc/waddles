@@ -45,6 +45,7 @@ from config import HubAPIConfig
 from services.audit_http import record_session_revoked
 from services.bundle_telemetry import bundle_span, get_meter
 from services.errors import ApiError, unauthorized
+from services.public_ids import parse_public_id
 
 logger = logging.getLogger(__name__)
 
@@ -131,6 +132,7 @@ class SessionInfo:
     expires_at: datetime | None
     is_active: bool
     revoked_at: datetime | None
+    public_id: str = ""
 
 
 def _b64(raw: bytes) -> str:
@@ -576,6 +578,23 @@ async def get_session_owner(async_dal: Any, dal: Any, *, session_id: int) -> int
     return int(owner) if owner is not None else None
 
 
+async def resolve_session_public_id(
+    async_dal: Any, dal: Any, *, user_id: int, public_id: object
+) -> int | None:
+    """Numeric id of the session `public_id` owned by `user_id`, else `None`.
+
+    A malformed, unknown or foreign-user UUID are indistinguishable (all `None`, never an
+    existence oracle), so callers map every miss to the same 404.
+    """
+    canonical = parse_public_id(public_id)
+    if canonical is None:
+        return None
+    rows = await async_dal.select_async(
+        dal((dal.hub_sessions.public_id == canonical) & (dal.hub_sessions.user_id == user_id))
+    )
+    return int(rows.first().id) if rows else None
+
+
 async def list_sessions(async_dal: Any, dal: Any, *, user_id: int) -> list[SessionInfo]:
     """Every login session of ``user_id`` (newest first): ids and timestamps, never a token."""
     rows = await async_dal.select_async(
@@ -584,6 +603,7 @@ async def list_sessions(async_dal: Any, dal: Any, *, user_id: int) -> list[Sessi
     return [
         SessionInfo(
             session_id=int(row.id),
+            public_id=str(row.public_id or ""),
             created_at=_utc(row.created_at),
             expires_at=_utc(row.expires_at),
             is_active=bool(row.is_active),

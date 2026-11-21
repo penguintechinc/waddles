@@ -382,10 +382,10 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("POST", "/api/v1/superadmin/tenants"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_CREATED
     ),
-    ("PUT", "/api/v1/superadmin/tenants/<int:tenant_id>"): RouteAudit(
+    ("PUT", "/api/v1/superadmin/tenants/<puuid:tenant_id>"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_UPDATED
     ),
-    ("DELETE", "/api/v1/superadmin/tenants/<int:tenant_id>"): RouteAudit(
+    ("DELETE", "/api/v1/superadmin/tenants/<puuid:tenant_id>"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_DELETED
     ),
     # --- session revocation (admin) ---
@@ -394,7 +394,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ),
     (
         "POST",
-        "/api/v1/superadmin/users/<uuuid:user_id>/sessions/<int:session_id>/revoke",
+        "/api/v1/superadmin/users/<uuuid:user_id>/sessions/<puuid:session_id>/revoke",
     ): RouteAudit(AuditCategory.AUTHN, AuditAction.SESSION_REVOKED),
     # --- role / privilege changes ---
     ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/super-admin-role"): RouteAudit(
@@ -557,7 +557,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PASSKEY_REMOVED),
-        (("DELETE", f"{_P}/user/passkey/credentials/<int:credential_id>"),),
+        (("DELETE", f"{_P}/user/passkey/credentials/<puuid:credential_id>"),),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_CONNECTION_CHANGED),

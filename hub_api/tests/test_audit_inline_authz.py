@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from flask_core.tenancy import tenant_middleware
 from quart import Quart, request
+from quart.routing import QuartMap
 from sqlalchemy import select
 
 from app import create_app
@@ -54,13 +55,32 @@ _NO_TENANT_MIDDLEWARE_PREFIX = "/api/v1/admin/<cuuid:community_id>/calendar/"
 _INLINE_PARAMS = sorted(INLINE_AUTHZ_ROUTES.items())
 
 
+_SAMPLE_UUID = "00000000-0000-4000-8000-000000000001"
+
+
+def _converter_sample(name: str, converter: type) -> str:
+    """A path value the `name` converter accepts: user 1's UUID, a sample UUID, else `1`."""
+    if name == "uuuid":
+        return uid(1)  # the seeded user the tests act on
+    regex = str(getattr(converter, "regex", ""))
+    for candidate in (_SAMPLE_UUID, "1"):
+        if re.fullmatch(regex, candidate):
+            return candidate
+    return "1"
+
+
 def _concrete(rule: str) -> str:
-    """Concrete path: cuuid/uuid/puuid -> UUIDs, uuuid -> user 1's UUID, any other converter `1`."""
-    rule = rule.replace("<cuuid:community_id>", "00000000-0000-4000-8000-000000000001")
+    """Concrete path built from the live converter registry, so new converters need no edit."""
+    converters = QuartMap.default_converters
+    # The floor-ban lift route (#1488) addresses the seeded floor-banned member by UUID.
     rule = rule.replace("<uuid:user_uuid>", "00000000-0000-4000-8000-000000000002")
-    rule = rule.replace("<uuuid:user_id>", uid(1))
-    rule = re.sub(r"<puuid:[^>]+>", "00000000-0000-4000-8000-0000000000a1", rule)
-    return re.sub(r"<[^>]+>", "1", rule)
+
+    def _fill(match: re.Match[str]) -> str:
+        conv = match.group(1)
+        return _converter_sample(conv, converters[conv]) if conv in converters else "1"
+
+    # `<conv(args):name>` -> a sample the converter accepts; a bare `<name>` -> `1`.
+    return re.sub(r"<(?:([A-Za-z_]\w*)(?:\([^)]*\))?:)?[^>]+>", _fill, rule)
 
 
 def _auth(**kwargs: str) -> dict[str, str]:
