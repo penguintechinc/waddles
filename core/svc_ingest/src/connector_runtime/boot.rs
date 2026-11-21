@@ -502,6 +502,8 @@ where
     pub interaction_routing: Option<InteractionRouting>,
     /// Registry that receives the runtime/connector series.
     pub registry: prometheus::Registry,
+    /// The Discord `GUILD_BAN_REMOVE` tap (platform-originated unban sync); `None` = off.
+    pub platform_unban: Option<Arc<dyn crate::interaction_tap::FrameTap>>,
     /// Loopback test seams (`Default` in production).
     pub seams: LoopbackSeams,
 }
@@ -648,10 +650,16 @@ where
     // Valkey connection; a runtime without discord has no tap.
     let frame_tap: Option<Arc<dyn crate::interaction_tap::FrameTap>> =
         settings.platforms.contains(&"discord").then(|| {
-            Arc::new(crate::interaction_tap::GatewayTap::new(
+            let interactions = Arc::new(crate::interaction_tap::GatewayTap::new(
                 crate::interaction_store::InteractionStore::new(deps.lease_conn.clone()),
                 Arc::new(crate::interaction_tap::InteractionAcker::new()),
-            )) as Arc<dyn crate::interaction_tap::FrameTap>
+            )) as Arc<dyn crate::interaction_tap::FrameTap>;
+            match deps.platform_unban.clone() {
+                // The unban tap runs first and always passes, so interactions are unaffected.
+                Some(unban) => Arc::new(crate::platform_unban::ChainTap(vec![unban, interactions]))
+                    as Arc<dyn crate::interaction_tap::FrameTap>,
+                None => interactions,
+            }
         });
     let interaction_routing = if settings.platforms.contains(&"discord") {
         Some(
@@ -949,13 +957,32 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
                 cli,
                 crate::interaction_store::InteractionStore::new(lease_conn.clone()),
                 &registry,
-                tokenizer,
+                Arc::clone(&tokenizer),
             )
             .await?,
         )
     } else {
         None
     };
+    // Platform-originated unban sync: Discord `GUILD_BAN_REMOVE` -> signed event for svc-action.
+    let platform_unban: Option<Arc<dyn crate::interaction_tap::FrameTap>> =
+        if settings.platforms.contains(&"discord") {
+            crate::platform_unban::register_metrics(&registry)
+                .map_err(|_| anyhow::anyhow!("platform unban metrics could not be registered"))?;
+            Some(Arc::new(crate::platform_unban::UnbanTap::new(
+                Arc::clone(&scope),
+                Arc::clone(&tokenizer),
+                Arc::new(crate::platform_unban::ValkeySink::new(lease_conn.clone())),
+                crate::platform_unban::Signer::from_env(),
+                Arc::new(crate::platform_unban::RestBanCheck::new(
+                    crate::outbound_creds_discord::ResolverDiscordCredentials::new(SharedResolver(
+                        Arc::clone(&resolver),
+                    )),
+                )),
+            )))
+        } else {
+            None
+        };
     let link = Arc::clone(&bridge.link);
     let runtime = assemble(
         settings,
@@ -980,6 +1007,7 @@ pub async fn start_runtime<R: ConnectionResolve + 'static>(
             webhook,
             interaction_routing,
             registry,
+            platform_unban,
             seams: LoopbackSeams::default(),
         },
     )?;
@@ -1572,6 +1600,7 @@ mod tests {
             webhook: None,
             interaction_routing: Some(test_routing().await),
             registry,
+            platform_unban: None,
             seams: LoopbackSeams::default(),
         }
     }

@@ -624,6 +624,18 @@ where
     if let Some(tap) = &sh.frame_tap {
         driver = driver.with_frame_tap(Arc::clone(tap));
     }
+    // Which connection this driver serves, from the RESOLVED connection (never frame content):
+    // the platform-unban tap accepts a frame only on the gateway WebSocket bound to its guild.
+    driver = driver.with_frame_binding(crate::interaction_tap::FrameBinding {
+        tenant_id,
+        community_id: key.community_id,
+        connection_id: key.connection_id,
+        bound_guild: match &desired.plan {
+            TransportPlan::Ws(cfg) => super::scoped::scope_source(key.platform, &cfg.source_key),
+            _ => None,
+        },
+        gateway_ws: matches!(&desired.plan, TransportPlan::Ws(_)),
+    });
     if let Some(gates) = &sh.gates {
         match gates.for_connection(&desired, Arc::clone(&secrets.0)) {
             Ok(Some(gate)) => driver = driver.with_handshake_gate(gate),

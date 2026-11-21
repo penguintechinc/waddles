@@ -120,6 +120,9 @@ class SecretDTO:
 
     success: bool
     secret: str = field(repr=False, default="")
+    tenant_id: int = 0
+    community_id: int = 0
+    connection_id: int = 0
 
 
 _auth = machine_authenticated(
@@ -265,8 +268,13 @@ async def secret_route(callback_key: str) -> Any:
     """Webhook secret for the ingest verifier (404 for an unknown key)."""
     # nosemgrep: python-silent-except-return-default -- _refusal() logs via logger.warning
     try:
+        bound = await es.binding_for_callback_key(_dal(), callback_key)
         return SecretDTO(
-            success=True, secret=await es.secret_for_callback_key(_dal(), callback_key)
+            success=True,
+            secret=bound.secret,
+            tenant_id=bound.tenant_id,
+            community_id=bound.community_id,
+            connection_id=bound.connection_id,
         )
     except es.EventSubError as exc:
         return _refusal(exc, "secret")

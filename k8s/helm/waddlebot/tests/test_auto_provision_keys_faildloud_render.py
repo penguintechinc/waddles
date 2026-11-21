@@ -143,6 +143,10 @@ def _run(tmp_path: Path, jwt_fields: dict[str, str]) -> tuple[subprocess.Complet
     ps = stub_dir / env["PRECOMPILE_SIGNING_SECRET"]
     _write(ps / "PRECOMPILE_SIGNING_PRIVATE_KEY", _b64(_b64(seed).encode()))
     _write(ps / "PRECOMPILE_SIGNING_KEY_ID", _b64(env["PRECOMPILE_SIGNING_KEY_ID"].encode()))
+    # The dedicated platform-unban signing key (Discord-native unban sync) -- pre-existing too.
+    pu = stub_dir / env["PLATFORM_UNBAN_SECRET"]
+    _write(pu / "PLATFORM_UNBAN_PRIVATE_KEY", _b64(_b64(seed).encode()))
+    _write(pu / "PLATFORM_UNBAN_KEY_ID", _b64(env["PLATFORM_UNBAN_KEY_ID"].encode()))
     for field, value in jwt_fields.items():
         _write(stub_dir / env["SERVICE_JWT_SECRET"] / field, value)
 

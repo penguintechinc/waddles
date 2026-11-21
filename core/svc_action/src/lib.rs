@@ -85,12 +85,14 @@ pub mod http;
 pub mod kv_sealing;
 pub mod metrics_facade;
 pub mod pin_sig;
+pub mod platform_unban;
 pub mod platform_user;
 pub mod retry;
 pub mod senders;
 pub mod stage_metrics;
 pub mod surface;
 pub mod telemetry;
+pub mod twitch_unban;
 pub mod usage;
 pub mod wiring;
 
@@ -929,6 +931,7 @@ async fn build_stage_capabilities(
     }
     start_floor_ban_dispatcher(
         cli,
+        &spine_cfg,
         &db_password,
         flag_or_closed(&license, flags::REPUTATION_AUTO_BAN_FLAG),
         Arc::clone(&caps),
@@ -944,6 +947,7 @@ async fn build_stage_capabilities(
 /// queued bans then wait in the outbox (nothing is lost) until the next start.
 async fn start_floor_ban_dispatcher(
     cli: &config::CliConfig,
+    spine_cfg: &penguin_spine::SpineConfig,
     db_password: &config::Secret,
     flag: Arc<dyn flags::FeatureFlag>,
     caps: Arc<
@@ -964,10 +968,88 @@ async fn start_floor_ban_dispatcher(
         }
     };
     let store = Arc::new(floor_ban_dispatch::PgFloorBanStore::new(conn));
+    // The platform -> Waddles half of the ban-lift sync: a confirmed host `mod.unban` lifts the
+    // matching Waddles floor ban over this same connection pool.
+    caps.set_unban_sync(store.clone());
+    start_platform_unban_consumer(spine_cfg, store.clone()).await;
+    start_twitch_unban_consumer(spine_cfg, store.clone()).await;
     let metrics = stage_metrics::stage_metrics();
     tokio::spawn(async move {
         floor_ban_dispatch::run_floor_ban_sweeper(store, caps, metrics, flag, shutdown_signal())
             .await;
+    });
+}
+
+/// Starts the platform-originated unban consumer ([`platform_unban`]): svc-ingest's signed
+/// Discord `GUILD_BAN_REMOVE` events lift the matching Waddles floor ban over the same pool.
+/// No usable signing ring or a Valkey failure is logged loudly and leaves it off (Discord-side
+/// unbans then do not lift Waddles bans until the next start); nothing runs unverified.
+async fn start_platform_unban_consumer(
+    spine_cfg: &penguin_spine::SpineConfig,
+    lift: Arc<floor_ban_dispatch::PgFloorBanStore>,
+) {
+    let Some(keys) = resolve_platform_unban_keys() else {
+        tracing::error!(
+            "platform-unban consumer NOT started: PLATFORM_UNBAN_PUBLIC_KEYS unusable; Discord-native unbans will not lift Waddles bans"
+        );
+        return;
+    };
+    let (pop, seen) = match (
+        usage::connect(spine_cfg).await,
+        usage::connect(spine_cfg).await,
+    ) {
+        (Ok(pop), Ok(seen)) => (pop, seen),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(error = %e, "platform-unban consumer NOT started: valkey connection failed");
+            return;
+        }
+    };
+    let handler = Arc::new(platform_unban::PlatformUnban::new(
+        lift,
+        keys,
+        Arc::new(platform_unban::ValkeySeen::new(seen)),
+        stage_metrics::stage_metrics(),
+    ));
+    tokio::spawn(async move {
+        platform_unban::run_consumer(handler, pop, shutdown_signal()).await;
+    });
+}
+
+/// Starts the Twitch EventSub unban consumer ([`twitch_unban`]): svc-ingest's signed
+/// `channel.unban` events lift the matching Waddles floor ban in the one community they name.
+/// Shares the public verify ring with the Discord consumer; no usable ring or a Valkey failure is
+/// logged loudly and leaves it off. Nothing runs unverified.
+async fn start_twitch_unban_consumer(
+    spine_cfg: &penguin_spine::SpineConfig,
+    lift: Arc<floor_ban_dispatch::PgFloorBanStore>,
+) {
+    let Some(keys) = resolve_platform_unban_keys() else {
+        tracing::error!(
+            "twitch-unban consumer NOT started: PLATFORM_UNBAN_PUBLIC_KEYS unusable; Twitch-native unbans will not lift Waddles bans"
+        );
+        return;
+    };
+    let (pop, seen) = match (
+        usage::connect(spine_cfg).await,
+        usage::connect(spine_cfg).await,
+    ) {
+        (Ok(pop), Ok(seen)) => (pop, seen),
+        (Err(e), _) | (_, Err(e)) => {
+            tracing::error!(error = %e, "twitch-unban consumer NOT started: valkey connection failed");
+            return;
+        }
+    };
+    let handler = Arc::new(twitch_unban::TwitchUnban::new(
+        lift,
+        keys,
+        Arc::new(platform_unban::ValkeySeen::with_prefix(
+            seen,
+            twitch_unban::SEEN_PREFIX,
+        )),
+        stage_metrics::stage_metrics(),
+    ));
+    tokio::spawn(async move {
+        twitch_unban::run_consumer(handler, pop, shutdown_signal()).await;
     });
 }
 
@@ -1106,6 +1188,25 @@ fn resolve_event_sync_request_keys() -> Option<pin_sig::PinKeys> {
         Ok(keys) => Some(keys),
         Err(err) => {
             tracing::error!(error = %err, "EVENT_SYNC_REQUEST_KEYS unusable; discord event-sync consumer disabled");
+            None
+        }
+    }
+}
+
+/// Loads the verify-only platform-unban ring from `PLATFORM_UNBAN_PUBLIC_KEYS`
+/// (`{"<kid>":"<base64 32-byte Ed25519 public key>"}`); logs (no key material) and returns
+/// `None` when unset or unusable. This stage never holds the signing half.
+fn resolve_platform_unban_keys() -> Option<platform_unban::VerifyKeys> {
+    let Ok(raw) = std::env::var("PLATFORM_UNBAN_PUBLIC_KEYS") else {
+        tracing::warn!(
+            "PLATFORM_UNBAN_PUBLIC_KEYS not set; discord-native unban consumer disabled"
+        );
+        return None;
+    };
+    match platform_unban::VerifyKeys::parse(&raw) {
+        Ok(keys) => Some(keys),
+        Err(reason) => {
+            tracing::error!(reason, "PLATFORM_UNBAN_PUBLIC_KEYS unusable");
             None
         }
     }

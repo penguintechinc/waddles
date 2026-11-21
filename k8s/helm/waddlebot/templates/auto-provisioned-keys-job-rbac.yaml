@@ -56,6 +56,7 @@ rules:
       - {{ .Values.autoProvisionedKeys.bundleSigning.secretName | default (printf "%s-bundle-signing" (include "waddlebot.fullname" .)) }}
       - {{ .Values.autoProvisionedKeys.serviceJwt.secretName }}
       - {{ (.Values.autoProvisionedKeys.precompileSigning.secretName | default (printf "%s-executor-precompile-signing" (include "waddlebot.fullname" .))) }}
+      - {{ (.Values.autoProvisionedKeys.platformUnban.secretName | default (printf "%s-platform-unban-signing" (include "waddlebot.fullname" .))) }}
     verbs: ["get", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
@@ -63,6 +64,7 @@ rules:
       - {{ .Values.autoProvisionedKeys.bundleSigning.publicKeyConfigMapName | default (printf "%s-bundle-signing-public" (include "waddlebot.fullname" .)) }}
       - {{ .Values.autoProvisionedKeys.serviceJwt.publicKeyConfigMapName | default (printf "%s-service-jwt-public" (include "waddlebot.fullname" .)) }}
       - {{ (.Values.autoProvisionedKeys.precompileSigning.publicKeyConfigMapName | default (printf "%s-executor-precompile-signing-public" (include "waddlebot.fullname" .))) }}
+      - {{ (.Values.autoProvisionedKeys.platformUnban.publicKeyConfigMapName | default (printf "%s-platform-unban-signing-public" (include "waddlebot.fullname" .))) }}
     verbs: ["get", "patch", "update"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

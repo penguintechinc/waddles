@@ -47,6 +47,21 @@ def _key(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CREDENTIAL_ENCRYPTION_KEY", "ab" * 32)
 
 
+@pytest.fixture(autouse=True)
+def _no_core_types(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run the bundle-driven tests WITHOUT the always-on core types (channel.unban).
+
+    `TestCoreUnbanSubscription` re-enables them via `core_on`.
+    """
+    monkeypatch.setattr(es, "CORE_TYPES", frozenset())
+
+
+@pytest.fixture
+def core_on(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Restore the real always-on core types for one test."""
+    monkeypatch.setattr(es, "CORE_TYPES", frozenset({es.EventSubType.CHANNEL_UNBAN}))
+
+
 def _manifest(app_id: str, patterns: list[str], platform: str = "twitch") -> dict[str, Any]:
     return {
         "app_id": app_id,
@@ -190,9 +205,11 @@ class TestPatternMatching:
     def test_event_patterns(self, patterns: list[str], expected: set[es.EventSubType]) -> None:
         assert es.types_for_event_patterns(patterns) == expected
 
-    def test_seven_types_with_follow_v2(self) -> None:
-        assert len(es.EVENTSUB_TYPES) == 7
+    def test_eight_types_with_follow_v2_and_core_unban(self, core_on: None) -> None:
+        assert len(es.EVENTSUB_TYPES) == 8
         assert es.EVENTSUB_TYPES[es.EventSubType.CHANNEL_FOLLOW] == ("channel.follow", 2)
+        assert es.EVENTSUB_TYPES[es.EventSubType.CHANNEL_UNBAN] == ("channel.unban", 1)
+        assert es.CORE_TYPES == {es.EventSubType.CHANNEL_UNBAN}
 
     def test_callback_url_requires_config(self) -> None:
         with pytest.raises(es.NotConfiguredError):
@@ -822,7 +839,7 @@ class TestSchemaConstraints:
         await _reconcile(world)
         row = (await world.rows())[0]
         for stmt in (
-            "UPDATE twitch_eventsub_subscriptions SET sub_type = 8 WHERE id = :i",
+            "UPDATE twitch_eventsub_subscriptions SET sub_type = 9 WHERE id = :i",
             "UPDATE twitch_eventsub_subscriptions SET status = 0 WHERE id = :i",
             "UPDATE twitch_eventsub_subscriptions SET failure_reason = 9 WHERE id = :i",
         ):
@@ -965,7 +982,14 @@ class TestContractHttp:
         assert resp.status_code == 200
         row = (await world.rows())[0]
         plain = decrypt_value(row.secret_enc, aad=f"eventsub:{row.public_id}".encode())
-        assert (await resp.get_json())["secret"] == plain
+        body = await resp.get_json()
+        assert body["secret"] == plain
+        # The key is bound to the tenant/community/connection that own the subscription.
+        assert (body["tenant_id"], body["community_id"], body["connection_id"]) == (
+            row.tenant_id,
+            row.community_id,
+            row.connection_id,
+        )
         assert item["callbackKey"] == key
         assert (
             await client.get("/api/v1/internal/eventsub/secret/unknown-key-0123456789", headers=hdr)
@@ -1034,3 +1058,45 @@ class TestContractHttp:
         )
         assert plain not in caplog.text
         assert os.environ["CREDENTIAL_ENCRYPTION_KEY"] not in caplog.text
+
+
+class TestCoreUnbanSubscription:
+    """A bound Twitch connection gets a `channel.unban` subscription with NO bundle consuming it.
+
+    It carries its own sealed per-subscription secret; the callback key resolves to exactly the
+    tenant/community/connection that own it.
+    """
+
+    async def test_binding_creates_the_unban_subscription_with_its_own_secret(
+        self, world: World, core_on: None
+    ) -> None:
+        _summary, work, _ = await _reconcile(world)
+        rows = await world.rows()
+        assert [r.sub_type for r in rows] == [int(es.EventSubType.CHANNEL_UNBAN)]
+        assert rows[0].sub_version == 1
+        mine = _mine(work, world)
+        assert len(mine) == 1 and mine[0].twitch_type == "channel.unban"
+        assert mine[0].action is es.Action.CREATE and mine[0].connection_id == world.conn_id
+        # Its secret is sealed per row (never the plaintext column), bound by the row AAD.
+        plain = decrypt_value(rows[0].secret_enc, aad=f"eventsub:{rows[0].public_id}".encode())
+        assert plain and plain not in rows[0].secret_enc
+        bound = await es.binding_for_callback_key(world.dal, rows[0].callback_key)
+        assert bound.secret == plain
+        assert (bound.tenant_id, bound.community_id, bound.connection_id) == (
+            world.tenant,
+            world.community,
+            world.conn_id,
+        )
+
+    async def test_two_communities_never_share_a_key_or_a_secret(
+        self, world: World, core_on: None
+    ) -> None:
+        _summary, work, _ = await _reconcile(world)
+        keys = {w.callback_key for w in work}
+        assert len(keys) == len(work), "every subscription has its own callback key"
+        rows = await world.rows()
+        assert rows[0].callback_key in keys
+
+    async def test_unknown_callback_key_has_no_binding(self, world: World) -> None:
+        with pytest.raises(es.UnknownSubscriptionError):
+            await es.binding_for_callback_key(world.dal, "unknown-key-0123456789")

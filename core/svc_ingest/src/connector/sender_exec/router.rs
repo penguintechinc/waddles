@@ -104,6 +104,34 @@ where
         }
     }
 
+    async fn resolve_user(
+        &self,
+        platform: &str,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &str,
+    ) -> Result<SlotValue, SlotError> {
+        match platform {
+            "twitch" => {
+                self.twitch
+                    .resolve_user(platform, tenant_id, community_id, user_uuid)
+                    .await
+            }
+            _ => Err(SlotError::Refused(UNKNOWN_PLATFORM)),
+        }
+    }
+
+    async fn bound_channel(
+        &self,
+        platform: &str,
+        community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        match platform {
+            "twitch" => self.twitch.bound_channel(platform, community_id).await,
+            _ => Err(SlotError::Refused(UNKNOWN_PLATFORM)),
+        }
+    }
+
     /// Delegates to the platform's own source; an unknown platform never supports app
     /// credentials.
     fn supports_app_credentials(&self, platform: &str) -> bool {

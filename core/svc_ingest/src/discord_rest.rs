@@ -215,6 +215,32 @@ impl DiscordRestClient {
         ensure_success(&resp, false)
     }
 
+    /// `GET /guilds/{guild_id}/bans/{user_id}`: whether `user_id` is CURRENTLY banned in the
+    /// guild (200 = banned, 404 = not banned). Used to confirm a replayed `GUILD_BAN_REMOVE`
+    /// against Discord's live state before a Waddles ban is lifted.
+    ///
+    /// # Errors
+    /// [`DiscordRestError`] -- invalid id, rate-limit exhaustion, any status other than 200/404
+    /// (e.g. 403 without the Ban Members permission), or a transport failure. Never a guess.
+    pub async fn is_banned(&self, guild_id: &str, user_id: &str) -> Result<bool, DiscordRestError> {
+        require_snowflake(guild_id, "guild_id")?;
+        require_snowflake(user_id, "user_id")?;
+        let resp = self
+            .execute(
+                "guild.ban.get",
+                Method::GET,
+                format!("/guilds/{guild_id}/bans/{user_id}"),
+                format!("GET /guilds/{guild_id}/bans"),
+                None,
+            )
+            .await?;
+        match resp.status {
+            200 => Ok(true),
+            404 => Ok(false),
+            status => Err(DiscordRestError::Status { status, code: None }),
+        }
+    }
+
     /// `chat.delete`: `DELETE /channels/{channel_id}/messages/{message_id}`.
     ///
     /// # Errors
@@ -698,6 +724,31 @@ mod tests {
             .send_dm("777", &t("@everyone psst"))
             .await
             .unwrap();
+    }
+
+    /// `is_banned` reads Discord's live ban state: 200 = banned, 404 = not banned, anything else
+    /// (e.g. 403 without Ban Members) is a loud error, never a guess.
+    #[tokio::test]
+    async fn is_banned_maps_200_404_and_refuses_everything_else() {
+        let server = MockServer::start().await;
+        for (user, status) in [("111", 200u16), ("222", 404), ("333", 403)] {
+            Mock::given(method("GET"))
+                .and(path(format!("/guilds/555/bans/{user}")))
+                .respond_with(ResponseTemplate::new(status).set_body_json(serde_json::json!({})))
+                .mount(&server)
+                .await;
+        }
+        let c = client(&server);
+        assert!(c.is_banned("555", "111").await.unwrap());
+        assert!(!c.is_banned("555", "222").await.unwrap());
+        assert!(matches!(
+            c.is_banned("555", "333").await,
+            Err(DiscordRestError::Status { status: 403, .. })
+        ));
+        assert!(matches!(
+            c.is_banned("555", "../x").await,
+            Err(DiscordRestError::InvalidId { .. })
+        ));
     }
 
     /// The `execute` choke point re-stamps the guard on a message-create

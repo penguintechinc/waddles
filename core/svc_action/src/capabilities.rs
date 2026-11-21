@@ -1097,6 +1097,9 @@ pub struct StageCapabilities<Q: RelayQueue, K: KvBackend = redis::aio::Connectio
     /// set in production; tests swap it via `with_stage_metrics` so they can
     /// read back exactly what this call emitted.
     stage_metrics: Arc<StageMetrics>,
+    /// The platform -> Waddles ban-lift sync (`floor_ban_dispatch::UnbanSync`); set once at
+    /// startup by the floor-ban wiring. Unset: a confirmed host `mod.unban` lifts nothing.
+    unban_sync: std::sync::OnceLock<Arc<dyn crate::floor_ban_dispatch::UnbanSync>>,
     /// Live per-community config cache (`hub_client::bundle_config`); `None` until
     /// [`Self::with_bundle_config`] (hub-api not configured) -- `get-context` then carries no
     /// `config_json` (the guest sees `{}`), exactly as before this feature.
@@ -1157,6 +1160,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             db: None,
             surface: None,
             stage_metrics: stage_metrics::stage_metrics(),
+            unban_sync: std::sync::OnceLock::new(),
             bundle_config: None,
             community_public_ids: None,
             egress_dispatcher_flag: None,

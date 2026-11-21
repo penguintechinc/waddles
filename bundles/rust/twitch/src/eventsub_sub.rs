@@ -45,7 +45,8 @@ const WEBHOOK_MARKER: &str = "/eventsub/twitch/webhook/";
 /// Most orphans one pass deletes.
 pub const MAX_GC_PER_PASS: usize = 25;
 
-/// `(type, version)` pairs hub-api may ask for (the seven types `eventsub.rs` ingests).
+/// `(type, version)` pairs hub-api may ask for: the seven types `eventsub.rs` ingests plus
+/// `channel.unban`, which svc-ingest consumes directly (Twitch-native unban -> Waddles lift).
 pub const SUPPORTED: &[(&str, &str)] = &[
     ("channel.follow", "2"),
     ("channel.subscribe", "1"),
@@ -54,6 +55,7 @@ pub const SUPPORTED: &[(&str, &str)] = &[
     ("channel.raid", "1"),
     ("stream.online", "1"),
     ("stream.offline", "1"),
+    ("channel.unban", "1"),
 ];
 
 fn app_headers(json_body: bool) -> Vec<(String, String)> {

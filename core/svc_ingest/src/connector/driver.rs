@@ -40,7 +40,7 @@ use super::sink::{check_event_limits, EventSink, SinkError};
 use super::transport::{FrameDropReason, FrameOutcome, Transport};
 use super::types::{ConnectionCtx, ConnectorEvent, RawFrame};
 use crate::ingest::{Backoff, STABILITY_WINDOW};
-use crate::interaction_tap::{FrameTap, TapVerdict};
+use crate::interaction_tap::{FrameBinding, FrameTap, TapVerdict};
 
 /// A fatal driver error: a configuration/programming fault that retrying
 /// cannot fix, so [`ConnectorDriver::run`] returns it instead of looping.
@@ -222,6 +222,7 @@ pub struct ConnectorDriver<I: ConnectorInvoker, S: EventSink> {
     heartbeat_send_timeout: Duration,
     gate: Arc<dyn HandshakeGate>,
     tap: Option<Arc<dyn FrameTap>>,
+    binding: Option<FrameBinding>,
 }
 
 impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
@@ -243,6 +244,7 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
             heartbeat_send_timeout: DEFAULT_HEARTBEAT_SEND_TIMEOUT,
             gate: Arc::new(NoopGate),
             tap: None,
+            binding: None,
         }
     }
 
@@ -252,6 +254,14 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
     #[must_use]
     pub fn with_frame_tap(mut self, tap: Arc<dyn FrameTap>) -> Self {
         self.tap = Some(tap);
+        self
+    }
+
+    /// Declares which connection this driver serves, so taps can bind a frame to the connection
+    /// that received it (the platform-unban tap refuses anything else).
+    #[must_use]
+    pub fn with_frame_binding(mut self, binding: FrameBinding) -> Self {
+        self.binding = Some(binding);
         self
     }
 
@@ -946,7 +956,10 @@ impl<I: ConnectorInvoker, S: EventSink> ConnectorDriver<I, S> {
         logs: &mut PumpLogs,
     ) -> FrameVerdict {
         if let Some(tap) = &self.tap {
-            match tap.on_frame(platform, &bytes).await {
+            match tap
+                .on_frame_bound(platform, self.binding.as_ref(), &bytes)
+                .await
+            {
                 TapVerdict::Pass => {}
                 // Already handled (redelivery): the frame is accounted for; do not route again.
                 TapVerdict::Duplicate => {

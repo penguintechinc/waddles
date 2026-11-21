@@ -297,6 +297,10 @@ pub enum PermissionFamily {
     /// `reputation.moderation.write` -- moderation-class deltas (larger cap,
     /// e.g. -200 for a ban) and soft-ban writes (core/approved bundles only).
     ReputationModerationWrite,
+    /// `reputation.floor_ban.lift` -- lets a bundle's CONFIRMED platform `mod.unban` lift the
+    /// matching Waddles floor ban + soft ban in its own community (per-action scope; core
+    /// moderation bundles on the explicit allowlist hold it implicitly).
+    ReputationFloorBanLift,
     /// `economy.read` -- balance / max-bet / leaderboard reads (issue #714).
     EconomyRead,
     /// `economy.wager` -- atomic debit-stake/credit-payout (issue #714).
@@ -425,6 +429,7 @@ impl PermissionFamily {
         Self::ReputationHistoryRead,
         Self::ReputationTenantRead,
         Self::ReputationModerationWrite,
+        Self::ReputationFloorBanLift,
         Self::EconomyRead,
         Self::EconomyWager,
         Self::EconomyTransfer,
@@ -488,6 +493,7 @@ impl PermissionFamily {
             Self::ReputationHistoryRead => "reputation.history.read",
             Self::ReputationTenantRead => "reputation.tenant.read",
             Self::ReputationModerationWrite => "reputation.moderation.write",
+            Self::ReputationFloorBanLift => "reputation.floor_ban.lift",
             Self::EconomyRead => "economy.read",
             Self::EconomyWager => "economy.wager",
             Self::EconomyTransfer => "economy.transfer",
@@ -935,6 +941,16 @@ impl PermissionFamily {
                 },
                 notes: "moderation-class deltas + soft-ban writes; core/approved bundles only; separate from the activity cap",
             },
+            Self::ReputationFloorBanLift => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Reputation,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                notes: "lift the matching Waddles floor/soft ban after a confirmed platform unban; own community only",
+            },
             Self::EconomyRead => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
@@ -1220,6 +1236,7 @@ pub enum PermissionId {
     ReputationHistoryRead,
     ReputationTenantRead,
     ReputationModerationWrite,
+    ReputationFloorBanLift,
     EconomyRead,
     EconomyWager,
     EconomyTransfer,
@@ -1324,6 +1341,7 @@ impl PermissionId {
             Self::ReputationHistoryRead => PermissionFamily::ReputationHistoryRead,
             Self::ReputationTenantRead => PermissionFamily::ReputationTenantRead,
             Self::ReputationModerationWrite => PermissionFamily::ReputationModerationWrite,
+            Self::ReputationFloorBanLift => PermissionFamily::ReputationFloorBanLift,
             Self::EconomyRead => PermissionFamily::EconomyRead,
             Self::EconomyWager => PermissionFamily::EconomyWager,
             Self::EconomyTransfer => PermissionFamily::EconomyTransfer,
@@ -1656,6 +1674,7 @@ impl PermissionId {
             "reputation.history.read" => Ok(Self::ReputationHistoryRead),
             "reputation.tenant.read" => Ok(Self::ReputationTenantRead),
             "reputation.moderation.write" => Ok(Self::ReputationModerationWrite),
+            "reputation.floor_ban.lift" => Ok(Self::ReputationFloorBanLift),
             "economy.read" => Ok(Self::EconomyRead),
             "economy.wager" => Ok(Self::EconomyWager),
             "economy.transfer" => Ok(Self::EconomyTransfer),

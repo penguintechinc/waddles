@@ -90,12 +90,14 @@ pub mod outbound_creds_youtube;
 pub mod outbound_ops;
 pub mod outbound_pin;
 pub mod pin_sig;
+pub mod platform_unban;
 pub mod platform_users;
 pub mod publish;
 pub mod scope_resolver;
 pub mod telemetry;
 pub mod tenant_discord;
 pub mod twitch_sessions;
+pub mod twitch_unban;
 
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -1223,9 +1225,13 @@ async fn try_build_eventsub_state(
         conn.clone(),
         ingest::twitch_eventsub::DEDUP_TTL,
     );
+    let unban = build_twitch_unban(config, conn.clone());
     let revocation = ingest::twitch_eventsub::RedisRevocationSink::new(conn);
 
-    tracing::info!("twitch eventsub webhook receiver configured");
+    tracing::info!(
+        unban_sync = unban.is_some(),
+        "twitch eventsub webhook receiver configured"
+    );
     Some(Arc::new(http::eventsub::EventSubState {
         resolver,
         dedup,
@@ -1236,7 +1242,79 @@ async fn try_build_eventsub_state(
         active_kid: config.cli.binding_active_kid.clone(),
         scope: config.ingest_scope(),
         dek_provider,
+        unban,
     }))
+}
+
+/// Builds the Twitch-native unban forwarder (`channel.unban` -> signed event for svc-action).
+/// `None` (logged, never fatal: the rest of the receiver is unaffected) when the signing key, the
+/// hub-api endpoints or the Twitch client id are not configured -- unbans are then acknowledged
+/// but never forwarded, so a Twitch-side unban does not lift the Waddles ban until configured.
+fn build_twitch_unban(
+    config: &config::Config,
+    conn: redis::aio::ConnectionManager,
+) -> Option<twitch_unban::TwitchUnban> {
+    let cli = &config.cli;
+    let signer = platform_unban::Signer::from_env()?;
+    let client_id = std::env::var("TWITCH_CLIENT_ID")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let (Some(client_id), false, false) = (
+        client_id,
+        cli.hub_api_url.trim().is_empty(),
+        cli.hub_api_grpc_endpoint.trim().is_empty(),
+    ) else {
+        tracing::error!(
+            "twitch unban sync NOT enabled: TWITCH_CLIENT_ID / HUB_API_URL / HUB_API_GRPC_ENDPOINT missing"
+        );
+        return None;
+    };
+    let build = || -> anyhow::Result<twitch_unban::TwitchUnban> {
+        let resolver = || {
+            connection_resolver::ConnectionResolver::new(
+                cli.resolver_config()?,
+                Arc::new(twitch_sessions::boot::ResolverTelemetry),
+            )
+            .map_err(|e| anyhow::anyhow!("connection resolver unavailable: {e}"))
+        };
+        let ca = (!cli.hub_api_grpc_ca_file.trim().is_empty())
+            .then_some(cli.hub_api_grpc_ca_file.as_str());
+        let hub = hub_client::HubClient::connect_lazy(
+            cli.hub_api_grpc_endpoint.trim(),
+            cli.service_jwt_token_endpoint.clone(),
+            cli.service_jwt_sa_token_path.clone(),
+            connector::host_calls::IDENTITY_MINT_SCOPE,
+            ca,
+        )
+        .map_err(|e| anyhow::anyhow!("identity client unavailable: {e}"))?;
+        let jwt = Arc::new(service_auth::MachineJwtClient::new(
+            cli.service_jwt_token_endpoint.clone(),
+            cli.service_jwt_sa_token_path.clone(),
+            twitch_unban::SECRET_READ_SCOPE,
+        ));
+        Ok(twitch_unban::TwitchUnban::new(
+            Arc::new(twitch_unban::CachedLedger::new(
+                twitch_unban::HubSubscriptionLedger::new(&cli.hub_api_url, jwt)?,
+            )),
+            Arc::new(twitch_unban::ResolverOwner::new(resolver()?)),
+            Arc::new(twitch_unban::HelixBanState::new(
+                outbound_creds::ResolverTwitchCredentials::new(resolver()?),
+                client_id,
+            )),
+            Arc::new(connector::host_calls::HubIdentityTokenizer::from_client(
+                hub,
+            )),
+            Arc::new(twitch_unban::ValkeyListSink::new(conn)),
+            Some(signer),
+        ))
+    };
+    match build() {
+        Ok(u) => Some(u),
+        Err(e) => {
+            tracing::error!(error = %e, "twitch unban sync NOT enabled");
+            None
+        }
+    }
 }
 
 /// Builds this runner's identity-field [`identity_crypto::DekProvider`] --

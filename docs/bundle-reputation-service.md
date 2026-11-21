@@ -82,12 +82,82 @@ undelivered ones, so hub-api (SELECT only on the table) erases a subject through
 |---|---|
 | 6 refused (never enforced) | deleted |
 | 2 done (sender-confirmed ban) | **never deleted**; `user_uuid` replaced by `sha256(suppression code ‖ row id)` so the row no longer names the person |
+| 8 lifted (an admin reversed the ban) | **never deleted**; `user_uuid` replaced by a random pseudonym (no suppression code needed) |
 | 1 queued, 3 retry, 4 dead, 5 rate limited, 7 dispatched | untouched -- erasure never cancels an unsent ban |
+
+#### Lifting a floor ban (a lifted user regains normal access)
+
+Status `8` = **lifted** (alembic 0137; `lifted_at`, `lifted_by` = the acting admin's hub UUID). Statuses 1-5 and 7
+deny (`ban_suppression.FLOOR_BAN_ACTIVE_STATUSES`); 6 (refused) and 8 never do, so a lifted user is treated exactly as if
+never banned and a later enqueue re-bans normally. Lift = `DELETE /api/v1/admin/{community}/reputation/floor-bans/{user_uuid}` (the member's hub public UUID, resolved server-side)
+(tenant admins only -- a floor ban is tenant-wide; community admins get 403), which calls the SECURITY DEFINER
+`reputation_floor_ban_lift(tenant, user_uuids[], lifted_by)`. It emits the `admin.floor_ban_lifted` audit event, the
+`waddles_hub_floor_ban_lift_total{result}` counter and a PII-free log line. A lift is **sticky** for its ban occurrence: the same idempotency key never re-bans, and a NEW event key is refused
+(`lift_sticky`) until the user's score has recovered to/above the floor (`recovered_at`, set by score triggers or at lift
+time if already above); a later fall below the floor is a new crossing and bans normally. The platform unban is delivered asynchronously by the dispatcher (Platform sync, below). Hard bans have no automatic recovery path by design. Soft bans need no status: clearing deletes the row and every check also ignores rows past `expires_at`.
 
 Before any row is touched, `ban_suppression.collect_active_restrictions` counts every row with status 1-5 or 7 as an
 active `AUTO_BAN` restriction, so the keyed suppression code is written (same transaction) and the erased user cannot
 re-join. A confirmed ban with no suppression code (no linked identity on that platform) fails the whole erasure
 (rolled back) instead of leaving the identifier behind.
+
+### Platform sync (both directions, alembic 0138)
+
+- **Waddles -> platform**: lifting a ban whose platform command was delivered (status 2 done, or 7 in flight) enqueues
+  exactly one UNBAN (`action = 2`, key `unban:<ban id>`) in the SAME outbox; the action-stage dispatcher claims, retries
+  with backoff and dead-letters it (ERROR alert) like a ban, emitting a signed `mod.unban` over the same sender path
+  (the community's own bound guild/credentials). Unban rows never deny access, are not throttled by the hourly ban
+  quota and are not cancelled by a recovered score. Undelivered bans (1/3/4/5) enqueue no unban.
+- **Platform -> Waddles**: after the sender CONFIRMS a platform `mod.unban`, svc_action calls
+  `reputation_floor_ban_lift_from_platform(tenant, community, platform, user, source_app)` -- but ONLY for a trusted
+  caller: a core moderation bundle on svc_action's explicit allowlist (`penguintechinc.waddles.chatguard`, i.e. `!unban`),
+  or a bundle holding the per-action permission `reputation.floor_ban.lift` in that community (dangerous; core-reviewed).
+  A vendor bundle's `mod.unban` still reaches the platform but lifts NOTHING in Waddles. Tenant + community come from the
+  invoke scope (never an event field); only COMMUNITY-scope bans (scope 1) of that community and platform are lifted
+  (tenant-scope bans lift only via the tenant-admin route); `lifted_by` is the fixed `system:platform_sync` UUID,
+  `lift_origin = 2`, and the calling app id is recorded (`lift_source_app`, ledger `source_event`). The community soft ban
+  is cleared only when the same call lifted a ban row of that platform, and only a floor-set soft ban (reason 1), never a
+  manual one. The platform has already unbanned the user, so this lift also CANCELS the community's undelivered bans
+  (statuses 1 queued, 3 retry, 4 dead, 5 rate limited, 7 in flight): they become lifted and are never sent. The calling app
+  is mandatory (no default; the pre-source-app overload is dropped). NO unban is enqueued back (no echo); replays are no-ops.
+  Both directions are sticky.
+- **Platform -> Waddles, Discord's own UI** (`GUILD_BAN_REMOVE`): an unban done in Discord lifts the Waddles floor ban
+  too, with no bundle involved. svc-ingest (which holds the gateway connection and has no database) taps the frame
+  (`core/svc_ingest/src/platform_unban.rs`; the connector requests the non-privileged `GUILD_MODERATION` intent for it,
+  no Developer Portal toggle) and accepts it ONLY on the gateway WebSocket of the connection whose host-derived binding
+  names that guild and whose tenant owns the guild pairing; a frame for another tenant's guild, or through any
+  HTTP/webhook/poll edge, is dropped (`svc_ingest_platform_unban_rejected_total{reason}`, PII-free WARN). It tokenizes
+  the Discord user id to the user UUID through hub-api's identity tokenizer (the raw id never leaves ingest), signs
+  `{event id, tenant, connection id, guild, user uuid, observed time, expiry}` with its dedicated Ed25519 key and
+  `LPUSH`es it to `waddles:platform-unban:discord:events` (unpaired / lookup failure / tokenize failure -> ignored,
+  `svc_ingest_platform_unban_total{outcome=ignored,reason}`). svc-action (`core/svc_action/src/platform_unban.rs`)
+  `BRPOP`s it, verifies the signature with the PUBLIC key (it can verify, never mint), freshness (5 min) and single use,
+  then calls `reputation_floor_ban_lift_from_platform_guild` (alembic 0140) under the fixed source
+  Replay safety: frames replayed after a gateway RESUME carry the pre-disconnect observed time, and svc-ingest confirms Discord's current state (`GET /guilds/{id}/bans/{user}` = 404) before forwarding; a user banned again, or an unreadable state, is dropped (`ignored{reason=rebanned|ban_state_unavailable}`).
+  `system:discord-gateway` (counted on `waddles_floor_ban_dispatch_total{result=gateway_unban_*}`). That function lifts in
+  EVERY community of the signed tenant linked to the guild (approved `community_servers`, else the legacy primary
+  server); a guild claimed by two tenants lifts nothing and a lift never crosses tenants. **Time bound**: only bans
+  armed at or before the observed time are lifted (`armed_at`, re-stamped by a trigger whenever a refused row is
+  re-armed through the enqueue `ON CONFLICT` paths), so a late event never lifts a newer re-ban; the trusted
+  `mod.unban` hook passes the server-side confirmation time instead. Why a stream and not a grant to svc-ingest: ingest
+  has no database role by design and is the internet-facing stage. Bundles cannot inject the event: the executor has no
+  Valkey access and no key. Same guards as above: scope-1 only (a tenant-scope ban is NOT lifted), no echo, idempotent.
+  Keys: `autoProvisionedKeys.platformUnban` (create-if-absent Ed25519; private half only in svc-ingest, public
+  ConfigMap in svc-action). Deploy prerequisite: svc-ingest's machine identity needs `identity:ephemeral:mint` (granted
+  in the chart). The `p_observed_ms`/guild functions replace the 5-arg `reputation_floor_ban_lift_from_platform`; every
+  caller passes an observed time.
+- **Outbox namespaces**: ban and unban rows live in separate idempotency namespaces (`action` is part of the unique key;
+  the `unban:` key prefix is reserved and rejected for bans by SQL and by the host). `reputation_floor_ban_lift` fails
+  loudly (`unban_shortfall`, whole lift rolled back) if a delivered ban could not get its unban.
+- **Re-arm on a new low**: a lift records `score_at_lift`. A later score at least `lift_rearm_drop` below it (policy
+  column on `bundle_reputation_policy` / `bundle_reputation_tenant_policy`, default 5 = the largest single activity delta
+  the host accepts, i.e. one maximal ordinary penalty step; no other per-offence penalty knob exists) bans again, provided
+  the floor is still breached; recover-then-cross also bans; the same score stays lifted. Only the most recent lift
+  governs.
+- **Not yet wired**: native platform events (Discord `GUILD_BAN_REMOVE`, Twitch EventSub `channel.unban`) -- ingest does not
+  consume them yet; the floor-ban path supports Discord only (Twitch bans are refused `platform_not_supported`).
+
+**Twitch-native unban (EventSub `channel.unban`).** Same shape, bound per subscription: svc-ingest (`core/svc_ingest/src/twitch_unban.rs`) verifies the delivery HMAC with the receiving subscription's own ledger secret (hub-api `eventsub:secret-read`), takes tenant/community/connection from that ledger row, requires the event's broadcaster to equal the connection's bound channel, confirms Twitch's live state (`GET /moderation/banned`, must be NOT banned, fail closed), tokenizes the user and signs `{event id, tenant, community, connection, broadcaster, user uuid, observed time (EventSub message_timestamp), expiry}` with the shared Ed25519 key under the label `waddles.platform-unban.twitch.v1` onto `waddles:platform-unban:twitch:events`. svc-action (`core/svc_action/src/twitch_unban.rs`) verifies with the PUBLIC key, freshness and single use, then lifts in that one community via `reputation_floor_ban_lift_from_platform` under `system:twitch-eventsub` (`waddles_floor_ban_dispatch_total{result=eventsub_unban_*}`). A cross-tenant broadcaster, an unknown subscription, a re-banned user or an unreadable state forwards nothing (`svc_ingest_twitch_unban_total{outcome=ignored,reason}`).
 
 ### Soft ban
 

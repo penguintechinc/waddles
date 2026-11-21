@@ -38,11 +38,16 @@ SCOPE_TENANT_ADMIN = "tenant:admin"
 
 @dataclass(slots=True, frozen=True)
 class TenantReputationConfigRequest:
-    """PUT body -- only supplied fields change; 300 <= floor < atRiskThreshold <= 850."""
+    """PUT body -- only supplied fields change; 300 <= floor < atRiskThreshold <= 850.
+
+    `liftRearmDrop` (1-100): how far below the score recorded at a ban lift a NEW low must fall
+    for the floor to ban again (default 5).
+    """
 
     tenantAutoBanEnabled: bool | None = None
     tenantAutoBanFloor: int | None = None
     tenantAtRiskThreshold: int | None = None
+    liftRearmDrop: int | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -53,6 +58,7 @@ class TenantReputationConfigResponse:
     tenantAutoBanEnabled: bool
     tenantAutoBanFloor: int
     tenantAtRiskThreshold: int
+    liftRearmDrop: int
     updatedAt: str | None
 
 
@@ -68,6 +74,7 @@ def _dto(cfg: dict[str, Any]) -> TenantReputationConfigResponse:
         tenantAutoBanEnabled=cfg["tenant_auto_ban_enabled"],
         tenantAutoBanFloor=cfg["tenant_auto_ban_floor"],
         tenantAtRiskThreshold=cfg["tenant_at_risk_threshold"],
+        liftRearmDrop=cfg["lift_rearm_drop"],
         updatedAt=cfg["updated_at"],
     )
 
@@ -113,6 +120,7 @@ async def put_tenant_reputation_config(
             auto_ban_enabled=data.tenantAutoBanEnabled,
             auto_ban_floor=data.tenantAutoBanFloor,
             at_risk_threshold=data.tenantAtRiskThreshold,
+            lift_rearm_drop=data.liftRearmDrop,
         )
     except ApiError as exc:
         logger.warning(

@@ -6,7 +6,7 @@
 use serde_json::Value;
 
 use super::super::super::tests::{test_pin_keys, FakeRelayQueue};
-use super::super::super::{outbound_relay_queue_key, StageCapabilities};
+use super::super::super::{outbound_relay_queue_key, InvokeScope, StageCapabilities};
 use super::super::super::{FloorBanCommand, FloorSendError, FloorSendFailure};
 use super::{build, mod_tools, rig_for, Rig, COMMUNITY_ID, TENANT_ID, UUID_A, UUID_B, UUID_C};
 use crate::pin_sig::PinFields;
@@ -19,6 +19,7 @@ fn cmd(user: &str) -> FloorBanCommand {
         user: user.parse().unwrap(),
         platform: "discord".to_string(),
         attempt: 2,
+        unban: false,
     }
 }
 
@@ -189,10 +190,10 @@ async fn every_unready_dependency_is_a_retry_that_queues_nothing() {
 #[tokio::test]
 async fn a_platform_with_no_outbound_ban_path_is_closed_for_good() {
     let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
-    let mut twitch = cmd(UUID_B);
-    twitch.platform = "twitch".to_string();
+    let mut unsupported = cmd(UUID_B);
+    unsupported.platform = "youtube".to_string();
     assert_eq!(
-        failure(c.emit_floor_ban(&twitch).await),
+        failure(c.emit_floor_ban(&unsupported).await),
         FloorSendError::Permanent("platform_not_supported".into())
     );
     let mut bad_scope = cmd(UUID_B);
@@ -202,4 +203,282 @@ async fn a_platform_with_no_outbound_ban_path_is_closed_for_good() {
         FloorSendError::Permanent("invalid_scope".into())
     );
     assert!(c.relay_queue.pushed.lock().unwrap().is_empty());
+}
+
+/// `(tenant, community, platform, user, calling app)` of one platform-originated lift.
+type LiftCall = (i32, i32, String, uuid::Uuid, String, i64);
+
+/// Records every platform-originated lift the hook asks for.
+#[derive(Default)]
+struct FakeUnbanSync {
+    calls: std::sync::Mutex<Vec<LiftCall>>,
+    fail: bool,
+}
+
+impl crate::floor_ban_dispatch::UnbanSync for FakeUnbanSync {
+    fn lift_from_platform<'a>(
+        &'a self,
+        tenant_id: i32,
+        community_id: i32,
+        platform: &'a str,
+        user: uuid::Uuid,
+        source_app: &'a str,
+        observed_ms: i64,
+    ) -> crate::floor_ban_dispatch::StoreFuture<'a, (i32, i32)> {
+        Box::pin(async move {
+            self.calls.lock().unwrap().push((
+                tenant_id,
+                community_id,
+                platform.to_string(),
+                user,
+                source_app.to_string(),
+                observed_ms,
+            ));
+            if self.fail {
+                Err("db down".to_string())
+            } else {
+                Ok((1, 0))
+            }
+        })
+    }
+
+    fn lift_guild_from_platform<'a>(
+        &'a self,
+        _tenant_id: i32,
+        _platform: &'a str,
+        _guild_id: &'a str,
+        _user: uuid::Uuid,
+        _source_app: &'a str,
+        _observed_ms: i64,
+    ) -> crate::floor_ban_dispatch::StoreFuture<'a, (i32, i32, i32)> {
+        Box::pin(async { Err("not used by the confirmed-unban hook".to_string()) })
+    }
+}
+
+#[tokio::test]
+async fn an_unban_row_becomes_a_signed_mod_unban_with_its_own_op_id_prefix() {
+    let c = build(
+        rig_for("discord"),
+        mod_tools("discord", "mod.unban"),
+        FakeRelayQueue::with_live_drain(),
+    )
+    .with_discord_ack_timeout(std::time::Duration::from_millis(60));
+    let mut unban = cmd(UUID_B);
+    unban.unban = true;
+    let op_id = c.emit_floor_ban(&unban).await.expect("confirmed");
+    let pushed = c.relay_queue.pushed.lock().unwrap().clone();
+    assert_eq!(pushed.len(), 1, "exactly one outbound command");
+    let env: Value = serde_json::from_str(&pushed[0].1).unwrap();
+    assert_eq!(env["op"], "mod.unban");
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(op_id.starts_with("fu-42-2-"), "{op_id}");
+}
+
+fn caller_scope(app_id: &str) -> InvokeScope {
+    InvokeScope {
+        tenant: TENANT_ID.to_string(),
+        community: Some(COMMUNITY_ID.to_string()),
+        app_id: app_id.to_string(),
+        tenant_id: TENANT_ID,
+        community_id: COMMUNITY_ID,
+        app_version: 1,
+        ..super::super::super::tests::scope()
+    }
+}
+
+const CHATGUARD: &str = "penguintechinc.waddles.chatguard";
+
+#[tokio::test]
+async fn an_allowlisted_core_bundles_confirmed_unban_lifts_only_its_own_tenant_and_community() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    let sync = std::sync::Arc::new(FakeUnbanSync::default());
+    c.set_unban_sync(sync.clone());
+    let before = i64::try_from(super::super::now_epoch_ms()).unwrap();
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
+        .await;
+    let after = i64::try_from(super::super::now_epoch_ms()).unwrap();
+    let calls = sync.calls.lock().unwrap().clone();
+    assert_eq!(calls.len(), 1);
+    let (t, cm, p, u, app, observed) = calls[0].clone();
+    assert_eq!(
+        (t, cm, p, u, app),
+        (
+            TENANT_ID,
+            COMMUNITY_ID,
+            "discord".to_string(),
+            UUID_B.parse().unwrap(),
+            CHATGUARD.to_string()
+        ),
+        "tenant and community come from the invoke scope, the calling app is recorded"
+    );
+    assert!(
+        (before..=after).contains(&observed),
+        "observed_ms is the server-side confirmation time, not caller-supplied"
+    );
+    assert!(
+        c.relay_queue.pushed.lock().unwrap().is_empty(),
+        "a sync-originated lift must not send a platform unban back"
+    );
+    // A malformed user token never reaches the store.
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", "not-a-uuid")
+        .await;
+    assert_eq!(sync.calls.lock().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_vendor_bundles_confirmed_unban_lifts_nothing_in_waddles() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    let sync = std::sync::Arc::new(FakeUnbanSync::default());
+    c.set_unban_sync(sync.clone());
+    // A third-party (non-core) bundle, and a core-namespace bundle that is NOT allowlisted: the
+    // platform unban already went out, but neither may lift a Waddles ban without the permission.
+    for app in [
+        "acme.vendor.modbot",
+        "penguintechinc.waddles.fixture-test-app-caller",
+    ] {
+        assert!(!c.may_sync_lift(&caller_scope(app)), "{app}");
+        c.sync_confirmed_unban(&caller_scope(app), "discord", UUID_B)
+            .await;
+    }
+    assert!(sync.calls.lock().unwrap().is_empty(), "nothing was lifted");
+}
+
+#[tokio::test]
+async fn a_bundle_holding_the_per_action_permission_may_lift() {
+    let mut c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    c.gate = super::gate(&[(
+        "acme.vendor.modbot",
+        1,
+        vec!["reputation.floor_ban.lift".to_string()],
+    )]);
+    let sync = std::sync::Arc::new(FakeUnbanSync::default());
+    c.set_unban_sync(sync.clone());
+    assert!(c.may_sync_lift(&caller_scope("acme.vendor.modbot")));
+    c.sync_confirmed_unban(&caller_scope("acme.vendor.modbot"), "discord", UUID_B)
+        .await;
+    assert_eq!(sync.calls.lock().unwrap().len(), 1);
+    // The grant is per app: another vendor bundle in the same community still lifts nothing.
+    assert!(!c.may_sync_lift(&caller_scope("acme.vendor.other")));
+}
+
+#[tokio::test]
+async fn a_failed_platform_lift_is_logged_loudly_and_never_panics() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    c.set_unban_sync(std::sync::Arc::new(FakeUnbanSync {
+        fail: true,
+        ..FakeUnbanSync::default()
+    }));
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
+        .await;
+}
+
+#[tokio::test]
+async fn without_an_installed_sync_a_confirmed_unban_changes_nothing() {
+    let c = caps_with(rig_for("discord"), FakeRelayQueue::with_live_drain());
+    c.sync_confirmed_unban(&caller_scope(CHATGUARD), "discord", UUID_B)
+        .await;
+}
+
+fn twitch_caps(op: &str, queue: FakeRelayQueue) -> StageCapabilities<FakeRelayQueue> {
+    build(rig_for("twitch"), mod_tools("twitch", op), queue)
+        .with_discord_ack_timeout(std::time::Duration::from_millis(60))
+}
+
+fn twitch_cmd(user: &str, unban: bool) -> FloorBanCommand {
+    FloorBanCommand {
+        platform: "twitch".to_string(),
+        unban,
+        ..cmd(user)
+    }
+}
+
+#[tokio::test]
+async fn a_twitch_floor_ban_names_no_channel_and_carries_the_resolved_id_and_a_fixed_reason() {
+    let c = twitch_caps("mod.ban", FakeRelayQueue::with_live_drain());
+    let op_id = c
+        .emit_floor_ban(&twitch_cmd(UUID_B, false))
+        .await
+        .expect("confirmed");
+    let pushed = c.relay_queue.pushed.lock().unwrap().clone();
+    assert_eq!(pushed.len(), 1);
+    assert_eq!(pushed[0].0, outbound_relay_queue_key("twitch"));
+    let env: Value = serde_json::from_str(&pushed[0].1).unwrap();
+    assert_eq!(env["op"], "mod.ban");
+    assert_eq!(env["platform"], "twitch");
+    // The channel is NEVER named by the producer: the consumer pins it from the DB binding.
+    assert!(env.get("channel").is_none(), "{env}");
+    assert_eq!(env["origin_channel"], "channel:-");
+    // PII: only the tokenized placeholder is queued and MAC-covered; svc-ingest detokenizes it
+    // per send. The resolved raw Twitch id never reaches the Valkey payload.
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(
+        !pushed[0].1.contains("999000111"),
+        "the raw platform id must never be queued"
+    );
+    let text = env["text"].as_str().expect("fixed reason text");
+    assert_eq!(
+        serde_json::from_str::<Value>(text).unwrap(),
+        serde_json::json!({"reason": "Waddles reputation floor"})
+    );
+    assert!(op_id.starts_with("fb-42-2-"), "{op_id}");
+    // The MAC binds the scope, the user id and the reason text.
+    let sig = env["pin_sig"].as_str().expect("signed");
+    let fields = PinFields {
+        platform: "twitch",
+        op: "mod.ban",
+        channel: "",
+        origin_channel: "channel:-",
+        message_id: "",
+        text,
+        user_id: &format!("{{user:{UUID_B}}}"),
+        op_id: &op_id,
+        exp_ms: env["exp_ms"].as_u64().unwrap(),
+        community_id: i64::from(COMMUNITY_ID),
+        tenant_id: i64::from(TENANT_ID),
+    };
+    assert_eq!(test_pin_keys().verify(&fields, sig), Ok(()));
+    let other_scope = PinFields {
+        origin_channel: "#someoneelse",
+        ..fields
+    };
+    assert!(test_pin_keys().verify(&other_scope, sig).is_err());
+}
+
+#[tokio::test]
+async fn a_twitch_unban_carries_no_text_and_does_not_need_the_discord_drain_flag() {
+    // Twitch has no readiness key: only the ack matters.
+    let mut queue = FakeRelayQueue::with_live_drain();
+    queue.ready = false;
+    let c = twitch_caps("mod.unban", queue);
+    let op_id = c
+        .emit_floor_ban(&twitch_cmd(UUID_B, true))
+        .await
+        .expect("confirmed");
+    let env = &c.relay_queue.envelopes()[0];
+    assert_eq!(env["op"], "mod.unban");
+    assert_eq!(env["origin_channel"], "channel:-");
+    assert_eq!(env["user_id"], format!("{{user:{UUID_B}}}"));
+    assert!(!c.relay_queue.pushed.lock().unwrap()[0]
+        .1
+        .contains("999000111"));
+    assert!(env.get("text").is_none() && env.get("channel").is_none());
+    assert!(op_id.starts_with("fu-42-2-"), "{op_id}");
+}
+
+#[tokio::test]
+async fn a_twitch_ban_of_a_protected_target_is_closed_and_a_failed_ack_retries() {
+    let c = twitch_caps("mod.ban", FakeRelayQueue::with_live_drain());
+    assert_eq!(
+        failure(c.emit_floor_ban(&twitch_cmd(UUID_C, false)).await),
+        FloorSendError::Permanent("protected_target".into())
+    );
+    assert!(c.relay_queue.pushed.lock().unwrap().is_empty());
+    let c = twitch_caps(
+        "mod.ban",
+        FakeRelayQueue::with_drain_result(r#"{"ok":false,"code":"quota_exhausted"}"#),
+    );
+    assert_eq!(
+        failure(c.emit_floor_ban(&twitch_cmd(UUID_B, false)).await),
+        FloorSendError::Retry("quota_exhausted".into())
+    );
 }

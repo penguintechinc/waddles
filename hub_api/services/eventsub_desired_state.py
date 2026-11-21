@@ -24,7 +24,7 @@ import secrets
 import time
 import uuid
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from enum import IntEnum
 from typing import Any, Final
@@ -66,7 +66,11 @@ _COUNT_KEYS: Final = ("created", "marked_delete", "removed", "marked_stale", "re
 
 
 class EventSubType(IntEnum):
-    """The seven EventSub types the Rust Twitch intake handles (bundles/rust/twitch eventsub.rs)."""
+    """The EventSub types hub-api keeps subscriptions for.
+
+    The seven the Rust Twitch intake handles (bundles/rust/twitch eventsub.rs), plus
+    ``channel.unban`` for the Twitch-native unban -> Waddles lift sync (svc-ingest).
+    """
 
     CHANNEL_FOLLOW = 1
     CHANNEL_SUBSCRIBE = 2
@@ -75,6 +79,7 @@ class EventSubType(IntEnum):
     CHANNEL_RAID = 5
     STREAM_ONLINE = 6
     STREAM_OFFLINE = 7
+    CHANNEL_UNBAN = 8
 
 
 #: code -> (Twitch type string, Twitch subscription version). ``channel.follow`` is v2 (v1 is
@@ -87,7 +92,13 @@ EVENTSUB_TYPES: Final[dict[EventSubType, tuple[str, int]]] = {
     EventSubType.CHANNEL_RAID: ("channel.raid", 1),
     EventSubType.STREAM_ONLINE: ("stream.online", 1),
     EventSubType.STREAM_OFFLINE: ("stream.offline", 1),
+    EventSubType.CHANNEL_UNBAN: ("channel.unban", 1),
 }
+
+#: Types desired for EVERY eligible connection regardless of bundle ``consumes`` rules: platform
+#: sync is a core mechanism (a Twitch-side unban must lift the matching Waddles floor ban), not an
+#: app feature. svc-ingest consumes it directly; no bundle sees the event.
+CORE_TYPES: Final[frozenset[EventSubType]] = frozenset({EventSubType.CHANNEL_UNBAN})
 
 
 class SubStatus(IntEnum):
@@ -417,8 +428,8 @@ async def sync_community(
     Runs in the caller's transaction; returns per-kind transition counts.
     """
     counts = dict.fromkeys(_COUNT_KEYS, 0)
-    types = await _desired_types(conn, tenant_id, community_id)
     conns = await _eligible_connections(conn, tenant_id, community_id)
+    types = (await _desired_types(conn, tenant_id, community_id)) | CORE_TYPES
     desired = {(c, int(t)) for c in conns for t in types}
     existing = (
         await conn.execute(
@@ -763,18 +774,40 @@ async def _apply(conn: Any, rep: Report, now: datetime) -> None:
     )
 
 
+@dataclass(slots=True, frozen=True)
+class CallbackBinding:
+    """A callback key's secret and the tenant, community and connection that own it."""
+
+    secret: str = field(repr=False)
+    tenant_id: int
+    community_id: int
+    connection_id: int
+
+
 async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> str:
     """Webhook secret for the ingest verifier, by opaque callback key (decrypted, never logged).
 
     DELETE_PENDING rows still resolve: a late notification for a not-yet-deleted subscription
     must still verify.
     """
+    return (await binding_for_callback_key(install_dal, callback_key)).secret
+
+
+async def binding_for_callback_key(install_dal: AsyncDB, callback_key: str) -> CallbackBinding:
+    """Secret AND owning ``(tenant, community, connection)`` of a callback key.
+
+    A delivery is only meaningful for the subscription that received it: the ingest verifier
+    binds an event to exactly this tuple (never to anything read from the payload).
+    """
     if not _CALLBACK_KEY_RE.fullmatch(callback_key):
         raise UnknownSubscriptionError("unknown callback key") from None
     async with install_dal.engine.connect() as conn:
         row = (
             await conn.execute(
-                text(f"SELECT public_id, secret_enc FROM {_TABLE} WHERE callback_key = :k"),  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                text(
+                    f"SELECT public_id, secret_enc, tenant_id, community_id, connection_id "  # noqa: S608  # nosec B608 -- _TABLE is a module constant
+                    f"FROM {_TABLE} WHERE callback_key = :k"
+                ),
                 {"k": callback_key},
             )
         ).first()
@@ -784,4 +817,9 @@ async def secret_for_callback_key(install_dal: AsyncDB, callback_key: str) -> st
     _ops.add(1, {"op": "secret", "outcome": "ok"})
     # Every eventsub row is sealed AAD-bound (there is no legacy layout), so pin SEAL_AAD:
     # a no-AAD ciphertext is refused rather than accepted through the migration fallback.
-    return open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD)
+    return CallbackBinding(
+        secret=open_secret(row.secret_enc, aad=_aad(row.public_id), seal_version=SEAL_AAD),
+        tenant_id=int(row.tenant_id),
+        community_id=int(row.community_id),
+        connection_id=int(row.connection_id),
+    )

@@ -186,6 +186,14 @@ pub trait TwitchCredentialSource: Send + Sync {
         community_id: Option<i64>,
         channel: &str,
     ) -> Result<TwitchCredential, CredError>;
+
+    /// The ONE channel (canonical login, no `#`) the community's verified Twitch binding owns,
+    /// for host-originated moderation that has no triggering chat event (a reputation floor
+    /// ban / lift). The answer comes only from the hub-api binding list, never from a queue
+    /// payload. The default refuses: a source that cannot prove the binding has no answer.
+    async fn bound_channel(&self, _community_id: Option<i64>) -> Result<String, CredError> {
+        Err(CredError::NoBinding)
+    }
 }
 
 /// Canonical Twitch login for comparison: drop a leading `#`, lowercase.
@@ -243,6 +251,35 @@ impl<R: ConnectionResolve> ResolverTwitchCredentials<R> {
             }
         }
         Err(CredError::BindingListOverflow)
+    }
+
+    /// The single channel the community's own bindings name, provided no OTHER community also
+    /// claims it. Zero bindings is `NoBinding`; several distinct channels (ambiguous) or a
+    /// contested channel is `ChannelNotOwned`. Never guessed, never cached.
+    async fn bound_channel_inner(&self, community_id: Option<i64>) -> Result<String, CredError> {
+        let community_id = community_id
+            .filter(|c| *c > 0)
+            .ok_or(CredError::NoCommunityScope)?;
+        let all = self.list_all().await?;
+        let mut mine: Vec<String> = all
+            .iter()
+            .filter(|b| b.community_id == community_id)
+            .filter_map(|b| SessionSpec::from_summary(b).ok().map(|s| s.channel))
+            .collect();
+        mine.sort_unstable();
+        mine.dedup();
+        let channel = match mine.len() {
+            0 => return Err(CredError::NoBinding),
+            1 => mine.swap_remove(0),
+            _ => return Err(CredError::ChannelNotOwned),
+        };
+        if all
+            .iter()
+            .any(|b| b.community_id != community_id && claims_channel(b, &channel))
+        {
+            return Err(CredError::ChannelNotOwned);
+        }
+        Ok(channel)
     }
 
     async fn resolve_inner(
@@ -373,6 +410,24 @@ impl<R: ConnectionResolve> TwitchCredentialSource for ResolverTwitchCredentials<
                 reason = e.reason(),
                 "outbound credential unavailable; send refused (no fallback credential)"
             ),
+        }
+        result
+    }
+
+    async fn bound_channel(&self, community_id: Option<i64>) -> Result<String, CredError> {
+        let result = self.bound_channel_inner(community_id).await;
+        let outcome = match &result {
+            Ok(_) => "bound_channel_ok",
+            Err(e) => e.reason(),
+        };
+        CRED_RESOLVE.with_label_values(&["twitch", outcome]).inc();
+        if let Err(e) = &result {
+            tracing::warn!(
+                platform = "twitch",
+                community_id = ?community_id,
+                reason = e.reason(),
+                "bound channel unavailable; host-originated moderation refused"
+            );
         }
         result
     }
@@ -906,6 +961,70 @@ mod tests {
         let s = StaticCredentialSource::new("legacy".to_owned(), "tok".to_owned());
         let c = s.credential(None, "#x").await.unwrap();
         assert_eq!((c.nick.as_str(), c.oauth_token.expose()), ("legacy", "tok"));
+    }
+
+    /// The floor-ban channel comes from the community's own binding, nothing else.
+    #[tokio::test]
+    async fn bound_channel_is_the_communitys_single_uncontested_binding() {
+        let src = ResolverTwitchCredentials::new(two_communities());
+        assert_eq!(src.bound_channel(Some(1)).await.unwrap(), "chan_a");
+        assert_eq!(src.bound_channel(Some(2)).await.unwrap(), "chan_b");
+        assert_eq!(src.bound_channel(Some(9)).await, Err(CredError::NoBinding));
+        assert_eq!(
+            src.bound_channel(None).await,
+            Err(CredError::NoCommunityScope)
+        );
+        assert_eq!(
+            src.bound_channel(Some(0)).await,
+            Err(CredError::NoCommunityScope)
+        );
+    }
+
+    #[tokio::test]
+    async fn bound_channel_fails_closed_on_ambiguity_or_a_contested_channel() {
+        // Two distinct channels for one community: never guessed.
+        let two = Fake::new(
+            vec![
+                test_binding(1, 10, "chan_a", "bot_a"),
+                test_binding(1, 11, "chan_c", "bot_a"),
+            ],
+            &[(10, "t"), (11, "t")],
+        );
+        assert_eq!(
+            ResolverTwitchCredentials::new(two)
+                .bound_channel(Some(1))
+                .await,
+            Err(CredError::ChannelNotOwned)
+        );
+        // Another community claims the same channel: contested.
+        let contested = Fake::new(
+            vec![
+                test_binding(1, 10, "chan_a", "bot_a"),
+                test_binding(2, 20, "chan_a", "bot_b"),
+            ],
+            &[(10, "t"), (20, "t")],
+        );
+        assert_eq!(
+            ResolverTwitchCredentials::new(contested)
+                .bound_channel(Some(1))
+                .await,
+            Err(CredError::ChannelNotOwned)
+        );
+        // Hub-api down: retryable, not a guess.
+        let mut down = two_communities();
+        down.list_err = Some(ResolveError::CircuitOpen);
+        assert_eq!(
+            ResolverTwitchCredentials::new(down)
+                .bound_channel(Some(1))
+                .await,
+            Err(CredError::Unavailable)
+        );
+    }
+
+    #[tokio::test]
+    async fn a_source_without_a_binding_view_has_no_bound_channel() {
+        let s = StaticCredentialSource::new("legacy".to_owned(), "tok".to_owned());
+        assert_eq!(s.bound_channel(Some(1)).await, Err(CredError::NoBinding));
     }
 
     #[tokio::test]
