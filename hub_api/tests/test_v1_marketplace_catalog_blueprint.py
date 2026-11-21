@@ -177,26 +177,66 @@ class TestCategoriesAndFeatured:
         assert "other-private-widget" not in names
 
 
+def _uuid(dal: Any, table: str, numeric_id: int) -> str:
+    """`public_id` of one seeded catalogue-backing row (the entry's public `sourceId`)."""
+    row = dal(dal[table].id == numeric_id).select(dal[table].public_id).first()
+    assert row is not None and row.public_id
+    return str(row.public_id)
+
+
 class TestCatalogEntry:
-    async def test_get_own_tenant_entry(self, client: Any, auth_headers: Any) -> None:
+    async def test_get_own_tenant_entry(self, client: Any, auth_headers: Any, dal: Any) -> None:
+        uuid_ = _uuid(dal, "marketplace_modules", 2)
         response = await client.get(
-            "/api/v1/marketplace/catalog/marketplace/2",
+            f"/api/v1/marketplace/catalog/marketplace/{uuid_}",
             headers=auth_headers(tenant=TENANT_SLUG),
         )
         assert response.status_code == 200
         payload = await response.get_json()
         assert payload["module"]["name"] == "acme-private-widget"
+        assert payload["module"]["sourceId"] == uuid_
 
-    async def test_get_other_tenants_entry_is_404(self, client: Any, auth_headers: Any) -> None:
+    async def test_core_entry_resolves_against_hub_modules(self, client: Any, dal: Any) -> None:
+        uuid_ = _uuid(dal, "hub_modules", 1)
+        response = await client.get(f"/api/v1/marketplace/catalog/core/{uuid_}")
+        assert response.status_code == 200
+        assert (await response.get_json())["module"]["sourceId"] == uuid_
+
+    async def test_get_other_tenants_entry_is_404(
+        self, client: Any, auth_headers: Any, dal: Any
+    ) -> None:
         """`other-private-widget` (tenant=OTHER_TENANT_SLUG) must 404 for a TENANT_SLUG caller."""
+        uuid_ = _uuid(dal, "marketplace_modules", 3)
         response = await client.get(
-            "/api/v1/marketplace/catalog/marketplace/3",
+            f"/api/v1/marketplace/catalog/marketplace/{uuid_}",
             headers=auth_headers(tenant=TENANT_SLUG),
         )
         assert response.status_code == 404
         payload = await response.get_json()
         assert payload["error"]["code"] == "NOT_FOUND"
 
+    async def test_unknown_malformed_numeric_and_wrong_source_all_404(
+        self, client: Any, dal: Any
+    ) -> None:
+        marketplace_uuid = _uuid(dal, "marketplace_modules", 1)
+        for path in (
+            "marketplace/00000000-0000-4000-8000-00000000dead",  # unknown UUID
+            "marketplace/1",  # numeric id no longer routes
+            "marketplace/not-a-uuid",
+            f"core/{marketplace_uuid}",  # a marketplace UUID asked for as `core`
+            f"bogus/{marketplace_uuid}",  # unknown source
+        ):
+            response = await client.get(f"/api/v1/marketplace/catalog/{path}")
+            assert response.status_code == 404, path
+
+    async def test_list_emits_uuid_source_ids_never_numeric(self, client: Any) -> None:
+        payload = await (await client.get("/api/v1/marketplace/catalog")).get_json()
+        source_ids = [m["sourceId"] for m in payload["modules"]]
+        assert len(source_ids) == 2  # denominator: both visible rows were examined
+        assert all(isinstance(v, str) and len(v) == 36 for v in source_ids)
+
     async def test_get_unknown_entry_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/marketplace/catalog/core/9999")
+        response = await client.get(
+            "/api/v1/marketplace/catalog/core/00000000-0000-4000-8000-000000009999"
+        )
         assert response.status_code == 404
