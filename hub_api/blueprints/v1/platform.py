@@ -54,8 +54,14 @@ from services.current_user import get_current_user_id
 from services.db_routing import get_read_dals, reads_from_replica
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
-from services.pagination import parse_limit
-from services.user_public_id import lookup_user_public_ids, public_id_for, use_user_public_ids
+from services.pagination import parse_limit, parse_page
+from services.user_public_id import (
+    lookup_user_id,
+    lookup_user_public_ids,
+    parse_public_user_id,
+    public_id_for,
+    use_user_public_ids,
+)
 
 platform_bp = Blueprint("v1_platform", __name__, url_prefix="/api/v1/platform")
 use_user_public_ids(platform_bp)
@@ -262,7 +268,7 @@ class AuditEntryDTO:
     """Audit log entry DTO."""
 
     id: int
-    userId: int | None
+    userId: str | None
     action: str
     targetType: str | None
     targetId: str | None
@@ -334,10 +340,12 @@ class PlatformStatsResponse:
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(ListUsersResponse)
-async def list_users() -> ListUsersResponse:
+async def list_users() -> ListUsersResponse | tuple[dict[str, object], int]:
     """List users."""
     async_dal, dal = _dal()
-    page = int(request.args.get("page", "1"))
+    page = parse_page(request.args.get("page"))
+    if page is None:
+        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     platform = request.args.get("platform")
@@ -459,10 +467,12 @@ async def deactivate_user(
 @tenant_middleware  # type: ignore[misc]
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(ListCommunitiesResponse)
-async def list_communities() -> ListCommunitiesResponse:
+async def list_communities() -> ListCommunitiesResponse | tuple[dict[str, object], int]:
     """List communities."""
     async_dal, dal = _dal()
-    page = int(request.args.get("page", "1"))
+    page = parse_page(request.args.get("page"))
+    if page is None:
+        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     is_active = request.args.get("isActive", "true") != "false"
@@ -605,24 +615,34 @@ async def get_system_health() -> tuple[SystemHealthResponse, int]:
 @require_scope("platform:admin")  # type: ignore[misc]
 @validate_response(AuditLogResponse)
 @reads_from_replica("platform.get_audit_log")
-async def get_audit_log() -> AuditLogResponse:
+async def get_audit_log() -> AuditLogResponse | tuple[dict[str, object], int]:
     """Get audit log (append-only listing: scope-gated, no DB authz, replica lag is fine)."""
     async_dal, dal = get_read_dals()
-    page = int(request.args.get("page", "1"))
+    page = parse_page(request.args.get("page"))
+    if page is None:
+        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
     limit = parse_limit(request.args.get("limit"), default=50)
     action = request.args.get("action")
     user_id_param = request.args.get("userId")
-    user_id = int(user_id_param) if user_id_param else None
+    user_id: int | None = None
+    if user_id_param:
+        user_public_id = parse_public_user_id(user_id_param)
+        if user_public_id is None:
+            return _err(ApiError("Invalid userId", 400, "BAD_REQUEST"))
+        user_id = await lookup_user_id(user_public_id)
 
     rows, total, total_pages = await svc.get_audit_log(
         async_dal, dal, page=page, limit=limit, action=action, user_id=user_id
+    )
+    actor_uuids = await lookup_user_public_ids(
+        (r.user_id for r in rows), async_dal=async_dal, dal=dal
     )
     return AuditLogResponse(
         success=True,
         entries=[
             AuditEntryDTO(
                 id=r.id,
-                userId=r.user_id,
+                userId=public_id_for(actor_uuids, r.user_id),
                 action=r.action,
                 targetType=r.target_type,
                 targetId=r.target_id,

@@ -41,3 +41,17 @@ def parse_limit(
     except (TypeError, ValueError):
         parsed = default
     return min(maximum, max(minimum, parsed))
+
+
+def parse_page(raw: str | None) -> int | None:
+    """Parse a query-string `?page=` (default 1, values below 1 clamp to 1).
+
+    Returns `None` for a non-integer value so the caller answers 400 -- an unparsable page is a
+    client error, and a bare `int()` would otherwise surface it as a 500.
+    """
+    if raw is None or raw == "":
+        return 1
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        return None

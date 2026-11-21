@@ -429,7 +429,7 @@ components:
           title: Targettype
         userId:
           anyOf:
-          - type: integer
+          - type: string
           - type: 'null'
           title: Userid
       required:

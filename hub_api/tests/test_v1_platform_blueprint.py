@@ -415,11 +415,36 @@ class TestSystem:
         by_user = await client.get(
             "/api/v1/platform/audit-log",
             headers=_admin_headers(),
-            query_string={"userId": "8"},
+            query_string={"userId": uid(8)},
         )
         body2 = await by_user.get_json()
         assert len(body2["entries"]) == 1
-        assert body2["entries"][0]["userId"] == 8
+        assert body2["entries"][0]["userId"] == uid(8)
+
+    async def test_audit_log_rejects_numeric_or_malformed_user_id(self, client: Any) -> None:
+        for bad in ("8", "abc", "00000000-0000"):
+            response = await client.get(
+                "/api/v1/platform/audit-log",
+                headers=_admin_headers(),
+                query_string={"userId": bad},
+            )
+            assert response.status_code == 400, bad
+
+    async def test_audit_log_unknown_user_uuid_matches_nothing(self, client: Any) -> None:
+        response = await client.get(
+            "/api/v1/platform/audit-log",
+            headers=_admin_headers(),
+            query_string={"userId": uid(424242)},
+        )
+        assert response.status_code == 200
+        assert (await response.get_json())["entries"] == []
+
+    @pytest.mark.parametrize("path", ["/users", "/communities", "/audit-log"])
+    async def test_non_integer_page_is_400_not_500(self, client: Any, path: str) -> None:
+        response = await client.get(
+            f"/api/v1/platform{path}", headers=_admin_headers(), query_string={"page": "abc"}
+        )
+        assert response.status_code == 400
 
     async def test_stats(self, client: Any, platform_db: Any) -> None:
         community_id = _seed_community(platform_db)

@@ -358,6 +358,14 @@ class TestGlobalAdminRoleAssignment:
         assert is_global_user_sync(auth_db.dal, target) is True
 
 
+class TestListUsersPage:
+    async def test_non_integer_page_is_400_not_500(self, client: Any) -> None:
+        response = await client.get(
+            "/api/v1/superadmin/users", headers=_admin_headers(), query_string={"page": "abc"}
+        )
+        assert response.status_code == 400
+
+
 class TestGetUpdateDeleteUser:
     async def test_get_user_not_found_is_404(self, client: Any) -> None:
         response = await client.get(

@@ -22,7 +22,7 @@ from services import user_management_service as svc
 from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
-from services.pagination import parse_limit
+from services.pagination import parse_limit, parse_page
 from services.user_public_id import use_user_public_ids
 
 user_management_bp = Blueprint(
@@ -260,10 +260,12 @@ def _row_dto(row: Any, *, is_super_admin: bool) -> UserDTO:
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(ListUsersResponse)
-async def list_users() -> ListUsersResponse:
+async def list_users() -> ListUsersResponse | tuple[dict[str, object], int]:
     """List users."""
     async_dal, dal = _dal()
-    page = int(request.args.get("page", "1"))
+    page = parse_page(request.args.get("page"))
+    if page is None:
+        return _err(ApiError("Invalid page", 400, "BAD_REQUEST"))
     limit = parse_limit(request.args.get("limit"), default=25)
     search = request.args.get("search", "")
     role = request.args.get("role")
