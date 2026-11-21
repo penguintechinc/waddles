@@ -23,7 +23,7 @@ export interface OperatorPool {
 
 export interface OperatorPoolsResponse {
   success: boolean;
-  tenantId: number;
+  tenantId: string;
   pools: OperatorPool[];
   /** True only on bypass-domain deployments, where the operator sets pool sizes by hand. */
   bypassDomain: boolean;
@@ -64,12 +64,12 @@ export const tenantLicenseApi = {
 };
 
 export const operatorLicensePoolsApi = {
-  /** GET stored pool rows for a tenant (numeric id). */
-  get: (tenantId: number): Promise<OperatorPoolsResponse> =>
+  /** GET stored pool rows for a tenant (public UUID). */
+  get: (tenantId: string): Promise<OperatorPoolsResponse> =>
     apiClient.get<OperatorPoolsResponse>(`/api/v1/superadmin/tenants/${tenantId}/license-pools`).then((r) => r.data),
 
   /** PUT a pool size for tier 2 (Premium); `limit` null clears to not-licensed, -1 is unlimited. */
-  set: (tenantId: number, tierCode: 2, limit: number | null): Promise<OperatorPoolsResponse> =>
+  set: (tenantId: string, tierCode: 2, limit: number | null): Promise<OperatorPoolsResponse> =>
     apiClient
       .put<OperatorPoolsResponse>(`/api/v1/superadmin/tenants/${tenantId}/license-pools/${tierCode}`, { limit })
       .then((r) => r.data),

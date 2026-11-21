@@ -26,7 +26,7 @@ const api = vi.mocked(superTenantApi);
 
 const TENANTS: TenantDTO[] = [
   {
-    id: 0,
+    id: 'aaaaaaaa-0000-4000-8000-000000000000',
     slug: 'default',
     displayName: 'Default Tenant',
     description: null,
@@ -39,7 +39,7 @@ const TENANTS: TenantDTO[] = [
     updatedAt: null,
   },
   {
-    id: 5,
+    id: 'aaaaaaaa-0000-4000-8000-000000000005',
     slug: 'acme',
     displayName: 'Acme Corp',
     description: 'Roadrunners',
@@ -260,7 +260,7 @@ describe('SuperAdminTenants edit', () => {
     fireEvent.click(dialog.getByRole('button', { name: 'Save Changes' }));
 
     await waitFor(() =>
-      expect(api.update).toHaveBeenCalledWith(5, {
+      expect(api.update).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000005', {
         displayName: 'Acme Inc',
         description: 'Roadrunners',
         logoUrl: null,
@@ -314,7 +314,7 @@ describe('SuperAdminTenants deactivate', () => {
     fireEvent.change(box.getByLabelText('Confirm tenant slug'), { target: { value: 'acme' } });
     fireEvent.click(box.getByRole('button', { name: 'Deactivate Tenant' }));
 
-    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith(5));
+    await waitFor(() => expect(api.deactivate).toHaveBeenCalledWith('aaaaaaaa-0000-4000-8000-000000000005'));
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Deactivate Tenant' })).not.toBeInTheDocument());
     await waitFor(() => expect(api.list).toHaveBeenCalledTimes(2));
   });

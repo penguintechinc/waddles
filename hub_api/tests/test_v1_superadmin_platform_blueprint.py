@@ -303,6 +303,9 @@ class TestCommunityManagement:
         assert response.status_code == 400
 
 
+_UNKNOWN_TENANT_UUID = "00000000-0000-4000-8000-0000000000a1"
+
+
 class TestTenantManagement:
     async def test_list_tenants(self, client: Any) -> None:
         response = await client.get("/api/v1/superadmin/tenants", headers=_headers())
@@ -337,7 +340,9 @@ class TestTenantManagement:
         )
         body = await response.get_json()
         assert response.status_code == 201
-        assert provisioned == [(body["tenant"]["id"], "keyed-tenant")]
+        created = admin_db.dal(admin_db.dal.tenants.slug == "keyed-tenant").select().first()
+        assert body["tenant"]["id"] == created.public_id
+        assert provisioned == [(created.id, "keyed-tenant")]
 
     async def test_create_tenant_aborts_when_the_key_cannot_be_provisioned(
         self, client: Any, admin_db: Any, monkeypatch: pytest.MonkeyPatch
@@ -458,7 +463,7 @@ class TestTenantManagement:
     async def test_update_tenant_success(self, client: Any, admin_db: Any) -> None:
         tenant = admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).select().first()
         response = await client.put(
-            f"/api/v1/superadmin/tenants/{tenant.id}",
+            f"/api/v1/superadmin/tenants/{tenant.public_id}",
             headers=_headers(),
             json={"displayName": "Renamed Tenant"},
         )
@@ -466,7 +471,9 @@ class TestTenantManagement:
 
     async def test_update_tenant_not_found_is_404(self, client: Any) -> None:
         response = await client.put(
-            "/api/v1/superadmin/tenants/9999", headers=_headers(), json={"displayName": "X"}
+            f"/api/v1/superadmin/tenants/{_UNKNOWN_TENANT_UUID}",
+            headers=_headers(),
+            json={"displayName": "X"},
         )
         assert response.status_code == 404
 
@@ -474,7 +481,10 @@ class TestTenantManagement:
         dal = admin_db.dal
         new_id = dal.tenants.insert(slug="deletable", display_name="Deletable", is_global=False)
         dal.commit()
-        response = await client.delete(f"/api/v1/superadmin/tenants/{new_id}", headers=_headers())
+        public_id = dal(dal.tenants.id == new_id).select().first().public_id
+        response = await client.delete(
+            f"/api/v1/superadmin/tenants/{public_id}", headers=_headers()
+        )
         assert response.status_code == 200
 
     async def test_delete_global_tenant_is_403(self, client: Any, admin_db: Any) -> None:
@@ -482,10 +492,20 @@ class TestTenantManagement:
         admin_db.dal(admin_db.dal.tenants.id == tenant.id).update(is_global=True)
         admin_db.dal.commit()
         response = await client.delete(
-            f"/api/v1/superadmin/tenants/{tenant.id}", headers=_headers()
+            f"/api/v1/superadmin/tenants/{tenant.public_id}", headers=_headers()
         )
         assert response.status_code == 403
 
     async def test_delete_tenant_not_found_is_404(self, client: Any) -> None:
-        response = await client.delete("/api/v1/superadmin/tenants/9999", headers=_headers())
+        response = await client.delete(
+            f"/api/v1/superadmin/tenants/{_UNKNOWN_TENANT_UUID}", headers=_headers()
+        )
         assert response.status_code == 404
+
+    @pytest.mark.parametrize("bad", ["9999", "1", "not-a-uuid"])
+    async def test_numeric_or_malformed_tenant_id_is_404(self, client: Any, bad: str) -> None:
+        update = await client.put(
+            f"/api/v1/superadmin/tenants/{bad}", headers=_headers(), json={"displayName": "X"}
+        )
+        delete = await client.delete(f"/api/v1/superadmin/tenants/{bad}", headers=_headers())
+        assert (update.status_code, delete.status_code) == (404, 404)
