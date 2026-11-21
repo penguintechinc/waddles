@@ -63,16 +63,7 @@ spec:
               value: "landing-stats-refresh"
             {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
             # Same TLS-authenticated Valkey wiring hub-api / the core-bundle seeder use for build_client().
-            - name: VALKEY_URL
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "waddlebot.fullname" . }}-secrets
-                  key: VALKEY_DURABLE_URL_TLS_AUTH
-            - name: VALKEY_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: {{ include "waddlebot.fullname" . }}-secrets
-                  key: VALKEY_DURABLE_PASSWORD
+            {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "landing-stats" "url" "auth") | nindent 12 }}
             {{- end }}
             resources:
               {{- toYaml .Values.pipeline.hubApi.landingStatsRefresh.resources | nindent 14 }}
