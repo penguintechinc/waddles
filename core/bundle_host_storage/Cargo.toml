@@ -25,7 +25,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = ["sqlx-post
 thiserror = "=2.0.20"
 tokio = { version = "=1.53.3", features = ["sync", "time", "rt"] }
 tracing = "=0.1.44"
-url = "=2.5.8"
+url = "=2.5.9"
 
 [dev-dependencies]
 zeroize = "=1.9.0"
