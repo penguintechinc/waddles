@@ -93,7 +93,7 @@ penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.gi
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ad096f5d867629f4b62347c94db812d33b720f6e", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f512126656cfca0dc0d52f47a92180eceeddbbed", package = "penguin-licensing", version = "=0.1.1" }
 # D30 envelope binding MAC (spec SS5.11): HMAC-SHA256 hop verification --
 # `src/hop.rs`. Same exact pins `penguin-spine` itself uses internally for
 # byte-identical behavior. `penguin-spine`'s own `binding` module (above)
