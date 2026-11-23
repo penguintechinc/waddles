@@ -138,7 +138,8 @@ check_service_availability() {
 
     # Check critical service ports
     local services=(
-        "8060:Hub Module (WebUI)"
+        "8080:Hub WebUI"
+        "8204:Hub API"
         "8000:Router Module"
         "5432:PostgreSQL Database"
     )
@@ -332,7 +333,7 @@ run_webui_tests() {
 
     for page_spec in "${webui_pages[@]}"; do
         IFS=':' read -r page_path page_name <<< "$page_spec"
-        run_test_async "webui-tests" "hub_${page_name}" "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 'http://localhost:8060${page_path}' | grep -q '200'"
+        run_test_async "webui-tests" "hub_${page_name}" "curl -s -o /dev/null -w '%{http_code}' --connect-timeout 10 'http://localhost:8080${page_path}' | grep -q '200'"
     done
 
     echo "WebUI tests launched (running in background)..."

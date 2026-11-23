@@ -20,6 +20,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
+from .public_id_rows import row_public_id
+
 
 @dataclass(slots=True)
 class ShoutoutConfig:
@@ -39,9 +41,9 @@ class ShoutoutConfig:
 
 @dataclass(slots=True)
 class ShoutoutCreator:
-    """A row from `shoutout_creators`, camelCased to match the JSON contract."""
+    """A row from `shoutout_creators`, camelCased to match the JSON contract; `id` = public UUID."""
 
-    id: int
+    id: str
     platform: str
     platformUsername: str
     addedBy: int | None = None
@@ -139,7 +141,7 @@ def list_shoutout_creators(dal: Any, community_id: int) -> list[ShoutoutCreator]
     )
     return [
         ShoutoutCreator(
-            id=row.id,
+            id=row_public_id(row),
             platform=row.platform,
             platformUsername=row.platform_username,
             addedBy=row.added_by,
@@ -173,7 +175,7 @@ def add_shoutout_creator(
     dal.commit()
     row = dal.shoutout_creators[new_id]
     return ShoutoutCreator(
-        id=row.id,
+        id=row_public_id(row),
         platform=row.platform,
         platformUsername=row.platform_username,
         addedBy=row.added_by,

@@ -35,7 +35,12 @@ from tests.provider_connections.fake_google import (
     FakeGoogle,
     broadcast,
 )
-from tests.provider_connections.support import open_row, raw_rows, set_column
+from tests.provider_connections.support import (
+    numeric_connection_id,
+    open_row,
+    raw_rows,
+    set_column,
+)
 from tests.provider_connections.test_api import _bound
 from tests.provider_connections.youtube_fixtures import (
     YT_CHANNEL,
@@ -102,12 +107,12 @@ async def _install(
     return callback, params
 
 
-async def _connection_id(client: Any, db: Any, community_id: int | None = None) -> int:
+async def _connection_id(client: Any, db: Any, community_id: int | None = None) -> str:
     listed = await client.get(_base(db, community_id), headers=admin_headers(db))
     (connection,) = [
         c for c in (await listed.get_json())["connections"] if c["provider"] == "youtube"
     ]
-    return int(connection["id"])
+    return str(connection["id"])
 
 
 async def _ok(callback: Any) -> bool:
@@ -480,7 +485,7 @@ class TestCallback:
 
 
 class TestBinding:
-    async def _connected(self, client: Any, db: Any, google: FakeGoogle) -> int:
+    async def _connected(self, client: Any, db: Any, google: FakeGoogle) -> str:
         assert await _ok((await _install(client, db, google))[0])
         return await _connection_id(client, db)
 
@@ -500,7 +505,11 @@ class TestBinding:
         resolved = await yt_client.post(
             f"{INTERNAL}/communities/{yt_db.seed.community_id}/provider-connections/"
             f"{connection_id}/resolve",
-            headers=_bound(service_issuer, yt_db.seed.community_id, connection_id),
+            headers=_bound(
+                service_issuer,
+                yt_db.seed.community_id,
+                await numeric_connection_id(yt_db, connection_id),
+            ),
         )
         assert resolved.status_code == 409
         assert (await resolved.get_json())["reason"] == "metadata_incomplete"
@@ -538,7 +547,11 @@ class TestBinding:
         resolved = await yt_client.post(
             f"{INTERNAL}/communities/{yt_db.seed.community_id}/provider-connections/"
             f"{connection_id}/resolve",
-            headers=_bound(service_issuer, yt_db.seed.community_id, connection_id),
+            headers=_bound(
+                service_issuer,
+                yt_db.seed.community_id,
+                await numeric_connection_id(yt_db, connection_id),
+            ),
         )
         assert resolved.status_code == 200
         body = await resolved.get_json()
@@ -614,7 +627,9 @@ class TestBinding:
         assert (await yt_client.delete(url, headers=h)).status_code == 404
         resolved = await yt_client.post(
             f"{INTERNAL}/communities/{wrong}/provider-connections/{connection_id}/resolve",
-            headers=_bound(service_issuer, wrong, connection_id),
+            headers=_bound(
+                service_issuer, wrong, await numeric_connection_id(yt_db, connection_id)
+            ),
         )
         assert resolved.status_code in (403, 404)
 
@@ -637,7 +652,7 @@ def _list_headers(issuer: ServiceJwtIssuer) -> dict[str, str]:
 
 
 class TestDiscovery:
-    async def _connected(self, client: Any, db: Any, google: FakeGoogle) -> int:
+    async def _connected(self, client: Any, db: Any, google: FakeGoogle) -> str:
         assert await _ok((await _install(client, db, google))[0])
         return await _connection_id(client, db)
 
@@ -708,7 +723,8 @@ class TestDiscovery:
 
         view = await create_twitch(yt_service, yt_db, bot_tokens)
         response = await yt_client.post(
-            f"{_base(yt_db)}/{view.binding.connection.id}/discover", headers=admin_headers(yt_db)
+            f"{_base(yt_db)}/{view.binding.connection.public_id}/discover",
+            headers=admin_headers(yt_db),
         )
         assert response.status_code == 400
 
@@ -722,7 +738,9 @@ class TestDiscovery:
 
         connection_id = await self._connected(yt_client, yt_db, fake_google)
         await grant_to(
-            yt_db, community_id=yt_db.seed.second_community_id, connection_id=connection_id
+            yt_db,
+            community_id=yt_db.seed.second_community_id,
+            connection_id=await numeric_connection_id(yt_db, connection_id),
         )
         response = await yt_client.post(
             f"{_base(yt_db)}/{connection_id}/discover", headers=admin_headers(yt_db)
@@ -742,7 +760,9 @@ class TestRefresh:
             data=json.dumps({"metadata": {"live_chat_id": YT_CHAT}}),
         )
         assert patched.status_code == 200
-        return connection_id, _bound(issuer, db.seed.community_id, connection_id)
+        return connection_id, _bound(
+            issuer, db.seed.community_id, await numeric_connection_id(db, connection_id)
+        )
 
     def _resolve(self, client: Any, db: Any, connection_id: int, headers: dict[str, str]) -> Any:
         return client.post(
@@ -854,13 +874,15 @@ class TestRefresh:
         fake_google.down = True
         with pytest.raises(ProviderUnavailable):
             await yt_service.resolve(
-                community_id=yt_db.seed.community_id, connection_id=connection_id
+                community_id=yt_db.seed.community_id,
+                connection_id=await numeric_connection_id(yt_db, connection_id),
             )
         (after,) = await raw_rows(yt_db, "platform_connections")
         assert after["status"] == "active" and after["access_token"] == before["access_token"]
         fake_google.down = False  # and it recovers
         resolved = await yt_service.resolve(
-            community_id=yt_db.seed.community_id, connection_id=connection_id
+            community_id=yt_db.seed.community_id,
+            connection_id=await numeric_connection_id(yt_db, connection_id),
         )
         assert resolved.access_token
 
@@ -1002,7 +1024,11 @@ class TestSecretHygiene:
             await yt_client.post(
                 f"{INTERNAL}/communities/{yt_db.seed.community_id}/provider-connections/"
                 f"{connection_id}/resolve",
-                headers=_bound(service_issuer, yt_db.seed.community_id, connection_id),
+                headers=_bound(
+                    service_issuer,
+                    yt_db.seed.community_id,
+                    await numeric_connection_id(yt_db, connection_id),
+                ),
             )
         (row,) = await raw_rows(yt_db, "platform_connections")
         needles = [

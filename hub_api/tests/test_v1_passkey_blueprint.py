@@ -9,6 +9,7 @@ challenge-store logic is exercised directly instead.
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
@@ -41,6 +42,24 @@ def _seed_user(auth_db: Any) -> int:
     )
     auth_db.dal.commit()
     return user_id
+
+
+_UNKNOWN_UUID = "00000000-0000-4000-8000-0000000000a1"
+
+
+def _seed_passkey(auth_db: Any, user_id: int, credential_id: str) -> str:
+    """Insert a passkey row for `user_id`; returns its public UUID."""
+    public_id = str(uuid.uuid4())
+    auth_db.dal.user_passkeys.insert(
+        user_id=user_id,
+        credential_id=credential_id,
+        public_key="pk",
+        device_name="laptop",
+        created_at=datetime.now(UTC),
+        public_id=public_id,
+    )
+    auth_db.dal.commit()
+    return public_id
 
 
 def _headers(user_id: int) -> dict[str, str]:
@@ -80,16 +99,49 @@ class TestListCredentials:
 
 
 class TestRemoveCredential:
-    async def test_remove_nonexistent_credential_still_returns_success(
-        self, client: Any, auth_db: Any
+    @pytest.mark.parametrize("bad", ["9999", "not-a-uuid", _UNKNOWN_UUID])
+    async def test_numeric_malformed_and_unknown_credential_ids_are_404(
+        self, client: Any, auth_db: Any, bad: str
     ) -> None:
-        """DELETE is idempotent -- removing an already-absent credential is still a 200."""
+        """Only a UUID of the caller's OWN passkey resolves; everything else is the same 404."""
         user_id = _seed_user(auth_db)
         response = await client.delete(
-            "/api/v1/user/passkey/credentials/9999", headers=_headers(user_id)
+            f"/api/v1/user/passkey/credentials/{bad}", headers=_headers(user_id)
         )
-        assert response.status_code == 200
+        assert response.status_code == 404
 
     async def test_remove_credential_without_token_is_401(self, client: Any) -> None:
-        response = await client.delete("/api/v1/user/passkey/credentials/1")
+        response = await client.delete(f"/api/v1/user/passkey/credentials/{_UNKNOWN_UUID}")
         assert response.status_code == 401
+
+    async def test_list_emits_uuid_and_delete_by_uuid_removes_it(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        user_id = _seed_user(auth_db)
+        public_id = _seed_passkey(auth_db, user_id, "cred-a")
+        response = await client.get("/api/v1/user/passkey/credentials", headers=_headers(user_id))
+        listed = (await response.get_json())["credentials"]
+        assert [c["id"] for c in listed] == [public_id]
+        response = await client.delete(
+            f"/api/v1/user/passkey/credentials/{public_id}", headers=_headers(user_id)
+        )
+        assert response.status_code == 200
+        assert auth_db.dal(auth_db.dal.user_passkeys.public_id == public_id).count() == 0
+
+    async def test_another_users_credential_uuid_is_404_and_survives(
+        self, client: Any, auth_db: Any
+    ) -> None:
+        owner = _seed_user(auth_db)
+        public_id = _seed_passkey(auth_db, owner, "cred-b")
+        intruder: int = auth_db.dal.hub_users.insert(
+            email="mallory@example.com",
+            username="mallory",
+            is_active=True,
+            created_at=datetime.now(UTC),
+        )
+        auth_db.dal.commit()
+        response = await client.delete(
+            f"/api/v1/user/passkey/credentials/{public_id}", headers=_headers(intruder)
+        )
+        assert response.status_code == 404
+        assert auth_db.dal(auth_db.dal.user_passkeys.public_id == public_id).count() == 1

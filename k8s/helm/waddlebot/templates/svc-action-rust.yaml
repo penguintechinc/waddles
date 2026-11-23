@@ -310,44 +310,13 @@ spec:
         {{- if eq (include "waddlebot.valkeyTlsMaterialAvailable" .) "true" }}
         # fix/valkey-tls-alpha -- see templates/svc-process-rust.yaml's comment on this same
         # override block for the full rationale (identical here).
-        - name: VALKEY_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_URL_TLS
-        - name: VALKEY_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_PASSWORD
+        {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "svc-action" "url" "plain") | nindent 8 }}
         # bundle-kv rides its OWN dedicated noeviction kv Valkey (valkey-kv): quota counters are
         # integrity-critical (eviction = quota bypass) and must not share the delivery (durable)
         # instance. Credential-free URL + password via secretKeyRef from the dedicated
         # <fullname>-valkey-kv Secret (not the shared envFrom'd one). Kv disabled (local) falls
         # back to the cache instance. Rust builds the kv conn from these.
-        {{- if eq (include "waddlebot.valkeyKvEnabled" .) "true" }}
-        - name: VALKEY_KV_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-valkey-kv
-              key: VALKEY_KV_URL_TLS
-        - name: VALKEY_KV_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-valkey-kv
-              key: VALKEY_KV_PASSWORD
-        {{- else }}
-        - name: VALKEY_KV_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_URL_TLS
-        - name: VALKEY_KV_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: REDIS_PASSWORD
-        {{- end }}
+        {{- include "waddlebot.valkeyAcl.kvEnv" (dict "root" . "user" "svc-action") | nindent 8 }}
         {{- end }}
         {{- if eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true" }}
         {{- include "waddlebot.hostApiTlsServerEnv" . | nindent 8 }}

@@ -8,7 +8,7 @@
 # (Express, house convention: never nginx), which listens on $PORT (default 8080) and
 # proxies /api to $HUB_API_URL. containerPort/PORT/liveness+readiness port must all
 # agree with .Values.pipeline.hubWebui.port. HUB_API_URL is wired to the in-cluster
-# hub-api-v3 Service (never the server's localhost:8060 dev default) -- server.js
+# hub-api-v3 Service (never the server's localhost:8204 dev default) -- server.js
 # fails fast at startup if it's unset in NODE_ENV=production.
 {{- if .Values.pipeline.hubWebui.enabled }}
 ---

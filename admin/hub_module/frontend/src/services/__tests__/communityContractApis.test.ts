@@ -114,25 +114,25 @@ describe('joinRequestsApi', () => {
   it('sends a null message for blank input and echoes a trimmed-empty message as null', async () => {
     const post = vi
       .spyOn(apiClient, 'post')
-      .mockResolvedValue(ok({ request: { id: 1, status: 'pending', created_at: 't' } }, 201));
-    await expect(submitJoinRequest('00000007-0000-4000-8000-000000000000', '   ')).resolves.toMatchObject({ id: 1, message: null, reviewedAt: null });
+      .mockResolvedValue(ok({ request: { id: 'req-1', status: 'pending', created_at: 't' } }, 201));
+    await expect(submitJoinRequest('00000007-0000-4000-8000-000000000000', '   ')).resolves.toMatchObject({ id: 'req-1', message: null, reviewedAt: null });
     expect(post).toHaveBeenCalledWith('/api/v1/00000007-0000-4000-8000-000000000000/join-requests', { message: null });
     await submitJoinRequest('00000007-0000-4000-8000-000000000000', 'hi');
     expect(post).toHaveBeenLastCalledWith('/api/v1/00000007-0000-4000-8000-000000000000/join-requests', { message: 'hi' });
   });
 
   it('reads the caller request and tolerates its absence', async () => {
-    mockApiGet(() => ({ request: { id: 2, status: 'rejected', message: 'm', created_at: 'c', reviewed_at: 'r' } }));
+    mockApiGet(() => ({ request: { id: 'req-2', status: 'rejected', message: 'm', created_at: 'c', reviewed_at: 'r' } }));
     await expect(fetchMyJoinRequest('00000007-0000-4000-8000-000000000000')).resolves.toMatchObject({ status: 'rejected', reviewedAt: 'r' });
     mockApiGet(() => ({ request: null }));
     await expect(fetchMyJoinRequest('00000007-0000-4000-8000-000000000000')).resolves.toBeNull();
   });
 
   it('defaults sparse admin rows and totalPages; reviews with PUT', async () => {
-    mockApiGet(() => ({ requests: [{ id: 1, status: 'pending', created_at: 'c' }], pagination: { total: 1, page: 1 } }));
+    mockApiGet(() => ({ requests: [{ id: 'req-uuid-1', status: 'pending', created_at: 'c' }], pagination: { total: 1, page: 1 } }));
     await expect(fetchJoinRequests('00000007-0000-4000-8000-000000000000')).resolves.toMatchObject({ totalPages: 1, requests: [{ username: 'Unknown', email: null, message: null }] });
     const put = vi.spyOn(apiClient, 'put').mockResolvedValue(ok({ success: true }));
-    await reviewJoinRequest('00000007-0000-4000-8000-000000000000', 3, 'reject');
+    await reviewJoinRequest('00000007-0000-4000-8000-000000000000', '3', 'reject');
     expect(put).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/3/reject');
   });
 });

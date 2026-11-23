@@ -18,11 +18,13 @@ from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
+from services import session_service
 from services import user_management_service as svc
 from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
-from services.errors import ApiError
+from services.errors import ApiError, not_found
 from services.pagination import parse_limit, parse_page
+from services.public_ids import PublicId
 from services.user_public_id import use_user_public_ids
 
 user_management_bp = Blueprint(
@@ -201,7 +203,7 @@ class PasswordResetResponse:
 class SessionDTO:
     """One login session -- identifiers and timestamps only, never a token or digest."""
 
-    id: int
+    id: str
     createdAt: str | None
     expiresAt: str | None
     isActive: bool
@@ -514,7 +516,7 @@ async def list_user_sessions(user_id: int) -> SessionsResponse | tuple[dict[str,
         success=True,
         sessions=[
             SessionDTO(
-                id=s.session_id,
+                id=s.public_id,
                 createdAt=_iso(s.created_at),
                 expiresAt=_iso(s.expires_at),
                 isActive=s.is_active,
@@ -548,19 +550,22 @@ async def revoke_user_sessions(
     )
 
 
-@user_management_bp.route("/<uuuid:user_id>/sessions/<int:session_id>/revoke", methods=["POST"])
+@user_management_bp.route("/<uuuid:user_id>/sessions/<puuid:session_id>/revoke", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("users:admin")  # type: ignore[misc]
 @validate_response(RevokeSessionsResponse)
 async def revoke_user_session(
-    user_id: int, session_id: int
+    user_id: int, session_id: PublicId
 ) -> RevokeSessionsResponse | tuple[dict[str, object], int]:
     """Revoke one login session of a user (404 if the session is not theirs)."""
     async_dal, dal = _dal()
     try:
-        outcome = await svc.revoke_user_session(
-            async_dal, dal, user_id=user_id, session_id=session_id
+        pk_id = await session_service.resolve_session_public_id(
+            async_dal, dal, user_id=user_id, public_id=session_id
         )
+        if pk_id is None:
+            raise not_found("Session not found")
+        outcome = await svc.revoke_user_session(async_dal, dal, user_id=user_id, session_id=pk_id)
     except ApiError as exc:
         logger.info(
             "%s refused: status=%s code=%s", "revoke_user_session", exc.status_code, exc.code

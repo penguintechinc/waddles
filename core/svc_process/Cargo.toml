@@ -102,7 +102,7 @@ penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", re
 # `penguin-licensing` (spec SS13.5): gates the process-stage drain loop on
 # the `waddles.core.rust-data-plane` PostHog-compatible flag (default OFF,
 # fail-closed on an unreachable license server) -- see `src/license.rs`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ad096f5d867629f4b62347c94db812d33b720f6e", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f512126656cfca0dc0d52f47a92180eceeddbbed", package = "penguin-licensing", version = "=0.1.1" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Same pinned rev `core/svc_action`/`core/bundle_executor`

@@ -132,7 +132,7 @@ def worlds(community_db: Any, app: Quart) -> SimpleNamespace:
 def _fill(rule: str) -> str:
     return (
         rule.replace("<cuuid:community_id>", "{community_id}")
-        .replace("<int:announcement_id>", "{aid}")
+        .replace("<puuid:announcement_id>", "{aid}")
         .replace("<int:poll_id>", "1")
         .replace("<int:form_id>", "1")
         .replace("<event_type>", "raffle_start")
@@ -149,9 +149,9 @@ async def _call(
     uid: int,
     scopes: list[str],
     *,
-    aid: int = 1,
+    aid: str = UNKNOWN_PUBLIC_ID,
 ) -> Any:
-    url = cpath(w.dal, _fill(rule).replace("{aid}", str(aid)), cid)
+    url = cpath(w.dal, _fill(rule).replace("{aid}", aid), cid)
     token = make_user_token(user_id=uid, scope=" ".join(["*:read", *scopes]))
     body = {
         "platform": "twitch",
@@ -199,7 +199,9 @@ async def test_foreign_tenant_community_is_404_not_403(
 async def test_unknown_community_is_404(
     client: Any, worlds: SimpleNamespace, method: str, rule: str, scopes: list[str], kind: str
 ) -> None:
-    url = _fill(rule).replace("{community_id}", UNKNOWN_PUBLIC_ID).replace("{aid}", "1")
+    url = (
+        _fill(rule).replace("{community_id}", UNKNOWN_PUBLIC_ID).replace("{aid}", UNKNOWN_PUBLIC_ID)
+    )
     token = make_user_token(user_id=MAINTAINER_A, scope=" ".join(["*:read", *scopes]))
     response = await client.open(
         url, method=method, headers={"Authorization": f"Bearer {token}"}, data="{}"
@@ -228,12 +230,11 @@ async def test_announcement_of_b_is_not_reachable_through_a(
         "x",
     )
     assert err is None and dto is not None
-    before = get_announcement(worlds.dal, worlds.b, dto.id)
-    response = await _call(
-        client, worlds, method, rule, worlds.a, MAINTAINER_A, scopes, aid=int(dto.id)
-    )
+    numeric_id = int(worlds.dal(worlds.dal.announcements.public_id == dto.id).select().first().id)
+    before = get_announcement(worlds.dal, worlds.b, numeric_id)
+    response = await _call(client, worlds, method, rule, worlds.a, MAINTAINER_A, scopes, aid=dto.id)
     assert response.status_code == 404, f"{method} {rule} -> {response.status_code}"
-    assert get_announcement(worlds.dal, worlds.b, dto.id) == before
+    assert get_announcement(worlds.dal, worlds.b, numeric_id) == before
 
 
 async def test_raffle_delete_only_touches_the_url_community(

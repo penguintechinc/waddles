@@ -382,10 +382,10 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("POST", "/api/v1/superadmin/tenants"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_CREATED
     ),
-    ("PUT", "/api/v1/superadmin/tenants/<int:tenant_id>"): RouteAudit(
+    ("PUT", "/api/v1/superadmin/tenants/<puuid:tenant_id>"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_UPDATED
     ),
-    ("DELETE", "/api/v1/superadmin/tenants/<int:tenant_id>"): RouteAudit(
+    ("DELETE", "/api/v1/superadmin/tenants/<puuid:tenant_id>"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_DELETED
     ),
     # --- session revocation (admin) ---
@@ -394,7 +394,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ),
     (
         "POST",
-        "/api/v1/superadmin/users/<uuuid:user_id>/sessions/<int:session_id>/revoke",
+        "/api/v1/superadmin/users/<uuuid:user_id>/sessions/<puuid:session_id>/revoke",
     ): RouteAudit(AuditCategory.AUTHN, AuditAction.SESSION_REVOKED),
     # --- role / privilege changes ---
     ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/super-admin-role"): RouteAudit(
@@ -418,10 +418,10 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/roles"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<puuid:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<puuid:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
     # --- user administration ---
@@ -557,7 +557,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PASSKEY_REMOVED),
-        (("DELETE", f"{_P}/user/passkey/credentials/<int:credential_id>"),),
+        (("DELETE", f"{_P}/user/passkey/credentials/<puuid:credential_id>"),),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_CONNECTION_CHANGED),
@@ -598,8 +598,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.ROLE, AuditAction.ROLE_JOIN_REQUEST_DECIDED),
         (
-            ("PUT", f"{_ADM}/join-requests/<int:request_id>/approve"),
-            ("PUT", f"{_ADM}/join-requests/<int:request_id>/reject"),
+            ("PUT", f"{_ADM}/join-requests/<puuid:request_id>/approve"),
+            ("PUT", f"{_ADM}/join-requests/<puuid:request_id>/reject"),
         ),
     ),
     (
@@ -649,8 +649,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("POST", f"{_P}/marketplace/vendor/request"),
             ("POST", f"{_P}/marketplace/vendor/modules"),
-            ("PUT", f"{_P}/marketplace/vendor/modules/<int:module_id>"),
-            ("POST", f"{_P}/marketplace/vendor/modules/<int:module_id>/submit"),
+            ("PUT", f"{_P}/marketplace/vendor/modules/<puuid:module_id>"),
+            ("POST", f"{_P}/marketplace/vendor/modules/<puuid:module_id>/submit"),
         ),
     ),
     (
@@ -672,7 +672,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("PUT", f"{_ADM}/music/settings"),
             ("POST", f"{_ADM}/music/radio-stations"),
-            ("DELETE", f"{_ADM}/music/radio-stations/<int:station_id>"),
+            ("DELETE", f"{_ADM}/music/radio-stations/<puuid:station_id>"),
         ),
     ),
     (
@@ -704,16 +704,19 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
             ("POST", "/api/v1/admin/<cuuid:community_id>/temp-password"),
             ("PUT", "/api/v1/admin/<cuuid:community_id>/modules/<int:module_id>/config"),
             ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/channels"),
-            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>"),
-            ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>"),
-            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/forum/posts/<int:post_id>"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>"),
             (
                 "DELETE",
-                "/api/v1/admin/<cuuid:community_id>/interaction/forum/replies/<int:reply_id>",
+                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>",
+            ),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/forum/posts/<puuid:post_id>"),
+            (
+                "DELETE",
+                "/api/v1/admin/<cuuid:community_id>/interaction/forum/replies/<puuid:reply_id>",
             ),
             (
                 "PUT",
-                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<int:channel_id>/permissions",
+                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>/permissions",
             ),
         ),
     ),
@@ -801,7 +804,7 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/validate"): _R_OPS,
     (
         "POST",
-        "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<int:ticket_id>/comments",
+        "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<puuid:ticket_id>/comments",
     ): _R_USAGE,
     ("POST", "/api/v1/admin/<cuuid:community_id>/support/submit"): _R_USAGE,
     ("POST", "/api/v1/community/<cuuid:community_id>/ai/completions"): _R_USAGE,

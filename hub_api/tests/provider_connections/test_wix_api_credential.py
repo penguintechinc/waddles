@@ -25,7 +25,13 @@ from services.provider_connections.static_secret import ExternalHttpAdapter
 from services.provider_connections.wix import WixAdapter
 from tests.community_ids import public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
-from tests.provider_connections.support import open_row, raw_rows, seal_for_row, set_column
+from tests.provider_connections.support import (
+    numeric_connection_id,
+    open_row,
+    raw_rows,
+    seal_for_row,
+    set_column,
+)
 from tests.provider_connections.test_resolve_v2 import STATIC_SCOPE, _bound, _url
 
 API_KEY = "IST.fake-wix-api-key-0123456789"
@@ -260,10 +266,14 @@ class TestResolverExposure:
         )
         with pytest.raises(VaultCorrupt):
             await wix_service.resolve(
-                community_id=community, connection_id=conn, static_allowed=True
+                community_id=community,
+                connection_id=await numeric_connection_id(pc_db, conn),
+                static_allowed=True,
             )
         # Without the static scope the broken optional credential is never opened.
-        resolved = await wix_service.resolve(community_id=community, connection_id=conn)
+        resolved = await wix_service.resolve(
+            community_id=community, connection_id=await numeric_connection_id(pc_db, conn)
+        )
         assert resolved.secret_scheme is None
 
 
@@ -291,7 +301,9 @@ class TestRotation:
         assert after["access_token"] == before["access_token"]
         assert json.loads(open_row(after, "sealed_api_credential"))["api_key"] == NEW_KEY
         resolved = await wix_service.resolve(
-            community_id=pc_db.seed.community_id, connection_id=conn, static_allowed=True
+            community_id=pc_db.seed.community_id,
+            connection_id=await numeric_connection_id(pc_db, conn),
+            static_allowed=True,
         )
         assert resolved.secret_fields == {"apiKey": NEW_KEY, "siteId": SITE_ID}
 

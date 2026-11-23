@@ -40,7 +40,7 @@ anyhow = "=1.0.104"
 tracing = "=0.1.44"
 opentelemetry = "=0.32.0"
 penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "0a320ba2b08a6850b66e3062f6a9dfb44fec6950", package = "penguin-logging", version = "=0.1.0" }
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "ad096f5d867629f4b62347c94db812d33b720f6e", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f512126656cfca0dc0d52f47a92180eceeddbbed", package = "penguin-licensing", version = "=0.1.1" }
 
 [dev-dependencies]
 tokio = { version = "=1.53.3", features = ["test-util"] }

@@ -15,6 +15,7 @@ re-proving the HTTP client code.
 from __future__ import annotations
 
 import datetime as dt
+import re
 from typing import Any
 
 import pytest
@@ -30,6 +31,21 @@ from blueprints.v1.marketplace_billing import (
 from config import HubAPIConfig
 from tests.community_ids import install_community_ids, public_id
 from tests.conftest import insert_global_admin
+
+UNKNOWN_UUID = "00000000-0000-4000-8000-00000000dead"
+
+
+def _code_url(dal: Any, code_id: int) -> str:
+    """Discount-code route addressed by the code's public UUID."""
+    row_uuid = _row_uuid(dal, "vendor_discount_codes", code_id)
+    return f"/api/v1/marketplace/vendor/discount-codes/{row_uuid}"
+
+
+def _row_uuid(dal: Any, table: str, row_id: int) -> str:
+    """`public_id` of a seeded row (entity routes take it, never the numeric id)."""
+    row = dal(dal[table].id == row_id).select(dal[table].public_id).first()
+    assert row is not None and row.public_id
+    return str(row.public_id)
 
 
 def _cfg() -> HubAPIConfig:
@@ -295,7 +311,7 @@ class TestDiscountCodeCrudBlueprint:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/marketplace/vendor/discount-codes/{code_id}",
+            _code_url(dal, code_id),
             headers=user_auth_headers(user_id=vendor_id, scope="marketplace.discount:write"),
             json={"description": "updated"},
         )
@@ -322,7 +338,7 @@ class TestDiscountCodeCrudBlueprint:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/marketplace/vendor/discount-codes/{code_id}",
+            _code_url(dal, code_id),
             headers=user_auth_headers(user_id=vendor_id, scope="marketplace.discount:write"),
             json={"discountValue": "not-a-number"},
         )
@@ -347,7 +363,7 @@ class TestDiscountCodeCrudBlueprint:
         )
         dal.commit()
         response = await client.delete(
-            f"/api/v1/marketplace/vendor/discount-codes/{code_id}",
+            _code_url(dal, code_id),
             headers=user_auth_headers(user_id=vendor_id, scope="marketplace.discount:write"),
         )
         assert response.status_code == 200
@@ -369,7 +385,7 @@ class TestDiscountCodeCrudBlueprint:
                 **user_auth_headers(user_id=vendor_id, scope="marketplace.discount:read"),
                 "Content-Type": "application/json",
             },
-            data=b'{"code": "NOPE", "moduleId": 1}',
+            data=b'{"code": "NOPE", "moduleId": "%s"}' % UNKNOWN_UUID.encode(),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -392,8 +408,8 @@ class TestDiscountCodeCrudBlueprint:
                 **user_auth_headers(user_id=admin_id, scope="marketplace.discount:admin"),
                 "Content-Type": "application/json",
             },
-            data=b'{"codeId": 999999, "communityId": "%s", "subscriptionId": 1}'
-            % public_id(dal, community_id).encode(),
+            data=b'{"codeId": "%s", "communityId": "%s", "subscriptionId": 1}'
+            % (UNKNOWN_UUID.encode(), public_id(dal, community_id).encode()),
         )
         assert response.status_code == 409
 
@@ -426,10 +442,12 @@ class TestSubscriptionsBlueprint:
         subscribe_resp = await client.post(
             f"/api/v1/marketplace/communities/{public_id(dal, community_id)}/subscriptions",
             headers={**headers_write, "Content-Type": "application/json"},
-            data=b'{"moduleId": %d}' % module_id,
+            data=b'{"moduleId": "%s"}' % _row_uuid(dal, "hub_modules", module_id).encode(),
         )
         assert subscribe_resp.status_code == 201
         subscription_id = (await subscribe_resp.get_json())["subscription"]["id"]
+        # The handle is the module's public UUID (numeric installation ids never cross the API).
+        assert subscription_id == _row_uuid(dal, "hub_modules", module_id)
 
         update_resp = await client.put(
             f"/api/v1/marketplace/communities/{public_id(dal, community_id)}"
@@ -458,7 +476,7 @@ class TestSubscriptionsBlueprint:
                 **user_auth_headers(user_id=admin_id, scope="marketplace.subscription:write"),
                 "Content-Type": "application/json",
             },
-            data=b'{"moduleId": 999999}',
+            data=b'{"moduleId": "%s"}' % UNKNOWN_UUID.encode(),
         )
         assert response.status_code == 404
 
@@ -784,3 +802,109 @@ class TestPremiumRequestCommunityIsPublicUuid:
         )
         assert numeric.status_code == 200
         assert (await numeric.get_json())["seatCount"] is None
+
+
+_UUID_SHAPE = re.compile(r"^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$")
+
+
+def _seed_code(dal: Any, vendor_id: int, code: str) -> int:
+    now = dt.datetime.utcnow()
+    row_id = dal.vendor_discount_codes.insert(
+        code=code,
+        vendor_id=vendor_id,
+        discount_type="percentage",
+        discount_value=10,
+        current_uses=0,
+        valid_from=now,
+        is_active=True,
+        created_at=now,
+        updated_at=now,
+    )
+    dal.commit()
+    return int(row_id)
+
+
+class TestPublicUuidRoutes:
+    """Group C: discount-code and subscription ids cross the API as public UUIDs only."""
+
+    async def test_uuid_resolves_and_response_emits_uuid(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any
+    ) -> None:
+        dal, _t, _c = marketplace_billing_db
+        vendor_id = int(dal.hub_users.insert(username="u1", email="u1@x.com"))
+        code_id = _seed_code(dal, vendor_id, "UUIDOK")
+        code_uuid = _row_uuid(dal, "vendor_discount_codes", code_id)
+        headers = user_auth_headers(user_id=vendor_id, scope="marketplace.discount:write")
+        response = await client.put(
+            f"/api/v1/marketplace/vendor/discount-codes/{code_uuid}",
+            headers=headers,
+            json={"description": "via uuid"},
+        )
+        assert response.status_code == 200
+        dto = (await response.get_json())["data"]["discountCode"]
+        assert dto["id"] == code_uuid and _UUID_SHAPE.match(dto["id"])
+        listing = await client.get(
+            "/api/v1/marketplace/vendor/discount-codes",
+            headers=user_auth_headers(user_id=vendor_id, scope="marketplace.discount:read"),
+        )
+        codes = (await listing.get_json())["data"]["discountCodes"]
+        assert [c["id"] for c in codes] == [code_uuid]  # denominator: one code examined
+
+    async def test_foreign_unknown_malformed_and_numeric_ids_are_the_same_404(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any
+    ) -> None:
+        dal, _t, _c = marketplace_billing_db
+        owner = int(dal.hub_users.insert(username="o1", email="o1@x.com"))
+        other = int(dal.hub_users.insert(username="o2", email="o2@x.com"))
+        code_id = _seed_code(dal, owner, "FOREIGN")
+        headers = user_auth_headers(user_id=other, scope="marketplace.discount:write")
+        bodies = []
+        for segment in (
+            _row_uuid(dal, "vendor_discount_codes", code_id),  # foreign vendor's real code
+            UNKNOWN_UUID,
+            "not-a-uuid",
+            str(code_id),  # the old numeric form no longer routes
+        ):
+            response = await client.delete(
+                f"/api/v1/marketplace/vendor/discount-codes/{segment}", headers=headers
+            )
+            assert response.status_code == 404, segment
+            bodies.append(await response.get_json())
+        # the owner's code is untouched (still active)
+        assert dal.vendor_discount_codes[code_id].is_active is True
+        assert bodies[0]["error"]["message"] == bodies[1]["error"]["message"]  # no oracle
+
+    async def test_subscription_list_emits_uuid_and_numeric_path_404s(
+        self, client: Any, user_auth_headers: Any, marketplace_billing_db: Any
+    ) -> None:
+        dal, _t, community_id = marketplace_billing_db
+        admin_id = _admin(dal)
+        module_id = int(dal.hub_modules.insert(name="uuidmod", is_published=True))
+        dal.commit()
+        community = public_id(dal, community_id)
+        write = user_auth_headers(user_id=admin_id, scope="marketplace.subscription:write")
+        read = user_auth_headers(user_id=admin_id, scope="marketplace.subscription:read")
+        module_uuid = _row_uuid(dal, "hub_modules", module_id)
+        base = f"/api/v1/marketplace/communities/{community}/subscriptions"
+        created = await client.post(
+            base,
+            headers={**write, "Content-Type": "application/json"},
+            data=b'{"moduleId": "%s"}' % module_uuid.encode(),
+        )
+        assert created.status_code == 201
+        listed = (await (await client.get(base, headers=read)).get_json())["subscriptions"]
+        assert [(r["id"], r["moduleId"]) for r in listed] == [(module_uuid, module_uuid)]
+        for segment in (str(module_id), "nope", UNKNOWN_UUID):
+            response = await client.put(
+                f"{base}/{segment}",
+                headers={**write, "Content-Type": "application/json"},
+                data=b'{"isEnabled": false}',
+            )
+            assert response.status_code == 404, segment
+        # a module NOT installed in this community is also just "not found" here
+        other_module = int(dal.hub_modules.insert(name="othermod", is_published=True))
+        dal.commit()
+        response = await client.delete(
+            f"{base}/{_row_uuid(dal, 'hub_modules', other_module)}", headers=write
+        )
+        assert response.status_code == 404

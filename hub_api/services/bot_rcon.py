@@ -22,6 +22,7 @@ from typing import Any
 import httpx
 
 from . import bot_crypto
+from .public_id_rows import row_public_id
 from .url_guard import is_private_host
 
 # Re-exported for backward compatibility -- callers/tests import
@@ -262,9 +263,9 @@ class ServerUpdate:
 
 @dataclass(slots=True)
 class Server:
-    """Response DTO -- one `server_status_configs` row, admin view (host/port visible)."""
+    """Response DTO -- one `server_status_configs` row, admin view; `id` = public UUID."""
 
-    id: int
+    id: str
     display_name: str | None
     game_name: str
     server_type: str
@@ -282,9 +283,9 @@ class Server:
 
 @dataclass(slots=True)
 class ServerMemberView:
-    """Response DTO -- member-visible server listing, no host/port/credentials."""
+    """Response DTO -- member-visible server listing (public-UUID `id`), no host/port/creds."""
 
-    id: int
+    id: str
     display_name: str | None
     game_name: str
     server_type: str
@@ -300,7 +301,7 @@ class CommandLogEntry:
     """A row from `rcon_command_log`, joined with server/user display names."""
 
     id: int
-    server_config_id: int
+    server_config_id: str  # the server's public UUID
     command: str
     response_summary: str | None
     success: bool
@@ -320,7 +321,7 @@ def _iso(value: Any) -> str | None:
 
 def _to_server(row: Any) -> Server:
     return Server(
-        id=row.id,
+        id=row_public_id(row),
         display_name=row.display_name,
         game_name=row.game_name,
         server_type=row.server_type,
@@ -339,7 +340,7 @@ def _to_server(row: Any) -> Server:
 
 def _to_member_view(row: Any) -> ServerMemberView:
     return ServerMemberView(
-        id=row.id,
+        id=row_public_id(row),
         display_name=row.display_name,
         game_name=row.game_name,
         server_type=row.server_type,
@@ -681,6 +682,7 @@ def get_command_log(
         rcl.executed_at,
         rcl.user_id,
         ssc.display_name,
+        ssc.public_id,
         hu.display_name,
         left=hu.on(rcl.user_id == hu.id),
         orderby=~rcl.executed_at,
@@ -689,7 +691,7 @@ def get_command_log(
     return [
         CommandLogEntry(
             id=row.rcon_command_log.id,
-            server_config_id=row.rcon_command_log.server_config_id,
+            server_config_id=row_public_id(row.server_status_configs),
             command=row.rcon_command_log.command,
             response_summary=row.rcon_command_log.response_summary,
             success=bool(row.rcon_command_log.success),

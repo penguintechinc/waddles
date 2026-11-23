@@ -55,6 +55,7 @@ from services.provider_connections import (
 )
 from services.provider_connections import errors as pc_errors
 from services.provider_connections.kinds import ConnectionKind
+from services.provider_connections.public_ref import translate_connection_id
 from services.provider_connections.registry import build_default_registry
 from services.provider_connections.service import (
     FEATURE_STATIC_CONNECTIONS,
@@ -67,6 +68,8 @@ from services.youtube_install import make_app_credentials
 logger = logging.getLogger(__name__)
 
 provider_connections_bp = Blueprint("v1_provider_connections", __name__, url_prefix="/api/v1")
+# `<puuid:connection_id>` -> numeric before the handler, resolved through the community's grant.
+provider_connections_bp.before_request(translate_connection_id)
 
 #: OIDC scope for community connection administration. Carried by the tenant-owner bundle
 #: (``flask_core.auth.SCOPE_BUNDLES["tenant"]["admin"]``) and by global admins via ``*:admin``;
@@ -144,8 +147,7 @@ class ProviderListResponse:
 class ProviderConnectionDTO:
     """Admin view of one connection. Has no token field of any kind."""
 
-    id: int
-    publicId: str
+    id: str
     kind: int
     provider: str
     resourceType: str
@@ -309,8 +311,7 @@ def _provider_dto(spec: AdapterSpec) -> ProviderDTO:
 def _connection_dto(view: ConnectionView) -> ProviderConnectionDTO:
     binding = view.binding
     return ProviderConnectionDTO(
-        id=binding.connection.id,
-        publicId=str(binding.connection.public_id),
+        id=str(binding.connection.public_id),
         kind=binding.connection.connection_kind,
         provider=binding.connection.platform,
         resourceType=binding.connection.resource_type,
@@ -493,7 +494,7 @@ async def _admin_guard(community_id: int) -> tuple[int, int | None]:
 # --------------------------------------------------------------------------
 
 _BASE = "/communities/<cuuid:community_id>/provider-connections"
-_ONE = _BASE + "/<int:connection_id>"
+_ONE = _BASE + "/<puuid:connection_id>"
 
 
 @provider_connections_bp.route("/connection-providers", methods=["GET"])

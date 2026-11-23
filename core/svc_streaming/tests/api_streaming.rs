@@ -40,7 +40,7 @@ async fn seed_db() -> DatabaseConnection {
         .expect("connect in-memory sqlite");
     let schema = r#"
         CREATE TABLE tenants (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE);
-        CREATE TABLE communities (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL);
+        CREATE TABLE communities (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, public_id TEXT);
         CREATE TABLE community_servers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL,
@@ -72,8 +72,8 @@ async fn seed_db() -> DatabaseConnection {
             audio_codec TEXT
         );
         INSERT INTO tenants (id, slug) VALUES (1, 'tenant-abc');
-        INSERT INTO communities (id, tenant_id) VALUES (10, 1);
-        INSERT INTO communities (id, tenant_id) VALUES (20, 2);
+        INSERT INTO communities (id, tenant_id, public_id) VALUES (10, 1, '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f');
+        INSERT INTO communities (id, tenant_id, public_id) VALUES (20, 2, '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d');
         INSERT INTO community_servers (community_id, platform, platform_server_id, platform_server_name)
             VALUES (10, 'twitch', 'twitch-123', 'Cool Channel');
     "#;
@@ -1179,21 +1179,28 @@ impl ServiceBearer for FixedServiceBearer {
     }
 }
 
+/// Public UUID of the owned community (seeded as `communities.public_id`); hub-api's debit URL
+/// carries it, never the numeric id (a numeric segment is a 404 there).
+const OWNED_COMMUNITY_UUID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
+
 /// Spawns a mock hub-api whose INTERNAL token-ledger route admits the debit, but only when the
 /// request carries the service credential and names the JWT's member as `actor_user_id` (a
-/// forwarded member token or a missing actor would be refused, like the real hub-api).
+/// forwarded member token or a missing actor would be refused, like the real hub-api). The path
+/// segment must be the owned community's public UUID: the real route resolves it to the numeric id
+/// the community-bound JWT claims (`service-jwt-c10`).
 async fn spawn_admitting_ledger() -> String {
     let app = axum::Router::new().route(
-        "/api/v1/internal/communities/{community_id}/tokens/debit",
+        "/api/v1/internal/communities/{community_public_id}/tokens/debit",
         axum::routing::post(
-            |axum::extract::Path(community_id): axum::extract::Path<i64>,
+            |axum::extract::Path(community_public_id): axum::extract::Path<String>,
              headers: axum::http::HeaderMap,
              axum::Json(body): axum::Json<serde_json::Value>| async move {
-                let expected = format!("Bearer service-jwt-c{community_id}");
-                let authed = headers
-                    .get(AUTHORIZATION)
-                    .and_then(|v| v.to_str().ok())
-                    .is_some_and(|v| v == expected);
+                let expected = "Bearer service-jwt-c10";
+                let authed = community_public_id == OWNED_COMMUNITY_UUID
+                    && headers
+                        .get(AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v == expected);
                 if authed && body["actor_user_id"] == MEMBER_USER_ID {
                     (
                         StatusCode::OK,

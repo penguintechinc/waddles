@@ -7,7 +7,7 @@
  * Usage:
  *   # Start two port-forwards first:
  *   kubectl --context dal2-beta port-forward -n waddlebot svc/waddlebot-hub-webui 3001:80 &
- *   kubectl --context dal2-beta port-forward -n waddlebot svc/waddlebot-hub-api 8060:8060 &
+ *   kubectl --context dal2-beta port-forward -n waddlebot svc/waddlebot-hub-api-v3 8204:8204 &
  *
  *   # Then run tests via this proxy:
  *   BASE_URL=http://localhost:3000 node tests/e2e/local-proxy.js &
@@ -16,7 +16,7 @@
  * Environment variables:
  *   PROXY_PORT   - Port this proxy listens on (default: 3000)
  *   WEBUI_PORT   - Port hub-webui is port-forwarded to (default: 3001)
- *   API_PORT     - Port hub-api is port-forwarded to (default: 8060)
+ *   API_PORT     - Port hub-api is port-forwarded to (default: 8204)
  */
 
 'use strict';
@@ -25,7 +25,7 @@ const http = require('http');
 
 const PROXY_PORT = parseInt(process.env.PROXY_PORT || '3000', 10);
 const WEBUI_PORT = parseInt(process.env.WEBUI_PORT || '3001', 10);
-const API_PORT   = parseInt(process.env.API_PORT   || '8060', 10);
+const API_PORT   = parseInt(process.env.API_PORT   || '8204', 10);
 
 function isApiRequest(url) {
   return url.startsWith('/api/') || url.startsWith('/socket.io');
