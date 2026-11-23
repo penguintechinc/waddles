@@ -456,11 +456,11 @@ jobs:
           set -euo pipefail
           docker info --format '{{.ServerVersion}}'
           log="$(mktemp)"
-          # -n auto parallelizes across pytest-xdist workers. Safe because
+          # -n 2 (NOT auto): dal2-alpha-ci runners are limited to 2 CPU / 2Gi but xdist auto sees node cores (~20) -> OOM-killed runner. Parallelizes across pytest-xdist workers. Safe because
           # pg_docker.py gives each worker its own container (named per os.getpid())
           # and an OS-allocated free port per container -- no shared container name
           # or fixed port to collide on.
-          python3 -m pytest alembic/tests -n auto -rfEs -p no:cacheprovider 2>&1 | tee "$log"
+          python3 -m pytest alembic/tests -n 2 -rfEs -p no:cacheprovider 2>&1 | tee "$log"
           docker_skips="$(grep -c 'docker CLI not available' "$log" || [ $? -eq 1 ])"
           echo "docker-unavailable skips: ${docker_skips}"
           test "${docker_skips}" -eq 0
