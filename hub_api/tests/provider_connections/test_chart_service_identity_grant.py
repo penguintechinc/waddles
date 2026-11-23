@@ -163,7 +163,7 @@ def test_svc_ingest_identity_can_mint_connections_resolve_with_system_tenant(
 @pytest.mark.parametrize(
     "scope",
     [
-        "identity:ephemeral:mint",
+        # identity:ephemeral:mint is intentionally granted: ingest pseudonymizes platform ids for unban sync (#1505)
         "identity:handle:resolve",
         "identity:displayname:read",
         "egress:connect",
