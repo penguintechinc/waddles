@@ -86,6 +86,8 @@ from sqlalchemy import (
     Text,
     UniqueConstraint,
     Uuid,
+    func,
+    text,
 )
 
 from services.schema import (
@@ -111,6 +113,7 @@ from services.schema import (
     bind_tenant_tables,
     bind_token_billing_tables,
 )
+from services.scope_registry import MODERATOR_SEED_SCOPES
 
 # Env-gated real-Ollama fixtures (skip unless WADDLE_TEST_OLLAMA_URL is set) -- shared support
 # in <repo>/tests/support; see docs/testing/ollama-realpath.md. Additive re-export only.
@@ -137,21 +140,69 @@ _TEST_SIGNING_KEY_ID = "test-key-1"
 
 
 @pytest.fixture(autouse=True)
-def bundle_signing_test_env(monkeypatch: Any) -> None:
+def jwt_keyring() -> Any:
+    """Install a fresh in-memory ES256 key ring for every test (T10: no shared JWT secret).
+
+    `create_jwt_token` signs with its active key and `verify_jwt_token` verifies by `kid`; tests
+    that need a rotated / retired / foreign key build their own `InMemoryJwtKeyring`.
+    """
+    from flask_core import jwt_keyring as jk
+
+    ring = jk.generate_test_keyring()
+    previous = jk.get_jwt_keyring()
+    jk.set_jwt_keyring(ring)
+    yield ring
+    jk.set_jwt_keyring(previous)
+
+
+@pytest.fixture(autouse=True)
+def bundle_signing_test_env(monkeypatch: Any) -> Any:
     """Every test gets a valid (test-only) Ed25519 artifact-signing key configured.
 
     `bundle_approval_service.approve_version()` (spec SS5.6, artifact
-    signing) fails closed without `BUNDLE_SIGNING_PRIVATE_KEY`/
-    `BUNDLE_SIGNING_KEY_ID` set -- rather than mock signing away across
-    the ~30 existing `approve_version()`/`seed_one()` call sites in this
-    suite, this autouse fixture makes REAL Ed25519 signing happen on every
-    approval, matching this codebase's own "prove the wiring, don't fake
-    it" standard for security-sensitive code. A test specifically
-    exercising the "no key configured" failure path removes these with
-    `monkeypatch.delenv(...)` itself.
+    signing) fails closed without a key configured -- rather than mock
+    signing away across the ~30 existing `approve_version()`/`seed_one()`
+    call sites in this suite, this autouse fixture makes REAL Ed25519
+    signing happen on every approval, seeding both the `platform_vault`
+    process cache (`SecretType.BUNDLE_SIGNING`) and the legacy env vars.
+    A test specifically exercising the "no key configured" failure path
+    clears the process cache (`get_process_cache().seed(())`) and/or
+    removes env vars itself.
     """
+    import uuid
+
+    from services.platform_secrets.bootstrap import get_process_cache
+    from services.platform_secrets.cache import CachedSecret
+    from services.platform_secrets.registry import SecretType
+    from services.platform_secrets.repository import STATE_ACTIVE
+
     monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", _TEST_SIGNING_PRIVATE_KEY_B64)
     monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", _TEST_SIGNING_KEY_ID)
+    # The CLIs (seeder, backfill) load the vault from the database at start; the cache is seeded
+    # directly below instead, so stub the DB load. Tests of the real loader capture the function
+    # at import time (tests/test_platform_secrets_offline_signer.py).
+    from services.platform_secrets import bootstrap as vault_bootstrap
+
+    monkeypatch.setattr(vault_bootstrap, "load_offline_signer_cache", lambda *_a, **_k: 1)
+    cache = get_process_cache()
+    cache.seed(
+        [
+            CachedSecret(
+                secret_type=int(SecretType.BUNDLE_SIGNING),
+                scope_id=None,
+                version=1,
+                state=STATE_ACTIVE,
+                kid=_TEST_SIGNING_KEY_ID,
+                public_id=uuid.UUID(int=1),
+                public_material=None,
+                activated_at=None,
+                verify_until=None,
+                plaintext=b"t" * 32,
+            )
+        ]
+    )
+    yield
+    cache.seed(())
 
 
 @pytest.fixture(autouse=True)
@@ -455,13 +506,82 @@ def seed_community(
     return community_id
 
 
+_ROLE_KINDS = {"community-admin": 1, "community-owner": 1, "admin": 1, "moderator": 2}
+
+
+def role_kind_fields(name: str) -> dict[str, Any]:
+    """`is_system`/`role_kind` for a seeded role NAME, as the 0117 insert trigger sets them."""
+    kind = _ROLE_KINDS.get(name, 0)
+    return {"is_system": kind != 0, "role_kind": kind}
+
+
+def _seed_kind_role(dal: Any, community_id: int, name: str) -> int | None:
+    """Create (once) the predefined role row for `name`, as the 0117 trigger does for real seeding.
+
+    Authorization reads scopes from `community_roles`, so a member seeded by NAME alone holds
+    nothing; admin/owner get the admin kind (computed full scope set), moderator the moderator kind.
+    Names with no predefined kind return None (a bare member row, no scopes).
+    """
+    kind = _ROLE_KINDS.get(name)
+    if kind is None or "community_roles" not in dal.tables:
+        return None
+    existing = (
+        dal((dal.community_roles.community_id == community_id) & (dal.community_roles.name == name))
+        .select()
+        .first()
+    )
+    if existing is not None:
+        return int(existing.id)
+    scopes = (
+        ["community:manage_channels", "channels:moderate", *MODERATOR_SEED_SCOPES]
+        if kind == 2
+        else []
+    )
+    return int(
+        dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            is_system=True,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+    )
+
+
 def seed_membership(
     overlay_db: Any, *, community_id: int, user_id: int, role: str = "community-owner"
 ) -> None:
     """Insert one active `community_members` row for `user_id` in `community_id`."""
     dal = overlay_db.dal
+    role_id = _seed_kind_role(dal, community_id, role)
     dal.community_members.insert(
-        community_id=community_id, user_id=str(user_id), role=role, is_active=True
+        community_id=community_id,
+        user_id=str(user_id),
+        role=role,
+        is_active=True,
+        community_role_id=role_id,
+    )
+    dal.commit()
+
+
+def seed_scoped_member(
+    overlay_db: Any, *, community_id: int, user_id: int, scopes: list[str], name: str = "custom"
+) -> None:
+    """Active member holding a CUSTOM role with exactly `scopes` (no predefined kind, no extras)."""
+    dal = overlay_db.dal
+    role_id = dal.community_roles.insert(
+        community_id=community_id,
+        name=f"{name}{user_id}",
+        is_system=False,
+        role_kind=0,
+        base_claims={"scopes": scopes},
+    )
+    dal.community_members.insert(
+        community_id=community_id,
+        user_id=str(user_id),
+        role=name,
+        is_active=True,
+        community_role_id=role_id,
     )
     dal.commit()
 
@@ -503,6 +623,20 @@ def seed_super_admin(
     dal.commit()
 
 
+def create_exclusions_table(dal: Any) -> None:
+    """Create the sqlite twin of `public.data_use_exclusions` (alembic 0129) on `dal`.
+
+    The suppression list is raw SQL (not a pydal-bound table) in production, so sqlite test
+    harnesses that exercise consent / DSAR writes must create it explicitly.
+    """
+    dal.executesql(
+        "CREATE TABLE IF NOT EXISTS data_use_exclusions (user_uuid TEXT NOT NULL, "
+        "reason_code INTEGER NOT NULL, since TEXT DEFAULT CURRENT_TIMESTAMP, "
+        "PRIMARY KEY (user_uuid, reason_code))"
+    )
+    dal.commit()
+
+
 @pytest.fixture
 def privacy_db(tmp_path: Any) -> Any:
     """`auth_db`'s tables PLUS the Privacy/Compliance group's own.
@@ -528,6 +662,7 @@ def privacy_db(tmp_path: Any) -> Any:
     )
     bind_auth_tables(dal, migrate=True)
     bind_privacy_tables(dal, migrate=True)
+    create_exclusions_table(dal)
     dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme Corp", is_active=True)
     dal.commit()
     for table_name in dal.tables:
@@ -704,6 +839,8 @@ def lifecycle_db(tmp_path: Any) -> Any:
     role_id = dal.community_roles.insert(
         community_id=community_id,
         name="admin",
+        is_system=True,
+        role_kind=1,
         base_claims={"scopes": ["community:manage_members"]},
     )
     dal.community_members.insert(
@@ -773,7 +910,6 @@ def make_token(*, scope: str = "", tenant: str = TENANT_SLUG, user_id: str = "u1
         username="alice",
         email="alice@example.com",
         roles=["viewer"],
-        secret_key=SECRET_KEY,
         tenant=tenant,
         scope=scope,
     )
@@ -786,10 +922,17 @@ def make_user_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG)
         username="alice",
         email="alice@example.com",
         roles=["viewer"],
-        secret_key=SECRET_KEY,
         tenant=tenant,
         scope=scope,
     )
+
+
+_LEGACY_ADMIN_ROLES = {"super_admin", "platform-admin"}
+
+
+def _with_global_admin_scope(scope: str) -> str:
+    """Add the `users:admin` global-admin scope (the real token bypass authority, not `roles`)."""
+    return " ".join(sorted({*scope.split(), "users:admin"}))
 
 
 def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENANT_SLUG) -> str:
@@ -809,9 +952,8 @@ def make_super_admin_token(*, user_id: int, scope: str = "", tenant: str = TENAN
         username="root",
         email="root@example.com",
         roles=["super_admin"],
-        secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope),
     )
 
 
@@ -830,9 +972,8 @@ def make_user_token_with_roles(
         username="alice",
         email="alice@example.com",
         roles=roles,
-        secret_key=SECRET_KEY,
         tenant=tenant,
-        scope=scope,
+        scope=_with_global_admin_scope(scope) if set(roles) & _LEGACY_ADMIN_ROLES else scope,
     )
 
 
@@ -1158,6 +1299,21 @@ def marketplace_catalog_db(tmp_path: Any) -> Any:
         logo_url="https://example.com/logo.png",
     )
 
+    # Catalog `marketplace` rows' `source_id`s (1..3) are `marketplace_modules.id`s: the catalog
+    # now emits each entry's public UUID, so the backing rows must exist.
+    from services.schema import bind_marketplace_vendor_tables
+
+    bind_marketplace_vendor_tables(dal, migrate=True)
+    for module_name in ("global-vendor-widget", "acme-private-widget", "other-private-widget"):
+        dal.marketplace_modules.insert(
+            name=module_name,
+            slug=module_name,
+            webhook_url="https://vendor.example/hook",
+            webhook_secret="fixture-secret",
+            status="approved",
+        )
+    dal.commit()
+
     published_id = dal.hub_modules.insert(
         name="published-module",
         display_name="Published Module",
@@ -1473,6 +1629,17 @@ def _create_bundle_install_tables(conn: Any) -> None:
         "ingest_sources",
         metadata,
         Column("id", Integer, primary_key=True, autoincrement=True),
+        # migration 0122: the UUID that crosses the API boundary (Postgres: gen_random_uuid()).
+        Column(
+            "public_id",
+            String(36),
+            unique=True,
+            server_default=text(
+                "(lower(hex(randomblob(4)) || '-' || hex(randomblob(2)) || '-4' "
+                "|| substr(hex(randomblob(2)), 2) || '-a' || substr(hex(randomblob(2)), 2) "
+                "|| '-' || hex(randomblob(6))))"
+            ),
+        ),
         Column("tenant_id", Integer, nullable=False),
         Column("community_id", Integer),
         Column("platform", String(50), nullable=False),
@@ -1739,6 +1906,22 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("registered_at", DateTime),
         UniqueConstraint("tenant_id", "community_id", "app_id", "command"),
     )
+    # bundle_precompile_requests (migration 0108) -- AOT precompile queue, enqueued by the
+    # approval/signing paths. sqlite mirror; the lease SQL is Postgres-only and proven in
+    # alembic/tests/test_0108_bundle_precompile_requests.py.
+    Table(
+        "bundle_precompile_requests",
+        metadata,
+        Column("id", Integer, primary_key=True, autoincrement=True),
+        Column("artifact_digest", String(80), nullable=False),
+        Column("app_id", String(255), nullable=False),
+        Column("version", String(64), nullable=False),
+        Column("requested_at", DateTime),
+        Column("claimed_at", DateTime),
+        Column("attempts", Integer, nullable=False, server_default="0"),
+        Column("last_error", String(500)),
+        UniqueConstraint("artifact_digest"),
+    )
     # app_global_installs / bundle_tenant_availability (migration 0027) --
     # GLOBAL and TENANT tiers of the App Bundle 3-tier split
     # (services/bundle_approval_service.py's own module docstring).
@@ -1879,6 +2062,15 @@ def _create_bundle_install_tables(conn: Any) -> None:
         Column("user_agent", String),
         Column("created_at", DateTime),
     )
+    # `app_id_owners` (alembic 0136): atomic first-claim ownership + UNIQUE storage key.
+    Table(
+        "app_id_owners",
+        metadata,
+        Column("app_id", String(127), primary_key=True),
+        Column("owner_id", Integer),
+        Column("storage_key", String(63), nullable=False, unique=True),
+        Column("created_at", DateTime, server_default=func.now(), nullable=False),
+    )
     metadata.create_all(conn)
     # pydal-created `tenants` / `app_catalog` pre-date migration 0082's `public_id`; mirror it
     # (the real NOT NULL/unique/default are proven on Postgres in test_0082).
@@ -1997,3 +2189,162 @@ def bundle_data_pg_conn(bundle_data_pg_url: str) -> Any:
             pg_sql.SQL("DROP DATABASE IF EXISTS {} WITH (FORCE)").format(pg_sql.Identifier(db_name))
         )
     cleanup_conn.close()
+
+
+@pytest.fixture(autouse=True)
+def deterministic_user_uuids(  # type: ignore[no-untyped-def]
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+):
+    """Swap the two `hub_users.uuid` DB lookups for the pure mapping in `tests/user_ids.py`.
+
+    User/member routes take `<uuuid:user_id>`; existing tests seed users by numeric id, so the
+    fake maps numeric id <-> `uid(n)` without needing a `hub_users.uuid` row. Tests proving the
+    real lookup opt out with `@pytest.mark.real_user_ids`.
+    """
+    if request.node.get_closest_marker("real_user_ids"):
+        yield
+        return
+    import sys
+
+    from services import user_public_id
+    from tests.user_ids import uid, uid_to_int
+
+    async def fake_lookup_user_id(public_id: str) -> int:
+        resolved = uid_to_int(public_id)
+        return resolved if resolved > 0 else user_public_id.UNKNOWN_USER_ID
+
+    async def fake_lookup_user_public_ids(user_ids, **_kwargs):  # type: ignore[no-untyped-def]
+        out: dict[int, str] = {}
+        for raw in user_ids:
+            try:
+                out[int(str(raw))] = uid(int(str(raw)))
+            except (TypeError, ValueError):
+                continue
+        return out
+
+    real_one = user_public_id.lookup_user_id
+    real_many = user_public_id.lookup_user_public_ids
+    for name, module in list(sys.modules.items()):
+        if module is None or not name.startswith(("services", "blueprints")):
+            continue
+        if getattr(module, "lookup_user_id", None) is real_one:
+            monkeypatch.setattr(module, "lookup_user_id", fake_lookup_user_id)
+        if getattr(module, "lookup_user_public_ids", None) is real_many:
+            monkeypatch.setattr(module, "lookup_user_public_ids", fake_lookup_user_public_ids)
+    yield
+
+
+@pytest.fixture(autouse=True)
+def _fake_env_external_erasure(
+    request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Swap the service's default `EnvExternalErasure` for a recording fake (returns {}).
+
+    Production fails loud without `VALKEY_KV_URL`; tests that run the default erasure path would
+    otherwise need a live kv Valkey. Only `services.data_privacy_service`'s binding is replaced, so
+    tests importing `services.erasure_external` directly are unaffected. Opt out with
+    `@pytest.mark.real_env_erasure`.
+    """
+    if request.node.get_closest_marker("real_env_erasure"):
+        return
+    from services import data_privacy_service
+    from tests.erasure_support import FakeExternal
+
+    monkeypatch.setattr(data_privacy_service, "EnvExternalErasure", FakeExternal)
+
+
+@pytest.fixture(autouse=True)
+def _uuid_community_response_guard(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
+    """Opt-in guard against numeric community ids in JSON responses.
+
+    In a module that sets `UUID_COMMUNITY_RESPONSES = True`, every JSON response read through
+    `get_json()` must carry community ids as UUID strings (never a numeric id), except internal
+    service-key routes. The per-module denominator is enforced by the module-scope fixture below,
+    so zero examined is a failure.
+    """
+    module = request.module
+    if not getattr(module, "UUID_COMMUNITY_RESPONSES", False):
+        yield
+        return
+
+    from quart.testing.client import QuartClient
+    from quart.wrappers.response import Response
+
+    from tests.community_ids import assert_no_numeric_community_ids
+
+    original_get_json = Response.get_json
+    original_open = QuartClient.open
+
+    async def tagged_open(self: Any, path: str, *args: Any, **kwargs: Any) -> Any:
+        response = await original_open(self, path, *args, **kwargs)
+        response.__dict__["_probe_path"] = str(path)
+        return response
+
+    async def guarded(self: Any, *args: Any, **kwargs: Any) -> Any:
+        body = await original_get_json(self, *args, **kwargs)
+        # Internal service-key routes are machine routes: numeric community ids by design.
+        if "/api/v1/internal/" in self.__dict__.get("_probe_path", ""):
+            return body
+        examined = assert_no_numeric_community_ids(body, expect_at_least=0)
+        module.__dict__["_community_ids_examined"] = (
+            module.__dict__.get("_community_ids_examined", 0) + examined
+        )
+        return body
+
+    Response.get_json = guarded  # type: ignore[method-assign]
+    QuartClient.open = tagged_open  # type: ignore[method-assign]
+    try:
+        yield
+    finally:
+        Response.get_json = original_get_json  # type: ignore[method-assign]
+        QuartClient.open = original_open  # type: ignore[method-assign]
+
+
+@pytest.fixture(autouse=True, scope="module")
+def _uuid_community_guard_denominator(request: pytest.FixtureRequest):  # type: ignore[no-untyped-def]
+    """Fail a guarded module whose full run examined zero community id keys (a vacuous guard)."""
+    yield
+    module = request.module
+    if not getattr(module, "UUID_COMMUNITY_RESPONSES", False):
+        return
+    if request.config.getoption("keyword", default="") or request.config.getoption(
+        "markexpr", default=""
+    ):
+        return  # a -k/-m subset may legitimately touch no community-id response
+    examined = module.__dict__.get("_community_ids_examined", 0)
+    assert examined >= 1, (
+        f"{module.__name__}: UUID_COMMUNITY_RESPONSES guard examined {examined} community id "
+        "keys across the module (zero examined proves nothing)"
+    )
+
+
+def apply_route_guard_bypass(monkeypatch: Any) -> None:
+    """Make the read-route guards (`services.route_guards`) admit every caller as an admin.
+
+    For legacy blueprint-contract test modules that exercise handler behaviour with a bare
+    token and no seeded membership. The guards themselves are proven by
+    `tests/test_read_route_guards.py` and `tests/test_read_route_authz.py`, which never use it.
+    The tenant fence (`community_in_tenant` -> 404) still runs.
+    """
+    import blueprints.v1.bot as bot_module
+    import blueprints.v1.ingest_sources as ingest_module
+    from services import route_guards
+    from services.community_authz import CallerStanding
+
+    standing = CallerStanding(is_member=True, is_admin=True, bypass=True)
+
+    def _admin(*_a: Any, **_k: Any) -> CallerStanding:
+        return standing
+
+    monkeypatch.setattr(route_guards, "resolve_caller_standing_sync", _admin)
+    monkeypatch.setattr(bot_module, "resolve_caller_standing_sync", _admin)
+    monkeypatch.setattr(ingest_module, "resolve_caller_standing_sync", _admin)
+    monkeypatch.setattr(route_guards, "get_current_user_id", lambda _r: 1)
+    monkeypatch.setattr(route_guards, "is_global_admin_sync", lambda *_a, **_k: True)
+
+
+@pytest.fixture
+def bypass_route_guards(monkeypatch: Any) -> Any:
+    """Fixture form of `apply_route_guard_bypass` (re-call it after a `monkeypatch.undo()`)."""
+    apply_route_guard_bypass(monkeypatch)
+    yield

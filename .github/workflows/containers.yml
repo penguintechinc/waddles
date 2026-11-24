@@ -1,7 +1,23 @@
 name: Container Builds
 
 on:
+  # Short-lived branches (feature/fix/chore/docs/refactor/hotfix) are covered by
+  # the pull_request trigger below; listing them here too built images twice per
+  # PR commit (push + pull_request, different concurrency keys). KEEP main, v*,
+  # release/** for direct pushes to long-lived branches.
   push:
+    branches: [main, 'v*', 'release/**']
+    paths:
+      - 'admin/hub_module/**'
+      - 'hub_api/**'
+      - 'libs/flask_core/**'
+      - 'migrations/**'
+      - 'docker-compose.yml'
+      - '.version'
+      - '.github/workflows/containers.yml'
+  # Mirror the push paths so a PR that touches none of the container inputs
+  # doesn't spin up the build matrix (and its runner) for nothing.
+  pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
     paths:
       - 'admin/hub_module/**'
@@ -11,8 +27,6 @@ on:
       - 'docker-compose.yml'
       - '.version'
       - '.github/workflows/containers.yml'
-  pull_request:
-    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   merge_group:
     types: [checks_requested]
     branches: ['release/**']
@@ -181,7 +195,7 @@ jobs:
           # name|changed-flag-var|dockerfile|port
           MODULES=(
             "migrations|$MIGRATIONS|./migrations/Dockerfile|0"
-            "hub-api|$HUB|./hub_api/Dockerfile|8060"
+            "hub-api|$HUB|./hub_api/Dockerfile|8204"
             "hub-webui|$HUB|./admin/hub_module/Dockerfile.webui|8080"
           )
 
@@ -375,14 +389,19 @@ jobs:
     needs: [determine-version, detect-changes]
     permissions:
       contents: read
+    # PR / merge_group only. The previous guard also required github.ref ==
+    # main/release/workflow_dispatch, which can never hold on a pull_request or
+    # merge_group event (ref is refs/pull/N/merge or the gh-readonly-queue ref),
+    # so this job -- and its container boot smoke test -- never ran.
+    # Runner stays GitHub-hosted (matrix.runner) on purpose: PR image builds
+    # execute untrusted Dockerfiles, so they remain off dal2alpha until the
+    # Kata-isolated runners (#251) exist (CI Runner Routing exception 2).
     if: >
-      (github.ref == 'refs/heads/main' || github.event_name == 'release' || github.event_name == 'workflow_dispatch') &&
       (github.event_name == 'pull_request' ||
       github.event_name == 'merge_group') &&
       (needs.detect-changes.outputs.migrations == 'true' ||
       needs.detect-changes.outputs.hub == 'true' ||
-      needs.detect-changes.outputs.libs == 'true' ||
-      (github.event_name == 'workflow_dispatch' || github.event_name == 'release'))
+      needs.detect-changes.outputs.libs == 'true')
     strategy:
       fail-fast: false
       # Whole matrix object computed by detect-changes (see that job's

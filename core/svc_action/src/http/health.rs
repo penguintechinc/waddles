@@ -187,7 +187,6 @@ mod tests {
             cli,
             db_password: Secret::new("x"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: None,
             bundle_db_password: None,
         };
@@ -208,7 +207,6 @@ mod tests {
             cli,
             db_password: Secret::new("x"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: None,
             bundle_db_password: None,
         };
@@ -239,7 +237,7 @@ mod tests {
     // forever (alpha 2026-10-02)
     #[tokio::test]
     async fn readyz_is_503_when_configured_but_not_running() {
-        let state = readyz_state("waddles.core.example.ping", false);
+        let state = readyz_state("penguintechinc.waddles.ping", false);
         state
             .connections
             .set_active(crate::host_api::test_connection());
@@ -258,7 +256,7 @@ mod tests {
     /// executor would ever reach it) and the rollout stalled forever.
     #[tokio::test]
     async fn readyz_is_ok_when_running_with_no_executor() {
-        let state = readyz_state("waddles.core.example.ping", true);
+        let state = readyz_state("penguintechinc.waddles.ping", true);
         let (code, Json(body)) = readyz(State(state)).await;
         assert_eq!(code, axum::http::StatusCode::OK);
         assert!(body.running);
@@ -269,7 +267,7 @@ mod tests {
     // forever (alpha 2026-10-02)
     #[tokio::test]
     async fn readyz_is_ok_once_the_configured_loop_is_running_and_executor_connected() {
-        let state = readyz_state("waddles.core.example.ping", true);
+        let state = readyz_state("penguintechinc.waddles.ping", true);
         state
             .connections
             .set_active(crate::host_api::test_connection());
@@ -328,7 +326,6 @@ mod tests {
             cli,
             db_password: Secret::new("x"),
             envelope_binding_keys: None,
-            discord_bot_token: None,
             db_reader_password: None,
             bundle_db_password: None,
         };

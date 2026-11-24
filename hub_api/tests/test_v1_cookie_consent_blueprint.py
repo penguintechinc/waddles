@@ -40,6 +40,17 @@ def app(privacy_db: Any) -> Quart:
     return quart_app
 
 
+@pytest.fixture(autouse=True)
+def _hub_users(privacy_db: Any) -> None:
+    """Real `hub_users` rows for every JWT subject (exclusions resolve `hub_users.uuid`)."""
+    dal = privacy_db.dal
+    for user_id in range(1, 61):
+        dal.hub_users.insert(
+            id=user_id, email=f"u{user_id}@example.com", username=f"u{user_id}", is_active=True
+        )
+    dal.commit()
+
+
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
@@ -119,6 +130,25 @@ class TestSaveConsent:
         assert body["data"]["preferences"]["functional"] is True
         assert body["data"]["consentId"] is not None
         assert "waddlebot_consent_id" in response.headers.get("Set-Cookie", "")
+
+    @pytest.mark.parametrize("method", ["banner", "preferences", "do_not_sell"])
+    async def test_consent_method_enum_values_accepted(self, client: Any, method: str) -> None:
+        """Exactly the values the webui's CookieConsentContext sends are accepted."""
+        response = await client.post(
+            "/api/v1/cookie",
+            json={"preferences": {"functional": True}, "consentMethod": method},
+        )
+        assert response.status_code == 200
+
+    @pytest.mark.parametrize("method", ["admin_dsar", "x" * 5000, "<script>", "", None, 7])
+    async def test_consent_method_outside_enum_is_400(self, client: Any, method: Any) -> None:
+        """`consentMethod` is a closed enum: free text (even server-only `admin_dsar`) is 400."""
+        response = await client.post(
+            "/api/v1/cookie",
+            json={"preferences": {"functional": True}, "consentMethod": method},
+        )
+        assert response.status_code == 400
+        assert "waddlebot_consent_id" not in response.headers.get("Set-Cookie", "")
 
     async def test_gpc_overrides_marketing_true_in_request_body(self, client: Any) -> None:
         response = await client.post(

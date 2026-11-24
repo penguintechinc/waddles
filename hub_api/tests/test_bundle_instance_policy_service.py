@@ -9,13 +9,15 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from sqlalchemy import select
 
 from services import bundle_instance_policy_service as svc
 from services import bundle_permission_service as perm_svc
 from services.bundle_manifest_v2 import parse_bundle_manifest_v2
+from services.errors import ApiError
 
-_APP_ID = "waddles.socials.music.default"
+_APP_ID = "penguintechinc.waddles.music"
 _VERSION = "3.0.0"
 
 
@@ -38,7 +40,7 @@ def _manifest_raw(permissions: list[dict[str, Any]]) -> dict[str, Any]:
         "app_id": _APP_ID,
         "name": "Music Station",
         "version": _VERSION,
-        "feature": "waddles.socials.music",
+        "feature": "music",
         "module": "socials",
         "provider": "builtin",
         "author": "github:penguintechinc",
@@ -202,3 +204,70 @@ async def test_enabling_deny_when_already_denied_does_not_double_cascade(install
         valkey_client=_FakeValkeyClient(),
     )
     assert cascaded == 0
+
+
+# -- policy keys must be known catalog ids/families -------------------------
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "storage.objects",  # retired: split into .read/.write (alembic 0119)
+        "storage.nonexistent",
+        "net.http.privte-ip",
+        "",
+        "chat.send:twitch",  # a full parameterized id is not a family key
+    ],
+)
+async def test_set_instance_policy_rejects_unknown_keys(install_dal: Any, key: str) -> None:
+    with pytest.raises(ApiError) as exc:
+        await svc.set_instance_policy(
+            install_dal,
+            permission_key=key,
+            action="deny",
+            set_by=1,
+            valkey_client=_FakeValkeyClient(),
+        )
+    assert exc.value.code == "unknown_permission_key"
+    assert await svc.list_policies(install_dal) == ()
+
+
+@pytest.mark.parametrize("key", ["storage.objects.read", "storage.objects.write"])
+async def test_deny_on_each_new_object_storage_key_is_stored_and_enforced(
+    install_dal: Any, key: str
+) -> None:
+    await svc.set_instance_policy(
+        install_dal,
+        permission_key=key,
+        action="deny",
+        set_by=1,
+        valkey_client=_FakeValkeyClient(),
+    )
+    assert await svc.is_instance_denied(install_dal, permission_id=key)
+    other = "storage.objects.write" if key == "storage.objects.read" else "storage.objects.read"
+    assert not await svc.is_instance_denied(install_dal, permission_id=other)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "net.http.fqdn",
+        "net.http.public-ip",
+        "net.http.private-ip",
+        "chat.send",
+        "moderation",
+        "tool.call",
+        "storage.read",
+        "platform.table.write",
+        "message.edit",
+        "storage.kv",
+    ],
+)
+async def test_every_catalog_family_is_a_valid_policy_key(install_dal: Any, key: str) -> None:
+    await svc.set_instance_policy(
+        install_dal,
+        permission_key=key,
+        action="allow",
+        set_by=1,
+        valkey_client=_FakeValkeyClient(),
+    )

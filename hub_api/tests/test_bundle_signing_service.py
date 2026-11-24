@@ -30,7 +30,7 @@ from services.bundle_signing_service import (
 )
 from services.errors import ApiError
 
-_APP_ID = "waddles.test.signing-app"
+_APP_ID = "penguintechinc.waddles.signing-app"
 _VERSION = "1.0.0"
 _DIGEST = "a" * 64
 _APPROVAL_ID = 7
@@ -45,7 +45,10 @@ def test_build_signing_payload_distinguishes_every_field() -> None:
         app_id=_APP_ID, version="2.0.0", digest=_DIGEST, approval_id=1
     )
     assert base != build_signing_payload(
-        app_id="waddles.test.a-different-app", version=_VERSION, digest=_DIGEST, approval_id=1
+        app_id="penguintechinc.waddles.a-different-app",
+        version=_VERSION,
+        digest=_DIGEST,
+        approval_id=1,
     )
     assert base != build_signing_payload(
         app_id=_APP_ID, version=_VERSION, digest="b" * 64, approval_id=1
@@ -64,14 +67,14 @@ def test_build_signing_payload_matches_the_cross_language_golden_vector() -> Non
     that catches a drift between the two encodings.
     """
     payload = build_signing_payload(
-        app_id="waddles.core.example.ping",
+        app_id="penguintechinc.waddles.ping",
         version="1.2.3",
         digest="sha256:deadbeef",
         approval_id=42,
     )
     expected = bytes.fromhex(
-        "776164646c65732d62756e646c652d7369672d763100000019776164646c65"
-        "732e636f72652e6578616d706c652e70696e6700000005312e322e330000000f7368613235363a6465616462"
+        "776164646c65732d62756e646c652d7369672d76310000001b70656e6775696e7465"
+        "6368696e632e776164646c65732e70696e6700000005312e322e330000000f7368613235363a6465616462"
         "656566000000000000002a"
     )
     assert payload == expected
@@ -162,7 +165,7 @@ def test_platform_signer_sign_produces_a_signature_verifiable_against_its_own_pu
         ),
         pytest.param(
             lambda p: build_signing_payload(
-                app_id="waddles.test.a-different-app",
+                app_id="penguintechinc.waddles.a-different-app",
                 version=p["version"],
                 digest=p["digest"],
                 approval_id=p["approval_id"],
@@ -285,7 +288,7 @@ async def test_sign_and_record_version_updates_the_row(install_dal: Any) -> None
 
 async def test_sign_and_record_version_raises_when_digest_is_missing(install_dal: Any) -> None:
     version_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.test.no-digest-yet",
+        app_id="penguintechinc.waddles.no-digest-yet",
         version=_VERSION,
         artifact_digest=None,
         language="python",
@@ -300,7 +303,7 @@ async def test_sign_and_record_version_raises_when_digest_is_missing(install_dal
                 conn,
                 app_versions_table=versions_table,
                 version_id=version_id,
-                app_id="waddles.test.no-digest-yet",
+                app_id="penguintechinc.waddles.no-digest-yet",
                 version=_VERSION,
                 approval_id=1,
             )
@@ -310,6 +313,9 @@ async def test_sign_and_record_version_raises_when_digest_is_missing(install_dal
 async def test_sign_and_record_version_fails_closed_without_a_configured_key(
     install_dal: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from services.platform_secrets.bootstrap import get_process_cache
+
+    get_process_cache().seed(())
     monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("BUNDLE_SIGNING_KEY_ID", raising=False)
     version_id = await install_dal.app_versions.async_insert(
@@ -335,6 +341,134 @@ async def test_sign_and_record_version_fails_closed_without_a_configured_key(
     assert exc.value.code == "artifact_signing_key_unavailable"
 
 
+async def test_sign_and_record_version_reads_from_platform_vault_without_env(
+    install_dal: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import uuid
+
+    from services.platform_secrets.bootstrap import get_process_cache
+    from services.platform_secrets.cache import CachedSecret
+    from services.platform_secrets.registry import SecretType
+    from services.platform_secrets.repository import STATE_ACTIVE
+
+    monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY", raising=False)
+    monkeypatch.delenv("BUNDLE_SIGNING_KEY_ID", raising=False)
+    monkeypatch.delenv("FLAG_WADDLES_DISABLE_DB_PLATFORM_KEYS", raising=False)
+
+    vault_seed = bytes(range(10, 42))
+    get_process_cache().seed(
+        [
+            CachedSecret(
+                secret_type=int(SecretType.BUNDLE_SIGNING),
+                scope_id=None,
+                version=2,
+                state=STATE_ACTIVE,
+                kid="vault-bundle-v2",
+                public_id=uuid.UUID(int=2),
+                public_material=None,
+                activated_at=None,
+                verify_until=None,
+                plaintext=vault_seed,
+            )
+        ]
+    )
+    version_id = await install_dal.app_versions.async_insert(
+        app_id=_APP_ID,
+        version=_VERSION,
+        artifact_digest=_DIGEST,
+        language="python",
+        artifact_kind="prebuilt",
+        scan_status="not_scanned",
+    )
+    versions_table = install_dal.metadata.tables["app_versions"]
+
+    async with install_dal.engine.begin() as conn:
+        result = await sign_and_record_version(
+            conn,
+            app_versions_table=versions_table,
+            version_id=version_id,
+            app_id=_APP_ID,
+            version=_VERSION,
+            approval_id=_APPROVAL_ID,
+        )
+
+    assert result["key_id"] == "vault-bundle-v2"
+    pub = Ed25519PrivateKey.from_private_bytes(vault_seed).public_key()
+    payload = build_signing_payload(
+        app_id=_APP_ID, version=_VERSION, digest=_DIGEST, approval_id=_APPROVAL_ID
+    )
+    pub.verify(base64.b64decode(result["signature"]), payload)
+
+
+def test_platform_signer_from_vault_or_env_respects_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from services.platform_secrets.bootstrap import get_process_cache
+
+    get_process_cache().seed(())
+    env_seed = bytes(range(50, 82))
+    monkeypatch.setenv("BUNDLE_SIGNING_PRIVATE_KEY", base64.b64encode(env_seed).decode("ascii"))
+    monkeypatch.setenv("BUNDLE_SIGNING_KEY_ID", "env-fallback-k1")
+
+    monkeypatch.delenv("FLAG_WADDLES_DISABLE_DB_PLATFORM_KEYS", raising=False)
+    with pytest.raises(ApiError) as exc:
+        PlatformSigner.from_vault_or_env()
+    assert exc.value.code == "artifact_signing_key_unavailable"
+
+    monkeypatch.setenv("FLAG_WADDLES_DISABLE_DB_PLATFORM_KEYS", "true")
+    signer = PlatformSigner.from_vault_or_env()
+    assert signer.key_id == "env-fallback-k1"
+
+
+def test_platform_signer_from_vault_rejects_malformed_secret() -> None:
+    import uuid
+
+    from services.platform_secrets.cache import CachedSecret, PlatformSecretCache
+    from services.platform_secrets.registry import SecretType
+    from services.platform_secrets.repository import STATE_ACTIVE
+
+    cache = PlatformSecretCache()
+    cache.seed(
+        [
+            CachedSecret(
+                secret_type=int(SecretType.BUNDLE_SIGNING),
+                scope_id=None,
+                version=1,
+                state=STATE_ACTIVE,
+                kid=None,
+                public_id=uuid.UUID(int=3),
+                public_material=None,
+                activated_at=None,
+                verify_until=None,
+                plaintext=b"t" * 32,
+            )
+        ]
+    )
+    with pytest.raises(ApiError) as exc_kid:
+        PlatformSigner.from_vault(cache=cache)
+    assert exc_kid.value.code == "artifact_signing_key_invalid"
+
+    cache.seed(
+        [
+            CachedSecret(
+                secret_type=int(SecretType.BUNDLE_SIGNING),
+                scope_id=None,
+                version=1,
+                state=STATE_ACTIVE,
+                kid="k-short",
+                public_id=uuid.UUID(int=4),
+                public_material=None,
+                activated_at=None,
+                verify_until=None,
+                plaintext=b"short",
+            )
+        ]
+    )
+    with pytest.raises(ApiError) as exc_len:
+        PlatformSigner.from_vault(cache=cache)
+    assert exc_len.value.code == "artifact_signing_key_invalid"
+
+
 async def test_upload_signed_sidecar_writes_the_expected_document(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -344,26 +478,26 @@ async def test_upload_signed_sidecar_writes_the_expected_document(
         app_id: str, version: str, sha256_hex: str, document: dict[str, Any]
     ) -> str:
         calls.append((app_id, version, sha256_hex, document))
-        return "bundles/waddles.test.app/1/abc.json"
+        return "bundles/penguintechinc.waddles.app/1/abc.json"
 
     monkeypatch.setattr(bundle_signing_service.storage_service, "write_bundle_sidecar", fake_write)
 
     key = await upload_signed_sidecar(
-        app_id="waddles.test.app",
+        app_id="penguintechinc.waddles.app",
         version="1",
         digest="sha256:" + "c" * 64,
         approval_id=5,
         key_id="k1",
         signature="c2ln==",
     )
-    assert key == "bundles/waddles.test.app/1/abc.json"
+    assert key == "bundles/penguintechinc.waddles.app/1/abc.json"
     assert calls == [
         (
-            "waddles.test.app",
+            "penguintechinc.waddles.app",
             "1",
             "c" * 64,
             {
-                "app_id": "waddles.test.app",
+                "app_id": "penguintechinc.waddles.app",
                 "version": "1",
                 "digest": "sha256:" + "c" * 64,
                 "approval_id": 5,

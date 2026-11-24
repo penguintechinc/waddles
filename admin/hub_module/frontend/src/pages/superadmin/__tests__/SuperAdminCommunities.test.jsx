@@ -29,6 +29,7 @@ const COMMUNITIES = [
     ownerName: 'Alice',
     memberCount: 42,
     isPremium: true,
+    licenseTier: 2,
     isActive: true,
     isPublic: true,
     seatLimit: 50,
@@ -42,6 +43,7 @@ const COMMUNITIES = [
     ownerName: null,
     memberCount: 7,
     isPremium: false,
+    licenseTier: 1,
     isActive: false,
     isPublic: false,
     createdAt: '2026-03-04T12:00:00Z',
@@ -92,13 +94,13 @@ describe('SuperAdminCommunities listing', () => {
     expect(penguins.getByText(/Discord/)).toBeInTheDocument();
     expect(penguins.getByText('Alice')).toBeInTheDocument();
     expect(penguins.getByText('42')).toBeInTheDocument();
-    expect(penguins.getByText(/Premium/)).toBeInTheDocument();
+    expect(penguins.getByText('Premium')).toBeInTheDocument();
     expect(penguins.getByText('Active')).toBeInTheDocument();
     expect(penguins.getByText(new Date('2026-02-03T12:00:00Z').toLocaleDateString())).toBeInTheDocument();
 
     const seals = rowOf('Seal Society');
     expect(seals.getByText('Unassigned')).toBeInTheDocument();
-    expect(seals.getByText('Standard')).toBeInTheDocument();
+    expect(seals.getByText('Free')).toBeInTheDocument();
     expect(seals.getByText('Inactive')).toBeInTheDocument();
   });
 
@@ -187,15 +189,16 @@ describe('SuperAdminCommunities edit', () => {
     expect(m.getByDisplayValue('Waddle')).toBeInTheDocument();
     expect(m.getByLabelText('Active')).toBeChecked();
     expect(m.getByLabelText('Public')).toBeChecked();
-    expect(m.getByLabelText(/Premium Community/)).toBeChecked();
-    expect(m.getByPlaceholderText('Leave blank for unlimited')).toHaveValue(50);
+    expect(m.getByLabelText('License tier')).toHaveValue('2');
+    expect(m.queryByLabelText(/Premium Community/)).not.toBeInTheDocument();
+    expect(m.getByPlaceholderText('Leave blank for unlimited')).toHaveValue('50');
   });
 
   it('defaults optional fields for a sparse community', async () => {
     const m = await openEdit('Seal Society');
     expect(m.getByLabelText('Active')).not.toBeChecked();
-    expect(m.getByLabelText(/Premium Community/)).not.toBeChecked();
-    expect(m.getByPlaceholderText('Leave blank for unlimited')).toHaveValue(null);
+    expect(m.getByLabelText('License tier')).toHaveValue('1');
+    expect(m.getByPlaceholderText('Leave blank for unlimited')).toHaveValue('');
   });
 
   it('saves the edited form, closes and reloads', async () => {
@@ -204,7 +207,6 @@ describe('SuperAdminCommunities edit', () => {
     fireEvent.change(inputs[0], { target: { value: 'Emperor Club' } });
     fireEvent.change(inputs[1], { target: { value: 'Bigger' } });
     fireEvent.click(m.getByLabelText('Public'));
-    fireEvent.click(m.getByLabelText(/Premium Community/));
     fireEvent.change(m.getByPlaceholderText('Leave blank for unlimited'), { target: { value: '10' } });
     fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
 
@@ -214,8 +216,7 @@ describe('SuperAdminCommunities edit', () => {
         description: 'Bigger',
         isActive: true,
         isPublic: false,
-        isPremium: false,
-        seatLimit: '10',
+        seatLimit: 10,
       }),
     );
     await waitFor(() => expect(screen.queryByRole('heading', { name: 'Edit Community' })).not.toBeInTheDocument());
@@ -225,12 +226,61 @@ describe('SuperAdminCommunities edit', () => {
   it.each([
     ['the server message', failure('conflict'), 'conflict'],
     ['a generic fallback', new Error('x'), 'Failed to update community'],
-  ])('alerts with %s when the update fails and keeps the modal', async (_label, err, text) => {
+  ])('shows %s inline when the update fails and keeps the modal', async (_label, err, text) => {
     superAdminApi.updateCommunity.mockRejectedValue(err);
     const m = await openEdit();
     fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
-    await waitFor(() => expect(alert).toHaveBeenCalledWith(text));
+    expect(await m.findByText(text)).toBeInTheDocument();
     expect(screen.getByRole('heading', { name: 'Edit Community' })).toBeInTheDocument();
+  });
+
+  // regression: a blank seat limit was sent as '' (then 0/omitted); now cleared = explicit null.
+  it('sends explicit seatLimit null when a previously set limit is cleared', async () => {
+    const m = await openEdit();
+    fireEvent.change(m.getByPlaceholderText('Leave blank for unlimited'), { target: { value: '' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() => expect(superAdminApi.updateCommunity).toHaveBeenCalled());
+    const [, payload] = superAdminApi.updateCommunity.mock.calls[0];
+    expect(payload).toHaveProperty('seatLimit', null);
+  });
+
+  it('omits seatLimit when unchanged (absent vs null is meaningful)', async () => {
+    const m = await openEdit();
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() => expect(superAdminApi.updateCommunity).toHaveBeenCalled());
+    expect(superAdminApi.updateCommunity.mock.calls[0][1]).not.toHaveProperty('seatLimit');
+    expect(superAdminApi.updateCommunity.mock.calls[0][1]).not.toHaveProperty('licenseTier');
+  });
+
+  it('omits seatLimit for a blank field that was never set', async () => {
+    const m = await openEdit('Seal Society');
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() => expect(superAdminApi.updateCommunity).toHaveBeenCalled());
+    expect(superAdminApi.updateCommunity.mock.calls[0][1]).not.toHaveProperty('seatLimit');
+  });
+
+  it('sends description null when cleared', async () => {
+    const m = await openEdit();
+    fireEvent.change(m.getByLabelText('Description'), { target: { value: '' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() => expect(superAdminApi.updateCommunity).toHaveBeenCalled());
+    expect(superAdminApi.updateCommunity.mock.calls[0][1]).toHaveProperty('description', null);
+  });
+
+  it('trims the seat limit and sends it as an integer', async () => {
+    const m = await openEdit('Seal Society');
+    fireEvent.change(m.getByPlaceholderText('Leave blank for unlimited'), { target: { value: ' 25 ' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() => expect(superAdminApi.updateCommunity).toHaveBeenCalled());
+    expect(superAdminApi.updateCommunity.mock.calls[0][1].seatLimit).toBe(25);
+  });
+
+  it.each(['-5', '1.5', '0', '1e3', 'abc'])('rejects seat limit %s inline without calling the API', async (bad) => {
+    const m = await openEdit('Seal Society');
+    fireEvent.change(m.getByPlaceholderText('Leave blank for unlimited'), { target: { value: bad } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    expect(await m.findByText(/Seat limit must be a whole number/)).toBeInTheDocument();
+    expect(superAdminApi.updateCommunity).not.toHaveBeenCalled();
   });
 
   it('keeps the modal open when the API reports success:false, and Cancel closes it', async () => {
@@ -362,5 +412,110 @@ describe('SuperAdminCommunities delete', () => {
     fireEvent.click(m.getByRole('button', { name: 'Cancel' }));
     expect(screen.queryByRole('heading', { name: 'Delete Community' })).not.toBeInTheDocument();
     expect(superAdminApi.deleteCommunity).not.toHaveBeenCalled();
+  });
+});
+
+describe('SuperAdminCommunities license tier', () => {
+  async function openEdit(name = 'Seal Society') {
+    await loaded();
+    fireEvent.click(rowOf(name).getByRole('button', { name: 'Edit' }));
+    return modal('Edit Community');
+  }
+
+  it('offers only Free / Premium with operator-override helper text', async () => {
+    const m = await openEdit();
+    const options = within(m.getByLabelText('License tier')).getAllByRole('option').map((o) => o.textContent);
+    expect(options).toEqual(['Free', 'Premium']);
+    expect(m.getByText(/Operator override: not blocked by the tenant's pool; counts against it and is audited\./)).toBeInTheDocument();
+  });
+
+  it('does not ask for a reason until the tier changes', async () => {
+    const m = await openEdit();
+    expect(m.queryByLabelText('Reason for tier change')).not.toBeInTheDocument();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
+    expect(m.getByLabelText('Reason for tier change')).toBeInTheDocument();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '1' } });
+    expect(m.queryByLabelText('Reason for tier change')).not.toBeInTheDocument();
+  });
+
+  it('offers the seven reason codes with human labels', async () => {
+    const m = await openEdit();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
+    const values = within(m.getByLabelText('Reason for tier change')).getAllByRole('option').map((o) => o.getAttribute('value'));
+    expect(values).toEqual([
+      '', 'support_request', 'sales_agreement', 'trial_extension', 'billing_correction',
+      'partner_program', 'data_correction', 'other',
+    ]);
+    expect(m.getByRole('option', { name: 'Sales agreement' })).toBeInTheDocument();
+  });
+
+  it('blocks saving a tier change without a reason', async () => {
+    const m = await openEdit();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    expect(await m.findByText('Select a reason for the tier change.')).toBeInTheDocument();
+    expect(superAdminApi.updateCommunity).not.toHaveBeenCalled();
+  });
+
+  it('sends licenseTier + reasonCode and never isPremium', async () => {
+    const m = await openEdit();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
+    fireEvent.change(m.getByLabelText('Reason for tier change'), { target: { value: 'sales_agreement' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    await waitFor(() => expect(superAdminApi.updateCommunity).toHaveBeenCalled());
+    const [id, payload] = superAdminApi.updateCommunity.mock.calls[0];
+    expect(id).toBe(2);
+    expect(payload.licenseTier).toBe(2);
+    expect(payload.reasonCode).toBe('sales_agreement');
+    expect(payload).not.toHaveProperty('isPremium');
+  });
+
+  it('shows the global-admin message on 403 and keeps the dialog open', async () => {
+    superAdminApi.updateCommunity.mockRejectedValue({ response: { status: 403, data: {} } });
+    const m = await openEdit();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
+    fireEvent.change(m.getByLabelText('Reason for tier change'), { target: { value: 'other' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    const alertBox = await m.findByText(/requires global admin access/);
+    expect(alertBox.closest('[role="alert"]')).not.toBeNull();
+    expect(screen.getByRole('heading', { name: 'Edit Community' })).toBeInTheDocument();
+  });
+
+  it('shows the 402 TENANT_TIER_REQUIRED message with the operator-pool hint in the dialog', async () => {
+    superAdminApi.updateCommunity.mockRejectedValue({
+      response: {
+        status: 402,
+        data: { error: { code: 'TENANT_TIER_REQUIRED', message: 'Premium communities require a Professional or Enterprise license' } },
+      },
+    });
+    const m = await openEdit();
+    fireEvent.change(m.getByLabelText('License tier'), { target: { value: '2' } });
+    fireEvent.change(m.getByLabelText('Reason for tier change'), { target: { value: 'other' } });
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    const box = await m.findByText(/Premium communities require a Professional or Enterprise license/);
+    expect(box.closest('[role="alert"]')).not.toBeNull();
+    expect(box.textContent).toContain("On operator deployments set the tenant's pool first (License pools)");
+    expect(screen.getByRole('heading', { name: 'Edit Community' })).toBeInTheDocument();
+  });
+
+  it('surfaces a 400 backend message in the dialog', async () => {
+    superAdminApi.updateCommunity.mockRejectedValue({ response: { status: 400, data: { error: { message: 'reasonCode is invalid' } } } });
+    const m = await openEdit();
+    fireEvent.click(m.getByRole('button', { name: 'Save Changes' }));
+    expect(await m.findByText('reasonCode is invalid')).toBeInTheDocument();
+  });
+
+  it('falls back to the legacy premium flag when licenseTier is absent', async () => {
+    superAdminApi.getCommunities.mockResolvedValue(
+      reply([{ ...COMMUNITIES[0], licenseTier: undefined }, COMMUNITIES[1]]),
+    );
+    await loaded();
+    expect(rowOf('Penguin Club').getByText('Premium')).toBeInTheDocument();
+  });
+
+  it('maps an unknown tier code (3) to a Free badge in the list', async () => {
+    superAdminApi.getCommunities.mockResolvedValue(reply([{ ...COMMUNITIES[0], licenseTier: 3 }]));
+    await loaded();
+    expect(rowOf('Penguin Club').getByText('Free')).toBeInTheDocument();
   });
 });

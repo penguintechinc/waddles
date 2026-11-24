@@ -14,15 +14,22 @@ auto-discovery -- no edit to `routers/v1.py` needed.
 
 from __future__ import annotations
 
+import functools
+import logging
+from collections.abc import Callable
+from typing import Any
+
 from flask_core.api_utils import auth_required
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
+from services.community_authz import resolve_editor_scopes
 from services.community_common import (
     api_error,
     community_in_tenant,
+    feature_not_enabled,
     get_current_user,
     is_valid_service_key,
 )
@@ -42,10 +49,28 @@ from services.community_interaction import (
     get_hub_channels,
     internal_relay_incoming,
     moderate_forum_post,
+    resolve_reply_public_id,
     update_channel_permission_overrides,
     update_community_role,
     update_hub_channel,
 )
+from services.errors import ApiError, forbidden
+from services.public_ids import (
+    UNKNOWN_ID,
+    PublicId,
+    PublicIdTarget,
+    build_view_arg_translator,
+)
+from services.route_guards import community_member_guard
+from services.scope_registry import (
+    SCOPE_CHANNELS_MANAGE,
+    SCOPE_FORUMS_MANAGE,
+    SCOPE_ROLES_MANAGE,
+    SCOPE_ROLES_VIEW,
+    describe_scopes,
+)
+
+logger = logging.getLogger(__name__)
 
 interaction_admin_bp = Blueprint(
     "v1_community_interaction_admin", __name__, url_prefix="/api/v1/admin"
@@ -56,6 +81,44 @@ interaction_member_bp = Blueprint(
 interaction_internal_bp = Blueprint(
     "v1_community_interaction_internal", __name__, url_prefix="/api/v1/internal"
 )
+
+#: `<puuid:...>` -> numeric ids inside the URL community (unknown/foreign/malformed -> the
+#: handler's existing 404). Replies have no community column, so `reply_id` resolves via its post.
+interaction_admin_bp.before_request(
+    build_view_arg_translator(
+        {
+            "channel_id": PublicIdTarget("hub_channels"),
+            "post_id": PublicIdTarget("hub_forum_posts"),
+            "role_id": PublicIdTarget("community_roles"),
+        }
+    )
+)
+interaction_member_bp.before_request(
+    build_view_arg_translator(
+        {
+            "channel_id": PublicIdTarget("hub_channels"),
+            "post_id": PublicIdTarget("hub_forum_posts"),
+        }
+    )
+)
+
+
+@interaction_admin_bp.before_request
+async def _translate_reply_arg() -> None:
+    """Swap a `<puuid:reply_id>` view arg for the numeric id (scoped through the parent post)."""
+    view_args = request.view_args
+    raw = view_args.get("reply_id") if view_args else None
+    if view_args is None or not isinstance(raw, PublicId):
+        return None
+    community_id = view_args.get("community_id")
+    resolved = (
+        resolve_reply_public_id(current_app.config["dal"], str(raw), community_id)
+        if isinstance(community_id, int) and community_id > 0
+        else None
+    )
+    view_args["reply_id"] = UNKNOWN_ID if resolved is None else resolved
+    return None
+
 
 #: Two-gate Feature flags -- `libs/community_module/features.py`. Channel/
 #: role/permission-override CRUD (this file's "Admin: hub channels"/"Admin:
@@ -75,27 +138,52 @@ def _tenant_ok(community_id: int) -> bool:
     return community_in_tenant(current_app.config["dal"], community_id, ctx)
 
 
+def require_community_scope(scope: str) -> Callable[[Any], Any]:
+    """Route decorator: 404 for a foreign community, then 403 unless the caller holds `scope`."""
+
+    def decorate(fn: Any) -> Any:
+        @functools.wraps(fn)
+        async def wrapper(**kwargs: Any) -> Any:
+            community_id = kwargs["community_id"]
+            if not _tenant_ok(community_id):
+                return api_error("Community not found", status_code=404)
+            try:
+                held = resolve_editor_scopes(
+                    request, current_app.config["dal"], community_id=community_id
+                )
+            except ApiError as exc:
+                logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
+                return _guard_error(exc)
+            if scope not in held:
+                return {"success": False, "error": f"Missing required scope: {scope}"}, 403
+            return await fn(**kwargs)
+
+        return wrapper
+
+    return decorate
+
+
 # ── Admin: hub channels ────────────────────────────────────────────────
 
 
-@interaction_admin_bp.route("/<int:community_id>/interaction/channels", methods=["GET"])
+@interaction_admin_bp.route("/<cuuid:community_id>/interaction/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:read")  # type: ignore[misc]
+@require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
 async def admin_list_channels(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/interaction/channels`."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_INTERACTIONS, tenant=ctx.tenant_slug):
-        return api_error("Community interactions are not enabled for this plan", 402)
+        return feature_not_enabled("Community interactions are not enabled for this plan")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     channels = get_hub_channels(current_app.config["dal"], community_id)
     return {"success": True, "channels": channels}, 200
 
 
-@interaction_admin_bp.route("/<int:community_id>/interaction/channels", methods=["POST"])
+@interaction_admin_bp.route("/<cuuid:community_id>/interaction/channels", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:write")  # type: ignore[misc]
+@require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def admin_create_channel(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/interaction/channels`."""
@@ -112,10 +200,10 @@ async def admin_create_channel(community_id: int) -> tuple[dict[str, object], in
 
 
 @interaction_admin_bp.route(
-    "/<int:community_id>/interaction/channels/<int:channel_id>", methods=["PUT"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:write")  # type: ignore[misc]
+@require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
 async def admin_update_channel(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/interaction/channels/<id>`."""
     if not _tenant_ok(community_id):
@@ -128,10 +216,10 @@ async def admin_update_channel(community_id: int, channel_id: int) -> tuple[dict
 
 
 @interaction_admin_bp.route(
-    "/<int:community_id>/interaction/channels/<int:channel_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:write")  # type: ignore[misc]
+@require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
 async def admin_delete_channel(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/interaction/channels/<id>`."""
     if not _tenant_ok(community_id):
@@ -142,26 +230,28 @@ async def admin_delete_channel(community_id: int, channel_id: int) -> tuple[dict
 
 
 @interaction_admin_bp.route(
-    "/<int:community_id>/interaction/forum/posts/<int:post_id>", methods=["PUT"]
+    "/<cuuid:community_id>/interaction/forum/posts/<puuid:post_id>", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:write")  # type: ignore[misc]
+@require_community_scope(SCOPE_FORUMS_MANAGE)  # type: ignore[misc]
 async def admin_moderate_post(community_id: int, post_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/interaction/forum/posts/<id>` -- pin/lock/delete."""
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     payload = await request.get_json(force=True, silent=True) or {}
     err = moderate_forum_post(current_app.config["dal"], community_id, post_id, payload)
+    if err == "__not_found__":
+        return {"success": False, "error": "Post not found"}, 404
     if err:
         return {"success": False, "error": err}, 400
     return {"success": True, "message": "Post moderated"}, 200
 
 
 @interaction_admin_bp.route(
-    "/<int:community_id>/interaction/forum/replies/<int:reply_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/interaction/forum/replies/<puuid:reply_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:write")  # type: ignore[misc]
+@require_community_scope(SCOPE_FORUMS_MANAGE)  # type: ignore[misc]
 async def admin_delete_reply(community_id: int, reply_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/interaction/forum/replies/<id>`."""
     if not _tenant_ok(community_id):
@@ -174,9 +264,9 @@ async def admin_delete_reply(community_id: int, reply_id: int) -> tuple[dict[str
 # ── Admin: community roles ────────────────────────────────────────────
 
 
-@interaction_admin_bp.route("/<int:community_id>/interaction/roles", methods=["GET"])
+@interaction_admin_bp.route("/<cuuid:community_id>/interaction/roles", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:read")  # type: ignore[misc]
+@require_community_scope(SCOPE_ROLES_VIEW)  # type: ignore[misc]
 async def admin_list_roles(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/interaction/roles`."""
     if not _tenant_ok(community_id):
@@ -187,60 +277,104 @@ async def admin_list_roles(community_id: int) -> tuple[dict[str, object], int]:
     }, 200
 
 
-@interaction_admin_bp.route("/<int:community_id>/interaction/roles", methods=["POST"])
+def _roles_manage_scopes(community_id: int) -> frozenset[str]:
+    """Editor's effective scopes; 403 unless they hold the `roles:manage` scope."""
+    editor = resolve_editor_scopes(request, current_app.config["dal"], community_id=community_id)
+    if SCOPE_ROLES_MANAGE not in editor:
+        raise forbidden(f"Missing required scope: {SCOPE_ROLES_MANAGE}")
+    return editor
+
+
+def _guard_error(exc: ApiError) -> tuple[dict[str, object], int]:
+    """Map a role-guard `ApiError` to the legacy `{success, error}` body plus a machine `code`."""
+    return {"success": False, "error": exc.message, "code": exc.code}, exc.status_code
+
+
+@interaction_admin_bp.route("/<cuuid:community_id>/interaction/roles", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_create_role(community_id: int) -> tuple[dict[str, object], int]:
-    """`POST /api/v1/admin/<id>/interaction/roles`."""
+    """`POST /api/v1/admin/<id>/interaction/roles` (requires `roles:manage`)."""
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
-    payload = await request.get_json(force=True, silent=True) or {}
-    dto, err = create_community_role(current_app.config["dal"], community_id, payload)
+    try:
+        editor = _roles_manage_scopes(community_id)
+        payload = await request.get_json(force=True, silent=True) or {}
+        dto, err = create_community_role(
+            current_app.config["dal"], community_id, payload, editor_scopes=editor
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
+        return _guard_error(exc)
     if err:
         status = 409 if "already exists" in err else 400
         return {"success": False, "error": err}, status
     return {"success": True, "role": dto}, 201
 
 
-@interaction_admin_bp.route("/<int:community_id>/interaction/roles/<int:role_id>", methods=["PUT"])
+@interaction_admin_bp.route(
+    "/<cuuid:community_id>/interaction/roles/<puuid:role_id>", methods=["PUT"]
+)
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_update_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
-    """`PUT /api/v1/admin/<id>/interaction/roles/<roleId>`."""
+    """`PUT /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`)."""
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
-    payload = await request.get_json(force=True, silent=True) or {}
-    err = update_community_role(current_app.config["dal"], community_id, role_id, payload)
+    try:
+        editor = _roles_manage_scopes(community_id)
+        payload = await request.get_json(force=True, silent=True) or {}
+        err = update_community_role(
+            current_app.config["dal"], community_id, role_id, payload, editor_scopes=editor
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
+        return _guard_error(exc)
     if err == "__not_found__":
         return {"success": False, "error": "Role not found"}, 404
     return {"success": True, "message": "Role updated"}, 200
 
 
 @interaction_admin_bp.route(
-    "/<int:community_id>/interaction/roles/<int:role_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/interaction/roles/<puuid:role_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:manage_roles")  # type: ignore[misc]
 async def admin_delete_role(community_id: int, role_id: int) -> tuple[dict[str, object], int]:
-    """`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>`."""
+    """`DELETE /api/v1/admin/<id>/interaction/roles/<roleId>` (requires `roles:manage`).
+
+    Predefined roles (admin, moderator, ...) are refused with 409 `ROLE_PROTECTED`.
+    """
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
-    err = delete_community_role(current_app.config["dal"], community_id, role_id)
+    try:
+        editor = _roles_manage_scopes(community_id)
+        err = delete_community_role(
+            current_app.config["dal"], community_id, role_id, editor_scopes=editor
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
+        return _guard_error(exc)
     if err == "__not_found__":
         return {"success": False, "error": "Role not found"}, 404
-    if err:
-        return {"success": False, "error": err}, 403
     return {"success": True, "message": "Role deleted, members reassigned to member role"}, 200
+
+
+@interaction_admin_bp.route("/<cuuid:community_id>/interaction/scopes", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_community_scope(SCOPE_ROLES_VIEW)  # type: ignore[misc]
+async def admin_list_scopes(community_id: int) -> tuple[dict[str, object], int]:
+    """`GET /api/v1/admin/<id>/interaction/scopes` -- the scope registry for the role editor."""
+    if not _tenant_ok(community_id):
+        return api_error("Community not found", status_code=404)
+    return {"success": True, "scopes": describe_scopes()}, 200
 
 
 # ── Admin: channel permission overrides ───────────────────────────────
 
 
 @interaction_admin_bp.route(
-    "/<int:community_id>/interaction/channels/<int:channel_id>/permissions", methods=["GET"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>/permissions", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:read")  # type: ignore[misc]
+@require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
 async def admin_get_overrides(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/interaction/channels/<id>/permissions`."""
     if not _tenant_ok(community_id):
@@ -254,10 +388,10 @@ async def admin_get_overrides(community_id: int, channel_id: int) -> tuple[dict[
 
 
 @interaction_admin_bp.route(
-    "/<int:community_id>/interaction/channels/<int:channel_id>/permissions", methods=["PUT"]
+    "/<cuuid:community_id>/interaction/channels/<puuid:channel_id>/permissions", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.interaction:manage_channels")  # type: ignore[misc]
+@require_community_scope(SCOPE_CHANNELS_MANAGE)  # type: ignore[misc]
 async def admin_update_overrides(
     community_id: int, channel_id: int
 ) -> tuple[dict[str, object], int]:
@@ -268,9 +402,20 @@ async def admin_update_overrides(
     overrides = payload.get("overrides")
     if not isinstance(overrides, list):
         return {"success": False, "error": "overrides must be an array"}, 400
-    ok = update_channel_permission_overrides(
-        current_app.config["dal"], community_id, channel_id, overrides
-    )
+    try:
+        editor = resolve_editor_scopes(
+            request, current_app.config["dal"], community_id=community_id
+        )
+        ok = update_channel_permission_overrides(
+            current_app.config["dal"],
+            community_id,
+            channel_id,
+            overrides,
+            editor_scopes=editor,
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in community_interaction: %s", type(exc).__name__, exc)
+        return _guard_error(exc)
     if not ok:
         return {"success": False, "error": "Channel not found"}, 404
     return {"success": True, "message": "Permission overrides updated"}, 200
@@ -279,9 +424,10 @@ async def admin_update_overrides(
 # ── Member: channels + forum ──────────────────────────────────────────
 
 
-@interaction_member_bp.route("/<int:community_id>/interact/channels", methods=["GET"])
+@interaction_member_bp.route("/<cuuid:community_id>/interact/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def member_list_channels(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/interact/channels`."""
     if not _tenant_ok(community_id):
@@ -295,9 +441,10 @@ async def member_list_channels(community_id: int) -> tuple[dict[str, object], in
     return {"success": True, "channels": channels, "canCreateChannel": can_create}, 200
 
 
-@interaction_member_bp.route("/<int:community_id>/interact/channels", methods=["POST"])
+@interaction_member_bp.route("/<cuuid:community_id>/interact/channels", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def member_create_channel(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/community/<id>/interact/channels` -- gated by `channel_creation_policy`."""
@@ -316,16 +463,17 @@ async def member_create_channel(community_id: int) -> tuple[dict[str, object], i
 
 
 @interaction_member_bp.route(
-    "/<int:community_id>/interact/forum/<int:channel_id>/posts", methods=["GET"]
+    "/<cuuid:community_id>/interact/forum/<puuid:channel_id>/posts", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/interact/forum/<channelId>/posts`."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_FORUMS, tenant=ctx.tenant_slug):
-        return api_error("Community forums are not enabled for this plan", 402)
+        return feature_not_enabled("Community forums are not enabled for this plan")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     page = max(1, int(request.args.get("page", "1") or 1))
@@ -341,10 +489,11 @@ async def member_forum_posts(community_id: int, channel_id: int) -> tuple[dict[s
 
 
 @interaction_member_bp.route(
-    "/<int:community_id>/interact/forum/<int:channel_id>/posts/<int:post_id>", methods=["GET"]
+    "/<cuuid:community_id>/interact/forum/<puuid:channel_id>/posts/<puuid:post_id>", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def member_forum_post(
     community_id: int, channel_id: int, post_id: int
 ) -> tuple[dict[str, object], int]:
@@ -358,10 +507,11 @@ async def member_forum_post(
 
 
 @interaction_member_bp.route(
-    "/<int:community_id>/interact/forum/<int:channel_id>/posts", methods=["POST"]
+    "/<cuuid:community_id>/interact/forum/<puuid:channel_id>/posts", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def member_create_forum_post(
     community_id: int, channel_id: int
@@ -373,16 +523,19 @@ async def member_create_forum_post(
     dto, err = await create_forum_post(
         current_app.config["dal"], community_id, channel_id, payload, get_current_user(request)
     )
+    if err == "__not_found__":
+        return {"success": False, "error": "Channel not found"}, 404
     if err:
         return {"success": False, "error": err}, 400
     return {"success": True, "post": dto}, 201
 
 
 @interaction_member_bp.route(
-    "/<int:community_id>/interact/forum/posts/<int:post_id>/replies", methods=["POST"]
+    "/<cuuid:community_id>/interact/forum/posts/<puuid:post_id>/replies", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.interaction:write")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def member_create_forum_reply(
     community_id: int, post_id: int

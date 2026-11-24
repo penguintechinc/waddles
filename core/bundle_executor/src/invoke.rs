@@ -35,12 +35,19 @@
 //! NOT implemented -- [`ComponentSource`] is the seam a follow-up wires
 //! `object_store` into; production wiring
 //! ([`UnimplementedBucketSource`]) fails closed with `LOAD_FAILED` rather
-//! than pretending to fetch anything. Likewise, precompiled `.cwasm`
-//! caching under `EXECUTOR_PRECOMPILE_DIR` (spec SS7.2/SS7.6) is not
-//! wired -- every fresh digest's `load` calls `wasmtime::component::
-//! Component::new` (a real, from-source JIT compile) instead of loading a
-//! cached artifact; correctness holds, the ~3-4s cold-compile cost SS7.2
-//! measured for a large component does not yet get amortized away.
+//! than pretending to fetch anything.
+//!
+//! **Executor-scale phase 1 (T1/T5/T7):** every per-stage [`Executor`] in one
+//! process shares ONE [`SharedRuntime`]: one wasmtime `Engine`, one linker,
+//! one compile limiter and one digest-keyed compiled-module cache, so a digest
+//! loaded by svc-process AND svc-action compiles and stays resident once
+//! (previously twice). Per-stage registries (scopes, slots, limits) stay
+//! separate, so stage isolation is unchanged. Modules are made resident from
+//! a signed precompiled `.cwasm` when one verifies (`crate::precompile`), else
+//! JIT-compiled with a LOUD fallback; residency is bounded by
+//! `EXECUTOR_MEMORY_BUDGET_MB` with LRU eviction of idle, unpinned modules,
+//! and an evicted (or over-budget, verify-only) module is made resident again
+//! on its first call.
 
 use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -53,7 +60,7 @@ use penguin_bundle_host::wire::{
 };
 use sha2::{Digest, Sha256};
 use tokio::sync::{OwnedSemaphorePermit, RwLock, Semaphore};
-use tracing::{error, info, warn};
+use tracing::{debug, error, info, warn, Instrument};
 use wasmtime::component::{Component, Linker};
 use wasmtime::{Engine, Store};
 
@@ -65,7 +72,9 @@ use crate::engine::{ticks_for_deadline, Stage, StagePre};
 use crate::error::ExecutorError;
 use crate::host::{ExecState, HostBridge};
 use crate::metrics::{self, ExecutorMetrics};
+use crate::module_cache::ModuleCache;
 use crate::signing::PlatformPublicKeys;
+use crate::warm_pool::{FillTicket, WarmPool};
 use crate::wire::{Connection, RequestHandler};
 
 /// Supplies a bundle version's component bytes and signed sidecar bytes
@@ -82,6 +91,31 @@ pub trait ComponentSource: Send + Sync + 'static {
         component_key: &str,
         sidecar_key: &str,
     ) -> impl std::future::Future<Output = Result<(Vec<u8>, Vec<u8>), ExecutorError>> + Send;
+
+    /// Fetches one precompiled artifact object (`.cwasm` or its `.sig`) by
+    /// key. Default: unsupported -- the caller treats the error as an AOT
+    /// miss and falls back (loudly) to a JIT compile.
+    fn fetch_precompiled(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, ExecutorError>> + Send {
+        let key = key.to_string();
+        async move {
+            Err(ExecutorError::Config(format!(
+                "this component source serves no precompiled artifacts (key {key:?})"
+            )))
+        }
+    }
+
+    /// Fetches one small object (the bundle's signed sidecar on the AOT path,
+    /// where the source component itself is not needed). Default: fetch the
+    /// pair through [`ComponentSource::fetch`] and return the sidecar half.
+    fn fetch_object(
+        &self,
+        key: &str,
+    ) -> impl std::future::Future<Output = Result<Vec<u8>, ExecutorError>> + Send {
+        async move { self.fetch(key, key).await.map(|(_, sidecar)| sidecar) }
+    }
 }
 
 /// The seam production code plugs into once the bucket client lands
@@ -165,6 +199,14 @@ enum GuestInstance {
     Tools(StageTools),
 }
 
+/// One pre-instantiated, never-yet-invoked guest (see `crate::warm_pool`): its `Store` holds NO
+/// per-call state until [`ExecState::rebind_for_call`] binds it at checkout, and it serves
+/// exactly one invocation before being dropped.
+pub(crate) struct WarmGuest {
+    store: Store<ExecState>,
+    stage: GuestInstance,
+}
+
 struct LoadedBundle {
     /// The `app_id` from the FIRST `load` call that registered this digest
     /// -- informational only (logging/error messages): the registry's real
@@ -172,13 +214,14 @@ struct LoadedBundle {
     /// field, so a second scope loading the same digest under a different
     /// `app_id` string never causes a collision or a silent overwrite.
     app_id: String,
-    /// The component pre-linked against the executor's `Linker` once at
-    /// load time (`Linker::instantiate_pre`), so every invoke only pays for
-    /// instantiation, not import resolution/type-checking. A fresh `Store`
-    /// (and therefore fresh guest state) is still created per call -- the
-    /// digest is shared across tenants, so reusing a live instance would
-    /// leak guest state between them.
-    pre: GuestPre,
+    /// Where the compiled form comes from. The compiled, pre-linked
+    /// component itself lives in the process-wide [`SharedRuntime`] cache
+    /// (shared across stages, LRU-evictable when idle); this is everything
+    /// needed to make it resident again on the next call after an eviction.
+    /// A fresh `Store` (and therefore fresh guest state) is still created
+    /// per call -- the digest is shared across tenants, so reusing a live
+    /// instance would leak guest state between them.
+    request: ModuleRequest,
     /// `EXECUTOR_INSTANCES_PER_BUNDLE` permits: caps concurrent in-flight
     /// instances of THIS digest so one hot bundle can't consume every
     /// global call slot.
@@ -232,8 +275,8 @@ impl<S: ComponentSource> Executor<S> {
 impl LoadedBundle {
     /// Test seam: the shareable parts a hand-built second registry entry
     /// needs (`component`, pre-linked form, slot semaphore).
-    fn test_parts(&self) -> (GuestPre, Arc<Semaphore>) {
-        (self.pre.clone(), Arc::clone(&self.slots))
+    fn test_parts(&self) -> (ModuleRequest, Arc<Semaphore>) {
+        (self.request.clone(), Arc::clone(&self.slots))
     }
 }
 
@@ -242,7 +285,11 @@ impl LoadedBundle {
 /// read loop.
 pub struct Executor<S: ComponentSource> {
     engine: Engine,
-    linker: Arc<Linker<ExecState>>,
+    /// Process-wide engine + compiled-module cache shared by every stage.
+    runtime: Arc<SharedRuntime>,
+    /// Reported in `hello` (CONTRACT `HelloBody.executor_id`): `EXECUTOR_ID`,
+    /// else `POD_NAME`; see [`Executor::executor_id`].
+    executor_id: Option<String>,
     source: S,
     max_call_timeout_ms: u64,
     /// `EXECUTOR_MEMORY_LIMIT_MB`: the per-instance memory cap a `load`
@@ -263,23 +310,14 @@ pub struct Executor<S: ComponentSource> {
     /// Per-component `Linker` cache for connector loads via
     /// [`Executor::pin_connector`].
     connector_linkers: crate::engine::LinkerCache,
-    /// Single-flight compile-in-progress tracker (gh security review item
-    /// 2): concurrent `load`s for the SAME cold digest share one `OnceCell`,
-    /// so N scopes activating an identical never-before-seen digest at once
-    /// trigger exactly one bucket fetch + one `Component::new` JIT compile
-    /// (spec SS7.2's ~3-4s cold-compile cost), not N redundant ones. Entries
-    /// are removed once their compile resolves (success or failure) --
-    /// never left to accumulate across the process's lifetime; a digest
-    /// already resident in `bundles` never touches this map at all (the
-    /// fast path in `on_load`).
-    compiling: tokio::sync::Mutex<HashMap<String, Arc<tokio::sync::OnceCell<Compiled>>>>,
     /// `EXECUTOR_MAX_CONCURRENT_CALLS` permits: the process-wide ceiling on
     /// in-flight invocations across every bundle and tenant. Guest
     /// execution runs on the tokio blocking pool, so this also bounds how
     /// many blocking threads guests can occupy.
     call_limiter: Arc<Semaphore>,
     /// `EXECUTOR_MAX_CONCURRENT_COMPILES` permits: bounds concurrent WASM
-    /// JIT compiles (each on a blocking-pool thread).
+    /// JIT compiles (each on a blocking-pool thread). The SAME semaphore as
+    /// [`SharedRuntime::compile_limiter`] -- one compile budget per process.
     compile_limiter: Arc<Semaphore>,
     max_concurrent_calls: u32,
     max_concurrent_compiles: u32,
@@ -321,8 +359,9 @@ pub struct Executor<S: ComponentSource> {
     /// and any heartbeat task run on a different OS worker thread than the
     /// one blocked running guest code, so they are never starved by it.
     /// `heartbeat_task_is_never_blocked_by_a_slow_guest_invocation` (below)
-    /// is the regression test for this property.
-    epoch_ticker: tokio::task::JoinHandle<()>,
+    /// is the regression test for this property. The ticker now lives on
+    /// [`SharedRuntime`] (one per engine) and is aborted when the last
+    /// executor sharing it drops.
     /// Platform Ed25519 public key(s) `on_load` checks every fetched
     /// sidecar's signature against (spec SS5.6). Derived leniently from
     /// `cfg.bundle_signing_public_keys` -- unset/blank yields an empty set
@@ -338,11 +377,813 @@ pub struct Executor<S: ComponentSource> {
     metrics: Arc<ExecutorMetrics>,
 }
 
-/// What the single-flight compile produces: the pre-linked component
-/// (`StagePre` owns the compiled `Component`).
-#[derive(Clone)]
-struct Compiled {
+/// Everything needed to make one digest resident (or resident AGAIN after an
+/// LRU eviction): the identity the stage's `Load` named plus the bucket keys
+/// its source component and signed sidecar live at.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ModuleRequest {
+    pub app_id: String,
+    pub version: String,
+    /// `sha256:<64 hex>` -- the cache key.
+    pub digest: String,
+    pub component_key: String,
+    pub sidecar_key: String,
+}
+
+impl ModuleRequest {
+    fn from_load(body: &LoadBody) -> Self {
+        Self {
+            app_id: body.app_id.clone(),
+            version: body.version.clone(),
+            digest: body.digest.clone(),
+            component_key: body.component_key.clone(),
+            sidecar_key: body.sidecar_key.clone(),
+        }
+    }
+}
+
+/// Why the AOT path was not used (closed label vocabulary for
+/// `executor_precompile_fallback_total{reason}`).
+type AotMiss = (&'static str, ExecutorError);
+
+/// One in-flight make-resident attempt: the pre-linked module + its size.
+type ResolvingCell = Arc<tokio::sync::OnceCell<(GuestPre, u64)>>;
+
+/// The process-wide half of the executor (executor-scale CONTRACT T1): ONE
+/// wasmtime `Engine` (+ its epoch ticker), ONE linker, ONE compile limiter and
+/// ONE digest-keyed compiled-module cache shared by every per-stage
+/// [`Executor`] in this process. Previously each stage built its own engine,
+/// so every digest both stages loaded was compiled and resident twice.
+pub struct SharedRuntime {
+    engine: Engine,
+    linker: Arc<Linker<ExecState>>,
+    engine_fingerprint: String,
+    compile_limiter: Arc<Semaphore>,
+    max_concurrent_compiles: u32,
+    /// `false` when the `waddles.disable-aot-precompile` kill switch is on.
+    aot_enabled: bool,
+    /// `PRECOMPILE_SIGNING_PUBLIC_KEYS`: the ONLY keys a `.cwasm` signature
+    /// is checked against (a dedicated precompiler key, distinct from the
+    /// bundle-approval `BUNDLE_SIGNING_PUBLIC_KEYS`). Empty = no AOT.
+    precompile_keys: PlatformPublicKeys,
+    cache: std::sync::Mutex<ModuleCache<GuestPre>>,
+    /// Single-flight make-resident tracker (gh security review item 2,
+    /// now process-wide): concurrent requests for the SAME cold digest --
+    /// from any scope on any stage -- share one `OnceCell`, so they trigger
+    /// exactly one fetch + one deserialize/compile. Entries are removed once
+    /// their attempt resolves (success or failure).
+    resolving: tokio::sync::Mutex<HashMap<String, ResolvingCell>>,
+    /// Cache gauges, module-load histogram, fallback/eviction counters.
+    metrics: Arc<ExecutorMetrics>,
+    /// Lifetime count of JIT compiles performed (tests + diagnostics).
+    compiles_total: AtomicU64,
+    /// Test seam: milliseconds [`SharedRuntime::acquire`] pauses between a
+    /// resolved attempt and inserting it into the cache -- exactly the window
+    /// the duplicate-load race lived in -- so a test can land a second load in it
+    /// deterministically.
+    #[cfg(test)]
+    resolve_gap_ms: AtomicU64,
+    /// Lifetime count of verified `.cwasm` deserializations.
+    aot_loads_total: AtomicU64,
+    /// Lifetime count of AOT misses that fell back to a compile.
+    aot_fallbacks_total: AtomicU64,
+    /// Advances `engine`'s epoch every `EPOCH_TICK` so per-call deadlines
+    /// fire (see the `Executor` doc's heartbeat-safety note). Aborted on drop.
+    epoch_ticker: tokio::task::JoinHandle<()>,
+    /// Pre-instantiated one-shot guests, process-wide (shared by every stage). Disabled
+    /// (inert) unless `EXECUTOR_WARM_POOL_SIZE > 0` and the kill switch is off.
+    warm: WarmPool<WarmGuest>,
+    /// Bounds concurrent background prewarm instantiations so they never starve real calls.
+    warm_fill_limiter: Arc<Semaphore>,
+}
+
+impl SharedRuntime {
+    /// Builds the runtime from config: the engine comes from
+    /// [`crate::engine::build_engine`] -- the SAME builder the precompiler
+    /// uses, so [`crate::engine::engine_fingerprint`] matches its artifacts.
+    pub fn new(cfg: &CliConfig) -> Result<Arc<Self>, ExecutorError> {
+        Self::with_metrics(cfg, metrics::executor_metrics())
+    }
+
+    /// [`SharedRuntime::new`] recording into `metrics` (tests read it back).
+    pub fn with_metrics(
+        cfg: &CliConfig,
+        metrics: Arc<ExecutorMetrics>,
+    ) -> Result<Arc<Self>, ExecutorError> {
+        let engine = crate::engine::build_engine(cfg)?;
+        let linker = Arc::new(crate::engine::build_linker(&engine)?);
+        let engine_fingerprint = crate::engine::engine_fingerprint(&engine);
+        let epoch_ticker = crate::engine::spawn_epoch_ticker(&engine);
+        let max_compiles = cfg.effective_max_concurrent_compiles();
+        let aot_enabled = !cfg.flag_disable_aot_precompile;
+        let (precompile_keys, precompile_key_problem) = resolve_precompile_keys(cfg);
+        if let Some(problem) = &precompile_key_problem {
+            error!(
+                %problem,
+                "PRECOMPILE_SIGNING_PUBLIC_KEYS is unusable; AOT is disabled and every load \
+                 falls back (loudly) to a JIT compile from the signed source"
+            );
+        } else if aot_enabled && precompile_keys.is_empty() {
+            warn!(
+                "PRECOMPILE_SIGNING_PUBLIC_KEYS unset: every load will fall back (loudly) to \
+                 a JIT compile"
+            );
+        }
+        info!(
+            engine_fingerprint,
+            aot_enabled,
+            memory_budget_mb = cfg.executor_memory_budget_mb,
+            max_concurrent_compiles = max_compiles,
+            "shared executor runtime built (one engine + module cache for all stages)"
+        );
+        let warm_size = if cfg.flag_disable_executor_warm_pool {
+            0
+        } else {
+            cfg.executor_warm_pool_size as usize
+        };
+        let warm_ttl = Duration::from_secs(cfg.executor_warm_pool_idle_secs.max(1));
+        let warm = WarmPool::new(
+            warm_size,
+            cfg.executor_warm_pool_max_total as usize,
+            warm_ttl,
+        );
+        if warm.enabled() {
+            info!(
+                per_digest = warm_size,
+                max_total = cfg.executor_warm_pool_max_total,
+                idle_secs = warm_ttl.as_secs(),
+                "warm instance pool ENABLED (one-shot pre-instantiated guests)"
+            );
+        } else if cfg.flag_disable_executor_warm_pool {
+            warn!(
+                "warm instance pool forced OFF by kill switch waddles.disable-executor-warm-pool"
+            );
+        }
+        let runtime = Arc::new(Self {
+            engine,
+            linker,
+            engine_fingerprint,
+            compile_limiter: Arc::new(Semaphore::new(max_compiles as usize)),
+            max_concurrent_compiles: max_compiles,
+            aot_enabled,
+            precompile_keys,
+            cache: std::sync::Mutex::new(ModuleCache::new(cfg.memory_budget_bytes())),
+            resolving: tokio::sync::Mutex::new(HashMap::new()),
+            metrics,
+            compiles_total: AtomicU64::new(0),
+            #[cfg(test)]
+            resolve_gap_ms: AtomicU64::new(0),
+            aot_loads_total: AtomicU64::new(0),
+            aot_fallbacks_total: AtomicU64::new(0),
+            epoch_ticker,
+            warm,
+            warm_fill_limiter: Arc::new(Semaphore::new(2)),
+        });
+        runtime.start_warm_sweeper();
+        Ok(runtime)
+    }
+
+    /// This runtime's engine fingerprint (precompiled artifact key).
+    #[must_use]
+    pub fn engine_fingerprint(&self) -> &str {
+        &self.engine_fingerprint
+    }
+
+    /// Lifetime JIT compiles performed.
+    #[must_use]
+    pub fn compiles_total(&self) -> u64 {
+        self.compiles_total.load(Ordering::SeqCst)
+    }
+
+    /// Lifetime verified `.cwasm` loads.
+    #[must_use]
+    pub fn aot_loads_total(&self) -> u64 {
+        self.aot_loads_total.load(Ordering::SeqCst)
+    }
+
+    /// Lifetime AOT misses that fell back to a compile.
+    #[must_use]
+    pub fn aot_fallbacks_total(&self) -> u64 {
+        self.aot_fallbacks_total.load(Ordering::SeqCst)
+    }
+
+    /// `(resident modules, resident bytes)`.
+    pub fn residency(&self) -> Result<(usize, u64), ExecutorError> {
+        let cache = self.lock_cache()?;
+        Ok((cache.len(), cache.total_bytes()))
+    }
+
+    /// Test seam: overrides the memory budget in BYTES (config is in MiB).
+    #[cfg(test)]
+    pub(crate) fn set_budget_bytes(&self, budget_bytes: u64) {
+        #[allow(clippy::unwrap_used)]
+        self.cache.lock().unwrap().set_budget_bytes(budget_bytes);
+    }
+
+    /// `true` when `digest` is resident.
+    pub fn is_resident(&self, digest: &str) -> Result<bool, ExecutorError> {
+        Ok(self.lock_cache()?.contains(digest))
+    }
+
+    fn lock_cache(
+        &self,
+    ) -> Result<std::sync::MutexGuard<'_, ModuleCache<GuestPre>>, ExecutorError> {
+        self.cache
+            .lock()
+            .map_err(|_| ExecutorError::Wasmtime("module cache mutex poisoned".to_string()))
+    }
+
+    fn publish_gauges(&self, cache: &ModuleCache<GuestPre>) {
+        self.metrics
+            .set_module_cache(cache.len(), cache.total_bytes());
+    }
+
+    /// `true` when a cold module may be made resident now without exceeding
+    /// the budget; `false` = verify only and load on first call (lazy).
+    fn has_headroom(&self) -> Result<bool, ExecutorError> {
+        Ok(self.lock_cache()?.has_headroom())
+    }
+
+    /// One more stage registry references `digest`.
+    fn add_ref(&self, digest: &str) -> Result<(), ExecutorError> {
+        self.lock_cache()?.add_ref(digest);
+        Ok(())
+    }
+
+    /// One stage registry stopped referencing `digest` (unload/disconnect).
+    /// Compiled code is NOT dropped here unless the budget is unlimited: an
+    /// idle module stays warm (LRU-evictable) so a reconnecting stage does not
+    /// trigger a full recompile.
+    fn release_ref(&self, digest: &str) {
+        match self.cache.lock() {
+            Ok(mut cache) => {
+                cache.release_ref(digest);
+                self.publish_gauges(&cache);
+            }
+            Err(_) => error!(
+                digest,
+                "module cache mutex poisoned; reference not released"
+            ),
+        }
+    }
+
+    fn unpin(&self, digest: &str) {
+        match self.cache.lock() {
+            Ok(mut cache) => {
+                cache.unpin(digest);
+                self.publish_gauges(&cache);
+            }
+            Err(_) => error!(digest, "module cache mutex poisoned; module left pinned"),
+        }
+    }
+
+    /// Returns `req`'s module pinned for the caller, making it resident first
+    /// if needed (verified `.cwasm` deserialize, else a JIT compile under the
+    /// compile limiter). The pin is released when the [`ModuleLease`] drops;
+    /// a pinned module is never evicted.
+    async fn acquire<S: ComponentSource>(
+        self: &Arc<Self>,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+        phase_metrics: &ExecutorMetrics,
+    ) -> Result<ModuleLease, ExecutorError> {
+        if let Some(pre) = self.lock_cache()?.get_pinned(&req.digest) {
+            return Ok(ModuleLease::new(Arc::clone(self), req.digest.clone(), pre));
+        }
+        let cell = {
+            let mut resolving = self.resolving.lock().await;
+            if !resolving.contains_key(&req.digest) {
+                // Re-check the cache under the `resolving` lock. A winner
+                // inserts into the cache BEFORE it removes its cell (see
+                // below), so "no cell" + "not resident" here can only mean a
+                // genuinely cold (or since-evicted) digest. Without this a
+                // caller that missed the fast path just before the winner
+                // finished would see no cell and compile the digest again.
+                if let Some(pre) = self.lock_cache()?.get_pinned(&req.digest) {
+                    return Ok(ModuleLease::new(Arc::clone(self), req.digest.clone(), pre));
+                }
+            }
+            Arc::clone(
+                resolving
+                    .entry(req.digest.clone())
+                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
+            )
+        };
+        let span = tracing::info_span!(
+            "executor.module_load",
+            app_id = %req.app_id,
+            digest = %req.digest,
+            engine_fingerprint = %self.engine_fingerprint,
+        );
+        let resolved = cell
+            .get_or_try_init(|| {
+                self.materialize(req, source, keys, phase_metrics)
+                    .instrument(span)
+            })
+            .await
+            .cloned();
+        let (pre, bytes) = match resolved {
+            Ok(done) => done,
+            Err(err) => {
+                // A failed attempt is not cached: drop this cell so the next
+                // request retries from scratch.
+                self.forget_cell(&req.digest, &cell).await;
+                return Err(err);
+            }
+        };
+        #[cfg(test)]
+        {
+            let gap = self.resolve_gap_ms.load(Ordering::SeqCst);
+            if gap > 0 {
+                tokio::time::sleep(Duration::from_millis(gap)).await;
+            }
+        }
+        // Insert into the cache BEFORE dropping the single-flight cell, so a
+        // caller arriving in between finds either the cell (and waits on it) or
+        // the resident entry -- never neither (which would recompile).
+        // (Scoped so the std mutex guard is provably dropped before the next
+        // `.await`; an explicit `drop` is not enough for the future's `Send` bound.)
+        let pre = {
+            let mut cache = self.lock_cache()?;
+            let (pre, outcome) = cache.insert_pinned(&req.digest, pre, bytes);
+            self.metrics.record_module_evictions(outcome.evicted.len());
+            if !outcome.evicted.is_empty() {
+                info!(
+                    evicted = outcome.evicted.len(),
+                    resident_bytes = cache.total_bytes(),
+                    "evicted idle modules (LRU) to honour EXECUTOR_MEMORY_BUDGET_MB; \
+                     they reload on their next call"
+                );
+            }
+            if outcome.over_budget {
+                warn!(
+                    resident_bytes = cache.total_bytes(),
+                    resident_modules = cache.len(),
+                    "module cache above EXECUTOR_MEMORY_BUDGET_MB: every other resident module \
+                     is pinned by an in-flight invoke"
+                );
+            }
+            self.publish_gauges(&cache);
+            pre
+        };
+        self.forget_cell(&req.digest, &cell).await;
+        Ok(ModuleLease::new(Arc::clone(self), req.digest.clone(), pre))
+    }
+
+    /// Removes `cell` from the single-flight map, but only if it is still the
+    /// registered cell for `digest` -- a late waiter of an old attempt must not
+    /// remove a newer attempt's cell (e.g. after an LRU eviction re-resolves
+    /// the digest).
+    async fn forget_cell(&self, digest: &str, cell: &ResolvingCell) {
+        let mut resolving = self.resolving.lock().await;
+        if resolving
+            .get(digest)
+            .is_some_and(|current| Arc::ptr_eq(current, cell))
+        {
+            resolving.remove(digest);
+        }
+    }
+
+    /// Makes `req` resident: AOT first (unless the kill switch is on), LOUD
+    /// fallback to a JIT compile on any AOT problem.
+    async fn materialize<S: ComponentSource>(
+        &self,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+        phase_metrics: &ExecutorMetrics,
+    ) -> Result<(GuestPre, u64), ExecutorError> {
+        let started = Instant::now();
+        if self.aot_enabled {
+            match self.try_aot(req, source, keys).await {
+                Ok(loaded) => {
+                    self.aot_loads_total.fetch_add(1, Ordering::SeqCst);
+                    self.metrics
+                        .record_module_load("aot", "ok", started.elapsed());
+                    info!(
+                        app_id = req.app_id,
+                        digest = req.digest,
+                        bytes = loaded.1,
+                        ms = started.elapsed().as_millis() as u64,
+                        "module resident from verified precompiled artifact"
+                    );
+                    return Ok(loaded);
+                }
+                Err((reason, err)) => {
+                    self.aot_fallbacks_total.fetch_add(1, Ordering::SeqCst);
+                    self.metrics.record_precompile_fallback(reason);
+                    error!(
+                        app_id = req.app_id,
+                        digest = req.digest,
+                        reason,
+                        error = %err,
+                        "precompiled artifact unusable; FALLING BACK to JIT compile \
+                         under the compile limiter"
+                    );
+                }
+            }
+        }
+        let compiled = self
+            .compile_from_source(req, source, keys, phase_metrics)
+            .await;
+        self.metrics.record_module_load(
+            "compile",
+            if compiled.is_ok() { "ok" } else { "error" },
+            started.elapsed(),
+        );
+        compiled
+    }
+
+    /// The AOT path. Order matters: the bundle's own signed sidecar and the
+    /// artifact's detached signature are BOTH verified before a single byte
+    /// reaches the `unsafe` deserialize.
+    async fn try_aot<S: ComponentSource>(
+        &self,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+    ) -> Result<(GuestPre, u64), AotMiss> {
+        if keys.is_empty() {
+            return Err((
+                "signature",
+                ExecutorError::SignatureInvalid(
+                    "no BUNDLE_SIGNING_PUBLIC_KEYS configured; AOT requires signed artifacts"
+                        .to_string(),
+                ),
+            ));
+        }
+        if self.precompile_keys.is_empty() {
+            return Err((
+                "signature",
+                ExecutorError::SignatureInvalid(
+                    "no PRECOMPILE_SIGNING_PUBLIC_KEYS configured; refusing to deserialize an \
+                     unverifiable .cwasm"
+                        .to_string(),
+                ),
+            ));
+        }
+        let fp = &self.engine_fingerprint;
+        let (artifact_key, sig_key) =
+            crate::precompile::object_keys(fp, &req.digest).map_err(|e| ("fetch", e))?;
+        let cwasm = source
+            .fetch_precompiled(&artifact_key)
+            .await
+            .map_err(|e| ("fetch", e))?;
+        let sig = source
+            .fetch_precompiled(&sig_key)
+            .await
+            .map_err(|e| ("fetch", e))?;
+        let sidecar = source
+            .fetch_object(&req.sidecar_key)
+            .await
+            .map_err(|e| ("fetch", e))?;
+        crate::signing::verify_artifact_signature(
+            &sidecar,
+            keys,
+            &req.app_id,
+            &req.version,
+            &req.digest,
+        )
+        .map_err(|e| ("signature", e))?;
+        // The ONLY gate before the unsafe deserialize: the precompiler's
+        // dedicated signing key (`PRECOMPILE_SIGNING_PUBLIC_KEYS`), never the
+        // bundle-approval key.
+        crate::precompile::verify_precompiled(&cwasm, &sig, &self.precompile_keys, &req.digest, fp)
+            .map_err(|e| ("signature", e))?;
+        let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
+        tokio::task::spawn_blocking(move || {
+            // SAFETY: `Component::deserialize` trusts its input as native
+            // code. `cwasm` reached here only after `verify_precompiled` proved it
+            // is byte-identical to an artifact the platform signing key
+            // (precompile key) signed for THIS digest and THIS engine fingerprint (and the
+            // bundle's own sidecar signature verified above); wasmtime still
+            // re-checks engine compatibility inside `deserialize`.
+            let component = unsafe { Component::deserialize(&engine, &cwasm) }?;
+            let bytes = component_resident_bytes(&component);
+            let pre = GuestPre::new(&component, linker.instantiate_pre(&component)?)?;
+            Ok::<_, wasmtime::Error>((pre, bytes))
+        })
+        .await
+        .map_err(|e| {
+            (
+                "deserialize",
+                ExecutorError::Wasmtime(format!("deserialize task failed: {e}")),
+            )
+        })?
+        .map_err(|e| ("deserialize", ExecutorError::from(e)))
+    }
+
+    /// The JIT path: fetch, verify digest + sidecar signature, compile on a
+    /// blocking thread under the shared compile limiter.
+    async fn compile_from_source<S: ComponentSource>(
+        &self,
+        req: &ModuleRequest,
+        source: &S,
+        keys: &PlatformPublicKeys,
+        phase_metrics: &ExecutorMetrics,
+    ) -> Result<(GuestPre, u64), ExecutorError> {
+        let bytes = fetch_and_verify(req, source, keys, phase_metrics).await?;
+        // Bounded + off-reactor: the JIT compile is seconds of pure CPU, so
+        // it queues on `compile_limiter` and runs on a blocking-pool thread.
+        let compile_permit = Arc::clone(&self.compile_limiter)
+            .acquire_owned()
+            .await
+            .map_err(|_| ExecutorError::Wasmtime("executor is shutting down".to_string()))?;
+        let compile_started = Instant::now();
+        let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
+        let compiled = tokio::task::spawn_blocking(move || {
+            let _permit = compile_permit;
+            let component = Component::new(&engine, &bytes)?;
+            let resident = component_resident_bytes(&component);
+            let pre = GuestPre::new(&component, linker.instantiate_pre(&component)?)?;
+            Ok::<_, wasmtime::Error>((pre, resident))
+        })
+        .await
+        .map_err(|e| ExecutorError::Wasmtime(format!("compile task failed: {e}")))
+        .and_then(|r| r.map_err(ExecutorError::from));
+        if compiled.is_ok() {
+            self.compiles_total.fetch_add(1, Ordering::SeqCst);
+        }
+        phase_metrics.record_load_phase(
+            &req.app_id,
+            "precompile",
+            if compiled.is_ok() { "ok" } else { "error" },
+            compile_started.elapsed(),
+        );
+        compiled
+    }
+}
+
+impl Drop for SharedRuntime {
+    fn drop(&mut self) {
+        self.epoch_ticker.abort();
+    }
+}
+
+impl SharedRuntime {
+    /// Takes one prewarmed guest for `digest` (one-shot: it is consumed). `None` when the pool
+    /// is off or empty; the caller records the hit/miss against its own metrics handle.
+    fn take_warm(&self, digest: &str) -> Option<WarmGuest> {
+        if !self.warm.enabled() {
+            return None;
+        }
+        self.warm.take(digest, Instant::now())
+    }
+
+    /// Drops every warm guest of `digest` (bundle unloaded / superseded) and invalidates any
+    /// fill still in flight for it.
+    fn evict_warm(&self, digest: &str) {
+        let dropped = self.warm.evict(digest);
+        if !dropped.is_empty() {
+            debug!(
+                digest,
+                dropped = dropped.len(),
+                "warm pool: evicted on unload"
+            );
+        }
+        drop(dropped);
+        self.metrics.set_warm_pool_size(self.warm.total_ready());
+    }
+
+    /// Starts the idle sweeper (needs the `Arc`, so it is spawned after construction).
+    fn start_warm_sweeper(self: &Arc<Self>) {
+        if !self.warm.enabled() {
+            return;
+        }
+        let weak = Arc::downgrade(self);
+        // Detached on purpose: it holds only a `Weak`, so it exits on its own once the runtime drops.
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(Duration::from_secs(15));
+            loop {
+                tick.tick().await;
+                let Some(rt) = weak.upgrade() else { return };
+                let dropped = rt.warm.sweep(Instant::now());
+                if !dropped.is_empty() {
+                    debug!(dropped = dropped.len(), "warm pool: idle entries dropped");
+                }
+                drop(dropped);
+                rt.metrics.set_warm_pool_size(rt.warm.total_ready());
+            }
+        });
+    }
+
+    /// After an invoke of `digest`, tops the pool back up in the background: reserves the
+    /// fills the bounds allow and instantiates each OFF the request path.
+    fn refill_warm(
+        self: &Arc<Self>,
+        digest: &str,
+        pre: &GuestPre,
+        app_id: &str,
+        memory_limit_mb: u32,
+        fuel_budget: u64,
+        deadline_ms: u64,
+    ) {
+        for ticket in self.warm.reserve_fills(digest, Instant::now()) {
+            let rt = Arc::clone(self);
+            let pre = pre.clone();
+            let app_id = app_id.to_string();
+            tokio::spawn(async move {
+                let Ok(_permit) = Arc::clone(&rt.warm_fill_limiter).acquire_owned().await else {
+                    rt.warm.fill_failed(&ticket, false);
+                    return;
+                };
+                rt.fill_one(
+                    ticket,
+                    pre,
+                    app_id,
+                    memory_limit_mb,
+                    fuel_budget,
+                    deadline_ms,
+                )
+                .await;
+            });
+        }
+    }
+
+    async fn fill_one(
+        self: &Arc<Self>,
+        ticket: FillTicket,
+        pre: GuestPre,
+        app_id: String,
+        memory_limit_mb: u32,
+        fuel_budget: u64,
+        deadline_ms: u64,
+    ) {
+        let engine = self.engine.clone();
+        let handle = tokio::runtime::Handle::current();
+        let started = Instant::now();
+        let built = tokio::task::spawn_blocking(move || {
+            handle.block_on(prewarm_one(
+                &engine,
+                &pre,
+                app_id,
+                memory_limit_mb,
+                fuel_budget,
+                deadline_ms,
+            ))
+        })
+        .await;
+        match built {
+            Ok(Ok(guest)) => {
+                self.metrics.record_prewarm(started.elapsed());
+                // A refused put (evicted / full meanwhile) just drops the instance.
+                let _ = self.warm.put(&ticket, guest, Instant::now());
+                self.metrics.set_warm_pool_size(self.warm.total_ready());
+            }
+            Ok(Err(reason)) => {
+                self.metrics.record_warm_pool("fill_failed");
+                warn!(
+                    digest = ticket.digest(),
+                    %reason,
+                    "warm pool: prewarm instantiate failed; this digest now serves cold \
+                     (a start function that needs a host call cannot be prewarmed)"
+                );
+                self.warm.fill_failed(&ticket, true);
+            }
+            Err(join) => {
+                self.metrics.record_warm_pool("fill_failed");
+                error!(digest = ticket.digest(), error = %join, "warm pool: prewarm task failed");
+                self.warm.fill_failed(&ticket, false);
+            }
+        }
+    }
+}
+
+/// Instantiates one guest with NO per-call state (no bridge, no scope, no invoke id), armed with
+/// the same bounds as a real call (epoch deadline, memory cap, fuel), so a hostile start
+/// function cannot hang or balloon the background fill either.
+async fn prewarm_one(
+    engine: &Engine,
+    pre: &GuestPre,
+    app_id: String,
+    memory_limit_mb: u32,
+    fuel_budget: u64,
+    deadline_ms: u64,
+) -> Result<WarmGuest, String> {
+    let exec_state = ExecState::new(None, app_id, 0).with_memory_limit_mb(memory_limit_mb);
+    let mut store = new_bounded_store(engine, exec_state, deadline_ms);
+    store.set_fuel(fuel_budget).map_err(|e| e.to_string())?;
+    let stage = match pre {
+        GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
+        GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
+        GuestPre::Tools(p) => p
+            .instantiate_async(&mut store)
+            .await
+            .map(GuestInstance::Tools),
+    }
+    .map_err(|e| e.to_string())?;
+    Ok(WarmGuest { store, stage })
+}
+
+/// Resolves `PRECOMPILE_SIGNING_PUBLIC_KEYS` into the key set `.cwasm`
+/// signatures are checked against, plus a human-readable problem when the
+/// configuration is unusable. FAIL-CLOSED: a malformed value, or a key set that
+/// reuses a bundle-approval public key (domain/key separation), yields an
+/// EMPTY set -- no artifact can then verify, so every load compiles from the
+/// signed source instead. Unset yields an empty set with no problem. Key
+/// material never appears in the returned text.
+fn resolve_precompile_keys(cfg: &CliConfig) -> (PlatformPublicKeys, Option<String>) {
+    let Some(raw) = cfg
+        .precompile_signing_public_keys
+        .as_deref()
+        .filter(|s| !s.trim().is_empty())
+    else {
+        return (PlatformPublicKeys::default(), None);
+    };
+    let parsed = match PlatformPublicKeys::from_json_named(raw, "PRECOMPILE_SIGNING_PUBLIC_KEYS") {
+        Ok(keys) => keys,
+        Err(e) => return (PlatformPublicKeys::default(), Some(e.to_string())),
+    };
+    match PlatformPublicKeys::from_cli(cfg) {
+        Ok(bundle_keys) if parsed.shares_key_with(&bundle_keys) => (
+            PlatformPublicKeys::default(),
+            Some(
+                "PRECOMPILE_SIGNING_PUBLIC_KEYS contains a key that is also in \
+                 BUNDLE_SIGNING_PUBLIC_KEYS; the precompile key must be a dedicated keypair"
+                    .to_string(),
+            ),
+        ),
+        _ => (parsed, None),
+    }
+}
+
+/// Estimated resident cost of a compiled component: its compiled code image.
+fn component_resident_bytes(component: &Component) -> u64 {
+    let range = component.image_range();
+    u64::try_from(range.end.addr().saturating_sub(range.start.addr())).unwrap_or(u64::MAX)
+}
+
+/// Fetches `req`'s component + sidecar and verifies the digest and (when a
+/// platform key is configured) the sidecar's Ed25519 signature, recording the
+/// `fetch`/`verify` phases. Shared by the JIT path and the lazy (verify-only)
+/// `Load`, so a bad artifact fails the `Load` loudly even when compilation is
+/// deferred to the first call.
+async fn fetch_and_verify<S: ComponentSource>(
+    req: &ModuleRequest,
+    source: &S,
+    keys: &PlatformPublicKeys,
+    phase_metrics: &ExecutorMetrics,
+) -> Result<Vec<u8>, ExecutorError> {
+    let fetch_started = Instant::now();
+    let fetched = source.fetch(&req.component_key, &req.sidecar_key).await;
+    phase_metrics.record_load_phase(
+        &req.app_id,
+        "fetch",
+        if fetched.is_ok() { "ok" } else { "error" },
+        fetch_started.elapsed(),
+    );
+    let (bytes, sidecar_bytes) = fetched?;
+    let verify_started = Instant::now();
+    // Artifact integrity (spec SS5.6/Gemini review condition 9): refuse a
+    // component whose signed sidecar does not verify against a configured
+    // platform public key, BEFORE the (expensive, otherwise-trusting)
+    // compile. Skipped only when no platform key is configured at all --
+    // unreachable in production, see `crate::signing::PlatformPublicKeys`.
+    let verified = verify_digest(&bytes, &req.digest).and_then(|()| {
+        if keys.is_empty() {
+            return Ok(());
+        }
+        crate::signing::verify_artifact_signature(
+            &sidecar_bytes,
+            keys,
+            &req.app_id,
+            &req.version,
+            &req.digest,
+        )
+    });
+    phase_metrics.record_load_phase(
+        &req.app_id,
+        "verify",
+        if verified.is_ok() { "ok" } else { "error" },
+        verify_started.elapsed(),
+    );
+    verified?;
+    Ok(bytes)
+}
+
+/// A pinned, resident module. While any lease exists the module cannot be
+/// evicted; dropping it unpins (and touches) the entry.
+pub(crate) struct ModuleLease {
+    runtime: Arc<SharedRuntime>,
+    digest: String,
     pre: GuestPre,
+}
+
+impl ModuleLease {
+    fn new(runtime: Arc<SharedRuntime>, digest: String, pre: GuestPre) -> Self {
+        Self {
+            runtime,
+            digest,
+            pre,
+        }
+    }
+}
+
+impl Drop for ModuleLease {
+    fn drop(&mut self) {
+        self.runtime.unpin(&self.digest);
+    }
 }
 
 /// How [`Executor::drain`] ended.
@@ -359,22 +1200,37 @@ pub enum DrainOutcome {
 }
 
 impl<S: ComponentSource> Executor<S> {
+    /// Switches artifact-signature verification to the database-backed key cache
+    /// (`BUNDLE_SIGNING_KEY_SOURCE=db`, design T5). The static ConfigMap set is dropped, not
+    /// kept as a fallback: an unknown kid or an unreadable store fails the `load` closed.
+    #[must_use]
+    pub fn with_key_cache(mut self, cache: Arc<platform_keys::KeyCache>, key_type: i16) -> Self {
+        self.signing_keys = PlatformPublicKeys::from_cache(cache, key_type);
+        self
+    }
+
+    /// An executor with its OWN [`SharedRuntime`] (tests, single-stage
+    /// processes). A multi-stage process builds one runtime and calls
+    /// [`Executor::with_runtime`] per stage so stages share compiled code.
     pub fn new(cfg: &CliConfig, source: S) -> Result<Self, ExecutorError> {
-        let engine = crate::engine::build_engine(cfg)?;
-        let linker = Arc::new(crate::engine::build_linker(&engine)?);
-        let ticker_engine = engine.clone();
-        let epoch_ticker = tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(crate::engine::EPOCH_TICK).await;
-                ticker_engine.increment_epoch();
-            }
-        });
+        Self::with_runtime(cfg, source, SharedRuntime::new(cfg)?)
+    }
+
+    /// An executor serving one stage on top of a shared `runtime`.
+    pub fn with_runtime(
+        cfg: &CliConfig,
+        source: S,
+        runtime: Arc<SharedRuntime>,
+    ) -> Result<Self, ExecutorError> {
+        let engine = runtime.engine.clone();
         let signing_keys = PlatformPublicKeys::from_cli(cfg)?;
         let connector_linkers = crate::engine::LinkerCache::new(engine.clone());
-        let max_compiles = cfg.effective_max_concurrent_compiles();
+        let max_compiles = runtime.max_concurrent_compiles;
+        let compile_limiter = Arc::clone(&runtime.compile_limiter);
         Ok(Self {
             engine,
-            linker,
+            runtime,
+            executor_id: cfg.reported_executor_id(),
             source,
             max_call_timeout_ms: cfg.executor_max_call_timeout_ms,
             default_memory_limit_mb: cfg.executor_memory_limit_mb,
@@ -384,16 +1240,14 @@ impl<S: ComponentSource> Executor<S> {
             bundles: RwLock::new(HashMap::new()),
             connectors: crate::connector_wire::ConnectorRouter::new(),
             connector_linkers,
-            compiling: tokio::sync::Mutex::new(HashMap::new()),
             call_limiter: Arc::new(Semaphore::new(cfg.executor_max_concurrent_calls as usize)),
-            compile_limiter: Arc::new(Semaphore::new(max_compiles as usize)),
+            compile_limiter,
             max_concurrent_calls: cfg.executor_max_concurrent_calls,
             max_concurrent_compiles: max_compiles,
             instances_per_bundle: cfg.executor_instances_per_bundle as usize,
             pool_wait: Duration::from_millis(cfg.executor_pool_wait_ms),
             draining: AtomicBool::new(false),
             orphaned_unload_total: AtomicU64::new(0),
-            epoch_ticker,
             signing_keys,
             metrics: metrics::executor_metrics(),
         })
@@ -570,13 +1424,23 @@ impl<S: ComponentSource> Executor<S> {
                 runtime: sandbox_runtime.to_string(),
                 verified: sandbox_verified,
             },
+            // Stable StatefulSet identity for slot ownership (CONTRACT;
+            // penguin-bundle-host 0.6.0). `None` = stage falls back to broadcast.
+            executor_id: self.executor_id.clone(),
         }
     }
-}
 
-impl<S: ComponentSource> Drop for Executor<S> {
-    fn drop(&mut self) {
-        self.epoch_ticker.abort();
+    /// The stable executor identity this process reports to stages
+    /// (`EXECUTOR_ID`, else `POD_NAME`).
+    #[must_use]
+    pub fn executor_id(&self) -> Option<&str> {
+        self.executor_id.as_deref()
+    }
+
+    /// The process-wide runtime this executor shares with its sibling stages.
+    #[must_use]
+    pub fn runtime(&self) -> &Arc<SharedRuntime> {
+        &self.runtime
     }
 }
 
@@ -770,112 +1634,35 @@ impl<S: ComponentSource> Executor<S> {
             }
         }
 
-        // Single-flight fetch+verify+compile (gh security review item 2):
-        // get-or-create this digest's `OnceCell` under a short, map-only
-        // critical section, then await ITS `get_or_try_init` outside any
-        // lock -- a concurrent `load` for the identical digest (from a
-        // different scope, or a different connection entirely) awaits the
-        // SAME cell and gets the SAME compiled `Component` clone back,
-        // rather than redundantly re-fetching/re-compiling. `Component::new`
-        // (~3-4s for a large component, spec SS7.2) and the bucket fetch
-        // both run OUTSIDE `self.bundles`'s lock either way -- only the map
-        // insert further below (and the fast-path/re-check reads) ever hold
-        // it, so a slow compile never blocks other connections' `invoke`/
-        // `load`/`unload` calls against unrelated digests.
-        let cell = {
-            let mut compiling = self.compiling.lock().await;
-            Arc::clone(
-                compiling
-                    .entry(digest.clone())
-                    .or_insert_with(|| Arc::new(tokio::sync::OnceCell::new())),
-            )
-        };
-        let compiled: Result<&Compiled, ExecutorError> = cell
-            .get_or_try_init(|| async {
-                let fetch_started = Instant::now();
-                let fetched = self
-                    .source
-                    .fetch(&body.component_key, &body.sidecar_key)
-                    .await;
-                self.metrics.record_load_phase(
-                    &app_id,
-                    "fetch",
-                    if fetched.is_ok() { "ok" } else { "error" },
-                    fetch_started.elapsed(),
-                );
-                let (bytes, sidecar_bytes) = fetched?;
-                let verify_started = Instant::now();
-                let verified = verify_digest(&bytes, &body.digest);
-
-                // Artifact integrity (spec SS5.6/Gemini review condition 9):
-                // refuse to instantiate a component whose signed sidecar
-                // doesn't verify against a configured platform public key,
-                // BEFORE the (expensive, and otherwise-trusting)
-                // `Component::new` compile step below. Skipped only when no
-                // platform key is configured at all
-                // (`self.signing_keys.is_empty()`) -- unreachable in
-                // production, see `crate::signing::PlatformPublicKeys`'s
-                // own doc. Lives inside the single-flight closure so a
-                // concurrent `load` for the same digest never bypasses
-                // verification via the shared `OnceCell`.
-                let verified = verified.and_then(|()| {
-                    if self.signing_keys.is_empty() {
-                        return Ok(());
-                    }
-                    crate::signing::verify_artifact_signature(
-                        &sidecar_bytes,
-                        &self.signing_keys,
-                        &body.app_id,
-                        &body.version,
-                        &body.digest,
-                    )
-                });
-                self.metrics.record_load_phase(
-                    &app_id,
-                    "verify",
-                    if verified.is_ok() { "ok" } else { "error" },
-                    verify_started.elapsed(),
-                );
-                verified?;
-
-                // Bounded + off-reactor: the JIT compile is seconds of pure
-                // CPU, so it queues on `compile_limiter` and runs on a
-                // blocking-pool thread -- running it inline would stall the
-                // event loop (and every other tenant's frames) on this pod.
-                let compile_permit = Arc::clone(&self.compile_limiter)
-                    .acquire_owned()
-                    .await
-                    .map_err(|_| {
-                        ExecutorError::Wasmtime("executor is shutting down".to_string())
-                    })?;
-                let compile_started = Instant::now();
-                let (engine, linker) = (self.engine.clone(), Arc::clone(&self.linker));
-                let compiled = tokio::task::spawn_blocking(move || {
-                    let _permit = compile_permit;
-                    let component = Component::new(&engine, &bytes)?;
-                    let pre = GuestPre::new(&component, linker.instantiate_pre(&component)?)?;
-                    Ok::<_, wasmtime::Error>(Compiled { pre })
-                })
+        // Not in this stage's registry. Make the module resident through the
+        // process-wide runtime (T1: a digest another stage already loaded is
+        // a cache hit -- no second fetch, no second compile), or, when the
+        // memory budget has no headroom, verify only and defer the
+        // compile/deserialize to the first call (T7 lazy load). Either way a
+        // bad digest or signature fails THIS `Load`, loudly.
+        let request = ModuleRequest::from_load(&body);
+        let already_resident = self.runtime.is_resident(&digest).unwrap_or(false);
+        let eager = already_resident || self.runtime.has_headroom().unwrap_or(true);
+        // The lease (eager path) is held until this stage's registry holds a
+        // reference, so an unlimited-budget cache never drops the module in
+        // between.
+        let made_ready: Result<Option<ModuleLease>, ExecutorError> = if eager {
+            self.runtime
+                .acquire(&request, &self.source, &self.signing_keys, &self.metrics)
                 .await
-                .map_err(|e| ExecutorError::Wasmtime(format!("compile task failed: {e}")))
-                .and_then(|r| r.map_err(ExecutorError::from));
-                self.metrics.record_load_phase(
-                    &app_id,
-                    "precompile",
-                    if compiled.is_ok() { "ok" } else { "error" },
-                    compile_started.elapsed(),
-                );
-                compiled
-            })
-            .await;
-        let Compiled { pre, .. } = match compiled {
-            Ok(c) => c.clone(),
+                .map(Some)
+        } else {
+            info!(
+                app_id,
+                digest, "memory budget has no headroom; verifying only, module loads on first call"
+            );
+            fetch_and_verify(&request, &self.source, &self.signing_keys, &self.metrics)
+                .await
+                .map(|_| None)
+        };
+        let _lease = match made_ready {
+            Ok(lease) => lease,
             Err(err) => {
-                // Never leave a failed attempt's slot behind -- a future
-                // `load` for this same digest (a legitimate retry, e.g.
-                // after a transient bucket outage) must start fresh, never
-                // be told "already failed" indefinitely.
-                self.compiling.lock().await.remove(&digest);
                 let code = match err {
                     ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
                     _ => ErrorCode::LoadFailed,
@@ -884,11 +1671,6 @@ impl<S: ComponentSource> Executor<S> {
                 return Err(error_body(code, err.to_string()));
             }
         };
-        // The compile succeeded -- this digest will now live in `bundles`
-        // (below), so its `OnceCell` slot in `compiling` is no longer
-        // needed; removing it keeps this map bounded to genuinely in-flight
-        // compiles, never accumulating one entry per digest ever seen.
-        self.compiling.lock().await.remove(&digest);
 
         // spec SS7.3: a `load` may request its own `limits.memory_mb`; `0`
         // means "no preference" and falls back to `EXECUTOR_MEMORY_LIMIT_MB`.
@@ -921,11 +1703,16 @@ impl<S: ComponentSource> Executor<S> {
         } else {
             let mut scopes = HashSet::with_capacity(1);
             scopes.insert(scope.clone());
+            if let Err(e) = self.runtime.add_ref(&digest) {
+                error!(app_id, digest, error = %e, "failed to reference the shared module");
+                self.metrics.record_load("load_failed");
+                return Err(error_body(ErrorCode::LoadFailed, e.to_string()));
+            }
             bundles.insert(
                 digest.clone(),
                 LoadedBundle {
                     app_id: app_id.clone(),
-                    pre,
+                    request,
                     slots: Arc::new(Semaphore::new(self.instances_per_bundle)),
                     memory_limit_mb,
                     scopes,
@@ -976,6 +1763,10 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
                 if loaded.scopes.remove(&scope) {
                     if loaded.scopes.is_empty() {
                         bundles.remove(&body.digest);
+                        self.runtime.release_ref(&body.digest);
+                        // Last scope gone (unload / version change = new digest): drop its warm
+                        // guests and invalidate in-flight fills so the old version never lingers.
+                        self.runtime.evict_warm(&body.digest);
                         self.metrics.record_unload("evicted");
                         self.metrics.set_bundles_loaded(bundles.len());
                         info!(
@@ -1055,11 +1846,17 @@ impl<S: ComponentSource> RequestHandler for Executor<S> {
         let evicted = {
             let mut bundles = self.bundles.write().await;
             let evicted = bundles.len();
+            // Drops this stage's registry entries, NOT the shared compiled
+            // code (T1): an idle module stays warm in the runtime cache
+            // (LRU-evictable) so the reconnecting stage's re-`Load` is a
+            // cache hit instead of a full recompile.
+            for digest in bundles.keys() {
+                self.runtime.release_ref(digest);
+            }
             bundles.clear();
             evicted
         };
         self.metrics.set_bundles_loaded(0);
-        self.compiling.lock().await.clear();
         if evicted > 0 {
             info!(
                 evicted_digests = evicted,
@@ -1223,13 +2020,13 @@ impl<S: ComponentSource> Executor<S> {
             let _global = self.acquire_global_slot(&body.app_id).await?;
             return self.connectors.invoke_bound(body, binding).await;
         }
-        let (pre, slots, memory_limit_mb, allowed_scopes) = {
+        let (request, slots, memory_limit_mb, allowed_scopes) = {
             let bundles = self.bundles.read().await;
             let loaded = bundles
                 .get(&body.digest)
                 .ok_or_else(|| error_body(ErrorCode::UnknownBundle, body.digest.clone()))?;
             (
-                loaded.pre.clone(),
+                loaded.request.clone(),
                 Arc::clone(&loaded.slots),
                 loaded.memory_limit_mb,
                 // The `(tenant, community)` scopes THIS app_id was loaded
@@ -1244,6 +2041,27 @@ impl<S: ComponentSource> Executor<S> {
         };
 
         let (bundle_permit, global_permit) = self.acquire_call_slots(slots, &body.app_id).await?;
+        // Pin the shared compiled module for the whole call (never evicted
+        // while in flight); makes it resident first if it was evicted or
+        // deferred at `Load` (T7 load-on-first-call).
+        let lease = self
+            .runtime
+            .acquire(&request, &self.source, &self.signing_keys, &self.metrics)
+            .await
+            .map_err(|err| {
+                error!(
+                    app_id = body.app_id,
+                    digest = body.digest,
+                    error = %err,
+                    "module could not be made resident for invoke"
+                );
+                let code = match err {
+                    ExecutorError::DigestMismatch { .. } => ErrorCode::DigestMismatch,
+                    _ => ErrorCode::LoadFailed,
+                };
+                error_body(code, err.to_string())
+            })?;
+        let pre = lease.pre.clone();
 
         let deadline_ms = body.deadline_ms.min(self.max_call_timeout_ms).max(1);
         // Connector spec SS0 condition 4: fuel per invocation, budgeted by
@@ -1272,6 +2090,23 @@ impl<S: ComponentSource> Executor<S> {
                 ));
             }
         };
+        // Warm pool: take a prewarmed one-shot guest for this digest if one is ready (a hit skips
+        // instantiation entirely), then top the pool back up in the background. Off by default.
+        let warm = self.runtime.take_warm(&body.digest);
+        if self.runtime.warm.enabled() {
+            self.metrics
+                .record_warm_pool(if warm.is_some() { "hit" } else { "miss" });
+            self.metrics
+                .set_warm_pool_size(self.runtime.warm.total_ready());
+            self.runtime.refill_warm(
+                &body.digest,
+                &pre,
+                &body.app_id,
+                memory_limit_mb,
+                self.fuel_limit_transform,
+                self.max_call_timeout_ms,
+            );
+        }
         let job = GuestJob {
             engine: self.engine.clone(),
             pre,
@@ -1283,6 +2118,7 @@ impl<S: ComponentSource> Executor<S> {
             deadline_ms,
             fuel_budget,
             allowed_scopes,
+            warm,
         };
         // Guest execution is synchronous CPU between host-call awaits (the
         // epoch deadline traps rather than yields), so it runs on a
@@ -1293,7 +2129,7 @@ impl<S: ComponentSource> Executor<S> {
         // genuinely finished, even if the caller's future is dropped.
         let handle = tokio::runtime::Handle::current();
         tokio::task::spawn_blocking(move || {
-            let _slots = (bundle_permit, global_permit);
+            let _slots = (bundle_permit, global_permit, lease);
             handle.block_on(run_guest(job))
         })
         .await
@@ -1321,6 +2157,8 @@ struct GuestJob {
     /// `(tenant_id, community_id)` scopes the invoked `app_id` was `Load`ed
     /// under; the confused-deputy guard checks v2 frame ids against it.
     allowed_scopes: Vec<(i32, i32)>,
+    /// A prewarmed one-shot guest taken for this call (`None` = instantiate inline).
+    warm: Option<WarmGuest>,
 }
 
 /// Instantiates (from the pre-linked component, in a fresh bounded `Store`)
@@ -1338,6 +2176,7 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
         deadline_ms,
         fuel_budget,
         allowed_scopes,
+        warm,
     } = job;
     let bridge = HostBridge::new(connection);
     let exec_state = ExecState::new(Some(bridge), body.app_id.clone(), invoke_id)
@@ -1402,54 +2241,75 @@ async fn run_guest(job: GuestJob) -> Result<ResultBody, ErrorBody> {
         }
         v2_dispatch = Some(envelope);
     }
-    let mut store = new_bounded_store(&engine, exec_state, deadline_ms);
-    // The engine was built with `consume_fuel(true)`
-    // (`crate::engine::build_engine`) so a `Store` starts at zero fuel and
-    // traps immediately unless armed here on every call -- armed BEFORE
-    // instantiation so a heavy start function is metered too.
-    store.set_fuel(fuel_budget).map_err(|e| {
-        // A set_fuel failure means fuel accounting is OFF on an engine that
-        // `build_engine` always configures with `consume_fuel(true)` -- a
-        // host/executor invariant breach, NOT a guest trap. Report it as an
-        // internal failure (never `WasmTrap`, which stage circuit breakers
-        // count against the guest) and shout about it.
-        error!(
-            app_id = %body.app_id,
-            invoke_id,
-            error = %e,
-            "invariant breach: could not arm the fuel budget (fuel accounting disabled?)"
-        );
-        fuel_invariant_error_body(format!("failed to arm fuel budget: {e}"))
-    })?;
-
     let start = std::time::Instant::now();
-    let instantiated = match &pre {
-        GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
-        GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
-        GuestPre::Tools(p) => p
-            .instantiate_async(&mut store)
-            .await
-            .map(GuestInstance::Tools),
-    };
-    let stage = match instantiated {
-        Ok(stage) => stage,
-        Err(err) => {
-            // Instantiation itself can trap (a heavy/looping start function
-            // burning the fuel budget, hitting the epoch deadline, or growing
-            // memory past the cap) exactly like an export call can --
-            // classify identically via `trap_to_error_body` rather than
-            // always bucketing an instantiate failure as `LOAD_FAILED`, which
-            // would hide a genuine guest fault from `svc_process::spine`'s
-            // DLQ-kind mapping and its per-source circuit breaker (both key
-            // off the typed `ErrorCode`, connector spec SS0 condition 5).
-            let memory_cap_hit = store.data().memory_cap_hit();
-            if memory_cap_hit || err.downcast_ref::<wasmtime::Trap>().is_some() {
-                return Err(trap_to_error_body(err, memory_cap_hit));
+    let (mut store, stage) = if let Some(WarmGuest { mut store, stage }) = warm {
+        // Warm hit: the guest was instantiated off the request path with NO per-call state; bind
+        // this call's identity now and re-arm the bounds relative to NOW. One-shot, so nothing
+        // of any earlier invocation (tenant/community) can be present.
+        let started = Instant::now();
+        let mut exec_state = exec_state;
+        let bridge = exec_state.bridge.take();
+        let v2_scope = exec_state.v2_scope.take();
+        store
+            .data_mut()
+            .rebind_for_call(bridge, body.app_id.clone(), invoke_id, v2_scope);
+        store.set_epoch_deadline(ticks_for_deadline(deadline_ms));
+        store
+            .set_fuel(fuel_budget)
+            .map_err(|e| fuel_invariant_error_body(format!("failed to arm fuel budget: {e}")))?;
+        metrics.record_instantiate(&body.app_id, started.elapsed());
+        (store, stage)
+    } else {
+        let mut store = new_bounded_store(&engine, exec_state, deadline_ms);
+        // The engine was built with `consume_fuel(true)`
+        // (`crate::engine::build_engine`) so a `Store` starts at zero fuel and
+        // traps immediately unless armed here on every call -- armed BEFORE
+        // instantiation so a heavy start function is metered too.
+        store.set_fuel(fuel_budget).map_err(|e| {
+            // A set_fuel failure means fuel accounting is OFF on an engine that
+            // `build_engine` always configures with `consume_fuel(true)` -- a
+            // host/executor invariant breach, NOT a guest trap. Report it as an
+            // internal failure (never `WasmTrap`, which stage circuit breakers
+            // count against the guest) and shout about it.
+            error!(
+                app_id = %body.app_id,
+                invoke_id,
+                error = %e,
+                "invariant breach: could not arm the fuel budget (fuel accounting disabled?)"
+            );
+            fuel_invariant_error_body(format!("failed to arm fuel budget: {e}"))
+        })?;
+
+        let inst_start = std::time::Instant::now();
+        let instantiated = match &pre {
+            GuestPre::V1(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V1),
+            GuestPre::V2(p) => p.instantiate_async(&mut store).await.map(GuestInstance::V2),
+            GuestPre::Tools(p) => p
+                .instantiate_async(&mut store)
+                .await
+                .map(GuestInstance::Tools),
+        };
+        let stage = match instantiated {
+            Ok(stage) => stage,
+            Err(err) => {
+                // Instantiation itself can trap (a heavy/looping start function
+                // burning the fuel budget, hitting the epoch deadline, or growing
+                // memory past the cap) exactly like an export call can --
+                // classify identically via `trap_to_error_body` rather than
+                // always bucketing an instantiate failure as `LOAD_FAILED`, which
+                // would hide a genuine guest fault from `svc_process::spine`'s
+                // DLQ-kind mapping and its per-source circuit breaker (both key
+                // off the typed `ErrorCode`, connector spec SS0 condition 5).
+                let memory_cap_hit = store.data().memory_cap_hit();
+                if memory_cap_hit || err.downcast_ref::<wasmtime::Trap>().is_some() {
+                    return Err(trap_to_error_body(err, memory_cap_hit));
+                }
+                return Err(error_body(ErrorCode::LoadFailed, err.to_string()));
             }
-            return Err(error_body(ErrorCode::LoadFailed, err.to_string()));
-        }
+        };
+        metrics.record_instantiate(&body.app_id, inst_start.elapsed());
+        (store, stage)
     };
-    metrics.record_instantiate(&body.app_id, start.elapsed());
     let guest_started = Instant::now();
 
     let result = match body.export {
@@ -1820,11 +2680,11 @@ mod tests {
             .on_load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 version: "1".to_string(),
                 digest: format!("sha256:{}", "0".repeat(64)),
-                component_key: "bundles/waddles.test.app/1/x.wasm".to_string(),
-                sidecar_key: "bundles/waddles.test.app/1/x.json".to_string(),
+                component_key: "bundles/penguintechinc.waddles.test-app/1/x.wasm".to_string(),
+                sidecar_key: "bundles/penguintechinc.waddles.test-app/1/x.json".to_string(),
                 capabilities: vec![],
                 limits: penguin_bundle_host::wire::LoadLimits {
                     timeout_ms: 2000,
@@ -1984,7 +2844,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         let loaded = executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds against the real fixture");
         assert_eq!(loaded.digest, fixture_digest());
@@ -1997,7 +2857,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2008,7 +2868,7 @@ mod tests {
             .on_unload(UnloadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 digest: format!("sha256:{}", "1".repeat(64)),
             })
             .await;
@@ -2024,7 +2884,7 @@ mod tests {
             .on_unload(UnloadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 digest: fixture_digest(),
             })
             .await
@@ -2073,7 +2933,7 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2082,7 +2942,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: format!("sha256:{}", "1".repeat(64)),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({}),
@@ -2119,10 +2979,10 @@ mod tests {
         // supplied "second digest") using an artificial second entry
         // inserted directly -- the wire-level `on_load` always compiles the
         // one fixture; the registry-identity property under test is that a
-        // SECOND, DIFFERENT digest for `waddles.test.app` occupies its own
+        // SECOND, DIFFERENT digest for `penguintechinc.waddles.test-app` occupies its own
         // slot rather than overwriting the first `on_load`'s entry.
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("first scope's load succeeds");
         assert_eq!(executor.bundles.read().await.len(), 1);
@@ -2139,12 +2999,12 @@ mod tests {
                 .expect("first scope's bundle is registered")
                 .test_parts();
             let mut scopes = HashSet::with_capacity(1);
-            scopes.insert((2, 0, "waddles.test.app".to_string()));
+            scopes.insert((2, 0, "penguintechinc.waddles.test-app".to_string()));
             bundles.insert(
                 other_digest.clone(),
                 LoadedBundle {
-                    app_id: "waddles.test.app".to_string(),
-                    pre: first.0,
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
+                    request: first.0,
                     slots: first.1,
                     memory_limit_mb: 64,
                     scopes,
@@ -2223,9 +3083,21 @@ mod tests {
         )?;
 
         let (a, b, c) = tokio::join!(
-            executor.on_load(fixture_load_body_scoped("waddles.test.app", 1, 0)),
-            executor.on_load(fixture_load_body_scoped("waddles.test.app", 2, 0)),
-            executor.on_load(fixture_load_body_scoped("waddles.test.app", 3, 0)),
+            executor.on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0
+            )),
+            executor.on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0
+            )),
+            executor.on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                3,
+                0
+            )),
         );
         a.expect("scope 1's load succeeds");
         b.expect("scope 2's load succeeds");
@@ -2260,11 +3132,19 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A's load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B's load of the identical digest succeeds");
 
@@ -2282,10 +3162,10 @@ mod tests {
         );
         assert!(resident
             .scopes
-            .contains(&(1, 0, "waddles.test.app".to_string())));
+            .contains(&(1, 0, "penguintechinc.waddles.test-app".to_string())));
         assert!(resident
             .scopes
-            .contains(&(2, 0, "waddles.test.app".to_string())));
+            .contains(&(2, 0, "penguintechinc.waddles.test-app".to_string())));
         Ok(())
     }
 
@@ -2297,18 +3177,26 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
 
         // Scope A goes away first.
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 1,
                 0,
                 &fixture_digest(),
@@ -2326,7 +3214,12 @@ mod tests {
 
         // An invoke from scope B must still succeed against the resident
         // component -- proves this isn't just a bookkeeping artifact.
-        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        let still_invokable = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await;
         assert!(
             still_invokable.is_ok(),
             "scope B's invoke must still succeed while its digest is still referenced: {still_invokable:?}"
@@ -2335,7 +3228,7 @@ mod tests {
         // Scope B goes away second -- now the digest actually unloads.
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 2,
                 0,
                 &fixture_digest(),
@@ -2365,11 +3258,19 @@ mod tests {
     ) -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
 
@@ -2378,7 +3279,7 @@ mod tests {
         for attempt in 0..2 {
             executor
                 .on_unload(fixture_unload_body(
-                    "waddles.test.app",
+                    "penguintechinc.waddles.test-app",
                     1,
                     0,
                     &fixture_digest(),
@@ -2395,7 +3296,12 @@ mod tests {
                 .contains_key(&fixture_digest()),
             "scope B's reference must survive scope A's duplicate unload"
         );
-        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        let still_invokable = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await;
         assert!(
             still_invokable.is_ok(),
             "scope B must still be able to invoke after scope A's duplicate unload: {still_invokable:?}"
@@ -2416,14 +3322,18 @@ mod tests {
     async fn unload_for_a_scope_that_never_loaded_has_no_effect() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
 
         // Scope (99, 0) never loaded anything.
         let result = executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 99,
                 0,
                 &fixture_digest(),
@@ -2441,7 +3351,12 @@ mod tests {
                 .contains_key(&fixture_digest()),
             "the real scope A must be completely unaffected"
         );
-        let still_invokable = invoke_noop(&executor, "waddles.test.app", &fixture_digest()).await;
+        let still_invokable = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await;
         assert!(
             still_invokable.is_ok(),
             "scope A must still invoke: {still_invokable:?}"
@@ -2461,17 +3376,25 @@ mod tests {
     async fn unload_from_both_referencing_scopes_evicts_the_digest() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
 
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 1,
                 0,
                 &fixture_digest(),
@@ -2480,7 +3403,7 @@ mod tests {
             .expect("scope A unload succeeds");
         executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 2,
                 0,
                 &fixture_digest(),
@@ -2526,7 +3449,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2538,7 +3461,7 @@ mod tests {
             std::time::Duration::from_secs(10),
             executor.on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -2587,7 +3510,7 @@ mod tests {
             .on_unload(UnloadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.app".to_string(),
+                app_id: "penguintechinc.waddles.test-app".to_string(),
                 digest: format!("sha256:{}", "3".repeat(64)),
             })
             .await;
@@ -2605,7 +3528,7 @@ mod tests {
     async fn on_invoke_reports_a_malformed_transform_payload() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2614,7 +3537,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     // Not a valid `PlatformEvent` shape at all.
@@ -2640,7 +3563,7 @@ mod tests {
     async fn on_invoke_reports_a_malformed_dispatch_payload() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2649,7 +3572,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Dispatch,
                     payload: serde_json::json!({"not": "the right shape"}),
@@ -2688,7 +3611,7 @@ mod tests {
             .on_load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.memory-hog".to_string(),
+                app_id: "penguintechinc.waddles.test-memory-hog".to_string(),
                 version: "1".to_string(),
                 digest: fixture_digest(),
                 component_key: "k".to_string(),
@@ -2710,7 +3633,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.memory-hog".to_string(),
+                    app_id: "penguintechinc.waddles.test-memory-hog".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -2856,7 +3779,7 @@ mod tests {
             .on_load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.test.fuel-hog".to_string(),
+                app_id: "penguintechinc.waddles.test-fuel-hog".to_string(),
                 version: "1".to_string(),
                 digest: fixture_digest(),
                 component_key: "k".to_string(),
@@ -2875,7 +3798,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.fuel-hog".to_string(),
+                    app_id: "penguintechinc.waddles.test-fuel-hog".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -2911,7 +3834,7 @@ mod tests {
         // against a connection whose reply receiver is discarded and stays
         // cheap enough to fit this test's deliberately tiny fuel budget.
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("a fresh bundle still loads after another bundle's fuel trap");
         let (tx2, _rx2) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
@@ -2919,7 +3842,7 @@ mod tests {
         let ok = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -2951,7 +3874,7 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
 
@@ -2966,7 +3889,7 @@ mod tests {
         let result = executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3018,7 +3941,7 @@ mod tests {
                     timeout_ms: 5000,
                     memory_mb: 256,
                 },
-                ..fixture_load_body("waddles.test.app")
+                ..fixture_load_body("penguintechinc.waddles.test-app")
             })
             .await
             .expect("load succeeds");
@@ -3039,7 +3962,7 @@ mod tests {
         executor
             .on_invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: fixture_digest(),
                     export: ExportKind::Transform,
                     payload: serde_json::json!({
@@ -3095,15 +4018,19 @@ mod tests {
     {
         let executor = Executor::new(&limited_config(2, 4, 150), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let held = hold_global_calls(&executor, 2);
 
         let started = Instant::now();
-        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect_err("N+1th invoke must not run while all slots are busy");
+        let err = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect_err("N+1th invoke must not run while all slots are busy");
         assert_eq!(err.code, ErrorCode::ExecutorDeadline);
         assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
         assert!(
@@ -3114,9 +4041,13 @@ mod tests {
 
         // Freeing a slot lets the next invoke through.
         drop(held);
-        invoke_noop(&executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect("invoke runs once a slot is free");
+        invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect("invoke runs once a slot is free");
         Ok(())
     }
 
@@ -3127,14 +4058,19 @@ mod tests {
     {
         let executor = Arc::new(Executor::new(&limited_config(1, 4, 5_000), FixtureSource)?);
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let held = hold_global_calls(&executor, 1);
         let waiter = {
             let executor = Arc::clone(&executor);
             tokio::spawn(async move {
-                invoke_noop(&*executor, "waddles.test.app", &fixture_digest()).await
+                invoke_noop(
+                    &*executor,
+                    "penguintechinc.waddles.test-app",
+                    &fixture_digest(),
+                )
+                .await
             })
         };
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -3154,7 +4090,7 @@ mod tests {
     async fn per_bundle_instance_cap_is_enforced_independently() -> Result<(), ExecutorError> {
         let executor = Executor::new(&limited_config(32, 1, 100), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let slots = {
@@ -3162,9 +4098,13 @@ mod tests {
             Arc::clone(&bundles.get(&fixture_digest()).expect("resident").slots)
         };
         let _held = slots.try_acquire_owned().expect("the one bundle slot");
-        let err = invoke_noop(&executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect_err("bundle at its instance cap must reject");
+        let err = invoke_noop(
+            &executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect_err("bundle at its instance cap must reject");
         assert_eq!(err.detail.as_deref(), Some("pool_exhausted"));
         assert!(executor.call_limiter.available_permits() == 32);
         Ok(())
@@ -3176,7 +4116,7 @@ mod tests {
     async fn drain_waits_for_in_flight_work_and_refuses_new_invokes() -> Result<(), ExecutorError> {
         let executor = Arc::new(Executor::new(&limited_config(2, 4, 100), FixtureSource)?);
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load");
         let held = hold_global_calls(&executor, 1);
@@ -3191,12 +4131,16 @@ mod tests {
             "drain must wait for the in-flight call"
         );
 
-        let err = invoke_noop(&*executor, "waddles.test.app", &fixture_digest())
-            .await
-            .expect_err("new invokes are refused while draining");
+        let err = invoke_noop(
+            &*executor,
+            "penguintechinc.waddles.test-app",
+            &fixture_digest(),
+        )
+        .await
+        .expect_err("new invokes are refused while draining");
         assert_eq!(err.code, ErrorCode::ShuttingDown);
         let err = executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect_err("new loads are refused while draining");
         assert_eq!(err.code, ErrorCode::ShuttingDown);
@@ -3241,7 +4185,7 @@ mod tests {
             }
         };
         tokio::select! {
-            loaded = executor.on_load(fixture_load_body("waddles.test.app")) => {
+            loaded = executor.on_load(fixture_load_body("penguintechinc.waddles.test-app")) => {
                 loaded.expect("load");
             }
             _ = ticker => unreachable!("the ticker never completes"),
@@ -3277,7 +4221,7 @@ mod tests {
         use super::*;
         use crate::signing::signing_payload;
 
-        const APP_ID: &str = "waddles.test.signed-app";
+        const APP_ID: &str = "penguintechinc.waddles.fixture-test-signed-app";
         const VERSION: &str = "1";
         const APPROVAL_ID: i64 = 7;
 
@@ -3464,11 +4408,19 @@ mod tests {
         crate::init_test_tracing();
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await
             .expect("scope A load succeeds");
         executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 2, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                2,
+                0,
+            ))
             .await
             .expect("scope B load succeeds");
         assert_eq!(executor.bundles.read().await.len(), 1);
@@ -3484,7 +4436,11 @@ mod tests {
         // proves `compiling`'s in-flight tracker was cleared too, not left
         // pointing at a stale resolved cell from before the wipe.
         let reloaded = executor
-            .on_load(fixture_load_body_scoped("waddles.test.app", 1, 0))
+            .on_load(fixture_load_body_scoped(
+                "penguintechinc.waddles.test-app",
+                1,
+                0,
+            ))
             .await;
         assert!(
             reloaded.is_ok(),
@@ -3503,14 +4459,14 @@ mod tests {
     async fn unload_after_disconnect_fails_closed_as_unknown() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.test.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.test-app"))
             .await
             .expect("load succeeds");
         executor.on_disconnect().await;
 
         let result = executor
             .on_unload(fixture_unload_body(
-                "waddles.test.app",
+                "penguintechinc.waddles.test-app",
                 1,
                 0,
                 &fixture_digest(),
@@ -3540,7 +4496,7 @@ mod tests {
     async fn measure_fuel_overhead() -> Result<(), ExecutorError> {
         let executor = Executor::new(&test_config(), FixtureSource)?;
         executor
-            .on_load(fixture_load_body("waddles.bench.app"))
+            .on_load(fixture_load_body("penguintechinc.waddles.bench-app"))
             .await
             .expect("load succeeds");
         const N: u32 = 2000;
@@ -3551,7 +4507,7 @@ mod tests {
             executor
                 .on_invoke(
                     InvokeBody {
-                        app_id: "waddles.bench.app".to_string(),
+                        app_id: "penguintechinc.waddles.bench-app".to_string(),
                         digest: fixture_digest(),
                         export: ExportKind::Transform,
                         payload: serde_json::json!({
@@ -3643,7 +4599,7 @@ mod tests {
         async fn a_cold_load_records_every_phase_and_the_resident_gauge() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.load"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-load"))
                 .await
                 .expect("load succeeds");
 
@@ -3652,7 +4608,7 @@ mod tests {
                     h.count(
                         "waddles_executor_load_seconds",
                         &[
-                            ("app_id", "waddles.mx.load"),
+                            ("app_id", "penguintechinc.waddles.mx-load"),
                             ("phase", phase),
                             ("result", "ok")
                         ]
@@ -3683,11 +4639,19 @@ mod tests {
         async fn a_second_scope_on_a_resident_digest_is_counted_without_redoing_the_phases() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.shared", 1, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-shared",
+                    1,
+                    0,
+                ))
                 .await
                 .expect("first load");
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.shared", 2, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-shared",
+                    2,
+                    0,
+                ))
                 .await
                 .expect("second scope, same digest");
 
@@ -3725,30 +4689,58 @@ mod tests {
             let (h, executor) = executor_with(FixtureSource);
             let digest = fixture_digest();
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.unload", 1, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-unload",
+                    1,
+                    0,
+                ))
                 .await
                 .expect("load a");
             executor
-                .on_load(fixture_load_body_scoped("waddles.mx.unload", 2, 0))
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-unload",
+                    2,
+                    0,
+                ))
                 .await
                 .expect("load b");
 
             // A scope that never referenced the digest: orphaned, no effect.
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 9, 9, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    9,
+                    9,
+                    &digest,
+                ))
                 .await
                 .expect("orphaned unload is a no-op, not an error");
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 1, 0, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    1,
+                    0,
+                    &digest,
+                ))
                 .await
                 .expect("unload a");
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    2,
+                    0,
+                    &digest,
+                ))
                 .await
                 .expect("unload b (last)");
             // Now fully evicted: another unload names an unknown digest.
             executor
-                .on_unload(fixture_unload_body("waddles.mx.unload", 2, 0, &digest))
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-unload",
+                    2,
+                    0,
+                    &digest,
+                ))
                 .await
                 .expect_err("unknown digest fails closed");
 
@@ -3781,7 +4773,7 @@ mod tests {
         #[tokio::test]
         async fn a_digest_mismatch_records_a_failed_verify_and_no_compile() {
             let (h, executor) = executor_with(FixtureSource);
-            let mut body = fixture_load_body("waddles.mx.mismatch");
+            let mut body = fixture_load_body("penguintechinc.waddles.mx-mismatch");
             body.digest = format!("sha256:{}", "0".repeat(64));
             executor
                 .on_load(body)
@@ -3814,7 +4806,7 @@ mod tests {
         async fn a_failed_fetch_records_a_failed_fetch_phase_and_load_failed() {
             let (h, executor) = executor_with(UnimplementedBucketSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.fetchfail"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-fetchfail"))
                 .await
                 .expect_err("the unimplemented bucket source fails closed");
             assert_eq!(
@@ -3839,12 +4831,12 @@ mod tests {
         async fn a_successful_invoke_records_instantiate_guest_and_total_and_clears_the_gauge() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.invoke"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-invoke"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.invoke",
+                "penguintechinc.waddles.mx-invoke",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -3856,7 +4848,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.invoke"),
+                        ("app_id", "penguintechinc.waddles.mx-invoke"),
                         ("export", "transform"),
                         ("result", "ok")
                     ]
@@ -3866,14 +4858,17 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_instantiate_seconds",
-                    &[("app_id", "waddles.mx.invoke")]
+                    &[("app_id", "penguintechinc.waddles.mx-invoke")]
                 ),
                 1.0
             );
             assert_eq!(
                 h.count(
                     "waddles_executor_guest_seconds",
-                    &[("app_id", "waddles.mx.invoke"), ("export", "transform")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-invoke"),
+                        ("export", "transform")
+                    ]
                 ),
                 1.0
             );
@@ -3900,7 +4895,7 @@ mod tests {
             // Nothing loaded: the digest lookup fails closed before any guest runs.
             invoke_event(
                 &executor,
-                "waddles.mx.unknown",
+                "penguintechinc.waddles.mx-unknown",
                 ExportKind::Transform,
                 event("noop"),
                 1000,
@@ -3911,7 +4906,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.unknown"),
+                        ("app_id", "penguintechinc.waddles.mx-unknown"),
                         ("result", "unknown_bundle")
                     ]
                 ),
@@ -3924,6 +4919,254 @@ mod tests {
                     .expect("gauge exported")
                     .value,
                 0.0
+            );
+        }
+
+        fn warm_config(per_digest: u32) -> CliConfig {
+            let mut cfg = test_config();
+            cfg.executor_warm_pool_size = per_digest;
+            cfg.executor_warm_pool_max_total = 8;
+            cfg
+        }
+
+        /// Waits (bounded) until `n` prewarmed guests are ready for the fixture digest.
+        async fn wait_warm_ready(executor: &Executor<impl ComponentSource>, n: usize) {
+            for _ in 0..400 {
+                if executor.runtime.warm.ready_len(&fixture_digest()) >= n {
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+            }
+            panic!(
+                "warm pool never reached {n} ready (have {})",
+                executor.runtime.warm.ready_len(&fixture_digest())
+            );
+        }
+
+        /// First invoke is a miss (pool empty) and schedules the fill; once filled the next invoke
+        /// is a hit that skips instantiation, and the pool tops itself back up afterwards.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn warm_pool_misses_first_then_hits_and_refills() {
+            let (h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-warm"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "penguintechinc.waddles.mx-warm",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("cold invoke ok");
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "miss")]),
+                1.0
+            );
+            wait_warm_ready(&executor, 2).await;
+
+            invoke_event(
+                &executor,
+                "penguintechinc.waddles.mx-warm",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("warm invoke ok");
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "hit")]),
+                1.0
+            );
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "miss")]),
+                1.0
+            );
+            // Every invoke (hit or miss) still records its on-path instantiate time.
+            assert_eq!(
+                h.count(
+                    "waddles_executor_instantiate_seconds",
+                    &[("app_id", "penguintechinc.waddles.mx-warm")]
+                ),
+                2.0
+            );
+            wait_warm_ready(&executor, 2).await; // refilled to the per-digest bound
+            assert!(
+                executor.runtime.warm.ready_len(&fixture_digest()) <= 2,
+                "bounded"
+            );
+        }
+
+        /// Isolation proof: a prewarmed guest is consumed by exactly one take -- two takes drain a
+        /// pool of two, a third misses, and nothing is ever handed back -- so no guest instance (and
+        /// no state in it) can serve two invocations, let alone two tenants.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn a_taken_warm_guest_is_never_returned_to_the_pool() {
+            let (_h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-once"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "penguintechinc.waddles.mx-once",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("seed invoke");
+            wait_warm_ready(&executor, 2).await;
+            assert!(executor.runtime.take_warm(&fixture_digest()).is_some());
+            assert!(executor.runtime.take_warm(&fixture_digest()).is_some());
+            assert!(
+                executor.runtime.take_warm(&fixture_digest()).is_none(),
+                "drained: nothing reused"
+            );
+            assert_eq!(executor.runtime.warm.ready_len(&fixture_digest()), 0);
+        }
+
+        /// Cross-tenant: two tenants share one digest (one compiled module, one warm pool). Both
+        /// are served from warm guests, each guest consumed by exactly one of them, and each call
+        /// is bound to ITS OWN app/scope at checkout.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn two_tenants_sharing_a_digest_each_consume_their_own_warm_guest() {
+            let (h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-ta",
+                    1,
+                    0,
+                ))
+                .await
+                .expect("load tenant A");
+            executor
+                .on_load(fixture_load_body_scoped(
+                    "penguintechinc.waddles.mx-tb",
+                    2,
+                    7,
+                ))
+                .await
+                .expect("load tenant B");
+            invoke_event(
+                &executor,
+                "penguintechinc.waddles.mx-ta",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("seed invoke");
+            wait_warm_ready(&executor, 2).await;
+            let before = executor.runtime.warm.ready_len(&fixture_digest());
+            assert_eq!(before, 2);
+            invoke_event(
+                &executor,
+                "penguintechinc.waddles.mx-ta",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("tenant A warm");
+            invoke_event(
+                &executor,
+                "penguintechinc.waddles.mx-tb",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("tenant B warm");
+            assert_eq!(
+                h.count("waddles_executor_warm_pool_total", &[("result", "hit")]),
+                2.0,
+                "both tenants were served from the pool, one guest each"
+            );
+            // A tenant that was never loaded for this digest cannot borrow a warm guest.
+            let (tx, _rx) = tokio::sync::mpsc::channel(crate::wire::WRITER_QUEUE_CAPACITY);
+            let conn = crate::wire::Connection::new(tx);
+            let stranger = executor
+                .on_invoke(
+                    InvokeBody {
+                        app_id: "penguintechinc.waddles.mx-stranger".to_string(),
+                        digest: format!("sha256:{}", "e".repeat(64)),
+                        export: ExportKind::Transform,
+                        payload: event("noop"),
+                        deadline_ms: 1000,
+                        trace: None,
+                    },
+                    3,
+                    conn,
+                )
+                .await;
+            assert!(stranger.is_err(), "unknown digest never reaches the pool");
+        }
+
+        /// Version change / unload: the last scope unloading evicts the digest's warm guests.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn unloading_the_last_scope_evicts_the_warm_pool() {
+            let (_h, executor) = executor_with_config(FixtureSource, warm_config(2));
+            executor
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-evict"))
+                .await
+                .expect("load");
+            invoke_event(
+                &executor,
+                "penguintechinc.waddles.mx-evict",
+                ExportKind::Transform,
+                event("noop"),
+                1000,
+            )
+            .await
+            .expect("seed invoke");
+            wait_warm_ready(&executor, 2).await;
+            executor
+                .on_unload(fixture_unload_body(
+                    "penguintechinc.waddles.mx-evict",
+                    1,
+                    0,
+                    &fixture_digest(),
+                ))
+                .await
+                .expect("unload");
+            assert_eq!(executor.runtime.warm.ready_len(&fixture_digest()), 0);
+            assert!(executor.runtime.take_warm(&fixture_digest()).is_none());
+        }
+
+        /// The kill switch forces the pool off even when a size is configured: every invoke is
+        /// cold, nothing is prewarmed, no warm-pool series is emitted.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+        async fn kill_switch_forces_the_warm_pool_off() {
+            let mut cfg = warm_config(2);
+            cfg.flag_disable_executor_warm_pool = true;
+            let (h, executor) = executor_with_config(FixtureSource, cfg);
+            assert!(!executor.runtime.warm.enabled());
+            executor
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-off"))
+                .await
+                .expect("load");
+            for _ in 0..2 {
+                invoke_event(
+                    &executor,
+                    "penguintechinc.waddles.mx-off",
+                    ExportKind::Transform,
+                    event("noop"),
+                    1000,
+                )
+                .await
+                .expect("cold invoke ok");
+            }
+            assert_eq!(h.count("waddles_executor_warm_pool_total", &[]), 0.0);
+            assert_eq!(executor.runtime.warm.total_ready(), 0);
+            assert_eq!(
+                h.count(
+                    "waddles_executor_instantiate_seconds",
+                    &[("app_id", "penguintechinc.waddles.mx-off")]
+                ),
+                2.0
             );
         }
 
@@ -3940,12 +5183,12 @@ mod tests {
             cfg.executor_fuel_limit_transform = u64::MAX;
             let (h, executor) = executor_with_config(FixtureSource, cfg);
             executor
-                .on_load(fixture_load_body("waddles.mx.busy"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-busy"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.busy",
+                "penguintechinc.waddles.mx-busy",
                 ExportKind::Transform,
                 event("busy-loop"),
                 200,
@@ -3956,7 +5199,10 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.busy"), ("limit", "timeout")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-busy"),
+                        ("limit", "timeout")
+                    ]
                 ),
                 1.0
             );
@@ -3964,7 +5210,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.busy"),
+                        ("app_id", "penguintechinc.waddles.mx-busy"),
                         ("result", "executor_deadline")
                     ]
                 ),
@@ -3974,7 +5220,7 @@ mod tests {
             let guest = h
                 .last(
                     "waddles_executor_guest_seconds",
-                    &[("app_id", "waddles.mx.busy")],
+                    &[("app_id", "penguintechinc.waddles.mx-busy")],
                 )
                 .expect("guest time recorded even when trapped");
             // The epoch deadline is enforced at `EPOCH_TICK` (50 ms) granularity
@@ -3999,12 +5245,12 @@ mod tests {
             cfg.executor_fuel_limit_transform = 5_000_000;
             let (h, executor) = executor_with_config(FixtureSource, cfg);
             executor
-                .on_load(fixture_load_body("waddles.mx.fuelhog"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-fuelhog"))
                 .await
                 .expect("load");
             let err = invoke_event(
                 &executor,
-                "waddles.mx.fuelhog",
+                "penguintechinc.waddles.mx-fuelhog",
                 ExportKind::Transform,
                 event("busy-loop"),
                 10_000,
@@ -4016,14 +5262,20 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.fuelhog"), ("limit", "fuel")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-fuelhog"),
+                        ("limit", "fuel")
+                    ]
                 ),
                 1.0
             );
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.fuelhog"), ("limit", "timeout")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-fuelhog"),
+                        ("limit", "timeout")
+                    ]
                 ),
                 0.0
             );
@@ -4031,7 +5283,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.fuelhog"),
+                        ("app_id", "penguintechinc.waddles.mx-fuelhog"),
                         ("result", "fuel_exhausted")
                     ]
                 ),
@@ -4043,7 +5295,7 @@ mod tests {
         async fn a_memory_hog_records_a_memory_trip() {
             crate::init_test_tracing();
             let (h, executor) = executor_with(FixtureSource);
-            let mut body = fixture_load_body("waddles.mx.hog");
+            let mut body = fixture_load_body("penguintechinc.waddles.mx-hog");
             body.limits = penguin_bundle_host::wire::LoadLimits {
                 timeout_ms: 10_000,
                 memory_mb: 8,
@@ -4051,7 +5303,7 @@ mod tests {
             executor.on_load(body).await.expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.hog",
+                "penguintechinc.waddles.mx-hog",
                 ExportKind::Transform,
                 event("memory-hog"),
                 10_000,
@@ -4061,7 +5313,10 @@ mod tests {
             assert_eq!(
                 h.count(
                     "waddles_executor_sandbox_trip_total",
-                    &[("app_id", "waddles.mx.hog"), ("limit", "memory")]
+                    &[
+                        ("app_id", "penguintechinc.waddles.mx-hog"),
+                        ("limit", "memory")
+                    ]
                 ),
                 1.0
             );
@@ -4071,12 +5326,12 @@ mod tests {
         async fn a_malformed_dispatch_payload_is_labeled_by_export_and_code() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.dispatch"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-dispatch"))
                 .await
                 .expect("load");
             invoke_event(
                 &executor,
-                "waddles.mx.dispatch",
+                "penguintechinc.waddles.mx-dispatch",
                 ExportKind::Dispatch,
                 serde_json::json!({"not": "an envelope"}),
                 1000,
@@ -4087,7 +5342,7 @@ mod tests {
                 h.count(
                     "waddles_executor_invoke_seconds",
                     &[
-                        ("app_id", "waddles.mx.dispatch"),
+                        ("app_id", "penguintechinc.waddles.mx-dispatch"),
                         ("export", "dispatch"),
                         ("result", "malformed_frame")
                     ]
@@ -4100,7 +5355,7 @@ mod tests {
         async fn a_disconnect_wipes_the_registry_and_zeroes_the_gauge() {
             let (h, executor) = executor_with(FixtureSource);
             executor
-                .on_load(fixture_load_body("waddles.mx.disconnect"))
+                .on_load(fixture_load_body("penguintechinc.waddles.mx-disconnect"))
                 .await
                 .expect("load");
             assert_eq!(
@@ -4122,6 +5377,686 @@ mod tests {
         fn export_labels_are_stable() {
             assert_eq!(export_label(&ExportKind::Transform), "transform");
             assert_eq!(export_label(&ExportKind::Dispatch), "dispatch");
+        }
+    }
+
+    /// Executor-scale phase 1 (T1/T5/T7/T9): shared runtime across stages,
+    /// signed `.cwasm` load with loud fallback, budget + LRU + lazy load, and
+    /// the new metrics actually emitting.
+    mod phase1_runtime {
+        use base64::engine::general_purpose::STANDARD as BASE64;
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer, SigningKey};
+        use serde_json::json;
+
+        use super::*;
+        use crate::metrics::test_support::Harness;
+        use crate::signing::signing_payload;
+
+        const APP_ID: &str = "penguintechinc.waddles.fixture-test-aot-app";
+        const VERSION: &str = "1";
+        const KEY_ID: &str = "k1";
+        const V2_WASM: &[u8] = include_bytes!("../tests/fixtures/stage_v2_fixture.wasm");
+
+        fn key() -> SigningKey {
+            SigningKey::from_bytes(&[21u8; 32])
+        }
+
+        fn precompile_signer() -> crate::precompile::PrecompileSigner {
+            crate::precompile::PrecompileSigner::from_seed("pc1", [33u8; 32]).expect("signer")
+        }
+
+        fn keyed_config() -> CliConfig {
+            let mut cfg = test_config();
+            cfg.bundle_signing_public_keys = Some(
+                json!({ KEY_ID: BASE64.encode(key().verifying_key().to_bytes()) }).to_string(),
+            );
+            cfg.precompile_signing_public_keys =
+                Some(json!({ "pc1": precompile_signer().public_key_b64() }).to_string());
+            cfg
+        }
+
+        fn digest_of(bytes: &[u8]) -> String {
+            format!("sha256:{:x}", Sha256::digest(bytes))
+        }
+
+        fn sidecar(digest: &str) -> Vec<u8> {
+            let payload = signing_payload(APP_ID, VERSION, digest, 1).expect("payload");
+            serde_json::to_vec(&json!({
+                "app_id": APP_ID, "version": VERSION, "digest": digest, "approval_id": 1,
+                "key_id": KEY_ID, "algorithm": "ed25519",
+                "signature": BASE64.encode(key().sign(&payload).to_bytes()),
+            }))
+            .expect("json")
+        }
+
+        /// Serves a component by key (`a`/`b`), its signed sidecar, and
+        /// optionally a precompiled artifact + signature.
+        struct AotSource {
+            wasm: Vec<u8>,
+            cwasm: Option<(Vec<u8>, Vec<u8>)>,
+        }
+
+        impl ComponentSource for AotSource {
+            async fn fetch(&self, _c: &str, _s: &str) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+                Ok((self.wasm.clone(), sidecar(&digest_of(&self.wasm))))
+            }
+            async fn fetch_precompiled(&self, key: &str) -> Result<Vec<u8>, ExecutorError> {
+                let (cwasm, sig) = self
+                    .cwasm
+                    .clone()
+                    .ok_or_else(|| ExecutorError::BucketFetch("404".to_string()))?;
+                Ok(if key.ends_with(".sig") { sig } else { cwasm })
+            }
+            async fn fetch_object(&self, _key: &str) -> Result<Vec<u8>, ExecutorError> {
+                Ok(sidecar(&digest_of(&self.wasm)))
+            }
+        }
+
+        /// Two digests served from one source, selected by component key.
+        struct TwoSource;
+
+        impl ComponentSource for TwoSource {
+            async fn fetch(&self, c: &str, _s: &str) -> Result<(Vec<u8>, Vec<u8>), ExecutorError> {
+                let wasm = if c == "b" { V2_WASM } else { FIXTURE_WASM };
+                Ok((wasm.to_vec(), b"{}".to_vec()))
+            }
+        }
+
+        fn load_body(wasm: &[u8], key: &str) -> LoadBody {
+            let mut b = fixture_load_body(APP_ID);
+            b.digest = digest_of(wasm);
+            b.component_key = key.to_string();
+            b
+        }
+
+        fn precompiled(runtime: &SharedRuntime, wasm: &[u8]) -> Vec<u8> {
+            Component::new(&runtime.engine, wasm)
+                .expect("compile")
+                .serialize()
+                .expect("serialize")
+        }
+
+        fn signed(runtime: &SharedRuntime, wasm: &[u8], cwasm: &[u8]) -> Vec<u8> {
+            precompile_signer()
+                .sign(&digest_of(wasm), runtime.engine_fingerprint(), cwasm)
+                .expect("sign")
+        }
+
+        /// T1: two stages on one runtime compile a shared digest exactly once
+        /// and hold ONE resident copy.
+        #[tokio::test]
+        async fn shared_runtime_compiles_once_per_digest_across_stages() -> Result<(), ExecutorError>
+        {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let process = Executor::with_runtime(&cfg, FixtureSource, Arc::clone(&runtime))?;
+            let action = Executor::with_runtime(&cfg, FixtureSource, Arc::clone(&runtime))?;
+            process
+                .on_load(fixture_load_body(APP_ID))
+                .await
+                .expect("process load");
+            action
+                .on_load(fixture_load_body(APP_ID))
+                .await
+                .expect("action load");
+            assert_eq!(runtime.compiles_total(), 1, "one compile for both stages");
+            assert_eq!(runtime.residency()?.0, 1, "one resident copy");
+            assert!(invoke_noop(&process, APP_ID, &fixture_digest())
+                .await
+                .is_ok());
+            assert!(invoke_noop(&action, APP_ID, &fixture_digest())
+                .await
+                .is_ok());
+            // Disconnect drops the registry, not the compiled code.
+            process.on_disconnect().await;
+            action.on_disconnect().await;
+            assert!(runtime.is_resident(&fixture_digest())?);
+            process
+                .on_load(fixture_load_body(APP_ID))
+                .await
+                .expect("reload");
+            assert_eq!(
+                runtime.compiles_total(),
+                1,
+                "reconnect re-load is a cache hit"
+            );
+            Ok(())
+        }
+
+        /// T5: a genuine signed `.cwasm` is deserialized (no JIT compile) and
+        /// the module is invokable.
+        #[tokio::test]
+        async fn verified_cwasm_loads_without_compiling() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signed(&runtime, FIXTURE_WASM, &cwasm);
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("aot load");
+            assert_eq!(runtime.aot_loads_total(), 1);
+            assert_eq!(runtime.compiles_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 0);
+            assert!(invoke_noop(&exec, APP_ID, &fixture_digest()).await.is_ok());
+            Ok(())
+        }
+
+        /// T5: a tampered artifact is REFUSED before deserialize, counted as a
+        /// fallback, and the module still loads via a JIT compile.
+        #[tokio::test]
+        async fn tampered_cwasm_is_refused_and_falls_back_to_compile() -> Result<(), ExecutorError>
+        {
+            let cfg = keyed_config();
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let runtime = SharedRuntime::with_metrics(&cfg, Arc::clone(&metrics))?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signed(&runtime, FIXTURE_WASM, &cwasm);
+            let mut tampered = cwasm;
+            let last = tampered.len() - 1;
+            tampered[last] ^= 0xff;
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((tampered, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("fallback load");
+            assert_eq!(
+                runtime.aot_loads_total(),
+                0,
+                "tampered bytes never deserialized"
+            );
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            assert_eq!(runtime.compiles_total(), 1);
+            assert!(
+                harness.count(
+                    "executor_precompile_fallback_total",
+                    &[("reason", "signature")]
+                ) >= 1.0
+            );
+            Ok(())
+        }
+
+        /// T5: an artifact signed by the BUNDLE key (not the dedicated
+        /// precompile key) is refused -- key separation.
+        #[tokio::test]
+        async fn bundle_key_cannot_sign_precompiled_artifacts() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let wrong = crate::precompile::PrecompileSigner::from_seed(KEY_ID, [21u8; 32])
+                .expect("signer")
+                .sign(&fixture_digest(), runtime.engine_fingerprint(), &cwasm)
+                .expect("sign");
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, wrong)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load");
+            assert_eq!(runtime.aot_loads_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            Ok(())
+        }
+
+        /// T5: an artifact signed for another engine fingerprint is refused.
+        #[tokio::test]
+        async fn foreign_engine_fingerprint_falls_back() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = precompile_signer()
+                .sign(&fixture_digest(), &"0".repeat(64), &cwasm)
+                .expect("sign");
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load");
+            assert_eq!(runtime.aot_loads_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            Ok(())
+        }
+
+        /// T5 kill switch: `waddles.disable-aot-precompile` ON never touches
+        /// the artifact path and never counts a fallback.
+        #[tokio::test]
+        async fn kill_switch_skips_aot_entirely() -> Result<(), ExecutorError> {
+            let mut cfg = keyed_config();
+            cfg.flag_disable_aot_precompile = true;
+            let runtime = SharedRuntime::new(&cfg)?;
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signed(&runtime, FIXTURE_WASM, &cwasm);
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(&cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load");
+            assert_eq!(runtime.aot_loads_total(), 0);
+            assert_eq!(runtime.aot_fallbacks_total(), 0);
+            assert_eq!(runtime.compiles_total(), 1);
+            Ok(())
+        }
+
+        /// Runs one AOT load against `cfg` serving `cwasm` + `sig`, returning
+        /// the runtime and the metric harness. The load MUST succeed (JIT
+        /// fallback) -- the artifact is never trusted, never fatal.
+        async fn load_with_artifact(
+            cfg: &CliConfig,
+            cwasm: Vec<u8>,
+            sig: Vec<u8>,
+        ) -> Result<(Arc<SharedRuntime>, Harness), ExecutorError> {
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let runtime = SharedRuntime::with_metrics(cfg, Arc::clone(&metrics))?;
+            let source = AotSource {
+                wasm: FIXTURE_WASM.to_vec(),
+                cwasm: Some((cwasm, sig)),
+            };
+            let exec = Executor::with_runtime(cfg, source, Arc::clone(&runtime))?;
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("a bad artifact must fall back to a compile, never fail the load");
+            Ok((runtime, harness))
+        }
+
+        /// Asserts the load fell back: nothing deserialized, one loud fallback
+        /// counted with `reason`, exactly one source compile.
+        fn assert_fell_back(runtime: &SharedRuntime, harness: &Harness, reason: &str) {
+            assert_eq!(runtime.aot_loads_total(), 0, "unverified bytes were loaded");
+            assert_eq!(runtime.aot_fallbacks_total(), 1);
+            assert_eq!(runtime.compiles_total(), 1);
+            assert!(
+                harness.count("executor_precompile_fallback_total", &[("reason", reason)]) >= 1.0,
+                "fallback metric with reason {reason} missing"
+            );
+        }
+
+        /// A genuine signed artifact for the fixture under `signer`.
+        fn genuine(
+            cfg: &CliConfig,
+            signer: &crate::precompile::PrecompileSigner,
+        ) -> (Vec<u8>, Vec<u8>) {
+            let runtime = SharedRuntime::new(cfg).expect("runtime");
+            let cwasm = precompiled(&runtime, FIXTURE_WASM);
+            let sig = signer
+                .sign(&fixture_digest(), runtime.engine_fingerprint(), &cwasm)
+                .expect("sign");
+            (cwasm, sig)
+        }
+
+        /// Regression (duplicate-load race): 160 concurrent loads of ONE cold
+        /// digest, arriving before, during and after the winner finishes
+        /// resolving, compile it exactly once and leave one resident copy.
+        /// Before the fix the single-flight cell was dropped BEFORE the module
+        /// was inserted into the cache, so a load landing in that gap saw
+        /// neither and compiled the digest again.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn one_hundred_sixty_concurrent_loads_of_one_digest_compile_exactly_once(
+        ) -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            let exec = Arc::new(Executor::with_runtime(
+                &cfg,
+                FixtureSource,
+                Arc::clone(&runtime),
+            )?);
+            let mut tasks = Vec::new();
+            for i in 0..160u64 {
+                let exec = Arc::clone(&exec);
+                tasks.push(tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis((i % 40) * 4)).await;
+                    exec.on_load(fixture_load_body_scoped(
+                        "penguintechinc.waddles.test-app",
+                        i32::try_from(i).unwrap_or(0) + 1,
+                        0,
+                    ))
+                    .await
+                }));
+            }
+            for task in tasks {
+                task.await.expect("task joined").expect("load succeeds");
+            }
+            assert_eq!(
+                runtime.compiles_total(),
+                1,
+                "160 concurrent loads of one digest must compile exactly once"
+            );
+            assert_eq!(runtime.residency()?.0, 1, "one resident copy");
+            assert!(
+                runtime.resolving.lock().await.is_empty(),
+                "single-flight map must drain"
+            );
+            Ok(())
+        }
+
+        /// Deterministic repro of the duplicate-load race: a second load that
+        /// arrives AFTER the winner finished compiling but BEFORE it inserted
+        /// the module into the cache (the window is widened to 300 ms) must
+        /// join the winner, not compile the digest again.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+        async fn load_landing_in_the_resolve_to_insert_window_does_not_recompile(
+        ) -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            runtime.resolve_gap_ms.store(300, Ordering::SeqCst);
+            let acquire = |runtime: Arc<SharedRuntime>| {
+                tokio::spawn(async move {
+                    let req = ModuleRequest::from_load(&load_body(FIXTURE_WASM, "a"));
+                    let metrics = Arc::clone(&runtime.metrics);
+                    runtime
+                        .acquire(
+                            &req,
+                            &FixtureSource,
+                            &PlatformPublicKeys::default(),
+                            &metrics,
+                        )
+                        .await
+                        .map(drop)
+                })
+            };
+            let first = acquire(Arc::clone(&runtime));
+            // Wait until the winner has compiled (it is now inside the gap).
+            let deadline = Instant::now() + Duration::from_secs(120);
+            while runtime.compiles_total() == 0 {
+                assert!(Instant::now() < deadline, "compile never finished");
+                tokio::time::sleep(Duration::from_millis(1)).await;
+            }
+            let second = acquire(Arc::clone(&runtime));
+            first.await.expect("joined").expect("first acquire");
+            second.await.expect("joined").expect("second acquire");
+            assert_eq!(
+                runtime.compiles_total(),
+                1,
+                "a load arriving between resolve and insert recompiled the digest"
+            );
+            Ok(())
+        }
+
+        /// Same invariant at the `acquire` seam, hammered repeatedly across
+        /// eviction-free rounds so the cell-removal/insert window is crossed
+        /// many times: every round (new runtime, 64 racing acquires) compiles
+        /// once.
+        #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+        async fn racing_acquires_never_recompile_a_digest() -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            for _ in 0..6 {
+                let runtime = SharedRuntime::new(&cfg)?;
+                let mut tasks = Vec::new();
+                for i in 0..64u64 {
+                    let runtime = Arc::clone(&runtime);
+                    tasks.push(tokio::spawn(async move {
+                        tokio::time::sleep(Duration::from_millis(i % 8)).await;
+                        let req = ModuleRequest::from_load(&load_body(FIXTURE_WASM, "a"));
+                        let metrics = Arc::clone(&runtime.metrics);
+                        runtime
+                            .acquire(
+                                &req,
+                                &FixtureSource,
+                                &PlatformPublicKeys::default(),
+                                &metrics,
+                            )
+                            .await
+                            .map(drop)
+                    }));
+                }
+                for task in tasks {
+                    task.await.expect("joined").expect("acquire");
+                }
+                assert_eq!(runtime.compiles_total(), 1);
+            }
+            Ok(())
+        }
+
+        /// T5: with no `PRECOMPILE_SIGNING_PUBLIC_KEYS` the AOT path is
+        /// refused (never deserializes), logged + counted, and compiles.
+        #[tokio::test]
+        async fn missing_precompile_key_falls_back_loudly() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let (cwasm, sig) = genuine(&cfg, &precompile_signer());
+            let mut no_keys = cfg.clone();
+            no_keys.precompile_signing_public_keys = None;
+            let (runtime, harness) = load_with_artifact(&no_keys, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: a malformed key variable does not crash the executor and does
+        /// not enable AOT -- it logs at ERROR and every load compiles.
+        #[tokio::test]
+        async fn malformed_precompile_key_config_disables_aot_not_the_executor(
+        ) -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let (cwasm, sig) = genuine(&cfg, &precompile_signer());
+            let mut bad = cfg.clone();
+            bad.precompile_signing_public_keys = Some("{not json".to_string());
+            let (runtime, harness) = load_with_artifact(&bad, cwasm.clone(), sig.clone()).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            let mut short = cfg.clone();
+            short.precompile_signing_public_keys =
+                Some(json!({ "pc1": BASE64.encode([1u8; 7]) }).to_string());
+            let (runtime, harness) = load_with_artifact(&short, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: a precompile key set that REUSES a bundle-approval public key
+        /// is rejected as a whole (key separation), even for an artifact whose
+        /// signature would verify under it.
+        #[tokio::test]
+        async fn precompile_key_reusing_a_bundle_key_is_rejected() -> Result<(), ExecutorError> {
+            let mut cfg = keyed_config();
+            cfg.precompile_signing_public_keys = Some(
+                json!({ "pc-shared": BASE64.encode(key().verifying_key().to_bytes()) }).to_string(),
+            );
+            let shared = crate::precompile::PrecompileSigner::from_seed("pc-shared", [21u8; 32])
+                .expect("signer");
+            let (cwasm, sig) = genuine(&cfg, &shared);
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: truncated / corrupted signature documents are refused.
+        #[tokio::test]
+        async fn truncated_and_corrupt_signatures_are_refused() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let (cwasm, sig) = genuine(&cfg, &precompile_signer());
+
+            // (a) the .sig object cut in half: not JSON.
+            let half = sig[..sig.len() / 2].to_vec();
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), half).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            // (b) empty .sig object.
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), Vec::new()).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            // (c) valid JSON whose Ed25519 signature is 63 bytes (truncated).
+            let mut doc: serde_json::Value = serde_json::from_slice(&sig).expect("sig json");
+            let raw = BASE64
+                .decode(doc["signature"].as_str().expect("sig field"))
+                .expect("b64");
+            doc["signature"] = json!(BASE64.encode(&raw[..63]));
+            let short = serde_json::to_vec(&doc).expect("json");
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), short).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            // (d) 64 bytes, one bit flipped.
+            let mut flipped = raw.clone();
+            flipped[0] ^= 0x01;
+            doc["signature"] = json!(BASE64.encode(&flipped));
+            let bad = serde_json::to_vec(&doc).expect("json");
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm, bad).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5: a signature naming a key id that is not configured is refused,
+        /// and one made for a DIFFERENT digest cannot be replayed.
+        #[tokio::test]
+        async fn unknown_key_id_and_swapped_digest_are_refused() -> Result<(), ExecutorError> {
+            let cfg = keyed_config();
+            let stranger =
+                crate::precompile::PrecompileSigner::from_seed("pc9", [44u8; 32]).expect("signer");
+            let (cwasm, sig) = genuine(&cfg, &stranger);
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm.clone(), sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+
+            let engine_fp = SharedRuntime::new(&cfg)?.engine_fingerprint().to_string();
+            let other = precompile_signer()
+                .sign(&digest_of(V2_WASM), &engine_fp, &cwasm)
+                .expect("sign");
+            let (runtime, harness) = load_with_artifact(&cfg, cwasm, other).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T5 rotation: both the current and the previous precompile key are
+        /// accepted while both are configured; once the previous key is
+        /// removed, artifacts it signed fall back to a compile.
+        #[tokio::test]
+        async fn key_rotation_accepts_current_and_previous() -> Result<(), ExecutorError> {
+            let previous =
+                crate::precompile::PrecompileSigner::from_seed("pc0", [11u8; 32]).expect("signer");
+            let current = precompile_signer();
+            let mut cfg = keyed_config();
+            cfg.precompile_signing_public_keys = Some(
+                json!({ "pc0": previous.public_key_b64(), "pc1": current.public_key_b64() })
+                    .to_string(),
+            );
+            for signer in [&previous, &current] {
+                let (cwasm, sig) = genuine(&cfg, signer);
+                let (runtime, _h) = load_with_artifact(&cfg, cwasm, sig).await?;
+                assert_eq!(
+                    runtime.aot_loads_total(),
+                    1,
+                    "key {} accepted",
+                    signer.key_id()
+                );
+                assert_eq!(runtime.compiles_total(), 0);
+                assert_eq!(runtime.aot_fallbacks_total(), 0);
+            }
+            // rotation finished: only the new key remains configured
+            let mut rotated = cfg.clone();
+            rotated.precompile_signing_public_keys =
+                Some(json!({ "pc1": current.public_key_b64() }).to_string());
+            let (cwasm, sig) = genuine(&cfg, &previous);
+            let (runtime, harness) = load_with_artifact(&rotated, cwasm, sig).await?;
+            assert_fell_back(&runtime, &harness, "signature");
+            Ok(())
+        }
+
+        /// T7: a module pinned by an in-flight invoke is never evicted, even
+        /// when the budget is exceeded; the cache goes over budget loudly
+        /// instead.
+        #[tokio::test]
+        async fn pinned_module_is_never_evicted_under_budget_pressure() -> Result<(), ExecutorError>
+        {
+            let cfg = test_config();
+            let runtime = SharedRuntime::new(&cfg)?;
+            runtime.set_budget_bytes(1);
+            let metrics = Arc::clone(&runtime.metrics);
+            let keys = PlatformPublicKeys::default();
+            let req_a = ModuleRequest::from_load(&load_body(FIXTURE_WASM, "a"));
+            let req_b = ModuleRequest::from_load(&load_body(V2_WASM, "b"));
+            let lease_a = runtime.acquire(&req_a, &TwoSource, &keys, &metrics).await?;
+            let lease_b = runtime.acquire(&req_b, &TwoSource, &keys, &metrics).await?;
+            assert!(
+                runtime.is_resident(&digest_of(FIXTURE_WASM))?,
+                "pinned A must survive B's insert"
+            );
+            assert_eq!(runtime.residency()?.0, 2, "over budget, nothing evictable");
+            drop(lease_b);
+            drop(lease_a);
+            // both idle now; the next insert may evict, but a hit never does
+            let again = runtime.acquire(&req_a, &TwoSource, &keys, &metrics).await?;
+            assert_eq!(runtime.compiles_total(), 2, "resident A is a cache hit");
+            drop(again);
+            Ok(())
+        }
+
+        /// T7: over budget, a new `Load` only verifies (lazy); its first call
+        /// makes it resident and evicts the idle LRU module, which in turn is
+        /// rebuilt on ITS next call. T9: the cache metrics emit.
+        #[tokio::test]
+        async fn budget_lazy_load_and_lru_eviction() -> Result<(), ExecutorError> {
+            let cfg = test_config();
+            let harness = Harness::new();
+            let metrics = Arc::new(ExecutorMetrics::new(&harness.meter()));
+            let runtime = SharedRuntime::with_metrics(&cfg, Arc::clone(&metrics))?;
+            runtime.set_budget_bytes(1);
+            let exec = Executor::with_runtime(&cfg, TwoSource, Arc::clone(&runtime))?;
+            let (da, db) = (digest_of(FIXTURE_WASM), digest_of(V2_WASM));
+
+            exec.on_load(load_body(FIXTURE_WASM, "a"))
+                .await
+                .expect("load a");
+            assert!(
+                runtime.is_resident(&da)?,
+                "first load is eager (headroom at 0)"
+            );
+            exec.on_load(load_body(V2_WASM, "b")).await.expect("load b");
+            assert!(
+                !runtime.is_resident(&db)?,
+                "no headroom: verified, not compiled"
+            );
+            assert_eq!(runtime.compiles_total(), 1);
+
+            let _ = invoke_noop(&exec, APP_ID, &db).await;
+            assert!(runtime.is_resident(&db)?, "first call loads it");
+            assert!(!runtime.is_resident(&da)?, "idle LRU module evicted");
+            assert_eq!(runtime.compiles_total(), 2);
+
+            assert!(
+                invoke_noop(&exec, APP_ID, &da).await.is_ok(),
+                "evicted module reloads"
+            );
+            assert_eq!(runtime.compiles_total(), 3);
+            assert!(harness.count("executor_module_evictions_total", &[]) >= 2.0);
+            assert!(
+                harness.count("executor_load_duration_seconds", &[("source", "compile")]) >= 3.0
+            );
+            assert!(harness.last("executor_loaded_modules", &[]).is_some());
+            assert!(harness.last("executor_memory_bytes", &[]).is_some());
+            Ok(())
+        }
+
+        /// `executor_id` resolves from `EXECUTOR_ID` and is sent in `hello`;
+        /// StatefulSet mode without an identity fails loudly.
+        #[tokio::test]
+        async fn executor_id_is_sent_in_hello_and_required_in_statefulset_mode(
+        ) -> Result<(), ExecutorError> {
+            let mut cfg = test_config();
+            cfg.executor_id = Some("waddlebot-svc-bundles-executor-0".to_string());
+            let exec = Executor::new(&cfg, UnimplementedBucketSource)?;
+            assert_eq!(
+                exec.hello(true, "gvisor").executor_id.as_deref(),
+                Some("waddlebot-svc-bundles-executor-0")
+            );
+            cfg.validate_executor_id()?;
+            if std::env::var("POD_NAME").is_err() {
+                let mut strict = test_config();
+                strict.executor_require_id = true;
+                assert!(strict.validate_executor_id().is_err());
+            }
+            Ok(())
         }
     }
 }

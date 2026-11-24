@@ -17,11 +17,34 @@ describe('toAuthView', () => {
     }
   });
 
+  it('wraps isCommunityAdmin, passing the community id and treating anything but true as false', () => {
+    const isCommunityAdmin = vi.fn((id: string) => id === '00000007-0000-4000-8000-000000000000');
+    const view = toAuthView({ isCommunityAdmin });
+    expect(view.isCommunityAdmin('00000007-0000-4000-8000-000000000000')).toBe(true);
+    expect(view.isCommunityAdmin('00000008-0000-4000-8000-000000000000')).toBe(false);
+    expect(isCommunityAdmin).toHaveBeenCalledWith('00000007-0000-4000-8000-000000000000');
+    expect(toAuthView({ isCommunityAdmin: () => 'yes' }).isCommunityAdmin('00000001-0000-4000-8000-000000000000')).toBe(false);
+    expect(toAuthView({}).isCommunityAdmin('00000007-0000-4000-8000-000000000000')).toBe(false);
+  });
+
   it('refreshUser calls the context function and is a no-op when absent', async () => {
     const refresh = vi.fn().mockResolvedValue(undefined);
     await toAuthView({ refreshUser: refresh }).refreshUser();
     expect(refresh).toHaveBeenCalledTimes(1);
     await expect(toAuthView({}).refreshUser()).resolves.toBeUndefined();
+  });
+});
+
+describe('toAuthView communityTier', () => {
+  it('wraps the context function and clamps unknown values to Free', () => {
+    const view = toAuthView({ communityTier: (id: string) => (id === '00000007-0000-4000-8000-000000000000' ? 3 : id === '00000008-0000-4000-8000-000000000000' ? 2 : 42) });
+    expect(view.communityTier('00000007-0000-4000-8000-000000000000')).toBe(1);
+    expect(view.communityTier('00000008-0000-4000-8000-000000000000')).toBe(2);
+    expect(view.communityTier('00000009-0000-4000-8000-000000000000')).toBe(1);
+  });
+
+  it('defaults to Free when the context has no communityTier', () => {
+    expect(toAuthView({}).communityTier('00000007-0000-4000-8000-000000000000')).toBe(1);
   });
 });
 

@@ -1,13 +1,13 @@
 """Register + tenant-wide activate the social music app bundle.
 
-Registers `waddles.social.music.default` in `app_catalog` -- process
+Registers `penguintechinc.waddles.music-pipeline` in `app_catalog` -- process
 stage `bundles.social_music_process:transform` parses `!sr`/
 `!songrequest`, action stage `bundles.social_music_action:
 enqueue_song_request` enqueues into the hub-api Music Station
 (`hub_api/blueprints/v1/community_music_queue.py`) via the service-key-
 gated internal endpoint added alongside this migration, then replies
 in-place. Without this row, svc_process/svc_action never subscribe to
-`waddles.social.music.default`'s `:process`/`:action` Valkey keys and
+`penguintechinc.waddles.music-pipeline`'s `:process`/`:action` Valkey keys and
 `!sr`/`!songrequest` -- despite being wired into `bot_process.py`'s
 command router -- is never actually dispatched. Mirrors
 `0007_forum_catalog`'s exact shape (tenant-wide activation via
@@ -25,7 +25,7 @@ down_revision = "0008_moderation_config"
 branch_labels = None
 depends_on = None
 
-APP_ID = "waddles.social.music.default"
+APP_ID = "penguintechinc.waddles.music-pipeline"
 TENANT_SLUG = "global"
 
 
@@ -44,7 +44,7 @@ def upgrade() -> None:
             '{APP_ID}',
             '1.0.0',
             'social',
-            'waddles.social.music',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,

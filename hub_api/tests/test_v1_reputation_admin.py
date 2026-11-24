@@ -29,7 +29,9 @@ from services.schema import (
     bind_erasure_reputation_tables,
     bind_reputation_policy_tables,
 )
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 OTHER_TENANT = "other-tenant"
 
@@ -108,10 +110,11 @@ def rep_db(tmp_path: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
 def client(rep_db: Any) -> Any:
     app = Quart(__name__)
     QuartSchema(app)
-    app.register_blueprint(admin_bp)
-    app.register_blueprint(tenant_reputation_bp)
     app.config["dal"] = rep_db.dal
     app.config["async_dal"] = rep_db
+    install_community_ids(app, rep_db.dal)
+    app.register_blueprint(admin_bp)
+    app.register_blueprint(tenant_reputation_bp)
     return app.test_client()
 
 
@@ -142,7 +145,11 @@ def _member(
     _user(dal, n) if dal(dal.hub_users.id == n).select().first() is None else None
     scopes = ["community:manage_members"] if admin else ["community:read"]
     role_id = dal.community_roles.insert(
-        community_id=community_id, name=f"role{n}", base_claims={"scopes": scopes}
+        community_id=community_id,
+        name=f"role{n}",
+        is_system=admin,
+        role_kind=1 if admin else 0,
+        base_claims={"scopes": scopes},
     )
     dal.community_members.insert(
         community_id=community_id,
@@ -171,7 +178,7 @@ def _h(user_id: int, *, scope: str = "", tenant: str = TENANT_SLUG) -> dict[str,
 
 
 @pytest.fixture
-def seeded(rep_db: Any) -> dict[str, int]:
+def seeded(rep_db: Any) -> dict[str, Any]:
     """Community with admin user 1 and plain member user 2; a second same-tenant community."""
     dal = rep_db.dal
     c1 = _community(dal, name="c1")
@@ -179,7 +186,7 @@ def seeded(rep_db: Any) -> dict[str, int]:
     _member(dal, c1, 1, admin=True)
     _member(dal, c1, 2)
     _member(dal, c2, 3, admin=True)  # admin of the OTHER community only
-    return {"c1": c1, "c2": c2}
+    return {"c1": c1, "c2": c2, "c1_pid": public_id(rep_db, c1), "c2_pid": public_id(rep_db, c2)}
 
 
 CONFIG_FIELDS = {
@@ -198,9 +205,9 @@ CONFIG_FIELDS = {
 
 class TestCommunityConfig:
     async def test_defaults_are_off_with_ordered_floors_and_exact_fields(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        r = await client.get(f"/api/v1/admin/{seeded['c1']}/reputation/config", headers=_h(1))
+        r = await client.get(f"/api/v1/admin/{seeded['c1_pid']}/reputation/config", headers=_h(1))
         assert r.status_code == 200
         body = await r.get_json()
         assert set(body) == CONFIG_FIELDS
@@ -213,9 +220,9 @@ class TestCommunityConfig:
         assert (body["scoreMin"], body["scoreMax"], body["scoreDefault"]) == (300, 850, 600)
 
     async def test_community_admin_can_set_and_it_persists(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        url = f"/api/v1/admin/{seeded['c1']}/reputation/config"
+        url = f"/api/v1/admin/{seeded['c1_pid']}/reputation/config"
         r = await client.put(
             url,
             headers=_h(1),
@@ -238,9 +245,9 @@ class TestCommunityConfig:
         assert again["softBanFloor"] == 520 and again["softBanEnabled"] is True
 
     async def test_partial_update_keeps_other_fields(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        url = f"/api/v1/admin/{seeded['c1']}/reputation/config"
+        url = f"/api/v1/admin/{seeded['c1_pid']}/reputation/config"
         await client.put(url, headers=_h(1), json={"hardBanEnabled": True})
         body = await (await client.get(url, headers=_h(1))).get_json()
         assert body["hardBanEnabled"] is True and body["hardBanFloor"] == 400
@@ -256,52 +263,102 @@ class TestCommunityConfig:
         ],
     )
     async def test_out_of_range_or_misordered_is_400(
-        self, client: Any, seeded: dict[str, int], payload: dict[str, int]
+        self, client: Any, seeded: dict[str, Any], payload: dict[str, int]
     ) -> None:
         r = await client.put(
-            f"/api/v1/admin/{seeded['c1']}/reputation/config", headers=_h(1), json=payload
+            f"/api/v1/admin/{seeded['c1_pid']}/reputation/config", headers=_h(1), json=payload
         )
         assert r.status_code == 400
 
-    async def test_plain_member_is_403(self, client: Any, seeded: dict[str, int]) -> None:
+    async def test_plain_member_is_403(self, client: Any, seeded: dict[str, Any]) -> None:
         for method in ("get", "put"):
             kw: dict[str, Any] = {"json": {"softBanEnabled": True}} if method == "put" else {}
             r = await getattr(client, method)(
-                f"/api/v1/admin/{seeded['c1']}/reputation/config", headers=_h(2), **kw
+                f"/api/v1/admin/{seeded['c1_pid']}/reputation/config", headers=_h(2), **kw
             )
             assert r.status_code == 403
 
+    async def test_rejected_requests_are_logged_not_silently_swallowed(
+        self, client: Any, seeded: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Every ApiError the handlers turn into an error response leaves a log record (gate)."""
+        caplog.set_level("WARNING", logger="blueprints.v1.admin")
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation"
+        assert (await client.get(f"{base}/config", headers=_h(2))).status_code == 403
+        assert (
+            await client.put(f"{base}/config", headers=_h(2), json={"softBanEnabled": True})
+        ).status_code == 403
+        assert (await client.get(f"{base}/at-risk", headers=_h(2))).status_code == 403
+        assert (await client.get(f"{base}/history", headers=_h(2))).status_code == 403
+        assert (await client.get(f"{base}/soft-bans", headers=_h(2))).status_code == 403
+        assert (
+            await client.put(f"{base}/soft-bans/{uid(2)}", headers=_h(2), json={})
+        ).status_code == 403
+        assert (await client.delete(f"{base}/soft-bans/{uid(2)}", headers=_h(2))).status_code == 403
+        messages = [r.getMessage() for r in caplog.records if r.name == "blueprints.v1.admin"]
+        expected = (
+            "get_reputation_config",
+            "put_reputation_config",
+            "get_reputation_at_risk",
+            "get_reputation_history",
+            "list_reputation_soft_bans",
+            "put_reputation_soft_ban",
+            "delete_reputation_soft_ban",
+        )
+        for name in expected:
+            hits = [m for m in messages if m.startswith(f"{name} rejected: code=")]
+            assert len(hits) == 1, f"{name}: expected one rejection log record, got {messages}"
+            assert "status=403" in hits[0]
+
+    async def test_invalid_expires_at_is_400_and_logged(
+        self, client: Any, seeded: dict[str, Any], caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("WARNING", logger="blueprints.v1.admin")
+        r = await client.put(
+            f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans/{uid(2)}",
+            headers=_h(1),
+            json={"expiresAt": "not-a-date"},
+        )
+        assert r.status_code == 400
+        assert any(
+            "put_reputation_soft_ban invalid expiresAt: ValueError" in rec.getMessage()
+            for rec in caplog.records
+        )
+        assert "not-a-date" not in caplog.text  # user input never reaches the log
+
     async def test_admin_of_another_community_is_403(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.put(
-            f"/api/v1/admin/{seeded['c1']}/reputation/config",
+            f"/api/v1/admin/{seeded['c1_pid']}/reputation/config",
             headers=_h(3),
             json={"softBanEnabled": True},
         )
         assert r.status_code == 403
 
     async def test_other_tenant_community_is_404(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         foreign = _community(rep_db.dal, OTHER_TENANT, "foreign")
-        r = await client.get(f"/api/v1/admin/{foreign}/reputation/config", headers=_h(1))
+        r = await client.get(
+            f"/api/v1/admin/{public_id(rep_db, foreign)}/reputation/config", headers=_h(1)
+        )
         assert r.status_code == 404
 
-    async def test_unauthenticated_is_401(self, client: Any, seeded: dict[str, int]) -> None:
-        r = await client.get(f"/api/v1/admin/{seeded['c1']}/reputation/config")
+    async def test_unauthenticated_is_401(self, client: Any, seeded: dict[str, Any]) -> None:
+        r = await client.get(f"/api/v1/admin/{seeded['c1_pid']}/reputation/config")
         assert r.status_code == 401
 
 
 class TestSoftBans:
     async def test_manual_set_list_clear(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
-        assert (await client.put(f"{base}/2", headers=_h(1), json={})).status_code == 200
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
+        assert (await client.put(f"{base}/{uid(2)}", headers=_h(1), json={})).status_code == 200
         listed = await (await client.get(base, headers=_h(1))).get_json()
         assert [(b["userId"], b["reason"], b["setByType"]) for b in listed["softBans"]] == [
-            ("2", "manual", "admin")
+            (uid(2), "manual", "admin")
         ]
         assert set(listed["softBans"][0]) == {
             "userId",
@@ -311,12 +368,12 @@ class TestSoftBans:
             "setAt",
             "expiresAt",
         }
-        assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 200
-        assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 404
+        assert (await client.delete(f"{base}/{uid(2)}", headers=_h(1))).status_code == 200
+        assert (await client.delete(f"{base}/{uid(2)}", headers=_h(1))).status_code == 404
         assert (await (await client.get(base, headers=_h(1))).get_json())["softBans"] == []
 
     async def test_floor_set_soft_ban_is_listed_as_floor_and_admin_can_clear_it(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         dal = rep_db.dal
         dal.bundle_reputation_soft_bans.insert(
@@ -328,62 +385,64 @@ class TestSoftBans:
             set_at=datetime.now(UTC),
         )
         dal.commit()
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         listed = await (await client.get(base, headers=_h(1))).get_json()
         assert listed["softBans"][0]["reason"] == "floor"
         assert listed["softBans"][0]["setByType"] == "system"
-        assert (await client.delete(f"{base}/2", headers=_h(1))).status_code == 200
+        assert (await client.delete(f"{base}/{uid(2)}", headers=_h(1))).status_code == 200
 
     async def test_expired_bans_are_not_listed_and_past_expiry_is_400(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
         past = (datetime.now(UTC) - timedelta(days=1)).isoformat()
         assert (
-            await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": past})
+            await client.put(f"{base}/{uid(2)}", headers=_h(1), json={"expiresAt": past})
         ).status_code == 400
         future = (datetime.now(UTC) + timedelta(days=1)).isoformat()
         assert (
-            await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": future})
+            await client.put(f"{base}/{uid(2)}", headers=_h(1), json={"expiresAt": future})
         ).status_code == 200
         assert (
-            await client.put(f"{base}/2", headers=_h(1), json={"expiresAt": "nope"})
+            await client.put(f"{base}/{uid(2)}", headers=_h(1), json={"expiresAt": "nope"})
         ).status_code == 400
 
-    async def test_unknown_member_is_404(self, client: Any, seeded: dict[str, int]) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
-        assert (await client.put(f"{base}/999", headers=_h(1), json={})).status_code == 404
+    async def test_unknown_member_is_404(self, client: Any, seeded: dict[str, Any]) -> None:
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
+        assert (await client.put(f"{base}/{uid(999)}", headers=_h(1), json={})).status_code == 404
 
     async def test_member_and_foreign_admin_are_403(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
-        base = f"/api/v1/admin/{seeded['c1']}/reputation/soft-bans"
-        for uid in (2, 3):
-            assert (await client.put(f"{base}/2", headers=_h(uid), json={})).status_code == 403
-            assert (await client.delete(f"{base}/2", headers=_h(uid))).status_code == 403
-            assert (await client.get(base, headers=_h(uid))).status_code == 403
+        base = f"/api/v1/admin/{seeded['c1_pid']}/reputation/soft-bans"
+        for caller in (2, 3):
+            assert (
+                await client.put(f"{base}/{uid(2)}", headers=_h(caller), json={})
+            ).status_code == 403
+            assert (await client.delete(f"{base}/{uid(2)}", headers=_h(caller))).status_code == 403
+            assert (await client.get(base, headers=_h(caller))).status_code == 403
 
 
 class TestAtRiskAndHistory:
     async def test_at_risk_lists_members_below_threshold_with_floor_flags(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         dal = rep_db.dal
         _member(dal, seeded["c1"], 10, score=380)  # below hard (400) and soft (550)
         _member(dal, seeded["c1"], 11, score=570)  # below at-risk (600) only
         _member(dal, seeded["c1"], 12, score=700)  # fine
-        r = await client.get(f"/api/v1/admin/{seeded['c1']}/reputation/at-risk", headers=_h(1))
+        r = await client.get(f"/api/v1/admin/{seeded['c1_pid']}/reputation/at-risk", headers=_h(1))
         members = (await r.get_json())["members"]
         assert [
             (m["userId"], m["score"], m["belowSoftBanFloor"], m["belowHardBanFloor"])
             for m in members
         ] == [
-            ("10", 380, True, True),
-            ("11", 570, False, False),
+            (uid(10), 380, True, True),
+            (uid(11), 570, False, False),
         ]
 
     async def test_history_lists_newest_first_filters_and_hides_internal_actor_ids(
-        self, client: Any, rep_db: Any, seeded: dict[str, int]
+        self, client: Any, rep_db: Any, seeded: dict[str, Any]
     ) -> None:
         dal = rep_db.dal
         admin_uuid = _uuid(900)
@@ -404,7 +463,7 @@ class TestAtRiskAndHistory:
                 reason_code_id=100,
             )
         dal.commit()
-        url = f"/api/v1/admin/{seeded['c1']}/reputation/history"
+        url = f"/api/v1/admin/{seeded['c1_pid']}/reputation/history"
         entries = (await (await client.get(url, headers=_h(1))).get_json())["entries"]
         assert [e["delta"] for e in entries] == [-20, 5]
         assert entries[0]["actorType"] == "admin" and admin_uuid not in str(entries)
@@ -420,7 +479,9 @@ class TestAtRiskAndHistory:
             "sourceEvent",
             "occurredAt",
         }
-        only = (await (await client.get(f"{url}?userId=2", headers=_h(1))).get_json())["entries"]
+        only = (await (await client.get(f"{url}?userId={uid(2)}", headers=_h(1))).get_json())[
+            "entries"
+        ]
         assert len(only) == 2
         assert (await client.get(f"{url}?userId=abc", headers=_h(1))).status_code == 400
         assert (await client.get(url, headers=_h(2))).status_code == 403
@@ -431,6 +492,7 @@ TENANT_FIELDS = {
     "tenantAutoBanEnabled",
     "tenantAutoBanFloor",
     "tenantAtRiskThreshold",
+    "liftRearmDrop",
     "updatedAt",
 }
 
@@ -440,16 +502,17 @@ class TestTenantConfig:
         return f"/api/v1/tenant/{slug}/reputation/config"
 
     async def test_defaults_off_floor_350_exact_fields(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.get(self._url(), headers=_h(1, scope="tenant:admin"))
         body = await r.get_json()
         assert r.status_code == 200 and set(body) == TENANT_FIELDS
         assert body["tenantAutoBanEnabled"] is False
         assert (body["tenantAutoBanFloor"], body["tenantAtRiskThreshold"]) == (350, 450)
+        assert body["liftRearmDrop"] == 5, "default: one maximal activity step"
 
     async def test_tenant_admin_sets_and_it_persists(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.put(
             self._url(),
@@ -465,7 +528,7 @@ class TestTenantConfig:
         assert body["tenantAutoBanEnabled"] is True and body["tenantAutoBanFloor"] == 400
 
     async def test_community_admin_cannot_set_the_tenant_floor(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         # user 1 administers community c1 but holds no tenant:admin scope
         r = await client.put(self._url(), headers=_h(1), json={"tenantAutoBanFloor": 320})
@@ -473,7 +536,7 @@ class TestTenantConfig:
         assert (await client.get(self._url(), headers=_h(1))).status_code == 403
 
     async def test_slug_must_match_the_jwt_tenant(
-        self, client: Any, seeded: dict[str, int]
+        self, client: Any, seeded: dict[str, Any]
     ) -> None:
         r = await client.put(
             self._url(OTHER_TENANT),
@@ -491,10 +554,60 @@ class TestTenantConfig:
         ],
     )
     async def test_out_of_range_is_400(
-        self, client: Any, seeded: dict[str, int], payload: dict[str, int]
+        self, client: Any, seeded: dict[str, Any], payload: dict[str, int]
     ) -> None:
         r = await client.put(self._url(), headers=_h(1, scope="tenant:admin"), json=payload)
         assert r.status_code == 400
+
+    async def test_lift_rearm_drop_is_tenant_admin_settable_and_persists(
+        self, client: Any, seeded: dict[str, Any]
+    ) -> None:
+        h = _h(1, scope="tenant:admin")
+        r = await client.put(self._url(), headers=h, json={"liftRearmDrop": 12})
+        assert r.status_code == 200 and (await r.get_json())["liftRearmDrop"] == 12
+        body = await (await client.get(self._url(), headers=h)).get_json()
+        assert body["liftRearmDrop"] == 12
+        # A PUT that omits it leaves it unchanged.
+        await client.put(self._url(), headers=h, json={"tenantAutoBanFloor": 340})
+        again = await (await client.get(self._url(), headers=h)).get_json()
+        assert again["liftRearmDrop"] == 12 and again["tenantAutoBanFloor"] == 340
+
+    @pytest.mark.parametrize("value", [0, -3, 101, 5.5, "abc", None.__class__.__name__])
+    async def test_lift_rearm_drop_out_of_range_or_wrong_type_is_400(
+        self, client: Any, seeded: dict[str, Any], value: Any
+    ) -> None:
+        r = await client.put(
+            self._url(), headers=_h(1, scope="tenant:admin"), json={"liftRearmDrop": value}
+        )
+        assert r.status_code in {400, 422}
+        body = await (await client.get(self._url(), headers=_h(1, scope="tenant:admin"))).get_json()
+        assert body["liftRearmDrop"] == 5, "a rejected value changes nothing"
+
+    async def test_a_community_admin_cannot_set_lift_rearm_drop(
+        self, client: Any, seeded: dict[str, Any]
+    ) -> None:
+        r = await client.put(self._url(), headers=_h(1), json={"liftRearmDrop": 50})
+        assert r.status_code == 403
+
+    def test_the_tenant_config_write_is_audited_as_a_reputation_policy_change(self) -> None:
+        from services.audit_events import (
+            AuditAction,
+            RequestFacts,
+            classify_request,
+        )
+
+        got = classify_request(
+            RequestFacts(
+                method="PUT",
+                rule="/api/v1/tenant/<tenant_slug>/reputation/config",
+                status_code=200,
+                scope_checked=True,
+                denied=False,
+                authenticated=True,
+            )
+        )
+        assert got is not None
+        assert got.action == AuditAction.ADMIN_REPUTATION_POLICY_CHANGED
 
     async def test_unauthenticated_is_401(self, client: Any) -> None:
         assert (await client.get(self._url())).status_code == 401
@@ -576,3 +689,16 @@ class TestApplyBoundary:
         assert err.value.status_code == 403
         with pytest.raises(reputation_svc.ApiError):
             await reputation_svc._admin_actor(rep_db, rep_db.dal, 424242)  # noqa: SLF001
+
+
+def test_actor_type_logs_an_unparseable_actor_instead_of_hiding_it(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """A stored actor that is neither `system:*` nor a UUID is reported `unknown` AND logged."""
+    caplog.set_level("DEBUG", logger="services.community_reputation_service")
+    assert reputation_svc._actor_type("not-a-uuid-or-system") == "unknown"  # noqa: SLF001
+    assert any("neither system:* nor a UUID: ValueError" in r.getMessage() for r in caplog.records)
+    assert "not-a-uuid-or-system" not in caplog.text  # the stored actor value is never logged
+    assert reputation_svc._actor_type("system:floor") == "system"  # noqa: SLF001
+    assert reputation_svc._actor_type(_uuid(7)) == "admin"  # noqa: SLF001
+    assert reputation_svc._actor_type(None) == "unknown"  # noqa: SLF001

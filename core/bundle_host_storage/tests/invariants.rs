@@ -28,9 +28,9 @@ impl AuditSink for FailingSink {
     }
 }
 
-const OWNER: &str = "waddles.harness.media";
-const CONSUMER: &str = "waddles.app.clips";
-const OTHER: &str = "waddles.app.other";
+const OWNER: &str = "penguintechinc.waddles.harness-media";
+const CONSUMER: &str = "penguintechinc.waddles.app-clips";
+const OTHER: &str = "penguintechinc.waddles.app-other";
 
 fn scope(app: &str, tenant: u64, community: u64, grants: &[&str]) -> StorageScope {
     StorageScope {
@@ -62,10 +62,10 @@ fn consumer_scope() -> StorageScope {
         1,
         7,
         &[
-            "storage.read:waddles.harness.media",
-            "storage.list:waddles.harness.media",
-            "storage.delete:waddles.harness.media",
-            "storage.write:waddles.harness.media",
+            "storage.read:penguintechinc.waddles.harness-media",
+            "storage.list:penguintechinc.waddles.harness-media",
+            "storage.delete:penguintechinc.waddles.harness-media",
+            "storage.write:penguintechinc.waddles.harness-media",
         ],
     )
 }
@@ -290,14 +290,14 @@ async fn cross_writer_object_is_auto_tagged_and_free_tags_refused() {
 async fn cross_tenant_and_community_isolated() {
     let (h, _, _) = rig();
     seed(&h, "k.mp4", &[&format!("app-bundle:{CONSUMER}")]).await;
-    for (t, c) in [(2u64, 7u64), (1, 8), (1, 0)] {
+    for (t, c) in [(2u64, 7u64), (1, 8), (1, 9)] {
         let s = scope(
             CONSUMER,
             t,
             c,
             &[
-                "storage.read:waddles.harness.media",
-                "storage.list:waddles.harness.media",
+                "storage.read:penguintechinc.waddles.harness-media",
+                "storage.list:penguintechinc.waddles.harness-media",
             ],
         );
         assert_eq!(
@@ -874,8 +874,8 @@ impl AuditSink for GateSink {
     }
 }
 
-const FLOODER: &str = "waddles.app.flood";
-const VICTIM: &str = "waddles.app.victim";
+const FLOODER: &str = "penguintechinc.waddles.app-flood";
+const VICTIM: &str = "penguintechinc.waddles.app-victim";
 
 #[tokio::test]
 async fn flooder_cannot_drop_other_principals_records_and_is_refused_then_summarised() {

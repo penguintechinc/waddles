@@ -5,7 +5,7 @@
 
 const WebSocket = require('ws');
 
-const WS_URL = process.env.WS_URL || 'ws://localhost:8060';
+const WS_URL = process.env.WS_URL || 'ws://localhost:8204';
 
 describe('WebSocket Integration Tests', () => {
   let ws;

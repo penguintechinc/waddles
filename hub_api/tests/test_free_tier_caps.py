@@ -19,6 +19,7 @@ import flask_core.feature_flags as feature_flags_module
 import pytest
 from flask_core.entitlement import EntitlementClient
 from flask_core.feature_registry import FeatureRegistry
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -32,6 +33,7 @@ from services.global_identity import (
     revoke_global_admin_sync,
 )
 from tests.conftest import TENANT_SLUG, make_user_token, seed_super_admin
+from tests.user_ids import uid
 
 KILL_SWITCH = free_tier_caps.FLAG_DISABLE_FREE_TIER_CAPS
 
@@ -73,7 +75,6 @@ def gates(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeFlagGate, FakeLicenseGat
         flag_gate=flag,
         license_gate=lic,
         tier_requirements={},
-        community_tier_source=None,
         feature_registry=FeatureRegistry(),
     )
     monkeypatch.setattr(feature_flags_module, "get_entitlement_client", lambda: client)
@@ -81,13 +82,19 @@ def gates(monkeypatch: pytest.MonkeyPatch) -> tuple[FakeFlagGate, FakeLicenseGat
 
 
 @pytest.fixture
-def app(admin_db: Any) -> Quart:
+def app(admin_db: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
+    async def _no_key_store(dal: Any, service: Any, *, tenant_id: int, slug: str) -> None:
+        """Key provisioning needs the Postgres key store (see test_tenant_key_provisioning)."""
+
+    monkeypatch.setattr("blueprints.v1.superadmin.provision_new_tenant", _no_key_store)
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
     quart_app.register_blueprint(superadmin_bp)
     quart_app.register_blueprint(user_management_bp)
     quart_app.config["dal"] = admin_db.dal
     quart_app.config["async_dal"] = admin_db
+    quart_app.config["envelope_runtime"] = type("R", (), {"service": object()})()
+    quart_app.config["install_dal"] = object()
     return quart_app
 
 
@@ -138,7 +145,7 @@ def _seed_user(admin_db: Any, email: str) -> int:
 
 async def _grant(client: Any, user_id: int, *, caller: int = 1) -> Any:
     return await client.post(
-        f"/api/v1/superadmin/users/{user_id}/super-admin-role",
+        f"/api/v1/superadmin/users/{uid(user_id)}/super-admin-role",
         headers=_headers(caller),
         json={"grant": True},
     )
@@ -225,7 +232,25 @@ class TestCommunityAtomicity:
     ) -> None:
         assert (await _post_community(client, "first")).status_code == 201
         members = admin_db.dal(admin_db.dal.community_members.id > 0).select()
-        assert [(m.user_id, m.role) for m in members] == [("1", "owner")]
+        assert [(m.user_id, m.role) for m in members] == [("1", "community-owner")]
+
+    @pytest.mark.parametrize("bad_role", ["owner", "admin", "Community-Owner", ""])
+    async def test_non_canonical_member_role_is_rejected_and_nothing_stored(
+        self, admin_db: Any, gates: Any, bad_role: str
+    ) -> None:
+        # regression: community owners got role 'owner' (gates expect 'community-owner')
+        with pytest.raises(ApiError) as exc:
+            await free_tier_caps.create_community_capped(
+                admin_db,
+                admin_db.dal,
+                tenant_slug=TENANT_SLUG,
+                tenant_id=_tenant_id(admin_db),
+                values={"name": "typo", "display_name": "Typo", "is_active": True},
+                member_values=lambda cid: {"community_id": cid, "user_id": "1", "role": bad_role},
+            )
+        assert exc.value.status_code == 400
+        assert admin_db.dal(admin_db.dal.communities.id > 0).count() == 0
+        assert admin_db.dal(admin_db.dal.community_members.id > 0).count() == 0
 
     async def test_null_is_global_counts_as_user_created(self, admin_db: Any) -> None:
         # regression: review LOW -- NULL is_global must count (is_global IS NOT TRUE)
@@ -278,11 +303,13 @@ class TestTenantCap:
         self, client: Any, admin_db: Any, gates: Any
     ) -> None:
         # Free deployment whose only tenant is the catch-all: already at the cap.
-        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(slug="global", is_global=True)
+        admin_db.dal(admin_db.dal.tenants.slug == TENANT_SLUG).update(
+            slug=DEFAULT_TENANT_SLUG, is_global=True
+        )
         admin_db.dal.commit()
         headers = {
             "Authorization": "Bearer "
-            + make_user_token(user_id=1, scope="*:admin", tenant="global")
+            + make_user_token(user_id=1, scope="*:admin", tenant=DEFAULT_TENANT_SLUG)
         }
         blocked = await client.post(
             "/api/v1/superadmin/tenants", headers=headers, json={"slug": "t1", "displayName": "t1"}
@@ -290,7 +317,7 @@ class TestTenantCap:
         assert blocked.status_code == 402
         _assert_upgrade_block(await blocked.get_json(), "tenant")
         slugs = {r.slug for r in admin_db.dal(admin_db.dal.tenants.id > 0).select()}
-        assert slugs == {"global"}  # nothing created, nothing mutated
+        assert slugs == {DEFAULT_TENANT_SLUG}  # nothing created, nothing mutated
 
     async def test_only_system_inactive_excluded_from_count(
         self, admin_db: Any, gates: Any
@@ -300,8 +327,10 @@ class TestTenantCap:
         dal.tenants.insert(slug="gone", display_name="X", is_active=False)
         dal.commit()
         assert free_tier_caps.count_user_created_tenants(dal) == 1  # acme only
-        dal.tenants.insert(slug="global", display_name="G", is_global=True, is_active=True)
-        dal.tenants.insert(slug="default", display_name="D", is_active=True)
+        dal.tenants.insert(
+            slug=DEFAULT_TENANT_SLUG, display_name="D", is_global=True, is_active=True
+        )
+        dal.tenants.insert(slug="beta-corp", display_name="B", is_active=True)
         dal.commit()
         assert free_tier_caps.count_user_created_tenants(dal) == 3
 
@@ -630,7 +659,7 @@ class TestReservedTenants:
     ) -> None:
         _seed_bootstrap(admin_db)  # creates the `system` tenant
         dal = admin_db.dal
-        system_id = dal(dal.tenants.slug == "system").select().first().id
+        system_id = dal(dal.tenants.slug == "system").select().first().public_id
         put = await client.put(
             f"/api/v1/superadmin/tenants/{system_id}", headers=_headers(), json={"isActive": False}
         )

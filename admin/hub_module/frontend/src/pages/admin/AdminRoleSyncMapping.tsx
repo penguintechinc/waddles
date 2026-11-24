@@ -1,14 +1,18 @@
-import { useMemo, useState } from 'react';
-import { useParams } from 'react-router-dom';
+import { useEffect, useMemo, useState } from 'react';
+import { useParams, useSearchParams } from 'react-router-dom';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
-import { FormModalBuilder, type FormField } from '@penguintechinc/react-libs';
+import { type FormField } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import PairingStatusCard from '../../components/roleSync/PairingStatusCard';
 import BindingTable from '../../components/roleSync/BindingTable';
+import AddDiscordServerPanel from '../../components/roleSync/AddDiscordServerPanel';
+import EventDiscordSyncToggle from '../../components/calendar/EventDiscordSyncToggle';
 import MirrorRolesSection from '../../components/roleSync/MirrorRolesSection';
 import { useAuth } from '../../contexts/AuthContext';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 import {
   roleSyncApi,
+  roleSyncKeys,
   extractErrorMessage,
   COMMUNITY_ROLES,
   SUBSCRIBER_TIERS,
@@ -19,6 +23,7 @@ import {
   type RoleSyncScope,
   type SubscriberTier,
 } from '../../services/roleSyncApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 /**
  * Discord guild role <-> community role/scope mapping admin UI -- the
@@ -39,15 +44,17 @@ import {
 
 // `AuthContext.jsx` is plain JS (checkJs: false) -- see `AdminCommunityBundles.tsx`.
 interface CommunityAuth {
-  isCommunityAdmin: (communityId: string | number | undefined) => boolean;
+  isCommunityAdmin: (communityId: string | undefined) => boolean;
 }
 
-const roleSyncKeys = {
-  pairings: (communityId: number) => ['role-sync-pairings', communityId] as const,
-  bindings: (communityId: number, pairingId: number) =>
-    ['role-sync-bindings', communityId, pairingId] as const,
+/** Friendly text for hub-api's install-callback `?discord_server=error&reason=` codes. */
+const INSTALL_ERROR_REASONS: Record<string, string> = {
+  invalid_or_expired_state: 'The Discord install link expired. Please try adding the server again.',
+  state_binding_mismatch: 'The Discord install could not be verified for this account. Please try again.',
+  cancelled: 'Adding the Discord server was cancelled.',
+  install_failed: 'Discord could not complete the server install. Please try again.',
+  DISCORD_NOT_CONFIGURED: 'Discord bot is not configured for this tenant.',
 };
-
 const SYNC_SCOPE_LABELS: Record<RoleSyncScope, string> = {
   subscriber_tier: 'Twitch subscriber tier → Discord role',
   moderator: 'Twitch moderator → Discord role',
@@ -60,11 +67,29 @@ export default function AdminRoleSyncMapping() {
   const { isCommunityAdmin } = useAuth() as CommunityAuth;
   const queryClient = useQueryClient();
 
-  const communityId = Number(communityIdParam);
-  const hasValidCommunity = Number.isFinite(communityId);
+  // '' marks an invalid route param: queries stay disabled and the page renders its invalid state.
+  const communityId = parseCommunityId(communityIdParam) ?? '';
+  const hasValidCommunity = communityId !== '';
   const canManage = Boolean(isCommunityAdmin(communityIdParam));
 
-  const [selectedPairingId, setSelectedPairingId] = useState<number | null>(null);
+  const [searchParams] = useSearchParams();
+  const installResult = searchParams.get('discord_server');
+  const installGuildId = searchParams.get('guild_id');
+  const installReason = searchParams.get('reason');
+
+  // hub-api's install callback redirects here; refetch so the new pairing shows with no reload.
+  useEffect(() => {
+    if (installResult === 'paired' || installResult === 'error') {
+      console.debug('[RoleSyncMapping] ServerInstallCallback', {
+        communityId,
+        result: installResult,
+        reason: installReason,
+      });
+      void queryClient.invalidateQueries({ queryKey: roleSyncKeys.pairings(communityId) });
+    }
+  }, [installResult, installReason, communityId, queryClient]);
+
+  const [selectedPairingId, setSelectedPairingId] = useState<string | null>(null);
   const [createOpen, setCreateOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<RoleSyncBinding | null>(null);
 
@@ -89,14 +114,14 @@ export default function AdminRoleSyncMapping() {
     isLoading: bindingsLoading,
     error: bindingsError,
   } = useQuery({
-    queryKey: roleSyncKeys.bindings(communityId, activePairingId ?? -1),
-    queryFn: () => roleSyncApi.listBindings(communityId, activePairingId as number),
+    queryKey: roleSyncKeys.bindings(communityId, activePairingId ?? ''),
+    queryFn: () => roleSyncApi.listBindings(communityId, activePairingId as string),
     enabled: pageEnabled && hasValidCommunity && activePairingId !== null,
   });
 
   const createMutation = useMutation({
     mutationFn: (payload: CreateRoleSyncBindingPayload) =>
-      roleSyncApi.createBinding(communityId, activePairingId as number, payload),
+      roleSyncApi.createBinding(communityId, activePairingId as string, payload),
     onSuccess: (binding) => {
       console.debug('[RoleSyncMapping] CreateBinding', {
         communityId,
@@ -104,7 +129,7 @@ export default function AdminRoleSyncMapping() {
         syncScope: binding.sync_scope,
       });
       void queryClient.invalidateQueries({
-        queryKey: roleSyncKeys.bindings(communityId, activePairingId as number),
+        queryKey: roleSyncKeys.bindings(communityId, activePairingId as string),
       });
       setCreateOpen(false);
     },
@@ -119,7 +144,7 @@ export default function AdminRoleSyncMapping() {
 
   const toggleMutation = useMutation({
     mutationFn: (enabled: boolean) =>
-      roleSyncApi.updatePairing(communityId, activePairingId as number, { sync_enabled: enabled }),
+      roleSyncApi.updatePairing(communityId, activePairingId as string, { sync_enabled: enabled }),
     onMutate: async (enabled) => {
       const key = roleSyncKeys.pairings(communityId);
       await queryClient.cancelQueries({ queryKey: key });
@@ -146,7 +171,7 @@ export default function AdminRoleSyncMapping() {
 
   const deleteMutation = useMutation({
     mutationFn: (binding: RoleSyncBinding) =>
-      roleSyncApi.deleteBinding(communityId, activePairingId as number, binding.id),
+      roleSyncApi.deleteBinding(communityId, activePairingId as string, binding.id),
     onSuccess: (_result, binding) => {
       console.debug('[RoleSyncMapping] DeleteBinding', {
         communityId,
@@ -154,7 +179,7 @@ export default function AdminRoleSyncMapping() {
         bindingId: binding.id,
       });
       void queryClient.invalidateQueries({
-        queryKey: roleSyncKeys.bindings(communityId, activePairingId as number),
+        queryKey: roleSyncKeys.bindings(communityId, activePairingId as string),
       });
       setDeleteTarget(null);
     },
@@ -257,6 +282,26 @@ export default function AdminRoleSyncMapping() {
         (never auto-demotes).
       </p>
 
+      {installResult === 'paired' && (
+        <p role="status" data-testid="install-banner-success" className="mb-3 text-sm text-emerald-400">
+          Discord server{installGuildId ? ` ${installGuildId}` : ''} added to this community.
+        </p>
+      )}
+      {installResult === 'error' && (
+        <p role="alert" data-testid="install-banner-error" className="mb-3 text-sm text-red-400">
+          {(installReason && INSTALL_ERROR_REASONS[installReason]) ||
+            'Adding the Discord server failed. Please try again.'}
+        </p>
+      )}
+
+      {canManage && hasValidCommunity && <AddDiscordServerPanel communityId={communityId} canManage={canManage} />}
+
+      {canManage && hasValidCommunity && (
+        <div className="mb-4">
+          <EventDiscordSyncToggle communityId={communityId} />
+        </div>
+      )}
+
       {pairingsLoading && (
         <p role="status" className="text-fg-muted">
           Loading guild pairings…
@@ -271,8 +316,9 @@ export default function AdminRoleSyncMapping() {
 
       {!pairingsLoading && !pairingsError && (pairings?.length ?? 0) === 0 && (
         <p className="text-fg-muted">
-          No Discord guild is paired with this community yet. Pair a Discord server under{' '}
-          <strong>Connections</strong> before mapping roles.
+          No Discord guild is paired with this community yet. Use{' '}
+          <strong>Add Discord server</strong> above to invite the bot, or pair a server by ID,
+          before mapping roles.
         </p>
       )}
 
@@ -284,7 +330,7 @@ export default function AdminRoleSyncMapping() {
           <select
             id="pairing-select"
             value={activePairingId ?? ''}
-            onChange={(e) => setSelectedPairingId(Number(e.target.value))}
+            onChange={(e) => setSelectedPairingId(e.target.value)}
             className="rounded border border-line-strong bg-surface-raised px-3 py-2 text-fg focus:outline-none focus:ring-2 focus:ring-sky-500"
           >
             {pairings?.map((pairing) => (

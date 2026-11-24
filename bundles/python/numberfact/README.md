@@ -1,6 +1,6 @@
 # numberfact (Python)
 
-Static fun number facts; no external API. First-party (`provider: builtin`, `app_id: waddles.core.example.numberfact`), stateless WASI component, modeled on `eightball`.
+Static fun number facts; no external API. First-party (`provider: builtin`, `app_id: penguintechinc.waddles.numberfact`), stateless WASI component, modeled on `eightball`.
 
 | | |
 |---|---|

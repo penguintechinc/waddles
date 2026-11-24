@@ -21,6 +21,7 @@ exists and what it closes off relative to Node's own (bugged) auth chain.
 from __future__ import annotations
 
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -35,10 +36,12 @@ from services import tenant_service as svc
 from services.errors import ApiError, payment_required
 from services.pagination import parse_limit
 from services.schema import bind_tenant_tables
+from services.user_public_id import lookup_user_id, use_user_public_ids
 
 logger = logging.getLogger(__name__)
 
 tenant_bp = Blueprint("v1_tenant", __name__, url_prefix="/api/v1/tenant")
+use_user_public_ids(tenant_bp)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -163,9 +166,15 @@ class UpdateSettingsRequest:
 
 @dataclass(slots=True, frozen=True)
 class CommunityDTO:
-    """Community summary DTO."""
+    """Community summary DTO.
 
-    id: int
+    `publicId` is the community's `public_id` UUID: the identifier the
+    UUID-keyed routes (e.g. ingest sources) take. The numeric `id` is retained
+    only for the legacy `/admin/<id>` links in `TenantCommunities.jsx`.
+    """
+
+    id: str
+    publicId: str
     name: str
     displayName: str
     memberCount: int
@@ -198,7 +207,7 @@ class CommunitiesResponse:
 class TenantAdminDTO:
     """Tenant admin DTO."""
 
-    userId: int
+    userId: str
     displayName: str | None
     email: str | None
     role: str
@@ -217,7 +226,7 @@ class TenantAdminsResponse:
 class AddTenantAdminRequest:
     """Request DTO for `POST /<tenant_slug>/admins`."""
 
-    userId: int
+    userId: uuid.UUID
     role: str = "tenant-admin"
 
 
@@ -242,8 +251,12 @@ def _tenant_dto(row: Any) -> TenantDTO:
 
 
 def _community_dto(row: Any) -> CommunityDTO:
+    """Community DTO; `id` carries the PUBLIC UUID (same as `publicId`), never the numeric id."""
+    if not row.public_id:
+        raise RuntimeError("community row missing public_id")
     return CommunityDTO(
-        id=row.id,
+        id=str(row.public_id),
+        publicId=str(row.public_id),
         name=row.name,
         displayName=row.display_name or row.name,
         memberCount=row.member_count or 0,
@@ -258,7 +271,7 @@ def _admin_dto(row: Any) -> TenantAdminDTO:
     ta = row.tenant_admins
     user = row.hub_users
     return TenantAdminDTO(
-        userId=ta.user_id,
+        userId=str(user.uuid),
         displayName=user.display_name or user.username,
         email=user.email,
         role=ta.role,
@@ -432,7 +445,7 @@ async def add_tenant_admin(
             async_dal,
             dal,
             tenant_id=tenant_id,
-            user_id=data.userId,
+            user_id=await lookup_user_id(str(data.userId)),
             role=data.role,
             tenant_slug=tenant_slug,  # TARGET tenant (URL), not the caller's
         )
@@ -442,7 +455,7 @@ async def add_tenant_admin(
     return MessageResponse(success=True, message="Tenant admin added")
 
 
-@tenant_bp.route("/<tenant_slug>/admins/<int:user_id>", methods=["DELETE"])
+@tenant_bp.route("/<tenant_slug>/admins/<uuuid:user_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("tenant:admin")  # type: ignore[misc]
 @validate_response(MessageResponse)
@@ -457,6 +470,7 @@ async def remove_tenant_admin(
             async_dal, dal, tenant_id=tenant_id, user_id=user_id, tenant_slug=tenant_slug
         )
     except ApiError as exc:
+        logger.warning("remove_tenant_admin rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return MessageResponse(success=True, message="Tenant admin removed")
 

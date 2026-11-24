@@ -76,6 +76,10 @@ struct Live {
     admin_token: String,
     community_a: i64,
     community_b: i64,
+    /// Community public UUIDs: the client-facing `/api/v1/communities/{uuid}/...` routes reject
+    /// numeric ids (#1434); internal service routes and `ConnectionRef` keep the numeric ids.
+    community_a_public_id: String,
+    community_b_public_id: String,
     pg_container: String,
     action_sa: PathBuf,
     ingest_sa: PathBuf,
@@ -126,6 +130,14 @@ impl Live {
             admin_token: m["admin_token"].as_str().expect("admin_token").to_string(),
             community_a: id("community_a"),
             community_b: id("community_b"),
+            community_a_public_id: m["community_a_public_id"]
+                .as_str()
+                .expect("manifest.community_a_public_id")
+                .to_string(),
+            community_b_public_id: m["community_b_public_id"]
+                .as_str()
+                .expect("manifest.community_b_public_id")
+                .to_string(),
             pg_container: m["pg_container"].as_str().expect("pg").to_string(),
             action_sa: write_sa("action", "svc-action"),
             ingest_sa: write_sa("ingest", "svc-ingest"),
@@ -154,7 +166,18 @@ impl Live {
         self.resolver(&self.action_sa, SCOPE_CONNECTIONS_RESOLVE_STATIC)
     }
 
-    /// Create one static connection through the admin API; returns its numeric id.
+    /// Public UUID of a seeded community, for the client-facing admin routes.
+    fn public_id(&self, community: i64) -> &str {
+        if community == self.community_a {
+            &self.community_a_public_id
+        } else if community == self.community_b {
+            &self.community_b_public_id
+        } else {
+            panic!("no public id seeded for community {community}")
+        }
+    }
+
+    /// Create one static connection through the admin API; returns its numeric id (resolved from the public UUID).
     async fn create(
         &self,
         community: i64,
@@ -166,8 +189,9 @@ impl Live {
         let resp = self
             .http
             .post(format!(
-                "{}/api/v1/communities/{community}/provider-connections",
-                self.hub_url
+                "{}/api/v1/communities/{}/provider-connections",
+                self.hub_url,
+                self.public_id(community)
             ))
             .bearer_auth(&self.admin_token)
             .json(&json!({
@@ -178,13 +202,51 @@ impl Live {
             .send()
             .await
             .expect("create request");
-        assert_eq!(
-            resp.status().as_u16(),
-            201,
-            "admin create {provider} failed"
+        let status = resp.status().as_u16();
+        let text = resp.text().await.expect("create body text");
+        assert_eq!(status, 201, "admin create {provider} failed: {text}");
+        let body: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("create body not JSON ({e}): {text}"));
+        // The admin API's `id` is the connection's public UUID; the resolver and the SQL
+        // tamper below speak the numeric id, so read it back through Postgres.
+        let public_id = body["connection"]["id"]
+            .as_str()
+            .expect("connection public id");
+        self.numeric_connection_id(public_id)
+    }
+
+    /// Numeric `platform_connections.id` for a public UUID (UUID validated: it is interpolated).
+    fn numeric_connection_id(&self, public_id: &str) -> i64 {
+        assert!(
+            public_id.len() == 36 && public_id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'),
+            "not a UUID: {public_id}"
         );
-        let body: Value = resp.json().await.expect("create body");
-        body["connection"]["id"].as_i64().expect("connection id")
+        let sql = format!("SELECT id FROM platform_connections WHERE public_id = '{public_id}'");
+        let out = Command::new("docker")
+            .args([
+                "exec",
+                "-i",
+                &self.pg_container,
+                "psql",
+                "-U",
+                "waddlebot",
+                "-d",
+                "waddlebot",
+                "-tAq",
+                "-c",
+                &sql,
+            ])
+            .output()
+            .expect("docker exec psql");
+        assert!(
+            out.status.success(),
+            "id lookup failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout)
+            .trim()
+            .parse()
+            .expect("numeric connection id")
     }
 
     /// Print this test's telemetry counts for the gate script and assert nothing was silent.
@@ -410,7 +472,9 @@ async fn live_legacy_service_key_is_rejected() {
             json!({"url": "https://hooks.example.com/lg"}),
         )
         .await;
-    // The retired shared-secret header must not authenticate on EITHER data-plane route.
+    // The retired shared-secret header must not authenticate on EITHER legacy data-plane REST
+    // route. Those routes were replaced by internal gRPC, so the hub now answers 404 (route gone)
+    // where it once answered 401; either way the header must never yield success or the secret.
     let list = live
         .http
         .get(format!(
@@ -421,7 +485,12 @@ async fn live_legacy_service_key_is_rejected() {
         .send()
         .await
         .expect("list");
-    assert_eq!(list.status().as_u16(), 401, "list accepted X-Service-Key");
+    let list_status = list.status().as_u16();
+    assert!(
+        matches!(list_status, 401 | 404),
+        "list accepted X-Service-Key: {list_status} {}",
+        list.text().await.unwrap_or_default()
+    );
     let resolve = live
         .http
         .post(format!(
@@ -432,16 +501,13 @@ async fn live_legacy_service_key_is_rejected() {
         .send()
         .await
         .expect("resolve");
-    assert_eq!(
-        resolve.status().as_u16(),
-        401,
-        "resolve accepted X-Service-Key"
+    let resolve_status = resolve.status().as_u16();
+    let resolve_body = resolve.text().await.expect("body");
+    assert!(
+        matches!(resolve_status, 401 | 404),
+        "resolve accepted X-Service-Key: {resolve_status} {resolve_body}"
     );
-    assert!(!resolve
-        .text()
-        .await
-        .expect("body")
-        .contains("LG-bearer-1f2e"));
+    assert!(!resolve_body.contains("LG-bearer-1f2e"));
 
     // And a caller whose bootstrap SA token the cluster does not recognise maps to Auth.
     let bogus = std::env::temp_dir().join(format!("live-bogus-sa-{}", std::process::id()));

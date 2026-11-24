@@ -72,7 +72,7 @@ class StreamDetailsResponse:
 def _register(bp: Blueprint) -> None:
     """Wire the 3 `streamController.js` handlers onto `bp` -- shared by both mount points."""
 
-    @bp.route("/<int:community_id>/streams", methods=["GET"])
+    @bp.route("/<cuuid:community_id>/streams", methods=["GET"])
     @tenant_middleware  # type: ignore[misc]
     @validate_response(LiveStreamsResponse)
     async def get_live_streams(
@@ -93,7 +93,7 @@ def _register(bp: Blueprint) -> None:
             return _err(exc)
         return LiveStreamsResponse(success=True, streams=streams)
 
-    @bp.route("/<int:community_id>/streams/featured", methods=["GET"])
+    @bp.route("/<cuuid:community_id>/streams/featured", methods=["GET"])
     @tenant_middleware  # type: ignore[misc]
     @validate_response(LiveStreamsResponse)
     async def get_featured_streams(
@@ -110,7 +110,7 @@ def _register(bp: Blueprint) -> None:
             return _err(exc)
         return LiveStreamsResponse(success=True, streams=streams)
 
-    @bp.route("/<int:community_id>/streams/<entity_id>", methods=["GET"])
+    @bp.route("/<cuuid:community_id>/streams/<entity_id>", methods=["GET"])
     @tenant_middleware  # type: ignore[misc]
     @validate_response(StreamDetailsResponse)
     async def get_stream_details(

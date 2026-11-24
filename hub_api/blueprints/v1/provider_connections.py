@@ -55,17 +55,21 @@ from services.provider_connections import (
 )
 from services.provider_connections import errors as pc_errors
 from services.provider_connections.kinds import ConnectionKind
+from services.provider_connections.public_ref import translate_connection_id
 from services.provider_connections.registry import build_default_registry
 from services.provider_connections.service import (
     FEATURE_STATIC_CONNECTIONS,
     ConnectionView,
 )
 from services.provider_connections.telemetry import log_failure
+from services.scope_registry import SCOPE_PROVIDER_CONNECTIONS
 from services.youtube_install import make_app_credentials
 
 logger = logging.getLogger(__name__)
 
 provider_connections_bp = Blueprint("v1_provider_connections", __name__, url_prefix="/api/v1")
+# `<puuid:connection_id>` -> numeric before the handler, resolved through the community's grant.
+provider_connections_bp.before_request(translate_connection_id)
 
 #: OIDC scope for community connection administration. Carried by the tenant-owner bundle
 #: (``flask_core.auth.SCOPE_BUNDLES["tenant"]["admin"]``) and by global admins via ``*:admin``;
@@ -143,8 +147,7 @@ class ProviderListResponse:
 class ProviderConnectionDTO:
     """Admin view of one connection. Has no token field of any kind."""
 
-    id: int
-    publicId: str
+    id: str
     kind: int
     provider: str
     resourceType: str
@@ -156,6 +159,7 @@ class ProviderConnectionDTO:
     shared: bool
     hasRefreshToken: bool
     hasApiCredential: bool
+    ownershipVerified: bool
     expiresAt: str | None
     capabilities: list[str]
     metadata: dict[str, Any]
@@ -307,8 +311,7 @@ def _provider_dto(spec: AdapterSpec) -> ProviderDTO:
 def _connection_dto(view: ConnectionView) -> ProviderConnectionDTO:
     binding = view.binding
     return ProviderConnectionDTO(
-        id=binding.connection.id,
-        publicId=str(binding.connection.public_id),
+        id=str(binding.connection.public_id),
         kind=binding.connection.connection_kind,
         provider=binding.connection.platform,
         resourceType=binding.connection.resource_type,
@@ -320,6 +323,7 @@ def _connection_dto(view: ConnectionView) -> ProviderConnectionDTO:
         shared=binding.shared_with > 0,
         hasRefreshToken=binding.connection.has_refresh_token,
         hasApiCredential=binding.connection.has_api_credential,
+        ownershipVerified=binding.connection.ownership_verified,
         expiresAt=_iso(binding.connection.expires_at),
         capabilities=view.capabilities,
         metadata=view.public_metadata,
@@ -379,12 +383,18 @@ _STATUS_BY_ERROR: dict[type[pc_errors.ProviderConnectionError], tuple[int, str]]
     pc_errors.ProviderQuotaExceeded: (429, "PROVIDER_QUOTA_EXCEEDED"),
     pc_errors.ConnectionNotFound: (404, "NOT_FOUND"),
     pc_errors.ConnectionConflict: (409, "CONFLICT"),
+    pc_errors.OwnershipNotProven: (403, "OWNERSHIP_NOT_PROVEN"),
     pc_errors.ConnectionNotUsable: (409, "CONNECTION_NOT_USABLE"),
     pc_errors.RefreshRejected: (409, "REFRESH_REJECTED"),
     pc_errors.RefreshNotConfigured: (409, "REFRESH_NOT_CONFIGURED"),
     pc_errors.VaultUnavailable: (503, "CONNECTIONS_UNAVAILABLE"),
     pc_errors.VaultCorrupt: (500, "CONNECTIONS_UNAVAILABLE"),
     pc_errors.SchemaMissing: (503, "CONNECTIONS_UNAVAILABLE"),
+}
+
+#: Finer API codes for a framework ``code`` that is more specific than its class (same status).
+_API_CODE_BY_FRAMEWORK_CODE: dict[str, str] = {
+    "live_chat_not_owned": "LIVE_CHAT_NOT_OWNED",
 }
 
 
@@ -403,6 +413,7 @@ def _connection_err(
         )
         return {"error": "forbidden"}, 403
     status, code = _STATUS_BY_ERROR.get(type(exc), (500, "INTERNAL_ERROR"))
+    code = _API_CODE_BY_FRAMEWORK_CODE.get(exc.code, code)
     level = logging.ERROR if status >= 500 else logging.INFO
     # The event name is a static literal (LiteralString); the route name is a bounded label.
     log_failure(logger, "provider_connections.request_failed", exc, level=level, route=event)
@@ -471,6 +482,7 @@ async def _admin_guard(community_id: int) -> tuple[int, int | None]:
         current_app.config["dal"],
         community_id=community_id,
         admin=True,
+        scope=SCOPE_PROVIDER_CONNECTIONS,
     )
     if not await feature_enabled(FEATURE_PROVIDER_CONNECTIONS, tenant=ctx.tenant_slug):
         raise payment_required("Provider connections are not enabled for this plan")
@@ -481,8 +493,8 @@ async def _admin_guard(community_id: int) -> tuple[int, int | None]:
 # Admin routes
 # --------------------------------------------------------------------------
 
-_BASE = "/communities/<int:community_id>/provider-connections"
-_ONE = _BASE + "/<int:connection_id>"
+_BASE = "/communities/<cuuid:community_id>/provider-connections"
+_ONE = _BASE + "/<puuid:connection_id>"
 
 
 @provider_connections_bp.route("/connection-providers", methods=["GET"])

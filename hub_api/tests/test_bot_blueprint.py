@@ -18,6 +18,7 @@ port exposes, not integration tests of the downstream services.
 
 from __future__ import annotations
 
+import logging
 import os
 from typing import Any
 
@@ -31,6 +32,12 @@ from blueprints.v1 import bot as bot_blueprint  # noqa: E402
 from blueprints.v1.bot import bot_bp  # noqa: E402 - env var must be set first
 from services import bot_ai_chatter, bot_ai_knowledge, bot_rcon  # noqa: E402
 from services.bot_tables import bind_bot_tables  # noqa: E402
+from tests.community_ids import (  # noqa: E402
+    UNKNOWN_PUBLIC_ID,
+    install_community_ids,
+    public_id,
+)
+from tests.entity_ids import pid  # noqa: E402
 
 OTHER_TENANT_SLUG = "other-tenant"
 
@@ -76,6 +83,18 @@ def community_id(dal: Any) -> int:
 
 
 @pytest.fixture
+def community_uuid(dal: Any, community_id: int) -> str:
+    """The seeded community's public UUID (the only form its URLs accept)."""
+    return public_id(dal, community_id)
+
+
+@pytest.fixture
+def other_tenant_community_uuid(dal: Any, other_tenant_community_id: int) -> str:
+    """The other-tenant community's public UUID."""
+    return public_id(dal, other_tenant_community_id)
+
+
+@pytest.fixture
 def other_tenant_community_id(dal: Any) -> int:
     """A `communities` row owned by a *different* tenant -- proves `_require_community`."""
     other_tenant_id = dal.tenants.insert(slug=OTHER_TENANT_SLUG, is_active=True)
@@ -89,8 +108,9 @@ def other_tenant_community_id(dal: Any) -> int:
 def app(dal: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(bot_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(bot_bp)
     return quart_app
 
 
@@ -107,13 +127,19 @@ def client(app: Quart) -> Any:
 class TestTenantIsolation:
     """`_require_community` -- the path-param tenant re-verification this port adds."""
 
-    async def test_missing_token_is_401(self, client: Any, community_id: int) -> None:
+    async def test_missing_token_is_401(
+        self, client: Any, community_id: int, community_uuid: str
+    ) -> None:
         """Fail-first auth-bypass check #1: no bearer token at all."""
-        response = await client.get(f"/api/v1/admin/{community_id}/shoutout/config")
+        response = await client.get(f"/api/v1/admin/{community_uuid}/shoutout/config")
         assert response.status_code == 401
 
-    async def test_community_from_other_tenant_is_403(
-        self, client: Any, auth_headers: Any, other_tenant_community_id: int
+    async def test_community_from_other_tenant_is_404(
+        self,
+        client: Any,
+        auth_headers: Any,
+        other_tenant_community_id: int,
+        other_tenant_community_uuid: str,
     ) -> None:
         """Fail-first auth-bypass check #2.
 
@@ -123,43 +149,45 @@ class TestTenantIsolation:
         """
         headers = auth_headers(scope="bot.shoutout:read")
         response = await client.get(
-            f"/api/v1/admin/{other_tenant_community_id}/shoutout/config", headers=headers
+            f"/api/v1/admin/{other_tenant_community_uuid}/shoutout/config", headers=headers
         )
-        assert response.status_code == 403
+        assert response.status_code == 404
 
-    async def test_unknown_community_is_403(self, client: Any, auth_headers: Any) -> None:
+    async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         headers = auth_headers(scope="bot.shoutout:read")
-        response = await client.get("/api/v1/admin/999999/shoutout/config", headers=headers)
-        assert response.status_code == 403
+        response = await client.get(
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/shoutout/config", headers=headers
+        )
+        assert response.status_code == 404
 
 
 class TestScopeEnforcement:
     """Fail-first scope-check proof."""
 
     async def test_missing_scope_is_403(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         headers = auth_headers(scope="")
         response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/config", headers=headers
+            f"/api/v1/admin/{community_uuid}/shoutout/config", headers=headers
         )
         assert response.status_code == 403
 
     async def test_wrong_scope_is_403(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         headers = auth_headers(scope="bot.rcon:read")
         response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/config", headers=headers
+            f"/api/v1/admin/{community_uuid}/shoutout/config", headers=headers
         )
         assert response.status_code == 403
 
     async def test_wildcard_scope_passes(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         headers = auth_headers(scope="*:read")
         response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/config", headers=headers
+            f"/api/v1/admin/{community_uuid}/shoutout/config", headers=headers
         )
         assert response.status_code == 200
 
@@ -171,10 +199,10 @@ class TestScopeEnforcement:
 
 class TestShoutoutConfig:
     async def test_get_creates_default_on_first_access(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/config",
+            f"/api/v1/admin/{community_uuid}/shoutout/config",
             headers=auth_headers(scope="bot.shoutout:read"),
         )
         assert response.status_code == 200
@@ -184,7 +212,7 @@ class TestShoutoutConfig:
         assert body["config"]["widgetPosition"] == "bottom-right"
 
     async def test_put_persists_full_replace(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         payload = {
             "soEnabled": False,
@@ -199,7 +227,7 @@ class TestShoutoutConfig:
             "cooldownMinutes": 15,
         }
         response = await client.put(
-            f"/api/v1/admin/{community_id}/shoutout/config",
+            f"/api/v1/admin/{community_uuid}/shoutout/config",
             headers=auth_headers(scope="bot.shoutout:write"),
             json=payload,
         )
@@ -210,16 +238,16 @@ class TestShoutoutConfig:
 
         # Round-trip: a subsequent GET sees the persisted update.
         get_response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/config",
+            f"/api/v1/admin/{community_uuid}/shoutout/config",
             headers=auth_headers(scope="bot.shoutout:read"),
         )
         assert (await get_response.get_json())["config"]["soPermission"] == "vip"
 
     async def test_put_read_scope_is_403(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.put(
-            f"/api/v1/admin/{community_id}/shoutout/config",
+            f"/api/v1/admin/{community_uuid}/shoutout/config",
             headers=auth_headers(scope="bot.shoutout:read"),
             json={
                 "soEnabled": True,
@@ -238,17 +266,21 @@ class TestShoutoutConfig:
 
 
 class TestShoutoutCreators:
-    async def test_list_empty(self, client: Any, auth_headers: Any, community_id: int) -> None:
+    async def test_list_empty(
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
+    ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/creators",
+            f"/api/v1/admin/{community_uuid}/shoutout/creators",
             headers=auth_headers(scope="bot.shoutout:read"),
         )
         assert response.status_code == 200
         assert (await response.get_json())["creators"] == []
 
-    async def test_add_success(self, client: Any, auth_headers: Any, community_id: int) -> None:
+    async def test_add_success(
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
+    ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/shoutout/creators",
+            f"/api/v1/admin/{community_uuid}/shoutout/creators",
             headers=auth_headers(scope="bot.shoutout:write"),
             json={"platform": "twitch", "username": "SomeStreamer"},
         )
@@ -257,48 +289,50 @@ class TestShoutoutCreators:
         assert body["creator"]["platformUsername"] == "SomeStreamer"
 
     async def test_add_missing_fields_is_400(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/shoutout/creators",
+            f"/api/v1/admin/{community_uuid}/shoutout/creators",
             headers=auth_headers(scope="bot.shoutout:write"),
             json={"platform": "twitch"},
         )
         assert response.status_code == 400
 
     async def test_add_duplicate_is_409(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         headers = auth_headers(scope="bot.shoutout:write")
         payload = {"platform": "twitch", "username": "dupe"}
         first = await client.post(
-            f"/api/v1/admin/{community_id}/shoutout/creators", headers=headers, json=payload
+            f"/api/v1/admin/{community_uuid}/shoutout/creators", headers=headers, json=payload
         )
         assert first.status_code == 200
         second = await client.post(
-            f"/api/v1/admin/{community_id}/shoutout/creators", headers=headers, json=payload
+            f"/api/v1/admin/{community_uuid}/shoutout/creators", headers=headers, json=payload
         )
         assert second.status_code == 409
 
-    async def test_remove_success(self, client: Any, auth_headers: Any, community_id: int) -> None:
+    async def test_remove_success(
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
+    ) -> None:
         headers = auth_headers(scope="bot.shoutout:write")
         created = await client.post(
-            f"/api/v1/admin/{community_id}/shoutout/creators",
+            f"/api/v1/admin/{community_uuid}/shoutout/creators",
             headers=headers,
             json={"platform": "youtube", "username": "vidcreator"},
         )
         creator_id = (await created.get_json())["creator"]["id"]
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/shoutout/creators/{creator_id}", headers=headers
+            f"/api/v1/admin/{community_uuid}/shoutout/creators/{creator_id}", headers=headers
         )
         assert response.status_code == 200
         assert (await response.get_json())["message"] == "Creator removed"
 
     async def test_remove_not_found_is_404(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/shoutout/creators/999999",
+            f"/api/v1/admin/{community_uuid}/shoutout/creators/999999",
             headers=auth_headers(scope="bot.shoutout:write"),
         )
         assert response.status_code == 404
@@ -306,10 +340,10 @@ class TestShoutoutCreators:
 
 class TestShoutoutHistory:
     async def test_empty_history_pagination_shape(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/history",
+            f"/api/v1/admin/{community_uuid}/shoutout/history",
             headers=auth_headers(scope="bot.shoutout:read"),
         )
         assert response.status_code == 200
@@ -318,7 +352,7 @@ class TestShoutoutHistory:
         assert body["pagination"] == {"page": 1, "limit": 25, "total": 0, "totalPages": 0}
 
     async def test_history_reflects_seeded_rows(
-        self, client: Any, auth_headers: Any, community_id: int, dal: Any
+        self, client: Any, auth_headers: Any, community_id: int, dal: Any, community_uuid: str
     ) -> None:
         dal.shoutout_history.insert(
             community_id=community_id,
@@ -329,7 +363,7 @@ class TestShoutoutHistory:
         )
         dal.commit()
         response = await client.get(
-            f"/api/v1/admin/{community_id}/shoutout/history?limit=10",
+            f"/api/v1/admin/{community_uuid}/shoutout/history?limit=10",
             headers=auth_headers(scope="bot.shoutout:read"),
         )
         body = await response.get_json()
@@ -348,21 +382,48 @@ class TestAIChatter:
         monkeypatch.setenv("AI_INTERACTION_API_URL", "http://ai-interaction.test:8005")
 
     async def test_unconfigured_upstream_is_typed_503(
-        self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        monkeypatch: Any,
+        community_uuid: str,
     ) -> None:
         monkeypatch.delenv("AI_INTERACTION_API_URL", raising=False)
         resp = await client.get(
-            f"/api/v1/admin/{community_id}/ai-chatter/config",
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
             headers=auth_headers(scope="bot.ai_chatter:read"),
         )
         assert resp.status_code == 503
-        assert await resp.get_json() == {
-            "error": "service_unavailable",
-            "service": "ai-interaction",
-        }
+        body = await resp.get_json()
+        assert body["success"] is False
+        assert body["error"]["code"] == "AI_CHATTER_UNAVAILABLE"
+        assert "service_unavailable" not in str(body)
+
+    async def test_unconfigured_upstream_put_is_typed_503(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        monkeypatch: Any,
+        community_uuid: str,
+    ) -> None:
+        monkeypatch.delenv("AI_INTERACTION_API_URL", raising=False)
+        resp = await client.put(
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
+            headers=auth_headers(scope="bot.ai_chatter:write"),
+            json={"enabled": True},
+        )
+        assert resp.status_code == 503
+        assert (await resp.get_json())["error"]["code"] == "AI_CHATTER_UNAVAILABLE"
 
     async def test_get_config_proxies_service_response(
-        self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        monkeypatch: Any,
+        community_uuid: str,
     ) -> None:
         async def fake_get(cid: int) -> dict[str, Any]:
             assert cid == community_id
@@ -370,7 +431,7 @@ class TestAIChatter:
 
         monkeypatch.setattr(bot_ai_chatter, "get_chatter_config", fake_get)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/ai-chatter/config",
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
             headers=auth_headers(scope="bot.ai_chatter:read"),
         )
         assert response.status_code == 200
@@ -389,7 +450,12 @@ class TestAIChatter:
         }
 
     async def test_get_config_drops_unknown_upstream_keys(
-        self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        monkeypatch: Any,
+        community_uuid: str,
     ) -> None:
         """Regression (output-DTO audit): relayed upstream extras never reach the client."""
 
@@ -398,7 +464,7 @@ class TestAIChatter:
 
         monkeypatch.setattr(bot_ai_chatter, "get_chatter_config", fake_get)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/ai-chatter/config",
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
             headers=auth_headers(scope="bot.ai_chatter:read"),
         )
         body = await response.get_json()
@@ -412,7 +478,12 @@ class TestAIChatter:
         }
 
     async def test_update_config_proxies_service_response(
-        self, client: Any, auth_headers: Any, community_id: int, monkeypatch: Any
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        monkeypatch: Any,
+        community_uuid: str,
     ) -> None:
         async def fake_update(
             cid: int, update: bot_ai_chatter.AIChatterConfigUpdate
@@ -423,18 +494,18 @@ class TestAIChatter:
 
         monkeypatch.setattr(bot_ai_chatter, "update_chatter_config", fake_update)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/ai-chatter/config",
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
             headers=auth_headers(scope="bot.ai_chatter:write"),
             json={"enabled": True},
         )
         assert response.status_code == 200
 
     async def test_update_config_out_of_range_is_400(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         """Real (unmocked) validation -- `AIChatterValidationError` -> 400, matches Node."""
         response = await client.put(
-            f"/api/v1/admin/{community_id}/ai-chatter/config",
+            f"/api/v1/admin/{community_uuid}/ai-chatter/config",
             headers=auth_headers(scope="bot.ai_chatter:write"),
             json={"window_seconds": 1},
         )
@@ -519,7 +590,7 @@ class TestAIKnowledgeSources:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/admin/ai-knowledge/sources/{source_id}",
+            f"/api/v1/admin/ai-knowledge/sources/{pid(dal, 'ai_knowledge_sources', source_id)}",
             headers=auth_headers(scope="bot.ai_knowledge:write"),
             json={"source_name": "New"},
         )
@@ -540,7 +611,7 @@ class TestAIKnowledgeSources:
         )
         dal.commit()
         response = await client.delete(
-            f"/api/v1/admin/ai-knowledge/sources/{source_id}",
+            f"/api/v1/admin/ai-knowledge/sources/{pid(dal, 'ai_knowledge_sources', source_id)}",
             headers=auth_headers(scope="bot.ai_knowledge:write"),
         )
         assert response.status_code == 200
@@ -566,12 +637,16 @@ class TestAIKnowledgeSources:
 
         monkeypatch.setattr(bot_ai_knowledge, "index_source", fake_index)
         response = await client.post(
-            f"/api/v1/admin/ai-knowledge/sources/{source_id}/reindex",
+            f"/api/v1/admin/ai-knowledge/sources/{pid(dal, 'ai_knowledge_sources', source_id)}/reindex",  # noqa: E501
             headers=auth_headers(scope="bot.ai_knowledge:write"),
         )
         assert response.status_code == 200
         body = await response.get_json()
-        assert body == {"success": True, "message": "Reindex started", "sourceId": source_id}
+        assert body == {
+            "success": True,
+            "message": "Reindex started",
+            "sourceId": pid(dal, "ai_knowledge_sources", source_id),
+        }
         import asyncio
 
         await asyncio.sleep(0)
@@ -695,7 +770,7 @@ class TestAIKnowledgeSourceSSRFGuard:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/admin/ai-knowledge/sources/{source_id}",
+            f"/api/v1/admin/ai-knowledge/sources/{pid(dal, 'ai_knowledge_sources', source_id)}",
             headers=auth_headers(scope="bot.ai_knowledge:write"),
             json={"source_url": "http://127.0.0.1/admin"},
         )
@@ -709,7 +784,7 @@ class TestAIKnowledgeSourceSSRFGuard:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/admin/ai-knowledge/sources/{source_id}",
+            f"/api/v1/admin/ai-knowledge/sources/{pid(dal, 'ai_knowledge_sources', source_id)}",
             headers=auth_headers(scope="bot.ai_knowledge:write"),
             json={"source_url": "http://169.254.169.254/latest/meta-data/"},
         )
@@ -731,14 +806,19 @@ class TestAIKnowledgeSearchAndSuggest:
         assert response.status_code == 400
 
     async def test_search_proxies_service_results(
-        self, client: Any, auth_headers: Any, monkeypatch: Any
+        self, client: Any, auth_headers: Any, monkeypatch: Any, dal: Any
     ) -> None:
+        source_id = dal.ai_knowledge_sources.insert(
+            source_name="Docs", source_type="manual", is_active=True
+        )
+        dal.commit()
+
         async def fake_search(dal: Any, query: str, **kwargs: Any) -> list[Any]:
             assert query == "how do I reset my password"
             return [
                 bot_ai_knowledge.KnowledgeSearchResult(
                     chunk_id=1,
-                    source_id=2,
+                    source_id=source_id,
                     content="Reset via settings.",
                     source_url="https://docs.example.com/reset",
                     source_title="Password Reset",
@@ -758,6 +838,9 @@ class TestAIKnowledgeSearchAndSuggest:
         body = await response.get_json()
         assert body["results"][0]["score"] == 0.91
         assert body["results"][0]["chunk"]["id"] == 1
+        assert body["results"][0]["chunk"]["source_id"] == pid(
+            dal, "ai_knowledge_sources", source_id
+        )
 
     async def test_suggest_missing_fields_is_400(self, client: Any, auth_headers: Any) -> None:
         response = await client.post(
@@ -784,11 +867,16 @@ class TestAIKnowledgeSearchAndSuggest:
         assert body["suggestion"] is None
 
     async def test_suggest_found_returns_201(
-        self, client: Any, auth_headers: Any, monkeypatch: Any
+        self, client: Any, auth_headers: Any, monkeypatch: Any, dal: Any
     ) -> None:
+        suggestion_row = dal.ai_ticket_suggestions.insert(
+            ticket_id=1, suggestion_text="x", confidence_score=0.9, cited_chunks=[]
+        )
+        dal.commit()
+
         async def fake_generate(dal: Any, ticket_id: int, text: str, **kwargs: Any) -> Any:
             return bot_ai_knowledge.TicketSuggestion(
-                id=1,
+                id=suggestion_row,
                 ticket_id=ticket_id,
                 suggestion_text="Try resetting via settings [1].",
                 confidence_score=0.85,
@@ -807,10 +895,11 @@ class TestAIKnowledgeSearchAndSuggest:
         assert response.status_code == 201
         body = await response.get_json()
         assert body["suggestion"]["confidence_score"] == 0.85
+        assert body["suggestion"]["id"] == pid(dal, "ai_ticket_suggestions", suggestion_row)
 
     async def test_feedback_invalid_value_is_400(self, client: Any, auth_headers: Any) -> None:
         response = await client.post(
-            "/api/v1/admin/ai-knowledge/suggestions/1/feedback",
+            "/api/v1/admin/ai-knowledge/suggestions/00000000-0000-4000-8000-000000000001/feedback",
             headers=auth_headers(scope="bot.ai_knowledge:write"),
             json={"feedback": "meh"},
         )
@@ -830,7 +919,7 @@ class TestAIKnowledgeSearchAndSuggest:
         )
         dal.commit()
         response = await client.post(
-            f"/api/v1/admin/ai-knowledge/suggestions/{suggestion_id}/feedback",
+            f"/api/v1/admin/ai-knowledge/suggestions/{pid(dal, 'ai_ticket_suggestions', suggestion_id)}/feedback",  # noqa: E501
             headers=auth_headers(scope="bot.ai_knowledge:write"),
             json={"feedback": "helpful"},
         )
@@ -845,23 +934,25 @@ class TestAIKnowledgeSearchAndSuggest:
 
 class TestRconServerCrud:
     async def test_list_admin_view_includes_host(
-        self, client: Any, auth_headers: Any, community_id: int, dal: Any
+        self, client: Any, auth_headers: Any, community_id: int, dal: Any, community_uuid: str
     ) -> None:
         dal.server_status_configs.insert(
             community_id=community_id, display_name="Rust #1", game_name="rust1", host="1.2.3.4"
         )
         dal.commit()
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/servers",
+            f"/api/v1/admin/{community_uuid}/rcon/servers",
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 200
         servers = (await response.get_json())["servers"]
         assert servers[0]["host"] == "1.2.3.4"
 
-    async def test_create_success(self, client: Any, auth_headers: Any, community_id: int) -> None:
+    async def test_create_success(
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
+    ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers",
+            f"/api/v1/admin/{community_uuid}/rcon/servers",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"display_name": "My Server", "host": "1.2.3.5", "password": "secret123"},
         )
@@ -871,34 +962,34 @@ class TestRconServerCrud:
         assert body["server"]["game_name"] == "my_server"
 
     async def test_create_private_ip_is_400(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers",
+            f"/api/v1/admin/{community_uuid}/rcon/servers",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"display_name": "Local", "host": "192.168.1.5"},
         )
         assert response.status_code == 400
 
     async def test_create_missing_display_name_is_400(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers",
+            f"/api/v1/admin/{community_uuid}/rcon/servers",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"display_name": "  ", "host": "1.2.3.5"},
         )
         assert response.status_code == 400
 
     async def test_update_success(
-        self, client: Any, auth_headers: Any, community_id: int, dal: Any
+        self, client: Any, auth_headers: Any, community_id: int, dal: Any, community_uuid: str
     ) -> None:
         server_id = dal.server_status_configs.insert(
             community_id=community_id, display_name="Old", game_name="old", host="1.2.3.5"
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/admin/{community_id}/rcon/servers/{server_id}",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{pid(dal, 'server_status_configs', server_id)}",  # noqa: E501
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"display_name": "New Name"},
         )
@@ -906,34 +997,34 @@ class TestRconServerCrud:
         assert (await response.get_json())["server"]["display_name"] == "New Name"
 
     async def test_update_not_found_is_404(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.put(
-            f"/api/v1/admin/{community_id}/rcon/servers/999999",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/999999",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"display_name": "New"},
         )
         assert response.status_code == 404
 
     async def test_delete_success(
-        self, client: Any, auth_headers: Any, community_id: int, dal: Any
+        self, client: Any, auth_headers: Any, community_id: int, dal: Any, community_uuid: str
     ) -> None:
         server_id = dal.server_status_configs.insert(
             community_id=community_id, display_name="Del", game_name="del", host="1.2.3.5"
         )
         dal.commit()
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/rcon/servers/{server_id}",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{pid(dal, 'server_status_configs', server_id)}",  # noqa: E501
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 200
         assert (await response.get_json())["message"] == "Server deleted"
 
     async def test_delete_not_found_is_404(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/rcon/servers/999999",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/999999",
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 404
@@ -946,6 +1037,12 @@ def seeded_server_id(dal: Any, community_id: int) -> int:
     )
     dal.commit()
     return server_id
+
+
+@pytest.fixture
+def seeded_server_uuid(dal: Any, seeded_server_id: int) -> str:
+    """The seeded server's public UUID (the only form its URLs accept)."""
+    return pid(dal, "server_status_configs", seeded_server_id)
 
 
 class TestRconLiveCommandProxy:
@@ -963,10 +1060,16 @@ class TestRconLiveCommandProxy:
         return calls
 
     async def test_test_connection(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/test",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/test",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"password": "x"},
         )
@@ -974,163 +1077,376 @@ class TestRconLiveCommandProxy:
         assert (await response.get_json()) == {"ok": True}
 
     async def test_execute_command(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/command",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/command",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"command": "status"},
         )
         assert response.status_code == 200
 
     async def test_execute_command_missing_command_is_400(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/command",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/command",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"command": "  "},
         )
         assert response.status_code == 400
 
     async def test_kick_player(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/kick",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/kick",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"player": "griefer"},
         )
         assert response.status_code == 200
 
     async def test_kick_player_missing_player_is_400(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/kick",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/kick",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"player": ""},
         )
         assert response.status_code == 400
 
     async def test_ban_player(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/ban",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/ban",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"player": "cheater", "duration": 0},
         )
         assert response.status_code == 200
 
     async def test_get_channels(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/channels",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/channels",
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 200
 
     async def test_move_user(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/move",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/move",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"user_id": "42", "channel_id": 3},
         )
         assert response.status_code == 200
 
     async def test_send_message(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/message",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/message",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"text": "hello"},
         )
         assert response.status_code == 200
 
     async def test_send_message_missing_text_is_400(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/message",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/message",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"text": ""},
         )
         assert response.status_code == 400
 
     async def test_get_access_policy(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/policy",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/policy",
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 200
 
     async def test_update_access_policy(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.put(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/policy",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/policy",
             headers=auth_headers(scope="bot.server_manager:admin"),
             json={"auto_kick_enabled": True},
         )
         assert response.status_code == 200
 
     async def test_trigger_enforcement(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.post(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/enforce",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/enforce",
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 200
 
     async def test_get_access_log(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/servers/{seeded_server_id}/access-log",
+            f"/api/v1/admin/{community_uuid}/rcon/servers/{seeded_server_uuid}/access-log",
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 200
 
     async def test_member_status(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/info/{seeded_server_id}/status",
+            f"/api/v1/admin/{community_uuid}/rcon/info/{seeded_server_uuid}/status",
             headers=auth_headers(scope="bot.server_manager:read"),
         )
         assert response.status_code == 200
 
     async def test_member_players(
-        self, client: Any, auth_headers: Any, community_id: int, seeded_server_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/info/{seeded_server_id}/players",
+            f"/api/v1/admin/{community_uuid}/rcon/info/{seeded_server_uuid}/players",
             headers=auth_headers(scope="bot.server_manager:read"),
         )
         assert response.status_code == 200
 
+    async def test_member_routes_return_exact_allowlisted_field_set(
+        self,
+        client: Any,
+        auth_headers: Any,
+        community_id: int,
+        seeded_server_id: int,
+        seeded_server_uuid: str,
+        community_uuid: str,
+        monkeypatch: Any,
+    ) -> None:
+        stuffed = {
+            "success": True,
+            "status": {
+                "online": True, "server_name": "1.2.3.4:27015", "players": 2, "map": "m",
+                "serverIp": "10.0.0.1", "connect_str": "10.0.0.1:1", "rcon_password": "pw",
+                "host": "h", "conn": {"addr": "10.0.0.2:2"},
+            },
+            "players": [{"name": "bob", "ping": 5, "ip": "10.0.0.3", "addr": {"ip": "10.0.0.4"}}],
+        }  # fmt: skip
+
+        async def fake_proxy(path: str, method: str = "GET", body: Any = None) -> Any:
+            return stuffed
+
+        monkeypatch.setattr(bot_rcon, "_proxy", fake_proxy)
+        base = f"/api/v1/admin/{community_uuid}/rcon/info/{seeded_server_uuid}"
+        headers = auth_headers(scope="bot.server_manager:read")
+        status = await (await client.get(f"{base}/status", headers=headers)).get_json()
+        players = await (await client.get(f"{base}/players", headers=headers)).get_json()
+        assert set(status) == {"success", "status"}
+        assert set(status["status"]) == {
+            "online", "server_name", "players_online", "max_players", "map", "game", "version",
+        }  # fmt: skip
+        assert status["status"]["server_name"] == "S1"  # DB display_name, not upstream
+        assert status["status"]["players_online"] == 2
+        assert set(players) == {"success", "players"}
+        assert set(players["players"][0]) == {"name", "score", "ping", "duration"}
+        assert players["players"][0]["name"] == "bob"
+        blob = str(status) + str(players)
+        for leaked in ("10.0.0", "rcon_password", "pw", "connect_str", "serverIp", "conn"):
+            assert leaked not in blob
+
+
+class TestRconMemberVisibility:
+    """Member status/players honour `visibility`; hidden servers 404 for non-admins."""
+
+    @pytest.fixture(autouse=True)
+    def _mock_proxy(self, monkeypatch: Any) -> None:
+        async def fake_proxy(path: str, method: str = "GET", body: Any = None) -> Any:
+            return {"success": True, "status": {"online": True}, "players": [{"name": "bob"}]}
+
+        monkeypatch.setattr(bot_rcon, "_proxy", fake_proxy)
+
+    @staticmethod
+    def _seed(dal: Any, community_id: int, visibility: str) -> int:
+        sid: int = dal.server_status_configs.insert(
+            community_id=community_id,
+            display_name=f"S-{visibility}",
+            game_name="g",
+            host="1.2.3.9",
+            visibility=visibility,
+        )
+        dal.commit()
+        return sid
+
+    @pytest.mark.parametrize("leaf", ["status", "players"])
+    @pytest.mark.parametrize(
+        ("visibility", "member_status", "admin_status"),
+        [
+            ("admin_only", 404, 200),
+            ("members", 200, 200),
+            ("registered", 200, 200),
+        ],
+    )
+    async def test_visibility_matrix(
+        self,
+        client: Any,
+        auth_headers: Any,
+        dal: Any,
+        community_id: int,
+        community_uuid: str,
+        monkeypatch: Any,
+        leaf: str,
+        visibility: str,
+        member_status: int,
+        admin_status: int,
+    ) -> None:
+        sid = self._seed(dal, community_id, visibility)
+        url = f"/api/v1/admin/{community_uuid}/rcon/info/{pid(dal, 'server_status_configs', sid)}/{leaf}"  # noqa: E501
+        headers = auth_headers(scope="bot.server_manager:read")
+        monkeypatch.setattr(bot_blueprint, "_caller_administers", lambda _c: False)
+        assert (await client.get(url, headers=headers)).status_code == member_status
+        monkeypatch.setattr(bot_blueprint, "_caller_administers", lambda _c: True)
+        assert (await client.get(url, headers=headers)).status_code == admin_status
+
+    async def test_hidden_server_404_body_matches_missing_id(
+        self,
+        client: Any,
+        auth_headers: Any,
+        dal: Any,
+        community_id: int,
+        community_uuid: str,
+        monkeypatch: Any,
+    ) -> None:
+        monkeypatch.setattr(bot_blueprint, "_caller_administers", lambda _c: False)
+        hidden = self._seed(dal, community_id, "admin_only")
+        headers = auth_headers(scope="bot.server_manager:read")
+        base = f"/api/v1/admin/{community_uuid}/rcon/info"
+        a = await client.get(f"{base}/{hidden}/status", headers=headers)
+        b = await client.get(f"{base}/999999/status", headers=headers)
+        assert a.status_code == b.status_code == 404
+        assert await a.get_json() == await b.get_json()
+
+    def test_member_visible_set_is_shared_with_listing(self, dal: Any, community_id: int) -> None:
+        for visibility in ("admin_only", "members", "registered"):
+            self._seed(dal, community_id, visibility)
+        listed = {
+            int(dal(dal.server_status_configs.public_id == s.id).select().first().id)
+            for s in bot_rcon.list_servers(dal, community_id, is_admin=False)
+        }
+        for sid in listed:
+            assert bot_rcon.get_active_server(dal, community_id, sid, member_only=True)
+        assert bot_rcon.MEMBER_VISIBLE_VISIBILITIES == ("members", "registered")
+
 
 class TestRconCommandLogAndMemberInfo:
     async def test_command_log_empty(
-        self, client: Any, auth_headers: Any, community_id: int
+        self, client: Any, auth_headers: Any, community_id: int, community_uuid: str
     ) -> None:
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/log",
+            f"/api/v1/admin/{community_uuid}/rcon/log",
             headers=auth_headers(scope="bot.server_manager:admin"),
         )
         assert response.status_code == 200
         assert (await response.get_json())["log"] == []
 
     async def test_member_info_excludes_admin_only_servers(
-        self, client: Any, auth_headers: Any, community_id: int, dal: Any
+        self, client: Any, auth_headers: Any, community_id: int, dal: Any, community_uuid: str
     ) -> None:
         dal.server_status_configs.insert(
             community_id=community_id,
@@ -1148,7 +1464,7 @@ class TestRconCommandLogAndMemberInfo:
         )
         dal.commit()
         response = await client.get(
-            f"/api/v1/admin/{community_id}/rcon/info",
+            f"/api/v1/admin/{community_uuid}/rcon/info",
             headers=auth_headers(scope="bot.server_manager:read"),
         )
         assert response.status_code == 200
@@ -1167,3 +1483,80 @@ async def test_ai_chatter_service_unavailable_is_typed_503(monkeypatch: pytest.M
         await bot_ai_chatter.update_chatter_config(
             1, bot_ai_chatter.AIChatterConfigUpdate(enabled=True)
         )
+
+
+class TestCredentialRedactionInRejections:
+    """Rejected-request handlers never echo URL userinfo/query or RCON secrets (logs + body)."""
+
+    # Built at runtime so secret scanners don't flag the planted sentinels.
+    _PW = "hunter2" + "-SENTINEL"
+    _TOK = "tok" + "-SENTINEL"
+    SECRET_URL = f"https://admin:{_PW}@127.0.0.1:8443/docs?token={_TOK}"
+    LEAKS = (_PW, _TOK, "admin:hunter2", "SENTINEL")
+
+    @pytest.fixture(autouse=True)
+    def _caller_is_super_admin(self, monkeypatch: Any) -> None:
+        monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _dal, _uid: True)
+
+    def _assert_clean(self, body: str, caplog: Any) -> None:
+        logs = "\n".join(
+            [r.getMessage() for r in caplog.records]
+            + [str(r.__dict__) for r in caplog.records]
+            + [r.exc_text or "" for r in caplog.records]
+        )
+        for leak in self.LEAKS:
+            assert leak not in body
+            assert leak not in logs
+
+    async def test_create_source_bad_url_not_echoed(
+        self, client: Any, auth_headers: Any, caplog: Any
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        response = await client.post(
+            "/api/v1/admin/ai-knowledge/sources",
+            headers=auth_headers(scope="bot.ai_knowledge:write"),
+            json={
+                "source_name": "Docs",
+                "source_type": "generic_url",
+                "source_url": self.SECRET_URL,
+            },
+        )
+        assert response.status_code == 400
+        body = await response.get_data(as_text=True)
+        assert "source_url rejected" in body
+        assert "127.0.0.1" in body  # redacted origin only
+        self._assert_clean(body, caplog)
+        assert any(r.getMessage() == "bot_request_rejected" for r in caplog.records)
+
+    async def test_update_source_bad_url_not_echoed(
+        self, client: Any, auth_headers: Any, caplog: Any
+    ) -> None:
+        created = await client.post(
+            "/api/v1/admin/ai-knowledge/sources",
+            headers=auth_headers(scope="bot.ai_knowledge:write"),
+            json={"source_name": "Manual", "source_type": "manual"},
+        )
+        source_id = (await created.get_json())["source"]["id"]
+        caplog.set_level(logging.DEBUG)
+        response = await client.put(
+            f"/api/v1/admin/ai-knowledge/sources/{source_id}",
+            headers=auth_headers(scope="bot.ai_knowledge:write"),
+            json={"source_url": self.SECRET_URL},
+        )
+        assert response.status_code == 400
+        self._assert_clean(await response.get_data(as_text=True), caplog)
+
+    async def test_rcon_create_private_host_not_leaking_password(
+        self, client: Any, auth_headers: Any, community_uuid: str, caplog: Any
+    ) -> None:
+        caplog.set_level(logging.DEBUG)
+        response = await client.post(
+            f"/api/v1/admin/{community_uuid}/rcon/servers",
+            headers=auth_headers(scope="bot.server_manager:admin"),
+            json={"display_name": "S", "host": "10.0.0.5", "password": self._PW},
+        )
+        assert response.status_code == 400
+        self._assert_clean(await response.get_data(as_text=True), caplog)
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

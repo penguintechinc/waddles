@@ -2,8 +2,8 @@
 
 Reuses the `install_dal`/`bundle_install_db` fixtures every other bundle-install test uses
 (`tests/conftest.py`) -- same schema, same `TENANT_SLUG` ("acme-corp") seeded tenant row, so a
-catalog entry here targets that slug rather than "global" (the seeder never hardcodes a tenant
-slug; "global" is only `bundles/core-bundles.yaml`'s own default).
+catalog entry here targets that slug rather than "default" (the seeder never hardcodes a tenant
+slug; "default" is only `bundles/core-bundles.yaml`'s own default).
 """
 
 from __future__ import annotations
@@ -11,6 +11,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +30,7 @@ from cli.seed_core_bundles import (
     reconcile_removed_core_bundles,
     seed_one,
 )
+from services.bundle_app_id import bundle_storage_key
 from services.bundle_approval_service import activate_for_community
 from services.bundle_component_validator import ComponentValidationResult
 from services.bundle_permission_service import get_approved_permission_ids
@@ -37,10 +40,10 @@ from tests.conftest import TENANT_SLUG
 
 _MANIFEST: dict[str, Any] = {
     "schema_version": 2,
-    "app_id": "waddles.core.example.ping",
+    "app_id": "penguintechinc.waddles.ping",
     "name": "Ping Example Bundle (Rust)",
     "version": "1.0.0",
-    "feature": "waddles.core.example",
+    "feature": "example",
     "module": "core",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -99,7 +102,7 @@ def _patch_validator_and_storage(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         bvs.storage_service,
         "upload_bundle_component",
-        AsyncMock(return_value=f"bundles/waddles.core.example.ping/1.0.0/{digest}.wasm"),
+        AsyncMock(return_value=f"bundles/penguintechinc.waddles.ping/1.0.0/{digest}.wasm"),
     )
 
 
@@ -109,10 +112,8 @@ def _patch_validator_and_storage(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 async def test_seed_one_refuses_a_non_core_app_id(install_dal: Any, tmp_path: Path) -> None:
-    entry = _write_bundle(
-        tmp_path, manifest={**_MANIFEST, "app_id": "waddles.integrations.vendor-1.evil"}
-    )
-    with pytest.raises(CoreBundleSeederError, match="waddles.core."):
+    entry = _write_bundle(tmp_path, manifest={**_MANIFEST, "app_id": "acmecorp.widgets.evil"})
+    with pytest.raises(CoreBundleSeederError, match="penguintechinc.waddles."):
         await seed_one(install_dal, entry, tmp_path)
 
 
@@ -120,32 +121,29 @@ async def test_seed_one_refuses_before_touching_the_database(
     install_dal: Any, tmp_path: Path
 ) -> None:
     """The HARD GUARD runs before any manifest read/DB write -- no app_catalog row is created."""
-    entry = _write_bundle(
-        tmp_path, manifest={**_MANIFEST, "app_id": "waddles.integrations.vendor-1.evil"}
-    )
+    entry = _write_bundle(tmp_path, manifest={**_MANIFEST, "app_id": "acmecorp.widgets.evil"})
     with pytest.raises(CoreBundleSeederError):
         await seed_one(install_dal, entry, tmp_path)
-    rows = await install_dal(
-        install_dal.app_catalog.app_id == "waddles.integrations.vendor-1.evil"
-    ).select()
+    rows = await install_dal(install_dal.app_catalog.app_id == "acmecorp.widgets.evil").select()
     assert not rows
 
 
 @pytest.mark.parametrize(
     "app_id",
     [
-        pytest.param("waddles.corex.example.ping", id="near-miss-not-a-dot-boundary"),
-        pytest.param("waddles.core.example.pÿng", id="latin-supplement-not-ascii"),
+        pytest.param("penguintechinc.waddlesx.ping", id="near-miss-not-a-dot-boundary"),
+        pytest.param("penguintechinc.waddles.pÿng", id="latin-supplement-not-ascii"),
         # Fullwidth 'l' (U+FF4C) NFKC-normalizes to ASCII 'l' -- normalization changes the
         # string, so it is refused outright regardless of what it visually resembles.
-        pytest.param("waddles.core.exampｌe.ping", id="nfkc-changing-fullwidth-l"),
+        pytest.param("penguintechinc.waddles.exampｌe", id="nfkc-changing-fullwidth-l"),
         # Cyrillic 'а' (U+0430) is NOT touched by NFKC (different script, not canonically
         # equivalent to Latin 'a') -- caught by the ASCII-only charset regex instead.
-        pytest.param("wаddles.core.example.ping", id="cyrillic-homoglyph-a"),
-        pytest.param("Waddles.Core.Example.Ping", id="uppercase"),
-        pytest.param("waddles..core.example.ping", id="consecutive-dots-empty-segment"),
-        pytest.param("waddles.core.example.p_ng", id="underscore-not-in-charset"),
-        pytest.param("waddles.core.example.ping.", id="trailing-dot-empty-segment"),
+        pytest.param("penguintechinc.wаddles.ping", id="cyrillic-homoglyph-a"),
+        pytest.param("Penguintechinc.Waddles.Ping", id="uppercase"),
+        pytest.param("penguintechinc..waddles.ping", id="consecutive-dots-empty-segment"),
+        pytest.param("penguintechinc.waddles.p_ng", id="underscore-not-in-charset"),
+        pytest.param("penguintechinc.other.x", id="wrong-repo-under-reserved-org"),
+        pytest.param("penguintechinc.waddles.ping.", id="trailing-dot-empty-segment"),
     ],
 )
 def test_guard_core_namespace_refuses_lookalike_and_malformed_app_ids(app_id: str) -> None:
@@ -154,7 +152,7 @@ def test_guard_core_namespace_refuses_lookalike_and_malformed_app_ids(app_id: st
 
 
 def test_guard_core_namespace_accepts_a_well_formed_core_app_id() -> None:
-    seeder._guard_core_namespace("waddles.core.example.ping")  # must not raise
+    seeder._guard_core_namespace("penguintechinc.waddles.ping")  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +282,7 @@ async def test_seed_one_with_no_community_id_activates_tenant_wide(
     schema sentinel split -- see its own docstring). Never silently skip:
     `bundles/core-bundles.yaml`'s every real entry declares
     `community_id: null`, so a skip here means the DB-driven data plane
-    never loads waddles.core.* at all.
+    never loads penguintechinc.waddles.* at all.
     """
     _patch_validator_and_storage(monkeypatch)
     entry = _write_bundle(tmp_path)  # community_id=None (default)
@@ -520,6 +518,43 @@ async def test_seed_one_reruns_are_a_no_op(
 
     versions = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
     assert len(versions) == 1, "a no-op re-run must not publish a second app_versions row"
+
+
+async def test_seed_one_records_app_id_owner_idempotently_across_reseeds(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Seeding twice leaves exactly one `app_id_owners` row (NULL owner = system actor)."""
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
+
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+    rows = await install_dal(install_dal.app_id_owners.app_id == entry.app_id).select()
+    assert len(rows) == 1
+    assert rows[0].owner_id is None
+    assert rows[0].storage_key == bundle_storage_key(entry.app_id)
+
+
+async def test_seed_one_fails_loudly_when_its_storage_key_belongs_to_another_app_id(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-existing row holding this id's storage key (different app_id) refuses the seed."""
+    _patch_validator_and_storage(monkeypatch)
+    community_id = await _seed_community(install_dal)
+    entry = _write_bundle(tmp_path, community_id=community_id)
+    await install_dal.app_id_owners.async_insert(
+        app_id="evil.squatter.bundle",
+        owner_id=99,
+        storage_key=bundle_storage_key(entry.app_id),
+    )
+
+    with pytest.raises(ApiError) as exc:
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    assert exc.value.status_code == 409
+    versions = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
+    assert len(versions) == 0, "a refused seed must not publish anything"
 
 
 async def test_seed_one_self_heals_permission_grants_for_a_pre_catalog_bundle(
@@ -772,15 +807,15 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     # would red this test on every single addition. This proves every KNOWN core bundle is
     # still present (and the catalog still parses) without forbidding new ones.
     known_app_ids = {
-        "waddles.core.example.ping",
-        "waddles.core.example.pyping",
-        "waddles.core.example.csping",
+        "penguintechinc.waddles.ping",
+        "penguintechinc.waddles.pyping",
+        "penguintechinc.waddles.csping",
         # PR batch 1 (2026-10-03): token-safe Python command bundles -- relay/kv only, no
         # handle echoed back, so these ship ahead of the PII-tokenization pipeline #427/#429.
-        "waddles.core.example.eightball",
-        "waddles.core.example.roll",
-        "waddles.core.example.lurk",
-        "waddles.core.example.count",
+        "penguintechinc.waddles.eightball",
+        "penguintechinc.waddles.roll",
+        "penguintechinc.waddles.lurk",
+        "penguintechinc.waddles.count",
     }
     catalog_app_ids = {e.app_id for e in entries}
     missing = known_app_ids - catalog_app_ids
@@ -800,8 +835,9 @@ def test_load_catalog_parses_the_real_repo_catalog() -> None:
     # digest_conflict. 1.0.1 is the first version built from the corrected Dockerfile.
     versions_by_app_id = {e.app_id: e.version for e in entries}
     # 1.0.1 -> 1.0.2: manifest-only bump declaring `chat.send:<platform>` (least privilege).
-    # 1.0.2 -> 1.0.3: manifest-only bump backfilling the validated `author` (github:penguintechinc).
-    assert versions_by_app_id["waddles.core.example.csping"] == "1.0.3"
+    # 1.0.2 -> 1.0.3: manifest-only author backfill.
+    # 1.0.3 -> 1.0.4: app_id cutover (the new app_id changes the signed payload).
+    assert versions_by_app_id["penguintechinc.waddles.csping"] == "1.0.4"
 
 
 def test_load_catalog_defaults_a_missing_activation_targets_to_default(tmp_path: Path) -> None:
@@ -811,7 +847,7 @@ def test_load_catalog_defaults_a_missing_activation_targets_to_default(tmp_path:
             {
                 "bundles": [
                     {
-                        "app_id": "waddles.core.example.ping",
+                        "app_id": "penguintechinc.waddles.ping",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "ping.manifest.yaml",
@@ -838,7 +874,7 @@ def test_load_catalog_accepts_a_connector_tools_wit_world_row(tmp_path: Path) ->
             {
                 "bundles": [
                     {
-                        "app_id": "waddles.core.service.twitch",
+                        "app_id": "penguintechinc.waddles.twitch",
                         "version": "1.0.0",
                         "language": "rust",
                         "wit_world": "connector-tools",
@@ -854,7 +890,7 @@ def test_load_catalog_accepts_a_connector_tools_wit_world_row(tmp_path: Path) ->
     )
     entries = load_catalog(catalog_path)
     assert [(e.app_id, e.language, e.source_dir) for e in entries] == [
-        ("waddles.core.service.twitch", "rust", "rust/twitch")
+        ("penguintechinc.waddles.twitch", "rust", "rust/twitch")
     ]
 
 
@@ -868,12 +904,12 @@ def test_env_override_replaces_every_entrys_activation_targets(
 ) -> None:
     monkeypatch.setenv("CORE_BUNDLES_TENANT_SLUGS", "acme-corp, other-corp")
     entry = CatalogEntry(
-        app_id="waddles.core.example.ping",
+        app_id="penguintechinc.waddles.ping",
         version="1.0.0",
         language="rust",
         manifest_path="ping.manifest.yaml",
         artifact_path="ping.wasm",
-        activation_targets=(ActivationTarget(tenant_slug="global"),),
+        activation_targets=(ActivationTarget(tenant_slug="default"),),
     )
     resolved = seeder._resolve_activation_targets(entry)
     assert resolved == (
@@ -1073,7 +1109,7 @@ async def test_run_examines_every_catalog_entry_and_reports_a_nonzero_exit_on_an
             {
                 "bundles": [
                     {
-                        "app_id": "waddles.core.example.ping",
+                        "app_id": "penguintechinc.waddles.ping",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "ping.manifest.yaml",
@@ -1081,7 +1117,7 @@ async def test_run_examines_every_catalog_entry_and_reports_a_nonzero_exit_on_an
                         "activation_targets": [{"tenant_slug": TENANT_SLUG}],
                     },
                     {
-                        "app_id": "waddles.integrations.vendor-1.evil",
+                        "app_id": "acmecorp.widgets.evil",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "ping.manifest.yaml",
@@ -1089,7 +1125,7 @@ async def test_run_examines_every_catalog_entry_and_reports_a_nonzero_exit_on_an
                         "activation_targets": [{"tenant_slug": TENANT_SLUG}],
                     },
                     {
-                        "app_id": "waddles.core.example.missing",
+                        "app_id": "penguintechinc.waddles.missing",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "missing.manifest.yaml",
@@ -1108,7 +1144,7 @@ async def test_run_examines_every_catalog_entry_and_reports_a_nonzero_exit_on_an
     # This catalog's own activation_targets carry no community_id -- TENANT-tier
     # availability only (see `ActivationTarget`'s own docstring), not COMMUNITY activation.
     available = await install_dal(
-        (install_dal.bundle_tenant_availability.app_id == "waddles.core.example.ping")
+        (install_dal.bundle_tenant_availability.app_id == "penguintechinc.waddles.ping")
         & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
     ).select()
     assert len(available) == 1  # the one good bundle still seeded successfully
@@ -1150,7 +1186,7 @@ async def test_run_rerun_with_the_same_digest_is_a_clean_no_op_at_process_level(
             {
                 "bundles": [
                     {
-                        "app_id": "waddles.core.example.ping",
+                        "app_id": "penguintechinc.waddles.ping",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "ping.manifest.yaml",
@@ -1170,7 +1206,7 @@ async def test_run_rerun_with_the_same_digest_is_a_clean_no_op_at_process_level(
     assert second_exit == 0  # idempotent re-run: no-op, not a failure
 
     versions = await install_dal(
-        install_dal.app_versions.app_id == "waddles.core.example.ping"
+        install_dal.app_versions.app_id == "penguintechinc.waddles.ping"
     ).select()
     assert len(versions) == 1  # never republished
 
@@ -1279,7 +1315,7 @@ async def test_run_a_fatal_api_error_still_fails_the_run_and_other_bundles_still
             {
                 "bundles": [
                     {
-                        "app_id": "waddles.core.example.ping",
+                        "app_id": "penguintechinc.waddles.ping",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "ping.manifest.yaml",
@@ -1287,7 +1323,7 @@ async def test_run_a_fatal_api_error_still_fails_the_run_and_other_bundles_still
                         "activation_targets": [{"tenant_slug": "no-such-tenant"}],
                     },
                     {
-                        "app_id": "waddles.core.example.ping",
+                        "app_id": "penguintechinc.waddles.ping",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "ping.manifest.yaml",
@@ -1314,7 +1350,7 @@ async def test_run_a_fatal_api_error_still_fails_the_run_and_other_bundles_still
     # The second catalog entry (same bundle, a valid tenant) still seeded despite the first
     # entry's failure -- one bundle's fatal error never aborts the batch.
     available = await install_dal(
-        (install_dal.bundle_tenant_availability.app_id == "waddles.core.example.ping")
+        (install_dal.bundle_tenant_availability.app_id == "penguintechinc.waddles.ping")
         & (install_dal.bundle_tenant_availability.available == True)  # noqa: E712
     ).select()
     assert len(available) == 1
@@ -1434,10 +1470,10 @@ def test_main_honors_an_explicit_catalog_override(
 
 _PYPING_MANIFEST: dict[str, Any] = {
     "schema_version": 2,
-    "app_id": "waddles.core.example.pyping",
+    "app_id": "penguintechinc.waddles.pyping",
     "name": "Ping Example Bundle (Python)",
     "version": "1.0.0",
-    "feature": "waddles.core.example",
+    "feature": "example",
     "module": "core",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -1483,7 +1519,7 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
             {
                 "platform_connections": [
                     {
-                        "tenant_slug": "global",
+                        "tenant_slug": "default",
                         "platform": "twitch",
                         "source_id": "static-source",
                         "label": "static",
@@ -1499,7 +1535,7 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
         json.dumps(
             [
                 {
-                    "tenant_slug": "global",
+                    "tenant_slug": "default",
                     "platform": "discord",
                     "source_id": "dg-474965105759748096",
                 }
@@ -1511,10 +1547,10 @@ def test_load_platform_connections_extends_the_static_catalog_with_the_env_overr
 
     assert connections == (
         seeder.PlatformConnection(
-            tenant_slug="global", platform="twitch", source_id="static-source", label="static"
+            tenant_slug="default", platform="twitch", source_id="static-source", label="static"
         ),
         seeder.PlatformConnection(
-            tenant_slug="global",
+            tenant_slug="default",
             platform="discord",
             source_id="dg-474965105759748096",
             label="dg-474965105759748096",
@@ -1554,7 +1590,7 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
     monkeypatch.setattr(
         bvs.storage_service,
         "upload_bundle_component",
-        AsyncMock(return_value=f"bundles/waddles.core.example.pyping/1.0.0/{digest}.wasm"),
+        AsyncMock(return_value=f"bundles/penguintechinc.waddles.pyping/1.0.0/{digest}.wasm"),
     )
     monkeypatch.setattr(bvs.valkey_admin_client, "build_client", lambda: AsyncMock())
 
@@ -1590,7 +1626,7 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
                 ],
                 "bundles": [
                     {
-                        "app_id": "waddles.core.example.pyping",
+                        "app_id": "penguintechinc.waddles.pyping",
                         "version": "1.0.0",
                         "language": "python",
                         "manifest_path": "pyping.manifest.yaml",
@@ -1615,7 +1651,7 @@ async def test_run_registers_platform_connections_before_activating_a_bundle_tha
     assert connection_row.secret_ciphertext is None
 
     bindings = await install_dal(
-        install_dal.app_source_bindings.app_id == "waddles.core.example.pyping"
+        install_dal.app_source_bindings.app_id == "penguintechinc.waddles.pyping"
     ).select()
     assert {b.platform for b in bindings} == {"discord"}
     assert bindings.first().source_id == "dg-474965105759748096"
@@ -1643,7 +1679,7 @@ async def test_run_registers_platform_connection_and_binds_tenant_wide_to_discor
     monkeypatch.setattr(
         bvs.storage_service,
         "upload_bundle_component",
-        AsyncMock(return_value=f"bundles/waddles.core.example.pyping/1.0.0/{digest}.wasm"),
+        AsyncMock(return_value=f"bundles/penguintechinc.waddles.pyping/1.0.0/{digest}.wasm"),
     )
     monkeypatch.setattr(bvs.valkey_admin_client, "build_client", lambda: AsyncMock())
 
@@ -1673,7 +1709,7 @@ async def test_run_registers_platform_connection_and_binds_tenant_wide_to_discor
                 ],
                 "bundles": [
                     {
-                        "app_id": "waddles.core.example.pyping",
+                        "app_id": "penguintechinc.waddles.pyping",
                         "version": "1.0.0",
                         "language": "python",
                         "manifest_path": "pyping.manifest.yaml",
@@ -1697,7 +1733,7 @@ async def test_run_registers_platform_connection_and_binds_tenant_wide_to_discor
 
     active_row = (
         await install_dal(
-            (install_dal.app_active_versions.app_id == "waddles.core.example.pyping")
+            (install_dal.app_active_versions.app_id == "penguintechinc.waddles.pyping")
             & (
                 install_dal.app_active_versions.community_id
                 == seeder.TENANT_WIDE_COMMUNITY_SENTINEL
@@ -1707,7 +1743,7 @@ async def test_run_registers_platform_connection_and_binds_tenant_wide_to_discor
     assert active_row is not None
 
     bindings = await install_dal(
-        install_dal.app_source_bindings.app_id == "waddles.core.example.pyping"
+        install_dal.app_source_bindings.app_id == "penguintechinc.waddles.pyping"
     ).select()
     assert {b.platform for b in bindings} == {"discord"}
     assert bindings.first().source_id == "dg-474965105759748096"
@@ -1729,7 +1765,7 @@ async def _seeded_system_activation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     *,
-    app_id: str = "waddles.core.example.ping",
+    app_id: str = "penguintechinc.waddles.ping",
 ) -> tuple[str, int]:
     """Seed one SYSTEM-owned COMMUNITY-tier activation via the real `seed_one()` path.
 
@@ -1890,7 +1926,7 @@ async def test_run_wires_the_reconcile_sweep_end_to_end(
             {
                 "bundles": [
                     {
-                        "app_id": "waddles.core.example.ping",
+                        "app_id": "penguintechinc.waddles.ping",
                         "version": "1.0.0",
                         "language": "rust",
                         "manifest_path": "ping.manifest.yaml",
@@ -1907,7 +1943,7 @@ async def test_run_wires_the_reconcile_sweep_end_to_end(
     assert await seeder._run(tmp_path, first_catalog) == 0
     assert (
         await _active_row(
-            install_dal, app_id="waddles.core.example.ping", community_id=community_id
+            install_dal, app_id="penguintechinc.waddles.ping", community_id=community_id
         )
         is not None
     )
@@ -1919,7 +1955,7 @@ async def test_run_wires_the_reconcile_sweep_end_to_end(
     assert await seeder._run(tmp_path, second_catalog) == 0
     assert (
         await _active_row(
-            install_dal, app_id="waddles.core.example.ping", community_id=community_id
+            install_dal, app_id="penguintechinc.waddles.ping", community_id=community_id
         )
         is None
     )
@@ -2030,7 +2066,7 @@ async def test_agreement_check_warns_when_bundle_yaml_absent(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     entry = CatalogEntry(
-        app_id="waddles.core.x.default",
+        app_id="penguintechinc.waddles.x",
         version="1.0.0",
         language="python",
         manifest_path="m.yaml",
@@ -2046,7 +2082,7 @@ async def test_agreement_check_warns_when_bundle_yaml_absent(
 @pytest.mark.parametrize("bad", [None, [], "x"])
 def test_agreement_check_rejects_non_mapping_manifest(tmp_path: Path, bad: Any) -> None:
     entry = CatalogEntry(
-        app_id="waddles.core.x.default",
+        app_id="penguintechinc.waddles.x",
         version="1.0.0",
         language="python",
         manifest_path="m.yaml",
@@ -2073,11 +2109,14 @@ def test_real_catalog_bundle_yaml_and_hub_manifest_agree() -> None:
 
 
 _CONNECTOR_APP_IDS = (
-    "waddles.core.service.twitch",
-    "waddles.core.service.discord",
-    "waddles.core.service.youtube",
-    "waddles.core.service.wix",
+    "penguintechinc.waddles.twitch",
+    "penguintechinc.waddles.discord",
+    "penguintechinc.waddles.youtube",
+    "penguintechinc.waddles.wix",
 )
+#: Connectors whose manifest declares the dangerous `connector.pii.read`. Wix is events-only (it
+#: syncs Wix Events and ingests no member data), so it declares -- and is granted -- none.
+_PII_READ_CONNECTORS = frozenset(_CONNECTOR_APP_IDS) - {"penguintechinc.waddles.wix"}
 
 
 def test_real_catalog_has_the_connector_tools_rows() -> None:
@@ -2107,12 +2146,12 @@ def test_real_catalog_has_the_spectrum_connector_row() -> None:
     """#486: the inbound-only Spectrum connector is a catalog row on the `connector` world."""
     bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
     entry = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}[
-        "waddles.core.service.spectrum"
+        "penguintechinc.waddles.spectrum"
     ]
     raw = {
         r["app_id"]: r
         for r in yaml.safe_load((bundles_dir / "core-bundles.yaml").read_text())["bundles"]
-    }["waddles.core.service.spectrum"]
+    }["penguintechinc.waddles.spectrum"]
     assert (raw["language"], raw["wit_world"], raw["kind"]) == ("rust", "connector", "service")
     assert raw["source_dir"] == "rust/spectrum"
     assert (raw["manifest_path"], raw["artifact_path"]) == (
@@ -2124,17 +2163,18 @@ def test_real_catalog_has_the_spectrum_connector_row() -> None:
 
 
 @pytest.mark.parametrize("app_id", _CONNECTOR_APP_IDS)
-async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
+async def test_seed_one_seeds_each_real_connector_row_and_grants_its_declared_permissions(
     app_id: str, install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Seeds every connector from the REAL catalog + REAL hub-manifest (wasm bytes faked).
 
     `wit_world: connector-tools` never reaches the seeder's validation, so the row seeds like any
-    rust service; as a `waddles.core.*` bundle the seeder pre-grants every declared permission,
-    including the dangerous `connector.pii.read`.
+    rust service; as a core bundle the seeder pre-grants EVERY declared permission
+    and nothing else -- including the dangerous `connector.pii.read` only where the manifest
+    declares it (not for the events-only Wix connector).
     """
     _patch_validator_and_storage(monkeypatch)
-    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"
+    bundles_dir = Path(__file__).resolve().parents[2] / "bundles"  # noqa: ASYNC240
     catalog = {e.app_id: e for e in load_catalog(bundles_dir / "core-bundles.yaml")}
     real = catalog[app_id]
     (tmp_path / real.manifest_path).write_bytes(
@@ -2155,7 +2195,16 @@ async def test_seed_one_seeds_each_real_connector_row_and_grants_pii_read(
 
     assert [r.outcome for r in results] == ["made_available", "activated"]
     grants = await install_dal(install_dal.community_permission_grants.app_id == app_id).select()
-    assert "connector.pii.read" in {row.permission_id for row in grants}
+    granted = {row.permission_id for row in grants}
+    declared = {
+        p["id"]
+        for p in yaml.safe_load((bundles_dir / real.source_dir / "hub-manifest.yaml").read_text())[
+            "permissions"
+        ]
+    }
+    assert declared, f"{app_id} declares no permissions"
+    assert granted == declared
+    assert ("connector.pii.read" in granted) == (app_id in _PII_READ_CONNECTORS)
 
 
 def test_real_catalog_manifest_and_artifact_filenames_are_unique() -> None:
@@ -2297,3 +2346,164 @@ def test_every_real_core_bundle_manifest_has_a_derivable_vendor() -> None:
         seeder._assert_vendor_derivable(manifest)
         checked += 1
     assert checked >= 100, f"only {checked} manifests examined"
+
+
+def _single_row_catalog(tmp_path: Path, entry: CatalogEntry, language: str) -> Path:
+    """Write a one-row catalog for `entry` with the given `language`; return its path."""
+    catalog_path = tmp_path / "core-bundles.yaml"
+    catalog_path.write_text(
+        yaml.safe_dump(
+            {
+                "bundles": [
+                    {
+                        "app_id": entry.app_id,
+                        "version": entry.version,
+                        "language": language,
+                        "manifest_path": "ping.manifest.yaml",
+                        "artifact_path": "ping.wasm",
+                        "activation_targets": [{"tenant_slug": TENANT_SLUG}],
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    return catalog_path
+
+
+@pytest.mark.parametrize(
+    "language", ["python", "javascript", "nodejs", "typescript", "TypeScript", "ruby"]
+)
+async def test_scripted_digest_mismatch_is_a_logged_counted_noop_keeping_the_row(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    language: str,
+) -> None:
+    """Policy: scripted (python/node/ts) bundles are not byte-checked; logged, counted, kept."""
+    _patch_validator_and_storage(monkeypatch)
+    rust_entry = _write_bundle(tmp_path)
+    entry = replace(rust_entry, language=language)
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    before = (await install_dal(install_dal.app_versions.app_id == entry.app_id).select()).first()
+
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-different-content")
+    drift: list[str] = []
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock(), digest_drift=drift)
+
+    rows = await install_dal(install_dal.app_versions.app_id == entry.app_id).select()
+    assert len(rows) == 1
+    assert rows.first().artifact_digest == before.artifact_digest  # existing row kept
+    assert len(drift) == 1
+    assert f"existing={before.artifact_digest[:12]}" in drift[0]
+    assert f"{entry.app_id}@{entry.version}" in drift[0]
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelname == "WARNING" and "byte-check not enforced (policy)" in r.getMessage()
+    ]
+    assert len(warnings) == 1
+    assert entry.app_id in warnings[0].getMessage()
+    assert warnings[0].existing_digest_prefix == before.artifact_digest[:12]
+    assert warnings[0].this_build_digest_prefix != warnings[0].existing_digest_prefix
+
+
+@pytest.mark.parametrize(
+    "language", ["python", "javascript", "nodejs", "typescript", "TypeScript", "ruby"]
+)
+async def test_run_scripted_digest_mismatch_is_not_a_conflict_or_failure(
+    install_dal: Any,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    language: str,
+) -> None:
+    """`_run()`: exit 0, NOT in skipped_conflicts, counted in digest_drift_not_enforced."""
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    entry = _write_bundle(tmp_path)
+    catalog_path = _single_row_catalog(tmp_path, entry, language)
+
+    assert await seeder._run(tmp_path, catalog_path) == 0
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-drifted")
+    with caplog.at_level("INFO", logger="waddles.hub_api.core_bundle_seeder"):
+        assert await seeder._run(tmp_path, catalog_path) == 0
+
+    summary = [
+        r for r in caplog.records if r.getMessage().startswith("core-bundle-seeder: summary")
+    ][-1]
+    assert summary.failures == 0
+    assert summary.skipped_conflicts == []
+    assert len(summary.digest_drift_not_enforced) == 1
+    assert not [r for r in caplog.records if getattr(r, "error_code", None) == "digest_conflict"]
+
+
+@pytest.mark.parametrize("language", ["rust", "csharp", "go", "RUST"])
+async def test_compiled_digest_mismatch_still_raises_digest_conflict(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, language: str
+) -> None:
+    """Compiled (rust/csharp/go) bundles keep the strict 409 digest_conflict byte check."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = replace(_write_bundle(tmp_path), language=language)
+    await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+    (tmp_path / "ping.wasm").write_bytes(_COMPONENT_BYTES + b"-different-content")
+
+    drift: list[str] = []
+    with pytest.raises(ApiError) as excinfo:
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock(), digest_drift=drift)
+    assert excinfo.value.code == "digest_conflict"
+    assert excinfo.value.status_code == 409
+    assert drift == []
+
+
+async def test_unknown_catalog_language_fails_loud(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A language that is neither compiled nor scripted is a loud seeder error, not a guess."""
+    _patch_validator_and_storage(monkeypatch)
+    entry = replace(_write_bundle(tmp_path), language="cobol")
+    with pytest.raises(CoreBundleSeederError, match="unknown catalog language 'cobol'"):
+        await seed_one(install_dal, entry, tmp_path, valkey_client=AsyncMock())
+
+
+async def test_run_unknown_catalog_language_fails_the_run(
+    install_dal: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`_run()` counts an unknown-language row as a failure (non-zero exit)."""
+    _patch_validator_and_storage(monkeypatch)
+    _patch_run_dependencies(install_dal, monkeypatch)
+    entry = _write_bundle(tmp_path)
+    catalog_path = _single_row_catalog(tmp_path, entry, "cobol")
+    assert await seeder._run(tmp_path, catalog_path) == 1
+
+
+def test_every_catalog_language_is_classified_compiled_or_scripted() -> None:
+    """Every real catalog row's language is known to the digest policy (no unknown fails loud)."""
+    catalog = Path(__file__).resolve().parents[2] / "bundles" / "core-bundles.yaml"
+    entries = seeder.load_catalog(catalog)
+    assert len(entries) >= 100
+    known = seeder.COMPILED_LANGUAGES | seeder.SCRIPTED_LANGUAGES
+    unknown = {seeder.normalize_language(e.language) for e in entries} - known
+    assert not unknown, f"unclassified catalog languages: {unknown}"
+
+
+def test_language_classes_are_disjoint_and_exactly_the_owner_policy() -> None:
+    """Compiled = rust/csharp/go; scripted = python + node aliases + typescript + ruby; disjoint."""
+    assert seeder.COMPILED_LANGUAGES == frozenset({"rust", "csharp", "go"})
+    assert seeder.SCRIPTED_LANGUAGES == frozenset(
+        {"python", "javascript", "nodejs", "typescript", "ruby"}
+    )
+    assert not seeder.COMPILED_LANGUAGES & seeder.SCRIPTED_LANGUAGES
+    assert seeder.normalize_language("  NodeJS ") == "nodejs"
+
+
+def test_language_sets_stay_plain_frozenset_string_literals() -> None:
+    """The Rust executor_profile parity test parses these textually -- keep the literal shape."""
+    src = (Path(__file__).resolve().parents[1] / "cli" / "seed_core_bundles.py").read_text()
+    for name in ("COMPILED_LANGUAGES", "SCRIPTED_LANGUAGES"):
+        match = re.search(
+            rf"^{name} = frozenset\(\{{((?:\s*\"[a-z0-9_-]+\",?)+)\s*\}}\)$", src, re.M
+        )
+        assert match, f"{name} is no longer a plain frozenset literal of string literals"

@@ -192,11 +192,16 @@ pub fn build(kind: &str, payload_json: &str) -> Result<HttpTpl> {
             let mut seen = std::collections::BTreeSet::new();
             let mut out = Vec::with_capacity(list.len());
             for c in list {
-                let name = c.get("name").and_then(Value::as_str).unwrap_or_default();
+                let name = c
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .ok_or_else(|| ConnectorError::Malformed("missing command name".into()))?;
                 let description = c
                     .get("description")
                     .and_then(Value::as_str)
-                    .unwrap_or_default();
+                    .ok_or_else(|| {
+                        ConnectorError::Malformed("missing command description".into())
+                    })?;
                 validate(name, description)?;
                 if !seen.insert(name.to_string()) {
                     return Err(ConnectorError::Malformed("duplicate command name".into()));

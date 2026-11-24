@@ -44,6 +44,11 @@ class TestEventValidation:
         source["method"] = "mutated-after-the-fact"
         assert event.details["method"] == "PUT"
 
+    def test_wildcard_scope_names_are_auditable(self) -> None:
+        """regression: DSAR 500 AUDIT_UNAVAILABLE -- the `*:read` self-service scope was refused."""
+        details = validate_details({"required_scopes": ["*:read", "tenant:admin"]})
+        assert details["required_scopes"] == ["*:read", "tenant:admin"]
+
     @pytest.mark.parametrize(
         "bad_value",
         [
@@ -141,13 +146,16 @@ class TestEventValidation:
             _event(target_id="bob@example.com")
         with pytest.raises(AuditValidationError):
             _event(tenant_slug="has space")
-        assert _event(target_id="waddles.core.ping@1.2.3").target_id == "waddles.core.ping@1.2.3"
+        assert (
+            _event(target_id="penguintechinc.waddles.ping@1.2.3").target_id
+            == "penguintechinc.waddles.ping@1.2.3"
+        )
 
     @pytest.mark.parametrize(
         ("value", "expected"),
         [
             ("tenant:3:app.id", True),
-            ("waddles.core.ping@1.0.0", True),
+            ("penguintechinc.waddles.ping@1.0.0", True),
             ("app@2.0.0-rc.1", True),
             ("bob@example.com", False),
             ("bob@1password.com", False),
@@ -255,7 +263,12 @@ class TestClassifyRequest:
         assert classify_request(_facts(method="GET")) is None
 
     def test_unscoped_mutation_without_a_semantic_entry_is_not_audited(self) -> None:
-        assert classify_request(_facts(scope_checked=False)) is None
+        assert (
+            classify_request(
+                _facts(scope_checked=False, rule="/api/v1/admin/<int:community_id>/not-classified")
+            )
+            is None
+        )
 
     @pytest.mark.parametrize("rule", ["/api/v1/internal/activity/batch", "/mcp/v1"])
     def test_service_plumbing_is_never_classified(self, rule: str) -> None:
@@ -266,7 +279,7 @@ class TestClassifyRequest:
 
     def test_semantic_route_overrides_the_generic_action(self) -> None:
         result = classify_request(
-            _facts(method="DELETE", rule="/api/v1/tenant/<tenant_slug>/admins/<int:user_id>")
+            _facts(method="DELETE", rule="/api/v1/tenant/<tenant_slug>/admins/<uuuid:user_id>")
         )
         assert result is not None
         assert (result.category, result.action) == (

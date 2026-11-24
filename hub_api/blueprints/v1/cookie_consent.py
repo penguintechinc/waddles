@@ -43,7 +43,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from typing import Any, cast
+from typing import Any, Literal, cast
 
 from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
@@ -181,10 +181,14 @@ class SaveConsentPreferencesDTO:
 
 @dataclass(slots=True, frozen=True)
 class SaveConsentRequest:
-    """Request DTO for `POST /api/v1/cookie`."""
+    """Request DTO for `POST /api/v1/cookie`.
+
+    `consentMethod` is a closed enum -- exactly the values the webui's `CookieConsentContext` sends
+    (`admin_dsar` is written server-side only, never via this endpoint); anything else is 400.
+    """
 
     preferences: SaveConsentPreferencesDTO = field(default_factory=SaveConsentPreferencesDTO)
-    consentMethod: str = "banner"
+    consentMethod: Literal["banner", "preferences", "do_not_sell"] = "banner"
 
 
 @dataclass(slots=True, frozen=True)
@@ -309,6 +313,7 @@ async def save_consent(data: SaveConsentRequest) -> tuple[Any, int]:
         ip_address=request.remote_addr,
         user_agent=request.headers.get("User-Agent"),
         version=version,
+        gpc_applied=gpc_applied,
     )
 
     response, status = jsonify_dto(
@@ -465,7 +470,7 @@ async def update_preferences(data: UpdatePreferencesRequest) -> tuple[Any, int]:
         }
         preferences, gpc_applied = svc.apply_gpc(request, requested)
         record = await svc.update_preferences(
-            async_dal, dal, user_id=user_id, preferences=preferences
+            async_dal, dal, user_id=user_id, preferences=preferences, gpc_applied=gpc_applied
         )
     except ApiError as exc:
         # PII-free: only the static status/code, never exc.message or the subject id.

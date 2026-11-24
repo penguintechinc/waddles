@@ -22,11 +22,11 @@ from tests.test_bundle_activation_service import _MANIFEST, _install_and_make_av
 
 LOGIC_A = {
     **_MANIFEST,
-    "app_id": "waddles.core.app.reputation-accrual",
+    "app_id": "penguintechinc.waddles.reputation-accrual",
     "provides": ["reputation-logic"],
 }
 LOGIC_B = {**_MANIFEST, "app_id": "thirdparty.app.my-reputation", "provides": "reputation-logic"}
-PLAIN = {**_MANIFEST, "app_id": "waddles.socials.music.default"}
+PLAIN = {**_MANIFEST, "app_id": "penguintechinc.waddles.socials-music"}
 
 
 def _is_conflict(exc: pytest.ExceptionInfo[ApiError], active_app: str) -> bool:

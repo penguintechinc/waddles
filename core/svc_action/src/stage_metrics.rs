@@ -59,7 +59,7 @@ pub const COUNT_BUCKETS: [f64; 12] = [
 /// against the emitted data in tests and mirrored in
 /// `docs/observability/data-plane-metrics.md`, so a rename is a conscious,
 /// documented act.
-pub const METRIC_NAMES: [&str; 18] = [
+pub const METRIC_NAMES: [&str; 19] = [
     "waddles_stage_latency_seconds",
     "waddles_executor_call_seconds",
     "waddles_host_call_latency_seconds",
@@ -78,6 +78,7 @@ pub const METRIC_NAMES: [&str; 18] = [
     "waddles_group_pending",
     "waddles_insecure_transport",
     "waddles_tenant_boundary_violations_total",
+    "waddles_floor_ban_dispatch_total",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -278,6 +279,12 @@ pub struct StageMetrics {
     group_pending: Histogram<u64>,
     insecure_transport: Gauge<u64>,
     boundary_violations: Counter<u64>,
+    floor_ban_dispatch: Counter<u64>,
+    load_inflight: Gauge<u64>,
+    queue_wait: Histogram<f64>,
+    pool_exhausted: Counter<u64>,
+    slot_owner_changes: Counter<u64>,
+    partition_unroutable: Counter<u64>,
 }
 
 impl StageMetrics {
@@ -385,7 +392,88 @@ impl StageMetrics {
                 "waddles_tenant_boundary_violations_total",
                 "Hop-verification (tenant boundary) failures, by stage and reason",
             ),
+            floor_ban_dispatch: counter(
+                "waddles_floor_ban_dispatch_total",
+                "Automated floor-ban outbox deliveries, by result",
+            ),
+            load_inflight: meter
+                .u64_gauge(instrument_name("stage_load_inflight"))
+                .with_description("Bundle Loads this stage has sent and not yet seen answered")
+                .build(),
+            queue_wait: latency(
+                "queue_wait_seconds",
+                "Time a stream entry waited before the stage dispatched it, by hash slot",
+            ),
+            pool_exhausted: counter(
+                "pool_exhausted_total",
+                "Executor invokes refused with pool_exhausted back-pressure, by hash slot",
+            ),
+            slot_owner_changes: counter(
+                "executor_slot_owner_changes_total",
+                "Hash slots whose owner executor set changed after a membership change",
+            ),
+            partition_unroutable: counter(
+                "executor_partition_unroutable_total",
+                "Active bundles, per reconcile tick, that no live executor of the right language class can host (class = compiled|scripted|unknown_language)",
+            ),
         }
+    }
+
+    /// Sets `stage_load_inflight` to the current in-flight Load count.
+    pub fn set_load_inflight(&self, inflight: usize) {
+        self.load_inflight.record(
+            u64::try_from(inflight).unwrap_or(u64::MAX),
+            &[KeyValue::new("stage", STAGE)],
+        );
+    }
+
+    /// Records one entry's queue wait (`queue_wait_seconds`) against the
+    /// app's hash slot and executor pool (bounded: 1024 slots x a handful of
+    /// pools; app_id is NOT a label here).
+    pub fn record_queue_wait(&self, app_id: &str, wait: Duration) {
+        self.queue_wait
+            .record(wait.as_secs_f64(), &scale_labels(app_id));
+    }
+
+    /// Counts one `pool_exhausted` executor refusal (`pool_exhausted_total`).
+    pub fn record_pool_exhausted(&self, app_id: &str) {
+        self.pool_exhausted.add(1, &scale_labels(app_id));
+    }
+
+    /// Adds `n` bundles that no live executor of their language class can host
+    /// (`executor_partition_unroutable_total`); `class` is the closed
+    /// `Placement::label` vocabulary (`compiled`, `scripted`, `unknown_language`).
+    pub fn record_partition_unroutable(&self, class: &'static str, n: u64) {
+        if n > 0 {
+            self.partition_unroutable.add(
+                n,
+                &[KeyValue::new("stage", STAGE), KeyValue::new("class", class)],
+            );
+        }
+    }
+
+    /// Adds `changed` slot-owner changes (`executor_slot_owner_changes_total`).
+    pub fn record_slot_owner_changes(&self, changed: u64) {
+        if changed > 0 {
+            self.slot_owner_changes
+                .add(changed, &[KeyValue::new("stage", STAGE)]);
+        }
+    }
+
+    /// Records one floor-ban outbox delivery outcome (`waddles_floor_ban_dispatch_total`).
+    /// `result` is a host constant: `done` (sender-confirmed), `failed` (retry scheduled),
+    /// `refused` (permanent or no longer breached), `dead` (attempts exhausted: ALERT),
+    /// `lease_lost` (another claimant owns it), `store_error` (outbox unreachable), `halted`
+    /// (durable kill switch: released), `flag_off` (sweep skipped, flag OFF), `backlog_alert`
+    /// (rows waiting past the threshold: ALERT).
+    pub fn record_floor_ban_dispatch(&self, result: &'static str) {
+        self.floor_ban_dispatch.add(
+            1,
+            &[
+                KeyValue::new("stage", STAGE),
+                KeyValue::new("result", result),
+            ],
+        );
     }
 
     /// Records one delivered entry's total handling time and terminal
@@ -614,6 +702,35 @@ impl penguin_spine::SpineMetrics for StageMetrics {
     }
 }
 
+/// Default executor pool name when `EXECUTOR_POOL` is unset (phase 1 has a
+/// single shared pool; dedicated tenant pools are phase 2).
+pub const DEFAULT_EXECUTOR_POOL: &str = "default";
+
+/// The executor pool this stage dispatches to (`EXECUTOR_POOL`, else
+/// [`DEFAULT_EXECUTOR_POOL`]) -- the `executor_pool` attribute KEDA selects
+/// on. Read once; the handshake carries no pool field yet.
+pub fn executor_pool() -> &'static str {
+    static POOL: OnceLock<String> = OnceLock::new();
+    POOL.get_or_init(|| pool_name(std::env::var("EXECUTOR_POOL").ok()))
+}
+
+/// Normalizes a configured pool name: trimmed, empty/unset -> default.
+fn pool_name(raw: Option<String>) -> String {
+    raw.map(|p| p.trim().to_string())
+        .filter(|p| !p.is_empty())
+        .unwrap_or_else(|| DEFAULT_EXECUTOR_POOL.to_string())
+}
+
+/// `stage` + `executor_pool` + `slot` attributes for the autoscaling
+/// metrics (`queue_wait_seconds`, `pool_exhausted_total`).
+fn scale_labels(app_id: &str) -> [KeyValue; 3] {
+    [
+        KeyValue::new("stage", STAGE),
+        KeyValue::new("executor_pool", executor_pool()),
+        KeyValue::new("slot", i64::from(bundle_active_set::slot(app_id))),
+    ]
+}
+
 /// The process-wide [`StageMetrics`], built on first use from the global
 /// meter provider. [`crate::run_with_shutdown`] calls this immediately after
 /// [`crate::telemetry::init`] so the instruments bind to the provider
@@ -836,13 +953,25 @@ mod tests {
     #[test]
     fn record_stage_emits_a_second_scaled_histogram_with_stage_app_and_result() {
         let (h, m) = fresh();
-        m.record_stage("waddles.test.a", "success", Duration::from_millis(40));
-        m.record_stage("waddles.test.a", "success", Duration::from_millis(60));
-        m.record_stage("waddles.test.a", "dead_lettered", Duration::from_millis(5));
+        m.record_stage(
+            "penguintechinc.waddles.test-a",
+            "success",
+            Duration::from_millis(40),
+        );
+        m.record_stage(
+            "penguintechinc.waddles.test-a",
+            "success",
+            Duration::from_millis(60),
+        );
+        m.record_stage(
+            "penguintechinc.waddles.test-a",
+            "dead_lettered",
+            Duration::from_millis(5),
+        );
 
         let filter = [
             ("stage", "action"),
-            ("app_id", "waddles.test.a"),
+            ("app_id", "penguintechinc.waddles.test-a"),
             ("result", "success"),
         ];
         assert_eq!(h.count("waddles_stage_latency_seconds", &filter), 2.0);
@@ -862,17 +991,57 @@ mod tests {
         );
     }
 
+    /// The executor scale-out metrics are emitted with the stage and the
+    /// `executor_pool` attribute KEDA selects on.
+    #[test]
+    fn scale_out_metrics_carry_stage_and_executor_pool() {
+        let (h, m) = fresh();
+        m.record_queue_wait("penguintechinc.waddles.test-q", Duration::from_millis(250));
+        m.record_pool_exhausted("penguintechinc.waddles.test-q");
+        m.set_load_inflight(3);
+        m.record_slot_owner_changes(0);
+        m.record_slot_owner_changes(7);
+        m.record_partition_unroutable("scripted", 0);
+        m.record_partition_unroutable("scripted", 3);
+        let pool = [("stage", "action"), ("executor_pool", executor_pool())];
+        assert_eq!(h.count("queue_wait_seconds", &pool), 1.0);
+        assert_eq!(h.count("pool_exhausted_total", &pool), 1.0);
+        assert_eq!(
+            h.last("stage_load_inflight", &[("stage", "action")])
+                .map(|p| p.value),
+            Some(3.0)
+        );
+        assert_eq!(
+            h.count("executor_slot_owner_changes_total", &[("stage", "action")]),
+            7.0
+        );
+        assert_eq!(
+            h.count(
+                "executor_partition_unroutable_total",
+                &[("stage", "action"), ("class", "scripted")]
+            ),
+            3.0
+        );
+    }
+
+    #[test]
+    fn pool_name_defaults_and_trims() {
+        assert_eq!(pool_name(None), DEFAULT_EXECUTOR_POOL);
+        assert_eq!(pool_name(Some("  ".into())), DEFAULT_EXECUTOR_POOL);
+        assert_eq!(pool_name(Some(" ent-a ".into())), "ent-a");
+    }
+
     #[test]
     fn record_executor_call_labels_export_and_result() {
         let (h, m) = fresh();
         m.record_executor_call(
-            "waddles.test.b",
+            "penguintechinc.waddles.test-b",
             "transform",
             "ok",
             Duration::from_millis(3),
         );
         m.record_executor_call(
-            "waddles.test.b",
+            "penguintechinc.waddles.test-b",
             "transform",
             "executor_error",
             Duration::from_millis(2000),
@@ -891,7 +1060,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_call_seconds",
-                &[("app_id", "waddles.test.b"), ("result", "executor_error")]
+                &[
+                    ("app_id", "penguintechinc.waddles.test-b"),
+                    ("result", "executor_error")
+                ]
             ),
             1.0
         );
@@ -921,14 +1093,24 @@ mod tests {
     #[test]
     fn record_bundle_load_labels_phase_and_result() {
         let (h, m) = fresh();
-        m.record_bundle_load("waddles.test.c", "load", "ok", Duration::from_millis(900));
         m.record_bundle_load(
-            "waddles.test.c",
+            "penguintechinc.waddles.test-c",
+            "load",
+            "ok",
+            Duration::from_millis(900),
+        );
+        m.record_bundle_load(
+            "penguintechinc.waddles.test-c",
             "precompile",
             "ok",
             Duration::from_millis(850),
         );
-        m.record_bundle_load("waddles.test.c", "load", "error", Duration::from_millis(10));
+        m.record_bundle_load(
+            "penguintechinc.waddles.test-c",
+            "load",
+            "error",
+            Duration::from_millis(10),
+        );
         for (phase, result, want) in [
             ("load", "ok", 1.0),
             ("precompile", "ok", 1.0),
@@ -938,7 +1120,7 @@ mod tests {
                 h.count(
                     "waddles_bundle_load_seconds",
                     &[
-                        ("app_id", "waddles.test.c"),
+                        ("app_id", "penguintechinc.waddles.test-c"),
                         ("phase", phase),
                         ("result", result)
                     ]
@@ -965,13 +1147,16 @@ mod tests {
     #[test]
     fn record_sandbox_trip_counts_by_limit() {
         let (h, m) = fresh();
-        m.record_sandbox_trip("waddles.test.d", "timeout");
-        m.record_sandbox_trip("waddles.test.d", "timeout");
-        m.record_sandbox_trip("waddles.test.d", "memory");
+        m.record_sandbox_trip("penguintechinc.waddles.test-d", "timeout");
+        m.record_sandbox_trip("penguintechinc.waddles.test-d", "timeout");
+        m.record_sandbox_trip("penguintechinc.waddles.test-d", "memory");
         assert_eq!(
             h.count(
                 "waddles_sandbox_trip_total",
-                &[("app_id", "waddles.test.d"), ("limit", "timeout")]
+                &[
+                    ("app_id", "penguintechinc.waddles.test-d"),
+                    ("limit", "timeout")
+                ]
             ),
             2.0
         );
@@ -986,16 +1171,24 @@ mod tests {
         let (h, m) = fresh();
         m.stream_event_written("twitch", "tw-some-channel-login");
         m.stream_trimmed("waddles:t:acme:c:main:app:x:action");
-        m.stream_claimed("waddles.test.e");
-        m.consumer_skipped("waddles.test.e", "route_denied");
+        m.stream_claimed("penguintechinc.waddles.test-e");
+        m.consumer_skipped("penguintechinc.waddles.test-e", "route_denied");
         m.dlq_written("action", "call_timeout");
         m.group_lag(
-            "waddles.test.e",
+            "penguintechinc.waddles.test-e",
             "waddles:t:acme:c:main:app:x:action",
             Some(12),
         );
-        m.group_lag("waddles.test.e", "waddles:t:acme:c:main:app:x:action", None);
-        m.group_pending("waddles.test.e", "waddles:t:acme:c:main:app:x:action", 3);
+        m.group_lag(
+            "penguintechinc.waddles.test-e",
+            "waddles:t:acme:c:main:app:x:action",
+            None,
+        );
+        m.group_pending(
+            "penguintechinc.waddles.test-e",
+            "waddles:t:acme:c:main:app:x:action",
+            3,
+        );
         m.insecure_transport("valkey", "tls", true);
         m.tenant_boundary_violation("action", "mac_mismatch");
 
@@ -1010,14 +1203,17 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_stream_claimed_total",
-                &[("app_id", "waddles.test.e")]
+                &[("app_id", "penguintechinc.waddles.test-e")]
             ),
             1.0
         );
         assert_eq!(
             h.count(
                 "waddles_consumer_skipped_total",
-                &[("app_id", "waddles.test.e"), ("reason", "route_denied")]
+                &[
+                    ("app_id", "penguintechinc.waddles.test-e"),
+                    ("reason", "route_denied")
+                ]
             ),
             1.0
         );
@@ -1034,7 +1230,10 @@ mod tests {
             .expect("queue depth must be exported");
         assert_eq!((depth.value, depth.sum), (1.0, 12.0));
         let pending = h
-            .last("waddles_group_pending", &[("app_id", "waddles.test.e")])
+            .last(
+                "waddles_group_pending",
+                &[("app_id", "penguintechinc.waddles.test-e")],
+            )
             .expect("group pending must be exported");
         assert_eq!((pending.value, pending.sum), (1.0, 3.0));
         let insecure = h
@@ -1096,6 +1295,7 @@ mod tests {
         m.group_pending("a", "s", 1);
         m.insecure_transport("valkey", "tls", false);
         m.tenant_boundary_violation("action", "unknown_kid");
+        m.record_floor_ban_dispatch("done");
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1107,7 +1307,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 18);
+        assert_eq!(METRIC_NAMES.len(), 19);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",
@@ -1262,13 +1462,17 @@ mod tests {
     #[test]
     fn record_attempts_emits_a_count_histogram_by_result() {
         let (h, m) = fresh();
-        m.record_attempts("waddles.test.attempts", "success", 1);
-        m.record_attempts("waddles.test.attempts", "retryable_failure", 4);
+        m.record_attempts("penguintechinc.waddles.test-attempts", "success", 1);
+        m.record_attempts(
+            "penguintechinc.waddles.test-attempts",
+            "retryable_failure",
+            4,
+        );
         let point = h
             .last(
                 "waddles_action_dispatch_attempts",
                 &[
-                    ("app_id", "waddles.test.attempts"),
+                    ("app_id", "penguintechinc.waddles.test-attempts"),
                     ("result", "retryable_failure"),
                 ],
             )
@@ -1290,14 +1494,14 @@ mod tests {
         let b = stage_metrics();
         assert!(Arc::ptr_eq(&a, &b));
         a.record_stage(
-            "waddles.test.singleton",
+            "penguintechinc.waddles.test-singleton",
             "success",
             Duration::from_millis(1),
         );
         assert_eq!(
             test_support::shared().count(
                 "waddles_stage_latency_seconds",
-                &[("app_id", "waddles.test.singleton")]
+                &[("app_id", "penguintechinc.waddles.test-singleton")]
             ),
             1.0
         );

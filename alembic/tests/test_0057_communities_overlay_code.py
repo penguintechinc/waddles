@@ -87,8 +87,11 @@ class TestMigrationMetadata:
         for path in files:
             module = _load(path)
             revisions.add(module.revision)
-            if module.down_revision is not None:
+            # A merge revision (0067_merge_heads_*) declares a tuple of parents.
+            if isinstance(module.down_revision, str):
                 down_revisions.append(module.down_revision)
+            elif module.down_revision is not None:
+                down_revisions.extend(module.down_revision)
         heads = revisions - set(down_revisions)
         assert len(heads) == 1, f"diverged alembic heads: {sorted(heads)}"
         assert migration.revision in revisions

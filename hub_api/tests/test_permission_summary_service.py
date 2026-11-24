@@ -11,10 +11,10 @@ from services.permission_summary_service import (
 
 _MANIFEST = BundleManifestV2(
     schema_version=2,
-    app_id="waddles.socials.music.default",
+    app_id="penguintechinc.waddles.socials-music",
     name="Music Station",
     version="3.0.0",
-    feature="waddles.socials.music",
+    feature="penguintechinc.waddles.socials-music",
     module="socials",
     provider="builtin",
     language="python",
@@ -26,7 +26,7 @@ _MANIFEST = BundleManifestV2(
     data_tables=("music_queue",),
     limits=Limits(timeout_ms=2000, memory_mb=64, egress_rps=10),
     permissions=(),
-    routes_to=("waddles.community.forums.default",),
+    routes_to=("penguintechinc.waddles.forums-pipeline",),
     consumes=(
         ConsumeRule(platform="twitch", source_id=None, event_types=("chat.message",), filters={}),
     ),
@@ -41,7 +41,7 @@ def _summary() -> dict:
         ],
         component_capabilities=frozenset({"http", "db", "kv"}),
         min_tier="free",
-        flag_key="waddles.socials.music",
+        flag_key="penguintechinc.waddles.socials-music",
         allow_private_hosts=False,
     )
 
@@ -55,7 +55,7 @@ def test_summary_lists_grant_labels_in_words() -> None:
 
 def test_summary_lists_routes_to() -> None:
     summary = _summary()
-    assert summary["routesTo"] == ["waddles.community.forums.default"]
+    assert summary["routesTo"] == ["penguintechinc.waddles.forums-pipeline"]
 
 
 def test_summary_lists_capabilities_actually_imported() -> None:
@@ -85,7 +85,7 @@ def test_widened_capability_changes_the_hash() -> None:
         ],
         component_capabilities=frozenset({"http", "db", "kv", "relay"}),  # widened
         min_tier="free",
-        flag_key="waddles.socials.music",
+        flag_key="penguintechinc.waddles.socials-music",
         allow_private_hosts=False,
     )
     assert permission_hash(summary) != narrow
@@ -97,7 +97,7 @@ def test_unusual_flags_a_private_hosts_egress_request() -> None:
         grant_labels=[],
         component_capabilities=frozenset({"http"}),
         min_tier="free",
-        flag_key="waddles.socials.music",
+        flag_key="penguintechinc.waddles.socials-music",
         allow_private_hosts=True,
     )
     assert "allow_private_hosts" in summary["unusual"]
@@ -111,10 +111,10 @@ def test_unusual_flags_routes_to() -> None:
 def test_unusual_empty_when_nothing_unusual() -> None:
     plain_manifest = BundleManifestV2(
         schema_version=2,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.socials-music",
         name="Music Station",
         version="3.0.0",
-        feature="waddles.socials.music",
+        feature="penguintechinc.waddles.socials-music",
         module="socials",
         provider="builtin",
         language="python",
@@ -134,7 +134,7 @@ def test_unusual_empty_when_nothing_unusual() -> None:
         grant_labels=[],
         component_capabilities=frozenset({"kv"}),
         min_tier="free",
-        flag_key="waddles.socials.music",
+        flag_key="penguintechinc.waddles.socials-music",
         allow_private_hosts=False,
     )
     assert summary["unusual"] == []
@@ -151,16 +151,22 @@ def test_summary_and_hash_cover_requested_tools() -> None:
             grant_labels=[],
             component_capabilities=frozenset({"kv"}),
             min_tier="free",
-            flag_key="waddles.socials.music",
+            flag_key="penguintechinc.waddles.socials-music",
             allow_private_hosts=False,
         )
         return s, permission_hash(s)
 
     base_s, base_h = _h(())
     assert "requestedTools" not in base_s
-    s1, h1 = _h((RequestedTool(target_app_id="waddles.svc.a", tool="t", access="read"),))
-    s2, h2 = _h((RequestedTool(target_app_id="waddles.svc.a", tool="t", access="write"),))
-    assert s1["requestedTools"] == [{"target": "waddles.svc.a", "tool": "t", "access": "read"}]
+    s1, h1 = _h(
+        (RequestedTool(target_app_id="penguintechinc.waddles.svc-a", tool="t", access="read"),)
+    )
+    s2, h2 = _h(
+        (RequestedTool(target_app_id="penguintechinc.waddles.svc-a", tool="t", access="write"),)
+    )
+    assert s1["requestedTools"] == [
+        {"target": "penguintechinc.waddles.svc-a", "tool": "t", "access": "read"}
+    ]
     assert len({base_h, h1, h2}) == 3
 
 

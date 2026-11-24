@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from provision_harness import with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -23,7 +24,9 @@ _ENVS = (
     "values-ci.yaml",
     "values-local.yaml",
 )
-_CONSUMERS = ("svc-process-rust", "svc-action-rust")
+#: ONLY the process stage hosts the object-storage capability (svc-action refuses it loudly).
+_CONSUMERS = ("svc-process-rust",)
+_NON_CONSUMERS = ("svc-action-rust",)
 _BUCKET = "waddles-bundle-storage"
 _EXTERNAL = (
     "bundleStorage.mode=external",
@@ -105,7 +108,9 @@ def test_bundled_is_default_in_every_env(values):
 
 
 def test_bundled_identity_not_in_any_non_secret_document():
-    docs = _docs("values-alpha.yaml")
+    # the identity is generated at runtime by the provision-secrets hook; run the real hook so the
+    # check covers every rendered document (incl. the hook spec ConfigMap) against REAL values.
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     secret = [d for d in docs if d["kind"] == "Secret" and "BUNDLE_STORAGE_S3_ACCESS_KEY_ID" in (d.get("stringData") or d.get("data") or {})]
     assert len(secret) == 1
     s = secret[0].get("stringData") or {}
@@ -149,3 +154,90 @@ def test_bad_mode_and_bundled_without_seaweedfs_fail():
     assert r.returncode != 0 and "must be bundled or external" in r.stderr
     r = _helm("values-alpha.yaml", ("infrastructure.seaweedfs.enabled=false",))
     assert r.returncode != 0 and "requires infrastructure.seaweedfs.enabled=true" in r.stderr
+
+
+def _deployment_env(docs, suffix):
+    found = [
+        d for d in docs if d["kind"] == "Deployment" and d["metadata"]["name"].endswith(suffix)
+    ]
+    assert len(found) == 1, f"{suffix}: {len(found)} deployments"
+    c = found[0]["spec"]["template"]["spec"]["containers"][0]
+    return {e["name"]: e for e in c["env"]}
+
+
+@pytest.mark.parametrize("values", _ENVS)
+@pytest.mark.parametrize("extra", [(), _EXTERNAL])
+def test_svc_action_gets_no_bundle_storage_env(values, extra):
+    # least privilege: svc-action never reads object storage, so it must not mount the S3 credentials
+    env = _deployment_env(_docs(values, extra), "svc-action-rust")
+    leaked = sorted(k for k in env if k.startswith("BUNDLE_STORAGE_"))
+    assert not leaked, leaked
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_audit_password_is_a_secret_ref_to_the_credentials_secret(values):
+    env = _deployment_env(_docs(values), "svc-process-rust")["BUNDLE_STORAGE_AUDIT_PASSWORD"]
+    assert "value" not in env
+    ref = env["valueFrom"]["secretKeyRef"]
+    assert ref["key"] == "PW_WADDLES_BUNDLE_STORAGE_AUDIT" and ref["name"].endswith("db-credentials")
+
+
+def test_audit_password_is_generated_per_tier_and_handed_to_the_migrator():
+    # run the real provisioning hook: create-if-absent in every tier, same value reaches the db-migrate hook
+    for values in ("values-alpha.yaml", "values-production.yaml"):
+        docs = with_provisioned(_docs(values))
+        creds = [
+            d for d in docs
+            if d["kind"] == "Secret" and "PW_WADDLES_BUNDLE_STORAGE_AUDIT" in (d.get("stringData") or {})
+        ]
+        assert len(creds) == 1, values
+        pw = creds[0]["stringData"]["PW_WADDLES_BUNDLE_STORAGE_AUDIT"]
+        assert len(pw) >= 32, values
+        mig = [
+            d for d in docs
+            if d["kind"] == "Secret" and "DB_BUNDLE_STORAGE_AUDIT_PASSWORD" in (d.get("stringData") or {})
+        ]
+        assert len(mig) == 1, values
+        assert mig[0]["stringData"]["DB_BUNDLE_STORAGE_AUDIT_PASSWORD"] == pw, values
+        for d in docs:
+            if d is creds[0] or d is mig[0]:
+                continue
+            assert pw not in yaml.safe_dump(d), (values, d["metadata"]["name"])
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_bundled_storage_pins_the_runtime_generated_transit_ca(values):
+    env = _deployment_env(_docs(values), "svc-process-rust")
+    ca = env["BUNDLE_STORAGE_CA_FILE"]["value"]
+    assert ca.endswith(".crt") and ca == env["S3_CA_FILE"]["value"], ca
+    assert "seaweedfs" in env["BUNDLE_STORAGE_ENDPOINT"]["value"]
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_external_storage_never_pins_the_private_transit_ca(values):
+    # a public-CA external S3 must verify with system roots: the host client gets NO CA override
+    env = _deployment_env(_docs(values, _EXTERNAL), "svc-process-rust")
+    assert "BUNDLE_STORAGE_CA_FILE" not in env
+    assert env["BUNDLE_STORAGE_ENDPOINT"]["value"] == "https://s3.example.com"
+
+
+@pytest.mark.parametrize("values", _ENVS)
+def test_legacy_plaintext_cutoff_is_unset_by_default_so_no_plaintext_is_ever_served(values):
+    # Objects are sealed per tenant with no plaintext write path; the only plaintext allowance is a
+    # bounded READ window, and it must be an explicit operator opt-in.
+    for name, env in _consumer_envs(_docs(values)).items():
+        assert "BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL" not in env, name
+
+
+@pytest.mark.parametrize("extra", ((), _EXTERNAL))
+def test_legacy_plaintext_cutoff_renders_as_a_quoted_unix_timestamp_when_set(extra):
+    docs = _docs("values-alpha.yaml", (*extra, "bundleStorage.legacyPlaintextUntil=1700000000"))
+    for name, env in _consumer_envs(docs).items():
+        assert env["BUNDLE_STORAGE_LEGACY_PLAINTEXT_UNTIL"]["value"] == "1700000000", name
+
+
+@pytest.mark.parametrize("bad", ("soon", "-5", "12.5", "0x10"))
+def test_a_non_numeric_legacy_cutoff_fails_the_render(bad):
+    r = _helm("values-alpha.yaml", (f"bundleStorage.legacyPlaintextUntil={bad}",))
+    assert r.returncode != 0
+    assert "legacyPlaintextUntil must be unix seconds" in r.stderr

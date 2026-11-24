@@ -15,6 +15,8 @@ os.environ.setdefault("RCON_ENCRYPTION_KEY", "ab" * 32)
 
 from blueprints.v1 import bot as bot_blueprint  # noqa: E402
 from services import bot_ai_knowledge, bot_rcon  # noqa: E402
+from tests.community_ids import public_id  # noqa: E402
+from tests.entity_ids import pid  # noqa: E402
 from tests.test_bot_blueprint import (  # noqa: E402,F401 - fixtures
     app,
     client,
@@ -42,7 +44,9 @@ def _fb(dal: Any, sid: int) -> Any:
 
 
 class TestSuggestionFeedbackAuthz:
-    async def _post(self, client: Any, auth_headers: Any, sid: int) -> Any:
+    async def _post(self, client: Any, auth_headers: Any, sid: int | str) -> Any:
+        if isinstance(sid, int):
+            sid = pid(client.app.config["dal"], "ai_ticket_suggestions", sid)
         return await client.post(
             f"/api/v1/admin/ai-knowledge/suggestions/{sid}/feedback",
             headers=auth_headers(scope=WRITE),
@@ -60,7 +64,7 @@ class TestSuggestionFeedbackAuthz:
         self, client: Any, auth_headers: Any, dal: Any, other_tenant_community_id: int
     ) -> None:
         foreign = await self._post(client, auth_headers, _sug(dal, other_tenant_community_id))
-        missing = await self._post(client, auth_headers, 999999)
+        missing = await self._post(client, auth_headers, "00000000-0000-4000-8000-0000000000ff")
         assert await foreign.get_json() == await missing.get_json()
 
     async def test_unowned_row_non_superadmin_404(
@@ -78,12 +82,43 @@ class TestSuggestionFeedbackAuthz:
         assert (await self._post(client, auth_headers, sid)).status_code == 200
         assert _fb(dal, sid) == "helpful"
 
-    async def test_own_community_ok(
-        self, client: Any, auth_headers: Any, dal: Any, community_id: int
+    @staticmethod
+    def _caller(dal: Any, community_id: int, role: str) -> dict[str, str]:
+        """Real seeded standing in `community_id` (no guard bypass): a token for that member."""
+        from types import SimpleNamespace
+
+        from services.community_common import ensure_community_tables
+        from services.global_identity import ensure_tables
+        from tests.conftest import make_token, seed_membership
+
+        ensure_tables(dal, migrate=True)
+        ensure_community_tables(dal, migrate=True)
+        seed_membership(SimpleNamespace(dal=dal), community_id=community_id, user_id=61, role=role)
+        return {"Authorization": f"Bearer {make_token(scope=WRITE, user_id='61')}"}
+
+    async def test_own_community_admin_ok(self, client: Any, dal: Any, community_id: int) -> None:
+        sid = _sug(dal, community_id)
+        headers = self._caller(dal, community_id, "community-admin")
+        r = await client.post(
+            f"/api/v1/admin/ai-knowledge/suggestions/{pid(dal, 'ai_ticket_suggestions', sid)}/feedback",  # noqa: E501
+            headers=headers,
+            json={"feedback": "helpful"},
+        )
+        assert r.status_code == 200
+        assert _fb(dal, sid) == "helpful"
+
+    async def test_own_community_plain_member_404_and_unchanged(
+        self, client: Any, dal: Any, community_id: int
     ) -> None:
         sid = _sug(dal, community_id)
-        assert (await self._post(client, auth_headers, sid)).status_code == 200
-        assert _fb(dal, sid) == "helpful"
+        headers = self._caller(dal, community_id, "member")
+        r = await client.post(
+            f"/api/v1/admin/ai-knowledge/suggestions/{pid(dal, 'ai_ticket_suggestions', sid)}/feedback",  # noqa: E501
+            headers=headers,
+            json={"feedback": "helpful"},
+        )
+        assert r.status_code == 404
+        assert _fb(dal, sid) is None
 
     def test_service_write_is_filtered_by_community(
         self, dal: Any, community_id: int, other_tenant_community_id: int
@@ -145,6 +180,7 @@ class TestRconServerIdScope:
         community_id: int,
         other_tenant_community_id: int,
         monkeypatch: Any,
+        bypass_route_guards: Any,
         method: str,
         path: str,
         scope: str,
@@ -165,7 +201,8 @@ class TestRconServerIdScope:
         if body is not None:
             kwargs["json"] = body
         r = await getattr(client, method)(
-            f"/api/v1/admin/{community_id}/{path.format(s=foreign)}", **kwargs
+            f"/api/v1/admin/{public_id(dal, community_id)}/{path.format(s=pid(dal, 'server_status_configs', foreign))}",  # noqa: E501
+            **kwargs,
         )
-        assert r.status_code == 404
+        assert r.status_code == 404, await r.get_data(as_text=True)
         assert calls == []

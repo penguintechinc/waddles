@@ -1,0 +1,29 @@
+name: Install deploy tools
+description: >-
+  Install SHA256-verified helm v3.17.3 and kubectl v1.35.10 into RUNNER_TEMP/bin on the
+  stock ARC runner (no helm/kubectl/gh there, no sudo). helm stays v3 (helm v4 breaks fresh
+  installs, helm#31361); kubectl tracks the alpha cluster's MicroK8s minor (v1.35).
+runs:
+  using: composite
+  steps:
+    - name: Install helm v3.17.3 and kubectl v1.35.10
+      shell: bash
+      env:
+        HELM_VERSION: v3.17.3
+        HELM_SHA256: ee88b3c851ae6466a3de507f7be73fe94d54cbf2987cbaa3d1a3832ea331f2cd
+        KUBECTL_VERSION: v1.35.10
+        KUBECTL_SHA256: c49a28f1f4efc4d475ed05f47f2ce8e563bf7bef69ed77fe1b924ea6d83b6327
+      run: |
+        set -euo pipefail
+        BIN="${RUNNER_TEMP}/bin"; DL="${RUNNER_TEMP}/dl"
+        mkdir -p "${BIN}" "${DL}"
+        curl -fsSL --retry 3 -o "${DL}/helm.tgz" "https://get.helm.sh/helm-${HELM_VERSION}-linux-amd64.tar.gz"
+        echo "${HELM_SHA256}  ${DL}/helm.tgz" | sha256sum -c -
+        tar -xzf "${DL}/helm.tgz" -C "${DL}" linux-amd64/helm
+        install -m 0755 "${DL}/linux-amd64/helm" "${BIN}/helm"
+        curl -fsSL --retry 3 -o "${DL}/kubectl" "https://dl.k8s.io/release/${KUBECTL_VERSION}/bin/linux/amd64/kubectl"
+        echo "${KUBECTL_SHA256}  ${DL}/kubectl" | sha256sum -c -
+        install -m 0755 "${DL}/kubectl" "${BIN}/kubectl"
+        echo "${BIN}" >> "$GITHUB_PATH"
+        "${BIN}/helm" version --short
+        "${BIN}/kubectl" version --client

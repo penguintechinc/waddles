@@ -43,7 +43,7 @@ const STATS = {
   },
 };
 
-const ME = { success: true, user: { id: 1, communities: [{ id: 7, name: 'acme', displayName: 'Acme', role: 'member' }] } };
+const ME = { success: true, user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'member' }] } };
 
 type Handler = (url: string, params: unknown) => unknown;
 
@@ -52,14 +52,14 @@ function serve(overrides: Handler = () => undefined) {
     const custom = overrides(url, params);
     if (custom !== undefined) return custom;
     if (url === '/api/v1/auth/me') return ME;
-    if (url === '/api/v1/community/7/activity/my-stats') return STATS;
-    if (url === '/api/v1/community/7/leaderboard/watch-time') return board([entry(1), entry(2)]);
-    if (url === '/api/v1/community/7/leaderboard/messages') return board([entry(1, { value: 12345, value_formatted: null })]);
+    if (url === '/api/v1/community/00000007-0000-4000-8000-000000000000/activity/my-stats') return STATS;
+    if (url === '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time') return board([entry(1), entry(2)]);
+    if (url === '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/messages') return board([entry(1, { value: 12345, value_formatted: null })]);
     return unexpectedUrl(url);
   });
 }
 
-function renderPage(route = '/dashboard/community/7/leaderboard') {
+function renderPage(route = '/dashboard/community/00000007-0000-4000-8000-000000000000/leaderboard') {
   return renderWithProviders(<CommunityLeaderboard />, { route, path: '/dashboard/community/:id/leaderboard' });
 }
 
@@ -74,11 +74,11 @@ describe('CommunityLeaderboard', () => {
     const table = screen.getByRole('table');
     expect(within(table).getByText('1h 0m')).toBeInTheDocument();
     expect(within(table).getByText('2h 0m')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/community/7/leaderboard/watch-time', {
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time', {
       params: { period: 'weekly', limit: 25, offset: 0 },
     });
     expect(get.mock.calls.map(([url]) => url).filter((url) => url.includes('/communities/'))).toEqual([]);
-    expect(screen.getByRole('link', { name: 'Acme' })).toHaveAttribute('href', '/dashboard/community/7');
+    expect(screen.getByRole('link', { name: 'Acme' })).toHaveAttribute('href', '/dashboard/community/00000007-0000-4000-8000-000000000000');
   });
 
   it('shows my weekly stats and ranks, with a dash for an unranked board', async () => {
@@ -97,16 +97,16 @@ describe('CommunityLeaderboard', () => {
     await screen.findByText('viewer1');
     fireEvent.click(screen.getByRole('tab', { name: 'Messages' }));
     expect(await screen.findByText('12,345')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/community/7/leaderboard/messages', {
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/messages', {
       params: { period: 'weekly', limit: 25, offset: 0 },
     });
   });
 
   it('honours ?type=messages on first load', async () => {
     const get = serve();
-    renderPage('/dashboard/community/7/leaderboard?type=messages');
+    renderPage('/dashboard/community/00000007-0000-4000-8000-000000000000/leaderboard?type=messages');
     expect(await screen.findByText('12,345')).toBeInTheDocument();
-    expect(get).not.toHaveBeenCalledWith('/api/v1/community/7/leaderboard/watch-time', expect.anything());
+    expect(get).not.toHaveBeenCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time', expect.anything());
   });
 
   it('re-queries with the chosen period and resets to the first page', async () => {
@@ -115,7 +115,7 @@ describe('CommunityLeaderboard', () => {
     await screen.findByText('viewer1');
     fireEvent.click(screen.getByRole('button', { name: 'Monthly' }));
     await waitFor(() =>
-      expect(get).toHaveBeenCalledWith('/api/v1/community/7/leaderboard/watch-time', {
+      expect(get).toHaveBeenCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time', {
         params: { period: 'monthly', limit: 25, offset: 0 },
       }),
     );
@@ -124,7 +124,7 @@ describe('CommunityLeaderboard', () => {
 
   it('paginates with offset when the server reports more rows', async () => {
     const get = serve((url, params) => {
-      if (url !== '/api/v1/community/7/leaderboard/watch-time') return undefined;
+      if (url !== '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time') return undefined;
       const offset = (params as { offset: number }).offset;
       return offset === 0
         ? board([entry(1)], { pagination: { offset: 0, limit: 25, total: 30, has_more: true } })
@@ -135,14 +135,14 @@ describe('CommunityLeaderboard', () => {
     expect(screen.getByRole('button', { name: 'Previous' })).toBeDisabled();
     fireEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(await screen.findByText('viewer26')).toBeInTheDocument();
-    expect(get).toHaveBeenCalledWith('/api/v1/community/7/leaderboard/watch-time', {
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time', {
       params: { period: 'weekly', limit: 25, offset: 25 },
     });
     expect(screen.getByRole('button', { name: 'Next' })).toBeDisabled();
   });
 
   it('shows the empty state for a period with no activity', async () => {
-    serve((url) => (url === '/api/v1/community/7/leaderboard/watch-time' ? board([]) : undefined));
+    serve((url) => (url === '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time' ? board([]) : undefined));
     renderPage();
     expect(await screen.findByText('No activity data yet for this period')).toBeInTheDocument();
   });
@@ -150,8 +150,8 @@ describe('CommunityLeaderboard', () => {
   it('shows a retryable error for a failed board, while stats failure stays inline', async () => {
     let calls = 0;
     serve((url) => {
-      if (url === '/api/v1/community/7/activity/my-stats') throw httpError(402, { success: false, error: { message: 'Community activity tracking is not enabled for this plan' } });
-      if (url !== '/api/v1/community/7/leaderboard/watch-time') return undefined;
+      if (url === '/api/v1/community/00000007-0000-4000-8000-000000000000/activity/my-stats') throw httpError(402, { success: false, error: { message: 'Community activity tracking is not enabled for this plan' } });
+      if (url !== '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time') return undefined;
       calls += 1;
       if (calls === 1) throw httpError(500, { error: 'Leaderboard exploded' });
       return board([entry(1)]);
@@ -167,7 +167,7 @@ describe('CommunityLeaderboard', () => {
 
   it('turns the legacy camelCase shape into a visible contract error', async () => {
     serve((url) =>
-      url === '/api/v1/community/7/leaderboard/watch-time'
+      url === '/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/watch-time'
         ? { success: true, leaderboard: [{ rank: 1, userId: 1, username: 'x', watchTimeFormatted: '1h' }], pagination: { offset: 0, limit: 25, total: 1, hasMore: false } }
         : undefined,
     );

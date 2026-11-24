@@ -30,6 +30,19 @@ from bootstrap import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _no_platform_secret_step(monkeypatch: pytest.MonkeyPatch) -> MagicMock:
+    """These tests cover the schema state machine; the platform-secret step has its own suite.
+
+    `_run_first_run_scripts` is replaced by a mock (also used to assert WHEN it runs) and the
+    cache-refresher start is a no-op, so no KEK / real engine is needed here.
+    """
+    step = MagicMock()
+    monkeypatch.setattr("bootstrap._run_first_run_scripts", step)
+    monkeypatch.setattr("bootstrap._start_platform_secret_refresher", MagicMock())
+    return step
+
+
 def test_script_heads_reads_real_alembic_versions_dir() -> None:
     """Sanity check against the real alembic/versions/ directory -- no mocking, no DB."""
     from pathlib import Path
@@ -128,6 +141,31 @@ class TestSyncBootstrapAttempt:
         assert state is BootstrapState.READY
         assert "already at head" in detail
         engine.begin.assert_not_called()
+
+    @patch("bootstrap._script_heads", return_value=("0030_bundle_app_schemas",))
+    def test_first_run_scripts_run_only_at_head_while_locked(
+        self, _mock_heads, _no_platform_secret_step: MagicMock
+    ) -> None:
+        """The platform-secret step runs once at head, between lock and unlock; never otherwise."""
+        order: list[str] = []
+        lock_conn = MagicMock()
+        lock_conn.execute.side_effect = lambda stmt, *a, **k: order.append(str(stmt))
+        _no_platform_secret_step.side_effect = lambda *_: order.append("FIRST_RUN")
+        engine = self._engine_with(
+            _make_conn_mock(current_rows=["0030_bundle_app_schemas"]), lock_conn
+        )
+
+        _sync_bootstrap_attempt(engine, "/fake/alembic")
+
+        assert [o for o in order if "advisory" in o or o == "FIRST_RUN"] == [
+            "SELECT pg_advisory_lock(:k)",
+            "FIRST_RUN",
+            "SELECT pg_advisory_unlock(:k)",
+        ]
+        behind = _make_conn_mock(current_rows=["0014_old"])
+        _no_platform_secret_step.reset_mock()
+        _sync_bootstrap_attempt(self._engine_with(behind, MagicMock()), "/fake/alembic")
+        _no_platform_secret_step.assert_not_called()
 
     @patch("bootstrap._script_heads", return_value=("0030_bundle_app_schemas",))
     def test_lock_released_even_if_work_raises(self, _mock_heads) -> None:

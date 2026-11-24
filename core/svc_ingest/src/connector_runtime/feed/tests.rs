@@ -204,6 +204,66 @@ async fn a_route_key_claimed_by_two_communities_is_dropped_for_both() {
     assert_eq!(keys(&got), vec![(3, 3)]);
 }
 
+const V: (&str, &str) = ("ownership_verified", "true");
+
+#[tokio::test]
+async fn verified_owner_keeps_the_channel_and_unverified_squatter_is_dropped() {
+    let cap = capture();
+    let reg = prometheus::Registry::new();
+    let m = RuntimeMetrics::register(&reg).expect("metrics");
+    let f = feed(ScriptedResolver::new(vec![page(
+        vec![
+            binding(3, 30, &[("channel", "Owned-Handle"), V]),
+            binding(9, 90, &[("channel", "Owned-Handle")]),
+            binding(4, 40, &[("channel", "fine")]),
+        ],
+        None,
+    )]))
+    .with_metrics(m.clone());
+    let got = f.desired("twitch").await.expect("desired");
+    assert_eq!(keys(&got), vec![(3, 30), (4, 40)], "owner keeps ingest");
+    let skipped = |r: &str| m.feed_skipped_total.with_label_values(&["twitch", r]).get();
+    assert_eq!(skipped("unverified"), 1);
+    assert_eq!(skipped("conflict"), 0);
+    let logged = cap.text();
+    assert!(logged.contains("dropping unverified claimants"), "{logged}");
+    assert!(logged.contains("[9]"), "{logged}");
+    assert!(!logged.to_lowercase().contains("owned-handle"), "{logged}");
+}
+
+#[tokio::test]
+async fn several_verified_communities_all_keep_the_channel_n_to_m() {
+    let reg = prometheus::Registry::new();
+    let m = RuntimeMetrics::register(&reg).expect("metrics");
+    let f = feed(ScriptedResolver::new(vec![page(
+        vec![
+            binding(1, 10, &[("channel", "shared"), V]),
+            binding(2, 20, &[("channel", "shared"), V]),
+            binding(2, 21, &[("channel", "shared"), V]),
+        ],
+        None,
+    )]))
+    .with_metrics(m.clone());
+    let got = f.desired("twitch").await.expect("desired");
+    assert_eq!(keys(&got), vec![(1, 10), (2, 20)]);
+    let skipped = |r: &str| m.feed_skipped_total.with_label_values(&["twitch", r]).get();
+    assert_eq!(skipped("duplicate"), 1);
+    assert_eq!(skipped("conflict"), 0);
+    assert_eq!(skipped("unverified"), 0);
+}
+
+#[tokio::test]
+async fn a_garbled_verified_flag_is_unverified() {
+    let f = feed(ScriptedResolver::new(vec![page(
+        vec![
+            binding(1, 10, &[("channel", "x"), ("ownership_verified", "TRUE")]),
+            binding(2, 20, &[("channel", "x"), ("ownership_verified", "1")]),
+        ],
+        None,
+    )]));
+    assert!(f.desired("twitch").await.expect("desired").is_empty());
+}
+
 #[test]
 fn debug_never_prints_the_resource_handle() {
     let d = desired_ws("twitch", 1, 2, 9, "secret-handle", 5);
@@ -264,4 +324,71 @@ async fn bindings_refused_for_the_identify_budget_are_skipped_loudly_not_run() {
     let got = f.desired("twitch").await.expect("desired");
     assert_eq!(keys(&got), vec![(2, 2)]);
     assert!(cap.text().contains("identify budget is not ready"));
+}
+
+fn gated(r: ScriptedResolver, on: bool) -> HubBindingFeed<ScriptedResolver, TestProfile> {
+    feed(r).with_unverified_gate(Arc::new(
+        crate::connector_runtime::unverified_gate::StaticGate(on),
+    ))
+}
+
+#[tokio::test]
+async fn kill_switch_off_keeps_legacy_sole_unverified_routing() {
+    let reg = prometheus::Registry::new();
+    let m = RuntimeMetrics::register(&reg).expect("metrics");
+    let f = gated(
+        ScriptedResolver::new(vec![page(
+            vec![
+                binding(1, 10, &[("channel", "legacy")]),
+                binding(2, 20, &[("channel", "owned"), V]),
+            ],
+            None,
+        )]),
+        false,
+    )
+    .with_metrics(m.clone());
+    let got = f.desired("twitch").await.expect("desired");
+    assert_eq!(
+        keys(&got),
+        vec![(1, 10), (2, 20)],
+        "legacy claimant still routes"
+    );
+    let skipped = |r: &str| m.feed_skipped_total.with_label_values(&["twitch", r]).get();
+    assert_eq!(skipped("unverified"), 0);
+}
+
+#[tokio::test]
+async fn kill_switch_on_never_routes_unverified_and_warns_per_binding() {
+    let cap = capture();
+    let reg = prometheus::Registry::new();
+    let m = RuntimeMetrics::register(&reg).expect("metrics");
+    let f = gated(
+        ScriptedResolver::new(vec![page(
+            vec![
+                binding(1, 10, &[("channel", "Legacy-Handle")]),
+                binding(1, 11, &[("channel", "Legacy-Handle")]),
+                binding(2, 20, &[("channel", "owned"), V]),
+                binding(5, 50, &[("channel", "other")]),
+            ],
+            None,
+        )]),
+        true,
+    )
+    .with_metrics(m.clone());
+    let got = f.desired("twitch").await.expect("desired");
+    assert_eq!(
+        keys(&got),
+        vec![(2, 20)],
+        "only the verified binding routes"
+    );
+    let skipped = |r: &str| m.feed_skipped_total.with_label_values(&["twitch", r]).get();
+    assert_eq!(skipped("unverified"), 3, "one per skipped binding");
+    assert_eq!(skipped("duplicate"), 0);
+    assert_eq!(skipped("conflict"), 0);
+    let logged = cap.text();
+    let warns = logged
+        .matches("unverified binding skipped; unverified-binding routing is disabled")
+        .count();
+    assert_eq!(warns, 3, "{logged}");
+    assert!(!logged.to_lowercase().contains("legacy-handle"), "{logged}");
 }

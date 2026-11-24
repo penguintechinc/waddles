@@ -31,10 +31,10 @@ from services.tenant_app_availability_service import set_available
 
 _MANIFEST = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music Station",
     "version": "3.0.1",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -78,10 +78,10 @@ async def _seed_published(install_dal: Any, *, manifest: dict = _MANIFEST) -> No
 async def test_get_permission_summary_is_deterministic(install_dal: Any) -> None:
     await _seed_published(install_dal)
     summary1, hash1 = await get_permission_summary(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1"
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1"
     )
     summary2, hash2 = await get_permission_summary(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1"
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1"
     )
     assert summary1 == summary2
     assert hash1 == hash2
@@ -89,14 +89,16 @@ async def test_get_permission_summary_is_deterministic(install_dal: Any) -> None
 
 async def test_get_permission_summary_unknown_version_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
-        await get_permission_summary(install_dal, app_id="waddles.x.y.default", version="1.0.0")
+        await get_permission_summary(
+            install_dal, app_id="penguintechinc.waddles.y", version="1.0.0"
+        )
     assert exc.value.status_code == 404
 
 
 async def test_install_version_globally_records_a_row(install_dal: Any) -> None:
     await _seed_published(install_dal)
     row = await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     assert row.installed_by == 1
     assert row.install_source == "human"
@@ -108,7 +110,7 @@ async def test_install_version_globally_system_actor_has_no_installed_by(install
     await _seed_published(install_dal)
     row = await install_version_globally(
         install_dal,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         installed_by=None,
         install_source="system:core-seeder",
@@ -120,7 +122,7 @@ async def test_install_version_globally_system_actor_has_no_installed_by(install
 async def test_install_version_globally_not_published_is_refused(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="0.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -132,7 +134,7 @@ async def test_install_version_globally_not_published_is_refused(install_dal: An
     )
     with pytest.raises(ApiError) as exc:
         await install_version_globally(
-            install_dal, app_id="waddles.socials.music.default", version="0.0.1", installed_by=1
+            install_dal, app_id="penguintechinc.waddles.music", version="0.0.1", installed_by=1
         )
     assert exc.value.code == "version_not_published"
 
@@ -144,7 +146,7 @@ async def test_install_version_globally_headless_hash_mismatch_fails_closed(
     with pytest.raises(ApiError) as exc:
         await install_version_globally(
             install_dal,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             version="3.0.1",
             installed_by=1,
             expected_permission_hash="sha256:" + "0" * 64,
@@ -158,12 +160,12 @@ async def test_install_version_globally_supersedes_the_previous_current_install(
 ) -> None:
     await _seed_published(install_dal)
     first = await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     newer_manifest = {**_MANIFEST, "version": "3.0.2"}
     await _seed_published(install_dal, manifest=newer_manifest)
     second = await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.2", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.2", installed_by=1
     )
     refreshed_first = (
         await install_dal(install_dal.app_global_installs.id == first.id).select()
@@ -174,7 +176,7 @@ async def test_install_version_globally_supersedes_the_previous_current_install(
 async def test_install_version_globally_sets_app_versions_approval_id(install_dal: Any) -> None:
     await _seed_published(install_dal)
     row = await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     upload = (
         await install_dal(install_dal.app_version_uploads.version == "3.0.1").select()
@@ -188,7 +190,7 @@ async def test_install_version_globally_sets_app_versions_approval_id(install_da
 async def test_install_version_globally_missing_app_version_id_is_500(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="4.0.0",
         tenant_id=1,
         artifact_kind="source",
@@ -201,7 +203,7 @@ async def test_install_version_globally_missing_app_version_id_is_500(install_da
     )
     with pytest.raises(ApiError) as exc:
         await install_version_globally(
-            install_dal, app_id="waddles.socials.music.default", version="4.0.0", installed_by=1
+            install_dal, app_id="penguintechinc.waddles.music", version="4.0.0", installed_by=1
         )
     assert exc.value.status_code == 500
     assert exc.value.code == "missing_app_version"
@@ -211,26 +213,26 @@ async def test_install_version_globally_does_not_activate_anywhere(install_dal: 
     """The core split invariant: GLOBAL install never touches app_active_versions."""
     await _seed_published(install_dal)
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     active = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+        install_dal.app_active_versions.app_id == "penguintechinc.waddles.music"
     ).select()
     assert not active
 
 
 async def test_uninstall_globally_unknown_app_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
-        await uninstall_globally(install_dal, app_id="waddles.x.y.default", revoked_by=1)
+        await uninstall_globally(install_dal, app_id="penguintechinc.waddles.y", revoked_by=1)
     assert exc.value.status_code == 404
 
 
 async def test_uninstall_globally_marks_revoked(install_dal: Any) -> None:
     await _seed_published(install_dal)
     installed = await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
-    await uninstall_globally(install_dal, app_id="waddles.socials.music.default", revoked_by=2)
+    await uninstall_globally(install_dal, app_id="penguintechinc.waddles.music", revoked_by=2)
     refreshed = (
         await install_dal(install_dal.app_global_installs.id == installed.id).select()
     ).first()
@@ -242,16 +244,16 @@ async def test_uninstall_globally_cascades_to_tenant_availability(install_dal: A
     """Cascade rule: global uninstall hides the app in every tenant that had it available."""
     await _seed_published(install_dal)
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.music", updated_by=1
     )
-    await uninstall_globally(install_dal, app_id="waddles.socials.music.default", revoked_by=1)
+    await uninstall_globally(install_dal, app_id="penguintechinc.waddles.music", revoked_by=1)
     availability = (
         await install_dal(
             (install_dal.bundle_tenant_availability.tenant_id == 1)
-            & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+            & (install_dal.bundle_tenant_availability.app_id == "penguintechinc.waddles.music")
         ).select()
     ).first()
     assert availability.available is False
@@ -260,10 +262,10 @@ async def test_uninstall_globally_cascades_to_tenant_availability(install_dal: A
 async def test_list_global_installs_returns_current_rows(install_dal: Any) -> None:
     await _seed_published(install_dal)
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     rows = await list_global_installs(install_dal)
-    assert any(r.app_id == "waddles.socials.music.default" for r in rows)
+    assert any(r.app_id == "penguintechinc.waddles.music" for r in rows)
 
 
 def test_classify_diff_widened_when_a_new_table_is_added() -> None:
@@ -321,7 +323,7 @@ def test_classify_diff_initial_with_no_previous() -> None:
 async def test_deny_version_does_not_activate(install_dal: Any) -> None:
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="9.9.9",
         tenant_id=1,
         artifact_kind="source",
@@ -332,10 +334,10 @@ async def test_deny_version_does_not_activate(install_dal: Any) -> None:
         updated_at=now,
     )
     await deny_version(
-        install_dal, app_id="waddles.socials.music.default", version="9.9.9", reason="bad"
+        install_dal, app_id="penguintechinc.waddles.music", version="9.9.9", reason="bad"
     )
     active = await install_dal(
-        install_dal.app_active_versions.app_id == "waddles.socials.music.default"
+        install_dal.app_active_versions.app_id == "penguintechinc.waddles.music"
     ).select()
     assert not active
 
@@ -344,7 +346,7 @@ async def test_deny_version_sets_rejected_from_a_valid_state(install_dal: Any) -
     """Deny is legal from any non-terminal state (spec Sec9.1), exercised straight off UPLOADED."""
     now = datetime.now(UTC)
     await install_dal.app_version_uploads.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         tenant_id=1,
         artifact_kind="source",
@@ -356,7 +358,7 @@ async def test_deny_version_sets_rejected_from_a_valid_state(install_dal: Any) -
     )
     await deny_version(
         install_dal,
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1",
         reason="egress host not acceptable",
     )
@@ -371,7 +373,7 @@ async def test_deny_version_on_a_published_row_is_refused(install_dal: Any) -> N
     with pytest.raises(ApiError) as exc:
         await deny_version(
             install_dal,
-            app_id="waddles.socials.music.default",
+            app_id="penguintechinc.waddles.music",
             version="3.0.1",
             reason="late objection",
         )
@@ -384,7 +386,7 @@ async def test_deny_version_on_a_published_row_is_refused(install_dal: Any) -> N
 async def test_deny_version_unknown_raises_404(install_dal: Any) -> None:
     with pytest.raises(ApiError) as exc:
         await deny_version(
-            install_dal, app_id="waddles.x.y.default", version="1.0.0", reason="nope"
+            install_dal, app_id="penguintechinc.waddles.y", version="1.0.0", reason="nope"
         )
     assert exc.value.status_code == 404
 
@@ -419,6 +421,60 @@ def test_derive_capabilities_includes_kv_when_declared() -> None:
     assert KV_PERMISSION_ID in caps
 
 
+_STRUCTURED_KV = [{"id": KV_PERMISSION_ID, "justification": "persists per-community counters"}]
+
+
+def test_derive_capabilities_includes_kv_for_a_structured_permission_declaration() -> None:
+    """Regression: `- id: storage.kv` (the real schema) must grant `kv`, not just the bare string.
+
+    Before the fix `_derive_capabilities` read only the bare-string `permissions` tuple, so every
+    bundle using the structured shape (count/cringe/hype/...) was denied `kv` by the data plane's
+    interim `authorize_kv` check -- every `!`-command then answered "Something went wrong updating
+    the counter storage".
+    """
+    manifest = _parse_derived_manifest(permissions=_STRUCTURED_KV)
+    assert manifest.permissions == ()  # structured entries never land in the bare-string tuple
+    assert KV_PERMISSION_ID in _derive_capabilities(manifest)
+
+
+def test_derive_capabilities_includes_kv_after_the_trusted_reparse_round_trip() -> None:
+    """The production path (`get_permission_summary`) re-parses the stored manifest blob."""
+    from services.bundle_approval_service import _reparse_trusted
+
+    raw = {**_MANIFEST, "permissions": _STRUCTURED_KV}
+    assert KV_PERMISSION_ID in _derive_capabilities(_reparse_trusted(raw))
+
+
+def test_derive_capabilities_omits_kv_for_an_unrelated_structured_declaration() -> None:
+    manifest = _parse_derived_manifest(
+        permissions=[{"id": "chat.send:discord", "justification": "replies to the invoking user"}]
+    )
+    assert KV_PERMISSION_ID not in _derive_capabilities(manifest)
+
+
+def test_every_shipped_bundle_declaring_storage_kv_derives_the_kv_capability() -> None:
+    """Real-path: each in-repo hub-manifest declaring `storage.kv` yields the capability."""
+    import pathlib
+
+    import yaml
+
+    root = pathlib.Path(__file__).resolve().parents[2] / "bundles"
+    manifests = sorted(root.rglob("hub-manifest.yaml"))
+    declaring = 0
+    for path in manifests:
+        raw = yaml.safe_load(path.read_text())
+        perms = raw.get("permissions") or []
+        ids = {p["id"] if isinstance(p, dict) else p for p in perms}
+        if KV_PERMISSION_ID not in ids:
+            continue
+        declaring += 1
+        from services.bundle_approval_service import _reparse_trusted
+
+        assert KV_PERMISSION_ID in _derive_capabilities(_reparse_trusted(raw)), path
+    assert manifests, "no hub-manifest.yaml examined -- scanner pointed at the wrong root"
+    assert declaring > 0, "no bundle declares storage.kv -- scanner pointed at the wrong root"
+
+
 def test_derive_capabilities_always_includes_the_unconditional_set() -> None:
     manifest = _parse_derived_manifest(permissions=[])
     caps = _derive_capabilities(manifest)
@@ -436,10 +492,10 @@ async def test_uninstall_globally_finishes_the_cascade_then_raises_when_the_audi
 
     await _seed_published(install_dal)
     await install_version_globally(
-        install_dal, app_id="waddles.socials.music.default", version="3.0.1", installed_by=1
+        install_dal, app_id="penguintechinc.waddles.music", version="3.0.1", installed_by=1
     )
     await set_available(
-        install_dal, tenant_id=1, app_id="waddles.socials.music.default", updated_by=1
+        install_dal, tenant_id=1, app_id="penguintechinc.waddles.music", updated_by=1
     )
 
     async def audit_store_down(_dal: Any, **_kw: Any) -> None:
@@ -447,17 +503,17 @@ async def test_uninstall_globally_finishes_the_cascade_then_raises_when_the_audi
 
     monkeypatch.setattr(bundle_audit, "record", audit_store_down)
     with pytest.raises(AuditWriteError):
-        await uninstall_globally(install_dal, app_id="waddles.socials.music.default", revoked_by=1)
+        await uninstall_globally(install_dal, app_id="penguintechinc.waddles.music", revoked_by=1)
     availability = (
         await install_dal(
             (install_dal.bundle_tenant_availability.tenant_id == 1)
-            & (install_dal.bundle_tenant_availability.app_id == "waddles.socials.music.default")
+            & (install_dal.bundle_tenant_availability.app_id == "penguintechinc.waddles.music")
         ).select()
     ).first()
     assert availability.available is False  # cascade completed before the error surfaced
     revoked = (
         await install_dal(
-            install_dal.app_global_installs.app_id == "waddles.socials.music.default"
+            install_dal.app_global_installs.app_id == "penguintechinc.waddles.music"
         ).select()
     ).first()
     assert revoked.revoked_at is not None
@@ -466,7 +522,7 @@ async def test_uninstall_globally_finishes_the_cascade_then_raises_when_the_audi
 async def test_install_version_globally_is_idempotent_for_same_artifact(install_dal: Any) -> None:
     """Regression: a repeat approve (e.g. after the seeder) hit uq_app_global_installs_current."""
     await _seed_published(install_dal)
-    kwargs = {"app_id": "waddles.socials.music.default", "version": "3.0.1", "installed_by": 1}
+    kwargs = {"app_id": "penguintechinc.waddles.music", "version": "3.0.1", "installed_by": 1}
     first = await install_version_globally(install_dal, **kwargs)
     second = await install_version_globally(install_dal, **kwargs)
     assert second.id == first.id
@@ -479,10 +535,10 @@ async def test_install_version_globally_different_digest_is_409_version_conflict
 ) -> None:
     """A different artifact at an already-installed (app_id, version) is a typed 409, never 500."""
     await _seed_published(install_dal)
-    kwargs = {"app_id": "waddles.socials.music.default", "version": "3.0.1", "installed_by": 1}
+    kwargs = {"app_id": "penguintechinc.waddles.music", "version": "3.0.1", "installed_by": 1}
     await install_version_globally(install_dal, **kwargs)
     other_id = await install_dal.app_versions.async_insert(
-        app_id="waddles.socials.music.default",
+        app_id="penguintechinc.waddles.music",
         version="3.0.1-rebuild",
         artifact_digest="sha256:" + "b" * 64,
         language="python",
@@ -490,7 +546,7 @@ async def test_install_version_globally_different_digest_is_409_version_conflict
         scan_status="scanned",
     )
     await install_dal(
-        (install_dal.app_version_uploads.app_id == "waddles.socials.music.default")
+        (install_dal.app_version_uploads.app_id == "penguintechinc.waddles.music")
         & (install_dal.app_version_uploads.version == "3.0.1")
     ).update(app_version_id=other_id)
     with pytest.raises(ApiError) as exc:

@@ -47,7 +47,8 @@ def test_from_env_refuses_to_start_when_placeholder_in_production(
 
 
 def test_from_env_passes_through_real_secret_key(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("SECRET_KEY", "a-real-randomly-generated-value")
+    # T10: the session-cookie / refresh-token MAC key is its own env var (no shared JWT secret).
+    monkeypatch.setenv("SESSION_MAC_KEY", "a-real-randomly-generated-value")
     cfg = HubAPIConfig.from_env()
     assert cfg.secret_key == "a-real-randomly-generated-value"
 

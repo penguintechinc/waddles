@@ -48,6 +48,11 @@ from enum import StrEnum
 #: Written into NOT NULL text columns that must stop identifying the subject but cannot be NULL.
 ERASED_PLACEHOLDER = "[erased]"
 
+#: `data_use_exclusions.reason_code` written for every erased subject token (alembic 0129 enum:
+#: 1 do_not_sell, 2 gpc, 3 objection, 4 erased, 5 age_not_adult).
+EXCLUSION_REASON_ERASED = 4
+EXCLUSIONS_TABLE = "data_use_exclusions"
+
 
 class Key(StrEnum):
     """How a column identifies the erased subject."""
@@ -222,6 +227,10 @@ RULES: tuple[Rule, ...] = (
     core("bundle_reputation_tenant_scores"),
     core("bundle_reputation_soft_bans"),
     core("bundle_reputation_adjustments"),
+    # Automated hard-ban outbox (alembic 0114): refused rows deleted, confirmed bans pseudonymised
+    # (never deleted), undelivered bans kept -- `floor_ban_erasure` via the SECURITY DEFINER
+    # function `reputation_floor_ban_erase_subject` (hub-api has no DELETE/UPDATE on the table).
+    core("bundle_reputation_floor_bans"),
     core("ephemeral_pseudonyms"),
     # --- retained: Art. 5(2) / 17(3)(e) evidence -------------------------------------------------
     retain("cookie_consent", "consent record (Art. 5(2)); ERASURE_RETAINED_TABLES"),
@@ -249,6 +258,18 @@ RULES: tuple[Rule, ...] = (
         columns=("actor",),
     ),
     delete("analytics_suspected_bots", platform("platform", "platform_user_id")),
+    # analytics foundation (alembic 0129): layer A user-keyed tables are in schema `analytics_fp`
+    # (registry names are schema-qualified for non-public schemas).
+    delete("analytics_fp.member_daily", uuid("user_uuid")),
+    delete("analytics_fp.member_sessions", uuid("user_uuid")),
+    delete("analytics_fp.member_signals_daily", uuid("user_uuid")),
+    retain(
+        "data_use_exclusions",
+        "suppression list (do-not-sell/GPC/objection/erased/not-adult): must outlive erasure so "
+        "the subject is never re-included (Art. 17(3)(b)/21); holds only a pseudonymous uuid token",
+    ),
+    ref("tenant_data_programme_optin", "signer_uuid", reason=_ACTOR + "; programme consent record"),
+    ref("export_runs", "actor_uuid", reason=_ACTOR + "; export decision audit trail"),
     delete("auto_shoutout_creators", platform("platform", "platform_user_id")),
     delete("booking_page_members", hub("hub_user_id")),
     delete("booking_pages", hub("hub_user_id")),
@@ -275,6 +296,9 @@ RULES: tuple[Rule, ...] = (
     delete("community_join_requests", hub("user_id")),
     delete("connected_calendars", hub("hub_user_id")),
     delete("discord_role_mirror_grants", platform("platform", "platform_user_id")),
+    delete("role_sync_community_grants", hub("hub_user_id")),
+    delete("role_sync_discord_grants", platform("platform", "platform_user_id")),
+    delete("role_sync_remediation_queue", hub("hub_user_id")),
     delete("economy_balances", uuid("user_uuid")),
     delete("user_active_context", uuid("user_uuid")),
     delete("economy_ledger", uuid("user_uuid")),
@@ -368,7 +392,17 @@ RULES: tuple[Rule, ...] = (
     ref("ai_model_config", "updated_by_user_id", reason=_ACTOR),
     ref("ai_token_transactions", "actor_user_id", reason=_ACTOR),
     ref("analytics_suspected_bots", "reviewed_by", reason=_ACTOR),
+    ref("token_transactions", "actor_user_id", reason=_ACTOR),
     ref("announcements", "updated_by", reason=_ACTOR),
+    ref(
+        "dsar_requests",
+        "subject_user_id",
+        "assignee_user_id",
+        reason="DSAR handling record, retained as proof the request was honoured (Art. 5(2), "
+        "17(3)(e)); the user row is anonymised in place so the reference is pseudonymous; "
+        "requester contact data is blanked by the retention job",
+    ),
+    ref("dsar_request_events", "actor_user_id", reason=_ACTOR + "; append-only DSAR audit trail"),
     ref("app_activations", "activated_by", reason=_ACTOR),
     ref(
         "app_active_versions",
@@ -385,6 +419,7 @@ RULES: tuple[Rule, ...] = (
     ref("app_stream_grants", "granted_by", reason=_ACTOR),
     ref("app_tenant_permission_restrictions", "restricted_by", reason=_ACTOR),
     ref("app_version_uploads", "requested_by", reason=_ACTOR),
+    ref("app_id_owners", "owner_id", reason=_ACTOR),
     ref("auto_shoutout_creators", "added_by", reason=_ACTOR),
     ref("bot_detection_results", "reviewed_by", reason=_ACTOR),
     ref(
@@ -392,11 +427,20 @@ RULES: tuple[Rule, ...] = (
         "user_uuid",
         reason=_ACTOR + "; per-write ledger, old/new values are allowlisted non-PII columns only",
     ),
+    ref("bundle_community_config", "updated_by", reason=_ACTOR),
     ref("bundle_tenant_availability", "updated_by", reason=_ACTOR),
     ref("calendar_event_admins", "revoked_by", reason=_ACTOR),
     ref("calendar_tickets", "cancelled_by", "checked_in_by", "transferred_by", reason=_ACTOR),
     ref("call_raised_hands", "acknowledged_by", reason=_ACTOR),
     ref("command_aliases", "created_by", reason=_ACTOR),
+    ref(
+        "community_tier_allocations",
+        "allocated_by",
+        "released_by",
+        reason=_ACTOR + "; licensing ledger row retained as proof of entitlement allocation",
+    ),
+    ref("tenant_license_pools", "set_by", reason=_ACTOR),
+    ref("tenant_license_keys", "license_key_set_by", reason=_ACTOR),
     ref("community_access_tokens", "created_by_user_id", reason=_ACTOR),
     ref(
         "community_connection_access", "approved_by_user_id", "requested_by_user_id", reason=_ACTOR
@@ -409,6 +453,11 @@ RULES: tuple[Rule, ...] = (
     ref("community_servers", "added_by", "approved_by", reason=_ACTOR),
     ref("community_vendor_installations", "installed_by", reason=_ACTOR),
     ref("cookie_policy_versions", "created_by", reason=_ACTOR),
+    ref(
+        "economy_elevated_audit",
+        "approved_by",
+        reason=_AUDIT + "; the approving admin, referenced by id; target/counterparty are UUIDs",
+    ),
     ref("github_repo_connections", "vendor_id", reason=_ACTOR),
     ref("guild_tenant_pairings", "created_by_user_id", reason=_ACTOR),
     ref("hub_channels", "created_by", reason=_ACTOR),
@@ -473,6 +522,17 @@ RULES: tuple[Rule, ...] = (
         "overlay_access_log",
         "ip_address",
         reason="anonymous overlay viewer log (overlay key + IP), no user id",
+    ),
+    exempt(
+        "overlay_scene_components",
+        "display_name",
+        reason="widget label copied from the bundle manifest declaration at placement; no person "
+        "input, table has no user-keyed or *_by column",
+    ),
+    exempt(
+        "overlay_widget_registry",
+        "display_name",
+        reason="widget label declared by the bundle manifest (overlay_widgets), not a person",
     ),
     exempt("permission_scopes", "display_name", reason=_ORG_NAME),
     exempt("server_link_requests", "initiated_by", reason="enum: community | platform"),

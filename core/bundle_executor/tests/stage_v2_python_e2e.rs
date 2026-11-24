@@ -31,7 +31,7 @@ use penguin_bundle_host::wire::{
     ShutdownBody,
 };
 
-const APP_ID: &str = "waddles.test.stage-v2-py";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-stage-v2-py";
 
 /// Builds the Python test bundle for `world stage-v2` inside the same pinned
 /// image/componentize-py version production's builder uses.
@@ -272,6 +272,7 @@ async fn drive(wasm: Vec<u8>, steps: Vec<(ExportKind, serde_json::Value)>) -> Ve
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

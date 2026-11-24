@@ -20,7 +20,7 @@ fn scope(tenant: i32, community: i32) -> InvokeScope {
     HostInvokeScopeBuilder::new()
         .tenant_id(tenant)
         .community_id(community)
-        .app_id("waddles.test.role_sync")
+        .app_id("penguintechinc.waddles.fixture-test-role-sync")
         .app_version(1)
         .tenant_tier(TenantTier::Free)
         .build()

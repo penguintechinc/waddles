@@ -85,6 +85,7 @@ describe('TenantReputationSettings', () => {
         tenantAutoBanEnabled: true,
         tenantAutoBanFloor: 350,
         tenantAtRiskThreshold: 450,
+        liftRearmDrop: 5,
       }),
     );
     expect(await screen.findByText(/settings saved/i)).toBeInTheDocument();
@@ -182,6 +183,7 @@ describe('CommunityReputationBans', () => {
     expect(screen.getByText('Soft ban cleared.')).toBeInTheDocument();
   });
 
+  const UUID_99 = '00000000-0000-4000-8000-000000000099';
   it('manual soft-ban validates id and calls API; at-risk soft-ban works', async () => {
     adminApi.getReputationSoftBans.mockResolvedValue({ data: { softBans: [] } });
     adminApi.getAtRiskUsers.mockResolvedValue({ data: { members: [risk] } });
@@ -189,12 +191,12 @@ describe('CommunityReputationBans', () => {
     load();
     fireEvent.change(await screen.findByLabelText(/member id/i), { target: { value: 'abc' } });
     fireEvent.click(screen.getByRole('button', { name: /soft-ban member/i }));
-    expect(await screen.findByTestId('rep-action-error')).toHaveTextContent(/numeric/);
+    expect(await screen.findByTestId('rep-action-error')).toHaveTextContent(/UUID/);
     expect(adminApi.setReputationSoftBan).not.toHaveBeenCalled();
 
-    fireEvent.change(screen.getByLabelText(/member id/i), { target: { value: '99' } });
+    fireEvent.change(screen.getByLabelText(/member id/i), { target: { value: UUID_99 } });
     fireEvent.click(screen.getByRole('button', { name: /soft-ban member/i }));
-    await waitFor(() => expect(adminApi.setReputationSoftBan).toHaveBeenCalledWith('7', '99', undefined));
+    await waitFor(() => expect(adminApi.setReputationSoftBan).toHaveBeenCalledWith('7', UUID_99, undefined));
 
     fireEvent.click(await screen.findByRole('button', { name: /^soft-ban$/i }));
     await waitFor(() => expect(adminApi.setReputationSoftBan).toHaveBeenCalledWith('7', '12', undefined));

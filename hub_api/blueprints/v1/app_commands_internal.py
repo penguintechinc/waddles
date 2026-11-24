@@ -145,6 +145,7 @@ def _int_arg(name: str, default: int) -> int:
 @validate_response(SlashSourcesDTO)
 async def list_sources_route() -> Any:
     """``GET`` -- one page of sources of a platform that have a paired community."""
+    # nosemgrep: python-silent-except-return-default -- _refusal() logs via logger.warning
     try:
         page = await registry.list_sources(
             _dal(),
@@ -162,6 +163,7 @@ async def list_sources_route() -> Any:
 @validate_response(SlashDesiredDTO)
 async def desired_route() -> Any:
     """``GET`` -- the desired slash registration of one source, with its idempotency version."""
+    # nosemgrep: python-silent-except-return-default -- _refusal() logs via logger.warning
     try:
         state = await registry.desired_commands(
             _dal(), request.args.get("platform", ""), request.args.get("source_id", "")

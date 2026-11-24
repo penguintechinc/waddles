@@ -59,8 +59,13 @@ class TestMigrationMetadata:
     def test_single_head(self) -> None:
         cfg = Config(str(_ROOT / "alembic.ini"))
         cfg.set_main_option("script_location", str(_ROOT / "alembic"))
-        heads = ScriptDirectory.from_config(cfg).get_heads()
-        assert heads == ["0098_system_tenant_global_admin"]
+        script = ScriptDirectory.from_config(cfg)
+        heads = script.get_heads()
+        # A pinned head went stale on every later migration; assert the invariant instead:
+        # one head, and this revision is still in its ancestry (merge revisions included).
+        assert len(heads) == 1, f"diverged alembic heads: {heads}"
+        ancestry = {rev.revision for rev in script.walk_revisions()}
+        assert "0097_reputation_unify" in ancestry
 
 
 @pytest.fixture(scope="module")

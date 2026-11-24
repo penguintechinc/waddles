@@ -30,10 +30,10 @@ use uuid::Uuid;
 
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
-const APP_ID: &str = "waddles.core.test-economy";
+const APP_ID: &str = "penguintechinc.waddles.test-economy";
 const VERSION: i64 = 1;
 /// The calling app (an APP bundle reaching the economy service via `tool.invoke`).
-const CALLER_APP: &str = "waddles.app.steal-game";
+const CALLER_APP: &str = "penguintechinc.waddles.app-steal-game";
 const CALLER_VERSION: i64 = 5;
 /// The spine event this invocation handles (a UUID v4, as the hop MAC covers).
 const EVENT_ID: &str = "3fa85f64-5717-4562-b3fc-2c963f66afa6";

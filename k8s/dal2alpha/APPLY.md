@@ -81,8 +81,40 @@ kubectl --context dal2alpha -n gateway-system create secret tls cloudflare-origi
 kubectl --context dal2alpha -n gateway-system get gateway shared   # Programmed=True
 ```
 
+## 4b. Gateway -> hub-webui CA bundle (transit TLS, audit F4)
+`values-dal2alpha.yaml` enables `global.internalTransitTls`: pods get ECDSA P-256 certs from the
+step-3 ClusterIssuer, and the Gateway re-encrypts to hub-webui with a `BackendTLSPolicy` that needs
+the (public) CA cert as a ConfigMap in ns waddlebot. After the first `helm upgrade` (step 5) has
+let cert-manager mint `waddlebot-hub-api-http-tls`, create it once (or set `httproute.backendTls.caPem`);
+until it exists the policy is not Accepted and the Gateway fails closed (503), never plaintext:
+```bash
+kubectl --context dal2alpha -n waddlebot get secret waddlebot-hub-api-http-tls \
+  -o jsonpath='{.data.ca\.crt}' | base64 -d > "$(mktemp -d)/ca.crt"   # inspect, then:
+kubectl --context dal2alpha -n waddlebot create configmap waddlebot-internal-ca-bundle \
+  --from-literal=ca.crt="$(kubectl --context dal2alpha -n waddlebot get secret waddlebot-hub-api-http-tls -o jsonpath='{.data.ca\.crt}' | base64 -d)" \
+  --dry-run=client -o yaml | kubectl --context dal2alpha apply -f -
+```
+Needs the Gateway API `BackendTLSPolicy` CRD (`gateway.networking.k8s.io/v1`); override with
+`httproute.backendTls.apiVersion` if the cluster serves another version.
+
 ## 5. Waddles (helm 3.17.x -- NOT v4, helm#31361 fresh-install bug)
-Prereq secrets in ns waddlebot: `ghcr-pull`, `waddlebot-platform-credentials`.
+Prereq secrets in ns waddlebot: `waddlebot-platform-credentials` (alpha images are public; no ghcr-pull needed).
+
+**Feature flags (license-server PostHog) -- operator step.** hub-api and the Rust data plane read flags
+from the PostHog hosted at `https://license.penguintech.io` (`posthog.licenseServer.host`). Precedence:
+PostHog value, then last-known value, then `FLAG_*` env, then default OFF. Create this Secret (optional --
+without it flags simply use the `FLAG_*` baselines and pods still start):
+```bash
+# Secret `waddlebot-posthog-license`, key `POSTHOG_API_KEY` = the license-server PostHog project's PUBLIC
+# project API key (`phc_...`, NOT the `phx_...` personal key). Get it from the license-server owner
+# (license-server docs/POSTHOG_SETUP.md: POSTHOG_PROJECT_API_KEY / PostHog project settings).
+# Paste the value at the prompt; it never touches shell history or argv.
+read -rs PH_KEY && kubectl --context dal2alpha -n waddlebot create secret generic waddlebot-posthog-license \
+  --from-literal=POSTHOG_API_KEY="$PH_KEY" --dry-run=client -o yaml | kubectl --context dal2alpha apply -f -; unset PH_KEY
+kubectl --context dal2alpha -n waddlebot rollout restart deploy/waddlebot-hub-api-v3   # pick up the key
+```
+Note: the Rust data plane (`svc-process-rust`/`svc-action-rust`) reads the same Secret as `POSTHOG_KEY`, but
+`dataplane-egress-deny` has no route to license.penguintech.io, so it degrades to `FLAG_*` env until an egress rule is added.
 ```bash
 kubectl --context dal2alpha create ns waddlebot --dry-run=client -o yaml | kubectl --context dal2alpha apply -f -
 # REQUIRED: without this label the shared Gateway rejects the waddlebot HTTPRoute

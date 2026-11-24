@@ -1,7 +1,7 @@
 # secret (Python)
 
 `!secret <username> <message>` -- one-time secret messaging (feature #684). First-party
-(`provider: builtin`, `app_id: waddles.core.example.secret`, `author: PenguinTech/waddles`,
+(`provider: builtin`, `app_id: penguintechinc.waddles.secret`, `author: PenguinTech/waddles`,
 Apache-2.0), **original Waddles content** (not a port; no third-party attribution applies).
 
 The sender's chat message is deleted, the secret is stored by hub-api as a **single-use** secret,
@@ -73,7 +73,10 @@ identity-link flow; an **unlinked target fails loud** rather than guessing. A co
 Egress is exactly `hub-api.penguintech.cloud` `POST`; the `net.http.fqdn` grant host must match
 `hub_api_url`'s host -- adjust both per deployment. The service credential is the stage secret-ref
 `SECRET_MESSAGING_SERVICE_TOKEN` (value `Bearer <jwt>`): it is passed as a `secret_refs` **name**,
-never as a header/body value, and never enters the guest. The chat/DM ops depend on host connector
+never as a header/body value, and never enters the guest. The token must carry scopes
+`secret_messaging:create` AND `secret_messaging:create_internal`: the host hands the bundle only the
+numeric community id (the data plane never exposes public UUIDs to bundles), and hub-api accepts a
+numeric `communityId` on this endpoint solely for tokens holding the second scope. The chat/DM ops depend on host connector
 support (see #719).
 
 ## Config

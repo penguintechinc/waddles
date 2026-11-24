@@ -28,6 +28,7 @@ services/clip_service.py`.
 from __future__ import annotations
 
 import os
+import uuid as _uuid
 from datetime import datetime
 from typing import Any
 
@@ -163,6 +164,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("updated_at", "datetime"),
             dal.Field("published_at", "datetime"),
             dal.Field("archived_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -226,6 +228,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("created_by", "integer"),
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -248,6 +251,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("platform_thread_id", "string"),
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -262,6 +266,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("content", "text", notnull=True),
             dal.Field("platform_message_id", "string"),
             dal.Field("created_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -273,10 +278,12 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("display_name", "string"),
             dal.Field("description", "text"),
             dal.Field("is_system", "boolean", default=False),
+            dal.Field("role_kind", "integer", default=0),
             dal.Field("priority", "integer", default=0),
             dal.Field("base_claims", "json"),
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -318,6 +325,7 @@ def ensure_community_tables(dal: Any, *, migrate: bool = False) -> None:
             dal.Field("created_at", "datetime"),
             dal.Field("updated_at", "datetime"),
             dal.Field("deleted_at", "datetime"),
+            dal.Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -396,7 +404,9 @@ def is_valid_service_key(request: Any) -> bool:
     return bool(verify_service_key(provided, expected))
 
 
-def api_error(message: str, status_code: int) -> tuple[dict[str, object], int]:
+def api_error(
+    message: str, status_code: int, code: str | None = None
+) -> tuple[dict[str, object], int]:
     """Typed error envelope, same shape as `flask_core.api_utils.error_response`.
 
     `error_response` itself is untyped (flask_core has no py.typed marker,
@@ -411,10 +421,25 @@ def api_error(message: str, status_code: int) -> tuple[dict[str, object], int]:
         "success": False,
         "error": {
             "message": message,
-            "code": f"ERROR_{status_code}",
+            "code": code or f"ERROR_{status_code}",
             "timestamp": datetime.utcnow().isoformat(),
         },
     }, status_code
+
+
+#: Wire `error.code` of every licensed-feature 402; hub-webui keys its upsell state on it.
+FEATURE_NOT_ENABLED_CODE = "FEATURE_NOT_ENABLED"
+
+
+def feature_not_enabled(message: str) -> tuple[dict[str, object], int]:
+    """Standard 402 licensed-feature envelope (`FEATURE_NOT_ENABLED`), as `payment_required`."""
+    return api_error(message, 402, FEATURE_NOT_ENABLED_CODE)
+
+
+from .sql_util import (  # noqa: E402,F401  (re-export for #1462 callers)
+    execute_positional,
+    positional_sql,
+)
 
 
 def sql_bool(value: Any) -> bool:

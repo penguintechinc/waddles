@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock, MagicMock
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -36,6 +37,8 @@ from services import tenant_discord_install_state as discord_state
 from services import twitch_install_state as twitch_state
 from services.install_state_binding import ERR_BINDING, ERR_STATE
 from services.oauth_providers import ProviderSpec, TokenResponse
+from tests.community_ids import cpath, install_community_ids
+from tests.conftest import apply_route_guard_bypass
 
 CALLBACK_BASE = "http://localhost:19999"
 
@@ -78,8 +81,7 @@ def _cfg() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",  # noqa: S106
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -137,9 +139,9 @@ def connections_app(community_db: Any) -> Quart:
     dal, _ = community_db
     app = Quart(__name__)
     QuartSchema(app)
+    install_community_ids(app, dal)
     app.register_blueprint(connections_bp)
     app.config["dal"] = dal
-    app.config["async_dal"] = dal
     app.config["HUB_API_CONFIG"] = _cfg()
     return app
 
@@ -181,7 +183,17 @@ def _twitch_flow(app: Quart, auth: Any, monkeypatch: pytest.MonkeyPatch) -> Flow
 def _discord_flow(app: Quart, auth: Any, monkeypatch: pytest.MonkeyPatch) -> Flow:
     client = app.test_client(use_cookies=False)
     monkeypatch.setattr(discord_bp_module, "feature_enabled", AsyncMock(return_value=True))
-    monkeypatch.setattr(discord_svc, "_exchange_code", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        discord_svc,
+        "_exchange_code",
+        AsyncMock(return_value={"guild": {"id": "123456789012345678"}}),
+    )
+    monkeypatch.setattr(discord_svc, "_validate_bot_token", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        discord_svc,
+        "ensure_tenant_discord_connection",
+        MagicMock(return_value=MagicMock(connection_id=1, granted_community_id=None)),
+    )
     store = MagicMock()
     monkeypatch.setattr(discord_svc, "store_tenant_credentials", store)
 
@@ -192,7 +204,9 @@ def _discord_flow(app: Quart, auth: Any, monkeypatch: pytest.MonkeyPatch) -> Flo
                 **auth(user_id=user_id, scope="tenant.discord_install:write"),
                 "Content-Type": "application/json",
             },
-            data=json_module.dumps({"application_id": "app-1", "client_secret": "sec-1"}),
+            data=json_module.dumps(
+                {"application_id": "app-1", "client_secret": "sec-1", "bot_token": "bot-1"}
+            ),
         )
         assert resp.status_code == 200
         header = _cookie_header(resp, discord_bp_module.BINDING_COOKIE)
@@ -230,6 +244,9 @@ def _connections_flow(
     prov = connections_module.providers_svc
     monkeypatch.setattr(connections_module, "feature_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(connections_module, "_tenant_ok", lambda _cid: True)
+    # This module proves the OAuth state/cookie binding, not authz (that is
+    # `test_authz_sweep_b_community_routes.py`): admit the caller past `@community_admin_guard`.
+    apply_route_guard_bypass(monkeypatch)
     monkeypatch.setattr(prov, "get_provider", lambda _n: spec)
     monkeypatch.setattr(
         prov, "build_authorize_url", lambda _n, **kw: f"https://x.example/a?state={kw['state']}"
@@ -253,7 +270,11 @@ def _connections_flow(
 
     async def start(user_id: int) -> tuple[str, str]:
         resp = await client.post(
-            f"/api/v1/communities/{community_id}/connections/youtube/authorize",
+            cpath(
+                client.app.config["dal"],
+                "/api/v1/communities/{community_id}/connections/youtube/authorize",
+                community_id,
+            ),
             headers=auth(user_id=user_id, scope="community.connections:write"),
         )
         assert resp.status_code == 200
@@ -343,6 +364,10 @@ class TestCrossContext:
         user_auth_headers: Any,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
+        dal = connections_app.config["dal"]
+        first = dal(dal.communities.id == 1).select().first()
+        dal.communities.insert(id=2, name="second-community", tenant_id=first.tenant_id)
+        dal.commit()
         flow_a = _connections_flow(connections_app, user_auth_headers, monkeypatch, 1)
         state_a, nonce_a = await flow_a.start(1)
         flow_b = _connections_flow(connections_app, user_auth_headers, monkeypatch, 2)

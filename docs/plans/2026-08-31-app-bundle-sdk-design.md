@@ -84,10 +84,10 @@ follows the same optionality — most bundles have no overlay and omit the direc
 
 | Field | Type | Today (file:line) | Status |
 |---|---|---|---|
-| `app_id` | str, `waddles.<module>.<feature>.<app>` | `app_manifest.py:104`, `_APP_ID_RE` line 57 | unchanged |
+| `app_id` | str, `<github-org>.<repo>.<bundle-name>` | `app_manifest.py:104`, `_APP_ID_RE` line 57 | unchanged |
 | `name` | str | `app_manifest.py:105` | unchanged |
 | `version` | SemVer str | `app_manifest.py:106`, `_SEMVER_RE` line 61-66 | unchanged |
-| `feature` | str, `waddles.<module>.<feature>`, must equal `app_id`'s prefix | `app_manifest.py:107`, checked line 169-175 | unchanged |
+| `feature` | removed — the owner is the first two segments of `app_id` | `app_manifest.py:107` | unchanged |
 | `module` | str, one of `KNOWN_MODULES` | `app_manifest.py:108`, set at line 35-47 | unchanged |
 | `provider` | `builtin` \| `thirdparty` | `app_manifest.py:109`, `KNOWN_PROVIDERS` line 53 | unchanged — **authorship** axis |
 | `is_default` | bool | `app_manifest.py:113` | unchanged |
@@ -164,7 +164,7 @@ stages:
     assets:
       - "presentation/overlay.js"
       - "presentation/overlay.css"
-    browser_source_path: "/presentation/waddles.bot.giveaway.giveaway-classic"
+    browser_source_path: "/presentation/penguintechinc.waddles.bot-giveaway-giveaway-classic"
     consumes: ["giveaway.winner_selected"]   # optional -- live data, not a pipeline hop
 ```
 
@@ -286,7 +286,7 @@ Three tiers, narrowing global → tenant → community, with a hard **subset** i
 ```sql
 -- GLOBAL: installed
 CREATE TABLE app_catalog (
-    app_id                  TEXT PRIMARY KEY,          -- waddles.<module>.<feature>.<app>
+    app_id                  TEXT PRIMARY KEY,          -- <github-org>.<repo>.<bundle-name>
     manifest_version        TEXT NOT NULL,              -- bundle.yaml `version`
     module                  TEXT NOT NULL,
     feature                 TEXT NOT NULL,
@@ -521,7 +521,7 @@ giveaway-classic/
 `bundle.yaml`:
 
 ```yaml
-app_id: waddles.bot.giveaway.giveaway-classic
+app_id: penguintechinc.waddles.bot-giveaway-giveaway-classic
 name: "Giveaway (Classic)"
 version: "1.0.0"
 feature: waddles.bot.giveaway
@@ -560,7 +560,7 @@ stages:
 Stage specs (`spec.yaml`), abbreviated:
 
 - `ingest/spec.yaml`: watches chat for `!giveaway enter`; emits `giveaway.entry_detected {user_uuid, community_id, ts}` (PII-tokenized per `backend-database.md` — chat username resolved via the identity table, never carried in the event itself).
-- `process/spec.yaml`: accumulates entrants per active giveaway window in this instance's isolated state key (`waddles:t:{tenant}:c:{community}:app:waddles.bot.giveaway.giveaway-classic:state`); on window close, picks a winner, emits `giveaway.winner_selected {winner_uuid, giveaway_id}`.
+- `process/spec.yaml`: accumulates entrants per active giveaway window in this instance's isolated state key (`waddles:t:{tenant}:c:{community}:app:penguintechinc.waddles.bot-giveaway-giveaway-classic:state`); on window close, picks a winner, emits `giveaway.winner_selected {winner_uuid, giveaway_id}`.
 - `action/spec.yaml`: posts the winner announcement via the platform's outbound chat action.
 
 Two queue hops, not one: `ingest.produces["giveaway.entry_detected"]` ==
@@ -579,10 +579,10 @@ Community `C1` activates `giveaway-classic`, `giveaway-raffle`, `giveaway-milest
 returns all 4. Each gets its own isolated stream set:
 
 ```
-waddles:t:T:c:C1:app:waddles.bot.giveaway.giveaway-classic:{ingest,process,action,dlq}
-waddles:t:T:c:C1:app:waddles.bot.giveaway.giveaway-raffle:{ingest,process,action,dlq}
-waddles:t:T:c:C1:app:waddles.bot.giveaway.giveaway-milestone:{ingest,process,action,dlq}
-waddles:t:T:c:C1:app:waddles.bot.giveaway.giveaway-sub-only:{ingest,process,action,dlq}
+waddles:t:T:c:C1:app:penguintechinc.waddles.bot-giveaway-giveaway-classic:{ingest,process,action,dlq}
+waddles:t:T:c:C1:app:penguintechinc.waddles.bot-giveaway-giveaway-raffle:{ingest,process,action,dlq}
+waddles:t:T:c:C1:app:penguintechinc.waddles.bot-giveaway-giveaway-milestone:{ingest,process,action,dlq}
+waddles:t:T:c:C1:app:penguintechinc.waddles.bot-giveaway-giveaway-sub-only:{ingest,process,action,dlq}
 ```
 
 A `!giveaway enter` chat event is evaluated by all 4 ingest handlers independently — no shared
@@ -590,13 +590,13 @@ state, no interference, per §7.1/§7.2.
 
 ### 9.2 Conflict — 2 incompatible Twitch bundles
 
-`waddles.bot.twitch-chat.official-eventsub` and `waddles.bot.twitch-chat.legacy-irc-bridge`
+`penguintechinc.waddles.bot-twitch-chat-official-eventsub` and `penguintechinc.waddles.bot-twitch-chat-legacy-irc-bridge`
 both implement `waddles.bot.twitch-chat` but cannot both hold the platform's single Twitch
 IRC/EventSub connection for one channel. Each declares:
 
 ```yaml
 # official-eventsub/bundle.yaml
-incompatible_with: [waddles.bot.twitch-chat.legacy-irc-bridge]
+incompatible_with: [penguintechinc.waddles.bot-twitch-chat-legacy-irc-bridge]
 ```
 
 Activating `legacy-irc-bridge` in a community that already has `official-eventsub` enabled is

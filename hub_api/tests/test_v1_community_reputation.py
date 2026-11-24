@@ -23,6 +23,7 @@ import blueprints.v1.community_reputation as reputation_module
 from blueprints.v1.community_reputation import reputation_bp
 from services import community_reputation_service as reputation_svc
 from services.schema import bind_auth_tables
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 from tests.conftest import TENANT_SLUG, make_token
 
 
@@ -62,9 +63,10 @@ def app(reputation_db: Any) -> Quart:
     async_dal, _community_id, _tenant_id = reputation_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(reputation_bp)
     quart_app.config["dal"] = async_dal.dal
     quart_app.config["async_dal"] = async_dal
+    install_community_ids(quart_app, async_dal.dal)
+    quart_app.register_blueprint(reputation_bp)
     return quart_app
 
 
@@ -117,35 +119,40 @@ def _seed_tenant(dal: Any, *, tenant_id: int, hub_user_id: int, score: int) -> N
 
 class TestAuthAndTenant:
     async def test_no_token_is_401(self, client: Any, reputation_db: Any) -> None:
-        _, community_id, _tenant_id = reputation_db
-        response = await client.get(f"/api/v1/community/{community_id}/reputation/me")
+        async_dal, community_id, _tenant_id = reputation_db
+        response = await client.get(
+            cpath(async_dal, "/api/v1/community/{community_id}/reputation/me", community_id)
+        )
         assert response.status_code == 401
 
     async def test_wrong_scope_is_403(self, client: Any, reputation_db: Any) -> None:
-        _, community_id, _tenant_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/me",
+            cpath(async_dal, "/api/v1/community/{community_id}/reputation/me", community_id),
             headers=_headers(scope="community.loyalty:read"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any) -> None:
-        response = await client.get("/api/v1/community/9999/reputation/me", headers=_headers())
+        response = await client.get(
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/reputation/me", headers=_headers()
+        )
         assert response.status_code == 404
 
     async def test_leaderboard_unknown_community_is_404(self, client: Any) -> None:
         response = await client.get(
-            "/api/v1/community/9999/reputation/leaderboard", headers=_headers()
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/reputation/leaderboard", headers=_headers()
         )
         assert response.status_code == 404
 
     async def test_feature_disabled_is_402(
         self, client: Any, reputation_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        _, community_id, _tenant_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         monkeypatch.setattr(reputation_module, "feature_enabled", AsyncMock(return_value=False))
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/me", headers=_headers()
+            cpath(async_dal, "/api/v1/community/{community_id}/reputation/me", community_id),
+            headers=_headers(),
         )
         assert response.status_code == 402
 
@@ -154,9 +161,10 @@ class TestGetMyReputation:
     async def test_shape_and_defaults_when_new_member(
         self, client: Any, reputation_db: Any
     ) -> None:
-        _, community_id, _tenant_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/me", headers=_headers()
+            cpath(async_dal, "/api/v1/community/{community_id}/reputation/me", community_id),
+            headers=_headers(),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -181,7 +189,8 @@ class TestGetMyReputation:
         _seed_tenant(dal, tenant_id=tenant_id, hub_user_id=7, score=300)
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/me", headers=_headers(user_id="7")
+            cpath(async_dal, "/api/v1/community/{community_id}/reputation/me", community_id),
+            headers=_headers(user_id="7"),
         )
         body = await response.get_json()
         data = body["data"]
@@ -206,7 +215,8 @@ class TestGetMyReputation:
         _seed_tenant(dal, tenant_id=other_tenant_id, hub_user_id=7, score=850)
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/me", headers=_headers(user_id="7")
+            cpath(async_dal, "/api/v1/community/{community_id}/reputation/me", community_id),
+            headers=_headers(user_id="7"),
         )
         body = await response.get_json()
         data = body["data"]
@@ -218,9 +228,12 @@ class TestGetMyReputation:
 
 class TestGetLeaderboard:
     async def test_empty_leaderboard(self, client: Any, reputation_db: Any) -> None:
-        _, community_id, _tenant_id = reputation_db
+        async_dal, community_id, _tenant_id = reputation_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/leaderboard", headers=_headers()
+            cpath(
+                async_dal, "/api/v1/community/{community_id}/reputation/leaderboard", community_id
+            ),
+            headers=_headers(),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -237,7 +250,10 @@ class TestGetLeaderboard:
         )
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/leaderboard", headers=_headers()
+            cpath(
+                async_dal, "/api/v1/community/{community_id}/reputation/leaderboard", community_id
+            ),
+            headers=_headers(),
         )
         body = await response.get_json()
         entries = body["data"]["entries"]
@@ -257,7 +273,15 @@ class TestGetLeaderboard:
                 reputation=600 + i,
             )
         response = await client.get(
-            f"/api/v1/community/{community_id}/reputation/leaderboard?limit=1", headers=_headers()
+            cpath(
+                async_dal,
+                "/api/v1/community/{community_id}/reputation/leaderboard?limit=1",
+                community_id,
+            ),
+            headers=_headers(),
         )
         body = await response.get_json()
         assert len(body["data"]["entries"]) == 1
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

@@ -17,7 +17,6 @@ use webrtc::peer_connection::PeerConnection;
 
 use rtc_common::*;
 use svc_streaming::egress::whep;
-use svc_streaming::rooms::token::TokenKeys;
 use svc_streaming::rooms::{host_api, media, RoomService, MAX_ISSUED_PER_COMMUNITY};
 use svc_streaming::rtc::fanout::MediaFanouts;
 use svc_streaming::rtc::metrics::RtcMetrics;
@@ -75,7 +74,9 @@ async fn whep_session_never_outlives_its_token_or_epoch() {
     assert_eq!(st, StatusCode::CREATED);
     assert_eq!(whep.viewer_count(pipeline).await, 2);
     assert_eq!(whep.sweep().await, 0, "nothing expired yet");
-    let reaped = whep.sweep_at(chrono::Utc::now().timestamp() + 60).await;
+    let reaped = whep
+        .sweep_at(time::OffsetDateTime::now_utc().unix_timestamp() + 60)
+        .await;
     assert_eq!(reaped, 1, "only the 30s-token session expired");
     assert_eq!(whep.viewer_count(pipeline).await, 1);
 
@@ -147,7 +148,7 @@ fn svc(range: (u16, u16), cap: Option<usize>) -> Arc<RoomService> {
     let s = RoomService::new(
         factory(range),
         metrics(),
-        Some(TokenKeys::new(VIEWER_SECRET).unwrap()),
+        Some(rtc_common::test_token_keys()),
         "http://svc.test".into(),
     );
     Arc::new(match cap {
@@ -189,19 +190,24 @@ async fn issued_ledger_is_capped_per_community_and_prunes_by_expiry() {
         a["room_id"].as_str().unwrap().to_string(),
         b["room_id"].as_str().unwrap().to_string(),
     );
+    // One fixed participant: the ledger counts every issuance, while distinct participants are
+    // capped per room (MAX_MEMBERS_PER_ROOM) well below the per-community ledger cap under test.
+    let participant = uuid::Uuid::new_v4().to_string();
     for _ in 0..MAX_ISSUED_PER_COMMUNITY {
-        let (st, _) = host_call(
+        let (st, body) = host_call(
             &host,
             "token.issue",
-            json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+            json!({"community_id":"7","room_id":a,"participant_id":participant,
+                   "publish":false,"subscribe":true}),
         )
         .await;
-        assert_eq!(st, StatusCode::OK);
+        assert_eq!(st, StatusCode::OK, "{body}");
     }
     let (st, body) = host_call(
         &host,
         "token.issue",
-        json!({"community_id":"7","room_id":a,"publish":false,"subscribe":true}),
+        json!({"community_id":"7","room_id":a,"participant_id":participant,
+               "publish":false,"subscribe":true}),
     )
     .await;
     assert_eq!(st, StatusCode::TOO_MANY_REQUESTS, "{body}");
@@ -292,7 +298,7 @@ async fn community_subscriber_cap_is_enforced_below_the_global_cap() {
 /// it must be refused even though the pipeline was never revoked.
 #[tokio::test]
 async fn whep_tokens_from_a_previous_boot_are_refused_after_restart() {
-    let keys = TokenKeys::new(VIEWER_SECRET).unwrap();
+    let keys = rtc_common::test_token_keys();
     let viewers = PeerConnectionFactory::new(loopback_rtc_config((42400, 42419))).unwrap();
     let pipeline = Uuid::new_v4();
     let old_token = viewer_token("7", pipeline, 120, "pipeline", Uuid::new_v4());

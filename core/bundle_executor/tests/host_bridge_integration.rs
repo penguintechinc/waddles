@@ -30,7 +30,7 @@ use penguin_bundle_host::wire::{
 use sha2::{Digest, Sha256};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/hostile_fixture.wasm");
-const APP_ID: &str = "waddles.test.hostile-fixture";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-hostile-fixture";
 
 /// Hands back the committed fixture bytes regardless of key -- there is
 /// exactly one bundle in this test.
@@ -265,6 +265,7 @@ async fn full_stack_load_transform_dispatch_against_a_real_component() {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",
@@ -422,6 +423,7 @@ async fn socket_probe_completes_without_trapping_the_component() {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

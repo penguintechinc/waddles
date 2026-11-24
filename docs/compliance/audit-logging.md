@@ -129,6 +129,7 @@ cascade into immutable history.
 | license (inline) | `license.token_balance_changed`, `license.payout_profile_changed`, `license.vendor_module_changed` | `INLINE_AUTHZ_ROUTES` |
 | admin (inline) | `admin.community_profile_changed/ai_config_changed/music_config_changed/stream_config_changed/workflow_changed/calendar_event_changed/ticketing_changed`; `privacy.consent_changed` | `INLINE_AUTHZ_ROUTES` |
 | bundle | `app_installed_globally`, `permissions_approved_globally`, `tenant_availability_*`, ... | `bundle_audit.record` bridge (also kept in the legacy `audit_log`) |
+| privacy (analytics) | `privacy.exclusion_added`, `privacy.exclusion_removed`, `privacy.exclusions_reconciled` | `analytics_exclusions_service` (after commit; uuid token + `reason_code` only) |
 | audit | `audit.exported` | export endpoint (recorded **before** data is returned) |
 
 Coverage is a table, not a memory exercise: any new scope-protected `POST/PUT/PATCH/DELETE` route is an

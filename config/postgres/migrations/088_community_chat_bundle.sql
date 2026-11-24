@@ -11,7 +11,7 @@
 -- need to resolve how process stages should access the DB if needed. See
 -- the bundle's docstring for details.
 --
--- Registered as `waddles.community.chat.default` (module=community,
+-- Registered as `penguintechinc.waddles.chat-pipeline` (module=community,
 -- feature=waddles.community.chat) with only a process stage. An action
 -- stage (sending the reply back to the channel) uses existing platform
 -- send infrastructure and is not duplicated here. No ingest stage needed
@@ -32,10 +32,10 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.community.chat.default',
+    'penguintechinc.waddles.chat-pipeline',
     '1.0.0',
     'community',
-    'waddles.community.chat',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
@@ -49,7 +49,7 @@ INSERT INTO app_catalog (
 ON CONFLICT (app_id) DO NOTHING;
 
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.community.chat.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.chat-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

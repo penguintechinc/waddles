@@ -38,7 +38,7 @@ use crate::connector_runtime::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 /// Platform slug.
 pub const PLATFORM: &str = "spectrum";
 /// Connector bundle app id.
-pub const APP_ID: &str = "waddles.core.service.spectrum";
+pub const APP_ID: &str = "penguintechinc.waddles.spectrum";
 /// Hub-api provider name.
 pub const PROVIDER: &str = "spectrum";
 /// Capability the binding list is scoped to.

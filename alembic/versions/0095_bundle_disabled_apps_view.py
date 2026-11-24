@@ -7,6 +7,11 @@ A super-admin global disable sets `app_catalog.status = 'disabled'`
 This view exposes ONLY the `app_id` of disabled apps -- no manifest, author or other
 catalog column -- and the reader gets SELECT on the view alone.
 
+`app_catalog.status` is owned by legacy SQL 069 (`status TEXT DEFAULT 'active'`). A DB
+bootstrapped without the legacy replay (CI minimal-FK bootstrap stamped at 0019) lacks
+it, so upgrade() adds it ADD COLUMN IF NOT EXISTS with the identical 069 definition --
+a no-op on every DB that already has the column (alpha, full baseline replay).
+
 Chain note: down_revision is the current release head (0094). Rebase this onto
 whatever head is on `release/v3.0.X` when it merges (single alembic head).
 """
@@ -23,7 +28,8 @@ _ROLE = "waddles_bundle_reader"
 
 
 def upgrade() -> None:
-    """Create the view and grant it to the bundle reader (when that role already exists)."""
+    """Ensure `status` exists, create the view and grant it to the bundle reader."""
+    op.execute("ALTER TABLE app_catalog ADD COLUMN IF NOT EXISTS status TEXT DEFAULT 'active'")
     op.execute(
         f"CREATE OR REPLACE VIEW {_VIEW} AS "  # nosec B608 -- fixed literal
         "SELECT app_id FROM app_catalog WHERE status = 'disabled'"

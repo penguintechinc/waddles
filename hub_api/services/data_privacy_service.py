@@ -47,7 +47,7 @@ import bcrypt
 from flask_core.db_errors import describe_db_error, log_db_error
 from opentelemetry import trace
 
-from services import ban_suppression, mem0_privacy, session_service
+from services import ban_suppression, floor_ban_erasure, mem0_privacy, session_service
 from services.audit_events import AuditAction, AuditCategory
 from services.audit_service import report_write_failure
 from services.bundle_telemetry import get_meter, get_tracer
@@ -56,9 +56,13 @@ from services.erasure_external import EnvExternalErasure, ExternalErasure
 from services.errors import bad_request, not_found, unauthorized
 from services.global_identity import is_global_admin
 from services.platform_account import guard_platform_account
+from services.schema import bind_tenant_tables
 from services.suppression_keys import PlatformKekKeySource, SuppressionKeySource
 
 logger = logging.getLogger(__name__)
+
+#: Bounded reason code reported for an export source that failed (never raw exception text).
+EXPORT_SOURCE_FAILED = "source_unavailable"
 
 #: Tables erasure deliberately NEVER deletes from. GDPR Art. 5(2)
 #: (accountability) obliges the controller to be able to DEMONSTRATE that
@@ -82,11 +86,17 @@ _NON_DELETE_COUNT_KEYS: frozenset[str] = frozenset(
     {"hub_users_anonymized", "suppression_records_written"}
 )
 _SCRUBBED_SUFFIX = "__scrubbed"
+#: Rows deliberately KEPT (an undelivered automated ban survives erasure) -- reported, not deleted.
+_KEPT_SUFFIX = "__pending_kept"
 
 
 def _is_delete_count_key(key: str) -> bool:
     """Is `deletion_scope[key]` a count of hard-deleted rows (vs an anonymize/scrub/write count)?"""
-    return key not in _NON_DELETE_COUNT_KEYS and not key.endswith(_SCRUBBED_SUFFIX)
+    return (
+        key not in _NON_DELETE_COUNT_KEYS
+        and not key.endswith(_SCRUBBED_SUFFIX)
+        and not key.endswith(_KEPT_SUFFIX)
+    )
 
 
 def _iso(value: Any) -> str | None:
@@ -449,8 +459,54 @@ async def collect_user_data(
         try:
             data[key] = await coro
         except Exception as exc:  # noqa: BLE001 - a partial export beats a 500, see docstring
-            failures.append({"source": key, "error": str(exc)})
+            # Never echo the raw exception text (driver/host detail) to the subject or admin:
+            # the response carries a bounded reason code; the real error goes to the log.
+            logger.warning(
+                "dsar.export_source_failed",
+                extra={"source": key, "error_type": type(exc).__name__},
+            )
+            failures.append({"source": key, "error": EXPORT_SOURCE_FAILED})
     return data, failures
+
+
+async def community_public_ids(
+    async_dal: Any, dal: Any, community_ids: Collection[int]
+) -> dict[int, str]:
+    """Map internal `communities.id` -> `public_id` UUID for `community_ids` (one query)."""
+    if not community_ids:
+        return {}
+    if "public_id" not in dal.communities.fields:
+        # `communities` is first bound without `public_id`; the tenant binder extends it
+        # (idempotent, in-memory only). Do not depend on a tenant route having run first.
+        bind_tenant_tables(dal)
+    rows = await async_dal.select_async(
+        dal(dal.communities.id.belongs(sorted(community_ids))),
+        dal.communities.id,
+        dal.communities.public_id,
+    )
+    return {int(r.id): str(r.public_id) for r in rows if r.public_id}
+
+
+async def remap_community_ids(
+    async_dal: Any, dal: Any, data: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Replace every integer `community_id` in `data` with the community's public UUID, in place.
+
+    The numeric PK never crosses an API boundary. A community with no row (deleted) maps to
+    `None` rather than leaking the numeric id.
+    """
+    wanted = {
+        int(row["community_id"])
+        for rows in data.values()
+        for row in rows
+        if isinstance(row.get("community_id"), int) and not isinstance(row["community_id"], bool)
+    }
+    mapping = await community_public_ids(async_dal, dal, wanted)
+    for rows in data.values():
+        for row in rows:
+            cid = row.get("community_id")
+            if isinstance(cid, int) and not isinstance(cid, bool):
+                row["community_id"] = mapping.get(cid)
 
 
 async def export_user_data(
@@ -460,7 +516,11 @@ async def export_user_data(
     exists = await async_dal.select_async(dal(dal.hub_users.id == user_id), dal.hub_users.id)
     if not exists:
         raise not_found("User not found")
-    return await collect_user_data(async_dal, dal, user_id=user_id)
+    data, failures = await collect_user_data(async_dal, dal, user_id=user_id)
+    # Community-keyed rows carry the numeric community PK; the export is a client-facing
+    # boundary, so emit the public UUID only (same remap as the admin DSAR export).
+    await remap_community_ids(async_dal, dal, data)
+    return data, failures
 
 
 async def request_data_deletion(
@@ -619,6 +679,16 @@ def _read_subject_uuids(dal: Any, *, user_id: int) -> tuple[str, ...]:
     return _subject_uuids(dal, user_id=user_id, identities=identities, members=members)
 
 
+def subject_uuids_of(dal: Any, *, user_id: int) -> tuple[str, ...]:
+    """Public, read-only: the canonical PII-free token set of a hub user.
+
+    Hub uuid, member `user_uuid`s (incl. rows reached via linked platform identities) and
+    platform-identity pseudonyms -- the same definition erasure/export use, so authorization
+    checks keyed on bundle-written tokens (soft/floor bans) cannot miss an identity form.
+    """
+    return _read_subject_uuids(dal, user_id=user_id)
+
+
 def _collect_erasure_scope(dal: Any, *, user_id: int) -> _ErasureScope:
     """Read the subject's identities, memberships, bundle-reputation tokens and active bans.
 
@@ -628,10 +698,10 @@ def _collect_erasure_scope(dal: Any, *, user_id: int) -> _ErasureScope:
     """
     identities = ban_suppression.identities_of(dal, user_id)
     members = ban_suppression.subject_member_rows(dal, hub_user_id=user_id, identities=identities)
-    restrictions = ban_suppression.collect_active_restrictions(
-        dal, hub_user_id=user_id, identities=identities, members=members
-    )
     uuids = _subject_uuids(dal, user_id=user_id, identities=identities, members=members)
+    restrictions = ban_suppression.collect_active_restrictions(
+        dal, hub_user_id=user_id, identities=identities, members=members, user_uuids=uuids
+    )
     return _ErasureScope(
         identities=tuple(identities),
         member_rows=tuple(members),
@@ -839,6 +909,13 @@ def _sync_erase(
         # every erased user, banned or not.
         counts["community_members"] = _delete_memberships(dal, scope, now=now)
         counts.update(_delete_reputation_and_identity(dal, scope, user_id=user_id))
+        # Automated hard-ban outbox: refused rows deleted, confirmed bans pseudonymised (never
+        # deleted), undelivered bans left in place -- via the SQL function, hub-api has no DELETE.
+        counts.update(
+            floor_ban_erasure.erase_floor_ban_rows(
+                dal, user_uuids=scope.user_uuids, restrictions=scope.restrictions, keys=keys
+            )
+        )
         # Every OTHER user-keyed table (~100: activity, content, tokens, balances, SSO subjects,
         # bookings, economy ledgers, ...) -- driven by the declarative registry so a table added
         # later cannot be forgotten (`services/erasure_registry.py`, pinned by its coverage test).

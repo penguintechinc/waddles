@@ -217,6 +217,11 @@ pub struct Connection {
     /// events are metriced; `OnceLock` so the many bare
     /// `Connection::new` test call sites need no metrics plumbing.
     metrics: std::sync::OnceLock<crate::telemetry::HostApiMetrics>,
+    /// The stable executor identity (StatefulSet pod name) the peer sent in
+    /// its `hello` (`HelloBody.executor_id`) -- unset for an executor that
+    /// predates the field, which forces broadcast placement
+    /// (`bundle_active_set::sharding`). Set once, at handshake.
+    executor_id: std::sync::OnceLock<String>,
 }
 
 /// Drop guard for one in-flight [`Connection::invoke`]: removes its per-invoke
@@ -262,7 +267,20 @@ impl Connection {
             closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             scopes: std::sync::Mutex::new(std::collections::HashMap::new()),
             metrics: std::sync::OnceLock::new(),
+            executor_id: std::sync::OnceLock::new(),
         })
+    }
+
+    /// The executor id this peer reported in its handshake, if any.
+    pub fn executor_id(&self) -> Option<&str> {
+        self.executor_id.get().map(String::as_str)
+    }
+
+    /// Records the handshake's executor id (first call wins; empty ignored).
+    pub fn set_executor_id(&self, id: &str) {
+        if !id.is_empty() {
+            let _ = self.executor_id.set(id.to_string());
+        }
     }
 
     /// Wires the Prometheus handles in (production only -- called by
@@ -579,6 +597,18 @@ where
             code: ErrorCode::UnsandboxedExecutor,
             message: "executor sandbox posture mismatch".to_string(),
         });
+    }
+    match hello
+        .executor_id
+        .as_deref()
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+    {
+        Some(id) => connection.set_executor_id(id),
+        None => warn!(
+            "host-api hello carried no executor_id (executor predates the field); \
+             bundle placement falls back to broadcast while this session is live"
+        ),
     }
     debug!(?hello, "host-api hello accepted");
     connection
@@ -960,6 +990,16 @@ impl ConnectionRegistry {
             .collect()
     }
 
+    /// Executor id of every live session that reported one -- sessions of
+    /// old executors (no id) are absent, which the router treats as
+    /// "broadcast" (`bundle_active_set::SessionRouter`).
+    pub fn live_executor_ids(&self) -> HashMap<u64, String> {
+        self.prune_and_snapshot()
+            .into_iter()
+            .filter_map(|(id, conn)| conn.executor_id().map(|e| (id, e.to_string())))
+            .collect()
+    }
+
     /// The live connection for exactly `id`, or `None` if it was never
     /// registered, already removed, or has since reported closed -- the
     /// per-session dispatch target [`crate::bundle_loader::RegistrySink`]
@@ -1252,7 +1292,7 @@ mod tests {
             bundle_capability_gate::GrantScopeKey {
                 tenant_id: 7,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 app_version: 1,
             },
             bundle_capability_gate::GrantSet {
@@ -1287,6 +1327,7 @@ mod tests {
                 runtime: sandbox_runtime.to_string(),
                 verified: sandbox_runtime == "gvisor",
             },
+            executor_id: None,
         }
     }
 
@@ -1481,15 +1522,13 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
-            _,
-            redis::aio::MultiplexedConnection,
-        >::new(
-            NoopQueue,
-            egress,
-            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
-            test_gate(),
-        ));
+        let capabilities: Arc<dyn CapabilityHandler> =
+            Arc::new(StageCapabilities::<_, redis::aio::ConnectionManager>::new(
+                NoopQueue,
+                egress,
+                Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+                test_gate(),
+            ));
 
         let executor = tokio::spawn(async move {
             let mut io = executor_io;
@@ -1529,7 +1568,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Clock,
                         op: "now-millis".to_string(),
                         args: serde_json::json!({}),
@@ -1588,7 +1627,7 @@ mod tests {
             .request(Message::Load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
                 component_key: "k".to_string(),
@@ -1606,7 +1645,7 @@ mod tests {
         let result = connection
             .invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -1616,7 +1655,7 @@ mod tests {
                 crate::capabilities::InvokeScope {
                     tenant: "acme".to_string(),
                     community: None,
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: None,
                     origin_platform: None,
                     origin_guild_id: None,
@@ -1716,7 +1755,7 @@ mod tests {
             }
         }
         let capabilities: Arc<dyn CapabilityHandler> = Arc::new(
-            StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+            StageCapabilities::<_, redis::aio::ConnectionManager>::new(
                 SharedQueue(Arc::clone(&relay_queue)),
                 egress,
                 Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
@@ -1768,7 +1807,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Relay,
                         op: "send".to_string(),
                         args: crate::senders::twitch_relay_args(
@@ -1823,7 +1862,7 @@ mod tests {
             .request(Message::Load(LoadBody {
                 tenant_id: 1,
                 community_id: 0,
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 version: "1".to_string(),
                 digest: "sha256:00".to_string(),
                 component_key: "k".to_string(),
@@ -1840,7 +1879,7 @@ mod tests {
         let result = connection
             .invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -1850,7 +1889,7 @@ mod tests {
                 InvokeScope {
                     tenant: "acme".to_string(),
                     community: Some("main".to_string()),
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: Some("somechannel".to_string()),
                     origin_platform: Some("twitch".to_string()),
                     origin_guild_id: None,
@@ -1927,15 +1966,13 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
-            _,
-            redis::aio::MultiplexedConnection,
-        >::new(
-            NoopQueue,
-            egress,
-            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
-            test_gate(),
-        ));
+        let capabilities: Arc<dyn CapabilityHandler> =
+            Arc::new(StageCapabilities::<_, redis::aio::ConnectionManager>::new(
+                NoopQueue,
+                egress,
+                Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+                test_gate(),
+            ));
 
         let executor = tokio::spawn(async move {
             let mut io = executor_io;
@@ -1951,7 +1988,7 @@ mod tests {
                 &Frame::new(
                     2,
                     Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                        app_id: "waddles.bot.commands.default".to_string(),
+                        app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                         capability: penguin_bundle_host::wire::CapabilityKind::Clock,
                         op: "now-millis".to_string(),
                         args: serde_json::json!({}),
@@ -2037,15 +2074,13 @@ mod tests {
             .unwrap(),
             crate::flags::boxed(crate::flags::StaticFlag(true)),
         ));
-        let capabilities: Arc<dyn CapabilityHandler> = Arc::new(StageCapabilities::<
-            _,
-            redis::aio::MultiplexedConnection,
-        >::new(
-            NoopQueue,
-            egress,
-            Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
-            test_gate(),
-        ));
+        let capabilities: Arc<dyn CapabilityHandler> =
+            Arc::new(StageCapabilities::<_, redis::aio::ConnectionManager>::new(
+                NoopQueue,
+                egress,
+                Arc::new(std::sync::Mutex::new(crate::usage::UsageBatcher::new())),
+                test_gate(),
+            ));
 
         let executor = tokio::spawn(async move {
             let mut io = executor_io;
@@ -2092,7 +2127,8 @@ mod tests {
                     &Frame::new(
                         101,
                         Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                            app_id: "waddles.bot.commands.default".to_string(),
+                            app_id: "penguintechinc.waddles.fixture-bot-commands-default"
+                                .to_string(),
                             capability: penguin_bundle_host::wire::CapabilityKind::Context,
                             op: "get".to_string(),
                             args: serde_json::json!({}),
@@ -2154,7 +2190,7 @@ mod tests {
         let (result_a, result_b) = tokio::join!(
             connection.invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:aa".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -2164,7 +2200,7 @@ mod tests {
                 InvokeScope {
                     tenant: "tenant-a".to_string(),
                     community: None,
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: None,
                     origin_platform: None,
                     origin_guild_id: None,
@@ -2179,7 +2215,7 @@ mod tests {
             ),
             connection.invoke(
                 InvokeBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     digest: "sha256:bb".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Dispatch,
                     payload: serde_json::json!({}),
@@ -2189,7 +2225,7 @@ mod tests {
                 InvokeScope {
                     tenant: "tenant-b".to_string(),
                     community: None,
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     origin_channel_id: None,
                     origin_platform: None,
                     origin_guild_id: None,
@@ -2234,7 +2270,7 @@ mod tests {
         let scope = crate::capabilities::InvokeScope {
             tenant: "acme".to_string(),
             community: None,
-            app_id: "waddles.test.app.x".to_string(),
+            app_id: "penguintechinc.waddles.test-app-x".to_string(),
             origin_channel_id: None,
             origin_platform: None,
             origin_guild_id: None,
@@ -2250,7 +2286,7 @@ mod tests {
             std::time::Duration::from_millis(50),
             conn.invoke(
                 InvokeBody {
-                    app_id: "waddles.test.app.x".to_string(),
+                    app_id: "penguintechinc.waddles.test-app-x".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::ToolCall,
                     payload: serde_json::json!({}),
@@ -3016,7 +3052,7 @@ mod tests {
             Frame::new(
                 id,
                 Message::HostCall(penguin_bundle_host::wire::HostCallBody {
-                    app_id: "waddles.bot.commands.default".to_string(),
+                    app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                     capability: penguin_bundle_host::wire::CapabilityKind::Clock,
                     op: "now-millis".to_string(),
                     args: serde_json::json!({}),

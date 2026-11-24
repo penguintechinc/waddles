@@ -1,5 +1,8 @@
 import { useState, useEffect } from 'react';
 import { analyticsApi } from '../../services/api';
+import { AnalyticsPanel } from '../../components/analytics/AnalyticsStates';
+import { allZero } from '../../components/analytics/usePlatformAnalytics';
+import { classifyAnalyticsError } from '../../components/analytics/classifyAnalyticsError';
 import {
   ChatBubbleLeftIcon,
   ClockIcon,
@@ -7,52 +10,51 @@ import {
   StarIcon,
 } from '@heroicons/react/24/outline';
 
+const IDLE = { loading: true, data: null, failure: null };
+
+/**
+ * The caller's own activity + reputation. The two calls load independently so one failing does
+ * not hide the other; an undeployed analytics backend and "no activity yet" are neutral states.
+ */
 function MyAnalytics() {
-  const [stats, setStats] = useState(null);
-  const [reputation, setReputation] = useState(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState(null);
+  const [statsState, setStatsState] = useState(IDLE);
+  const [repState, setRepState] = useState(IDLE);
 
-  useEffect(() => {
-    loadData();
-  }, []);
-
-  const loadData = async () => {
+  const load = async (fetcher, setState) => {
+    setState(IDLE);
     try {
-      setLoading(true);
-      setError(null);
-      const [statsRes, repRes] = await Promise.all([
-        analyticsApi.getMyStats(),
-        analyticsApi.getMyReputation(),
-      ]);
-      setStats(statsRes.data);
-      setReputation(repRes.data);
+      const res = await fetcher();
+      setState({ loading: false, data: res.data ?? null, failure: null });
     } catch (err) {
-      setError(err.response?.data?.error?.message || err.response?.data?.error || 'Failed to load analytics');
-    } finally {
-      setLoading(false);
+      setState({ loading: false, data: null, failure: classifyAnalyticsError(err) });
     }
   };
+  const loadStats = () => load(() => analyticsApi.getMyStats(), setStatsState);
+  const loadRep = () => load(() => analyticsApi.getMyReputation(), setRepState);
 
-  if (loading) {
-    return (
-      <div className="flex items-center justify-center h-64">
-        <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-sky-400"></div>
-      </div>
-    );
-  }
+  useEffect(() => {
+    Promise.allSettled([loadStats(), loadRep()]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
-  if (error) {
-    return (
-      <div className="p-4 bg-red-500/20 border border-red-500/30 rounded-lg text-red-300">
-        {error}
-      </div>
-    );
-  }
+  const stats = statsState.data;
+  const reputation = repState.data;
 
   const globalRep = reputation?.global_reputation ?? reputation?.globalReputation;
   const communityStats = stats?.communities || [];
   const communityRepList = reputation?.communities || [];
+
+  const statsEmpty =
+    !stats ||
+    (allZero([
+      stats.total_messages ?? stats.totalMessages,
+      stats.total_watch_minutes ?? stats.totalWatchMinutes,
+      stats.community_count ?? stats.communityCount,
+    ]) &&
+      communityStats.length === 0);
+  const repEmpty = !reputation || (allZero([globalRep]) && communityRepList.length === 0);
+  // Both calls failing (e.g. backend not deployed) -> one note, not two.
+  const bothFailed = Boolean(statsState.failure && repState.failure);
 
   return (
     <div>
@@ -61,6 +63,31 @@ function MyAnalytics() {
         <p className="text-navy-400 mt-1">Your personal activity and reputation overview</p>
       </div>
 
+      {bothFailed ? (
+        <AnalyticsPanel
+          loading={false}
+          failure={statsState.failure}
+          empty={false}
+          onRetry={() => {
+            loadStats();
+            loadRep();
+          }}
+          testId="widget-my-analytics"
+        >
+          {null}
+        </AnalyticsPanel>
+      ) : (
+      <>
+      <AnalyticsPanel
+        loading={statsState.loading}
+        failure={statsState.failure}
+        empty={statsEmpty}
+        emptyTitle="No activity yet"
+        onRetry={loadStats}
+        testId="widget-my-stats"
+        className="mb-8"
+      >
+      <div>
       {/* Summary Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
         <div className="card p-6 border-l-4 border-l-sky-400">
@@ -151,8 +178,18 @@ function MyAnalytics() {
         </div>
       )}
 
+      </div>
+      </AnalyticsPanel>
+
       {/* Reputation Card */}
-      {reputation && (
+      <AnalyticsPanel
+        title="Reputation"
+        loading={repState.loading}
+        failure={repState.failure}
+        empty={repEmpty}
+        onRetry={loadRep}
+        testId="widget-my-reputation"
+      >
         <div className="card p-6">
           <h2 className="text-lg font-semibold text-sky-100 mb-4">Reputation</h2>
           <div className="flex items-center gap-4 mb-6">
@@ -181,6 +218,8 @@ function MyAnalytics() {
             </>
           )}
         </div>
+      </AnalyticsPanel>
+      </>
       )}
     </div>
   );

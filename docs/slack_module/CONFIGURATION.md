@@ -117,7 +117,7 @@ redis://host1:6379,host2:6379,host3:6379
 
 ### .env File
 
-Place in `trigger/receiver/slack_module/` directory:
+Place in trigger/receiver/slack_module directory:
 
 ```bash
 # .env

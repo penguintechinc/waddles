@@ -35,11 +35,13 @@ user_id_from_JWT)` instead.
 
 from __future__ import annotations
 
+import asyncio
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
@@ -48,8 +50,27 @@ from services.current_user import get_current_user_id
 from services.dto_response import jsonify_dto
 from services.errors import ApiError
 from services.pagination import parse_limit
+from services.public_ids import (
+    PublicIdTarget,
+    build_view_arg_translator,
+    lookup_public_ids,
+)
 
 join_request_bp = Blueprint("v1_join_request", __name__, url_prefix="/api/v1")
+
+# `<puuid:request_id>` -> numeric before the handler, scoped to the URL community.
+join_request_bp.before_request(
+    build_view_arg_translator({"request_id": PublicIdTarget("community_join_requests")})
+)
+
+
+async def _request_uuids(ids: list[int]) -> dict[int, str]:
+    """ONE batched numeric -> public UUID lookup for response DTOs (fails loud on a gap)."""
+    _, dal = _dal()
+    return await asyncio.to_thread(lookup_public_ids, dal, "community_join_requests", ids)
+
+
+logger = logging.getLogger(__name__)
 
 
 def _dal() -> tuple[Any, Any]:
@@ -75,7 +96,7 @@ class SubmitJoinRequestBody:
 class SubmittedJoinRequestDTO:
     """Response sub-DTO -- snake_case, matches Node's raw `RETURNING` shape verbatim."""
 
-    id: int
+    id: str
     status: str
     created_at: str
 
@@ -92,7 +113,7 @@ class SubmitJoinRequestResponse:
 class MyJoinRequestDTO:
     """Response sub-DTO -- snake_case, matches Node's raw SELECT shape verbatim."""
 
-    id: int
+    id: str
     status: str
     message: str | None
     created_at: str
@@ -111,7 +132,7 @@ class MyJoinRequestResponse:
 class JoinRequestListItemDTO:
     """Response sub-DTO -- mixed casing preserved byte-for-byte (see module docstring)."""
 
-    id: int
+    id: str
     status: str
     message: str | None
     created_at: str
@@ -147,7 +168,7 @@ class SimpleSuccessResponse:
     success: bool
 
 
-@join_request_bp.route("/<int:community_id>/join-requests", methods=["POST"])
+@join_request_bp.route("/<cuuid:community_id>/join-requests", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SubmitJoinRequestBody)
 # NOT @validate_response -- submit_request() awaits insert_async()/
@@ -155,27 +176,37 @@ class SimpleSuccessResponse:
 # crash documented in services/dto_response.py. jsonify_dto() is the
 # equivalent-safety workaround.
 async def submit_request(community_id: int, data: SubmitJoinRequestBody) -> tuple[Any, int]:
-    """Submit a join request (self-service, own resource)."""
+    """Submit a join request (self-service; tenant-fenced, rate-limited, one pending per user)."""
     async_dal, dal = _dal()
+    ctx = get_tenant_context(request)
+    assert ctx is not None  # noqa: S101  # nosec B101
     try:
         user_id = get_current_user_id(request)
         submitted = await svc.submit_request(
-            async_dal, dal, community_id=community_id, user_id=user_id, message=data.message
+            async_dal,
+            dal,
+            community_id=community_id,
+            user_id=user_id,
+            tenant_id=ctx.tenant_id,
+            message=data.message,
         )
     except ApiError as exc:
+        logger.warning("join_request.submit_rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
     return jsonify_dto(
         SubmitJoinRequestResponse(
             success=True,
             request=SubmittedJoinRequestDTO(
-                id=submitted.id, status=submitted.status, created_at=submitted.created_at
+                id=(await _request_uuids([submitted.id]))[submitted.id],
+                status=submitted.status,
+                created_at=submitted.created_at,
             ),
         ),
         status=201,
     )
 
 
-@join_request_bp.route("/<int:community_id>/join-requests/mine", methods=["GET"])
+@join_request_bp.route("/<cuuid:community_id>/join-requests/mine", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MyJoinRequestResponse)
 async def get_my_request(community_id: int) -> MyJoinRequestResponse:
@@ -188,7 +219,7 @@ async def get_my_request(community_id: int) -> MyJoinRequestResponse:
     return MyJoinRequestResponse(
         success=True,
         request=MyJoinRequestDTO(
-            id=found.id,
+            id=(await _request_uuids([found.id]))[found.id],
             status=found.status,
             message=found.message,
             created_at=found.created_at,
@@ -197,7 +228,7 @@ async def get_my_request(community_id: int) -> MyJoinRequestResponse:
     )
 
 
-@join_request_bp.route("/admin/<int:community_id>/join-requests", methods=["GET"])
+@join_request_bp.route("/admin/<cuuid:community_id>/join-requests", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ListJoinRequestsResponse)
 async def list_requests(
@@ -228,11 +259,12 @@ async def list_requests(
 
     page = max(1, page)
     limit = min(50, max(1, limit))
+    uuids = await _request_uuids([i.id for i in items])
     return ListJoinRequestsResponse(
         success=True,
         requests=[
             JoinRequestListItemDTO(
-                id=i.id,
+                id=uuids[i.id],
                 status=i.status,
                 message=i.message,
                 created_at=i.created_at,
@@ -253,7 +285,7 @@ async def list_requests(
 
 
 @join_request_bp.route(
-    "/admin/<int:community_id>/join-requests/<int:request_id>/approve", methods=["PUT"]
+    "/admin/<cuuid:community_id>/join-requests/<puuid:request_id>/approve", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)
@@ -277,7 +309,7 @@ async def approve_request(
 
 
 @join_request_bp.route(
-    "/admin/<int:community_id>/join-requests/<int:request_id>/reject", methods=["PUT"]
+    "/admin/<cuuid:community_id>/join-requests/<puuid:request_id>/reject", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(SimpleSuccessResponse)

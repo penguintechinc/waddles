@@ -8,11 +8,9 @@ handler forwards a GET request to the standalone `analytics-core` service
 axios wrapper, then relays (or lightly reshapes -- see
 `services/analytics_service.py::platform_overview`) its JSON response
 back. This module is the 1:1 async port of `admin/hub_module/backend/src/
-services/analyticsService.js`, following the same shape as
-`services/event_calendar_proxy.py`'s `EventCalendarProxyClient` (the
-Event module's own proxy-to-a-standalone-service port).
+services/analyticsService.js`, an opaque
+proxy-to-a-standalone-service client.
 
-Unlike `EventCalendarProxyClient` (one opaque `X-User-Context` JSON blob),
 `analytics-core` expects two flat headers per its own `blueprints/
 user_bp.py` module docstring ("Expects X-Caller-User-ID, X-Caller-Role,
 X-Service-Key headers from hub"), matching `analyticsService.js::
@@ -22,8 +20,7 @@ docstring ("Requires X-Service-Key header ... No PII in responses").
 
 Because there is no owned data model here (the response shape is
 whatever `analytics-core` returns, not a hub-api ORM row),
-`ProxyResult.body` is intentionally `Any` -- same rationale as
-`event_calendar_proxy.py`'s own module docstring: security.md's Output
+`ProxyResult.body` is intentionally `Any` -- security.md's Output
 Validation rule guards against over-serializing an OWNED row, not an
 opaque reverse-proxy body that was never hub-api's row to begin with.
 """
@@ -36,6 +33,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import httpx
+from flask_core.internal_tls import InternalTlsPolicy, PooledClient
 
 logger = logging.getLogger(__name__)
 
@@ -99,6 +97,9 @@ class AnalyticsCoreProxyClient:
     def __init__(self, config: AnalyticsProxyConfig | None = None) -> None:
         """Build the client; `config` defaults to `AnalyticsProxyConfig.from_env()`."""
         self._config = config or AnalyticsProxyConfig.from_env()
+        # One pooled HTTP/2 client per loop (TLS+CA per INTERNAL_* policy) -- never a
+        # per-request client, which would pay a TLS handshake on every call.
+        self._pool = PooledClient(timeout_s=self._config.timeout_seconds)
 
     async def get(
         self,
@@ -127,8 +128,8 @@ class AnalyticsCoreProxyClient:
             headers["X-Caller-User-ID"] = str(caller_user_id)
             headers["X-Caller-Role"] = caller_role or "user"
         try:
-            async with httpx.AsyncClient(timeout=self._config.timeout_seconds) as client:
-                response = await client.get(url, params=query, headers=headers)
+            InternalTlsPolicy.from_env().check_url(url)
+            response = await self._pool.get().get(url, params=query, headers=headers)
         except httpx.HTTPError as exc:
             logger.warning(
                 "analytics_proxy_transport_error path=%s error_type=%s",

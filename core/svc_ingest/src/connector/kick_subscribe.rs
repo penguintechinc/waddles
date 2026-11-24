@@ -571,7 +571,11 @@ impl<C: KickCredentialSource + 'static, H: KickEventsHttp + 'static> BackgroundS
             if entry.task.await.is_err() {
                 tracing::error!("kick subscription task panicked; its subscriptions may remain");
             }
-            let ids = entry.created.lock().map(|c| c.clone()).unwrap_or_default();
+            let ids = entry
+                .created
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .clone();
             let mut delay = FIRST_BACKOFF;
             for attempt in 1..=MAX_ATTEMPTS {
                 match inner.unsubscribe(entry.community_id, &ids).await {

@@ -6,7 +6,7 @@ The Clip Interaction Module manages all Twitch clip interactions within the Wadd
 
 | Property | Value |
 |----------|-------|
-| **Location** | `action/interactive/clip_interaction_module/` |
+| **Location** | action/interactive/clip_interaction_module |
 | **Language** | Python 3.12 |
 | **Framework** | Quart (async ASGI) |
 | **Port** | 8098 |

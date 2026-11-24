@@ -1,15 +1,16 @@
-.PHONY: backfill-bundle-author seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
+.PHONY: webui-api-coverage platform-secrets-rotate backfill-tenant-keys backfill-bundle-author role-sync-remediate seed-demo-prelink reseal-connections test-connection-resolver-live test-svc-ingest-twitch-live codemod-app-bundles-activation-only openapi-hubapi check-openapi-drift dev test test-unit test-integration test-e2e test-functional test-security \
         smoke-test lint build docker-build docker-push deploy-dev deploy-prod \
         seed-mock-data seed-ui-mock-data screenshots cleanpre-commit check-docs \
         verify-csping-fixture test-waddle-sdk-cs test-superpenguin-roll test-csping \
         build-superpenguin-roll-bundle test-superpenguin-roll-e2e test-csharp-bundle-compile \
         verify-core-bundles-reproducible generate-seaweedfs-sse-key alpha-deploy alpha-registry-gc \
         test-bundle-flag-on-command-e2e \
-        check-no-stubs check-bundle-hygiene check-platform-flag-authz generate-bundle-signing-key test-ollama-realpath \
-        test-seaweedfs-sse-kms test-helm-pending-recover publish-connector-bundles test-connector-publish \
+        check-no-stubs check-rustls-provider check-bundle-docker-context check-core-docker-context check-bundle-version-bump check-cert-name-constraints check-helm-hook-timeouts check-pii-egress check-bundle-hygiene check-platform-flag-authz generate-bundle-signing-key test-ollama-realpath \
+        test-seaweedfs-sse-kms test-helm-pending-recover test-smoke-pod-phase publish-connector-bundles test-connector-publish \
         verify-audit-chain verify-audit-export test-supply-chain \
         suppression-stats suppression-purge suppression-lift suppression-check \
-        test-data-plane-parity test-connector-parity gen-connector-parity-expected
+        test-data-plane-parity test-connector-parity gen-connector-parity-expected \
+        check-proto test-hub-api audit-schema-drift test-helm-matrix test-helm-matrix-quick audit-chart-values audit-chart-values-deep
 
 dev:
 	$(error dev: docker-compose is deprecated -- deploy to Kubernetes via scripts/deploy-alpha.sh)
@@ -25,11 +26,25 @@ docker-push:
 lint:
 	@bash scripts/lint.sh
 
+# Secrets T10 gate: no shared JWT secret / HMAC JWT (see scripts/ci/jwt-hs256-allowlist.txt)
+check-no-shared-jwt-secret:
+	@bash scripts/ci/check-no-shared-jwt-secret.sh
+
+# Idempotent: ensure every existing tenant owns an at-rest DEK (needs DATABASE_URL + the KEK env).
+backfill-tenant-keys:
+	@cd hub_api && PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 -m cli.backfill_tenant_keys
+
 backfill-bundle-author:
 	@python3 scripts/backfill_bundle_author.py
 
+# Rotate / retire a platform secret THROUGH the hub-api admin API (system-tenant global admin,
+# recent MFA, Idempotency-Key): `make platform-secrets-rotate ARGS="rotate jwt_signing --reason scheduled"`.
+# Needs WADDLES_API_URL and WADDLES_ADMIN_TOKEN in the environment (never as arguments).
+platform-secrets-rotate:
+	@python3 scripts/ops/platform_secrets_rotate.py $(ARGS)
+
 openapi-hubapi:
-	@python3 scripts/export-hubapi-openapi.py
+	@PYTHONPATH="$(CURDIR)/libs/flask_core:$(CURDIR)/libs:$(CURDIR)/hub_api" python3 scripts/export-hubapi-openapi.py
 	@spectral lint openapi/v1.yaml --fail-severity=error
 
 # Fails when the committed openapi/v1.yaml differs from a fresh regeneration
@@ -41,6 +56,11 @@ check-openapi-drift:
 
 check-docs:
 	@bash scripts/check-doc-refs.sh
+
+# Proto gate: buf lint + buf breaking vs origin/release/v3.0.X (override PROTO_BREAKING_AGAINST) +
+# committed hub-api stubs match the .proto sources. Prints files examined; fails on zero examined.
+check-proto:
+	@bash scripts/ci/check-proto-gate.sh
 
 # M1.5 gate (docs/superpowers/specs/2026-09-14-rust-data-plane-design.md §16):
 # zero flask_core.database/pydal occurrences under the App Bundle directories.
@@ -56,6 +76,30 @@ check-helm-hook-phases:
 check-wait-for-hub-api:
 	@python3 scripts/check_wait_for_hub_api.py
 
+# Helm matrix: every environment x helm v3 + v4 -- lint, template, kubeconform, the CI render
+# scripts, the chart tests. Zero items examined fails. `-quick` skips the chart tests (~5 min per
+# helm major). See k8s/helm/waddlebot/README.md "Helm matrix gate".
+test-helm-matrix:
+	@bash scripts/ci/helm_matrix.sh
+
+test-helm-matrix-quick:
+	@bash scripts/ci/helm_matrix.sh --quick
+
+# Dead values keys / never-included helpers in the waddlebot chart (static: .Values, $var aliases,
+# index, wholesale toYaml/range/include parents, subchart). Prints counts; zero examined fails.
+# Intentional keeps go in scripts/ci/audit-chart-values/allowlist.txt with a '# reason'.
+audit-chart-values:
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/audit-chart-values/test_audit_chart_values.py
+	@python3 scripts/ci/audit-chart-values/audit_chart_values.py k8s/helm/waddlebot \
+		--allowlist scripts/ci/audit-chart-values/allowlist.txt
+
+# Deep chart audit (~3 min, needs helm): every rendered env var of our containers must have a reader
+# in the code dirs (allowlist: scripts/ci/audit-chart-values/env-allowlist.txt), and a
+# delete-and-render pass over every values key must agree with the static audit. HELM=<binary>.
+audit-chart-values-deep: audit-chart-values
+	@HELM="$${HELM:-helm}" python3 -m pytest -q -p no:cacheprovider scripts/ci/audit-chart-values/test_audit_chart_deep.py
+	@python3 scripts/ci/audit-chart-values/audit_chart_deep.py k8s/helm/waddlebot --helm "$${HELM:-helm}"
+
 # USER DECISION (2026-10-01, fix/chart-fresh-install-hooks): db-migrate now runs
 # post-install -- helm upgrade --install in alpha-deploy.sh must never pass
 # --wait/--atomic, or a fresh install deadlocks (Deployments wait on hub-api,
@@ -64,10 +108,25 @@ check-wait-for-hub-api:
 check-alpha-deploy-no-wait:
 	@python3 scripts/check_alpha_deploy_no_wait.py
 
+# Live functional smoke of the deployed alpha (KUBE_CONTEXT=dal2alpha); see scripts/smoke/README.md.
+.PHONY: alpha-smoke test-alpha-smoke
+alpha-smoke:
+	@bash scripts/smoke/alpha-smoke.sh
+
+test-alpha-smoke:
+	@python3 -m pytest -q scripts/smoke/test_alpha_smoke.py
+
 # alpha-deploy.sh self-heals a release stuck in pending-* (interrupted upgrade);
 # stub-driven test of that recovery logic, no cluster touched.
 test-helm-pending-recover:
 	@bash scripts/test-helm-pending-recover.sh
+
+# Deploy smoke-step regression: the generic pod-phase scan must exclude precompile batch
+# pods by NAME (a pre-label CronJob pod does not carry waddlebot.io/workload, and k8s `!=`
+# selects label-less pods), and a Failed precompile batch Job must still trip the gate.
+test-smoke-pod-phase:
+	@bash scripts/ci/smoke/tests/test-pod-phase-check.sh
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/smoke/tests/test_pod_phase_classify.py scripts/ci/smoke/tests/test_precompile_batch_gate.py
 
 # No-stubs / no-silent-fallbacks gate (gh-regression: a `flags capability not
 # wired -- TODO(M4+)` stub returned a silent default and shipped as "done",
@@ -77,6 +136,59 @@ test-helm-pending-recover:
 # `semgrep` on PATH (pinned in CI; see scripts/ci/semgrep-silent-fallback.yml).
 check-no-stubs:
 	@bash scripts/ci/check-no-stubs.sh
+
+# Every core/ bin crate that uses rustls must install a process-level CryptoProvider.
+check-rustls-provider:
+	@bash scripts/ci/check-rustls-provider.sh
+
+# Every bundle-<crate> stage in bundles/Dockerfile.core-bundles must COPY each out-of-crate file the
+# release build reads (#[path], include_*!, Cargo path deps). Prints crates/refs examined.
+check-bundle-docker-context:
+	@python3 scripts/ci/check-bundle-docker-context.py
+
+# Every core Rust service Dockerfile (images in scripts/ci/image-inputs.yaml, built with their real
+# context + --build-context) must COPY each Cargo path dep / #[path] / include_*! target to the
+# container path the crate resolves it at. Negative test first: the pre-fix svc-streaming
+# Dockerfile (platform_keys COPYed before WORKDIR, deploy runs 43859970070/43858247593) MUST fail.
+# Prints images/crates/refs examined; zero examined fails.
+check-core-docker-context:
+	@out=$$(python3 scripts/ci/check-core-docker-context.py \
+		--dockerfile-override svc-streaming=scripts/ci/tests/fixtures/core-docker-context/svc_streaming-pre-fix.dockerfile.txt 2>&1); \
+	rc=$$?; if [ "$$rc" -ne 1 ] || ! printf '%s\n' "$$out" | grep -q 'COPYed to /platform_keys, crate expects /build/platform_keys'; then \
+		printf '%s\n' "$$out" >&2; echo "FAIL: negative test (pre-fix svc-streaming) was not rejected for platform_keys (rc=$$rc)" >&2; exit 1; fi; \
+	echo "negative test: pre-fix svc-streaming Dockerfile rejected (rc=1, platform_keys misplaced) -- expected"
+	@python3 scripts/ci/check-core-docker-context.py
+
+# #1382: every rendered cert-manager leaf Certificate's SAN must fall inside its CA's X.509
+# nameConstraint subtrees, for EVERY environment. Cryptographic (mint CA+leaf, `openssl verify`),
+# not a string compare. Fails loud if helm/openssl is missing (a skip examines zero leaves).
+check-cert-name-constraints:
+	@bash scripts/ci/check-cert-name-constraints.sh
+
+# #1391: every helm hook Job must carry a bounded activeDeadlineSeconds below the deploy's helm
+# --timeout, and long/serial work (precompile) must NOT be a blocking hook -- else it can hang
+# `helm --wait` past the timeout and time the release out. Renders each env and pipes to the
+# checker. HOOK_DEPLOY_TIMEOUT defaults to the alpha/dal2alpha deploy timeout (60m = 3600s).
+check-helm-hook-timeouts:
+	@bash -euo pipefail -c 'for v in values-alpha.yaml values-beta.yaml; do \
+		echo "== $$v =="; \
+		helm template waddlebot k8s/helm/waddlebot --kube-version 1.30.0 \
+			--values k8s/helm/waddlebot/$$v --set global.deploymentTier=alpha \
+		| python3 scripts/ci/check-helm-hook-job-timeouts.py --deploy-timeout $(or $(HOOK_DEPLOY_TIMEOUT),3600); \
+	done'
+
+# A catalog bundle whose build inputs changed vs BASE (own source; wit/+waddle-sdk for Python;
+# Cargo path deps, #[path] and include_*! targets for Rust) must bump its version, or the
+# seeder 409s digest_conflict. CI runs it in bundle-hygiene.yml. Zero bundles examined fails.
+check-bundle-version-bump:
+	@python3 scripts/ci/check-bundle-version-bump.py "$(or $(BASE),origin/release/v3.0.X)"
+
+# PII boundary: only svc-ingest's outbound drain/sender_exec and svc-presentation may reference the
+# egress detokenizer. Prints files examined; fails on a violation or zero files examined. Its
+# negative test (fixture tree with a violation must fail) runs first.
+check-pii-egress:
+	@bash scripts/ci/tests/test_check_pii_egress_boundary.sh
+	@bash scripts/ci/check-pii-egress-boundary.sh
 
 # Bundle hygiene gates (.github/workflows/bundle-hygiene.yml): raw user input in
 # bundle log calls, legacy bare-string `permissions:` in hub-manifest.yaml, broad
@@ -108,6 +220,13 @@ check-bundle-hygiene:
 	@python3 -m pytest scripts/ci/tests/test_bundle_rng_gate.py -q -p no:cacheprovider
 	@python3 -m pytest scripts/ci/tests/test_bundle_command_collisions.py -q -p no:cacheprovider
 
+# webui <-> hub-api REST coverage report (A uncovered, B webui->nonexistent,
+# C spec<->code drift, B-proxy calls proxy->svc-streaming). Report-only;
+# STRICT=1 exits non-zero on any gap. OUT=path writes markdown.
+webui-api-coverage:
+	@python3 -m pytest scripts/ci/tests/test_webui_api_coverage.py -q -p no:cacheprovider
+	@python3 scripts/ci/webui_api_coverage.py $(if $(OUT),--out $(OUT)) $(if $(STRICT),--strict)
+
 # Data-plane golden-vector parity harness (gh #840 PR4): Rust normalize.rs oracle vs committed
 # goldens (svc_ingest), every corpus event through svc_process's closed-schema pii_tokenize
 # classifier, then the connector-overlay expected/ freshness check. Real paths, no mocked
@@ -134,16 +253,70 @@ test:
 test-scripts:
 	@bash scripts/tests/test_release_merge.sh
 	@bash scripts/tests/test_release_auto_merge.sh
+	@bash scripts/tests/test_prune_agent_worktrees.sh
+	@python3 -m pytest -q -p no:cacheprovider scripts/ops
+	@python3 -m pytest -q -p no:cacheprovider scripts/rename/tests
+	@python3 -m pytest -q -p no:cacheprovider scripts/ci/tests/test_check_app_ids.py
+	@$(MAKE) check-app-ids
+	@$(MAKE) test-demo
 
-# Verify + merge a PR into release/*: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]
+# tests/demo (seed_demo_prelink against a real Postgres via docker) was never wired into CI, so a
+# stale test sat red on release unnoticed. Every test skips when docker is missing, so a run with
+# zero passed tests is a FAILURE, never a silent skip.
+.PHONY: test-demo
+test-demo:
+	@out=$$(python3 -m pytest -q -p no:cacheprovider tests/demo 2>&1) || { echo "$$out"; exit 1; }; \
+	echo "$$out" | tail -3; echo "$$out" | grep -Eq '[0-9]+ passed' || { echo "ERROR: tests/demo ran zero passing tests (docker unavailable?)" >&2; exit 1; }
+
+# Structural app_id guard: every bundle app_id (catalog SQL/alembic seeds, manifests, core-bundles.yaml,
+# Rust *_APP_ID consts, tool.call grants) must be <org>.<repo>.<name>; zero ids examined = FAIL.
+.PHONY: webui-boot-check
+webui-boot-check: ## Build hub-webui image and boot it (fails if the Node server does not start)
+	@docker build -q -f admin/hub_module/Dockerfile.webui -t hub-webui:boot-check .
+	@scripts/ci/container-smoke.sh hub-webui hub-webui:boot-check 8080
+
+.PHONY: check-app-ids
+check-app-ids:
+	@python3 -I scripts/ci/check_app_ids.py
+
+# Read-only command-latency SLA report (p99 < 1 s, first door -> outbound confirmed): p50/p95/p99
+# per command and per hop from the data-plane histograms. Zero samples = FAIL.
+#   make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics http://127.0.0.1:19091/metrics"
+#   make command-latency-report METRICS_FILES="/tmp/action-metrics.txt"
+# (port-forward the svc-action/svc-process :9090 first; this target only performs HTTP GETs)
+.PHONY: command-latency-report
+command-latency-report:
+	@test -n "$(strip $(METRICS_URLS)$(METRICS_FILES))" || { echo 'usage: make command-latency-report METRICS_URLS="http://127.0.0.1:19090/metrics ..." [METRICS_FILES="a.txt ..."]' >&2; exit 2; }
+	@python3 -I scripts/ops/command_latency_report.py $(foreach u,$(METRICS_URLS),--url $(u)) $(foreach f,$(METRICS_FILES),--file $(f))
+
+# Alpha-only, idempotent: create/find the latency-canary community bound to the testing guild via the
+# hub-api control plane, activate the Rust !ping bundle, ensure no reputation/economy bundle is active,
+# print the community id for helm `latencyCanary.communityId`. Token only from $WADDLES_ADMIN_TOKEN.
+#   make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]
+.PHONY: seed-latency-canary
+seed-latency-canary:
+	@test -n "$(HUB_API_URL)" -a -n "$(CANARY_GUILD_ID)" || { echo 'usage: make seed-latency-canary HUB_API_URL=http://127.0.0.1:18080 CANARY_GUILD_ID=<snowflake> [DRY=1]' >&2; exit 2; }
+	@python3 -I scripts/ops/seed_latency_canary.py --hub-api-url "$(HUB_API_URL)" --guild-id "$(CANARY_GUILD_ID)" --confirm-alpha $(if $(DRY),--dry-run,)
+
+# Wait for all checks, then merge a PR into release/* (non-admin, head-pinned):
+#   make release-merge PR=<n> SHA=<full-40-hex-head> [MAX=<minutes>] [DRY=1]
 release-merge:
-	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> [HEAD=<sha>] [DRY=1]" >&2; exit 2; }
-	@bash scripts/release-merge.sh "$(PR)" $(if $(HEAD),--expect-head "$(HEAD)") $(if $(DRY),--dry-run)
+	@test -n "$(PR)" || { echo "usage: make release-merge PR=<n> SHA=<full-head-sha> [MAX=<minutes>] [DRY=1]" >&2; exit 2; }
+	@bash scripts/release-merge.sh "$(PR)" $(SHA) $(MAX) $(if $(DRY),--dry-run)
 
 # Watch ordered PRs and merge each when green: make release-auto-merge PRS="1038 1037" [DRY=1]
 release-auto-merge:
 	@test -n "$(PRS)" || { echo 'usage: make release-auto-merge PRS="<n> <n> ..." [DRY=1]' >&2; exit 2; }
 	@bash scripts/release-auto-merge.sh $(if $(DRY),--dry-run) $(PRS)
+
+# hub_api pytest in a hash-pinned venv (built/refreshed automatically):
+#   make test-hub-api PYTEST_ARGS="tests/test_config.py -x"
+test-hub-api:
+	@bash scripts/test-hub-api.sh $(PYTEST_ARGS)
+
+# Code-vs-DB drift audit: every pydal column under hub_api/ vs a fresh-replayed throwaway Postgres.
+audit-schema-drift:
+	@python3 scripts/audit_schema_drift.py
 
 test-unit:
 	@echo "Running unit tests..."
@@ -161,6 +334,10 @@ test-integration:
 	@echo "Running integration tests..."
 	@test -d tests/integration || { echo "tests/integration directory not found" >&2; exit 1; }
 	@bash scripts/test-api-all.sh
+
+.PHONY: webui-sweep
+webui-sweep: ## Sweep every hub webui route for console/network errors (env: BASE_URL, HOST_HEADER, WEBUI_ADMIN_EMAIL, WEBUI_ADMIN_PASSWORD)
+	@cd tests/e2e && { test -d node_modules || npm ci --no-audit --no-fund; } && node webui-sweep/sweep.js
 
 test-e2e:
 	@echo "Running e2e tests..."
@@ -194,6 +371,17 @@ test-gate-integrity:
 test-supply-chain:
 	@bash scripts/ci/test-supply-chain.sh
 	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_supply_chain_verify_images_render.py
+
+# Per-service Valkey ACL least-privilege gate (docs/valkey-acl.md): the rendered ACL for the
+# alpha and beta topologies, then the render/check/real-path tests (real Valkey via docker; a
+# missing docker or helm fails loudly, never skips).
+.PHONY: check-valkey-acl
+check-valkey-acl:
+	@bash -c 'set -euo pipefail; for v in alpha beta; do \
+	  helm template waddlebot k8s/helm/waddlebot --values k8s/helm/waddlebot/values-$$v.yaml \
+	    --kube-version 1.30.0 --set global.deploymentTier=alpha \
+	  | python3 scripts/ci/check-valkey-acl-least-privilege.py --require-executor --require-clients; done'
+	@python3 -m pytest -q k8s/helm/waddlebot/tests/test_valkey_acl_render.py k8s/helm/waddlebot/tests/test_valkey_acl_service_paths.py
 
 smoke-test:
 	@echo "Running smoke tests..."
@@ -302,6 +490,12 @@ test-csharp-bundle-compile:
 # env, run from hub_api so `cli.*` resolves). Exits 1 on tampering, 2 if zero records were
 # examined (a check over nothing is not a pass; add ALLOW_EMPTY=1 for deployments with no
 # Enterprise tenant), 3 if it could not run. Pin heads with EXPECT="tenant:1=42:<hash>".
+# role-sync privilege hardening (migration 0104): members promoted by a purged privileged inbound
+# binding. Default queues them for admin review (role_sync_remediation_queue); APPLY=1 demotes
+# them to BASELINE (default member). Needs DATABASE_URL; run from a hub-api pod/shell.
+role-sync-remediate:
+	@cd hub_api && python3 -m cli.role_sync_remediate $(if $(APPLY),--apply) $(if $(BASELINE),--baseline-role $(BASELINE))
+
 verify-audit-chain:
 # NOTE: Rust port complete in core/waddles_ops_cli (`waddles-ops verify-audit-chain`); Python kept until the port is CI-validated. Do not rewire until then.
 	@cd hub_api && python3 -m cli.verify_audit_chain $(if $(ALLOW_EMPTY),--allow-empty) \
@@ -349,7 +543,7 @@ verify-audit-export:
 		$(if $(HEAD_SEQ),--expect-head-seq $(HEAD_SEQ)) $(if $(HEAD_HASH),--expect-head-hash $(HEAD_HASH))
 
 # Proves bundles/Dockerfile.core-bundles's two example-bundle artifacts (ping.wasm from the
-# rust-bundle-builder stage, pyping.wasm from the python-bundle-builder stage) are both
+# bundle-ping stage, pyping.wasm from the python-bundle-builder stage) are both
 # byte-reproducible -- two independent --no-cache builds of the full image must produce
 # identical sha256 for each. See scripts/verify-core-bundles-reproducible.sh for why.
 verify-core-bundles-reproducible:
@@ -416,6 +610,43 @@ test-seaweedfs-sse-kms:
 alpha-deploy:
 	@bash scripts/alpha-deploy.sh $(ARGS)
 
+# --- Changed-only alpha image builds (deploy-dal2alpha) ---------------------------------------
+# scripts/ci/image-inputs.yaml is the reviewable input map; changed_images.py maps a diff to the
+# images that need a rebuild. Usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]
+.PHONY: changed-images changed-images-audit test-ci-image-plan check-alpha-image-pins check-dockerfile-cache-mounts check-dockerfile-pip-hashes test-alpha-registry-e2e prune-alpha-images
+changed-images:
+	@test -n "$(BASE)" || { echo "usage: make changed-images BASE=<sha> [HEAD=HEAD] [FORCE_ALL=true]" >&2; exit 2; }
+	@python3 scripts/ci/changed_images.py --base "$(BASE)" --head "$(or $(HEAD),HEAD)" --format names $(if $(filter true,$(FORCE_ALL)),--force-all)
+
+# Fails if any tracked file is neither an image input nor an explicit ignore (map rot guard).
+changed-images-audit:
+	@python3 scripts/ci/changed_images.py --audit
+
+# Cache-mounted installs must be hash/lock verified (build-cache poisoning guard).
+check-dockerfile-cache-mounts:
+	@python3 scripts/ci/check-dockerfile-cache-mounts.py
+
+# Every Dockerfile pip install must be --require-hashes (or --no-deps/--no-build-isolation on a local path after one).
+check-dockerfile-pip-hashes:
+	@python3 scripts/ci/check-dockerfile-pip-hashes.py
+
+test-ci-image-plan:
+	@python3 -m pytest scripts/ci/tests/test_cache_trust_boundary.py scripts/ci/tests/test_check_dockerfile_pip_hashes.py scripts/ci/tests/test_changed_images.py scripts/ci/tests/test_image_inputs.py scripts/ci/tests/test_alpha_plan.py scripts/ci/tests/test_prune_alpha_images.py -q -p no:cacheprovider
+
+# Helm render proof: pinned images keep their pod template (no restart). Needs helm v3 on PATH.
+check-alpha-image-pins:
+	@python3 scripts/ci/check-alpha-image-pins.py
+
+# Real throwaway registry: plan + digest-verified retag. Needs docker+buildx. [BASE=<sha>]
+test-alpha-registry-e2e:
+	@bash scripts/ci/tests/alpha_registry_e2e.sh $(BASE)
+
+# ghcr alpha tag / stale buildcache pruning. DRY RUN unless ARGS contains --apply (which also
+# needs --deployed <plan.json|values.json>). Never scheduled; enabling a schedule needs owner approval.
+# Usage: GH_TOKEN=... make prune-alpha-images [ARGS="--keep 10 --deployed plan.json"]
+prune-alpha-images:
+	@python3 scripts/ci/prune_alpha_images.py $(ARGS)
+
 # resolve-433 -- alpha-deploy.sh's registry-backed build cache
 # (localhost:32000/waddlebot/buildcache/*) shares disk with the MicroK8s
 # registry's PVC, which was evicted once under DiskPressure. This runs the
@@ -474,3 +705,27 @@ test-superpenguin-wave4-contracts:
 	python3 -m pytest scripts/ci/tests/test_superpenguin_wave4_contracts.py -q
 scaffold-superpenguin-bundle:
 	bash scripts/scaffold-superpenguin-bundle.sh $(NAME)
+
+# Stale agent worktree pruning. DRY RUN unless ARGS=--apply.
+# Usage: make prune-worktrees [ARGS="--apply --skip-branch X --skip-path GLOB --no-pr-check"]
+# Env PRUNE_SKIP_BRANCHES / PRUNE_SKIP_PATHS (space-separated) also honored. Branches with an
+# OPEN PR are skipped automatically (needs gh; --no-pr-check to bypass).
+.PHONY: prune-worktrees
+prune-worktrees:
+	@bash scripts/ops/prune-agent-worktrees.sh $(ARGS)
+
+# ---- Post-cutover verification sweeps (alpha; read-only by default) ----------
+# api-sweep:    every hub-api OpenAPI route as admin; no mutations unless ARGS=--allow-mutations
+# bundle-sweep: every catalog bundle -> resolved/loaded/invoked/described + app_id pattern
+# old-id-scan:  leftover old app_id prefixes in DB/Valkey/S3/ConfigMaps/pod env (exit 1 if any)
+# Access defaults to kubectl port-forward (dal2alpha/waddlebot); override BASE_URL/HOST_HEADER.
+# Pre-cutover baselines: add ARGS=--allow-old-ids.  Docs: tests/e2e/api-sweep/README.md
+.PHONY: api-sweep bundle-sweep old-id-scan
+api-sweep:
+	@bash tests/e2e/api-sweep/run.sh $(ARGS)
+
+bundle-sweep:
+	@bash tests/e2e/bundle-sweep/run.sh $(ARGS)
+
+old-id-scan:
+	@bash tests/e2e/old-id-scan.sh

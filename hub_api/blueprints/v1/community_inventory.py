@@ -13,7 +13,9 @@ auto-discovery -- no edit to `routers/v1.py` needed.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import asdict
+from typing import Any
 
 from flask_core.api_utils import auth_required
 from flask_core.authz import require_scope
@@ -21,7 +23,12 @@ from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
-from services.community_common import api_error, community_in_tenant, get_current_user
+from services.community_common import (
+    api_error,
+    community_in_tenant,
+    feature_not_enabled,
+    get_current_user,
+)
 from services.community_inventory import (
     add_stock,
     checkin_item,
@@ -37,9 +44,26 @@ from services.community_inventory import (
     remove_stock,
     update_item,
 )
+from services.community_inventory_authz import require_inventory_admin, require_inventory_member
+from services.current_user import get_current_user_id
+from services.errors import ApiError
 from services.pagination import parse_limit
+from services.public_ids import (
+    PublicIdTarget,
+    Scope,
+    build_view_arg_translator,
+    resolve_public_id_sync,
+)
+from services.route_guards import GUARD_ADMIN, mark_guarded
+
+logger = logging.getLogger(__name__)
 
 inventory_bp = Blueprint("v1_community_inventory", __name__, url_prefix="/api/v1/admin")
+
+#: `<puuid:item_id>` -> numeric id inside the URL community (unknown/foreign/malformed -> 404).
+inventory_bp.before_request(
+    build_view_arg_translator({"item_id": PublicIdTarget("inventory_items")})
+)
 
 #: Two-gate Feature flag -- `libs/community_module/features.py`'s
 #: `community.inventory` Feature contract, Professional tier.
@@ -52,31 +76,80 @@ def _tenant_ok(community_id: int) -> bool:
     return community_in_tenant(current_app.config["dal"], community_id, ctx)
 
 
-# ── Admin routes ──────────────────────────────────────────────────────────
-
-
-@inventory_bp.route("/<int:community_id>/inventory/items", methods=["GET"])
-@tenant_middleware  # type: ignore[misc]
-@require_scope("community.inventory:read")  # type: ignore[misc]
-async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
-    """`GET /api/v1/admin/<id>/inventory/items`."""
+async def _precheck(community_id: int) -> tuple[Any, tuple[dict[str, object], int] | None]:
+    """Feature flag (402) -> tenant<->community (404). Returns `(ctx, denial_or_None)`."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_INVENTORY, tenant=ctx.tenant_slug):
-        return api_error("Community inventory requires a Professional plan or higher", 402)
+        return ctx, feature_not_enabled(
+            "Community inventory requires a Professional plan or higher"
+        )
     if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+        return ctx, api_error("Community not found", status_code=404)
+    return ctx, None
+
+
+async def _guard_admin(community_id: int) -> tuple[dict[str, object], int] | None:
+    """Precheck, then 403 unless the caller administers THIS community (never via `*:read`)."""
+    ctx, denied = await _precheck(community_id)
+    if denied:
+        return denied
+    dal = current_app.config["dal"]
+    try:
+        require_inventory_admin(
+            dal, ctx, community_id=community_id, user_id=get_current_user_id(request)
+        )
+    except ApiError as exc:
+        logger.debug("inventory guard denied community=%s status=%s", community_id, exc.status_code)
+        return api_error(exc.message, exc.status_code)
+    return None
+
+
+async def _guard_member(community_id: int) -> tuple[dict[str, object], int] | None:
+    """Precheck, then 403 unless the caller is an active, unbanned member of THIS community."""
+    ctx, denied = await _precheck(community_id)
+    if denied:
+        return denied
+    dal = current_app.config["dal"]
+    try:
+        require_inventory_member(
+            dal, ctx, community_id=community_id, user_id=get_current_user_id(request)
+        )
+    except ApiError as exc:
+        logger.debug("inventory guard denied community=%s status=%s", community_id, exc.status_code)
+        return api_error(exc.message, exc.status_code)
+    return None
+
+
+async def _guard(community_id: int, *, admin: bool) -> tuple[dict[str, object], int] | None:
+    """Admin or member guard by flag; stamped admin routes call `_guard_admin` directly."""
+    return await (_guard_admin(community_id) if admin else _guard_member(community_id))
+
+
+# ── Admin routes ──────────────────────────────────────────────────────────
+
+
+@inventory_bp.route("/<cuuid:community_id>/inventory/items", methods=["GET"])
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
+async def list_items_route(community_id: int) -> tuple[dict[str, object], int]:
+    """`GET /api/v1/admin/<id>/inventory/items`."""
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     items = list_items(current_app.config["dal"], community_id)
     return {"items": [asdict(i) for i in items]}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items", methods=["POST"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     dto, err = create_item(current_app.config["dal"], community_id, payload)
     if err:
@@ -85,13 +158,14 @@ async def create_item_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"item": asdict(dto)}, 201
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>", methods=["PUT"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items/<puuid:item_id>", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/inventory/items/<itemId>`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     dto = update_item(current_app.config["dal"], community_id, item_id, payload)
     if dto is None:
@@ -99,26 +173,30 @@ async def update_item_route(community_id: int, item_id: int) -> tuple[dict[str, 
     return {"item": asdict(dto)}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>", methods=["DELETE"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/items/<puuid:item_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 async def delete_item_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`DELETE /api/v1/admin/<id>/inventory/items/<itemId>`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     if not delete_item(current_app.config["dal"], community_id, item_id):
         return {"error": "Item not found"}, 404
     return {"message": "Item deleted"}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/items/<int:item_id>/stock/add", methods=["POST"])
+@inventory_bp.route(
+    "/<cuuid:community_id>/inventory/items/<puuid:item_id>/stock/add", methods=["POST"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/add`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     try:
         quantity = int(payload.get("quantity"))  # type: ignore[arg-type]  # TypeError caught below
@@ -142,15 +220,16 @@ async def add_stock_route(community_id: int, item_id: int) -> tuple[dict[str, ob
 
 
 @inventory_bp.route(
-    "/<int:community_id>/inventory/items/<int:item_id>/stock/remove", methods=["POST"]
+    "/<cuuid:community_id>/inventory/items/<puuid:item_id>/stock/remove", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/items/<itemId>/stock/remove`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     try:
         quantity = int(payload.get("quantity"))  # type: ignore[arg-type]  # TypeError caught below
@@ -173,37 +252,53 @@ async def remove_stock_route(community_id: int, item_id: int) -> tuple[dict[str,
     return {"item": asdict(dto)}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/checkouts", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/checkouts", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def list_checkouts_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/checkouts`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     checkouts = list_all_checkouts(
         current_app.config["dal"], community_id, request.args.get("status")
     )
     return {"checkouts": [asdict(c) for c in checkouts]}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/summary", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/summary", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def summary_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/summary`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
     return {"summary": asdict(get_summary(current_app.config["dal"], community_id))}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/log", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/log", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.inventory:read")  # type: ignore[misc]
+@mark_guarded(GUARD_ADMIN)  # type: ignore[misc]
 async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/log`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
-    item_id = request.args.get("item_id", type=int)
+    denied = await _guard_admin(community_id)
+    if denied:
+        return denied
+    item_id: int | None = None
+    raw_item = request.args.get("item_id")
+    if raw_item:
+        item_id = resolve_public_id_sync(
+            current_app.config["dal"],
+            "inventory_items",
+            raw_item,
+            scope=Scope(community_id=community_id),
+        )
+        if item_id is None:
+            return {"error": "Item not found"}, 404
     limit = parse_limit(request.args.get("limit"), default=50)
     offset = request.args.get("offset", default=0, type=int)
     log = get_audit_log(
@@ -220,28 +315,28 @@ async def audit_log_route(community_id: int) -> tuple[dict[str, object], int]:
 # ── Member routes ─────────────────────────────────────────────────────────
 
 
-@inventory_bp.route("/<int:community_id>/inventory/available", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/available", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.inventory:use")  # type: ignore[misc]
 async def available_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/available`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=False)
+    if denied:
+        return denied
     items = list_available(current_app.config["dal"], community_id, request.args.get("search"))
     return {"items": [asdict(i) for i in items]}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/checkout", methods=["POST"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/checkout", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.inventory:use")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/checkout`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=False)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
-    item_id = payload.get("item_id")
-    if not item_id:
+    raw_item_id = payload.get("item_id")
+    if not raw_item_id:
         return {"error": "item_id is required"}, 400
     try:
         quantity = int(payload.get("quantity"))  # type: ignore[arg-type]  # TypeError caught below
@@ -249,12 +344,20 @@ async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
         return {"error": "Quantity must be a positive number"}, 400
     if quantity <= 0:
         return {"error": "Quantity must be a positive number"}, 400
+    item_id = resolve_public_id_sync(
+        current_app.config["dal"],
+        "inventory_items",
+        raw_item_id,
+        scope=Scope(community_id=community_id),
+    )
+    if item_id is None:
+        return {"error": "Item not found"}, 404
 
     dto, err = checkout_item(
         current_app.config["dal"],
         community_id,
         int(get_current_user(request)["user_id"]),
-        int(item_id),
+        item_id,
         quantity,
         payload.get("due_date"),
         payload.get("notes"),
@@ -268,42 +371,50 @@ async def checkout_route(community_id: int) -> tuple[dict[str, object], int]:
     return {"checkout": asdict(dto)}, 201
 
 
-@inventory_bp.route("/<int:community_id>/inventory/checkin", methods=["POST"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/checkin", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.inventory:use")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def checkin_route(community_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/inventory/checkin`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=False)
+    if denied:
+        return denied
     payload = await request.get_json(force=True, silent=True) or {}
     checkout_id = payload.get("checkout_id")
     if not checkout_id:
         return {"error": "checkout_id is required"}, 400
-    quantity_returned = payload.get("quantity_returned")
+    raw_qty = payload.get("quantity_returned")
+    quantity_returned: int | None = None
+    if raw_qty is not None:
+        try:
+            quantity_returned = int(raw_qty)
+        except (TypeError, ValueError):
+            return {"error": "quantity_returned must be a positive number"}, 400
+        if isinstance(raw_qty, bool) or quantity_returned <= 0:
+            return {"error": "quantity_returned must be a positive number"}, 400
 
     dto, err = checkin_item(
         current_app.config["dal"],
         community_id,
         int(get_current_user(request)["user_id"]),
         int(checkout_id),
-        int(quantity_returned) if quantity_returned else None,
+        quantity_returned,
         payload.get("notes"),
     )
     if err:
-        return {"error": err}, 404
+        return {"error": err}, 404 if "not found" in err.lower() else 400
     assert dto is not None  # nosec B101 -- checkin_item: dto is None only when err is set
     return {"checkout": asdict(dto)}, 200
 
 
-@inventory_bp.route("/<int:community_id>/inventory/my-items", methods=["GET"])
+@inventory_bp.route("/<cuuid:community_id>/inventory/my-items", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
-@require_scope("community.inventory:use")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
 async def my_items_route(community_id: int) -> tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/inventory/my-items`."""
-    if not _tenant_ok(community_id):
-        return api_error("Community not found", status_code=404)
+    denied = await _guard(community_id, admin=False)
+    if denied:
+        return denied
     checkouts = get_my_checkouts(
         current_app.config["dal"], community_id, int(get_current_user(request)["user_id"])
     )

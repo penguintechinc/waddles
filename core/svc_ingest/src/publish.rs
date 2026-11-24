@@ -79,7 +79,8 @@ pub fn deterministic_workstream_id(source_id: &str) -> String {
 /// Sanitizes one `app_id` path segment (PA-ENVELOPE): lowercase, every
 /// character outside `[a-z0-9_-]` becomes `-`, and any leading run of
 /// characters outside `[a-z0-9]` is stripped, so the segment can never
-/// violate `penguin_spine`'s `^waddles\.<seg>\.<seg>\.<seg>$` app_id regex.
+/// violate `penguin_spine`'s `^[a-z0-9-]+\.[a-z0-9-]+\.[a-z0-9-]+$` app_id regex (the
+/// caller additionally maps `_` to `-`, which that regex does not allow).
 #[must_use]
 pub fn app_id_slug(raw: &str) -> String {
     let mut out: String = raw
@@ -100,6 +101,18 @@ pub fn app_id_slug(raw: &str) -> String {
         out.push('x');
     }
     out
+}
+
+/// Builds the `app_id` stamped on an ingest-published envelope:
+/// `penguintechinc.waddles.ingest-<platform>-<source>`, the `<org>.<repo>.<name>` shape
+/// `penguin_spine` requires (name segment limited to `[a-z0-9-]`, so `_` maps to `-`).
+#[must_use]
+pub fn ingest_app_id(platform: &str, source_id: &str) -> String {
+    format!(
+        "penguintechinc.waddles.ingest-{}-{}",
+        app_id_slug(platform).replace('_', "-"),
+        app_id_slug(source_id).replace('_', "-")
+    )
 }
 
 /// Errors [`publish_event`] can return: either the binding-MAC computation
@@ -209,6 +222,22 @@ fn mint_trace() -> Trace {
     Trace {
         traceparent: format!("00-{trace_id}-{span_id}-01"),
         tracestate: None,
+    }
+}
+
+/// The envelope trace: minted FROM the live `ingest.publish` span's OTel ids when a tracer backs
+/// it (so every downstream stage span joins one distributed trace rooted here, and the sampler's
+/// decision travels in the flags), else a fresh locally minted W3C trace as before.
+fn mint_trace_for(span: &tracing::Span) -> Trace {
+    if command_latency::switch::is_disabled() {
+        return mint_trace();
+    }
+    match command_latency::span::span_ids(span) {
+        Some((trace_id, span_id, sampled)) => Trace {
+            traceparent: command_latency::span::format_traceparent(&trace_id, &span_id, sampled),
+            tracestate: None,
+        },
+        None => mint_trace(),
     }
 }
 
@@ -451,9 +480,6 @@ pub async fn publish_event_scoped<A: EventAppender, M: SpineMetrics + ?Sized, D:
     .await
 }
 
-/// The shared stamping/encryption/append body. `resolved: Some` publishes a
-/// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
-#[allow(clippy::too_many_arguments)]
 /// `true` for event types reserved to the platform's own internal emitters
 /// (`reputation.*`, `internal.*`): ingest, which only carries external /
 /// connector input, must never publish one -- a system-originated event type
@@ -463,7 +489,64 @@ pub fn is_reserved_event_type(event_type: &str) -> bool {
     event_type.starts_with("reputation.") || event_type.starts_with("internal.")
 }
 
+/// The shared stamping/encryption/append body. `resolved: Some` publishes a
+/// schema-v3 envelope under the resolved scope; `None` the v2 static-`scope` one.
+// Justified: private shared core of the two public publish entry points; every argument is a
+// distinct injected dependency, and bundling them would only re-split at both call sites.
+#[allow(clippy::too_many_arguments)]
 async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
+    resolved: Option<ResolvedScope>,
+    appender: &A,
+    metrics: &M,
+    keyring: &KeyRing,
+    active_kid: &str,
+    scope: &Scope,
+    source_id: &str,
+    workstream_id: &str,
+    session_id: Option<&str>,
+    event: PlatformEvent,
+    dek_provider: &D,
+    identity_metrics: &prometheus::IntCounterVec,
+) -> Result<String, PublishError> {
+    use tracing::Instrument as _;
+    // Command-latency: the `ingest.publish` span covers the whole funnel (identity encryption,
+    // binding, XADD) and parents the downstream stage spans through the envelope's trace context.
+    // Attributes are bounded and non-PII: numeric ids and the platform slug only.
+    let span = tracing::info_span!(
+        "ingest.publish",
+        platform = %event.platform,
+        tenant_id = resolved.as_ref().map(|r| r.tenant_id),
+        community_id = resolved.as_ref().map(|r| r.community_id),
+        door = tracing::field::Empty,
+        "otel.kind" = "producer",
+    );
+    let outcome = publish_resolved_inner(
+        resolved,
+        appender,
+        metrics,
+        keyring,
+        active_kid,
+        scope,
+        source_id,
+        workstream_id,
+        session_id,
+        event,
+        dek_provider,
+        identity_metrics,
+        &span,
+    )
+    .instrument(span.clone())
+    .await;
+    if let Err(err) = &outcome {
+        command_latency::span::record_error(&span, "PublishError", &err.to_string());
+    }
+    outcome
+}
+
+/// The un-instrumented body of [`publish_resolved`]; `span` is the live `ingest.publish` span, read
+/// only to mint the envelope's trace from its OTel ids when a tracer backs it.
+#[allow(clippy::too_many_arguments)]
+async fn publish_resolved_inner<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProvider>(
     resolved: Option<ResolvedScope>,
     appender: &A,
     metrics: &M,
@@ -476,7 +559,9 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
     mut event: PlatformEvent,
     dek_provider: &D,
     identity_metrics: &prometheus::IntCounterVec,
+    span: &tracing::Span,
 ) -> Result<String, PublishError> {
+    let entered_ms = command_latency::stamp::now_ms();
     if is_reserved_event_type(&event.event_type) {
         return Err(PublishError::ReservedEventType);
     }
@@ -491,7 +576,22 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
     let stream = scope.source_stream(&event.platform, source_id);
     let platform = event.platform.clone();
 
-    let trace = mint_trace();
+    let mut trace = mint_trace_for(span);
+    // The first-door stamp: the receiver's instant when it set one, else this funnel's own entry
+    // time marked `publish` (a lower bound, never a silent zero). Metadata only; never read for
+    // authorization anywhere downstream.
+    let latency_on = !command_latency::switch::is_disabled();
+    let (t0_ms, door) = command_latency::first_door::current()
+        .unwrap_or((entered_ms, command_latency::Door::Publish));
+    if latency_on {
+        let stamps = command_latency::Stamps {
+            t0_ms: Some(t0_ms),
+            door: Some(door),
+            ..command_latency::Stamps::default()
+        };
+        trace.tracestate = Some(stamps.merge_into_tracestate(trace.tracestate.as_deref()));
+        span.record("door", door.label());
+    }
     let trace_id = trace_id_from_traceparent(&trace.traceparent)
         .expect("mint_trace always produces a valid W3C traceparent")
         .to_string();
@@ -519,14 +619,24 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
             )
         });
     if event.actor.is_some() || has_identity_payload_field {
-        match dek_provider.get_dek(&scope.tenant).await {
+        // The DEK is requested by NUMERIC tenant id, never the slug (a slug is a mutable display
+        // alias). The legacy string-scope path (resolver off) has no numeric id: `0` is never a
+        // valid tenant, so the hub broker refuses it client-side and the event is held -- only
+        // the dev/alpha local provider (which keys on whatever id it is given) serves it.
+        let dek_tenant_id: i64 = resolved.as_ref().map_or(0, |r| r.tenant_id);
+        // The AAD binds the numeric id too (immutable across a slug rename); the legacy path
+        // has nothing but the slug to bind.
+        let aad_tenant: String = resolved
+            .as_ref()
+            .map_or_else(|| scope.tenant.clone(), |r| r.tenant_id.to_string());
+        match dek_provider.get_dek(dek_tenant_id).await {
             Ok((dek, dek_version)) => {
                 let encrypt_field = |value: &str, field: &str| -> String {
                     let envelope = identity_crypto::encrypt_identity_value(
                         value,
                         &dek,
                         dek_version,
-                        &scope.tenant,
+                        &aad_tenant,
                         &stream,
                         field,
                         &event_id,
@@ -599,11 +709,7 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
         community: scope.community.clone(),
         tenant_id: resolved.as_ref().map(|r| r.tenant_id),
         community_id: resolved.as_ref().map(|r| r.community_id),
-        app_id: format!(
-            "waddles.ingest.{}.{}",
-            app_id_slug(&platform),
-            app_id_slug(source_id)
-        ),
+        app_id: ingest_app_id(&platform, source_id),
         // "process", NOT "ingest": `StageEnvelope.stage` names the stage
         // that will read/consume this entry off the stream and therefore
         // owns its DLQ routing -- the same forward-looking convention this
@@ -636,6 +742,33 @@ async fn publish_resolved<A: EventAppender, M: SpineMetrics + ?Sized, D: DekProv
 
     let entry_id = appender.append(&stream, &env).await?;
     metrics.stream_event_written(&platform, source_id);
+    // Analytics producer: metadata only, flag-gated, never fails or blocks the publish.
+    if let Some(a) = crate::analytics::get() {
+        a.observe(
+            &env.event,
+            resolved.as_ref().map(|r| (r.tenant_id, r.community_id)),
+        );
+    }
+    if latency_on {
+        // First door -> XADD acknowledged: receive, permissions lookup, identity encryption,
+        // binding, append. An implausible t0 only skips this sample.
+        let done_ms = command_latency::stamp::now_ms();
+        match command_latency::stamp::elapsed_ms(t0_ms, done_ms) {
+            Ok(ms) => {
+                command_latency::metrics::metrics().record_hop(
+                    command_latency::Hop::IngestPublish,
+                    std::time::Duration::from_millis(ms),
+                );
+                tracing::debug!(
+                    hop = command_latency::Hop::IngestPublish.label(),
+                    elapsed_ms = ms,
+                    door = door.label(),
+                    "ingest publish hop"
+                );
+            }
+            Err(why) => command_latency::metrics::metrics().record_marker_invalid(why.label()),
+        }
+    }
     Ok(entry_id)
 }
 
@@ -714,7 +847,7 @@ mod tests {
     impl DekProvider for FakeDekProvider {
         async fn get_dek(
             &self,
-            _tenant_id: &str,
+            _tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
             Ok((zeroize::Zeroizing::new([9u8; 32]), 3))
         }
@@ -730,10 +863,10 @@ mod tests {
     impl DekProvider for FailingDekProvider {
         async fn get_dek(
             &self,
-            tenant_id: &str,
+            tenant_id: i64,
         ) -> Result<(crate::identity_crypto::Dek, u32), DekUnavailableError> {
             Err(DekUnavailableError {
-                tenant_id: tenant_id.to_string(),
+                tenant_id,
                 dek_version: None,
                 reason: "no broker configured in this test".to_string(),
             })
@@ -775,7 +908,10 @@ mod tests {
         );
         assert_eq!(env.schema_version, LEGACY_ENVELOPE_SCHEMA_VERSION);
         assert_eq!(env.stage, "process");
-        assert_eq!(env.app_id, "waddles.ingest.twitch.tw-channela");
+        assert_eq!(
+            env.app_id,
+            "penguintechinc.waddles.ingest-twitch-tw-channela"
+        );
         assert_eq!(env.target_app_id, None);
         assert_eq!(env.tenant, "acme");
         assert_eq!(env.community.as_deref(), Some("main"));
@@ -785,6 +921,13 @@ mod tests {
             "event_id must be a UUID"
         );
         assert_eq!(env.session_id, None);
+        // Spine's own deserializer enforces the app_id grammar: the published envelope must round-trip.
+        let mut wire_env = env.clone();
+        wire_env.workstream_id = Uuid::new_v4().to_string(); // fixture "ws-1" is not a UUID
+        let wire = serde_json::to_string(&wire_env).expect("serialize envelope");
+        let back: StageEnvelope =
+            serde_json::from_str(&wire).expect("spine accepts the ingest app_id");
+        assert_eq!(back.app_id, env.app_id);
         let trace = env
             .trace
             .as_ref()
@@ -1063,7 +1206,10 @@ mod tests {
         .await
         .unwrap();
         let app_id = &appender.calls.lock().unwrap()[0].1.app_id;
-        assert_eq!(app_id, "waddles.ingest.custom-github.acme-github");
+        assert_eq!(
+            app_id,
+            "penguintechinc.waddles.ingest-custom-github-acme-github"
+        );
         assert!(app_id
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '.' || c == '-'));
@@ -1717,5 +1863,24 @@ mod tests {
         let mut neg = ok.clone();
         neg.tenant_id = 0;
         assert!(assert_scope_consistent(&neg, &ok.spine_scope()).is_err());
+    }
+
+    #[test]
+    fn ingest_app_id_is_always_a_spine_valid_three_segment_id() {
+        for (platform, source) in [
+            ("twitch", "tw-channelA"),
+            ("custom_github", "Acme_GitHub.1"),
+            ("x", "_-9"),
+        ] {
+            let id = ingest_app_id(platform, source);
+            let parts: Vec<&str> = id.split('.').collect();
+            assert_eq!(parts.len(), 3, "{id}");
+            assert!(
+                parts.iter().all(|p| !p.is_empty()
+                    && p.chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')),
+                "{id}"
+            );
+        }
     }
 }

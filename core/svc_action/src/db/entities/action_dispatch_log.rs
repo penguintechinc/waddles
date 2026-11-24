@@ -27,8 +27,8 @@ pub struct Model {
     pub attempt: i32,
     pub http_status: Option<i32>,
     pub detail: String,
-    pub envelope_ts: Option<DateTimeWithTimeZone>,
-    pub dispatched_at: DateTimeWithTimeZone,
+    pub envelope_ts: Option<TimeDateTimeWithTimeZone>,
+    pub dispatched_at: TimeDateTimeWithTimeZone,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]
@@ -52,7 +52,7 @@ pub async fn insert(
     attempt: i32,
     http_status: Option<i32>,
     detail: String,
-    envelope_ts: Option<DateTimeWithTimeZone>,
+    envelope_ts: Option<TimeDateTimeWithTimeZone>,
 ) -> Result<(), DbErr> {
     let model = ActiveModel {
         id: sea_orm::ActiveValue::NotSet,
@@ -65,7 +65,7 @@ pub async fn insert(
         http_status: Set(http_status),
         detail: Set(detail),
         envelope_ts: Set(envelope_ts),
-        dispatched_at: Set(chrono::Utc::now().into()),
+        dispatched_at: Set(time::OffsetDateTime::now_utc()),
     };
     Entity::insert(model).exec(db).await?;
     Ok(())
@@ -91,14 +91,14 @@ mod tests {
                 id: 1,
                 tenant_id: 7,
                 community_id: Some(3),
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 target_type: "irc_relay".to_string(),
                 status: "success".to_string(),
                 attempt: 1,
                 http_status: None,
                 detail: "relayed to twitch channel=#c".to_string(),
                 envelope_ts: None,
-                dispatched_at: chrono::Utc::now().into(),
+                dispatched_at: time::OffsetDateTime::now_utc(),
             }]])
             .into_connection();
 
@@ -106,7 +106,7 @@ mod tests {
             &db,
             7,
             Some(3),
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             "irc_relay".to_string(),
             "success".to_string(),
             1,
@@ -131,7 +131,7 @@ mod tests {
             &db,
             7,
             None,
-            "waddles.bot.commands.default".to_string(),
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             "irc_relay".to_string(),
             "retryable_failure".to_string(),
             4,

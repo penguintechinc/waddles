@@ -35,10 +35,14 @@ from blueprints.v1.event_discord_sync import (
 from services.errors import ApiError
 from services.guild_pairing import create_pairing
 from tests import demo_pg_support as pg
+from tests.community_ids import install_community_ids
 
-pytestmark = pytest.mark.skipif(
-    not pg.DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
-)
+pytestmark = [
+    pytest.mark.skipif(
+        not pg.DOCKER_AVAILABLE, reason="docker CLI not available in this environment"
+    ),
+    pytest.mark.usefixtures("bypass_route_guards"),
+]
 
 WRITE = "community.guild_pairing:write"
 READ = "community.guild_pairing:read"
@@ -90,14 +94,21 @@ def client(adal: AsyncDAL, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.setattr(module, "feature_enabled", AsyncMock(return_value=True))
     app = Quart(__name__)
     QuartSchema(app)
+    app.config["dal"] = adal.dal
+    install_community_ids(app, adal.dal)
     app.register_blueprint(event_discord_sync_admin_bp)
     app.register_blueprint(event_discord_sync_internal_bp)
-    app.config["dal"] = adal.dal
     return app.test_client()
 
 
-def _url(community_id: int) -> str:
-    return f"/api/v1/communities/{community_id}/calendar/event-sync"
+def _url(client: Any, community_id: int) -> str:
+    """Admin event-sync URL; client routes take the community's public UUID."""
+    pid = pg.scalar(
+        client.app.config["dal"],
+        "SELECT public_id::text FROM communities WHERE id=%s",
+        [community_id],
+    )
+    return f"/api/v1/communities/{pid}/calendar/event-sync"
 
 
 def _pair(dal: Any, community_id: int, n: int = 1) -> list[int]:
@@ -125,7 +136,7 @@ def _db_flags(dal: Any, community_id: int) -> list[bool]:
 
 async def _put(client: Any, headers: dict[str, str], cid: int, body: Any) -> Any:
     return await client.put(
-        _url(cid),
+        _url(client, cid),
         headers={**headers, "Content-Type": "application/json"},
         data=body if isinstance(body, str) else json.dumps(body),
     )
@@ -148,10 +159,10 @@ async def test_get_requires_read_scope(
     client: Any, auth_headers: Any, adal: AsyncDAL, community_id: int
 ) -> None:
     _pair(adal.dal, community_id)
-    assert (await client.get(_url(community_id))).status_code in (401, 403)
-    resp = await client.get(_url(community_id), headers=auth_headers(scope="other:read"))
+    assert (await client.get(_url(client, community_id))).status_code in (401, 403)
+    resp = await client.get(_url(client, community_id), headers=auth_headers(scope="other:read"))
     assert resp.status_code == 403
-    resp = await client.get(_url(community_id), headers=auth_headers(scope=READ))
+    resp = await client.get(_url(client, community_id), headers=auth_headers(scope=READ))
     assert resp.status_code == 200
 
 
@@ -160,7 +171,7 @@ async def test_other_tenant_cannot_read_or_flip(
 ) -> None:
     _pair(adal.dal, community_id)
     stranger = auth_headers(scope=f"{READ} {WRITE}", tenant="someone-else")
-    got = await client.get(_url(community_id), headers=stranger)
+    got = await client.get(_url(client, community_id), headers=stranger)
     put = await _put(client, stranger, community_id, {"enabled": True})
     assert got.status_code in (403, 404) and put.status_code in (403, 404)
     assert _db_flags(adal.dal, community_id) == [False]
@@ -197,7 +208,7 @@ async def test_toggle_persists_to_every_pairing_and_state_aggregates(
     )
     assert _db_flags(adal.dal, community_id) == [True, True]
 
-    got = await client.get(_url(community_id), headers=auth_headers(scope=READ))
+    got = await client.get(_url(client, community_id), headers=auth_headers(scope=READ))
     assert (await got.get_json())["event_sync_enabled"] is True
 
     # one guild turned off out-of-band => aggregate is NOT "enabled" (all-or-nothing semantics)
@@ -206,7 +217,7 @@ async def test_toggle_persists_to_every_pairing_and_state_aggregates(
         "UPDATE guild_tenant_pairings SET event_sync_enabled=false WHERE discord_guild_id=%s",
         [GUILDS[1]],
     )
-    got = await client.get(_url(community_id), headers=auth_headers(scope=READ))
+    got = await client.get(_url(client, community_id), headers=auth_headers(scope=READ))
     mixed = await got.get_json()
     assert (mixed["event_sync_enabled"], mixed["pairings_enabled"]) == (False, 1)
 
@@ -228,7 +239,7 @@ async def test_non_bool_body_is_400_and_persists_nothing(
 async def test_no_pairings_is_404(client: Any, auth_headers: Any, community_id: int) -> None:
     resp = await _put(client, auth_headers(scope=WRITE), community_id, {"enabled": True})
     assert resp.status_code == 404
-    got = await client.get(_url(community_id), headers=auth_headers(scope=READ))
+    got = await client.get(_url(client, community_id), headers=auth_headers(scope=READ))
     body = await got.get_json()
     assert (body["event_sync_enabled"], body["pairings_total"]) == (False, 0)
 
@@ -248,13 +259,20 @@ async def test_4xx_api_error_is_logged_warning_without_traceback_and_returned(
     monkeypatch: pytest.MonkeyPatch,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    """A pairing deleted between list and update -> the REAL service raises 404 `not_found`."""
-    _first, second = _pair(adal.dal, community_id, n=2)
+    """A pairing deleted between list and update -> the REAL service raises 404 `not_found`.
+
+    The racing pairing is whichever one the route updates SECOND (by call order, not by id):
+    `list_pairings` orders newest-first and same-transaction `created_at` ties are unordered,
+    so keying the race on insertion order would be nondeterministic.
+    """
+    _pair(adal.dal, community_id, n=2)
     real_update = module.pairing_svc.update_pairing
+    calls: list[int] = []
 
     def racing_update(dal: Any, cid: int, pairing_id: int, **kw: Any) -> Any:
-        if pairing_id == second:
-            pg.q(dal, "DELETE FROM guild_tenant_pairings WHERE id=%s", [second])
+        calls.append(pairing_id)
+        if len(calls) == 2:
+            pg.q(dal, "DELETE FROM guild_tenant_pairings WHERE id=%s", [pairing_id])
         return real_update(dal, cid, pairing_id, **kw)
 
     monkeypatch.setattr(module.pairing_svc, "update_pairing", racing_update)
@@ -276,6 +294,7 @@ async def test_4xx_api_error_is_logged_warning_without_traceback_and_returned(
         assert field in msg
     assert GUILDS[0] not in msg and GUILDS[1] not in msg and "Bearer" not in msg
     # state is honest about the partial write: first pairing flipped, second gone
+    assert len(calls) == 2 and calls[0] != calls[1]
     assert _db_flags(adal.dal, community_id) == [True]
 
 
@@ -321,7 +340,7 @@ async def test_5xx_api_error_is_logged_error_with_traceback_and_not_swallowed(
         assert field in msg
     assert GUILDS[0] not in msg and GUILDS[1] not in msg and "acme-corp" not in msg
     # GET reports the honest partial state, never a rosy default
-    got = await client.get(_url(community_id), headers=auth_headers(scope=READ))
+    got = await client.get(_url(client, community_id), headers=auth_headers(scope=READ))
     state = await got.get_json()
     assert (state["event_sync_enabled"], state["pairings_enabled"], state["pairings_total"]) == (
         False,

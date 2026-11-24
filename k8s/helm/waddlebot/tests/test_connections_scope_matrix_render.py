@@ -104,7 +104,9 @@ def test_svc_action_identity_has_resolve_and_static(
     assert "connections:resolve" in scopes
     assert "connections:resolve:static" in scopes
     assert "connections:list" not in scopes
-    assert {"identity:displayname:read", "egress:connect"} <= set(scopes)
+    assert "egress:connect" in scopes
+    # PII boundary: svc-action never detokenizes, so it holds no display-name scope.
+    assert "identity:displayname:read" not in scopes
 
 
 def test_svc_ingest_identity_gets_list_and_resolve_not_static(
@@ -113,6 +115,8 @@ def test_svc_ingest_identity_gets_list_and_resolve_not_static(
     scopes = _identities(enabled)["svc-ingest"]["allowed_scopes"]
     assert {"connections:resolve", "connections:list"} <= set(scopes)
     assert "connections:resolve:static" not in scopes
+    # Egress detokenization reads Postgres directly (no hub-api hop): no display-name scope.
+    assert "identity:displayname:read" not in scopes
 
 
 def test_no_other_identity_holds_any_connections_scope(
@@ -144,7 +148,8 @@ def test_identities_absent_when_feature_disabled(
     disabled: list[dict[str, Any]],
 ) -> None:
     identities = _identities(disabled)
-    assert "svc-ingest" not in identities
+    # svc-ingest keeps ONLY the tenant stream-DEK scope (it cannot publish without it).
+    assert identities["svc-ingest"]["allowed_scopes"] == ["key:stream-dek:read"]
     assert len(identities) >= 3, identities.keys()
     for name, entry in identities.items():
         assert not [
@@ -154,11 +159,28 @@ def test_identities_absent_when_feature_disabled(
     assert "egress:connect" in identities["svc-action"]["allowed_scopes"]
 
 
+def test_no_identity_lists_a_scope_twice(
+    enabled: list[dict[str, Any]], disabled: list[dict[str, Any]]
+) -> None:
+    """Every rendered identity allow-list is duplicate-free in both flag states.
+
+    Regression: ``key:stream-dek:read`` was listed twice for svc-ingest and svc-process in
+    values.yaml (merge artifact), so the "only the stream-DEK scope" grant rendered as a
+    two-element list.
+    """
+    for docs in (enabled, disabled):
+        identities = _identities(docs)
+        assert identities, "zero identities rendered -- cannot be a pass"
+        for name, entry in identities.items():
+            scopes = entry["allowed_scopes"]
+            assert len(scopes) == len(set(scopes)), (name, scopes)
+
+
 def test_each_flag_gates_only_its_own_grant() -> None:
     only_action = _identities(
         _render("pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false")
     )
-    assert "svc-ingest" not in only_action
+    assert only_action["svc-ingest"]["allowed_scopes"] == ["key:stream-dek:read"]
     assert "connections:resolve:static" in only_action["svc-action"]["allowed_scopes"]
     only_ingest = _identities(
         _render("pipeline.rustDataPlane.svcAction.dynamicConnections.enabled=false")

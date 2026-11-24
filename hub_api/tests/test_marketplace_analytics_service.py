@@ -15,6 +15,7 @@ import pytest
 
 from services import marketplace_analytics_service as analytics
 from services.schema import bind_marketplace_module_tables, bind_marketplace_vendor_tables
+from tests.community_ids import public_id
 
 
 @pytest.fixture
@@ -24,6 +25,12 @@ def dal() -> Any:
     db = DAL("sqlite:memory")
     bind_marketplace_module_tables(db, migrate=True)
     bind_marketplace_vendor_tables(db, migrate=True)
+    # Responses carry each community's PUBLIC UUID: seed communities 1..3 with one each.
+    for n in (1, 2, 3):
+        db.communities.insert(name=f"c{n}")
+    db.commit()
+    for n in (1, 2, 3):
+        public_id(db, n)
     yield db
     db.close()
 
@@ -153,7 +160,7 @@ class TestCommunityDrilldown:
         now = datetime.now(UTC)
         for i in range(3):
             dal.community_vendor_installations.insert(
-                community_id=i,
+                community_id=i + 1,
                 module_id=module_id,
                 status="active",
                 installed_at=now - timedelta(days=i),
@@ -163,6 +170,8 @@ class TestCommunityDrilldown:
         result = analytics.get_community_drilldown(dal, 1, page=1, limit=2, sort_by="status")
         assert result["total"] == 3
         assert len(result["rows"]) == 2
+        public_ids = {r.public_id for r in dal(dal.communities.id > 0).select()}
+        assert {row["communityId"] for row in result["rows"]} <= public_ids  # UUIDs, never ints
 
     def test_filters_by_module_id(self, dal: Any) -> None:
         seller_id, module_id = _seed_seller_with_module(dal)
@@ -186,7 +195,9 @@ class TestCommunityDrilldown:
 
         result = analytics.get_community_drilldown(dal, 1, module_id=other_module_id)
         assert result["total"] == 1
-        assert result["rows"][0]["moduleId"] == other_module_id
+        assert result["rows"][0]["moduleId"] == str(
+            dal.marketplace_modules[other_module_id].public_id
+        )
 
     def test_no_seller_returns_empty(self, dal: Any) -> None:
         result = analytics.get_community_drilldown(dal, 999)

@@ -35,6 +35,7 @@ from flask_core.bundle_attribution import (
 from flask_core.bundle_author import AuthorError, canonical_author
 
 from services.bundle_access_grants import is_access_grant_id
+from services.bundle_app_id import is_valid_app_id
 from services.bundle_permission_catalog import (
     NET_HTTP_IP_PREFIXES,
     NET_HTTP_PREFIXES,
@@ -56,9 +57,9 @@ from services.bundle_table_access import (
 
 logger = logging.getLogger(__name__)
 
-_SEGMENT = r"[a-z0-9][a-z0-9_-]*"
-_APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
-_FEATURE_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}$")
+#: `feature` is descriptive only (optional): dotted lowercase tokens, no relation to `app_id`.
+_FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$")
+_FEATURE_MAX_LEN = 128
 _SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
     r"(?:-((?:0|[1-9]\d*|\d*[a-zA-Z-][0-9a-zA-Z-]*)"
@@ -166,6 +167,25 @@ class PermissionDeclaration:
     risk: str
     justification: str
     params: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(slots=True, frozen=True)
+class OverlayWidgetDeclaration:
+    """One declared overlay widget for composite or standalone overlay display."""
+
+    widget_id: str
+    display_name: str
+    description: str
+    category: str
+    output_kind: str
+    surface_id: str | None
+    allow_standalone_output: bool
+    default_x: int
+    default_y: int
+    default_width: int
+    default_height: int
+    default_z_index: int
+    props_schema: dict[str, Any]
 
 
 @dataclass(slots=True, frozen=True)
@@ -372,6 +392,8 @@ class BundleManifestV2:
     # (op, owner) is ALSO folded into `permission_declarations` as a dangerous
     # `storage.<op>:<owner>` id. Defaulted last for hand-built fixtures.
     storage_access: tuple[StorageAccessRequest, ...] = ()
+    # `stages.presentation.overlay_widgets`: widgets the Overlay Designer offers for this bundle.
+    overlay_widgets: tuple[OverlayWidgetDeclaration, ...] = ()
     # Periodic host-delivered `hub`/`bundle.reconcile` event (APP and SERVICE bundles); `None`
     # = the host never schedules one. Defaulted last for hand-built fixtures.
     schedule: ScheduleDeclaration | None = None
@@ -570,6 +592,25 @@ TOOL_REQUIRED_SCOPES = frozenset(
         "community:timeout",
         "community:admin",
         "community:owner",
+        # Dedicated room-management scopes (admin/owner bundles carry them; a moderator
+        # does not yet) -- mirrors `scopes_for_role` in `core/bundle_tool_call`.
+        "rooms:create",
+        "rooms:update",
+        "rooms:close",
+        "rooms:guests",
+        "rooms:kick",
+        "rooms:mute",
+        "rooms:lock",
+        "rooms:hands",
+        # penguintechinc.waddles.music-requests (see `docs/music-requests-service.md`);
+        # mirrors the music entries in `core/bundle_tool_call::scopes_for_role`.
+        "music:requests.read",
+        "music:history.read",
+        "music:requests.write",
+        "music:requests.manage",
+        "music:dj.manage",
+        "music:stats.read",
+        "music:settings.write",
     }
 )
 _TOOL_NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
@@ -791,7 +832,7 @@ def parse_requested_tools(raw_entries: Any, *, own_app_id: str) -> tuple[Request
         )
         target = entry.get("target_app_id")
         _require(
-            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            is_valid_app_id(target),
             "invalid_requested_tools",
             "requested tool target_app_id must be a valid app_id",
         )
@@ -909,6 +950,30 @@ def parse_config_schema(raw: Any) -> dict[str, Any] | None:
     return dict(raw)
 
 
+def check_legacy_config_schema(raw: dict[str, Any]) -> None:
+    """Reject or flag the dead pre-v2 `config_schema:` key (`community_config_schema:` replaced it).
+
+    Nothing reads `config_schema`, so a schema declared there silently never reaches a community
+    admin. Non-empty content raises `ManifestV2Error` (`deprecated_config_schema`); an empty
+    placeholder (`config_schema: {}`, still present in many catalog manifests) only logs a
+    deprecation warning so it cannot be mistaken for a working declaration.
+    """
+    if "config_schema" not in raw:
+        return
+    legacy = raw["config_schema"]
+    if legacy:
+        raise ManifestV2Error(
+            "deprecated_config_schema",
+            "`config_schema` is deprecated and ignored; declare the per-community JSON Schema "
+            "under `community_config_schema` instead",
+        )
+    logger.warning(
+        "bundle manifest %s declares an empty deprecated `config_schema`; remove it "
+        "(per-community settings use `community_config_schema`)",
+        raw.get("app_id", "<unknown>"),
+    )
+
+
 def parse_admin_tools(raw_entries: Any, *, own_app_id: str) -> tuple[AdminTool, ...]:
     """Validate the optional `admin_tools:` list; absent (`None`) parses to none.
 
@@ -957,7 +1022,7 @@ def parse_admin_tools(raw_entries: Any, *, own_app_id: str) -> tuple[AdminTool, 
         )
         target = entry.get("target_app_id", own_app_id)
         _require(
-            isinstance(target, str) and bool(_APP_ID_RE.fullmatch(target)),
+            is_valid_app_id(target),
             "invalid_admin_tools",
             f"admin tool {name!r}: target_app_id must be a valid app_id",
         )
@@ -992,6 +1057,192 @@ def _check_admin_tools_declared(
                 "admin_tool_undeclared",
                 f"admin tool {at.name!r}: {at.target_app_id}:{at.tool} is not in requested_tools",
             )
+
+
+_WIDGET_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,127}$")
+_ALLOWED_OUTPUT_KINDS = frozenset({"text", "image", "sanitized_html", "surface"})
+
+
+_SURFACE_ID_RE = re.compile(r"^[a-z0-9][a-z0-9_.-]{0,63}$")
+
+
+def parse_presentation_widgets(
+    presentation_stage: Any, app_id: str
+) -> tuple[OverlayWidgetDeclaration, ...]:
+    """Parse `stages.presentation.{owned_surfaces,overlay_widgets}` together (both optional).
+
+    Surface names are global, so each owned surface must be namespaced under the declaring
+    bundle: equal to `app_id` or start with `<app_id>.` (no squatting another bundle's name).
+    """
+    if not isinstance(presentation_stage, dict):
+        return ()
+    raw_owned = presentation_stage.get("owned_surfaces")
+    owned: frozenset[str] = frozenset()
+    if raw_owned is not None:
+        _require(
+            isinstance(raw_owned, list)
+            and all(isinstance(x, str) and bool(_SURFACE_ID_RE.fullmatch(x)) for x in raw_owned),
+            "invalid_owned_surfaces",
+            "owned_surfaces must be a list of surface ids matching [a-z0-9][a-z0-9_.-]{0,63}",
+        )
+        squatted = [x for x in raw_owned if x != app_id and not x.startswith(f"{app_id}.")]
+        _require(
+            not squatted,
+            "owned_surface_not_namespaced",
+            f"owned_surfaces must equal or start with '{app_id}.'; got {squatted[:3]}",
+        )
+        owned = frozenset(raw_owned)
+    return parse_overlay_widgets(presentation_stage.get("overlay_widgets"), owned)
+
+
+def parse_overlay_widgets(
+    raw_entries: Any, owned_surfaces: frozenset[str] = frozenset()
+) -> tuple[OverlayWidgetDeclaration, ...]:
+    """Validate the optional `stages.presentation.overlay_widgets` list; absent parses to `()`.
+
+    An `output_kind: surface` widget may only name a surface the same bundle declares in
+    `stages.presentation.owned_surfaces` (`owned_surfaces` here), so a bundle cannot point a
+    widget at another bundle's surface.
+    """
+    if raw_entries is None:
+        return ()
+    _require(
+        isinstance(raw_entries, list), "invalid_overlay_widgets", "overlay_widgets must be a list"
+    )
+    widgets: list[OverlayWidgetDeclaration] = []
+    seen: set[str] = set()
+    for entry in raw_entries:
+        _require(
+            isinstance(entry, dict),
+            "invalid_overlay_widgets",
+            "each overlay_widgets entry must be a mapping",
+        )
+        widget_id = entry.get("widget_id")
+        _require(
+            isinstance(widget_id, str) and bool(_WIDGET_ID_RE.fullmatch(widget_id)),
+            "invalid_widget_id",
+            f"widget_id {widget_id!r} must match [a-z0-9][a-z0-9_.-]{{0,127}}",
+        )
+        assert isinstance(widget_id, str)
+        _require(
+            widget_id not in seen,
+            "duplicate_overlay_widget",
+            f"widget {widget_id!r} declared twice",
+        )
+        seen.add(widget_id)
+
+        display_name = entry.get("display_name")
+        _require(
+            isinstance(display_name, str) and 1 <= len(display_name.strip()) <= 120,
+            "invalid_widget_display_name",
+            "display_name must be a non-empty string <= 120 chars",
+        )
+        assert isinstance(display_name, str)
+
+        output_kind = entry.get("output_kind")
+        _require(
+            isinstance(output_kind, str) and output_kind in _ALLOWED_OUTPUT_KINDS,
+            "invalid_widget_output_kind",
+            f"output_kind must be one of {sorted(_ALLOWED_OUTPUT_KINDS)}, got {output_kind!r}",
+        )
+        assert isinstance(output_kind, str)
+
+        description = entry.get("description", "")
+        _require(
+            isinstance(description, str) and len(description) <= 280,
+            "invalid_widget_description",
+            "description must be a string <= 280 chars",
+        )
+
+        category = entry.get("category", "custom")
+        _require(
+            isinstance(category, str) and 1 <= len(category) <= 64,
+            "invalid_widget_category",
+            "category must be a string of 1..=64 chars",
+        )
+
+        surface_id = entry.get("surface_id")
+        if surface_id is not None:
+            _require(
+                isinstance(surface_id, str) and 1 <= len(surface_id) <= 64,
+                "invalid_widget_surface_id",
+                "surface_id must be a string of 1..=64 chars",
+            )
+        _require(
+            output_kind != "surface" or surface_id is not None,
+            "invalid_widget_surface_id",
+            "an output_kind 'surface' widget must name its surface_id",
+        )
+        _require(
+            output_kind != "surface" or surface_id in owned_surfaces,
+            "widget_surface_not_owned",
+            f"surface {surface_id!r} is not listed in this bundle's owned_surfaces",
+        )
+
+        allow_standalone = entry.get("allow_standalone_output", True)
+        _require(
+            isinstance(allow_standalone, bool),
+            "invalid_widget_standalone",
+            "allow_standalone_output must be a bool",
+        )
+
+        def_x = entry.get("default_x", 48)
+        def_y = entry.get("default_y", 48)
+        def_w = entry.get("default_width", 400)
+        def_h = entry.get("default_height", 200)
+        def_z = entry.get("default_z_index", 10)
+
+        _require(
+            isinstance(def_x, int) and 0 <= def_x <= 3840,
+            "invalid_widget_x",
+            "default_x must be in 0..=3840",
+        )
+        _require(
+            isinstance(def_y, int) and 0 <= def_y <= 2160,
+            "invalid_widget_y",
+            "default_y must be in 0..=2160",
+        )
+        _require(
+            isinstance(def_w, int) and 32 <= def_w <= 3840,
+            "invalid_widget_width",
+            "default_width must be in 32..=3840",
+        )
+        _require(
+            isinstance(def_h, int) and 32 <= def_h <= 2160,
+            "invalid_widget_height",
+            "default_height must be in 32..=2160",
+        )
+        _require(
+            isinstance(def_z, int) and -1000 <= def_z <= 1000,
+            "invalid_widget_z_index",
+            "default_z_index must be in -1000..=1000",
+        )
+
+        props_schema = entry.get("props_schema", {})
+        _require(
+            isinstance(props_schema, dict),
+            "invalid_widget_props_schema",
+            "props_schema must be an object",
+        )
+
+        widgets.append(
+            OverlayWidgetDeclaration(
+                widget_id=widget_id,
+                display_name=display_name.strip(),
+                description=description,
+                category=category,
+                output_kind=output_kind,
+                surface_id=surface_id,
+                allow_standalone_output=allow_standalone,
+                default_x=def_x,
+                default_y=def_y,
+                default_width=def_w,
+                default_height=def_h,
+                default_z_index=def_z,
+                props_schema=props_schema,
+            )
+        )
+    return tuple(widgets)
 
 
 def _parse_consumes(
@@ -1041,6 +1292,8 @@ def _parse_consumes(
 _MAX_JUSTIFICATION_LEN = 280
 _MAX_OVERLAY_DURATION_S = 30
 _MAX_REPUTATION_DELTA = 5
+#: Mirrors `core/bundle_host_reputation/src/scale.rs` `MODERATION_CAP`.
+_MAX_MODERATION_DELTA = 200
 #: Mirrors the Rust catalog's `economy.wager`/`economy.transfer`
 #: `per_call_abs_max` (`core/bundle_capability_gate/src/permission.rs`); the
 #: gate re-clamps a declared bound to it, this is the approval-time check.
@@ -1193,6 +1446,15 @@ def parse_permission_declarations(
             for code in reason_codes:
                 _require(bool(_REASON_CODE_RE.match(code)), "invalid_reason_code", f"{code!r}")
 
+        if permission_id == "reputation.moderation.write":
+            delta_min = int(params.get("delta_min", 0))
+            delta_max = int(params.get("delta_max", 0))
+            _require(
+                -_MAX_MODERATION_DELTA <= delta_min <= 0 <= delta_max <= _MAX_MODERATION_DELTA,
+                "delta_out_of_bounds",
+                f"delta_min={delta_min} delta_max={delta_max}",
+            )
+
         if permission_id in _ECONOMY_BOUND_PARAM:
             bound_param = _ECONOMY_BOUND_PARAM[permission_id]
             declared = params.get(bound_param)
@@ -1261,7 +1523,6 @@ def parse_bundle_manifest_v2(
         "app_id",
         "name",
         "version",
-        "feature",
         "module",
         "provider",
         "language",
@@ -1281,29 +1542,24 @@ def parse_bundle_manifest_v2(
         f"{raw['version']!r} is not valid SemVer 2.0.0",
     )
     _require(
-        bool(_APP_ID_RE.match(raw["app_id"])),
+        is_valid_app_id(raw["app_id"]),
         "not_namespaced",
         f"{raw['app_id']!r} is not a valid app_id",
     )
+    feature = raw.get("feature")
+    if feature is None:
+        feature = raw["app_id"].rsplit(".", 1)[0]
     _require(
-        bool(_FEATURE_RE.match(raw["feature"])),
+        isinstance(feature, str)
+        and len(feature) <= _FEATURE_MAX_LEN
+        and bool(_FEATURE_RE.match(feature)),
         "not_namespaced",
-        f"{raw['feature']!r} is not a valid feature id",
+        f"{feature!r} is not a valid feature id",
     )
     _require(
         raw["module"] in KNOWN_MODULES,
         "unknown_module",
         f"{raw['module']!r} is not a KNOWN_MODULES entry",
-    )
-    _require(
-        raw["feature"] == raw["app_id"].rsplit(".", 1)[0],
-        "feature_prefix_mismatch",
-        "feature must equal app_id minus its last segment",
-    )
-    _require(
-        raw["module"] == raw["feature"].split(".")[1],
-        "feature_prefix_mismatch",
-        "module must equal feature's second segment",
     )
     _require(
         raw["provider"] in {"builtin", "thirdparty"}, "invalid_provider", f"{raw['provider']!r}"
@@ -1504,11 +1760,19 @@ def parse_bundle_manifest_v2(
     )
 
     requested_tools = parse_requested_tools(raw.get("requested_tools"), own_app_id=raw["app_id"])
+    check_legacy_config_schema(raw)
     community_config_schema = parse_config_schema(raw.get("community_config_schema"))
     admin_tools = parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"])
     _check_admin_tools_declared(
         admin_tools, own_app_id=raw["app_id"], exported=exported_tools, requested=requested_tools
     )
+    presentation_stage = stages.get("presentation")
+    _require(
+        presentation_stage is None or isinstance(presentation_stage, dict),
+        "invalid_stage",
+        "stages.presentation must be a mapping",
+    )
+    overlay_widgets = parse_presentation_widgets(presentation_stage, raw["app_id"])
     declared_ids = {d.id for d in permission_declarations}
     permission_declarations = permission_declarations + tuple(
         d for d in requested_tool_declarations(requested_tools) if d.id not in declared_ids
@@ -1558,7 +1822,7 @@ def parse_bundle_manifest_v2(
         app_id=raw["app_id"],
         name=raw["name"],
         version=raw["version"],
-        feature=raw["feature"],
+        feature=feature,
         module=raw["module"],
         provider=raw["provider"],
         language=raw["language"],
@@ -1593,4 +1857,5 @@ def parse_bundle_manifest_v2(
         schedule=schedule,
         community_config_schema=community_config_schema,
         admin_tools=admin_tools,
+        overlay_widgets=overlay_widgets,
     )

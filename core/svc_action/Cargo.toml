@@ -57,7 +57,8 @@ futures-util = { version = "=0.3.34", default-features = false, features = ["std
 # than a JSON array of byte values or lossy UTF-8. Pinned to the version
 # already resolved transitively (Cargo.lock).
 base64 = "=0.22.1"
-chrono = { version = "=0.4.45", features = ["serde"] }
+# Envelope `ts` parsing (`crate::dispatch`) + sea-orm `with-time` column types; replaces chrono.
+time = { version = "=0.3.55", features = ["parsing"] }
 # This service owns `action_dispatch_log` (config/postgres/migrations/074) --
 # see `rules/backend-database.md` Per-Service Database Accounts. No other
 # tables are queried by this crate.
@@ -66,7 +67,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
     "sqlx-sqlite",
     "runtime-tokio-rustls",
     "macros",
-    "with-chrono",
+    "with-time",
 ] }
 # `penguin-logging` owns the tracing-subscriber/OTel/OTLP stack internally
 # (spec SS4.9) -- see `src/telemetry.rs`. Pinned to the HEAD of
@@ -82,17 +83,17 @@ penguin-logging = { git = "https://github.com/penguintechinc/penguin-libs.git", 
 # landed `binding` module (a separate follow-up, re-verified against this
 # rev's own canonical test vectors, not done here), and `src/dispatch.rs`'s
 # `fixture_delivered` for the `group` field this rev added.
-penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "90060a93925c50668cc1c6dd47a4ae24a7b4e321", package = "penguin-spine", version = "=0.2.0" }
+penguin-spine = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "1df082257597e05b1f8e4c2568fb934422d3e36c", package = "penguin-spine", version = "=0.2.0" }
 # `penguin-bundle-host::wire` (spec SS6.6): the host-API frame codec and
 # Frame/Message shapes shared verbatim with `bundle-executor` -- see
 # `src/host_api.rs`. Pinned to the HEAD of `release/rust-bundle-host/v0.1.x`
 # (PR penguintechinc/penguin-libs#93, same commit `core/bundle_executor`
 # pins).
-penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "53e95619f1b3e49e1150b78a125981fcc5905d8a", package = "penguin-bundle-host", version = "=0.5.0" }
+penguin-bundle-host = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "dcfbadac813d7203e6f1764c363aee21ebd20c1c", package = "penguin-bundle-host", version = "=0.6.0" }
 # Spec SS13.5's two flags this crate gates on (`waddles.core.rust-data-plane`,
 # `waddles.core.bundle-egress`) -- see `src/flags.rs`. Pinned to the tip of
 # `release/rust-licensing/v0.1.x`.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f512126656cfca0dc0d52f47a92180eceeddbbed", package = "penguin-licensing", version = "=0.1.1" }
 # D30 envelope binding MAC (spec SS5.11): HMAC-SHA256 hop verification --
 # `src/hop.rs`. Same exact pins `penguin-spine` itself uses internally for
 # byte-identical behavior. `penguin-spine`'s own `binding` module (above)
@@ -120,7 +121,7 @@ rustls-pki-types = "=1.15.1"
 # (`capabilities::INCR_WINDOW_SCRIPT`) -- already compiled in via
 # `bundle-host-kv`'s own redis dependency; declared here too so this crate
 # never relies on cargo feature unification for it.
-redis = { version = "=1.7.0", default-features = false, features = ["tokio-comp", "tls-rustls", "tokio-rustls-comp", "script"] }
+redis = { version = "=1.7.0", default-features = false, features = ["connection-manager", "tokio-comp", "tls-rustls", "tokio-rustls-comp", "script"] }
 # Unguessable id for each queued Discord op's confirmation handshake
 # (`capabilities::handle_discord_queued_op`'s `op_id`). Already in this
 # crate's lockfile transitively at the same exact version.
@@ -141,7 +142,7 @@ bundle-active-set = { path = "../bundle_active_set", version = "=0.1.0" }
 # repo owns. `core/svc_process` declares the identical dependency so the
 # capability is written and tested exactly once. See
 # `core/bundle_host_kv/Cargo.toml`.
-bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0" }
+bundle-host-kv = { path = "../bundle_host_kv", version = "=0.1.0", features = ["grpc"] }
 # The standard enforcement gate every host capability arm calls first
 # (`docs/superpowers/specs/2026-09-28-bundle-permissions-and-capability-gate.md`
 # SS5, `src/capabilities.rs`).
@@ -156,6 +157,9 @@ bundle-tool-call = { path = "../bundle_tool_call", version = "=0.1.0" }
 # declares the identical dependency so the breaker logic is written and
 # tested exactly once. See `core/circuit_breaker/Cargo.toml`.
 circuit-breaker = { path = "../circuit_breaker", version = "=0.1.0" }
+# Command-latency SLA telemetry (owner SLA 2026-11-14): first-door stamp in the tracestate, per-hop and
+# end-to-end histograms, bounded label registries, kill switch `waddles.disable-command-latency-telemetry`.
+command-latency = { path = "../command_latency", version = "=0.1.0" }
 # `db` bundle host capability (`src/capabilities.rs::handle_db`) -- same
 # same-repo path dependency as `core/svc_process`'s identical line: this
 # crate's identifier-safety/tenant-isolation rules are owned by this
@@ -171,25 +175,27 @@ bundle-host-db = { path = "../bundle_host_db", version = "=0.1.0" }
 bundle-host-http = { path = "../bundle_host_http", version = "=0.1.0" }
 # Per-community / host-minted credentials + Valkey quota for bundle http.send secret refs (host-seams-2).
 bundle-host-credentials = { path = "../bundle_host_credentials", version = "=0.1.0" }
-# Outbound PII-detokenization pass (`src/capabilities.rs`'s
-# `detokenize_text`/`with_detokenize`) -- the egress half of the PII
-# boundary whose inbound half is `core/svc_process`'s own `pii_tokenize`
-# dependency on `hub_client`. Same-repo path dependency, same rationale as
-# `bundle-active-set` above.
-egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # Discord `allowed_mentions` mass-mention backstop (`src/capabilities.rs`'s Discord
 # relay body, `src/senders.rs`'s webhook body) -- one definition shared with
 # `core/svc_ingest`'s bot-token REST sender so no Discord send path can forget
 # it. Same-repo path dependency, same rationale as `bundle-active-set` above.
 discord-mentions = { path = "../discord_mentions", version = "=0.1.0" }
-# `waddles.hub.internal.v1.IdentityService.ResolveDisplayNames` client,
-# needed directly (not just transitively via `egress_detokenizer`) so
-# `crate::lib`'s startup wiring can construct the real
-# `egress_detokenizer::HubClientResolver`.
+# `waddles.hub.internal.v1.IdentityService.ResolvePlatformUser` client
+# (`crate::platform_user`'s producer-side host-tool user resolver).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Live per-community bundle config read straight from the read-only replica (issue #1306); kept
+# out of hub_client so crates that only need hub-api gRPC do not pull sea-orm into their graph.
+bundle-config-db = { path = "../bundle_config_db", version = "=0.1.0" }
 # `crate::platform_user` classifies `hub_client`'s gRPC status codes (producer-side user
 # detokenization) -- same exact pin hub_client already resolves, no new version in the graph.
 tonic = { version = "=0.14.6", default-features = false }
+# `crate::surface`: the stage side of `overlay.publish-surface` (gRPC delivery to svc-presentation,
+# host-derived community + app-id namespace ownership). Same-repo path dependency; its build.rs
+# compiles `proto/waddles/presentation/internal/v1` with the same protoc/`proto` context as
+# `hub_client` (see Dockerfile.rust).
+bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
+# Community-bound machine JWT (`BoundMachineJwtClient`) for the surface delivery host.
+service_auth = { path = "../service_auth", version = "=0.1.0" }
 
 # `src/stage_metrics.rs`: OTel instruments built from the global meter
 # provider `penguin-logging` installs (never a provider of its own). Same
@@ -204,6 +210,9 @@ opentelemetry = "=0.32.0"
 metrics = "=0.24.6"
 
 [dev-dependencies]
+# `crate::surface` tests run a real in-process tonic `SurfaceService` on loopback.
+async-trait = "=0.1.89"
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 # `InMemoryMetricExporter` (the SDK's `testing` feature) so tests read back
 # the metric data points a collector would actually receive -- proving the
 # instruments EMIT, not merely exist. Same exact version `penguin-logging`

@@ -7,6 +7,7 @@ drives the real `HttpDiscordRoleTargetClient` over `httpx.MockTransport`.
 from __future__ import annotations
 
 import json as json_module
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -17,6 +18,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.guild_pairing import guild_pairing_bp
 from services import discord_role_mirror as mirror
+from services import guild_pairing as pairing_svc_mod
 from services import role_sync_service as svc
 from services.credential_resolver import PlatformCredentials, TransportUnavailable
 from services.discord_guild_roles import DiscordRole, is_privileged_role
@@ -28,6 +30,7 @@ from services.guild_pairing import (
     list_pairings,
     update_pairing,
 )
+from tests.community_ids import install_community_ids, public_id
 
 G_A = "111111111111111111"  # gitleaks:allow - fake snowflakes
 G_B = "222222222222222222"
@@ -125,7 +128,30 @@ _ALL_ROLES = {
 }
 
 
-def _pair(dal: Any, community_id: int, *guilds: str, enabled: bool = True) -> None:
+def _pair(
+    dal: Any, community_id: int, *guilds: str, enabled: bool = True, shared_legacy: bool = False
+) -> None:
+    """Pair `guilds` to `community_id`.
+
+    `shared_legacy=True` inserts the rows directly, bypassing the one-tenant-per-guild claim
+    (`discord_guild_tenants`, 0137). That state can no longer be created through the API and the
+    0137 backfill refuses to migrate it; these tests keep seeding it only to prove the mirror /
+    binding cross-tenant collision defenses stay generic if such rows ever exist.
+    """
+    if shared_legacy:
+        now = datetime.now(UTC)
+        for g in guilds:
+            dal.guild_tenant_pairings.insert(
+                community_id=community_id,
+                discord_guild_id=g,
+                direction="bidirectional",
+                sync_enabled=enabled,
+                role_name_prefix="[T]",
+                created_at=now,
+                updated_at=now,
+            )
+        dal.commit()
+        return
     for g in guilds:
         p = create_pairing(
             dal,
@@ -134,6 +160,7 @@ def _pair(dal: Any, community_id: int, *guilds: str, enabled: bool = True) -> No
             direction="bidirectional",
             role_name_prefix="[T]",
             actor_user_id=None,
+            ownership_verified=True,
         )
         if enabled:
             update_pairing(dal, community_id, p.id, sync_enabled=True)
@@ -387,7 +414,7 @@ class TestPrivilegedAndEveryone:
         _pair(dal, cid, G_A, G_B)
         monkeypatch.setattr(bp, "_list_roles_for_mirror", _lister_priv({R_DST: (0x8, False)}))
         r = await app.test_client().post(
-            f"/api/v1/communities/{cid}/discord/role-mirrors",
+            f"/api/v1/communities/{public_id(dal, cid)}/discord/role-mirrors",
             headers={
                 **auth_headers(scope="community.guild_pairing:write"),
                 "Content-Type": "application/json",
@@ -469,6 +496,276 @@ class TestPairingLifecycleAndBindings:
         create_binding(dal, cid, p.id, sync_scope="moderator", discord_role_id=R_OTHER)
 
 
+class TestAllowlistAndCrossCommunity:
+    @pytest.mark.parametrize(
+        ("perms", "privileged"),
+        [
+            (0, False),
+            (0x400 | 0x800 | 0x10000 | 0x40, False),  # view/send/history/reactions
+            (1 << 31 | 1 << 35 | 1 << 38, False),  # app commands, threads
+            (0x1, True),  # CREATE_INSTANT_INVITE is not on the allowlist
+            (1 << 13, True),  # MANAGE_MESSAGES
+            (1 << 40, True),  # unknown/future bit
+            (0x400 | 0x8, True),
+        ],
+    )
+    def test_allowlist(self, perms: int, privileged: bool) -> None:
+        assert is_privileged_role(perms, False) is privileged
+        assert is_privileged_role(0, True) is True  # managed always refused
+
+    async def _other_community(self, dal: Any, tenant_id: int, *guilds: str) -> int:
+        cid2 = dal.communities.insert(name="second-community", tenant_id=tenant_id)
+        dal.commit()
+        _pair(dal, cid2, *guilds)
+        return int(cid2)
+
+    async def test_mapping_rejects_role_bound_via_other_community_pairing(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        cid2 = await self._other_community(dal, tenant_id, G_A)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_A)
+        create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_SRC)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 409
+
+    async def test_binding_rejects_role_mirrored_by_other_community(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._other_community(dal, tenant_id, G_B)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_B)
+        with pytest.raises(ApiError) as exc:
+            create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_DST)
+        assert exc.value.status_code == 409
+
+    async def _foreign_community(self, dal: Any, *guilds: str) -> int:
+        t2 = dal.tenants.insert(slug="foreign-corp", is_active=True, is_global=False)
+        cid2 = dal.communities.insert(name="foreign-community", tenant_id=t2)
+        dal.commit()
+        _pair(dal, cid2, *guilds, shared_legacy=True)
+        return int(cid2)
+
+    @staticmethod
+    def _assert_generic(err: ApiError, *leaks: Any) -> None:
+        assert err.status_code == 409
+        assert str(err.message) == pairing_svc_mod.ROLE_UNAVAILABLE_MESSAGE
+        for leak in leaks:
+            assert str(leak) not in str(err.message)
+
+    async def test_cross_tenant_binding_conflict_is_generic(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        cid2 = await self._foreign_community(dal, G_A)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_A)
+        create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_SRC)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        self._assert_generic(exc.value, cid2, p2.id, "foreign", "binding")
+
+    async def test_cross_tenant_target_conflict_is_generic(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_B, G_C)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid2, G_C, R_SRC, G_B, R_DST)
+        self._assert_generic(exc.value, cid, "mirror mapping")
+        assert mirror.list_mappings(dal, cid2) == []
+
+    async def test_cross_community_cycle_is_generic_409(self, guild_pairing_db: Any) -> None:
+        """regression: a cycle spanning two communities' mappings is rejected, detail-free."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_A, G_B)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid2, G_B, R_DST, G_A, R_SRC)
+        self._assert_generic(exc.value, cid, "cycle")
+        assert mirror.list_mappings(dal, cid2) == []
+
+    async def test_cycle_rejection_identical_same_vs_cross_tenant(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """The rejection is not an oracle: same-tenant and cross-tenant cycles look identical."""
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        same = int(dal.communities.insert(name="same-tenant-other", tenant_id=tenant_id))
+        dal.commit()
+        _pair(dal, same, G_A, G_B)
+        cross = await self._foreign_community(dal, G_A, G_B)
+        seen = []
+        for other in (same, cross):
+            with pytest.raises(ApiError) as exc:
+                await _map(dal, other, G_B, R_DST, G_A, R_SRC)
+            seen.append((exc.value.status_code, exc.value.code, str(exc.value.message)))
+        assert seen[0] == seen[1]
+        self._assert_generic(
+            ApiError(seen[0][2], seen[0][0], seen[0][1]), cid, same, cross, "cycle"
+        )
+
+    async def test_concurrent_create_race_only_one_succeeds(self, guild_pairing_db: Any) -> None:
+        """A rival mapping committed during the awaited role check is caught on recheck."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        cid2 = await self._foreign_community(dal, G_A, G_B)
+        raced: list[bool] = []
+
+        def lister(dal_: Any, community_id: int, guild: str) -> Any:
+            async def _roles() -> Any:
+                if not raced:
+                    raced.append(True)  # the rival passes its checks and commits first
+                    dal.discord_role_mirror_mappings.insert(
+                        community_id=cid2,
+                        source_guild_id=G_B,
+                        source_role_id=R_DST,
+                        target_guild_id=G_A,
+                        target_role_id=R_SRC,
+                    )
+                    dal.commit()
+                return await _lister(_ALL_ROLES)(dal_, community_id, guild)
+
+            return _roles()
+
+        with pytest.raises(ApiError) as exc:
+            await mirror.create_mapping(
+                dal,
+                cid,
+                source_guild_id=G_A,
+                source_role_id=R_SRC,
+                target_guild_id=G_B,
+                target_role_id=R_DST,
+                list_roles=lister,
+            )
+        assert exc.value.status_code == 409
+        assert mirror.list_mappings(dal, cid) == []
+        assert len(mirror.list_mappings(dal, cid2)) == 1
+
+    async def test_reconcile_revokes_grants_of_cyclic_mappings(self, guild_pairing_db: Any) -> None:
+        """Pre-existing cyclic rows are never reconciled; their ledger grants are revoked."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        t = dal.discord_role_mirror_mappings
+        ids = []
+        for sg, sr, tg, tr in ((G_A, R_SRC, G_B, R_DST), (G_B, R_DST, G_A, R_SRC)):
+            ids.append(
+                t.insert(
+                    community_id=cid,
+                    source_guild_id=sg,
+                    source_role_id=sr,
+                    target_guild_id=tg,
+                    target_role_id=tr,
+                )
+            )
+        dal.discord_role_mirror_grants.insert(
+            mapping_id=ids[0], platform="discord", platform_user_id="u1"
+        )
+        dal.commit()
+        fake = _FakeGuilds({G_A: {"u1": {R_SRC}}, G_B: {"u1": {R_DST}}})
+        summary = await _run(dal, fake)
+        assert summary.mappings_examined == 2
+        assert summary.mappings_failed == 2
+        assert fake.adds == []
+        assert fake.removes == [(G_B, "u1", R_DST)]
+        assert dal(dal.discord_role_mirror_grants.mapping_id > 0).count() == 0
+
+    def _cyclic_pair(self, dal: Any, cid: int) -> list[int]:
+        t = dal.discord_role_mirror_mappings
+        ids = [
+            t.insert(
+                community_id=cid,
+                source_guild_id=sg,
+                source_role_id=sr,
+                target_guild_id=tg,
+                target_role_id=tr,
+            )
+            for sg, sr, tg, tr in ((G_A, R_SRC, G_B, R_DST), (G_B, R_DST, G_A, R_SRC))
+        ]
+        dal.discord_role_mirror_grants.insert(
+            mapping_id=ids[0], platform="discord", platform_user_id="u1"
+        )
+        dal.commit()
+        return ids
+
+    async def test_cyclic_revoke_keeps_rows_on_incomplete_snapshot(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """An unproven (incomplete) target snapshot never deletes ledger rows; retried later."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        ids = self._cyclic_pair(dal, cid)
+        fake = _FakeGuilds({G_A: {"u1": {R_SRC}}, G_B: {"u2": set()}}, complete=False)
+        await _run(dal, fake)
+        assert fake.removes == []
+        assert dal(dal.discord_role_mirror_grants.mapping_id == ids[0]).count() == 1
+        row = dal(dal.discord_role_mirror_mappings.id == ids[0]).select().first()
+        assert row.last_error == "MirrorCycle:incomplete_snapshot"
+
+    async def test_cyclic_revoke_never_calls_discord_for_unpaired_guild(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """Parity with NotPairedError: an unpaired target guild is never touched, rows stay."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A)
+        ids = self._cyclic_pair(dal, cid)
+        fake = _FakeGuilds({G_A: {"u1": {R_SRC}}, G_B: {"u1": {R_DST}}})
+        await _run(dal, fake)
+        assert fake.removes == []
+        assert dal(dal.discord_role_mirror_grants.mapping_id == ids[0]).count() == 1
+        row = dal(dal.discord_role_mirror_mappings.id == ids[0]).select().first()
+        assert row.last_error == "MirrorCycle:not_paired"
+
+    async def test_three_guild_cycle_is_refused_and_lock_is_global(
+        self, guild_pairing_db: Any
+    ) -> None:
+        """A cycle through a third guild (G1->G2, G2->G3 exist; G3->G1 refused), one lock key."""
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B, G_C)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_B, G_C)
+        await _map(dal, cid2, G_B, R_DST, G_C, R_SRC)
+        cid3 = await self._foreign_community_n(dal, "third-corp", G_C, G_A)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid3, G_C, R_SRC, G_A, R_SRC)
+        assert exc.value.status_code == 409
+        assert mirror.list_mappings(dal, cid3) == []
+        assert mirror._GRAPH_LOCK_KEY == "role_mirror:graph"
+
+    async def _foreign_community_n(self, dal: Any, slug: str, *guilds: str) -> int:
+        t = dal.tenants.insert(slug=slug, is_active=True, is_global=False)
+        cid = dal.communities.insert(name=f"{slug}-community", tenant_id=t)
+        dal.commit()
+        _pair(dal, cid, *guilds, shared_legacy=True)
+        return int(cid)
+
+    async def test_cross_tenant_binding_vs_mirror_is_generic(self, guild_pairing_db: Any) -> None:
+        dal, cid, _t, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._foreign_community(dal, G_B)
+        p2 = next(p for p in list_pairings(dal, cid2) if p.discord_guild_id == G_B)
+        with pytest.raises(ApiError) as exc:
+            create_binding(dal, cid2, p2.id, sync_scope="moderator", discord_role_id=R_DST)
+        self._assert_generic(exc.value, cid, R_DST)
+        assert exc.value.details is None
+
+    async def test_target_role_cannot_be_target_of_another_community_mapping(
+        self, guild_pairing_db: Any
+    ) -> None:
+        dal, cid, tenant_id, _g = guild_pairing_db
+        _pair(dal, cid, G_A, G_B)
+        await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
+        cid2 = await self._other_community(dal, tenant_id, G_B, G_C)
+        with pytest.raises(ApiError) as exc:
+            await _map(dal, cid2, G_C, R_SRC, G_B, R_DST)
+        assert exc.value.status_code == 409
+
+
 class TestReconcile:
     async def _setup(self, dal: Any, cid: int) -> Any:
         _pair(dal, cid, G_A, G_B)
@@ -533,7 +830,16 @@ class TestReconcile:
         dal, cid, _t, _g = guild_pairing_db
         _pair(dal, cid, G_A, G_B)
         await _map(dal, cid, G_A, R_SRC, G_B, R_DST)
-        await _map(dal, cid, G_A, R_OTHER, G_B, R_DST)
+        # create_mapping now forbids a shared target; insert directly to keep the defensive
+        # "another mapping still wants it" removal guard covered.
+        dal.discord_role_mirror_mappings.insert(
+            community_id=cid,
+            source_guild_id=G_A,
+            source_role_id=R_OTHER,
+            target_guild_id=G_B,
+            target_role_id=R_DST,
+        )
+        dal.commit()
         fake = _FakeGuilds({G_A: {U1: {R_SRC, R_OTHER}}, G_B: {U1: set()}})
         await _run(dal, fake)
         assert len(fake.adds) == 1  # second mapping sees the role the first just granted
@@ -638,8 +944,9 @@ def app(guild_pairing_db: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
     dal, *_ = guild_pairing_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(guild_pairing_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(guild_pairing_bp)
     monkeypatch.setattr(bp, "feature_enabled", AsyncMock(return_value=True))
     monkeypatch.setattr(bp, "_list_roles_for_mirror", _lister(_ALL_ROLES))
     return quart_app
@@ -659,9 +966,9 @@ class TestRoutes:
     async def test_member_forbidden(
         self, app: Quart, auth_headers: Any, guild_pairing_db: Any
     ) -> None:
-        _d, cid, *_ = guild_pairing_db
+        dal, cid, *_ = guild_pairing_db
         c = app.test_client()
-        url = f"/api/v1/communities/{cid}/discord/role-mirrors"
+        url = f"/api/v1/communities/{public_id(dal, cid)}/discord/role-mirrors"
         assert (await c.get(url, headers=auth_headers(scope="profile:read"))).status_code == 403
         r = await c.post(
             url,
@@ -673,7 +980,10 @@ class TestRoutes:
         )
         assert r.status_code == 403
         assert (
-            await c.delete(f"{url}/1", headers=auth_headers(scope="community.guild_pairing:read"))
+            await c.delete(
+                f"{url}/00000000-0000-4000-8000-000000000001",
+                headers=auth_headers(scope="community.guild_pairing:read"),
+            )
         ).status_code == 403
 
     async def test_create_list_delete_roundtrip(
@@ -682,7 +992,7 @@ class TestRoutes:
         dal, cid, *_ = guild_pairing_db
         _pair(dal, cid, G_A, G_B)
         c = app.test_client()
-        url = f"/api/v1/communities/{cid}/discord/role-mirrors"
+        url = f"/api/v1/communities/{public_id(dal, cid)}/discord/role-mirrors"
         w = {
             **auth_headers(scope="community.guild_pairing:write"),
             "Content-Type": "application/json",
@@ -726,7 +1036,14 @@ class TestRoutes:
         c2 = dal.communities.insert(name="oc", tenant_id=t2)
         dal.commit()
         r = await app.test_client().get(
-            f"/api/v1/communities/{c2}/discord/role-mirrors",
+            f"/api/v1/communities/{public_id(dal, c2)}/discord/role-mirrors",
             headers=auth_headers(scope="community.guild_pairing:read"),
         )
         assert r.status_code == 404
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

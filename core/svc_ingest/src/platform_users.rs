@@ -169,8 +169,23 @@ impl HubPlatformUserResolver {
         community_id: i64,
         uuids: &[String],
     ) -> Result<HashMap<String, SlotValue>, UserResolveError> {
+        self.resolve_many_for(PLATFORM, tenant_id, community_id, uuids)
+            .await
+    }
+
+    /// [`Self::resolve_many`] for an explicit platform (Twitch host-originated moderation).
+    ///
+    /// # Errors
+    /// As [`Self::resolve_many`].
+    pub async fn resolve_many_for(
+        &self,
+        platform: &str,
+        tenant_id: i64,
+        community_id: i64,
+        uuids: &[String],
+    ) -> Result<HashMap<String, SlotValue>, UserResolveError> {
         let result = self
-            .resolve_many_inner(tenant_id, community_id, uuids)
+            .resolve_many_inner(platform, tenant_id, community_id, uuids)
             .await;
         let label = outcome(result.as_ref().err().copied());
         RESOLVE.with_label_values(&[label]).inc();
@@ -188,6 +203,7 @@ impl HubPlatformUserResolver {
 
     async fn resolve_many_inner(
         &self,
+        platform: &str,
         tenant_id: i64,
         community_id: i64,
         uuids: &[String],
@@ -205,7 +221,7 @@ impl HubPlatformUserResolver {
             .resolve_platform_user(
                 tenant_id.to_string(),
                 community_id,
-                PLATFORM.to_string(),
+                platform.to_string(),
                 uuids.to_vec(),
             )
             .await
@@ -238,6 +254,22 @@ impl PlatformUserResolver for HubPlatformUserResolver {
             .resolve_many(tenant_id, community_id, &[user_uuid.to_string()])
             .await?;
         all.remove(user_uuid).ok_or(UserResolveError::Unavailable)
+    }
+}
+
+impl crate::connector::sender_exec::twitch_slots::TwitchUserResolver for HubPlatformUserResolver {
+    fn resolve<'a>(
+        &'a self,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &'a str,
+    ) -> crate::commands_reconcile::BoxFut<'a, Result<SlotValue, UserResolveError>> {
+        Box::pin(async move {
+            let mut all = self
+                .resolve_many_for("twitch", tenant_id, community_id, &[user_uuid.to_string()])
+                .await?;
+            all.remove(user_uuid).ok_or(UserResolveError::Unavailable)
+        })
     }
 }
 

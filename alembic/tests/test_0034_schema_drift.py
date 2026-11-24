@@ -39,7 +39,9 @@ _TABLE_MODEL_PAIRS = [
 # `test_0035_schema_drift.py` documents for the renamed tenant_platform_apps table.
 _COLUMNS_ADDED_BY_LATER_MIGRATIONS: dict[str, set[str]] = {
     # 0036_role_sync_community_role: Discord -> platform direction's own binding column.
-    "community_role_sync_bindings": {"community_role"},
+    "community_role_sync_bindings": {"community_role", "public_id"},
+    # entity-public-ids migration: UUID that crosses the API boundary.
+    "guild_tenant_pairings": {"public_id"},
 }
 
 

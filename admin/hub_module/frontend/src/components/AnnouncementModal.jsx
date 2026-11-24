@@ -4,7 +4,7 @@
  * Migrated to use FormModalBuilder from @penguintechinc/react-libs
  */
 import { useMemo } from 'react';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from './FormModal';
 import { WADDLES_COLORS } from '../theme/waddlebotTheme';
 
 export default function AnnouncementModal({

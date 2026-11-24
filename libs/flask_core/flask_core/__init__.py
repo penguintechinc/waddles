@@ -132,12 +132,6 @@ from .read_replica import (
     ReplicaStatus,
     create_read_replica_manager
 )
-from .tracing import (
-    TracingManager,
-    create_tracing_manager,
-    init_tracing,
-    get_tracing_manager
-)
 from .correlation import (
     CorrelationIDManager,
     CorrelationIDFilter,
@@ -353,11 +347,7 @@ __all__ = [
     "ReplicaMetrics",
     "ReplicaStatus",
     "create_read_replica_manager",
-    # Tracing & Observability
-    "TracingManager",
-    "create_tracing_manager",
-    "init_tracing",
-    "get_tracing_manager",
+    # Observability (tracing is configured by each service from OTEL_* env; see hub_api/telemetry.py)
     # Correlation IDs
     "CorrelationIDManager",
     "CorrelationIDFilter",

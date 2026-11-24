@@ -3,8 +3,7 @@
 Standalone Quart app registering only `analytics_bp` (PORTING.md test
 pattern), `community_db` fixture for tenant/membership-scoped Scenario 2
 routes, `AsyncMock`-stubbed `AnalyticsCoreProxyClient.get` (no real network
-I/O, same technique `test_event_blueprint.py::proxy_stub` uses against
-`EventCalendarProxyClient.request`).
+I/O).
 
 Fail-first proof (executed, not narrated) for the two SECURITY fixes this
 module's own docstring documents:
@@ -34,6 +33,8 @@ import blueprints.v1.analytics as analytics_module
 from blueprints.v1.analytics import analytics_bp
 from services import analytics_service
 from services.analytics_proxy import ProxyResult
+from tests.community_ids import cpath, install_community_ids
+from tests.user_ids import uid
 
 
 @pytest.fixture
@@ -41,9 +42,9 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(analytics_bp)
     quart_app.config["dal"] = dal
-    quart_app.config["async_dal"] = dal
     return quart_app
 
 
@@ -100,8 +101,8 @@ class TestAuthBypass:
             "/api/v1/analytics/platform/growth",
             "/api/v1/analytics/platform/activity",
             "/api/v1/analytics/platform/community-health",
-            "/api/v1/analytics/admin/users/1/stats",
-            "/api/v1/analytics/admin/users/1/reputation",
+            f"/api/v1/analytics/admin/users/{uid(1)}/stats",
+            f"/api/v1/analytics/admin/users/{uid(1)}/reputation",
         ],
     )
     async def test_missing_token_is_401(self, client: Any, path: str, proxy_stub: Any) -> None:
@@ -111,8 +112,14 @@ class TestAuthBypass:
     async def test_community_member_route_missing_token_is_401(
         self, client: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
-        response = await client.get(f"/api/v1/analytics/community/{community_id}/members/7/stats")
+        dal, community_id = community_db
+        response = await client.get(
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
+                community_id,
+            )
+        )
         assert response.status_code == 401
 
 
@@ -266,6 +273,9 @@ class TestCommunityHealthFeatureGate:
             headers=auth_headers(scope="analytics:read"),
         )
         assert response.status_code == 402
+        err = (await response.get_json())["error"]
+        assert err["code"] == "FEATURE_NOT_ENABLED"
+        assert "Professional plan" in err["message"]
         proxy_stub.assert_not_awaited()
 
     async def test_flag_on_is_200(
@@ -331,7 +341,7 @@ class TestSuperAdminUserViews:
         self, client: Any, user_auth_headers: Any, proxy_stub: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/analytics/admin/users/99/stats",
+            f"/api/v1/analytics/admin/users/{uid(99)}/stats",
             headers=user_auth_headers(user_id=1, scope="analytics:read"),
         )
         assert response.status_code == 403
@@ -340,7 +350,7 @@ class TestSuperAdminUserViews:
         self, client: Any, user_auth_headers: Any, proxy_stub: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/analytics/admin/users/99/stats",
+            f"/api/v1/analytics/admin/users/{uid(99)}/stats",
             headers=user_auth_headers(user_id=1, scope="users:admin"),
         )
         assert response.status_code == 200
@@ -352,7 +362,7 @@ class TestSuperAdminUserViews:
         self, client: Any, user_auth_headers: Any, proxy_stub: Any
     ) -> None:
         response = await client.get(
-            "/api/v1/analytics/admin/users/99/reputation",
+            f"/api/v1/analytics/admin/users/{uid(99)}/reputation",
             headers=user_auth_headers(user_id=1, scope="users:admin"),
         )
         assert response.status_code == 200
@@ -370,9 +380,13 @@ class TestCommunityMemberViews:
     async def test_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/7/stats",
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
+                community_id,
+            ),
             headers=auth_headers(scope="community.analytics:read"),
         )
         assert response.status_code == 403
@@ -384,7 +398,11 @@ class TestCommunityMemberViews:
         dal.community_members.insert(community_id=community_id, user_id="7", is_active=True)
         dal.commit()
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/7/stats",
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 200
@@ -402,7 +420,11 @@ class TestCommunityMemberViews:
         dal.community_members.insert(community_id=community_id, user_id="7", is_active=True)
         dal.commit()
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/7/reputation",
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/reputation",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 200
@@ -425,7 +447,11 @@ class TestCrossTenantLeak:
         dal.commit()
 
         response = await client.get(
-            f"/api/v1/analytics/community/{other_community_id}/members/7/stats",
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/stats",
+                other_community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 404
@@ -434,10 +460,14 @@ class TestCrossTenantLeak:
     async def test_non_member_user_is_404(
         self, client: Any, user_auth_headers: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         # No community_members row for user_id="404" -- never joined this community.
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/404/stats",
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(404)}/stats",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 404
@@ -446,9 +476,13 @@ class TestCrossTenantLeak:
     async def test_non_member_user_is_404_on_reputation_route_too(
         self, client: Any, user_auth_headers: Any, community_db: Any, proxy_stub: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/analytics/community/{community_id}/members/404/reputation",
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(404)}/reputation",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 404
@@ -465,7 +499,11 @@ class TestCrossTenantLeak:
         dal.commit()
 
         response = await client.get(
-            f"/api/v1/analytics/community/{other_community_id}/members/7/reputation",
+            cpath(
+                dal,
+                f"/api/v1/analytics/community/{{community_id}}/members/{uid(7)}/reputation",
+                other_community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.analytics:admin"),
         )
         assert response.status_code == 404
@@ -507,6 +545,41 @@ class TestMaskedFailure:
             "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
         )
         assert response.status_code == 502
+        err = (await response.get_json())["error"]
+        assert err["code"] == "ANALYTICS_UNAVAILABLE"
+        assert "analytics-core" in err["message"]
+        assert "unreachable" in err["message"]
+
+    async def test_url_unset_is_503_analytics_unavailable(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        body = {"error": "service_unavailable", "service": "analytics-core"}
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=503, body=body)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 503
+        payload = await response.get_json()
+        assert payload["success"] is False
+        assert payload["error"]["code"] == "ANALYTICS_UNAVAILABLE"
+
+    async def test_upstream_5xx_is_real_error_not_unavailable(
+        self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setattr(
+            analytics_module._proxy_client,
+            "get",
+            AsyncMock(return_value=ProxyResult(ok=False, status_code=500, body=None)),
+        )
+        response = await client.get(
+            "/api/v1/analytics/platform/activity", headers=auth_headers(scope="analytics:read")
+        )
+        assert response.status_code == 502
+        assert (await response.get_json())["error"]["code"] == "ANALYTICS_UPSTREAM_ERROR"
 
     async def test_upstream_4xx_passes_status_with_rewrapped_body(
         self, client: Any, auth_headers: Any, monkeypatch: pytest.MonkeyPatch
@@ -553,3 +626,6 @@ class TestMaskedFailure:
         )
         assert response.status_code == 404
         assert (await response.get_json())["success"] is False
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

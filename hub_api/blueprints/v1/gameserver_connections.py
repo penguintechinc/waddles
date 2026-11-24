@@ -35,13 +35,16 @@ from services.provider_connections.gameserver import (
     parse_sealed_target,
 )
 from services.provider_connections.gameserver_probe import probe
+from services.provider_connections.public_ref import translate_connection_id
 
 logger = logging.getLogger(__name__)
 
 gameserver_connections_bp = Blueprint("v1_gameserver_connections", __name__, url_prefix="/api/v1")
+# `<puuid:connection_id>` -> numeric before the handler, resolved through the community's grant.
+gameserver_connections_bp.before_request(translate_connection_id)
 
-_BASE = "/communities/<int:community_id>/gameserver-connections"
-_ONE = _BASE + "/<int:connection_id>"
+_BASE = "/communities/<cuuid:community_id>/gameserver-connections"
+_ONE = _BASE + "/<puuid:connection_id>"
 
 
 @dataclass(slots=True, frozen=True)
@@ -62,7 +65,7 @@ class CreateGameServerRequest:
 class GameServerDTO:
     """What an admin may see of a registered server: ids and display fields only."""
 
-    connectionId: int
+    connectionId: str
     serverId: str
     game: str | None
     label: str | None
@@ -99,7 +102,7 @@ def _dto(view: object) -> GameServerDTO:
     binding = view.binding  # type: ignore[attr-defined]
     meta = view.public_metadata  # type: ignore[attr-defined]
     return GameServerDTO(
-        connectionId=binding.connection.id,
+        connectionId=str(binding.connection.public_id),
         serverId=str(meta.get("server_id", "")),
         game=meta.get("game"),
         label=meta.get("label"),

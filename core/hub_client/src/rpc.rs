@@ -84,6 +84,7 @@ impl RpcGuard {
                 "ok".to_owned()
             }
             Err(HubClientError::Grpc(status)) if is_caller_error(status) => {
+                self.breaker.record_neutral();
                 format!("{:?}", status.code())
             }
             Err(err) => {

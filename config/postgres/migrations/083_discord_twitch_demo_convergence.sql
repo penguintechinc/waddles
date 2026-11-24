@@ -11,19 +11,19 @@
 -- seeded a split app_id per connector that never connected:
 --   - migration 082 (this file's own predecessor, `feature/v3-bundle-
 --     discord-action`, already merged to release) seeded
---     `waddles.bot.discord.default` with ONLY an `action` stage.
+--     `penguintechinc.waddles.discord-pipeline` with ONLY an `action` stage.
 --   - `feature/v3-svc-gateway-discord`'s own (now-deleted)
 --     `082_discord_gateway_bundle.sql` seeded a SEPARATE
---     `waddles.bot.discord.gateway` with only an `ingest` stage.
+--     `penguintechinc.waddles.bot-discord-gateway` with only an `ingest` stage.
 --   - `feature/v3-connector-twitch`'s own (now-deleted)
 --     `082_twitch_gateway_bundle.sql`/`083_twitch_send_action_bundle.sql`
---     split Twitch the same way: `waddles.bot.twitch.gateway` (ingest
---     only) vs `waddles.bot.twitch.default` (action only).
+--     split Twitch the same way: `penguintechinc.waddles.bot-twitch-gateway` (ingest
+--     only) vs `penguintechinc.waddles.twitch-pipeline` (action only).
 --
 -- This migration merges Discord's ingest+process stages onto the ONE
--- `waddles.bot.discord.default` row migration 082 already created (an
+-- `penguintechinc.waddles.discord-pipeline` row migration 082 already created (an
 -- UPSERT, since 082 is immutable -- already shipped on release), and
--- inserts ONE fresh `waddles.bot.twitch.default` row carrying all three
+-- inserts ONE fresh `penguintechinc.waddles.twitch-pipeline` row carrying all three
 -- Twitch stages at once (no pre-existing release-side row to merge onto).
 -- Both app_ids' in-process ingest manifests
 -- (`core/svc_ingest/bundles/{discord_gateway,twitch_gateway}_manifest.py`)
@@ -57,10 +57,10 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.bot.discord.default',
+    'penguintechinc.waddles.discord-pipeline',
     '1.0.0',
     'bot',
-    'waddles.bot.discord',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     TRUE,
@@ -81,10 +81,10 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.bot.twitch.default',
+    'penguintechinc.waddles.twitch-pipeline',
     '1.0.0',
     'bot',
-    'waddles.bot.twitch',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     TRUE,
@@ -104,13 +104,13 @@ ON CONFLICT (app_id) DO NOTHING;
 -- required for either app_id to appear in ANY stage's distribution
 -- response (see module docstring above).
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.bot.discord.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.discord-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;
 
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.bot.twitch.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.twitch-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

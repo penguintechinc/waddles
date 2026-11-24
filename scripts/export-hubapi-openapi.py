@@ -22,7 +22,7 @@ OUT = ROOT / "openapi" / "v1.yaml"
 
 def main() -> int:
     """Generate the spec and write it; fail loudly on an empty path set."""
-    os.environ.setdefault("SECRET_KEY", secrets.token_hex(24))
+    os.environ.setdefault("SESSION_MAC_KEY", secrets.token_hex(24))
     os.environ.setdefault("ENVIRONMENT", "development")
     sys.path.insert(0, str(ROOT / "hub_api"))
     from app import create_app  # noqa: PLC0415

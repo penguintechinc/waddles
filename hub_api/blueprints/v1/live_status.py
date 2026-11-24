@@ -49,6 +49,7 @@ from quart import Blueprint, Response, current_app, jsonify, request
 
 from services import live_status_service as svc
 from services.community_common import is_valid_service_key
+from services.db_routing import get_read_dals, reads_from_replica, record_primary_read
 from services.errors import ApiError, bad_request, not_found
 from services.schema import bind_streaming_tables
 
@@ -61,10 +62,24 @@ live_status_internal_bp = Blueprint(
 
 
 def _dal() -> tuple[Any, Any]:
-    """Return `(async_dal, dal)` from app config, ensuring this group's tables are bound."""
-    async_dal, dal = current_app.config["async_dal"], current_app.config["dal"]
+    """Return `(async_dal, read_dal)` with this group's tables bound on the serving DAL.
+
+    Both routes are pure GET reads polled by overlays; replica lag (sub-second typical) only
+    delays a live/offline flip by that much, so they are replica-eligible.
+    """
+    return get_read_dals(binders=(bind_streaming_tables,))
+
+
+def _gate_dal() -> Any:
+    """Primary DAL for the community existence/public-visibility gate.
+
+    The gate is an access decision (private/inactive communities must 404 immediately), so it
+    never reads a possibly-stale replica row; only the live-status data does.
+    """
+    record_primary_read("live_status.community_gate")
+    dal = current_app.config["dal"]
     bind_streaming_tables(dal)
-    return async_dal, dal
+    return dal
 
 
 def _err(exc: ApiError) -> tuple[dict[str, object], int]:
@@ -117,29 +132,36 @@ def _envelope(data: LiveStatusResponseDTO) -> Response:
     return response
 
 
-@live_status_public_bp.route("/communities/<int:community_id>/live", methods=["GET"])
+@live_status_public_bp.route("/communities/<cuuid:community_id>/live", methods=["GET"])
+@reads_from_replica("live_status.get_public_live_status")
 async def get_public_live_status(community_id: int) -> Any:
     """Unauthenticated, rate-limited read of one community's current live status.
 
     Same public-community gate as `blueprints/v1/public_music_queue.py`'s
     own `get_public_queue`.
     """
-    async_dal, dal = _dal()
+    gate_dal = _gate_dal()
     try:
         community_row = (
-            dal(
-                (dal.communities.id == community_id)
-                & (dal.communities.is_active == True)  # noqa: E712 - pydal idiom
-                & (dal.communities.deleted_at == None)  # noqa: E711 - pydal idiom
-                & (dal.communities.is_public == True)  # noqa: E712 - pydal idiom
+            gate_dal(
+                (gate_dal.communities.id == community_id)
+                & (gate_dal.communities.is_active == True)  # noqa: E712 - pydal idiom
+                & (gate_dal.communities.deleted_at == None)  # noqa: E711 - pydal idiom
+                & (gate_dal.communities.is_public == True)  # noqa: E712 - pydal idiom
             )
-            .select(dal.communities.id)
+            .select(gate_dal.communities.id)
             .first()
         )
         if community_row is None:
             return _err(not_found("Community not found"))
+        async_dal, dal = _dal()
         status = await svc.get_live_status(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug(
+            "get_public_live_status.api_error status=%s",
+            exc.status_code,
+            extra={"community_id": community_id},
+        )
         return _err(exc)
     except Exception as exc:  # noqa: BLE001 - last-resort 500 must still be JSON, never an empty body
         logger.exception(
@@ -151,6 +173,7 @@ async def get_public_live_status(community_id: int) -> Any:
 
 
 @live_status_internal_bp.route("/live", methods=["GET"])
+@reads_from_replica("live_status.get_internal_live_status")
 async def get_internal_live_status() -> Any:
     """`GET /api/v1/internal/live?community_id=` -- `X-Service-Key` only, no public/active gate."""
     if not is_valid_service_key(request):
@@ -165,13 +188,23 @@ async def get_internal_live_status() -> Any:
     if community_id is None:
         return _err(bad_request("community_id is required"))
 
-    async_dal, dal = _dal()
+    gate_dal = _gate_dal()
     try:
-        community_row = dal(dal.communities.id == community_id).select(dal.communities.id).first()
+        community_row = (
+            gate_dal(gate_dal.communities.id == community_id)
+            .select(gate_dal.communities.id)
+            .first()
+        )
         if community_row is None:
             return _err(not_found("Community not found"))
+        async_dal, dal = _dal()
         status = await svc.get_live_status(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug(
+            "get_internal_live_status.api_error status=%s",
+            exc.status_code,
+            extra={"community_id": community_id},
+        )
         return _err(exc)
     except Exception as exc:  # noqa: BLE001 - last-resort 500 must still be JSON, never an empty body
         logger.exception(

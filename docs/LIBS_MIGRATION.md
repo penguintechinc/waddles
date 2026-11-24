@@ -9,13 +9,9 @@ and imported by modules across `action/`, `core/`, `trigger/`, `services/`, and 
 Subdirectories: `flask_core/`, `platform_receiver/`, `calendar_sync/`, `module_sdk/`,
 `presence/`, `grpc_protos/`.
 
-## Known fork: `services/core-community/libs/flask_core/`
+## Former fork: `core-community` `flask_core` (retired)
 
-`services/core-community/libs/flask_core/` is a **diverged fork** of the root copy:
-- Root `/libs/flask_core/` uses **PyDAL** for database operations.
-- The core-community fork uses **penguin-dal** (the standards-mandated runtime DAL).
-- Divergence is concentrated in `database.py` and `read_replica.py` (DATABASE_URL
-  construction and read-replica logic).
+The former `core-community` `flask_core` fork (which used `penguin-dal`) has been retired; active Python services use `libs/flask_core/` and `hub_api/`.
 
 All other libs subdirectories (`platform_receiver`, `calendar_sync`, `module_sdk`,
 `presence`, `grpc_protos`) are byte-identical between the two locations.

@@ -17,6 +17,7 @@ from typing import Any
 
 from config import HubAPIConfig
 from services import landing_stats_cache, public_service
+from services.schema import bind_landing_stats_tables
 from services.valkey_admin_client import build_client
 
 logger = logging.getLogger("waddles.hub_api.refresh_landing_stats")
@@ -39,6 +40,7 @@ async def _run() -> int:
 
     cfg = HubAPIConfig.from_env()
     async_dal = init_database(cfg.database_url, pool_size=2)
+    bind_landing_stats_tables(async_dal.dal)
     client = build_client()
     try:
         await refresh(async_dal, async_dal.dal, cfg, client)

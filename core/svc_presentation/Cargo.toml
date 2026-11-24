@@ -22,6 +22,8 @@ path = "src/main.rs"
 # so cargo-deny/the workspace dependency graph never sees two resolved
 # versions of the same crate.
 [dependencies]
+# Direct pin so the entrypoint can install the process-level CryptoProvider (see src/crypto.rs).
+rustls = { version = "=0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 tokio = { version = "=1.53.3", features = ["full"] }
 # "ws" (not a default axum feature) -- P4's live overlay viewer channel
 # (`http::overlay::live_ws`) needs `axum::extract::ws`; "tokio" (default)
@@ -43,7 +45,7 @@ tracing-opentelemetry = "=0.33.0"
 prometheus = "=0.14.0"
 utoipa = { version = "=5.5.0", features = ["axum_extras", "uuid"] }
 uuid = { version = "=1.26.1", features = ["v4", "serde"] }
-chrono = { version = "=0.4.45", features = ["serde"] }
+time = { version = "=0.3.55", default-features = false, features = ["std"] }
 thiserror = "=2.0.20"
 anyhow = "=1.0.104"
 clap = { version = "=4.6.6", features = ["derive", "env"] }
@@ -58,7 +60,7 @@ sea-orm = { version = "=2.0.2", default-features = false, features = [
     "runtime-tokio-rustls",
     "macros",
     "with-json",
-    "with-chrono",
+    "with-time",
     # `overlay_images.asset_id` (migration 101) is a `UUID` column --
     # `with-uuid` is what makes `sea_orm::entity::prelude::Uuid` resolve to
     # the `uuid` crate's type in a `DeriveEntityModel`, same convention
@@ -129,7 +131,7 @@ base64 = "=0.22.1"
 # already resolved at this exact version transitively (`core/svc_streaming`,
 # `core/bundle_active_set`); declared directly so `crate::images::render`'s
 # return type is nameable.
-url = "=2.5.8"
+url = "=2.5.9"
 # `Signer::signed_url`'s `method: http::Method` parameter -- already
 # resolved at this exact version transitively (axum/hyper); declared
 # directly for the same reason as `url` above.
@@ -143,7 +145,7 @@ bytes = "=1.12.1"
 # `core/svc_action`/`core/svc_process`/`core/svc_ingest` already use, so no
 # second resolved revision of this unpublished crate appears anywhere in
 # this repo.
-penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "7110125df28045322e7c4c527d1d1be806f2f086", package = "penguin-licensing", version = "=0.1.0" }
+penguin-licensing = { git = "https://github.com/penguintechinc/penguin-libs.git", rev = "f512126656cfca0dc0d52f47a92180eceeddbbed", package = "penguin-licensing", version = "=0.1.1" }
 
 # P3's live SSE stream (`overlay::hub`/`http::overlay::live_event_stream`)
 # builds a `Stream` by hand with `futures::stream::unfold` rather than
@@ -167,6 +169,28 @@ egress_detokenizer = { path = "../egress_detokenizer", version = "=0.1.0" }
 # `Arc<hub_client::HubClient>`. Its build.rs compiles the repo-root
 # `proto/` tree (needs `protoc`; see Dockerfile.rust).
 hub_client = { path = "../hub_client", version = "=0.1.0" }
+# Server-side HTML/SVG sanitizer for sanitized-html widgets (`overlay::sanitize`), replacing the
+# hand-rolled tag scanner: html5ever-backed, so the sanitizer and the browser agree on what the
+# markup is. Supply-chain validated before adoption: maintained by a rust-lang member (notriddle),
+# MIT OR Apache-2.0, ~21M downloads, repo github.com/rust-ammonia/ammonia, no build script.
+# =4.2.5 is the RUSTSEC-2026-0533 fix (mutation XSS via embedded SVG/MathML -- exactly the SVG
+# subset widgets may use); 4.2.4 fails `cargo deny`. 4.2.5 (published 2026-11-13) is under the
+# two-week age floor, accepted ONLY because it is the advisory's remedy: the 4.2.4 -> 4.2.5 diff
+# was reviewed (two namespace checks in src/lib.rs plus regression tests; lockfile churn only).
+# Hash-locked by the committed Cargo.lock.
+ammonia = "=4.2.5"
+# Bundle surface contract validation (`surfaces::contract`): compiled with remote `$ref`
+# resolution compiled out (no `resolve-http`/`resolve-file`), so a hostile schema can never make
+# the service fetch anything.
+jsonschema = { version = "=0.60.2", default-features = false }
+# The surface gRPC contract: generated stubs (server side used here) shared with the stage hosts'
+# client. Its build.rs compiles `proto/waddles/presentation/internal/v1` (needs `protoc` and the
+# repo-root `proto/` tree, same as `hub_client`; see Dockerfile.rust).
+bundle-host-surface = { path = "../bundle_host_surface", version = "=0.1.0" }
+# The in-cluster gRPC server (`surfaces::ingress`): TLS via rustls (`tls-ring`, the one rustls
+# line `hub_client`/`service_auth` already resolve). Same pin as the rest of the repo.
+tonic = { version = "=0.14.6", features = ["transport", "tls-ring"] }
+tokio-stream = { version = "=0.1.19", features = ["net"] }
 
 [dev-dependencies]
 http-body-util = "=0.1.3"

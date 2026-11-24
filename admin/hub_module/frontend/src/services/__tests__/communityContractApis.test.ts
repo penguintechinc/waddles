@@ -16,22 +16,29 @@ afterEach(() => vi.restoreAllMocks());
 
 describe('myCommunitiesApi', () => {
   it('falls back to the community name, then a numbered label, for display names', () => {
-    expect(parsePublicCommunity({ id: 1, name: 'acme' })).toMatchObject({ displayName: 'acme', memberCount: 0, description: null, joinMode: null });
-    expect(parsePublicCommunity({ id: 2 })).toMatchObject({ displayName: 'Community 2', name: null });
-    expect(parsePublicCommunity({ id: 3, displayName: 'Shown', name: 'x', memberCount: 9 })).toMatchObject({ displayName: 'Shown', memberCount: 9 });
+    expect(parsePublicCommunity({ id: '00000001-0000-4000-8000-000000000000', name: 'acme' })).toMatchObject({ displayName: 'acme', memberCount: 0, description: null, joinMode: null });
+    expect(parsePublicCommunity({ id: '00000002-0000-4000-8000-000000000000' })).toMatchObject({ displayName: 'Community 00000002-0000-4000-8000-000000000000', name: null });
+    expect(parsePublicCommunity({ id: '00000003-0000-4000-8000-000000000000', displayName: 'Shown', name: 'x', memberCount: 9 })).toMatchObject({ displayName: 'Shown', memberCount: 9 });
+  });
+
+  it('fails loudly when a community id is not a UUID string (no silent numeric fallback)', async () => {
+    expect(() => parsePublicCommunity({ id: 7, name: 'acme' })).toThrow('"id" is not a string');
+    expect(() => parsePublicCommunity({ id: 'not-a-uuid', name: 'acme' })).toThrow('not a community UUID');
+    mockApiGet(() => ({ user: { communities: [{ id: 7, name: 'n', role: 'member' }] } }));
+    await expect(fetchMyCommunities()).rejects.toThrow('"id" is not a string');
   });
 
   it('defaults a membership displayName to its name and rejects a missing role', async () => {
-    mockApiGet(() => ({ user: { communities: [{ id: 1, name: 'n', role: 'member' }] } }));
-    await expect(fetchMyCommunities()).resolves.toEqual([{ id: 1, name: 'n', displayName: 'n', role: 'member' }]);
-    mockApiGet(() => ({ user: { communities: [{ id: 1, name: 'n' }] } }));
+    mockApiGet(() => ({ user: { communities: [{ id: '00000001-0000-4000-8000-000000000000', name: 'n', role: 'member' }] } }));
+    await expect(fetchMyCommunities()).resolves.toEqual([{ id: '00000001-0000-4000-8000-000000000000', name: 'n', displayName: 'n', role: 'member' }]);
+    mockApiGet(() => ({ user: { communities: [{ id: '00000001-0000-4000-8000-000000000000', name: 'n' }] } }));
     await expect(fetchMyCommunities()).rejects.toThrow('"role" is not a string');
   });
 
   it('requires the community wrapper and a list of results', async () => {
     mockApiGet(() => ({ success: true }));
-    await expect(fetchPublicCommunity(5)).rejects.toThrow('missing "community"');
-    mockApiGet(() => ({ communities: [{ id: 1, name: 'a' }] }));
+    await expect(fetchPublicCommunity('00000005-0000-4000-8000-000000000000')).rejects.toThrow('missing "community"');
+    mockApiGet(() => ({ communities: [{ id: '00000001-0000-4000-8000-000000000000', name: 'a' }] }));
     await expect(searchPublicCommunities('a', 3)).resolves.toHaveLength(1);
   });
 });
@@ -70,11 +77,11 @@ describe('communityActivityApi', () => {
       if (url.endsWith('/my-stats')) return ok({ stats: { all_time: {}, weekly: {}, monthly: {}, ranks: {} } });
       return ok({ events: [], leaderboard: [], pagination: { offset: 0, limit: 1, total: 0, has_more: false } });
     });
-    await expect(fetchLiveActivity(3, 20)).resolves.toEqual([]);
-    await fetchLeaderboard(3, 'messages', { period: 'alltime', limit: 10, offset: 20 });
-    expect(get).toHaveBeenCalledWith('/api/v1/community/3/live-activity', { params: { limit: 20 } });
-    expect(get).toHaveBeenCalledWith('/api/v1/community/3/leaderboard/messages', { params: { period: 'alltime', limit: 10, offset: 20 } });
-    await expect(fetchMyActivityStats(3)).rejects.toThrow('"watch_time_seconds" is not a number');
+    await expect(fetchLiveActivity('00000003-0000-4000-8000-000000000000', 20)).resolves.toEqual([]);
+    await fetchLeaderboard('00000003-0000-4000-8000-000000000000', 'messages', { period: 'alltime', limit: 10, offset: 20 });
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000003-0000-4000-8000-000000000000/live-activity', { params: { limit: 20 } });
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000003-0000-4000-8000-000000000000/leaderboard/messages', { params: { period: 'alltime', limit: 10, offset: 20 } });
+    await expect(fetchMyActivityStats('00000003-0000-4000-8000-000000000000')).rejects.toThrow('"watch_time_seconds" is not a number');
   });
 });
 
@@ -84,22 +91,22 @@ describe('communityMembersApi', () => {
     expect(page.members[0]).toMatchObject({ username: 'Unknown', userId: null, avatarUrl: null, joinedAt: null });
     expect(page.totalPages).toBe(1);
     const get = mockApiGet(() => ({ members: [], pagination: { page: 1, limit: 25, total: 0 } }));
-    await fetchCommunityMembers(4, { page: 1, limit: 25, search: '  ', role: '' });
-    expect(get).toHaveBeenCalledWith('/api/v1/admin/4/members', { params: { page: 1, limit: 25 } });
+    await fetchCommunityMembers('00000004-0000-4000-8000-000000000000', { page: 1, limit: 25, search: '  ', role: '' });
+    expect(get).toHaveBeenCalledWith('/api/v1/admin/00000004-0000-4000-8000-000000000000/members', { params: { page: 1, limit: 25 } });
   });
 });
 
 describe('communityOverviewApi', () => {
   it('fills defaults for sparse streams and announcements', async () => {
     mockApiGet(() => ({ streams: [{ entityId: 'e1' }] }));
-    await expect(fetchLiveStreams(2)).resolves.toEqual([
+    await expect(fetchLiveStreams('00000002-0000-4000-8000-000000000000')).resolves.toEqual([
       { entityId: 'e1', platform: '', channelName: 'Unknown channel', title: '', game: '', thumbnailUrl: '', viewerCount: 0 },
     ]);
     const get = mockApiGet(() => ({ data: [{ id: 1, title: 'T' }] }));
-    await expect(fetchPublishedAnnouncements(2, 5)).resolves.toEqual([
+    await expect(fetchPublishedAnnouncements('00000002-0000-4000-8000-000000000000', 5)).resolves.toEqual([
       { id: 1, title: 'T', content: '', type: 'general', isPinned: false, createdByName: null, createdAt: null },
     ]);
-    expect(get).toHaveBeenCalledWith('/api/v1/admin/2/announcements', { params: { status: 'published', limit: 5 } });
+    expect(get).toHaveBeenCalledWith('/api/v1/admin/00000002-0000-4000-8000-000000000000/announcements', { params: { status: 'published', limit: 5 } });
   });
 });
 
@@ -107,26 +114,26 @@ describe('joinRequestsApi', () => {
   it('sends a null message for blank input and echoes a trimmed-empty message as null', async () => {
     const post = vi
       .spyOn(apiClient, 'post')
-      .mockResolvedValue(ok({ request: { id: 1, status: 'pending', created_at: 't' } }, 201));
-    await expect(submitJoinRequest(7, '   ')).resolves.toMatchObject({ id: 1, message: null, reviewedAt: null });
-    expect(post).toHaveBeenCalledWith('/api/v1/7/join-requests', { message: null });
-    await submitJoinRequest(7, 'hi');
-    expect(post).toHaveBeenLastCalledWith('/api/v1/7/join-requests', { message: 'hi' });
+      .mockResolvedValue(ok({ request: { id: 'req-1', status: 'pending', created_at: 't' } }, 201));
+    await expect(submitJoinRequest('00000007-0000-4000-8000-000000000000', '   ')).resolves.toMatchObject({ id: 'req-1', message: null, reviewedAt: null });
+    expect(post).toHaveBeenCalledWith('/api/v1/00000007-0000-4000-8000-000000000000/join-requests', { message: null });
+    await submitJoinRequest('00000007-0000-4000-8000-000000000000', 'hi');
+    expect(post).toHaveBeenLastCalledWith('/api/v1/00000007-0000-4000-8000-000000000000/join-requests', { message: 'hi' });
   });
 
   it('reads the caller request and tolerates its absence', async () => {
-    mockApiGet(() => ({ request: { id: 2, status: 'rejected', message: 'm', created_at: 'c', reviewed_at: 'r' } }));
-    await expect(fetchMyJoinRequest(7)).resolves.toMatchObject({ status: 'rejected', reviewedAt: 'r' });
+    mockApiGet(() => ({ request: { id: 'req-2', status: 'rejected', message: 'm', created_at: 'c', reviewed_at: 'r' } }));
+    await expect(fetchMyJoinRequest('00000007-0000-4000-8000-000000000000')).resolves.toMatchObject({ status: 'rejected', reviewedAt: 'r' });
     mockApiGet(() => ({ request: null }));
-    await expect(fetchMyJoinRequest(7)).resolves.toBeNull();
+    await expect(fetchMyJoinRequest('00000007-0000-4000-8000-000000000000')).resolves.toBeNull();
   });
 
   it('defaults sparse admin rows and totalPages; reviews with PUT', async () => {
-    mockApiGet(() => ({ requests: [{ id: 1, status: 'pending', created_at: 'c' }], pagination: { total: 1, page: 1 } }));
-    await expect(fetchJoinRequests(7)).resolves.toMatchObject({ totalPages: 1, requests: [{ username: 'Unknown', email: null, message: null }] });
+    mockApiGet(() => ({ requests: [{ id: 'req-uuid-1', status: 'pending', created_at: 'c' }], pagination: { total: 1, page: 1 } }));
+    await expect(fetchJoinRequests('00000007-0000-4000-8000-000000000000')).resolves.toMatchObject({ totalPages: 1, requests: [{ username: 'Unknown', email: null, message: null }] });
     const put = vi.spyOn(apiClient, 'put').mockResolvedValue(ok({ success: true }));
-    await reviewJoinRequest(7, 3, 'reject');
-    expect(put).toHaveBeenCalledWith('/api/v1/admin/7/join-requests/3/reject');
+    await reviewJoinRequest('00000007-0000-4000-8000-000000000000', '3', 'reject');
+    expect(put).toHaveBeenCalledWith('/api/v1/admin/00000007-0000-4000-8000-000000000000/join-requests/3/reject');
   });
 });
 
@@ -137,7 +144,7 @@ describe('reputationApi', () => {
     ]);
     expect(() => parseReputationLeaderboard({ entries: [] })).toThrow('reputation leaderboard data: expected an object');
     const get = mockApiGet(() => ({ data: { entries: [] } }));
-    await fetchReputationLeaderboard(5, 50);
-    expect(get).toHaveBeenCalledWith('/api/v1/community/5/reputation/leaderboard', { params: { limit: 50 } });
+    await fetchReputationLeaderboard('00000005-0000-4000-8000-000000000000', 50);
+    expect(get).toHaveBeenCalledWith('/api/v1/community/00000005-0000-4000-8000-000000000000/reputation/leaderboard', { params: { limit: 50 } });
   });
 });

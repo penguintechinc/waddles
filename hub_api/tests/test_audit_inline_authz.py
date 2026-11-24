@@ -20,6 +20,7 @@ from typing import Any
 import pytest
 from flask_core.tenancy import tenant_middleware
 from quart import Quart, request
+from quart.routing import QuartMap
 from sqlalchemy import select
 
 from app import create_app
@@ -42,6 +43,7 @@ from services.audit_service import AuditService
 from tests.audit_support import USER_UUID
 from tests.conftest import make_token
 from tests.test_app_factory import _test_config
+from tests.user_ids import uid
 
 #: A fixture value asserted to NEVER appear in an audit event.
 SECRET = "sk-LIVE-4f9a1c0de5-SUPERSECRET"  # noqa: S105  # nosec B105
@@ -49,13 +51,36 @@ ADMIN_TOKEN = {"scope": "community:admin tenant:admin", "user_id": "7"}
 _MUTATING = {"POST", "PUT", "PATCH", "DELETE"}
 #: Inline routes that run no `tenant_middleware` in production: the audit hook must still
 #: attribute them to the caller's tenant chain from the verified JWT claim.
-_NO_TENANT_MIDDLEWARE_PREFIX = "/api/v1/admin/<community_id>/calendar/"
+_NO_TENANT_MIDDLEWARE_PREFIX = "/api/v1/admin/<cuuid:community_id>/calendar/"
 _INLINE_PARAMS = sorted(INLINE_AUTHZ_ROUTES.items())
 
 
+_SAMPLE_UUID = "00000000-0000-4000-8000-000000000001"
+
+
+def _converter_sample(name: str, converter: type) -> str:
+    """A path value the `name` converter accepts: user 1's UUID, a sample UUID, else `1`."""
+    if name == "uuuid":
+        return uid(1)  # the seeded user the tests act on
+    regex = str(getattr(converter, "regex", ""))
+    for candidate in (_SAMPLE_UUID, "1"):
+        if re.fullmatch(regex, candidate):
+            return candidate
+    return "1"
+
+
 def _concrete(rule: str) -> str:
-    """Turn a URL rule into a concrete path (every converter becomes ``1``)."""
-    return re.sub(r"<[^>]+>", "1", rule)
+    """Concrete path built from the live converter registry, so new converters need no edit."""
+    converters = QuartMap.default_converters
+    # The floor-ban lift route (#1488) addresses the seeded floor-banned member by UUID.
+    rule = rule.replace("<uuid:user_uuid>", "00000000-0000-4000-8000-000000000002")
+
+    def _fill(match: re.Match[str]) -> str:
+        conv = match.group(1)
+        return _converter_sample(conv, converters[conv]) if conv in converters else "1"
+
+    # `<conv(args):name>` -> a sample the converter accepts; a bare `<name>` -> `1`.
+    return re.sub(r"<(?:([A-Za-z_]\w*)(?:\([^)]*\))?:)?[^>]+>", _fill, rule)
 
 
 def _auth(**kwargs: str) -> dict[str, str]:
@@ -120,9 +145,9 @@ class TestInlineAuthzCoverage:
     def test_named_sensitive_routes_are_audited(self) -> None:
         """The finding's examples: BYOK keys, stream keys, PATs, payout profile."""
         for key in (
-            ("PUT", "/api/v1/admin/<int:community_id>/ai/byok-keys"),
-            ("DELETE", "/api/v1/admin/<int:community_id>/ai/byok-keys/<provider>"),
-            ("POST", "/api/v1/admin/<int:community_id>/streams/key/regenerate"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/ai/byok-keys"),
+            ("DELETE", "/api/v1/admin/<cuuid:community_id>/ai/byok-keys/<provider>"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/streams/key/regenerate"),
             ("POST", "/api/v1/user/tokens/pat"),
             ("DELETE", "/api/v1/user/tokens/pat"),
             ("POST", "/api/v1/marketplace/vendor/profile"),
@@ -263,7 +288,7 @@ class TestInlineAuthzRoutesEmitAuditEvents:
     async def test_inline_refusal_is_an_authz_denial_not_a_success(
         self, inline_app: Quart, audit_dal: Any
     ) -> None:
-        method, rule = ("PUT", "/api/v1/admin/<int:community_id>/ai/byok-keys")
+        method, rule = ("PUT", "/api/v1/admin/<cuuid:community_id>/ai/byok-keys")
         headers = {**_auth(**ADMIN_TOKEN), "X-Force-Status": "403"}
         await _call(inline_app, method, rule, headers=headers)
         (event,) = await _events(audit_dal)

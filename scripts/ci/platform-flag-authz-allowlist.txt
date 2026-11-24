@@ -18,7 +18,6 @@ bundles/python/heist/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 
 bundles/python/inventory/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 2
 bundles/python/joke/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 2
 bundles/python/lurk/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 2
-bundles/python/music/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 2
 bundles/python/queue/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 2
 bundles/python/quote/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 2
 bundles/python/raffle/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 3
@@ -57,7 +56,6 @@ bundles/python/ticket/src/app.py  # caller-can PR (feature/sdk-caller-can) batch
 bundles/python/vote/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 6
 bundles/python/wheel/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 6
 bundles/python/winner/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 6
-bundles/python/wix/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 6
 bundles/python/bingo/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 7
 bundles/python/blackjack/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 7
 bundles/python/chatguard/src/app.py  # caller-can PR (feature/sdk-caller-can) batch 7

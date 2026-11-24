@@ -41,7 +41,8 @@ Verified against `release/v3.0.X` (`1e6b0056`) plus in-flight PRs #741, #749, #7
 | Streaming hooks | `streaming.lifecycle.subscribe` | Normal | `streaming-lifecycle` export (stage-next) | WIT MERGED; host registration deferred |
 | Moderation | `moderation.<platform>` | Dangerous | none | CATALOG-ONLY |
 | AI generation | `ai.generate` | Dangerous | `ai` (stage-next) | NOT PRODUCTION-READY -- do not enable `waddles.bundle-ai-capability` in any environment until issue #858 is resolved (`svc_process` only; self-hosted model) |
-| Object storage | `storage.objects` | Normal | none | CATALOG-ONLY |
+| Object storage (read) | `storage.objects.read` | Normal | `db` (`object_storage.*`) | WIRED (svc-process) |
+| Object storage (write) | `storage.objects.write` | Normal | `db` (`object_storage.*`) | WIRED (svc-process) |
 | Game-server network | `gameserver.net` | Dangerous | `gameserver-net` (stage-tools world only; `core/bundle_host_gameserver_net`) | host-mediated RCON/TCP/UDP to admin-registered connections; first-party core only; flag `waddles.bundle-gameserver-net`, default OFF |
 | User profile read | `users.profile.read` | Normal | none | CATALOG-ONLY |
 | Telemetry | `telemetry.logs`, `telemetry.metrics` | Normal | none | CATALOG-ONLY |
@@ -123,7 +124,7 @@ Resolution: guest names a symbolic ref → must exist in the bundle's `granted_s
 | `cc:<provider>` | the community's own OAuth client id (metadata `client_id`) + secret; the HOST does the client-credentials exchange and caches the token per community (SoundCloud → `OAuth <token>`) | cache invalidated on secret rotation |
 | `app:<name>` | host-minted + cached platform-level client-credentials token (`spotify.app`) | client id/secret from host env; 60s early re-mint, single-flight |
 
-Grants for first-party bundles come from the PLATFORM table `bundle_host_http::grants::FIRST_PARTY_GRANTS` (keyed by the reserved `waddles.core.*` app id), never from bundle-declared data. Egress rows come from the approved install summary (`egress`/`egressRps`) via `ActiveEgressSnapshot` (before this, no production writer populated any egress catalog, so every bundle `http.send` was `host_not_declared`). Rows are keyed by activation scope `(tenant_id, community_id)` then `app_id`, resolved with the host-verified `CallScope` (own community's activation, else the tenant's tenant-wide `community_id=0` one, else nothing — never merged, never another tenant's), and rebuilt wholesale each active-set tick so a deactivated bundle drops out. Unscoped `resolve()` fails closed.
+Grants for first-party bundles come from the PLATFORM table `bundle_host_http::grants::FIRST_PARTY_GRANTS` (keyed by the reserved `penguintechinc.*` app id), never from bundle-declared data. Egress rows come from the approved install summary (`egress`/`egressRps`) via `ActiveEgressSnapshot` (before this, no production writer populated any egress catalog, so every bundle `http.send` was `host_not_declared`). Rows are keyed by activation scope `(tenant_id, community_id)` then `app_id`, resolved with the host-verified `CallScope` (own community's activation, else the tenant's tenant-wide `community_id=0` one, else nothing — never merged, never another tenant's), and rebuilt wholesale each active-set tick so a deactivated bundle drops out. Unscoped `resolve()` fails closed.
 
 **Quota** (`bundle_host_http::credentials::QuotaGuard`, Valkey counters via `bundle_host_credentials::ValkeyQuotaStore`): per secret ref, global per-minute + per-day budgets plus a per-community share of the day budget; atomic multi-counter charge (refused charges consume nothing); exhausted → `quota_exhausted`; store down for a metered ref → `quota_unavailable` (fail closed). Defaults in `grants::default_quota_policies`, override with `BUNDLE_SECRET_QUOTAS_JSON`.
 
@@ -212,7 +213,7 @@ No `dm.*` permission family exists in source.
 |---|---|---|---|
 | `moderation.<platform>` | Dangerous | Relay authz + `UsageBatcher` | No WIT import |
 | `ai.generate` | Dangerous | 10 / 60 s | Now has a WIT import + `svc_process` handler (see `bundle-host-imports.md` `ai`); Enterprise enforcement NOT YET implemented (issue #858) -- NOT PRODUCTION-READY |
-| `storage.objects` | Normal | 1k objects / 500 MB per (tenant, app) | No WIT import |
+| `storage.objects.read` / `storage.objects.write` | Normal | 1k objects / 500 MB per (tenant, app) | `object_storage.*` (process stage only) |
 | `users.profile.read` | Normal | Unlimited | Reputation-scoped membership check; non-identifying attributes only |
 | `telemetry.logs`, `telemetry.metrics` | Normal | Declared instruments only | Mechanics owned by a separate doc |
 | `interaction.pii.receive` | Dangerous | Descriptive | Default NO; host PII filter is separate work |

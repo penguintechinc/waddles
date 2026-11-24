@@ -31,17 +31,20 @@ _DISCORD_MISSING_ACCESS = 50001
 _REQUEST_TIMEOUT_SECONDS = 10.0
 
 
-#: Permission bits that make a role privileged: a mirror must never grant one of these.
-#: ADMINISTRATOR, MANAGE_GUILD, MANAGE_ROLES, MANAGE_CHANNELS, MANAGE_WEBHOOKS, BAN_MEMBERS,
-#: KICK_MEMBERS, MODERATE_MEMBERS, MENTION_EVERYONE.
-PRIVILEGED_PERMISSION_MASK = (
-    0x8 | 0x20 | 0x10000000 | 0x10 | 0x20000000 | 0x4 | 0x2 | 0x10000000000 | 0x20000
-)
+#: ALLOWLIST of permission bits a mirror-granted role may carry (official Discord bit values,
+#: `1 << n`). Anything outside it -- including every present or future privileged/unknown bit --
+#: makes the role privileged. ADD_REACTIONS 6, STREAM 9, VIEW_CHANNEL 10, SEND_MESSAGES 11,
+#: EMBED_LINKS 14, ATTACH_FILES 15, READ_MESSAGE_HISTORY 16, USE_EXTERNAL_EMOJIS 18, CONNECT 20,
+#: SPEAK 21, USE_VAD 25, CHANGE_NICKNAME 26, USE_APPLICATION_COMMANDS 31,
+#: CREATE_PUBLIC_THREADS 35, USE_EXTERNAL_STICKERS 37, SEND_MESSAGES_IN_THREADS 38.
+SAFE_PERMISSION_MASK = 0
+for _bit in (6, 9, 10, 11, 14, 15, 16, 18, 20, 21, 25, 26, 31, 35, 37, 38):
+    SAFE_PERMISSION_MASK |= 1 << _bit
 
 
 def is_privileged_role(permissions: int, managed: bool) -> bool:
-    """True for a managed (bot/integration) role or one carrying any privileged permission."""
-    return bool(managed) or bool(int(permissions) & PRIVILEGED_PERMISSION_MASK)
+    """True for a managed (bot/integration) role or one with any bit outside the safe allowlist."""
+    return bool(managed) or (int(permissions) & ~SAFE_PERMISSION_MASK) != 0
 
 
 @dataclass(slots=True, frozen=True)
@@ -202,3 +205,60 @@ async def list_guild_roles(
         len(roles),
     )
     return roles
+
+
+async def verify_bot_in_guild(
+    dal: Any,
+    community_id: int,
+    guild_id: str,
+    *,
+    http_client: httpx.AsyncClient | None = None,
+    credential_resolver: CredentialResolver | None = None,
+    api_base: str = DISCORD_API_BASE,
+) -> None:
+    """Raise 409 `DISCORD_BOT_NOT_IN_GUILD` unless the tenant's bot is a member of `guild_id`.
+
+    Used by the manual "pair server by ID" path so a pairing is only ever created for a guild
+    the bot can actually act in. Same credential seam + error mapping as `list_guild_roles`.
+    """
+    tenant = _resolve_tenant_for_community(dal, community_id)
+    if tenant is None:
+        raise ApiError("Community tenant could not be resolved", 404, "NOT_FOUND")
+    tenant_id, _slug, is_global = tenant
+    resolver = credential_resolver or DefaultCredentialResolver()
+    try:
+        creds = await resolver.resolve(
+            dal, tenant_id=tenant_id, is_global_tenant=is_global, platform="discord"
+        )
+    except TransportUnavailable as exc:
+        raise ApiError(
+            "Discord bot credentials are not configured for this tenant",
+            503,
+            "DISCORD_NOT_CONFIGURED",
+        ) from exc
+    bot_token = str(creds.payload.get("bot_token", ""))
+    if not bot_token:
+        raise ApiError(
+            "Discord bot credentials are not configured for this tenant",
+            503,
+            "DISCORD_NOT_CONFIGURED",
+        )
+    client = http_client or httpx.AsyncClient(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        try:
+            response = await client.get(
+                f"{api_base}/guilds/{guild_id}", headers={"Authorization": f"Bot {bot_token}"}
+            )
+        except httpx.HTTPError as exc:
+            logger.warning(
+                "discord_roles.verify_transport_error community_id=%s guild_id=%s exc=%s",
+                community_id,
+                guild_id,
+                type(exc).__name__,
+            )
+            raise ApiError("Discord API is unreachable", 502, "DISCORD_UNAVAILABLE") from exc
+    finally:
+        if http_client is None:
+            await client.aclose()
+    _raise_for_status(response, community_id=community_id, guild_id=guild_id)
+    logger.info("discord_roles.bot_in_guild community_id=%s guild_id=%s", community_id, guild_id)

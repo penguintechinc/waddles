@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.example.fortune
+app_id: penguintechinc.waddles.fortune
 name: Fortune Cookie Bundle (Python)
-version: 1.0.3
-feature: waddles.core.example
+version: 1.0.6
 module: core
 provider: builtin
 author: github:penguintechinc

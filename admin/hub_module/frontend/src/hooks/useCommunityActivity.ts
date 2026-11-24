@@ -12,15 +12,15 @@ import {
 
 /** Query keys for community activity reads. */
 export const activityKeys = {
-  leaderboard: (communityId: number, type: LeaderboardType, query: LeaderboardQuery) =>
+  leaderboard: (communityId: string, type: LeaderboardType, query: LeaderboardQuery) =>
     ['community', communityId, 'leaderboard', type, query] as const,
-  myStats: (communityId: number) => ['community', communityId, 'my-stats'] as const,
-  live: (communityId: number, limit: number) => ['community', communityId, 'live-activity', limit] as const,
+  myStats: (communityId: string) => ['community', communityId, 'my-stats'] as const,
+  live: (communityId: string, limit: number) => ['community', communityId, 'live-activity', limit] as const,
 };
 
 /** Paged leaderboard; the previous page stays on screen while the next one loads. */
 export function useLeaderboard(
-  communityId: number,
+  communityId: string,
   type: LeaderboardType,
   query: LeaderboardQuery,
 ): UseQueryResult<LeaderboardPage> {
@@ -32,12 +32,12 @@ export function useLeaderboard(
 }
 
 /** The caller's own watch-time/message stats and ranks. */
-export function useMyActivityStats(communityId: number): UseQueryResult<MyActivityStats> {
+export function useMyActivityStats(communityId: string): UseQueryResult<MyActivityStats> {
   return useQuery({ queryKey: activityKeys.myStats(communityId), queryFn: () => fetchMyActivityStats(communityId) });
 }
 
 /** Live-activity backfill; the SSE stream appends to it client-side. Never cached stale. */
-export function useLiveActivityBackfill(communityId: number, limit: number): UseQueryResult<LiveActivityEvent[]> {
+export function useLiveActivityBackfill(communityId: string, limit: number): UseQueryResult<LiveActivityEvent[]> {
   return useQuery({
     queryKey: activityKeys.live(communityId, limit),
     queryFn: () => fetchLiveActivity(communityId, limit),

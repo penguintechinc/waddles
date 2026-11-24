@@ -505,7 +505,7 @@ mod tests {
         GrantScopeKey {
             tenant_id: 7,
             community_id: 3,
-            app_id: "waddles.core.example_echo".to_string(),
+            app_id: "penguintechinc.waddles.example-echo".to_string(),
             app_version: 1,
         }
     }
@@ -620,7 +620,7 @@ mod tests {
     }
 
     /// End-to-end (spec SS4/SS5.3, task instruction): a core bundle
-    /// (`waddles.core.ping`, `chat.send:discord`) with a grant seeded like
+    /// (`penguintechinc.waddles.ping`, `chat.send:discord`) with a grant seeded like
     /// PR #432's seeder gets ALLOWED; the identical scope with no grant row
     /// gets DENIED; and a revoke -- modeled the same way `invalidate_
     /// matching` handles a real `bundle:grants:invalidate` entry, drop the
@@ -638,7 +638,7 @@ mod tests {
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("waddles.core.ping".to_string())
+            .app_id("penguintechinc.waddles.ping".to_string())
             .app_version(1)
             .tenant_tier(TenantTier::Free)
             .build()
@@ -784,20 +784,26 @@ mod tests {
         let fields = HashMap::from([
             ("tenant_id".to_string(), "7".to_string()),
             ("community_id".to_string(), "3".to_string()),
-            ("app_id".to_string(), "waddles.core.ping".to_string()),
+            (
+                "app_id".to_string(),
+                "penguintechinc.waddles.ping".to_string(),
+            ),
             ("version".to_string(), "1.0.0".to_string()),
         ]);
         let payload = parse_invalidate_fields(&fields).expect("all required fields present");
         assert_eq!(payload.tenant_id, 7);
         assert_eq!(payload.community_id, 3);
-        assert_eq!(payload.app_id, "waddles.core.ping");
+        assert_eq!(payload.app_id, "penguintechinc.waddles.ping");
     }
 
     #[test]
     fn parse_invalidate_fields_rejects_missing_tenant_id() {
         let fields = HashMap::from([
             ("community_id".to_string(), "3".to_string()),
-            ("app_id".to_string(), "waddles.core.ping".to_string()),
+            (
+                "app_id".to_string(),
+                "penguintechinc.waddles.ping".to_string(),
+            ),
         ]);
         assert!(parse_invalidate_fields(&fields).is_none());
     }
@@ -806,7 +812,10 @@ mod tests {
     fn parse_invalidate_fields_rejects_missing_community_id() {
         let fields = HashMap::from([
             ("tenant_id".to_string(), "7".to_string()),
-            ("app_id".to_string(), "waddles.core.ping".to_string()),
+            (
+                "app_id".to_string(),
+                "penguintechinc.waddles.ping".to_string(),
+            ),
         ]);
         assert!(parse_invalidate_fields(&fields).is_none());
     }
@@ -825,7 +834,10 @@ mod tests {
         let fields = HashMap::from([
             ("tenant_id".to_string(), "not-a-number".to_string()),
             ("community_id".to_string(), "3".to_string()),
-            ("app_id".to_string(), "waddles.core.ping".to_string()),
+            (
+                "app_id".to_string(),
+                "penguintechinc.waddles.ping".to_string(),
+            ),
         ]);
         assert!(parse_invalidate_fields(&fields).is_none());
     }
@@ -837,7 +849,7 @@ mod tests {
         GrantScopeKey {
             tenant_id: 7,
             community_id: 3,
-            app_id: "waddles.core.other_bundle".to_string(),
+            app_id: "penguintechinc.waddles.other-bundle".to_string(),
             app_version: 1,
         }
     }
@@ -1088,7 +1100,7 @@ mod tests {
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("waddles.core.example_echo".to_string())
+            .app_id("penguintechinc.waddles.example-echo".to_string())
             .app_version(1)
             .tenant_tier(TenantTier::Free)
             .build()
@@ -1126,7 +1138,7 @@ mod tests {
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("waddles.core.example_echo".to_string())
+            .app_id("penguintechinc.waddles.example-echo".to_string())
             .app_version(1)
             .tenant_tier(TenantTier::Free)
             .build()

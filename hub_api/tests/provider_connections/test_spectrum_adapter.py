@@ -29,6 +29,7 @@ from services.provider_connections.errors import (
 )
 from services.provider_connections.registry import build_default_registry
 from services.provider_connections.spectrum import SPECTRUM_SPEC, SpectrumAdapter
+from tests.community_ids import public_id
 from tests.conftest import make_user_token
 from tests.provider_connections.conftest import SYSTEM_SERVICE_ID, FakeClock, admin_headers
 from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
@@ -46,11 +47,11 @@ CONNECTION_FIELDS = {
     "expiresAt",
     "hasRefreshToken",
     "hasApiCredential",
+    "ownershipVerified",
     "id",
     "kind",
     "metadata",
     "provider",
-    "publicId",
     "resourceType",
     "shared",
     "status",
@@ -115,7 +116,7 @@ def sclient(pc_app: Any, pc_db: Any, fake_rsi: FakeRsi, clock: FakeClock) -> Any
 
 
 def _base(db: Any, community_id: int | None = None) -> str:
-    return f"/api/v1/communities/{community_id or db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, community_id or db.seed.community_id)}/provider-connections"
 
 
 def _body(**overrides: Any) -> str:

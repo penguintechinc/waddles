@@ -34,19 +34,24 @@ pub mod config;
 pub mod connector;
 pub mod connector_boot;
 pub mod connector_wire;
+pub mod crypto;
 pub mod engine;
+pub mod engine_config;
 pub mod error;
 pub mod heartbeat;
 pub mod host;
 pub mod invoke;
 pub mod manifest;
 pub mod metrics;
+pub mod module_cache;
 pub mod parity_support;
+pub mod precompile;
 pub mod probe;
 pub mod signing;
 pub mod stage_bridge;
 pub mod telemetry;
 pub mod tls;
+pub mod warm_pool;
 pub mod wire;
 
 use std::future::Future;
@@ -260,8 +265,18 @@ pub async fn run() -> Result<(), ExecutorError> {
     // `Executor::new`'s own (lenient) derivation from the same field is
     // only ever reached with an empty key set in a test that never called
     // this function. See `crate::signing::PlatformPublicKeys::from_cli_required`.
+    crate::signing::require_supported_key_source(&cfg)?;
     crate::signing::PlatformPublicKeys::from_cli_required(&cfg)?;
     cfg.validate_host_api_tls()?;
+    cfg.validate_executor_id()?;
+    cfg.validate_language_partition()?;
+    match cfg.validate_memory_budget()? {
+        Some(warning) => tracing::warn!(%warning, "memory budget check"),
+        None => tracing::info!(
+            memory_budget_mb = cfg.executor_memory_budget_mb,
+            "memory budget fits inside the container limit"
+        ),
+    }
 
     init_telemetry();
     // Metrics pipeline (OTLP export only when `OTEL_EXPORTER_OTLP_ENDPOINT` is
@@ -292,11 +307,19 @@ pub async fn run() -> Result<(), ExecutorError> {
         .iter()
         .map(|t| cfg.for_stage(t))
         .collect();
+    // ONE shared runtime (engine + compiled-module cache + compile limiter)
+    // under every per-stage executor (executor-scale T1): a digest both
+    // stages load compiles -- or deserializes -- and stays resident ONCE.
+    let runtime = invoke::SharedRuntime::new(&cfg)?;
     let mut executors: Vec<Arc<Executor<BucketComponentSource>>> =
         Vec::with_capacity(stage_cfgs.len());
     for stage_cfg in &stage_cfgs {
         let source = BucketComponentSource::from_cli(stage_cfg)?;
-        executors.push(Arc::new(Executor::new(stage_cfg, source)?));
+        executors.push(Arc::new(Executor::with_runtime(
+            stage_cfg,
+            source,
+            Arc::clone(&runtime),
+        )?));
     }
     let Some(executor) = executors.first().cloned() else {
         return Err(ExecutorError::Config(
@@ -625,6 +648,12 @@ fn init_telemetry() {
         // other tracing call before a subscriber is installed.
         warn!(error = %e, "tracing subscriber already installed, skipping");
     }
+}
+
+/// JSON `tracing` setup for `bundle-executor --precompile` -- same
+/// subscriber as the runtime path, exposed for `main.rs`.
+pub fn telemetry_init_precompile_logging() {
+    init_telemetry();
 }
 
 /// Installs a permissive `tracing` subscriber exactly once per test

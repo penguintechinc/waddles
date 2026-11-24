@@ -97,6 +97,15 @@ impl TwitchCredentialSource for TwCreds {
             oauth_token: SecretString::new(TW_TOKEN.to_string()),
         })
     }
+
+    /// The hub-api binding view: this community's verified channel is `#chan`.
+    async fn bound_channel(&self, community_id: Option<i64>) -> Result<String, CredError> {
+        if community_id == Some(COMMUNITY) {
+            Ok("chan".to_string())
+        } else {
+            Err(CredError::NoBinding)
+        }
+    }
 }
 
 const TW_APP_TOKEN: &str = "TW-APP-TOKEN-SECRET";
@@ -117,6 +126,35 @@ impl TwitchAppSource for TwApp {
         } else {
             Err(SlotError::Refused("no_connection"))
         }
+    }
+}
+
+/// hub-api tokenization double for Twitch floor bans: the one known uuid is the raw id `999`.
+struct TwUsers;
+impl svc_ingest::connector::sender_exec::twitch_slots::TwitchUserResolver for TwUsers {
+    fn resolve<'a>(
+        &'a self,
+        tenant_id: i64,
+        community_id: i64,
+        user_uuid: &'a str,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<
+                    Output = Result<
+                        SlotValue,
+                        svc_ingest::connector::sender_exec::discord_duties::UserResolveError,
+                    >,
+                > + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(async move {
+            if (tenant_id, community_id, user_uuid) == (TENANT, COMMUNITY, USER_UUID) {
+                Ok(SlotValue::new("999".to_string()))
+            } else {
+                Err(svc_ingest::connector::sender_exec::discord_duties::UserResolveError::NotFound)
+            }
+        })
     }
 }
 
@@ -303,7 +341,7 @@ async fn rig(flag: bool) -> Rig {
     std::env::set_var("SECURITY_TRANSPORT_TLS", "false");
     std::env::set_var("SECURITY_TRANSPORT_AUTH", "false");
     let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     for key in [
         TWITCH_OUTBOUND_QUEUE_KEY,
         DISCORD_OUTBOUND_QUEUE_KEY,
@@ -320,19 +358,19 @@ async fn rig(flag: bool) -> Rig {
         vec![
             RigConnector {
                 platform: "twitch".into(),
-                app_id: "waddles.core.service.twitch".into(),
+                app_id: "penguintechinc.waddles.twitch".into(),
                 wasm: TWITCH_WASM,
                 world: WitWorld::ConnectorTools,
             },
             RigConnector {
                 platform: "discord".into(),
-                app_id: "waddles.core.service.discord".into(),
+                app_id: "penguintechinc.waddles.discord".into(),
                 wasm: DISCORD_WASM,
                 world: WitWorld::ConnectorTools,
             },
             RigConnector {
                 platform: "youtube".into(),
-                app_id: "waddles.core.service.youtube".into(),
+                app_id: "penguintechinc.waddles.youtube".into(),
                 wasm: YOUTUBE_WASM,
                 world: WitWorld::ConnectorTools,
             },
@@ -389,7 +427,8 @@ async fn rig(flag: bool) -> Rig {
             guard(),
             format!("{}/helix/users", tw.uri()),
         )
-        .with_app_source(TwApp),
+        .with_app_source(TwApp)
+        .with_user_resolver(Arc::new(TwUsers)),
         DiscordSlots::with_endpoint(DcCreds, guard(), format!("{}/api/v10", dc.uri())),
         YoutubeSlots::new(YtCreds),
         KickSlots::new(KkCreds),
@@ -495,7 +534,7 @@ fn entry(
 
 async fn push(queue: &str, raw: &str) {
     let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     let _: i64 = redis::cmd("LPUSH")
         .arg(queue)
         .arg(raw)
@@ -837,7 +876,7 @@ fn event_entry(op: &str, expect_guild: &str, event_id: &str, text: &str) -> (Str
 /// Polls the drain's result key for `op_id` (what svc-action's producer reads).
 async fn ack_for(op_id: &str) -> serde_json::Value {
     let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-    let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+    let mut conn = client.get_connection_manager().await.unwrap();
     for _ in 0..200 {
         let raw: Option<String> = redis::cmd("GET")
             .arg(format!("waddles:transport:discord:ack:{op_id}"))
@@ -1061,7 +1100,7 @@ async fn registered_ops_reach_build_request_and_unregistered_ops_are_rejected_at
         (
             "twitch",
             TWITCH_OUTBOUND_QUEUE_KEY,
-            "eventsub.list",
+            "mod.unban",
             "#chan",
             true,
         ),
@@ -1113,7 +1152,7 @@ async fn registered_ops_reach_build_request_and_unregistered_ops_are_rejected_at
             // Rejected at parse: no ack is ever written for it.
             tokio::time::sleep(Duration::from_millis(600)).await;
             let client = redis::Client::open(std::env::var("VALKEY_URL").unwrap()).unwrap();
-            let mut conn = client.get_multiplexed_async_connection().await.unwrap();
+            let mut conn = client.get_connection_manager().await.unwrap();
             let raw_ack: Option<String> = redis::cmd("GET")
                 .arg(format!("waddles:transport:discord:ack:{op_id}"))
                 .query_async(&mut conn)
@@ -1332,95 +1371,82 @@ async fn twitch_schedule_update_fills_the_segment_id_host_side() {
     stop(tx, h).await;
 }
 
-/// Extras real path: `eventsub.create` runs with the APP token; the HOST fills the callback
-/// (configured base + `callbackKey`), the webhook secret (hub-api secret route) and the
-/// connection's broadcaster. The guest-built template contains none of them.
+/// Security regression (cross-tenant BOLA): Twitch EventSub subscriptions are APP-WIDE -- with
+/// the application token any community could create, delete or list another broadcaster's. Every
+/// `eventsub.*` kind is therefore refused host-side until a host-side broadcaster ownership
+/// binding exists: `create` (`slot_app_kind_unbound`), `delete` (the host's ownership duty cannot
+/// prove the subscription id is this community's: `subscription_not_owned`) and `list`, which no
+/// hook claims at all (`host_duty_missing`, acked `unsupported`). Nothing may reach the EventSub endpoints -- the
+/// fake Twitch would happily answer every one of them, so a leak cannot hide.
 #[tokio::test(flavor = "multi_thread")]
-async fn twitch_eventsub_create_fills_callback_secret_and_ids_host_side() {
+async fn twitch_eventsub_ops_are_refused_before_the_wire_until_a_broadcaster_binding_exists() {
     let rig = rig(true).await;
     mock_twitch(&rig.tw).await;
-    Mock::given(method("POST"))
-        .and(path("/helix/eventsub/subscriptions"))
-        .respond_with(
-            ResponseTemplate::new(202).set_body_json(json!({"data": [{"id": "tw-sub-1"}]})),
-        )
-        .mount(&rig.tw)
-        .await;
-    let (tx, h) = drain(&rig, "twitch");
-    let text =
-        json!({"type": "channel.follow", "version": 2, "callbackKey": CALLBACK_KEY}).to_string();
-    // Channel-less op: the stamp still needs a non-empty origin, so it uses the existing
-    // `guild:-` scope form (no channel to pin; the host binds the connection itself).
-    push(
-        TWITCH_OUTBOUND_QUEUE_KEY,
-        &entry(
-            "twitch",
-            "eventsub.create",
-            "",
-            "guild:-",
-            &text,
-            "",
-            TENANT,
-        ),
-    )
-    .await;
-    let req = wait_for(&rig.tw, "POST", 1)
-        .await
-        .into_iter()
-        .find(|r| r.url.path() == "/helix/eventsub/subscriptions")
-        .expect("eventsub request");
-    assert_eq!(
-        header(&req, "authorization"),
-        format!("Bearer {TW_APP_TOKEN}")
-    );
-    assert_eq!(header(&req, "client-id"), "cid123");
-    let b: serde_json::Value = serde_json::from_slice(&req.body).unwrap();
-    assert_eq!(b["type"], "channel.follow");
-    assert_eq!(b["version"], "2");
-    assert_eq!(b["condition"]["broadcaster_user_id"], "111");
-    assert_eq!(b["condition"]["moderator_user_id"], "111");
-    assert_eq!(b["transport"]["method"], "webhook");
-    assert_eq!(
-        b["transport"]["callback"],
-        format!("{HOOK_BASE}/eventsub/twitch/webhook/{CALLBACK_KEY}")
-    );
-    assert_eq!(b["transport"]["secret"], HOOK_SECRET);
-    let seen = rig.seen.lock().unwrap().clone();
-    assert!(!seen.is_empty(), "denominator: templates inspected");
-    for t in &seen {
-        assert!(!t.contains(HOOK_SECRET), "guest saw the secret: {t}");
-        assert!(!t.contains(CALLBACK_KEY), "guest saw the callback key: {t}");
-        assert!(
-            !t.contains("hooks.example.com"),
-            "guest saw the callback host"
-        );
-        assert!(!t.contains(TW_APP_TOKEN));
+    for verb in ["POST", "DELETE", "GET"] {
+        Mock::given(method(verb))
+            .and(path("/helix/eventsub/subscriptions"))
+            .respond_with(
+                ResponseTemplate::new(202).set_body_json(json!({"data": [{"id": "tw-sub-1"}]})),
+            )
+            .mount(&rig.tw)
+            .await;
     }
-
-    let before = rig.tw.received_requests().await.unwrap().len();
-    for text in [
-        json!({"type": "channel.follow", "version": 2, "callbackKey": "unknown-key-1"}),
-        json!({"type": "channel.follow", "version": 2, "callbackKey": "a/b"}),
-        json!({"type": "channel.follow", "version": 2, "callbackKey": CALLBACK_KEY, "secret": "mine"}),
-        json!({"type": "channel.update", "version": 1, "callbackKey": CALLBACK_KEY}),
-    ] {
-        push(
-            TWITCH_OUTBOUND_QUEUE_KEY,
-            &entry(
+    let (tx, h) = drain(&rig, "twitch");
+    let create_text =
+        json!({"type": "channel.follow", "version": 2, "callbackKey": CALLBACK_KEY}).to_string();
+    let cases: [(&str, String, &str); 3] = [
+        (
+            "eventsub.create",
+            entry(
                 "twitch",
                 "eventsub.create",
                 "",
                 "guild:-",
-                &text.to_string(),
+                &create_text,
                 "",
                 TENANT,
             ),
-        )
-        .await;
+            "slot_app_kind_unbound",
+        ),
+        (
+            "eventsub.delete",
+            scoped_entry("eventsub.delete", "tw-sub-1"),
+            "subscription_not_owned",
+        ),
+        (
+            "eventsub.list",
+            scoped_entry("eventsub.list", ""),
+            "unsupported",
+        ),
+    ];
+    let mut examined = 0;
+    for (op, raw, want_code) in &cases {
+        let op_id = op_id_of(raw);
+        push(TWITCH_OUTBOUND_QUEUE_KEY, raw).await;
+        let ack = ack_for(&op_id).await;
+        assert_eq!(ack["ok"], false, "{op}: {ack}");
+        assert_eq!(ack["code"], *want_code, "{op}: {ack}");
+        examined += 1;
     }
-    tokio::time::sleep(Duration::from_millis(2000)).await;
-    let all = rig.tw.received_requests().await.unwrap();
-    assert_eq!(all.len(), before, "refused creates must not reach the wire");
+    assert_eq!(examined, 3, "denominator: every eventsub op exercised");
+    let leaked: Vec<String> = rig
+        .tw
+        .received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .filter(|r| r.url.path().starts_with("/helix/eventsub"))
+        .map(|r| format!("{} {}", r.method, r.url.path()))
+        .collect();
+    assert!(leaked.is_empty(), "refused ops reached Twitch: {leaked:?}");
+    assert!(
+        rig.seen
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|t| !t.contains(HOOK_SECRET) && !t.contains(TW_APP_TOKEN)),
+        "the guest never saw the secret or the app token"
+    );
     stop(tx, h).await;
 }
 
@@ -1677,74 +1703,100 @@ async fn youtube_moderation_flows_through_the_real_connector_with_host_enforced_
     stop(tx, h).await;
 }
 
-/// regression: cross-tenant BOLA -- `eventsub.delete` runs with the APP token, which can delete
-/// any subscription of the application. The host resolves the subscription first and only deletes
-/// one whose condition names THIS community's own broadcaster (111); another broadcaster's
-/// subscription and `eventsub.list` (every community's subscriptions) never reach the delete/list
-/// endpoint.
+/// Floor ban / lift real path: the producer's signed `channel:-` command names NO channel; the
+/// host pins `#chan` from the community's verified binding, the REAL connector builds the Helix
+/// request, and the ban (with the fixed reason) and the unban both reach the wire.
 #[tokio::test(flavor = "multi_thread")]
-async fn twitch_eventsub_delete_is_bound_to_the_communitys_broadcaster_and_list_fails_closed() {
+async fn twitch_floor_ban_and_lift_pin_the_channel_from_the_binding_and_reach_helix() {
     let rig = rig(true).await;
     mock_twitch(&rig.tw).await;
-    for (id, broadcaster) in [("mine-sub", "111"), ("theirs-sub", "999")] {
-        Mock::given(method("GET"))
-            .and(path("/helix/eventsub/subscriptions"))
-            .and(wiremock::matchers::query_param("id", id))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [
-                {"id": id, "condition": {"broadcaster_user_id": broadcaster}}
-            ]})))
-            .mount(&rig.tw)
-            .await;
-    }
+    Mock::given(method("POST"))
+        .and(path("/helix/moderation/bans"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": [{}]})))
+        .mount(&rig.tw)
+        .await;
     Mock::given(method("DELETE"))
-        .and(path("/helix/eventsub/subscriptions"))
+        .and(path("/helix/moderation/bans"))
         .respond_with(ResponseTemplate::new(204))
         .mount(&rig.tw)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/helix/eventsub/subscriptions"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data": []})))
-        .mount(&rig.tw)
-        .await;
     let (tx, h) = drain(&rig, "twitch");
+
+    let reason = json!({"reason": "Waddles reputation floor"}).to_string();
     push(
         TWITCH_OUTBOUND_QUEUE_KEY,
-        &scoped_entry("eventsub.delete", "mine-sub"),
+        &entry(
+            "twitch",
+            "mod.ban",
+            "",
+            "channel:-",
+            &reason,
+            &format!("{{user:{USER_UUID}}}"),
+            TENANT,
+        ),
+    )
+    .await;
+    let posts = wait_for(&rig.tw, "POST", 1).await;
+    let ban: Vec<_> = posts
+        .iter()
+        .filter(|r| r.url.path() == "/helix/moderation/bans")
+        .collect();
+    assert_eq!(ban.len(), 1);
+    let q: HashMap<_, _> = ban[0].url.query_pairs().into_owned().collect();
+    assert_eq!(
+        q["broadcaster_id"], "111",
+        "broadcaster of the BOUND channel"
+    );
+    assert_eq!(q["moderator_id"], "222");
+    assert_eq!(
+        header(ban[0], "authorization"),
+        format!("Bearer {TW_TOKEN}")
+    );
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&ban[0].body).unwrap(),
+        json!({"data": {"user_id": "999", "reason": "Waddles reputation floor"}})
+    );
+
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry(
+            "twitch",
+            "mod.unban",
+            "",
+            "channel:-",
+            "",
+            &format!("{{user:{USER_UUID}}}"),
+            TENANT,
+        ),
     )
     .await;
     let dels = wait_for(&rig.tw, "DELETE", 1).await;
-    assert_eq!(dels.len(), 1);
     let q: HashMap<_, _> = dels[0].url.query_pairs().into_owned().collect();
-    assert_eq!(q["id"], "mine-sub");
     assert_eq!(
-        header(&dels[0], "authorization"),
-        format!("Bearer {TW_APP_TOKEN}")
+        (
+            q["broadcaster_id"].as_str(),
+            q["moderator_id"].as_str(),
+            q["user_id"].as_str()
+        ),
+        ("111", "222", "999")
     );
 
-    // Another broadcaster's subscription, an unknown one, and a list: no further DELETE, and the
-    // list never reaches Helix (its only GETs are the ownership lookups by id).
-    for raw in [
-        scoped_entry("eventsub.delete", "theirs-sub"),
-        scoped_entry("eventsub.delete", "unknown-sub"),
-        scoped_entry("eventsub.list", ""),
-    ] {
-        push(TWITCH_OUTBOUND_QUEUE_KEY, &raw).await;
-    }
-    tokio::time::sleep(Duration::from_millis(2500)).await;
-    let all = rig.tw.received_requests().await.unwrap();
-    let deletes: Vec<_> = all
-        .iter()
-        .filter(|r| r.method.as_str() == "DELETE")
-        .collect();
-    assert_eq!(deletes.len(), 1, "only the owned subscription was deleted");
-    let list_gets: Vec<_> = all
-        .iter()
-        .filter(|r| {
-            r.method.as_str() == "GET"
-                && r.url.path() == "/helix/eventsub/subscriptions"
-                && !r.url.query_pairs().any(|(k, _)| k == "id")
-        })
-        .collect();
-    assert!(list_gets.is_empty(), "eventsub.list must never run");
+    // The bound scope is never honoured for another op: nothing more reaches the wire.
+    let before = rig.tw.received_requests().await.unwrap().len();
+    push(
+        TWITCH_OUTBOUND_QUEUE_KEY,
+        &entry(
+            "twitch",
+            "mod.timeout",
+            "",
+            "channel:-",
+            &json!({"duration": 60}).to_string(),
+            &format!("{{user:{USER_UUID}}}"),
+            TENANT,
+        ),
+    )
+    .await;
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    assert_eq!(rig.tw.received_requests().await.unwrap().len(), before);
     stop(tx, h).await;
 }

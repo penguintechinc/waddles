@@ -39,9 +39,22 @@ from services.community_announcements import (
     unpin_announcement,
     update_announcement,
 )
-from services.community_common import api_error, community_in_tenant, get_current_user
+from services.community_common import (
+    api_error,
+    community_in_tenant,
+    feature_not_enabled,
+    get_current_user,
+)
+from services.public_ids import PublicIdTarget, build_view_arg_translator
+from services.route_guards import community_admin_guard
 
 announcements_bp = Blueprint("v1_community_announcements", __name__, url_prefix="/api/v1/admin")
+
+#: `<puuid:announcement_id>` -> numeric id, resolved inside the URL community (unknown, foreign and
+#: malformed UUIDs all become the handler's existing 404).
+announcements_bp.before_request(
+    build_view_arg_translator({"announcement_id": PublicIdTarget("announcements")})
+)
 
 #: Two-gate Feature flag -- `libs/community_module/features.py`'s
 #: `community.announcements` Feature contract, free tier.
@@ -54,16 +67,17 @@ def _tenant_ok(community_id: int) -> bool:
     return community_in_tenant(current_app.config["dal"], community_id, ctx)
 
 
-@announcements_bp.route("/<int:community_id>/announcements", methods=["GET"])
+@announcements_bp.route("/<cuuid:community_id>/announcements", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementListResponse)
 async def list_route(community_id: int) -> AnnouncementListResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/admin/<id>/announcements`."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_ANNOUNCEMENTS, tenant=ctx.tenant_slug):
-        return api_error("Community announcements are not enabled for this plan", 402)
+        return feature_not_enabled("Community announcements are not enabled for this plan")
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     page = max(1, int(request.args.get("page", "1") or 1))
@@ -79,9 +93,12 @@ async def list_route(community_id: int) -> AnnouncementListResponse | tuple[dict
     )
 
 
-@announcements_bp.route("/<int:community_id>/announcements/<int:announcement_id>", methods=["GET"])
+@announcements_bp.route(
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>", methods=["GET"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def get_route(
     community_id: int, announcement_id: int
@@ -95,10 +112,11 @@ async def get_route(
     return AnnouncementResponse(success=True, data=dto)
 
 
-@announcements_bp.route("/<int:community_id>/announcements", methods=["POST"])
+@announcements_bp.route("/<cuuid:community_id>/announcements", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse, 201)
 async def create_route(community_id: int) -> tuple[AnnouncementResponse | dict[str, object], int]:
     """`POST /api/v1/admin/<id>/announcements`."""
@@ -119,10 +137,13 @@ async def create_route(community_id: int) -> tuple[AnnouncementResponse | dict[s
     return AnnouncementResponse(success=True, data=dto), 201
 
 
-@announcements_bp.route("/<int:community_id>/announcements/<int:announcement_id>", methods=["PUT"])
+@announcements_bp.route(
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>", methods=["PUT"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def update_route(
     community_id: int, announcement_id: int
@@ -171,11 +192,12 @@ def _mutate(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def delete_route(
     community_id: int, announcement_id: int
@@ -185,11 +207,12 @@ async def delete_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/publish", methods=["POST"]
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>/publish", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def publish_route(
     community_id: int, announcement_id: int
@@ -199,11 +222,12 @@ async def publish_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/pin", methods=["PUT"]
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>/pin", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def pin_route(
     community_id: int, announcement_id: int
@@ -213,11 +237,12 @@ async def pin_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/unpin", methods=["PUT"]
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>/unpin", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def unpin_route(
     community_id: int, announcement_id: int
@@ -227,11 +252,12 @@ async def unpin_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/archive", methods=["POST"]
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>/archive", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(AnnouncementResponse)
 async def archive_route(
     community_id: int, announcement_id: int
@@ -241,11 +267,12 @@ async def archive_route(
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/broadcast", methods=["POST"]
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>/broadcast", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:write")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def broadcast_route(community_id: int, announcement_id: int) -> tuple[dict[str, object], int]:
     """`POST /api/v1/admin/<id>/announcements/<announcementId>/broadcast`."""
     if not _tenant_ok(community_id):
@@ -266,13 +293,13 @@ async def broadcast_route(community_id: int, announcement_id: int) -> tuple[dict
         dal,
         community_id,
         announcement_id,
-        {"id": announcement_id, "title": dto.title, "content": dto.content},
+        {"id": dto.id, "title": dto.title, "content": dto.content},
         platforms,
     )
     return {
         "success": True,
         "data": {
-            "announcementId": announcement_id,
+            "announcementId": dto.id,
             "platforms": platforms,
             "results": [asdict(r) for r in outcome.results],
             "status": "initiated",
@@ -282,10 +309,11 @@ async def broadcast_route(community_id: int, announcement_id: int) -> tuple[dict
 
 
 @announcements_bp.route(
-    "/<int:community_id>/announcements/<int:announcement_id>/broadcast-status", methods=["GET"]
+    "/<cuuid:community_id>/announcements/<puuid:announcement_id>/broadcast-status", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.announcements:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def broadcast_status_route(
     community_id: int, announcement_id: int
 ) -> tuple[dict[str, object], int]:
@@ -293,9 +321,10 @@ async def broadcast_status_route(
     if not _tenant_ok(community_id):
         return api_error("Community not found", status_code=404)
     dal = current_app.config["dal"]
-    if get_announcement(dal, community_id, announcement_id) is None:
+    dto_existing = get_announcement(dal, community_id, announcement_id)
+    if dto_existing is None:
         return api_error("Announcement not found", status_code=404)
-    records = get_broadcast_status(dal, announcement_id)
+    records = get_broadcast_status(dal, announcement_id, public_id=dto_existing.id)
     return {"success": True, "data": [asdict(r) for r in records]}, 200
 
 

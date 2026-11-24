@@ -1,14 +1,16 @@
 //! Contract-fixture tests for every CONSUMED tool. Each adapter payload (all ops, with extreme
 //! field lengths and defaults) must satisfy the tool's input schema fixture in `contracts/`, and
 //! the Discord fixtures are cross-checked against the real discord bundle manifest so drift in
-//! the service bundle surfaces here. Twitch/Wix fixtures encode the catalog-spec contract the
-//! other agents are implementing.
+//! the service bundle surfaces here. All fixtures are snapshots of the producer bundles'
+//! `exported_tools` input schemas; scripts/ci/tests/test_bundle_contracts.py fails on drift.
 
 mod common;
 
 use common::{contract, validate};
 use waddle_bundle_calendar_rust::model::*;
-use waddle_bundle_calendar_rust::sync::{DiscordAdapter, SyncAdapter, TwitchAdapter, WixAdapter};
+use waddle_bundle_calendar_rust::sync::{
+    DiscordAdapter, Remote, SyncAdapter, TwitchAdapter, WixAdapter,
+};
 
 fn event(title: &str, desc: &str, loc: Option<&str>, minutes: i64) -> Event {
     Event {
@@ -30,15 +32,17 @@ fn event(title: &str, desc: &str, loc: Option<&str>, minutes: i64) -> Event {
 }
 
 fn all_ops(a: &dyn SyncAdapter, ev: &Event, rid: &str) {
+    all_ops_at(a, ev, Remote::id(rid));
+}
+
+fn all_ops_at(a: &dyn SyncAdapter, ev: &Event, remote: Remote<'_>) {
     for op in [
         SyncOp::Create,
         SyncOp::Update,
         SyncOp::Cancel,
         SyncOp::Delete,
     ] {
-        let call = a
-            .build(op, ev, Some(rid), &Config::default())
-            .expect("builds");
+        let call = a.build(op, ev, remote, &Config::default()).expect("builds");
         validate(&contract(&call.tool), &call.args, "$")
             .unwrap_or_else(|e| panic!("{} {op:?}: {e}", call.tool));
     }
@@ -60,7 +64,7 @@ fn discord_payloads_satisfy_contracts_even_at_the_extremes() {
     let long = event(&"x".repeat(100), "", None, 60);
     assert!(
         DiscordAdapter
-            .build(SyncOp::Update, &long, None, &Config::default())
+            .build(SyncOp::Update, &long, Remote::default(), &Config::default())
             .is_err(),
         "update needs a remote id"
     );
@@ -76,7 +80,7 @@ fn twitch_payloads_satisfy_contracts_and_clamp_duration() {
         .build(
             SyncOp::Create,
             &event("x", "", None, 1),
-            None,
+            Remote::default(),
             &Config::default(),
         )
         .unwrap();
@@ -85,7 +89,7 @@ fn twitch_payloads_satisfy_contracts_and_clamp_duration() {
         .build(
             SyncOp::Create,
             &event("x", "", None, 5000),
-            None,
+            Remote::default(),
             &Config::default(),
         )
         .unwrap();
@@ -97,9 +101,73 @@ fn twitch_payloads_satisfy_contracts_and_clamp_duration() {
 fn wix_payloads_satisfy_contracts() {
     for ev in [
         event("t", "", None, 60),
-        event(&"w".repeat(100), &"d".repeat(1000), Some("Hall"), 90),
+        event(
+            &"w".repeat(300),
+            &"d".repeat(1000),
+            Some(&"h".repeat(80)),
+            90,
+        ),
     ] {
-        all_ops(&WixAdapter, &ev, "wix-1");
+        all_ops_at(
+            &WixAdapter,
+            &ev,
+            Remote {
+                id: Some(WIX_ID),
+                revision: Some(3),
+            },
+        );
+    }
+}
+
+const WIX_ID: &str = "0b5c1a2e-3f4d-4e5f-8a9b-0c1d2e3f4a5b";
+
+#[test]
+fn wix_payloads_use_the_wix_bundle_field_names_and_revision() {
+    let ev = event("t", "desc", Some("Hall"), 60);
+    let remote = Remote {
+        id: Some(WIX_ID),
+        revision: Some(7),
+    };
+    let c = WixAdapter
+        .build(SyncOp::Create, &ev, Remote::default(), &Config::default())
+        .unwrap();
+    assert_eq!(c.tool, "wix.event.create");
+    for k in ["starts_at", "ends_at", "timezone", "title", "description"] {
+        assert!(c.args.get(k).is_some(), "create missing {k}");
+    }
+    assert_eq!(c.args["location_name"], "Hall");
+    assert_eq!(c.args["location_type"], "VENUE");
+    assert!(c.args.get("start_date").is_none() && c.args.get("location").is_none());
+    let u = WixAdapter
+        .build(SyncOp::Update, &ev, remote, &Config::default())
+        .unwrap();
+    assert_eq!(u.args["event_id"], WIX_ID);
+    assert_eq!(u.args["revision"], 7);
+    let empty = event("t", "", None, 60);
+    let no_default = Config {
+        default_location: String::new(),
+        ..Config::default()
+    };
+    let c = WixAdapter
+        .build(SyncOp::Create, &empty, Remote::default(), &no_default)
+        .unwrap();
+    assert!(c.args.get("description").is_none() && c.args.get("location_name").is_none());
+}
+
+#[test]
+fn wix_update_without_a_known_revision_fails_loudly() {
+    let ev = event("t", "", None, 60);
+    for rev in [None, Some(0)] {
+        let r = WixAdapter.build(
+            SyncOp::Update,
+            &ev,
+            Remote {
+                id: Some(WIX_ID),
+                revision: rev,
+            },
+            &Config::default(),
+        );
+        assert!(r.is_err(), "revision {rev:?} must not build an update");
     }
 }
 
@@ -128,6 +196,16 @@ fn remote_id_extraction_follows_each_tools_result_shape() {
         Some("w")
     );
     assert_eq!(WixAdapter.remote_id(&json!({"event_id": ""})), None);
+    let wix = json!({"event": {"id": WIX_ID, "revision": "4"}});
+    assert_eq!(WixAdapter.remote_id(&wix).as_deref(), Some(WIX_ID));
+    assert_eq!(WixAdapter.remote_revision(&wix), Some(4));
+    assert_eq!(WixAdapter.remote_revision(&json!({"revision": 2})), Some(2));
+    assert_eq!(
+        WixAdapter.remote_revision(&json!({"event": {"revision": "x"}})),
+        None
+    );
+    assert_eq!(WixAdapter.remote_revision(&json!({"revision": 0})), None);
+    assert_eq!(DiscordAdapter.remote_revision(&wix), None);
 }
 
 #[test]

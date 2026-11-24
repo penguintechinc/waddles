@@ -19,7 +19,7 @@ import secrets
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from services import ban_suppression, login_providers
+from services import ban_suppression, identity_audit, login_providers, session_service
 from services.errors import ApiError, bad_request, not_found
 from services.install_state_binding import (
     ERR_STATE,
@@ -74,8 +74,20 @@ async def set_primary_identity(async_dal: Any, dal: Any, *, user_id: int, platfo
     )
 
 
-async def unlink_identity(async_dal: Any, dal: Any, *, user_id: int, platform: str) -> None:
-    """Unlink identity."""
+async def unlink_identity(
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    platform: str,
+    keep_session_id: int | None = None,
+) -> None:
+    """Unlink a platform identity and sign the user out of every OTHER session.
+
+    Same contract as `oauth_service.unlink_account`: a login method removed because it is
+    compromised must not leave the sessions it opened alive; `keep_session_id` (the caller's
+    own session) stays signed in. Writes a PII-free `audit_log` row.
+    """
     count = await async_dal.count_async(dal.hub_user_identities.hub_user_id == user_id)
     if count <= 1:
         raise bad_request("Cannot unlink last identity")
@@ -105,6 +117,18 @@ async def unlink_identity(async_dal: Any, dal: Any, *, user_id: int, platform: s
             await async_dal.update_async(
                 dal.hub_user_identities.id == remaining.first().id, is_primary=True
             )
+
+    await session_service.revoke_other_sessions(
+        async_dal, dal, user_id=user_id, keep_session_id=keep_session_id, reason="identity_unlinked"
+    )
+    await identity_audit.record_identity_event(
+        async_dal,
+        dal,
+        user_id=user_id,
+        platform=platform,
+        action="identity.unlinked",
+        via="user_identities",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -245,6 +269,14 @@ async def identity_link_callback(
         is_primary=(count == 0),
         linked_at=datetime.now(UTC),
         last_used=datetime.now(UTC),
+    )
+    await identity_audit.record_identity_event(
+        async_dal,
+        dal,
+        user_id=hub_user_id,
+        platform=platform,
+        action="identity.linked",
+        via="user_identities",
     )
     # Ban-evasion suppression: a banned person may join a community first and link the banned
     # platform account afterwards -- re-apply any matching restriction to this user's

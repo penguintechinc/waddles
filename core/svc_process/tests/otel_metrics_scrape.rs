@@ -35,7 +35,7 @@ fn gate_granting_clock() -> Arc<CapabilityGate> {
         GrantScopeKey {
             tenant_id: 1,
             community_id: 1,
-            app_id: "waddles.scrape.test".to_string(),
+            app_id: "penguintechinc.waddles.scrape-test".to_string(),
             app_version: 1,
         },
         GrantSet {
@@ -97,42 +97,51 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
 
     // Drive every instrument through its real recording API.
     metrics.record_stage(
-        "waddles.scrape.test",
+        "penguintechinc.waddles.scrape-test",
         "delivered",
         Duration::from_millis(40),
     );
     metrics.record_executor_call(
-        "waddles.scrape.test",
+        "penguintechinc.waddles.scrape-test",
         "transform",
         "ok",
         Duration::from_millis(3),
     );
     metrics.record_host_call("kv", "get", "ok", Duration::from_micros(300));
     metrics.record_tool_call(
-        "waddles.e2e.svc.one",
+        "penguintechinc.waddles.fixture-e2e-svc-one",
         "echo",
         "ok",
         Duration::from_micros(500),
     );
-    metrics.record_bundle_load("waddles.scrape.test", "load", "ok", Duration::from_secs(1));
+    metrics.record_bundle_load(
+        "penguintechinc.waddles.scrape-test",
+        "load",
+        "ok",
+        Duration::from_secs(1),
+    );
     metrics.record_batch(7);
-    metrics.record_sandbox_trip("waddles.scrape.test", "timeout");
+    metrics.record_sandbox_trip("penguintechinc.waddles.scrape-test", "timeout");
     metrics.stream_event_written("twitch", "tw-some-channel");
     metrics.stream_trimmed("waddles:t:acme:c:main:app:x:action");
-    metrics.stream_claimed("waddles.scrape.test");
-    metrics.consumer_skipped("waddles.scrape.test", "filter");
+    metrics.stream_claimed("penguintechinc.waddles.scrape-test");
+    metrics.consumer_skipped("penguintechinc.waddles.scrape-test", "filter");
     metrics.dlq_written("process", "bundle_error");
-    metrics.group_lag("waddles.scrape.test", "s", Some(3));
-    metrics.group_pending("waddles.scrape.test", "s", 2);
+    metrics.group_lag("penguintechinc.waddles.scrape-test", "s", Some(3));
+    metrics.group_pending("penguintechinc.waddles.scrape-test", "s", 2);
     metrics.insecure_transport("valkey", "tls", false);
     metrics.tenant_boundary_violation("process", "mac_mismatch");
+    metrics.record_floor_ban_enqueue("community_hard_floor", "queued");
+    metrics.identity_decrypt_failure("dek_unavailable");
+    metrics.tokenize_memo("hit");
+    metrics.tokenize_mint_call("ok");
 
     // And the real capability gate, through the real host-call handler: one
     // authorized call (clock), one denied (http to an ungranted host).
-    let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+    let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
         "acme".to_string(),
         Some("main".to_string()),
-        "waddles.scrape.test".to_string(),
+        "penguintechinc.waddles.scrape-test".to_string(),
         1,
         1,
         1,
@@ -140,7 +149,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
         gate_granting_clock(),
     );
     let call = |capability, op: &str, args| HostCallBody {
-        app_id: "waddles.scrape.test".to_string(),
+        app_id: "penguintechinc.waddles.scrape-test".to_string(),
         capability,
         op: op.to_string(),
         args,
@@ -180,7 +189,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
             &text,
             &format!("{latency}_count{{"),
             &[
-                "app_id=\"waddles.scrape.test\"",
+                "app_id=\"penguintechinc.waddles.scrape-test\"",
                 "result=\"delivered\"",
                 "stage=\"process\""
             ]
@@ -242,7 +251,10 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
         sample(
             &text,
             "waddles_sandbox_trip_total{",
-            &["limit=\"timeout\"", "app_id=\"waddles.scrape.test\""]
+            &[
+                "limit=\"timeout\"",
+                "app_id=\"penguintechinc.waddles.scrape-test\""
+            ]
         ),
         Some(1.0)
     );
@@ -272,7 +284,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
             &text,
             "waddles_bundle_capability_authorized_total{",
             &[
-                "app_id=\"waddles.scrape.test\"",
+                "app_id=\"penguintechinc.waddles.scrape-test\"",
                 "permission=\"platform.clock\""
             ]
         )
@@ -284,7 +296,7 @@ async fn stage_metrics_and_gate_counters_surface_on_the_prometheus_scrape() {
             &text,
             "waddles_bundle_capability_denied_total{",
             &[
-                "app_id=\"waddles.scrape.test\"",
+                "app_id=\"penguintechinc.waddles.scrape-test\"",
                 "permission=\"net.http.fqdn\"",
                 "reason=\"not_granted\""
             ]

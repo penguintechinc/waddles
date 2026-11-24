@@ -403,6 +403,7 @@ mod tests {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             }),
         );
         write_frame(&mut tls, &hello)
@@ -471,6 +472,7 @@ mod tests {
                 runtime: "runc".to_string(),
                 verified: false,
             },
+            executor_id: None,
         });
         write_frame(&mut tls, &Frame::new(1, hello)).await.unwrap();
         assert!(matches!(
@@ -486,7 +488,7 @@ mod tests {
                 args["_scope"] = serde_json::json!({ "connection_id": c });
             }
             Message::HostCall(HostCallBody {
-                app_id: "waddles.core.service.twitch".to_string(),
+                app_id: "penguintechinc.waddles.twitch".to_string(),
                 capability: CapabilityKind::Db,
                 op: "identity.lookup".to_string(),
                 args,

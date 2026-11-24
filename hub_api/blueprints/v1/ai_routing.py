@@ -49,8 +49,10 @@ from services.ai_routing.errors import ToolCallDeniedError, ai_disabled_by_deplo
 from services.ai_routing.models import AIRequest
 from services.ai_routing.router import route_completion
 from services.community_access import require_community_admin, require_community_member
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_scopes, get_current_user_id
 from services.errors import ApiError
+from services.scope_registry import SCOPE_AI_ROUTING_MANAGE
 
 #: Upper bound on the prompt characters the completion proxy accepts. Bounds the CPU the injection
 #: scan / PII redaction / provider call can be made to spend on one request (OWASP LLM10) -- every
@@ -120,7 +122,13 @@ async def _require_admin(community_id: int) -> int:
     async_dal, dal = _dal()
     user_id = get_current_user_id(request)
     await require_community_admin(
-        async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
+        async_dal,
+        dal,
+        request,
+        ctx,
+        community_id=community_id,
+        user_id=user_id,
+        scope=SCOPE_AI_ROUTING_MANAGE,
     )
     return user_id
 
@@ -150,7 +158,7 @@ class AIConfigResponse:
     """`GET`/`PUT` `.../ai/config` response."""
 
     success: bool
-    community_id: int
+    community_id: str
     preferred_tier: str
     byok_provider: str | None
     on_insufficient_balance: str
@@ -229,10 +237,11 @@ class CompletionResponseDTO:
     fallback_reason: str | None
 
 
-def _config_dto(cfg: config_service.AIConfig) -> AIConfigResponse:
+async def _config_dto(cfg: config_service.AIConfig) -> AIConfigResponse:
+    """Config DTO; `community_id` is the community's PUBLIC UUID, never the numeric id."""
     return AIConfigResponse(
         success=True,
-        community_id=cfg.community_id,
+        community_id=await lookup_public_id(cfg.community_id),
         preferred_tier=cfg.preferred_tier,
         byok_provider=cfg.byok_provider,
         on_insufficient_balance=cfg.on_insufficient_balance,
@@ -255,7 +264,7 @@ def _key_dto(info: config_service.ByokKeyInfo) -> ByokKeyDTO:
 # ---------------------------------------------------------------------------
 
 
-@ai_config_bp.route("/<int:community_id>/ai/config", methods=["GET"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(AIConfigResponse)
 async def get_config(community_id: int) -> AIConfigResponse | tuple[dict[str, object], int]:
@@ -268,10 +277,10 @@ async def get_config(community_id: int) -> AIConfigResponse | tuple[dict[str, ob
     except ApiError as exc:
         return _err(exc)
     cfg = await config_service.get_ai_config(async_dal, dal, community_id=community_id)
-    return _config_dto(cfg)
+    return await _config_dto(cfg)
 
 
-@ai_config_bp.route("/<int:community_id>/ai/config", methods=["PUT"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SetAIConfigRequest)
 @validate_response(AIConfigResponse)
@@ -295,10 +304,10 @@ async def set_config(
         )
     except ApiError as exc:
         return _err(exc)
-    return _config_dto(cfg)
+    return await _config_dto(cfg)
 
 
-@ai_config_bp.route("/<int:community_id>/ai/byok-keys", methods=["GET"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/byok-keys", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ListByokKeysResponse)
 async def list_byok_keys(community_id: int) -> ListByokKeysResponse | tuple[dict[str, object], int]:
@@ -314,7 +323,7 @@ async def list_byok_keys(community_id: int) -> ListByokKeysResponse | tuple[dict
     return ListByokKeysResponse(success=True, keys=[_key_dto(k) for k in keys])
 
 
-@ai_config_bp.route("/<int:community_id>/ai/byok-keys", methods=["PUT"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/byok-keys", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SetByokKeyRequest)
 @validate_response(ByokKeyDTO)
@@ -344,7 +353,7 @@ async def set_byok_key(
     return _key_dto(info)
 
 
-@ai_config_bp.route("/<int:community_id>/ai/byok-keys/<provider>", methods=["DELETE"])
+@ai_config_bp.route("/<cuuid:community_id>/ai/byok-keys/<provider>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def delete_byok_key(
@@ -369,7 +378,7 @@ async def delete_byok_key(
 # ---------------------------------------------------------------------------
 
 
-@ai_completions_bp.route("/<int:community_id>/ai/completions", methods=["POST"])
+@ai_completions_bp.route("/<cuuid:community_id>/ai/completions", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(CompletionRequestDTO)
 @validate_response(CompletionResponseDTO)

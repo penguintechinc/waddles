@@ -10,7 +10,7 @@ import {
   ChartBarIcon,
 } from '@heroicons/react/24/outline';
 import api, { superAdminApi, superadminTenantApi } from '../../services/api';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
 
 /** Ignore closes fired this soon after a modal opened (stray backdrop mousedown from the opening gesture). */

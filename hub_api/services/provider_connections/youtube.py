@@ -60,13 +60,14 @@ from services.provider_connections.adapter import (
 from services.provider_connections.errors import (
     CredentialsRejected,
     InsufficientScopes,
+    OwnershipNotProven,
     ProviderQuotaExceeded,
     ProviderUnavailable,
     RefreshNotConfigured,
     RefreshRejected,
     ResourceUnresolvable,
 )
-from services.provider_connections.telemetry import provider_call
+from services.provider_connections.telemetry import ownership_counter, provider_call
 from services.url_guard import validate_outbound_url
 
 logger = logging.getLogger(__name__)
@@ -153,6 +154,7 @@ YOUTUBE_SPEC: Final = AdapterSpec(
     ),
     runtime_metadata_keys=frozenset({"live_chat_id", "channel_id", "scopes", "capabilities"}),
     refreshable=True,
+    requires_ownership=True,
     binding_metadata=(BindingKey("live_chat_id", "live_chat_id", required=True),),
 )
 
@@ -249,7 +251,49 @@ class YoutubeAdapter:
         facts: dict[str, Any] = {"channel_id": channel_id, "client_id": account.app_id}
         if isinstance(title, str) and title:
             facts["channel_title"] = title[:100]
-        return ResolvedResource(resource_id=channel_id, facts=facts)
+        live_chat_id = metadata.get("live_chat_id")
+        if live_chat_id:
+            await self._assert_owned_live_chat(credentials, channel_id, live_chat_id)
+        # ``channels.list?mine=true`` is scoped to the token's own channel: the token proves it.
+        return ResolvedResource(
+            resource_id=channel_id,
+            facts=facts,
+            owner_platform_user_id=channel_id,
+            owner_proven_by_token=True,
+        )
+
+    async def _assert_owned_live_chat(
+        self, credentials: Credentials, channel_id: str, live_chat_id: str
+    ) -> None:
+        """Refuse (403) a ``live_chat_id`` that is not one of ``channel_id``'s own broadcasts.
+
+        ``live_chat_id`` is admin-typed; without this an admin could point their connection at
+        ANOTHER channel's live chat. One ``liveBroadcasts.list?mine=true`` page (1 quota unit);
+        only broadcasts whose ``snippet.channelId`` is exactly the connected channel count.
+        """
+        response = await self._send(
+            "verify_chat",
+            "GET",
+            YOUTUBE_BROADCASTS_URL,
+            headers=_bearer(credentials),
+            params={"part": "snippet,status", "mine": "true", "maxResults": str(_BROADCAST_PAGE)},
+        )
+        _raise_for_youtube_error(response, "verify_chat")
+        items = _json_object(response).get("items")
+        for item in items if isinstance(items, list) else []:
+            snippet = item.get("snippet") if isinstance(item, dict) else None
+            if (
+                isinstance(snippet, dict)
+                and snippet.get("channelId") == channel_id
+                and snippet.get("liveChatId") == live_chat_id
+            ):
+                return
+        ownership_counter.add(1, {"provider": PROVIDER_ID, "outcome": "live_chat_rejected"})
+        logger.warning("youtube.live_chat_not_owned -- live_chat_id is not the channel's own")
+        raise OwnershipNotProven(
+            "that live chat does not belong to one of the connected channel's own broadcasts",
+            code="live_chat_not_owned",
+        )
 
     async def refresh(self, refresh_token: str, facts: Mapping[str, Any]) -> RefreshedTokens:
         """Exchange the refresh token using the tenant's own Google OAuth application."""

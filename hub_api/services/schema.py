@@ -91,6 +91,115 @@ from typing import Any
 
 from pydal import Field
 
+from services.pg_array_types import PG_INT_ARRAY, PG_TEXT_ARRAY
+
+
+def _define_communities(dal: Any, *, migrate: bool, redefine: bool = False) -> None:
+    """Define the full `communities` pydal table (every column the hub-api services read).
+
+    Single source of truth: `bind_auth_tables` binds it first and `bind_tenant_tables`
+    re-binds it with `redefine=True`. Both MUST use the same complete field list -- a narrower
+    redefine silently drops columns (`description`, `platform`, `deleted_at`, ...) and every
+    query selecting them 500s with `AttributeError`.
+    """
+    kwargs: dict[str, Any] = {"redefine": True} if redefine else {}
+    dal.define_table(
+        "communities",
+        Field("name", "string", length=255),
+        Field("display_name", "string", length=255),
+        # Added by the Analytics-module port (M9): this table can only be
+        # `define_table()`-d once per DAL instance, and `create_app()`
+        # binds this M1 definition (via `_bind_reference_tables`) before
+        # any request runs -- `services/community_common.py::
+        # ensure_community_tables()`'s own idempotent guard then silently
+        # skips its (separately-defined) `tenant_id` column, so
+        # `community_in_tenant()` would `AttributeError` in production
+        # against a real app (pre-existing gap, only masked because every
+        # Community-module blueprint's own tests build an isolated app +
+        # dal that never loads `bind_auth_tables` at all). Extending here
+        # -- not redefining -- per this module's own docstring guidance for
+        # `tenants` columns, generalized to `communities`: the real
+        # Postgres column already exists (058_tenants_and_claims.sql),
+        # this just maps pydal onto it.
+        Field("tenant_id", "integer"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("member_count", "integer", default=0),
+        Field("config", "json"),
+        # license_key/license_expires_at/license_tier: added by the
+        # M-automation port group -- see module docstring gap (5).
+        Field("license_key", "string", length=255),
+        Field("license_expires_at", "datetime"),
+        Field("license_tier", "string", length=50),
+        # alembic 0084: external UUID id (UUIDs only cross the API boundary). The pydal-side
+        # default keeps non-Postgres (sqlite) rows addressable; Postgres inserts that bypass pydal
+        # still get the DB's own gen_random_uuid() default.
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        # Columns below added by the M3 Platform-admin group (adminController.js
+        # /superadminController.js), the M2 Core Tenancy-Misc group
+        # (communityProfileController.js / joinRequestController.js port),
+        # and the M3 Platform-admin/Public group (platformController.js/
+        # publicController.js -- see `hub_api/PORTING.md`) -- `communities`
+        # is bound once, here, by M1; every column any later group needs
+        # joins this same Field list rather than a second define_table()
+        # call (pydal allows exactly one per table name per DAL instance).
+        # `tenant_id`, `description`, `platform`, `owner_id`, `join_mode`,
+        # `is_public`, `deleted_at` match 000_create_base_schema.sql +
+        # 058_tenants_and_claims.sql's `ALTER TABLE communities ADD COLUMN
+        # tenant_id` verbatim. `tenant_id` is NOT NULL in Postgres -- every
+        # public/platform-admin query that lists communities MUST filter on
+        # this (security.md Tenant Isolation); see services/public_service.
+        # py's module docstring for the pre-auth resolution mechanism. Also
+        # relied on by the M7 Streaming (music/stream/streaming) group AND
+        # the M7 Streaming (overlay/calls) group: `flask_core.tenancy.
+        # tenant_scoped()`'s community_id-owning-table fallback path reads
+        # `dal.communities.tenant_id` directly -- no group before M7 queried
+        # a community_id-owning table through that helper, so this was the
+        # first caller to actually need the column bound (not just present
+        # in Postgres). `services/community_access.py` (overlay/calls) is
+        # the second `tenant_scoped()` caller with the identical need.
+        # `about_extended`, `social_links`, `website_url`,
+        # `discord_invite_url`, `visibility` are a pre-existing schema gap:
+        # `communityProfileController.js`'s own raw SQL reads/writes these
+        # exact column names on `communities`, but no numbered migration
+        # ever adds them (`social_links` migration 037 adds a same-named
+        # column to `community_members`, a DIFFERENT table -- not this
+        # one). Bound here anyway to stay byte-faithful to Node: a query
+        # touching these columns 500s against real Postgres exactly like
+        # Node's own controller does today. Needs a migration to
+        # reconcile -- out of scope for a "no schema changes" port PR.
+        # `logo_url`/`banner_url`/`primary_platform` are genuine columns
+        # platformController.js/publicController.js read, same
+        # 000_create_base_schema.sql origin as the rest of this list.
+        Field("tenant_id", "integer"),
+        Field("description", "text"),
+        Field("about_extended", "text"),  # gap -- see docstring above
+        Field("social_links", "json"),  # gap -- see docstring above
+        Field("website_url", "string", length=500),  # gap -- see docstring above
+        Field("discord_invite_url", "string", length=500),  # gap -- see docstring above
+        Field("visibility", "string", length=30, default="public"),  # gap -- see docstring above
+        Field("logo_url", "text"),
+        Field("banner_url", "text"),
+        Field("primary_platform", "string", length=50),
+        Field("platform", "string", length=50, default="discord"),
+        Field("platform_server_id", "string", length=255),
+        # VARCHAR in Postgres, not a hub_users.id FK -- see community_members.user_id below.
+        Field("owner_id", "string", length=255),
+        Field("owner_name", "string", length=255),
+        Field("community_type", "string", length=50, default="creator"),
+        Field("join_mode", "string", length=50, default="open"),
+        Field("is_public", "boolean", default=True),
+        Field("is_premium", "boolean", default=False),
+        Field("seat_limit", "integer"),
+        Field("created_by", "string", length=255),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        Field("deleted_at", "datetime"),
+        Field("deleted_by", "string", length=255),
+        migrate=migrate,
+        **kwargs,
+    )
+
 
 def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define every table the M1 auth/identity/passkey/profile/user-management group queries.
@@ -160,6 +269,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("expires_at", "datetime"),
         Field("revoked_at", "datetime"),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -251,6 +361,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("device_name", "string", length=100),
         Field("created_at", "datetime"),
         Field("last_used_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -273,97 +384,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
-        "communities",
-        Field("name", "string", length=255),
-        Field("display_name", "string", length=255),
-        # Added by the Analytics-module port (M9): this table can only be
-        # `define_table()`-d once per DAL instance, and `create_app()`
-        # binds this M1 definition (via `_bind_reference_tables`) before
-        # any request runs -- `services/community_common.py::
-        # ensure_community_tables()`'s own idempotent guard then silently
-        # skips its (separately-defined) `tenant_id` column, so
-        # `community_in_tenant()` would `AttributeError` in production
-        # against a real app (pre-existing gap, only masked because every
-        # Community-module blueprint's own tests build an isolated app +
-        # dal that never loads `bind_auth_tables` at all). Extending here
-        # -- not redefining -- per this module's own docstring guidance for
-        # `tenants` columns, generalized to `communities`: the real
-        # Postgres column already exists (058_tenants_and_claims.sql),
-        # this just maps pydal onto it.
-        Field("tenant_id", "integer"),
-        Field("is_global", "boolean", default=False),
-        Field("is_active", "boolean", default=True),
-        Field("member_count", "integer", default=0),
-        Field("config", "json"),
-        # license_key/license_expires_at/license_tier: added by the
-        # M-automation port group -- see module docstring gap (5).
-        Field("license_key", "string", length=255),
-        Field("license_expires_at", "datetime"),
-        Field("license_tier", "string", length=50),
-        # Columns below added by the M3 Platform-admin group (adminController.js
-        # /superadminController.js), the M2 Core Tenancy-Misc group
-        # (communityProfileController.js / joinRequestController.js port),
-        # and the M3 Platform-admin/Public group (platformController.js/
-        # publicController.js -- see `hub_api/PORTING.md`) -- `communities`
-        # is bound once, here, by M1; every column any later group needs
-        # joins this same Field list rather than a second define_table()
-        # call (pydal allows exactly one per table name per DAL instance).
-        # `tenant_id`, `description`, `platform`, `owner_id`, `join_mode`,
-        # `is_public`, `deleted_at` match 000_create_base_schema.sql +
-        # 058_tenants_and_claims.sql's `ALTER TABLE communities ADD COLUMN
-        # tenant_id` verbatim. `tenant_id` is NOT NULL in Postgres -- every
-        # public/platform-admin query that lists communities MUST filter on
-        # this (security.md Tenant Isolation); see services/public_service.
-        # py's module docstring for the pre-auth resolution mechanism. Also
-        # relied on by the M7 Streaming (music/stream/streaming) group AND
-        # the M7 Streaming (overlay/calls) group: `flask_core.tenancy.
-        # tenant_scoped()`'s community_id-owning-table fallback path reads
-        # `dal.communities.tenant_id` directly -- no group before M7 queried
-        # a community_id-owning table through that helper, so this was the
-        # first caller to actually need the column bound (not just present
-        # in Postgres). `services/community_access.py` (overlay/calls) is
-        # the second `tenant_scoped()` caller with the identical need.
-        # `about_extended`, `social_links`, `website_url`,
-        # `discord_invite_url`, `visibility` are a pre-existing schema gap:
-        # `communityProfileController.js`'s own raw SQL reads/writes these
-        # exact column names on `communities`, but no numbered migration
-        # ever adds them (`social_links` migration 037 adds a same-named
-        # column to `community_members`, a DIFFERENT table -- not this
-        # one). Bound here anyway to stay byte-faithful to Node: a query
-        # touching these columns 500s against real Postgres exactly like
-        # Node's own controller does today. Needs a migration to
-        # reconcile -- out of scope for a "no schema changes" port PR.
-        # `logo_url`/`banner_url`/`primary_platform` are genuine columns
-        # platformController.js/publicController.js read, same
-        # 000_create_base_schema.sql origin as the rest of this list.
-        Field("tenant_id", "integer"),
-        Field("description", "text"),
-        Field("about_extended", "text"),  # gap -- see docstring above
-        Field("social_links", "json"),  # gap -- see docstring above
-        Field("website_url", "string", length=500),  # gap -- see docstring above
-        Field("discord_invite_url", "string", length=500),  # gap -- see docstring above
-        Field("visibility", "string", length=30, default="public"),  # gap -- see docstring above
-        Field("logo_url", "text"),
-        Field("banner_url", "text"),
-        Field("primary_platform", "string", length=50),
-        Field("platform", "string", length=50, default="discord"),
-        Field("platform_server_id", "string", length=255),
-        # VARCHAR in Postgres, not a hub_users.id FK -- see community_members.user_id below.
-        Field("owner_id", "string", length=255),
-        Field("owner_name", "string", length=255),
-        Field("community_type", "string", length=50, default="creator"),
-        Field("join_mode", "string", length=50, default="open"),
-        Field("is_public", "boolean", default=True),
-        Field("is_premium", "boolean", default=False),
-        Field("seat_limit", "integer"),
-        Field("created_by", "string", length=255),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        Field("deleted_at", "datetime"),
-        Field("deleted_by", "string", length=255),
-        migrate=migrate,
-    )
+    _define_communities(dal, migrate=migrate)
 
     dal.define_table(
         "community_members",
@@ -442,8 +463,14 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("community_id", "integer", notnull=True),
         Field("name", "string", length=50, notnull=True),
         Field("display_name", "string", length=100),
+        Field("description", "text"),
+        Field("is_system", "boolean", default=False),
+        Field("role_kind", "integer", default=0),
         Field("priority", "integer", default=0),
         Field("base_claims", "json"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
         migrate=migrate,
     )
 
@@ -461,6 +488,7 @@ def bind_auth_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reviewed_by", "integer"),
         Field("reviewed_at", "datetime"),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -549,6 +577,7 @@ def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("is_active", "boolean", default=True),
             Field("form_fields", "json"),
             Field("created_at", "datetime"),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -570,6 +599,7 @@ def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("resolved_at", "datetime"),
             Field("created_at", "datetime"),
             Field("updated_at", "datetime"),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -592,10 +622,9 @@ def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("name", "string", length=100, notnull=True),
             # SHA-256 hex of the plaintext token; plaintext is never stored.
             Field("token_hash", "string", length=64, notnull=True, unique=True),
-            # NULL = inherit the user's full permissions; pydal has no native
-            # Postgres TEXT[] type -- "list:string" round-trips a Python list
-            # portably across Postgres/MySQL/sqlite (pydal's own abstraction).
-            Field("scope_ceiling", "list:string"),
+            # NULL = inherit the user's full permissions; a native Postgres TEXT[] column
+            # (`services.pg_array_types.PG_TEXT_ARRAY` round-trips a Python list on every DB).
+            Field("scope_ceiling", PG_TEXT_ARRAY),
             Field("created_at", "datetime"),
             Field("last_used_at", "datetime"),
             Field("expires_at", "datetime"),
@@ -610,11 +639,12 @@ def bind_support_token_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("created_by_user_id", "integer"),
             Field("name", "string", length=100, notnull=True),
             Field("token_hash", "string", length=64, notnull=True, unique=True),
-            Field("scopes", "list:string", notnull=True),
+            Field("scopes", PG_TEXT_ARRAY, notnull=True),
             Field("created_at", "datetime"),
             Field("last_used_at", "datetime"),
             Field("expires_at", "datetime"),
             Field("is_revoked", "boolean", notnull=True, default=False),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -703,6 +733,67 @@ def bind_overlay_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("previous_key_hash", "string", length=64),
             Field("is_active", "boolean", default=True),
             Field("rotated_at", "datetime"),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    # alembic 0113: composite-scene tables. Kind/status/canvas are int codes (see
+    # `services/overlay_scene_service.py` for the mappings); `public_id` is the only external id.
+    if "overlay_widget_registry" not in dal.tables:
+        dal.define_table(
+            "overlay_widget_registry",
+            Field("public_id", "string", length=36, notnull=True, unique=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("bundle_app_id", "string", length=128, notnull=True),
+            Field("widget_id", "string", length=128, notnull=True),
+            Field("display_name", "string", length=120, notnull=True),
+            Field("description", "string", length=280, default=""),
+            Field("category", "string", length=64, default="custom"),
+            Field("output_kind_code", "integer", notnull=True, default=1),
+            Field("surface_id", "string", length=64),
+            Field("allow_standalone_output", "boolean", default=True),
+            Field("default_x_px", "integer", default=48),
+            Field("default_y_px", "integer", default=48),
+            Field("default_width_px", "integer", default=400),
+            Field("default_height_px", "integer", default=200),
+            Field("default_z_index", "integer", default=10),
+            Field("props_schema", "json", default={}),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    if "overlay_scene_components" not in dal.tables:
+        dal.define_table(
+            "overlay_scene_components",
+            Field("public_id", "string", length=36, notnull=True, unique=True),
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("bundle_app_id", "string", length=128, notnull=True),
+            Field("widget_id", "string", length=128, notnull=True),
+            Field("surface_id", "string", length=64, default="custom"),
+            Field("output_kind_code", "integer", notnull=True, default=1),
+            Field("display_name", "string", length=120, notnull=True),
+            Field("x_px", "integer", default=48),
+            Field("y_px", "integer", default=48),
+            Field("width_px", "integer", default=400),
+            Field("height_px", "integer", default=200),
+            Field("z_index", "integer", default=10),
+            Field("status_code", "integer", notnull=True, default=1),
+            Field("props", "json", default={}),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            migrate=migrate,
+        )
+
+    # Owned by svc-presentation (legacy SQL 073); hub-api only writes the canvas code (0113).
+    if "presentation_config" not in dal.tables:
+        dal.define_table(
+            "presentation_config",
+            Field("community_id", "integer", notnull=True, unique=True),
+            Field("canvas_resolution_code", "integer", notnull=True, default=1),
             Field("created_at", "datetime"),
             Field("updated_at", "datetime"),
             migrate=migrate,
@@ -886,6 +977,7 @@ def bind_streaming_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_by", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -932,14 +1024,26 @@ def bind_community_authz_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("display_name", "string", length=100),
         Field("description", "text"),
         Field("is_system", "boolean", default=False),
+        Field("role_kind", "integer", default=0),
         Field("priority", "integer", default=0),
         # base_claims: JSONB `{"scopes": [...]}"` -- see requireCommunityAdmin's
         # `claims.scopes` read in middleware/auth.js.
         Field("base_claims", "json"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
+
+
+def _define_if_absent(dal: Any, name: str, *fields: Any, **kwargs: Any) -> None:
+    """`dal.define_table(name, ...)` unless `name` is already bound on this DAL (reuse it).
+
+    Only the "already defined" case is skipped; every other error from `define_table` propagates.
+    """
+    if name in dal.tables:
+        return
+    dal.define_table(name, *fields, **kwargs)
 
 
 def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -955,10 +1059,22 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     Lazy/idempotent, same rationale as `bind_community_authz_tables()`
     above (app.py is frozen for this port).
     """
-    if "github_repo_connections" in dal.tables:
+    # Per-table guards (not one early return on the first table): `support_tickets`/
+    # `support_ticket_comments` are ALSO bound (with a richer field list) by
+    # `bind_support_token_tables()`, and whichever binder runs first on a given DAL wins --
+    # an unconditional second `define_table()` raised "table already defined: support_tickets"
+    # at startup. Reuse the existing definition; any other `define_table` error still raises.
+    required = (
+        "github_repo_connections",
+        "ticket_github_sync",
+        "github_sync_log",
+        "support_tickets",
+        "support_ticket_comments",
+    )
+    if all(name in dal.tables for name in required):
         return
-
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "github_repo_connections",
         Field("community_id", "integer"),
         Field("vendor_id", "integer"),
@@ -966,7 +1082,7 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("repo_owner", "string", length=255, notnull=True),
         Field("repo_name", "string", length=255, notnull=True),
         Field("sync_mode", "string", length=30, default="tickets_only"),
-        Field("default_labels", "list:string"),
+        Field("default_labels", PG_TEXT_ARRAY),
         Field("auto_close_on_github_close", "boolean", default=True),
         Field("auth_type", "string", length=20, notnull=True),
         Field("encrypted_token", "text", notnull=True),
@@ -978,7 +1094,8 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "ticket_github_sync",
         Field("ticket_id", "integer", notnull=True),
         Field("github_repo_connection_id", "integer", notnull=True),
@@ -992,7 +1109,8 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
         migrate=migrate,
     )
 
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "github_sync_log",
         Field("ticket_github_sync_id", "integer"),
         Field("direction", "string", length=10, notnull=True),
@@ -1005,17 +1123,20 @@ def bind_github_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     )
 
     # --- gap (5): not in any numbered migration, bound byte-faithful to Node ---
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "support_tickets",
         Field("subject", "string", length=255),
         Field("description", "text"),
         Field("status", "string", length=50),
         Field("priority", "string", length=50),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
-    dal.define_table(
+    _define_if_absent(
+        dal,
         "support_ticket_comments",
         Field("ticket_id", "integer", notnull=True),
         Field("content", "text"),
@@ -1165,6 +1286,7 @@ def bind_privacy_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("sender_platform", "string", length=50),
         Field("sender_username", "string", length=255),
         Field("sender_avatar_url", "text"),
+        Field("hub_channel_id", "integer"),
         Field("message_content", "text", notnull=True),
         Field("message_type", "string", length=50, default="text"),
         Field("created_at", "datetime"),
@@ -1224,6 +1346,7 @@ def bind_reputation_policy_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("tenant_auto_ban_enabled", "boolean", default=False),
             Field("tenant_auto_ban_floor", "integer", default=350),
             Field("tenant_at_risk_threshold", "integer", default=450),
+            Field("lift_rearm_drop", "integer", default=5),
             Field("updated_at", "datetime"),
             primarykey=["tenant_id"],
             migrate=migrate,
@@ -1314,6 +1437,22 @@ def bind_erasure_reputation_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("set_by", "text", notnull=True),
             Field("set_at", "datetime"),
             Field("expires_at", "datetime"),
+            migrate=migrate,
+        )
+    if "bundle_reputation_floor_bans" not in dal.tables:
+        # Automated hard-ban outbox (alembic 0114). hub-api holds SELECT here (and EXECUTE on
+        # `reputation_floor_ban_erase_subject`), never DELETE/UPDATE: erasure reads the rows to
+        # classify them, then the SQL function deletes/pseudonymises.
+        dal.define_table(
+            "bundle_reputation_floor_bans",
+            Field("tenant_id", "integer", notnull=True),
+            Field("community_id", "integer", notnull=True),
+            Field("user_uuid", "string", length=36, notnull=True),
+            Field("platform", "string", length=32, notnull=True),
+            Field("status", "integer", notnull=True),
+            Field("lifted_at", "datetime"),
+            Field("lifted_by", "string", length=36),
+            Field("action", "integer", default=1),
             migrate=migrate,
         )
     if "bundle_reputation_tenant_scores" not in dal.tables:
@@ -1420,6 +1559,7 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("config_schema", "json", default={}),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1507,6 +1647,7 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("cancel_at_period_end", "boolean", default=False),
         Field("subscribed_at", "datetime"),
         Field("canceled_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1536,6 +1677,7 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("description", "text"),
         Field("created_at", "datetime", notnull=True),
         Field("updated_at", "datetime", notnull=True),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -1551,6 +1693,38 @@ def bind_marketplace_module_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("expires_at", "datetime"),
         migrate=migrate,
     )
+
+
+def bind_reference_tenants_table(dal: Any) -> None:
+    """Bind the shared `tenants` read table (schema owned by SQL migration 058).
+
+    Single definition used by `app.py::_bind_reference_tables` and by standalone CLIs
+    (`cli/refresh_landing_stats.py`) that never run `create_app()` -- `tenants` can only be
+    `define_table()`-d once per DAL, so it lives here, never re-declared per caller.
+    """
+    if "tenants" in dal.tables:
+        return
+    dal.define_table(
+        "tenants",
+        Field("slug", "string", length=100),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        Field("display_name", "string", length=255),
+        Field("logo_url", "text"),
+        Field("is_global", "boolean", default=False),
+        Field("is_active", "boolean", default=True),
+        Field("config", "json"),
+        migrate=False,
+    )
+
+
+def bind_landing_stats_tables(dal: Any) -> None:
+    """Bind every table `public_service` stats reads, for processes without `create_app()`.
+
+    Regression (landing-stats-refresh CronJob): the CLI's bare `init_database()` DAL had no
+    tables bound, so `resolve_default_tenant` raised `'DAL' object has no attribute 'tenants'`.
+    """
+    bind_reference_tenants_table(dal)
+    bind_platform_tables(dal)
 
 
 def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -1656,7 +1830,7 @@ def bind_platform_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("client_secret", "text"),
         Field("token_type", "string", length=50, default="Bearer"),
         Field("expires_at", "datetime"),
-        Field("scopes", "list:string"),
+        Field("scopes", PG_TEXT_ARRAY),
         Field("config_data", "json"),
         Field("is_active", "boolean", default=True),
         Field("is_encrypted", "boolean", default=True),
@@ -1762,6 +1936,7 @@ def bind_admin_tables(dal: Any, *, migrate: bool = False) -> None:
             "commands",
             Field("command", "string", length=100, notnull=True),
             Field("module_name", "string", length=255, notnull=True),
+            Field("module_url", "string", length=500),
             Field("description", "text"),
             Field("usage", "text"),
             Field("category", "string", length=100, default="general"),
@@ -1789,10 +1964,12 @@ def bind_admin_tables(dal: Any, *, migrate: bool = False) -> None:
             Field("display_name", "string", length=100),
             Field("description", "text"),
             Field("is_system", "boolean", default=False),
+            Field("role_kind", "integer", default=0),
             Field("priority", "integer", default=0),
             Field("base_claims", "json"),
             Field("created_at", "datetime"),
             Field("updated_at", "datetime"),
+            Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
             migrate=migrate,
         )
 
@@ -1814,7 +1991,7 @@ def bind_superadmin_tenant_fields(dal: Any, *, migrate: bool = False) -> None:
     check so this only runs once per DAL instance rather than on every
     request.
     """
-    if "seat_limit" in dal.tenants.fields:
+    if "seat_limit" in dal.tenants.fields and "updated_at" in dal.tenants.fields:
         return
 
     dal.define_table(
@@ -1827,7 +2004,7 @@ def bind_superadmin_tenant_fields(dal: Any, *, migrate: bool = False) -> None:
         Field("is_global", "boolean", default=False),
         Field("is_active", "boolean", default=True),
         Field("config", "json"),
-        Field("allowed_module_ids", "list:integer"),
+        Field("allowed_module_ids", PG_INT_ARRAY),
         Field("seat_limit", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
@@ -1894,28 +2071,15 @@ def bind_tenant_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("is_active", "boolean", default=True),
         Field("config", "json"),
         Field("description", "text"),
-        Field("allowed_module_ids", "list:integer"),
+        Field("allowed_module_ids", PG_INT_ARRAY),
         Field("seat_limit", "integer"),
         Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
         migrate=migrate,
         redefine=True,
     )
 
-    dal.define_table(
-        "communities",
-        Field("name", "string", length=255),
-        Field("display_name", "string", length=255),
-        Field("is_global", "boolean", default=False),
-        Field("is_active", "boolean", default=True),
-        Field("member_count", "integer", default=0),
-        Field("config", "json"),
-        Field("tenant_id", "integer"),
-        Field("is_public", "boolean", default=True),
-        Field("community_type", "string", length=50, default="creator"),
-        Field("created_at", "datetime"),
-        migrate=migrate,
-        redefine=True,
-    )
+    _define_communities(dal, migrate=migrate, redefine=True)
 
     dal.define_table(
         "tenant_settings",
@@ -2036,10 +2200,10 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("webhook_url", "string", length=500, notnull=True),
         Field("webhook_secret", "string", length=255, notnull=True),
         Field("webhook_timeout_ms", "integer", default=5000),
-        Field("trigger_commands", "list:string"),
-        Field("trigger_events", "list:string"),
-        Field("requested_scopes", "list:string"),
-        Field("response_types", "list:string"),
+        Field("trigger_commands", PG_TEXT_ARRAY),
+        Field("trigger_events", PG_TEXT_ARRAY),
+        Field("requested_scopes", PG_TEXT_ARRAY),
+        Field("response_types", PG_TEXT_ARRAY),
         Field("pricing_type", "string", length=50, default="free"),
         Field("pricing_model", "string", length=50, default="flat"),
         Field("price_cents", "integer", default=0),
@@ -2062,6 +2226,7 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
         Field("deleted_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -2076,6 +2241,7 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reviewed_by", "integer"),
         Field("reviewed_at", "datetime"),
         Field("review_notes", "text"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -2138,6 +2304,7 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reviewed_by", "integer"),
         Field("is_verified", "boolean", default=False),
         Field("requires_special_review", "boolean", default=False),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -2225,23 +2392,27 @@ def bind_marketplace_vendor_tables(dal: Any, *, migrate: bool = False) -> None:
 
     # Gotcha #4 note (1) above -- `module_url` is not defined by
     # `002_add_commands_table.sql` or any later migration.
-    dal.define_table(
-        "commands",
-        Field("command", "string", length=100, notnull=True),
-        Field("module_name", "string", length=255, notnull=True),
-        Field("module_url", "string", length=500),
-        Field("description", "text"),
-        Field("usage", "text"),
-        Field("category", "string", length=100, default="general"),
-        Field("permission_level", "string", length=50, default="everyone"),
-        Field("cooldown_seconds", "integer", default=0),
-        Field("community_id", "integer"),
-        Field("is_enabled", "boolean", default=True),
-        Field("is_active", "boolean", default=True),
-        Field("created_at", "datetime"),
-        Field("updated_at", "datetime"),
-        migrate=migrate,
-    )
+    if "commands" not in dal.tables:
+        dal.define_table(
+            "commands",
+            Field("command", "string", length=100, notnull=True),
+            Field("module_name", "string", length=255, notnull=True),
+            Field("module_url", "string", length=500),
+            Field("description", "text"),
+            Field("usage", "text"),
+            Field("category", "string", length=100, default="general"),
+            Field("permission_level", "string", length=50, default="everyone"),
+            Field("cooldown_seconds", "integer", default=0),
+            Field("community_id", "integer"),
+            Field("is_enabled", "boolean", default=True),
+            Field("is_active", "boolean", default=True),
+            Field("created_at", "datetime"),
+            Field("updated_at", "datetime"),
+            # Whichever `commands` binder runs first wins on a shared DAL, so every copy carries
+            # the full column set (a copy without `platforms` 500'd GET /admin/<c>/commands).
+            Field("platforms", "json"),
+            migrate=migrate,
+        )
 
 
 def bind_marketplace_billing_tables(dal: Any, *, migrate: bool = False) -> None:
@@ -2391,8 +2562,8 @@ def bind_lifecycle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("provider", "string", length=50, notnull=True),
         Field("execution_model", "string", length=50, notnull=True),
         Field("is_default", "boolean", default=False),
-        Field("compatible_with", "list:string"),
-        Field("incompatible_with", "list:string"),
+        Field("compatible_with", PG_TEXT_ARRAY),
+        Field("incompatible_with", PG_TEXT_ARRAY),
         Field("platform_compatibility", "json", notnull=True),
         Field("status", "string", length=20, default="active"),
         Field("installed_at", "datetime"),
@@ -2415,7 +2586,7 @@ def bind_lifecycle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("license", "string", length=50),
         Field("license_review_required", "boolean", default=False),
         Field("source_url", "text"),
-        Field("alternative_to", "list:string", default=[]),
+        Field("alternative_to", "json", default=[]),
         Field("homepage_url", "text"),
         Field("notice", "text"),
         Field("category", "string", length=50),
@@ -2498,8 +2669,8 @@ def bind_app_bundle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("provider", "string", length=50, notnull=True),
         Field("execution_model", "string", length=50, notnull=True),
         Field("is_default", "boolean", default=False),
-        Field("compatible_with", "list:string"),
-        Field("incompatible_with", "list:string"),
+        Field("compatible_with", PG_TEXT_ARRAY),
+        Field("incompatible_with", PG_TEXT_ARRAY),
         Field("platform_compatibility", "json", notnull=True),
         Field("status", "string", length=20, default="active"),
         Field("installed_at", "datetime"),
@@ -2510,7 +2681,7 @@ def bind_app_bundle_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("license", "string", length=50),
         Field("license_review_required", "boolean", default=False),
         Field("source_url", "text"),
-        Field("alternative_to", "list:string", default=[]),
+        Field("alternative_to", "json", default=[]),
         Field("homepage_url", "text"),
         Field("notice", "text"),
         Field("category", "string", length=50),
@@ -2687,6 +2858,10 @@ def bind_token_billing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("reason", "string", length=255, notnull=True),
         Field("ref", "string", length=255),
         Field("balance_after", "integer", notnull=True),
+        # Replay guard (alembic 0135): `<community_id>:<product_id>:<caller key>`, NULL for
+        # un-keyed rows; the UNIQUE constraint makes the database arbitrate a duplicate debit.
+        Field("idempotency_key", "string", length=255, unique=True),
+        Field("actor_user_id", "integer"),
         Field("created_at", "datetime"),
         migrate=migrate,
     )
@@ -2977,9 +3152,29 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         #: role-sync `sync_enabled` column above; gates
         #: `event_discord_sync_service.py`'s push engine per pairing.
         Field("event_sync_enabled", "boolean", notnull=True, default=False),
+        #: migration 0104 -- opt-in Twitch moderator -> Discord moderator propagation.
+        Field("propagate_moderators", "boolean", notnull=True, default=False),
+        #: migration 0104 -- NULL = grandfathered pre-0104 pairing (never ownership-proven).
+        Field("ownership_verified_at", "datetime"),
+        #: migration 0104 -- TRUE only for rows that existed at upgrade time (bounded).
+        Field("grandfathered", "boolean", notnull=True, default=False),
+        Field("discord_grants_backfilled_at", "datetime"),
         Field("created_by_user_id", "integer"),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
+        migrate=migrate,
+    )
+
+    #: migration 0137 -- the ONE tenant that may pair a Discord guild (first claim wins).
+    dal.define_table(
+        "discord_guild_tenants",
+        Field("discord_guild_id", "string", length=255, notnull=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("claimed_at", "datetime"),
+        Field("claimed_by_uuid", "string", length=36),
+        #: the table has no surrogate `id`: the guild id IS the primary key.
+        primarykey=["discord_guild_id"],
         migrate=migrate,
     )
 
@@ -2995,6 +3190,7 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("discord_role_id", "string", length=255, notnull=True),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
 
@@ -3012,6 +3208,7 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("last_skipped_not_member", "integer", notnull=True, default=0),
         Field("last_error", "string", length=80),
         Field("created_at", "datetime"),
+        Field("public_id", "string", length=36, default=lambda: str(_uuid.uuid4())),
         migrate=migrate,
     )
     dal.define_table(
@@ -3022,16 +3219,56 @@ def bind_guild_pairing_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("granted_at", "datetime"),
         migrate=migrate,
     )
+    # migration 0104_role_sync_priv_harden -- role-sync grant ledgers (remove only own grants).
+    dal.define_table(
+        "role_sync_community_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("granted_role", "string", length=20, notnull=True),
+        Field("prior_role", "string", length=20),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_purged_bindings",
+        Field("pairing_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
+        Field("community_role", "string", length=20, notnull=True),
+        Field("purged_at", "datetime"),
+        migrate=migrate,
+    )
+    #: status: 0 pending review, 1 demoted to baseline, 2 dismissed.
+    dal.define_table(
+        "role_sync_remediation_queue",
+        Field("purged_binding_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("hub_user_id", "integer", notnull=True),
+        Field("role_at_review", "string", length=20, notnull=True),
+        Field("status", "integer", notnull=True, default=0),
+        Field("created_at", "datetime"),
+        Field("resolved_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "role_sync_discord_grants",
+        Field("pairing_id", "integer", notnull=True),
+        Field("discord_role_id", "string", length=255, notnull=True),
+        Field("platform", "string", length=50, notnull=True, default="discord"),
+        Field("platform_user_id", "string", length=255, notnull=True),
+        Field("granted_at", "datetime"),
+        migrate=migrate,
+    )
 
 
 def bind_calendar_sync_tables(dal: Any, *, migrate: bool = False) -> None:
     """Define `calendar_events` (legacy, read/write subset) + `calendar_event_discord_syncs`.
 
-    **`calendar_events` is NOT owned by this binding** -- it's the
-    `calendar_interaction_module`'s own legacy table (`action/interactive/
-    calendar_interaction_module/services/calendar_service.py::EventInfo`
-    is the full column list; schema predates this port's numbered
-    migration set and is intentionally left alone here). This function
+    **`calendar_events` is NOT owned by this binding** -- it's a
+    legacy table the calendar app bundle writes (config/postgres/migrations/
+    024_add_event_ticketing.sql has the full column list; schema predates
+    this port's numbered migration set and is intentionally left alone here). This function
     maps only the subset `event_discord_sync_service.py` actually reads/
     writes: the full Discord-payload field set (title/description/
     event_date/end_date/timezone/location/status/community_id) plus the
@@ -3137,5 +3374,155 @@ def bind_stream_keys_tables(dal: Any, *, migrate: bool = False) -> None:
         Field("force_cut", "boolean", notnull=True, default=False),
         Field("created_at", "datetime"),
         Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_dsar_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the DSAR inbox tables (`dsar_requests`, `dsar_request_events`; alembic 0121).
+
+    Idempotent. Composes `bind_admin_privacy_tables()` (hub_users/tenants-adjacent tables the
+    `act` endpoint's reused export/erase/do-not-sell logic reads). Ciphertext (vault-sealed) and
+    hash columns are base64/hex TEXT (the repo's field-encryption convention) so they behave
+    identically on the sqlite test backend and Postgres. Timestamps are timezone-aware in Postgres
+    (TIMESTAMPTZ).
+    """
+    bind_admin_privacy_tables(dal, migrate=migrate)
+    if "dsar_requests" in dal.tables:
+        _bind_dsar_mail_outbox(dal, migrate=migrate)
+        return
+    dal.define_table(
+        "dsar_requests",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("community_id", "integer"),
+        Field("request_type", "integer", notnull=True),
+        Field("status", "integer", notnull=True),
+        Field("regime", "integer", notnull=True),
+        Field("source", "integer", notnull=True),
+        Field("requested_at", "datetime", notnull=True),
+        Field("verified_at", "datetime"),
+        Field("due_at", "datetime"),
+        Field("extended_until", "datetime"),
+        Field("extension_reason", "text"),
+        Field("completed_at", "datetime"),
+        Field("expires_at", "datetime"),
+        Field("assignee_user_id", "integer"),
+        Field("subject_user_id", "integer"),
+        Field("response_notes", "text"),
+        Field("contact_email_enc", "text"),
+        Field("contact_email_hash", "string", length=64),
+        Field("message_enc", "text"),
+        Field("pending_message_enc", "text"),
+        Field("pending_regime", "integer"),
+        Field("pending_token_hash", "string", length=64),
+        Field("contact_purged_at", "datetime"),
+        Field("verification_token_hash", "string", length=64),
+        Field("verification_expires_at", "datetime"),
+        Field("verification_sent_at", "datetime"),
+        Field("created_at", "datetime"),
+        Field("updated_at", "datetime"),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "dsar_request_events",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("request_id", "integer", notnull=True),
+        Field("event_type", "integer", notnull=True),
+        Field("actor_kind", "integer", notnull=True),
+        Field("actor_user_id", "integer"),
+        Field("from_status", "integer"),
+        Field("to_status", "integer"),
+        Field("detail", "json"),
+        Field("created_at", "datetime"),
+        migrate=migrate,
+    )
+    _bind_dsar_mail_outbox(dal, migrate=migrate)
+
+
+def _bind_dsar_mail_outbox(dal: Any, *, migrate: bool) -> None:
+    """Bind `dsar_mail_outbox` (alembic 0123): durable queue of verification mails to send."""
+    if "dsar_mail_outbox" in dal.tables:
+        return
+    dal.define_table(
+        "dsar_mail_outbox",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("request_id", "integer", notnull=True),
+        Field("tenant_slug", "string", length=63, notnull=True),
+        Field("kind", "integer", notnull=True),
+        Field("token_enc", "text"),
+        Field("status", "integer", notnull=True),
+        Field("attempts", "integer", notnull=True),
+        Field("next_attempt_at", "datetime", notnull=True),
+        Field("claimed_until", "datetime"),
+        Field("lease_token", "string", length=36),
+        Field("last_reason", "string", length=40),
+        Field("created_at", "datetime", notnull=True),
+        Field("completed_at", "datetime"),
+        migrate=migrate,
+    )
+
+
+def bind_community_tier_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind the community-tier ledger + pool cache (alembic 0126). Idempotent.
+
+    `community_tier_allocations`: at most one active (`released_at` NULL) row per community.
+    `tenant_license_pools`: last observed team-axis pool limit per (tenant, tier). Enum columns
+    are integer codes (see `services/community_tier_service.py`); timestamps are TIMESTAMPTZ in
+    Postgres. Also binds `communities` (idempotent) because the service writes its denormalized
+    `license_tier`/`is_premium` copies in the same transaction.
+    """
+    if "community_tier_allocations" in dal.tables:
+        return
+    if "communities" not in dal.tables:
+        bind_auth_tables(dal, migrate=migrate)
+    dal.define_table(
+        "community_tier_allocations",
+        Field("public_id", "string", length=36, notnull=True, unique=True),
+        Field("tenant_id", "integer", notnull=True),
+        Field("community_id", "integer", notnull=True),
+        Field("tier_code", "integer", notnull=True),
+        Field("source_code", "integer", notnull=True),
+        Field("allocated_by", "integer"),
+        Field("allocated_at", "datetime", notnull=True),
+        Field("released_at", "datetime"),
+        Field("released_by", "integer"),
+        Field("release_reason_code", "integer"),
+        Field("last_active_at", "datetime", notnull=True),
+        Field("created_at", "datetime", notnull=True),
+        Field("updated_at", "datetime", notnull=True),
+        migrate=migrate,
+    )
+    dal.define_table(
+        "tenant_license_pools",
+        Field("tenant_id", "integer", notnull=True),
+        Field("axis_code", "integer", notnull=True),
+        Field("tier_code", "integer", notnull=True),
+        Field("limit_count", "integer"),
+        Field("observed_at", "datetime", notnull=True),
+        Field("source_code", "integer", notnull=True),
+        Field("set_by", "integer"),
+        migrate=migrate,
+    )
+
+
+def bind_tenant_license_key_tables(dal: Any, *, migrate: bool = False) -> None:
+    """Bind `tenant_license_keys` (alembic 0127): one sealed license key per tenant. Idempotent.
+
+    Only `services/tenant_license_service.py` touches this table; `license_key_sealed` is the
+    vault's opaque ciphertext and is never selected into a response DTO.
+    """
+    if "tenant_license_keys" in dal.tables:
+        return
+    dal.define_table(
+        "tenant_license_keys",
+        Field("tenant_id", "integer", notnull=True, unique=True),
+        Field("license_key_sealed", "text", notnull=True),
+        Field("seal_version", "integer", notnull=True, default=1),
+        Field("license_key_fingerprint", "string", length=16, notnull=True),
+        Field("license_key_set_at", "datetime", notnull=True),
+        Field("license_key_set_by", "integer"),
         migrate=migrate,
     )

@@ -1,11 +1,10 @@
 schema_version: 2
-app_id: waddles.core.example.timer
+app_id: penguintechinc.waddles.timer
 name: Timed Announcements Bundle (Python)
 # 1.0.0: initial kv-only recurring announcements -- !timer add/del/list/enable/disable/reset,
 # fired by chat activity (there is no tick/scheduler event). See src/app.py's module docstring
 # (feature/bundles-queue-timer).
-version: 1.0.1
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc

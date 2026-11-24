@@ -1,11 +1,10 @@
 schema_version: 2
-app_id: waddles.core.example.social
+app_id: penguintechinc.waddles.social
 name: Social Interactions Example Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !hug/!highfive/!pat <user> (interact), !social stats. See
 # src/app.py's own module docstring for full scope.
 # 1.0.3: activation-gated only -- removed the in-bundle waddles.command-social feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 # Inspiration credit only -- general "fun social interaction command" concept, not a literal

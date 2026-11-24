@@ -13,6 +13,8 @@ pub mod captions;
 pub mod health;
 pub mod overlay;
 pub mod overlay_page;
+pub mod scene_page;
+pub mod widget_page;
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -106,6 +108,16 @@ pub struct AppState {
     pub caption_store: Arc<dyn CaptionStore>,
     pub captions_flag: Arc<dyn crate::flags::FeatureFlag>,
     pub caption_metrics: CaptionMetrics,
+    /// Bundle -> presentation surfaces (`crate::surfaces`): contract, validation, rate limit,
+    /// fan-out and bounded replay cache. Published to over gRPC only (`surfaces::ingress`).
+    pub surfaces: Arc<crate::surfaces::SurfaceService>,
+    /// Composite scene reads (layout, widget registration, bundle enablement).
+    pub scene: Arc<dyn crate::scene::SceneStore>,
+    /// Content-Security-Policy of the scene page; `None` (served as a 500) if the template ever
+    /// stops having exactly one inline script.
+    pub scene_csp: Option<Arc<str>>,
+    /// Content-Security-Policy of the standalone widget page.
+    pub widget_csp: Option<Arc<str>>,
 }
 
 impl AppState {
@@ -162,6 +174,22 @@ impl AppState {
             )
             .with_metrics(overlay_code_metrics),
         );
+        // INVARIANT: the contract is an embedded constant validated by the
+        // `embedded_contract_loads...` unit test, and the metric names are unique per fresh
+        // registry, so this cannot fail at runtime; if it ever does the service must refuse to
+        // start (fail loud).
+        let surfaces = crate::surfaces::SurfaceService::new(&metrics)
+            .expect("embedded surface contract and metrics must initialise");
+        let scene: Arc<dyn crate::scene::SceneStore> =
+            Arc::new(crate::scene::SeaOrmSceneStore::new(db.clone()));
+        let img_origins = crate::scene::img_origins(
+            &config.cli.widget_img_src_allowlist,
+            &config.cli.image_bucket_endpoint,
+        );
+        let scene_csp =
+            crate::scene::build_csp(scene_page::SCENE_PAGE, &img_origins).map(Arc::from);
+        let widget_csp =
+            crate::scene::build_csp(widget_page::WIDGET_PAGE, &img_origins).map(Arc::from);
         Self {
             config: Arc::new(config),
             metrics: Arc::new(metrics),
@@ -185,6 +213,10 @@ impl AppState {
             caption_store,
             captions_flag,
             caption_metrics,
+            surfaces,
+            scene,
+            scene_csp,
+            widget_csp,
         }
     }
 
@@ -304,6 +336,14 @@ async fn record_http_metrics(State(state): State<AppState>, req: Request, next: 
 pub fn router(state: AppState) -> Router {
     let overlay_view = crate::overlay::router::with_view_guard(
         Router::new()
+            // Literal `scene`/`widget` segments win over the generic `{surface}` captures.
+            .route("/{overlay_code}/scene", get(scene_page::page))
+            .route("/{overlay_code}/scene/layout", get(scene_page::layout))
+            .route("/{overlay_code}/scene/live", get(scene_page::live))
+            .route(
+                "/{overlay_code}/widget/{bundle_app_id}/{widget_id}",
+                get(widget_page::page),
+            )
             .route("/{overlay_code}/{surface}", get(overlay_page::page))
             .route("/{overlay_code}/{surface}/live", get(overlay::live_sse))
             .route("/{overlay_code}/{surface}/live/ws", get(overlay::live_ws)),
@@ -315,12 +355,38 @@ pub fn router(state: AppState) -> Router {
         state.overlay_codes.clone(),
         state.push_trust_source.clone(),
     );
+    let widget_push = crate::overlay::router::with_push_guard(
+        Router::new().route(
+            "/{overlay_code}/widget/{bundle_app_id}/{widget_id}/push",
+            post(widget_page::push),
+        ),
+        state.overlay_codes.clone(),
+        state.push_trust_source.clone(),
+    )
+    .layer(DefaultBodyLimit::max(widget_page::PUSH_BODY_LIMIT));
+    // Surface viewers (VIEW key, read-only). There is NO publish route: publishing is in-cluster
+    // traffic and goes over gRPC only (`crate::surfaces::ingress`).
+    let surfaces_view = crate::overlay::router::with_view_guard(
+        Router::new()
+            .route(
+                "/surfaces/{overlay_code}/view",
+                get(crate::surfaces::page::page),
+            )
+            .route(
+                "/surfaces/{overlay_code}/live",
+                get(crate::surfaces::http::live),
+            ),
+        state.overlay_codes.clone(),
+        state.view_store.clone(),
+    );
 
     let public = Router::new()
         .route("/health", get(health::liveness))
         .route("/readyz", get(health::readiness))
         .merge(overlay_view)
-        .merge(overlay_push);
+        .merge(overlay_push)
+        .merge(widget_push)
+        .merge(surfaces_view);
 
     // The literal `image` segment plays the generic PUSH route's
     // `{surface}` role -- `overlay_auth::push_scope` is keyed on

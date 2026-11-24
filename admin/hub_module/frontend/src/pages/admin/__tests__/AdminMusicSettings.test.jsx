@@ -1,10 +1,9 @@
 /**
- * Tests for the community music admin settings page's YouTube Allowed
- * Labels control (Music Station policy) -- load, add/remove chips, client
- * limits, save (lowercased/deduped full policy body), clear, error toast.
+ * Regression: AdminMusicSettings must use the real `music/settings` endpoints, never
+ * `updateModuleConfig(communityId, 'music', ...)` (PUT /modules/music/config -> 404).
  */
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { MemoryRouter, Route, Routes } from 'react-router-dom';
 
 import AdminMusicSettings from '../AdminMusicSettings';
@@ -12,15 +11,24 @@ import { adminApi } from '../../../services/api';
 
 vi.mock('../../../services/api', () => ({
   adminApi: {
+    getMusicSettings: vi.fn(),
+    updateMusicSettings: vi.fn(),
     updateModuleConfig: vi.fn(),
-    getMusicStationPolicy: vi.fn(),
-    updateMusicStationPolicy: vi.fn(),
   },
 }));
 
-function mount(communityId = '42') {
+const SETTINGS = {
+  isActive: true,
+  autoplayEnabled: false,
+  requireDjApproval: true,
+  volumeLimit: 60,
+  allowedGenres: ['rock'],
+  blockedArtists: ['Bad Band'],
+};
+
+function mount() {
   return render(
-    <MemoryRouter initialEntries={[`/admin/${communityId}/music/settings`]}>
+    <MemoryRouter initialEntries={['/admin/7/music/settings']}>
       <Routes>
         <Route path="/admin/:communityId/music/settings" element={<AdminMusicSettings />} />
       </Routes>
@@ -28,208 +36,61 @@ function mount(communityId = '42') {
   );
 }
 
-function type(input, value) {
-  fireEvent.change(input, { target: { value } });
-}
-
-function pressEnter(input) {
-  fireEvent.keyDown(input, { key: 'Enter', code: 'Enter' });
-}
-
-beforeEach(() => {
-  vi.clearAllMocks();
-  adminApi.updateModuleConfig.mockResolvedValue({
-    data: { success: true, config: { blacklist: [] } },
-  });
-});
-
-afterEach(() => {
-  vi.restoreAllMocks();
-});
-
-describe('AdminMusicSettings — YouTube Allowed Labels', () => {
-  it('loads and renders existing labels as chips', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: ['music', 'lofi'] } },
-    });
-
-    mount();
-
-    expect(await screen.findByTestId('youtube-label-chip-music')).toHaveTextContent('music');
-    expect(screen.getByTestId('youtube-label-chip-lofi')).toHaveTextContent('lofi');
-    expect(adminApi.getMusicStationPolicy).toHaveBeenCalledWith('42');
+describe('AdminMusicSettings', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    adminApi.getMusicSettings.mockResolvedValue({ data: { success: true, settings: SETTINGS } });
+    adminApi.updateMusicSettings.mockResolvedValue({ data: { success: true } });
   });
 
-  it('adds a chip on Enter and on comma, normalizing to lowercase', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: [] } },
-    });
-
+  it('loads settings from the music/settings endpoint, not module config', async () => {
     mount();
-    await screen.findByTestId('youtube-labels-section');
-
-    const input = screen.getByTestId('youtube-label-input');
-    await act(async () => {
-      type(input, 'Music');
-      pressEnter(input);
-    });
-    expect(await screen.findByTestId('youtube-label-chip-music')).toBeInTheDocument();
-
-    await act(async () => {
-      type(input, 'lofi,');
-    });
-    expect(await screen.findByTestId('youtube-label-chip-lofi')).toBeInTheDocument();
+    await screen.findByText('Music Settings');
+    expect(adminApi.getMusicSettings).toHaveBeenCalledWith('7');
+    expect(adminApi.updateModuleConfig).not.toHaveBeenCalled();
+    expect(screen.getByText('Bad Band')).toBeTruthy();
+    expect(screen.getByLabelText('Require DJ approval').checked).toBe(true);
   });
 
-  it('removes a chip via its remove button', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: ['music', 'lofi'] } },
-    });
-
+  it('saves the edited settings through updateMusicSettings', async () => {
     mount();
-    await screen.findByTestId('youtube-label-chip-music');
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('remove-youtube-label-music'));
+    await screen.findByText('Music Settings');
+    fireEvent.click(screen.getByLabelText('Autoplay'));
+    fireEvent.change(screen.getByLabelText('Blocked artist'), { target: { value: 'Worse Band' } });
+    fireEvent.click(screen.getByText('Add'));
+    fireEvent.click(screen.getAllByText('Save Settings')[0]);
+    await waitFor(() => expect(adminApi.updateMusicSettings).toHaveBeenCalledTimes(1));
+    expect(adminApi.updateMusicSettings).toHaveBeenCalledWith('7', {
+      isActive: true,
+      autoplayEnabled: true,
+      requireDjApproval: true,
+      volumeLimit: 60,
+      allowedGenres: ['rock'],
+      blockedArtists: ['Bad Band', 'Worse Band'],
     });
-
-    expect(screen.queryByTestId('youtube-label-chip-music')).not.toBeInTheDocument();
-    expect(screen.getByTestId('youtube-label-chip-lofi')).toBeInTheDocument();
+    expect(adminApi.updateModuleConfig).not.toHaveBeenCalled();
+    await screen.findByText('Music settings saved successfully');
   });
 
-  it('rejects a duplicate label without adding a second chip', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: ['music'] } },
-    });
-
+  it('shows the API error and falls back to defaults when load fails', async () => {
+    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 500, data: { error: { message: 'not enabled' } } } });
     mount();
-    await screen.findByTestId('youtube-label-chip-music');
-
-    const input = screen.getByTestId('youtube-label-input');
-    await act(async () => {
-      type(input, 'MUSIC');
-      pressEnter(input);
-    });
-
-    const section = screen.getByTestId('youtube-labels-section');
-    expect(within(section).getAllByText('music')).toHaveLength(1);
+    await screen.findByText('not enabled');
+    expect(screen.getByText('No blocked artists')).toBeTruthy();
   });
 
-  it('shows inline validation at the 64-char label limit', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: [] } },
-    });
-
+  it('surfaces save failures', async () => {
+    adminApi.updateMusicSettings.mockRejectedValue({ response: { data: { error: { message: 'nope' } } } });
     mount();
-    await screen.findByTestId('youtube-labels-section');
-
-    const input = screen.getByTestId('youtube-label-input');
-    const tooLong = 'a'.repeat(65);
-    await act(async () => {
-      type(input, tooLong);
-      pressEnter(input);
-    });
-
-    expect(await screen.findByTestId('youtube-labels-error')).toHaveTextContent(
-      'Label must be 64 characters or fewer',
-    );
-    expect(screen.queryByTestId(`youtube-label-chip-${tooLong}`)).not.toBeInTheDocument();
+    await screen.findByText('Music Settings');
+    fireEvent.click(screen.getAllByText('Save Settings')[0]);
+    await screen.findByText('nope');
   });
 
-  it('shows inline validation at the 32-label limit', async () => {
-    const existing = Array.from({ length: 32 }, (_, i) => `label${i}`);
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: existing } },
-    });
-
+  it('renders the UpgradeNotice upsell (not an error banner) on a 402', async () => {
+    adminApi.getMusicSettings.mockRejectedValue({ response: { status: 402, data: {} } });
     mount();
-    await screen.findByTestId(`youtube-label-chip-${existing[31]}`);
-
-    const input = screen.getByTestId('youtube-label-input');
-    await act(async () => {
-      type(input, 'onemore');
-      pressEnter(input);
-    });
-
-    expect(await screen.findByTestId('youtube-labels-error')).toHaveTextContent(
-      'Maximum 32 labels allowed',
-    );
-    expect(screen.queryByTestId('youtube-label-chip-onemore')).not.toBeInTheDocument();
-  });
-
-  it('saves the lowercased, de-duplicated array in the full policy body', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { songRequestsAllowed: true, youtube_allowed_labels: ['music'] } },
-    });
-    adminApi.updateMusicStationPolicy.mockResolvedValue({ data: { success: true } });
-
-    mount();
-    await screen.findByTestId('youtube-label-chip-music');
-
-    const input = screen.getByTestId('youtube-label-input');
-    await act(async () => {
-      type(input, 'LOFI');
-      pressEnter(input);
-    });
-    await screen.findByTestId('youtube-label-chip-lofi');
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('youtube-labels-save'));
-    });
-
-    await waitFor(() =>
-      expect(adminApi.updateMusicStationPolicy).toHaveBeenCalledWith('42', {
-        songRequestsAllowed: true,
-        youtube_allowed_labels: ['music', 'lofi'],
-      }),
-    );
-    expect(await screen.findByTestId('youtube-labels-feedback')).toHaveTextContent(
-      'saved successfully',
-    );
-  });
-
-  it('clears all labels and sends an empty array on save', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: ['music', 'lofi'] } },
-    });
-    adminApi.updateMusicStationPolicy.mockResolvedValue({ data: { success: true } });
-
-    mount();
-    await screen.findByTestId('youtube-label-chip-music');
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('youtube-labels-clear'));
-    });
-    expect(screen.queryByTestId('youtube-label-chip-music')).not.toBeInTheDocument();
-    expect(screen.queryByTestId('youtube-label-chip-lofi')).not.toBeInTheDocument();
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('youtube-labels-save'));
-    });
-
-    await waitFor(() =>
-      expect(adminApi.updateMusicStationPolicy).toHaveBeenCalledWith(
-        '42',
-        expect.objectContaining({ youtube_allowed_labels: [] }),
-      ),
-    );
-  });
-
-  it('shows an error toast on a 4xx save failure', async () => {
-    adminApi.getMusicStationPolicy.mockResolvedValue({
-      data: { data: { youtube_allowed_labels: ['music'] } },
-    });
-    adminApi.updateMusicStationPolicy.mockRejectedValue({
-      response: { status: 400, data: { error: { message: 'Invalid label' } } },
-    });
-
-    mount();
-    await screen.findByTestId('youtube-label-chip-music');
-
-    await act(async () => {
-      fireEvent.click(screen.getByTestId('youtube-labels-save'));
-    });
-
-    expect(await screen.findByTestId('youtube-labels-feedback')).toHaveTextContent('Invalid label');
+    expect(await screen.findByTestId('upgrade-notice')).toBeTruthy();
+    expect(screen.queryByText('Failed to load music settings')).toBeNull();
   });
 });

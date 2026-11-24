@@ -16,6 +16,7 @@ mod metrics;
 pub mod pg_audit;
 pub mod policy;
 pub mod s3;
+pub mod seal;
 pub mod tags;
 
 pub use audit::{AuditEvent, AuditOutcome, AuditSink, TracingAuditSink};
@@ -25,3 +26,4 @@ pub use error::StorageError;
 pub use host::{StorageHost, StorageScope};
 pub use pg_audit::PgAuditSink;
 pub use policy::{GrantSet, Op};
+pub use seal::{AlwaysSeal, ObjectSealing, SealGate};

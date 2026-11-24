@@ -48,6 +48,7 @@ spec:
               protocol: UDP
             - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
               protocol: TCP
+    {{- include "waddlebot.otel.egressRule" (dict "root" $) | nindent 4 }}
     # In-namespace infra: Valkey, Postgres, SeaweedFS. These infra Deployments
     # label pods with app.kubernetes.io/name: redis|postgres|seaweedfs directly
     # (NOT the chart-wide selectorLabels name — see
@@ -116,15 +117,30 @@ spec:
               protocol: TCP
             {{- end }}
     {{- end }}
+    # Postgres primary (writes + read-your-own-write paths).
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
             app.kubernetes.io/name: postgres
             app.kubernetes.io/component: database
+            app.kubernetes.io/role: primary
+      toPorts:
+        - ports:
+            - port: {{ .Values.infrastructure.postgresql.service.port | quote }}
+              protocol: TCP
+    {{- if include "waddlebot.postgres.replicasActive" . }}
+    # Postgres read replicas (the <service>-ro Service's pods).
+    - toEndpoints:
+        - matchLabels:
+            app.kubernetes.io/instance: {{ .Release.Name }}
+            app.kubernetes.io/name: postgres
+            app.kubernetes.io/component: database
+            app.kubernetes.io/role: replica
       toPorts:
         - ports:
             - port: {{ .Values.egressPolicy.inCluster.postgresReplicaPort | quote }}
               protocol: TCP
+    {{- end }}
     - toEndpoints:
         - matchLabels:
             app.kubernetes.io/instance: {{ .Release.Name }}
@@ -301,6 +317,7 @@ spec:
               protocol: UDP
             - port: {{ .Values.egressPolicy.inCluster.dnsPort | quote }}
               protocol: TCP
+    {{- include "waddlebot.otel.egressRule" (dict "root" $ "component" "egress-proxy") | nindent 4 }}
     # The world — minus loopback/link-local/metadata and this cluster's own
     # pod/service/node CIDRs. Customer private ranges (net.http.private-ip
     # grants) are intentionally reachable at the network level; the

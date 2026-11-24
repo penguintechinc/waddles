@@ -31,8 +31,8 @@ use penguin_bundle_host::wire::{
 
 const V1_WASM: &[u8] = include_bytes!("fixtures/hostile_fixture.wasm");
 const V2_WASM: &[u8] = include_bytes!("fixtures/stage_v2_fixture.wasm");
-const V1_APP: &str = "waddles.test.hostile-fixture";
-const V2_APP: &str = "waddles.test.stage-v2-fixture";
+const V1_APP: &str = "penguintechinc.waddles.fixture-test-hostile-fixture";
+const V2_APP: &str = "penguintechinc.waddles.test-stage-v2-fixture";
 
 /// Serves each bundle's bytes by its `component_key` (== its `app_id` here).
 struct MultiSource(HashMap<String, Vec<u8>>);
@@ -202,6 +202,7 @@ async fn drive(steps: Vec<Step>) -> Vec<Outcome> {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

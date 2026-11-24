@@ -90,6 +90,7 @@ def overlay_assets(directory: Path, origins: dict[str, str]) -> list[dict]:
 
 def build(src: dict, *, install: bool, assets: list[dict] | None = None) -> dict:
     """Build one manifest (`install=True` -> hub-manifest.yaml shape, else bundle.yaml shape)."""
+    # app_id format: <github-org>.<repo>.<bundle-name>; PenguinTwitchBot ports are psychoboy.penguintwitchbot.<slug>.
     slug = src["slug"]
     process: dict = {"entry": "waddle:bundle/process-stage#transform", "consumes": src["consumes"]}
     action: dict = {"entry": "waddle:bundle/action-stage#dispatch"}
@@ -98,10 +99,10 @@ def build(src: dict, *, install: bool, assets: list[dict] | None = None) -> dict
         action.update({"config": {}, "spec": {"required_config": []}})
     manifest: dict = {
         "schema_version": 2,
-        "app_id": f"waddles.integrations.superpenguin.{slug}",
+        "app_id": f"psychoboy.penguintwitchbot.{slug}",
         "name": src["title"],
         "version": src["version"],
-        "feature": "waddles.integrations.superpenguin",
+        "feature": "psychoboy.penguintwitchbot",
         "module": "integrations",
         "provider": "thirdparty",
         "language": "csharp",

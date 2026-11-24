@@ -15,7 +15,7 @@ fn valid_python_manifest_parses() {
         &ManifestOptions::default(),
     )
     .unwrap();
-    assert_eq!(m.app_id, "waddles.core.example.echo");
+    assert_eq!(m.app_id, "penguintechinc.waddles.echo");
     assert_eq!(m.language, "python");
     assert_eq!(m.artifact, "source");
 }

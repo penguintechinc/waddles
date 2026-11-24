@@ -663,7 +663,7 @@ mod tests {
                 Message::Load(LoadBody {
                     tenant_id: 1,
                     community_id: 0,
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     version: "1".to_string(),
                     digest: "sha256:00".to_string(),
                     component_key: "k".to_string(),
@@ -687,7 +687,7 @@ mod tests {
             &Frame::new(
                 101,
                 Message::Invoke(InvokeBody {
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: "sha256:00".to_string(),
                     export: penguin_bundle_host::wire::ExportKind::Transform,
                     payload: serde_json::json!({"hello": "world"}),
@@ -751,6 +751,7 @@ mod tests {
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 },
                 EchoHandlerRef(handler_for_conn),
                 "test-peer",
@@ -813,6 +814,7 @@ mod tests {
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 },
                 EchoHandlerRef(std::sync::Arc::new(EchoHandler {
                     shutdown_seen: AtomicBool::new(false),
@@ -853,6 +855,7 @@ mod tests {
                 runtime: "runc".to_string(),
                 verified: false,
             },
+            executor_id: None,
         }
     }
 
@@ -937,7 +940,7 @@ mod tests {
                 Message::Unload(UnloadBody {
                     tenant_id: 1,
                     community_id: 0,
-                    app_id: "waddles.test.app".to_string(),
+                    app_id: "penguintechinc.waddles.test-app".to_string(),
                     digest: "sha256:00".to_string(),
                 }),
             ),
@@ -1553,7 +1556,7 @@ mod tests {
 
         fn call_body(capability: CapabilityKind, op: &str) -> HostCallBody {
             HostCallBody {
-                app_id: "waddles.t.hostcall".to_string(),
+                app_id: "penguintechinc.waddles.t-hostcall".to_string(),
                 capability,
                 op: op.to_string(),
                 args: serde_json::json!({}),
@@ -1711,7 +1714,7 @@ mod tests {
 
         fn log_msg() -> Message {
             Message::HostCall(HostCallBody {
-                app_id: "waddles.t.log".to_string(),
+                app_id: "penguintechinc.waddles.t-log".to_string(),
                 capability: CapabilityKind::Log,
                 op: "write".to_string(),
                 args: serde_json::json!({}),
@@ -1721,7 +1724,7 @@ mod tests {
 
         fn must_msg() -> Message {
             Message::HostCall(HostCallBody {
-                app_id: "waddles.t.kv".to_string(),
+                app_id: "penguintechinc.waddles.t-kv".to_string(),
                 capability: CapabilityKind::Kv,
                 op: "set".to_string(),
                 args: serde_json::json!({}),

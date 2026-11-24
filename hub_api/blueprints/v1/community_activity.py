@@ -41,9 +41,11 @@ from services.community_activity import (
 from services.community_common import (
     api_error,
     community_in_tenant,
+    feature_not_enabled,
     get_current_user,
     is_valid_service_key,
 )
+from services.route_guards import community_admin_guard, community_member_guard
 
 activity_member_bp = Blueprint(
     "v1_community_activity_member", __name__, url_prefix="/api/v1/community"
@@ -70,9 +72,10 @@ def _int_arg(name: str, default: int) -> int:
 # ---------------------------------------------------------------------------
 
 
-@activity_member_bp.route("/<int:community_id>/leaderboard/watch-time", methods=["GET"])
+@activity_member_bp.route("/<cuuid:community_id>/leaderboard/watch-time", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(LeaderboardResponse)
 async def watch_time_leaderboard(
     community_id: int,
@@ -81,7 +84,7 @@ async def watch_time_leaderboard(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_ACTIVITY, tenant=ctx.tenant_slug):
-        return api_error("Community activity tracking is not enabled for this plan", 402)
+        return feature_not_enabled("Community activity tracking is not enabled for this plan")
     dal = current_app.config["dal"]
     if not community_in_tenant(dal, community_id, ctx):
         return api_error("Community not found", status_code=404)
@@ -92,9 +95,10 @@ async def watch_time_leaderboard(
     return get_watch_time_leaderboard(dal, community_id, period=period, limit=limit, offset=offset)
 
 
-@activity_member_bp.route("/<int:community_id>/leaderboard/messages", methods=["GET"])
+@activity_member_bp.route("/<cuuid:community_id>/leaderboard/messages", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(LeaderboardResponse)
 async def message_leaderboard(
     community_id: int,
@@ -112,7 +116,7 @@ async def message_leaderboard(
     return get_message_leaderboard(dal, community_id, period=period, limit=limit, offset=offset)
 
 
-@activity_member_bp.route("/<int:community_id>/activity/my-stats", methods=["GET"])
+@activity_member_bp.route("/<cuuid:community_id>/activity/my-stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:read")  # type: ignore[misc]
 @auth_required  # type: ignore[misc]  # populates get_current_user() for "my" stats
@@ -139,9 +143,10 @@ async def my_activity_stats(
 # ---------------------------------------------------------------------------
 
 
-@activity_admin_bp.route("/<int:community_id>/leaderboard-config", methods=["GET"])
+@activity_admin_bp.route("/<cuuid:community_id>/leaderboard-config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(LeaderboardConfigResponse)
 async def leaderboard_config_get(
     community_id: int,
@@ -155,9 +160,10 @@ async def leaderboard_config_get(
     return get_leaderboard_config(dal, community_id)
 
 
-@activity_admin_bp.route("/<int:community_id>/leaderboard-config", methods=["PUT"])
+@activity_admin_bp.route("/<cuuid:community_id>/leaderboard-config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.activity:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def leaderboard_config_update(community_id: int) -> tuple[dict[str, object], int]:
     """`PUT /api/v1/admin/<id>/leaderboard-config`."""
     ctx = get_tenant_context(request)

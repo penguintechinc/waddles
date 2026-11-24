@@ -59,14 +59,14 @@ async def test_requires_platform_admin_scope(app: Quart) -> None:
 
 async def test_default_status_lists_only_published_as_pending(app: Quart, install_dal: Any) -> None:
     await _insert_upload(
-        install_dal, app_id="waddles.integrations.vendor-1.a", version="1.0.0", status="PUBLISHED"
+        install_dal, app_id="acmecorp.widgets.a", version="1.0.0", status="PUBLISHED"
     )
     await _insert_upload(
-        install_dal, app_id="waddles.integrations.vendor-2.b", version="1.0.0", status="UPLOADED"
+        install_dal, app_id="acmecorp.widgets.b", version="1.0.0", status="UPLOADED"
     )
     await _insert_upload(
         install_dal,
-        app_id="waddles.integrations.vendor-3.c",
+        app_id="acmecorp.widgets.c",
         version="1.0.0",
         status="REJECTED",
         reject_reason="bad manifest",
@@ -80,7 +80,7 @@ async def test_default_status_lists_only_published_as_pending(app: Quart, instal
     body = await response.get_json()
     assert body["success"] is True
     assert len(body["versions"]) == 1
-    assert body["versions"][0]["appId"] == "waddles.integrations.vendor-1.a"
+    assert body["versions"][0]["appId"] == "acmecorp.widgets.a"
     assert body["versions"][0]["status"] == "PUBLISHED"
     assert body["pagination"]["total"] == 1
 
@@ -88,7 +88,7 @@ async def test_default_status_lists_only_published_as_pending(app: Quart, instal
 async def test_status_query_param_passthrough(app: Quart, install_dal: Any) -> None:
     await _insert_upload(
         install_dal,
-        app_id="waddles.integrations.vendor-3.c",
+        app_id="acmecorp.widgets.c",
         version="1.0.0",
         status="REJECTED",
         reject_reason="bad manifest",
@@ -109,7 +109,7 @@ async def test_pagination(app: Quart, install_dal: Any) -> None:
     for i in range(3):
         await _insert_upload(
             install_dal,
-            app_id=f"waddles.integrations.vendor-{i}.x",
+            app_id=f"acmecorp.widgets.x{i}",
             version="1.0.0",
             status="PUBLISHED",
         )
@@ -127,7 +127,7 @@ async def test_pagination(app: Quart, install_dal: Any) -> None:
 async def test_response_matches_dto_shape(app: Quart, install_dal: Any) -> None:
     """`@validate_response(ListBundleVersionsResponse)` -- exact field set, no drift."""
     await _insert_upload(
-        install_dal, app_id="waddles.integrations.vendor-1.a", version="1.0.0", status="PUBLISHED"
+        install_dal, app_id="acmecorp.widgets.a", version="1.0.0", status="PUBLISHED"
     )
     token = make_token(scope="platform:admin")
     client = app.test_client()
@@ -151,7 +151,7 @@ async def test_response_matches_dto_shape(app: Quart, install_dal: Any) -> None:
 
 async def test_pending_upgrade_reports_installed_version(app: Quart, install_dal: Any) -> None:
     """A pending 1.1.0 for an app whose live install is 1.0.0 reports installedVersion 1.0.0."""
-    app_id = "waddles.integrations.vendor-1.a"
+    app_id = "acmecorp.widgets.a"
     version_id = await install_dal.app_versions.async_insert(
         app_id=app_id,
         version="1.0.0",
@@ -177,3 +177,38 @@ async def test_pending_upgrade_reports_installed_version(app: Quart, install_dal
     body = await response.get_json()
     assert body["versions"][0]["version"] == "1.1.0"
     assert body["versions"][0]["installedVersion"] == "1.0.0"
+
+
+async def test_pending_excludes_already_installed_versions(app: Quart, install_dal: Any) -> None:
+    """Seeded or approved versions in app_global_installs must not linger in Pending."""
+    app_id = "penguintechinc.waddles.ping"
+    version_id = await install_dal.app_versions.async_insert(
+        app_id=app_id,
+        version="1.0.0",
+        artifact_digest="sha256:" + "c" * 64,
+        language="python",
+        artifact_kind="prebuilt",
+        scan_status="scanned",
+    )
+    await _insert_upload(install_dal, app_id=app_id, version="1.0.0", status="PUBLISHED")
+    await install_dal.app_global_installs.async_insert(
+        app_id=app_id,
+        version="1.0.0",
+        version_id=version_id,
+        permission_hash="sha256:" + "d" * 64,
+        summary_json={},
+        install_source="system:core-seeder",
+        installed_at=datetime.now(UTC),
+    )
+    # A second, unapproved vendor bundle should still appear with total=1.
+    await _insert_upload(
+        install_dal, app_id="acmecorp.widgets.new", version="1.0.0", status="PUBLISHED"
+    )
+    token = make_token(scope="platform:admin")
+    response = await app.test_client().get(
+        "/api/v1/admin/bundle-versions", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert response.status_code == 200
+    body = await response.get_json()
+    assert [v["appId"] for v in body["versions"]] == ["acmecorp.widgets.new"]
+    assert body["pagination"]["total"] == 1

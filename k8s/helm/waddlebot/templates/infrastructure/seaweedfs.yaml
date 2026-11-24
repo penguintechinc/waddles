@@ -43,6 +43,10 @@ spec:
 # transient case where the SeaweedFS pod is created but not yet Ready. Weight
 # "1" runs it before core-bundle-seeder-job.yaml's weight "5" in case seeded
 # bundles ever need the buckets to exist first.
+{{- $bij := .Values.infrastructure.seaweedfs.bucketInitJob }}
+{{- if gt (int $bij.totalBudgetSeconds) (sub (int $bij.activeDeadlineSeconds) 60) }}
+{{- fail (printf "infrastructure.seaweedfs.bucketInitJob.totalBudgetSeconds (%d) must be <= activeDeadlineSeconds (%d) - 60" (int $bij.totalBudgetSeconds) (int $bij.activeDeadlineSeconds)) }}
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:
@@ -59,10 +63,24 @@ metadata:
     "helm.sh/hook-delete-policy": before-hook-creation,hook-succeeded
 spec:
   backoffLimit: 3
+  # Bounded so this post-install/post-upgrade HOOK can never hang `helm --wait`
+  # past the deploy timeout (#1391 class). activeDeadlineSeconds spans the WHOLE Job (pod
+  # scheduling, image pull, termination), and 300s was hit on dal2alpha (DeadlineExceeded, no
+  # script log), so it defaults to 600s. The script's own TOTAL_BUDGET (default 480s) must stay
+  # strictly below this with >=60s margin (enforced by `fail` above), so the script always exits
+  # itself first with an `elapsed/budget` log line.
+  # scripts/ci/check-helm-hook-job-timeouts.py enforces the deadline < deploy timeout statically.
+  # Tunables: infrastructure.seaweedfs.bucketInitJob.* in values.yaml.
+  activeDeadlineSeconds: {{ int $bij.activeDeadlineSeconds }}
+  # FAILED Jobs (and their pods/logs) stay inspectable for 24h; hook-succeeded above only
+  # deletes on success. NOTE: on DeadlineExceeded the Job controller itself reaps running pods,
+  # so diagnosability comes from the script's own per-call timeouts (it fails first, with logs).
+  ttlSecondsAfterFinished: 86400
   template:
     spec:
       serviceAccountName: {{ .Values.serviceAccount.name }}
       restartPolicy: Never
+      {{- include "waddlebot.imagePullSecrets" . | nindent 6 }}
       securityContext:
         runAsNonRoot: true
         runAsUser: 1000
@@ -81,34 +99,119 @@ spec:
         - /bin/sh
         - -c
         - |
-          set -e
+          set -eu
+          # pipefail is absent from some sh builds; enable when supported.
+          (set -o pipefail) 2>/dev/null && set -o pipefail
           export AWS_ACCESS_KEY_ID="${S3_ACCESS_KEY_ID}"
           export AWS_SECRET_ACCESS_KEY="${S3_SECRET_ACCESS_KEY}"
           export AWS_DEFAULT_REGION="us-east-1"
           # feature/transit-tls-core (F5): https against the FQDN, internal CA pinned (aws cli reads AWS_CA_BUNDLE).
           export AWS_CA_BUNDLE="{{ include "waddlebot.transitTls.caPath" . }}"
           ENDPOINT="{{ include "waddlebot.transitTls.s3Endpoint" . }}"
+          # Fail FAST and DIAGNOSABLY: the Job controller reaps the pod on
+          # activeDeadlineSeconds (no logs survive), so the script enforces ONE total budget
+          # (TOTAL_BUDGET) strictly below that deadline minus a margin for scheduling/image pull/
+          # termination (default activeDeadlineSeconds 600 - 120 = 480). The budget is checked before every
+          # call and caps each call's timeout to the remaining time, so a stall makes THIS script
+          # exit non-zero with an `elapsed/budget` log line, leaving a Failed pod whose logs
+          # `kubectl logs` can still read.
+          TOTAL_BUDGET={{ int $bij.totalBudgetSeconds }}
+          # Per-call cap (also used by the readiness wait loop): aws-cli v2 is a python cold start
+          # and list-buckets is authenticated, so ~10s was intermittently killed on dal2alpha.
+          CALL_TIMEOUT={{ int $bij.callTimeoutSeconds }}
+          # Wall-clock seconds to keep retrying the readiness probe (time-based, not sleep-counted).
+          WAIT_MAX={{ int $bij.waitMaxSeconds }}
+          START_TS=$(date +%s)
+          log() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) bucket-init: $*"; }
+          elapsed() { echo $(( $(date +%s) - START_TS )); }
+          remaining() { echo $(( TOTAL_BUDGET - $(elapsed) )); }
+          trap 'rc=$?; if [ "${rc}" -ne 0 ]; then log "ERROR: exiting rc=${rc} elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s"; fi' EXIT
+          # budget_check: abort the whole script (main shell only) once the total budget is spent.
+          budget_check() {
+            if [ "$(remaining)" -le 0 ]; then
+              log "ERROR: total budget exhausted elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s while: $*"
+              exit 1
+            fi
+          }
+          command -v timeout >/dev/null 2>&1 || { log "ERROR: 'timeout' not found in image; cannot bound aws calls"; exit 1; }
+          # capped_timeout <max>: min(max, remaining budget), never below 1s.
+          capped_timeout() {
+            r=$(remaining)
+            if [ "${r}" -lt 1 ]; then echo 1; elif [ "${r}" -lt "$1" ]; then echo "${r}"; else echo "$1"; fi
+          }
+          awsx() {
+            budget_check "aws $*"
+            timeout "$(capped_timeout "${CALL_TIMEOUT}")" aws --endpoint-url "$ENDPOINT" "$@"
+          }
+          # Bounded wait for the S3 gateway (post-hook can fire before SeaweedFS is Ready).
+          log "waiting for S3 endpoint ${ENDPOINT} (max ${WAIT_MAX}s, total budget ${TOTAL_BUDGET}s)"
+          WAIT_START=$(date +%s)
+          attempt=0
+          while :; do
+            attempt=$((attempt + 1))
+            budget_check "waiting for S3 endpoint ${ENDPOINT}"
+            call_to=$(capped_timeout "${CALL_TIMEOUT}")
+            t0=$(date +%s)
+            rc=0
+            err=$(timeout "${call_to}" aws --endpoint-url "$ENDPOINT" s3api list-buckets 2>&1 >/dev/null) || rc=$?
+            [ "${rc}" -eq 0 ] && break
+            took=$(( $(date +%s) - t0 ))
+            case "${rc}" in
+              124) why="timeout after ${call_to}s (killed by our own per-call cap; not refused/TLS/403)" ;;
+              *) why="aws exited rc=${rc} (refused/TLS/auth: see stderr)" ;;
+            esac
+            log "attempt ${attempt} failed rc=${rc} took=${took}s: ${why}; stderr: $(echo "${err}" | tail -n 3)"
+            waited=$(( $(date +%s) - WAIT_START ))
+            if [ "${waited}" -ge "${WAIT_MAX}" ]; then
+              log "ERROR: S3 endpoint ${ENDPOINT} not ready after ${waited}s/${WAIT_MAX}s attempts=${attempt} last_rc=${rc} elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s; last error: $(echo "${err}" | tail -n 3)"
+              exit 1
+            fi
+            sleep 3
+          done
+          waited=$(( $(date +%s) - WAIT_START ))
+          log "S3 endpoint ready after ${waited}s (elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s)"
           # "recordings" (svc-streaming egress) and bundleExecutor.bucketName
           # ("waddles-bundles", core/bundle_executor's BUNDLE_BUCKET_NAME) --
           # both consumers expect their bucket to already exist; previously
           # only bucketName + "recordings" were created here, leaving
           # "waddles-bundles" as a pre-existing gap.
-          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}"{{ if eq .Values.bundleStorage.mode "bundled" }} "{{ .Values.bundleStorage.bucketName }}"{{ end }}; do
-            aws --endpoint-url "$ENDPOINT" s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already" && true || true
-            aws --endpoint-url "$ENDPOINT" s3api head-bucket --bucket "${bucket}" 2>/dev/null \
-              || aws --endpoint-url "$ENDPOINT" s3api create-bucket --bucket "${bucket}" --region us-east-1
+          EXPECTED={{ if eq .Values.bundleStorage.mode "bundled" }}5{{ else }}4{{ end }}
+          VERIFIED=0
+          for bucket in "{{ .Values.infrastructure.seaweedfs.bucketName }}" "recordings" "{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}" "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}"{{ if eq .Values.bundleStorage.mode "bundled" }} "{{ .Values.bundleStorage.bucketName }}"{{ end }}; do
+            budget_check "bucket ${bucket}"
+            log "bucket ${bucket}: ensure exists (elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s)"
+            # Best-effort mb (masked on purpose): the head-bucket || create-bucket gate below is the real check.
+            { awsx s3 mb "s3://${bucket}" --region us-east-1 2>&1 | grep -qi "already"; } || true
+            awsx s3api head-bucket --bucket "${bucket}" 2>/dev/null \
+              || awsx s3api create-bucket --bucket "${bucket}" --region us-east-1
           {{- if and .Values.infrastructure.seaweedfs.encryption.enabled .Values.infrastructure.seaweedfs.encryption.autoEncryptBucket (or .Values.infrastructure.seaweedfs.encryption.secretName (include "waddlebot.kms.objectStorageActive" .)) }}
             # Default bucket encryption (SSE-S3) -- objects written without an
             # explicit ServerSideEncryption header are still encrypted at rest,
             # requires WEED_S3_SSE_KEK to already be configured on the server.
             # kms.objectStorage.mode=kms (templates/_kms.tpl) swaps the default to
             # SSE-KMS under the operator's key, ON TOP of the baseline above.
-            aws --endpoint-url "$ENDPOINT" s3api put-bucket-encryption --bucket "${bucket}" \
+            log "bucket ${bucket}: put-bucket-encryption"
+            awsx s3api put-bucket-encryption --bucket "${bucket}" \
               --server-side-encryption-configuration '{{ include "waddlebot.kms.bucketEncryptionConfig" . }}'
           {{- end }}
+            awsx s3api head-bucket --bucket "${bucket}"
+            VERIFIED=$((VERIFIED + 1))
+            log "bucket ${bucket}: verified (${VERIFIED}/${EXPECTED})"
           done
-          aws --endpoint-url "$ENDPOINT" s3 ls
-          echo "Buckets {{ .Values.infrastructure.seaweedfs.bucketName }}, recordings, {{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }} initialized successfully"
+          {{- if .Values.infrastructure.seaweedfs.escrow.versioning }}
+          # Platform-secret escrow bucket: versioning keeps every prior object/manifest version so a
+          # poisoned or mistaken overwrite is recoverable. Loud (not fatal) if unsupported.
+          log "bucket {{ .Values.infrastructure.seaweedfs.escrow.bucketName }}: put-bucket-versioning"
+          awsx s3api put-bucket-versioning --bucket "{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}" \
+            --versioning-configuration Status=Enabled \
+            || echo "WARNING: could not enable versioning on {{ .Values.infrastructure.seaweedfs.escrow.bucketName }} -- escrow history is NOT retained" >&2
+          {{- end }}
+          awsx s3 ls
+          if [ "${EXPECTED}" -lt 1 ] || [ "${VERIFIED}" -ne "${EXPECTED}" ]; then
+            log "ERROR: ${VERIFIED}/${EXPECTED} buckets verified"
+            exit 1
+          fi
+          log "${VERIFIED}/${EXPECTED} buckets verified (elapsed=$(elapsed)s/budget=${TOTAL_BUDGET}s)"
         env:
         # Dedicated hook-scoped "bucket-init" identity (Admin) -- never the
         # shared rootUser/rootPassword admin credential, and never mounted by
@@ -125,12 +228,7 @@ spec:
               name: waddlebot-secrets
               key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
         resources:
-          requests:
-            memory: "64Mi"
-            cpu: "100m"
-          limits:
-            memory: "128Mi"
-            cpu: "200m"
+          {{- toYaml $bij.resources | nindent 10 }}
         volumeMounts:
         {{- include "waddlebot.transitTls.caVolumeMount" . | nindent 8 }}
       volumes:
@@ -229,6 +327,31 @@ spec:
                 ]
               },
               {
+                "name": "svc-bundles-precompiler",
+                "credentials": [
+                  {"accessKey": "${PRECOMPILER_S3_ACCESS_KEY_ID}", "secretKey": "${PRECOMPILER_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  "List:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}",
+                  {{/* regression: precompiler sign PUTs 403'd -- SeaweedFS Identity.CanDo matches a
+                  non-wildcard action only against "Action:bucket" exactly; a prefix grant needs a
+                  trailing "*" (wildcard-matched against "Action:bucket/objectKey"). */}}
+                  "Write:{{ .Values.pipeline.rustDataPlane.bundleExecutor.bucketName }}/precompiled/*"
+                ]
+              },
+              {
+                "name": "hub-api-escrow",
+                "credentials": [
+                  {"accessKey": "${ESCROW_S3_ACCESS_KEY_ID}", "secretKey": "${ESCROW_S3_SECRET_ACCESS_KEY}"}
+                ],
+                "actions": [
+                  "Read:{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}",
+                  "Write:{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}",
+                  "List:{{ .Values.infrastructure.seaweedfs.escrow.bucketName }}"
+                ]
+              },
+              {
                 "name": "bucket-init",
                 "credentials": [
                   {"accessKey": "${BUCKET_INIT_S3_ACCESS_KEY_ID}", "secretKey": "${BUCKET_INIT_S3_SECRET_ACCESS_KEY}"}
@@ -291,6 +414,16 @@ spec:
             secretKeyRef:
               name: waddlebot-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        - name: ESCROW_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_ACCESS_KEY_ID
+        - name: ESCROW_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_SECRET_ACCESS_KEY
         - name: DATAPLANE_S3_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
@@ -311,6 +444,16 @@ spec:
             secretKeyRef:
               name: waddlebot-secrets
               key: BUCKET_INIT_S3_SECRET_ACCESS_KEY
+        - name: PRECOMPILER_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: PRECOMPILER_S3_ACCESS_KEY_ID
+        - name: PRECOMPILER_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-secrets
+              key: PRECOMPILER_S3_SECRET_ACCESS_KEY
         - name: STREAMING_S3_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:

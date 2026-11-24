@@ -11,16 +11,17 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.bundle_permissions import BLUEPRINTS
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import make_token, make_user_token, make_user_token_with_roles
 
-_APP_ID = "waddles.socials.music.default"
+_APP_ID = "penguintechinc.waddles.music"
 _VERSION = "3.0.0"
 _MANIFEST = {
     "schema_version": 2,
     "app_id": _APP_ID,
     "name": "Music Station",
     "version": _VERSION,
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "language": "python",
@@ -105,6 +106,7 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     quart_app.config["async_dal"] = bundle_install_db
     quart_app.config["dal"] = dal
     quart_app.config["install_dal"] = install_dal
+    install_community_ids(quart_app, dal)
     for bp in BLUEPRINTS:
         quart_app.register_blueprint(bp)
     return quart_app
@@ -195,20 +197,21 @@ async def test_community_access_grants_requires_admin_and_version(
     app: Quart, install_dal: Any
 ) -> None:
     community_id = await _seed_community(install_dal)
+    cuuid = public_id(app.config["dal"], community_id)
     client = app.test_client()
     denied = await client.get(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/access-grants?version={_VERSION}",
+        f"/api/v1/apps/community/{cuuid}/{_APP_ID}/access-grants?version={_VERSION}",
         headers={"Authorization": f"Bearer {make_user_token(user_id=999, scope='')}"},
     )
     assert denied.status_code == 403
     admin = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     missing = await client.get(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/access-grants",
+        f"/api/v1/apps/community/{cuuid}/{_APP_ID}/access-grants",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert missing.status_code == 400
     ok = await client.get(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/access-grants?version={_VERSION}",
+        f"/api/v1/apps/community/{cuuid}/{_APP_ID}/access-grants?version={_VERSION}",
         headers={"Authorization": f"Bearer {admin}"},
     )
     assert ok.status_code == 200
@@ -221,28 +224,28 @@ async def test_community_consent_grant_then_revocation_takes_effect(
     client = app.test_client()
     await _approve(client, _VERSION, _ROLE_IDS)
     community_id = await _seed_community(install_dal)
+    cuuid = public_id(app.config["dal"], community_id)
     token = make_user_token_with_roles(user_id=1, roles=["platform-admin"])
     headers = {"Authorization": f"Bearer {token}"}
     partial = await client.post(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+        f"/api/v1/apps/community/{cuuid}/{_APP_ID}/permissions/grant",
         headers=headers,
         json={"version": _VERSION, "grantedPermissions": [_ROLE_IDS[0]]},
     )
     assert partial.status_code == 422
     assert (await partial.get_json())["error"]["code"] == "consent_required"
     granted = await client.post(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/grant",
+        f"/api/v1/apps/community/{cuuid}/{_APP_ID}/permissions/grant",
         headers=headers,
         json={"version": _VERSION, "grantedPermissions": _ROLE_IDS},
     )
     assert granted.status_code == 201
     revoked = await client.delete(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/{_ROLE_IDS[1]}"
-        f"?version={_VERSION}",
+        f"/api/v1/apps/community/{cuuid}/{_APP_ID}/permissions/{_ROLE_IDS[1]}?version={_VERSION}",
         headers=headers,
     )
     assert revoked.status_code == 200
     listing = await client.get(
-        f"/api/v1/apps/community/{community_id}/{_APP_ID}/permissions/granted", headers=headers
+        f"/api/v1/apps/community/{cuuid}/{_APP_ID}/permissions/granted", headers=headers
     )
     assert (await listing.get_json())["permissionIds"] == [_ROLE_IDS[0]]

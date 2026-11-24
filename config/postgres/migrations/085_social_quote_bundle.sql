@@ -32,10 +32,10 @@ INSERT INTO app_catalog (
     app_id, manifest_version, module, feature, provider, execution_model,
     is_default, platform_compatibility, status, stages
 ) VALUES (
-    'waddles.social.quote.default',
+    'penguintechinc.waddles.quote-pipeline',
     '1.0.0',
     'social',
-    'waddles.social.quote',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
@@ -53,7 +53,7 @@ ON CONFLICT (app_id) DO NOTHING;
 
 -- Activate bundle tenant-wide (every community under the global tenant can use it)
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.social.quote.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.quote-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

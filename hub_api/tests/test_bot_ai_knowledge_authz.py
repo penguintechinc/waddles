@@ -11,6 +11,7 @@ import asyncio
 import dataclasses
 import logging
 import os
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -19,8 +20,17 @@ os.environ.setdefault("RCON_ENCRYPTION_KEY", "ab" * 32)
 
 from blueprints.v1 import bot as bot_blueprint  # noqa: E402
 from services import bot_ai_knowledge  # noqa: E402
+from services.community_common import ensure_community_tables  # noqa: E402
 from services.github_sync_service import decrypt_token  # noqa: E402
-from tests.conftest import insert_global_admin  # noqa: E402
+from services.global_identity import ensure_tables as ensure_global_tables  # noqa: E402
+from tests.community_ids import public_id  # noqa: E402
+from tests.conftest import (  # noqa: E402
+    TENANT_SLUG,
+    insert_global_admin,
+    make_token,
+    seed_membership,
+)
+from tests.entity_ids import pid  # noqa: E402
 from tests.test_bot_blueprint import (  # noqa: E402,F401 - fixtures
     app,
     client,
@@ -45,6 +55,34 @@ def _key(monkeypatch: Any) -> None:
     monkeypatch.setenv("GITHUB_SYNC_ENCRYPTION_KEY", "cd" * 32)
 
 
+COMMUNITY_ADMIN_UID, COMMUNITY_MEMBER_UID = 41, 42
+
+
+@pytest.fixture
+def auth_headers(dal: Any, community_id: int) -> Any:
+    """Header factory whose DEFAULT caller is a real, seeded community admin of `community_id`.
+
+    Real guards run in this module (no `bypass_route_guards`): the caller's standing comes from
+    seeded `community_members`/`community_roles` rows. `user_id=` overrides pick other callers.
+    """
+    ensure_global_tables(dal, migrate=True)  # real `tenant_admins` for the standing lookup
+    ensure_community_tables(dal, migrate=True)
+    db = SimpleNamespace(dal=dal)
+    seed_membership(
+        db, community_id=community_id, user_id=COMMUNITY_ADMIN_UID, role="community-admin"
+    )
+    seed_membership(db, community_id=community_id, user_id=COMMUNITY_MEMBER_UID, role="member")
+
+    def _make(
+        *, scope: str = "", tenant: str = TENANT_SLUG, user_id: str = str(COMMUNITY_ADMIN_UID)
+    ) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {make_token(scope=scope, tenant=tenant, user_id=user_id)}"
+        }
+
+    return _make
+
+
 @pytest.fixture
 def users(dal: Any) -> dict[str, int]:
     """Real hub_users rows: a vendor, another vendor, and a super admin."""
@@ -64,6 +102,8 @@ def _src(dal: Any, **kw: Any) -> int:
     kw.setdefault("source_type", "manual")
     sid: int = dal.ai_knowledge_sources.insert(is_active=True, **kw)
     dal.commit()
+    if kw.get("community_id") is not None:
+        public_id(dal, kw["community_id"])  # responses carry the community UUID
     return sid
 
 
@@ -78,7 +118,9 @@ class TestCrossCommunityRefused:
     ) -> None:
         sid = _src(dal, community_id=other_tenant_community_id, source_name="victim")
         r = await client.put(
-            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json={"source_name": "pwned"}
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE),
+            json={"source_name": "pwned"},
         )
         assert r.status_code == 404
         assert _name(dal, sid) == "victim"
@@ -87,7 +129,9 @@ class TestCrossCommunityRefused:
         self, client: Any, auth_headers: Any, dal: Any, other_tenant_community_id: int
     ) -> None:
         sid = _src(dal, community_id=other_tenant_community_id)
-        r = await client.delete(f"{BASE}/{sid}", headers=auth_headers(scope=WRITE))
+        r = await client.delete(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}", headers=auth_headers(scope=WRITE)
+        )
         assert r.status_code == 404
         assert dal.ai_knowledge_sources[sid] is not None
 
@@ -106,7 +150,10 @@ class TestCrossCommunityRefused:
             called.append(s)
 
         monkeypatch.setattr(bot_ai_knowledge, "index_source", fake)
-        r = await client.post(f"{BASE}/{sid}/reindex", headers=auth_headers(scope=WRITE))
+        r = await client.post(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}/reindex",
+            headers=auth_headers(scope=WRITE),
+        )
         await asyncio.sleep(0)
         assert r.status_code == 404
         assert called == []
@@ -115,8 +162,12 @@ class TestCrossCommunityRefused:
         self, client: Any, auth_headers: Any, dal: Any, other_tenant_community_id: int
     ) -> None:
         sid = _src(dal, community_id=other_tenant_community_id)
-        foreign = await client.delete(f"{BASE}/{sid}", headers=auth_headers(scope=WRITE))
-        missing = await client.delete(f"{BASE}/999999", headers=auth_headers(scope=WRITE))
+        foreign = await client.delete(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}", headers=auth_headers(scope=WRITE)
+        )
+        missing = await client.delete(
+            f"{BASE}/00000000-0000-4000-8000-0000000000ff", headers=auth_headers(scope=WRITE)
+        )
         assert foreign.status_code == missing.status_code == 404
         assert await foreign.get_json() == await missing.get_json()
 
@@ -125,11 +176,15 @@ class TestCrossCommunityRefused:
     ) -> None:
         sid = _src(dal, community_id=community_id, source_name="mine")
         r = await client.put(
-            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json={"source_name": "renamed"}
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE),
+            json={"source_name": "renamed"},
         )
         assert r.status_code == 200
         assert _name(dal, sid) == "renamed"
-        r = await client.delete(f"{BASE}/{sid}", headers=auth_headers(scope=WRITE))
+        r = await client.delete(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}", headers=auth_headers(scope=WRITE)
+        )
         assert r.status_code == 200
 
 
@@ -139,7 +194,7 @@ class TestVendorAndGlobalScope:
     ) -> None:
         sid = _src(dal, vendor_id=users["vendor"], source_name="v")
         r = await client.put(
-            f"{BASE}/{sid}",
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
             headers=auth_headers(scope=WRITE, user_id=str(users["other_vendor"])),
             json={"source_name": "x"},
         )
@@ -151,7 +206,7 @@ class TestVendorAndGlobalScope:
     ) -> None:
         sid = _src(dal, vendor_id=users["vendor"])
         r = await client.put(
-            f"{BASE}/{sid}",
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
             headers=auth_headers(scope=WRITE, user_id=str(users["vendor"])),
             json={"source_name": "x"},
         )
@@ -162,11 +217,13 @@ class TestVendorAndGlobalScope:
     ) -> None:
         sid = _src(dal)
         r = await client.delete(
-            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE, user_id=str(users["vendor"]))
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE, user_id=str(users["vendor"])),
         )
         assert r.status_code == 404
         r = await client.delete(
-            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE, user_id=str(users["root"]))
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE, user_id=str(users["root"])),
         )
         assert r.status_code == 200
 
@@ -174,7 +231,9 @@ class TestVendorAndGlobalScope:
         self, client: Any, auth_headers: Any, dal: Any
     ) -> None:
         sid = _src(dal, vendor_id=0)  # `_user_id()` == 0 for non-numeric sub
-        r = await client.delete(f"{BASE}/{sid}", headers=auth_headers(scope=WRITE))
+        r = await client.delete(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}", headers=auth_headers(scope=WRITE)
+        )
         assert r.status_code == 404
 
 
@@ -187,12 +246,13 @@ class TestListScope:
         assert r.status_code == 400
 
     async def test_other_tenant_community_refused(
-        self, client: Any, auth_headers: Any, other_tenant_community_id: int
+        self, client: Any, auth_headers: Any, dal: Any, other_tenant_community_id: int
     ) -> None:
         r = await client.get(
-            f"{BASE}?communityId={other_tenant_community_id}", headers=auth_headers(scope=READ)
+            f"{BASE}?communityId={public_id(dal, other_tenant_community_id)}",
+            headers=auth_headers(scope=READ),
         )
-        assert r.status_code == 403
+        assert r.status_code == 404
 
     async def test_scoped_list_only_that_community(
         self, client: Any, auth_headers: Any, dal: Any, community_id: int,
@@ -200,7 +260,8 @@ class TestListScope:
     ) -> None:  # fmt: skip
         _src(dal, community_id=community_id, source_name="mine")
         _src(dal, community_id=other_tenant_community_id, source_name="theirs")
-        for q in (f"communityId={community_id}", f"community_id={community_id}"):
+        cuuid = public_id(dal, community_id)
+        for q in (f"communityId={cuuid}", f"community_id={cuuid}"):
             r = await client.get(f"{BASE}?{q}", headers=auth_headers(scope=READ))
             assert r.status_code == 200
             assert [s["source_name"] for s in (await r.get_json())["sources"]] == ["mine"]
@@ -217,8 +278,8 @@ class TestListScope:
 
 
 class TestCreateScope:
-    async def test_other_tenant_community_403(
-        self, client: Any, auth_headers: Any, other_tenant_community_id: int
+    async def test_other_tenant_community_404(
+        self, client: Any, auth_headers: Any, dal: Any, other_tenant_community_id: int
     ) -> None:
         r = await client.post(
             BASE,
@@ -226,10 +287,10 @@ class TestCreateScope:
             json={
                 "source_name": "x",
                 "source_type": "manual",
-                "community_id": int(other_tenant_community_id),
+                "community_id": public_id(dal, other_tenant_community_id),
             },
         )
-        assert r.status_code == 403
+        assert r.status_code == 404
 
     async def test_global_create_non_superadmin_403(self, client: Any, auth_headers: Any) -> None:
         r = await client.post(
@@ -240,7 +301,12 @@ class TestCreateScope:
         assert r.status_code == 403
 
     async def test_spoofed_vendor_id_403(
-        self, client: Any, auth_headers: Any, users: dict[str, int], community_id: int
+        self,
+        client: Any,
+        auth_headers: Any,
+        dal: Any,
+        users: dict[str, int],
+        community_id: int,
     ) -> None:
         r = await client.post(
             BASE,
@@ -248,7 +314,7 @@ class TestCreateScope:
             json={
                 "source_name": "x",
                 "source_type": "manual",
-                "community_id": int(community_id),
+                "community_id": public_id(dal, community_id),
                 "vendor_id": int(users["vendor"]),
             },
         )
@@ -265,7 +331,7 @@ class TestTokenAtRest:
             json={
                 "source_name": "Repo",
                 "source_type": "manual",
-                "community_id": int(community_id),
+                "community_id": public_id(client.app.config["dal"], community_id),
                 **extra,
             },
         )
@@ -279,7 +345,12 @@ class TestTokenAtRest:
         caplog.set_level(logging.DEBUG)
         r, body = await self._create(client, auth_headers, community_id, **{field: PLAINTEXT})
         assert r.status_code == 201
-        stored = dal.ai_knowledge_sources[body["source"]["id"]].encrypted_token
+        stored = (
+            dal(dal.ai_knowledge_sources.public_id == body["source"]["id"])
+            .select()
+            .first()
+            .encrypted_token
+        )
         assert stored and stored != PLAINTEXT and PLAINTEXT not in stored
         assert decrypt_token(stored) == PLAINTEXT
         assert PLAINTEXT not in str(body) and "token" not in str(body).lower()
@@ -296,7 +367,9 @@ class TestTokenAtRest:
         self, client: Any, auth_headers: Any, dal: Any, community_id: int
     ) -> None:
         _src(dal, community_id=community_id, encrypted_token="x")
-        r = await client.get(f"{BASE}?communityId={community_id}", headers=auth_headers(scope=READ))
+        r = await client.get(
+            f"{BASE}?communityId={public_id(dal, community_id)}", headers=auth_headers(scope=READ)
+        )
         body = await r.get_json()
         assert set(body) == {"success", "sources"}
         assert set(body["sources"][0]) == SOURCE_FIELDS
@@ -306,14 +379,16 @@ class TestTokenAtRest:
     ) -> None:
         sid = _src(dal, community_id=community_id)
         r = await client.put(
-            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json={"token": PLAINTEXT}
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE),
+            json={"token": PLAINTEXT},
         )
         assert r.status_code == 200 and PLAINTEXT not in str(await r.get_json())
         dal.commit()
         first = dal.ai_knowledge_sources[sid].encrypted_token
         assert first != PLAINTEXT and decrypt_token(first) == PLAINTEXT
         r = await client.put(
-            f"{BASE}/{sid}",
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
             headers=auth_headers(scope=WRITE),
             json={"token": "", "source_name": "n"},
         )
@@ -326,7 +401,9 @@ class TestTokenAtRest:
     ) -> None:
         sid = _src(dal, community_id=community_id)
         r = await client.put(
-            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json={"encrypted_token": PLAINTEXT}
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE),
+            json={"encrypted_token": PLAINTEXT},
         )
         assert r.status_code == 200
         dal.commit()
@@ -437,19 +514,19 @@ class TestSearchSuggestScope:
         ],
     )
     async def test_foreign_community_refused(
-        self, client: Any, auth_headers: Any, spy: Any, other_tenant_community_id: int,
+        self, client: Any, auth_headers: Any, spy: Any, dal: Any, other_tenant_community_id: int,
         path: str, body: dict[str, Any],
     ) -> None:  # fmt: skip
         r = await client.post(
             f"/api/v1/admin/ai-knowledge/{path}",
             headers=auth_headers(scope=_SCOPE[path]),
-            json={**body, "communityId": int(other_tenant_community_id)},
+            json={**body, "communityId": public_id(dal, other_tenant_community_id)},
         )
-        assert r.status_code == 403
+        assert r.status_code == 404
         assert spy == []
 
     async def test_own_community_passes_scope_through(
-        self, client: Any, auth_headers: Any, spy: Any, community_id: int
+        self, client: Any, auth_headers: Any, spy: Any, dal: Any, community_id: int
     ) -> None:
         cid = int(community_id)
         for path, body in (
@@ -459,7 +536,7 @@ class TestSearchSuggestScope:
             r = await client.post(
                 f"/api/v1/admin/ai-knowledge/{path}",
                 headers=auth_headers(scope=_SCOPE[path]),
-                json={**body, "communityId": cid},
+                json={**body, "communityId": public_id(dal, cid)},
             )
             assert r.status_code == 200
         assert spy == [("search", cid), ("suggest", cid)]
@@ -491,6 +568,38 @@ class TestSearchSuggestScope:
         assert "ks.community_id = %s" in captured["sql"]
         assert 42 in captured["ph"] and 7 in captured["ph"]
 
+    @pytest.mark.parametrize("path", ["search", "suggest"])
+    async def test_numeric_community_id_rejected(
+        self, client: Any, auth_headers: Any, spy: Any, community_id: int, path: str
+    ) -> None:
+        body = {"query": "q"} if path == "search" else {"ticketId": 1, "ticketText": "t"}
+        r = await client.post(
+            f"/api/v1/admin/ai-knowledge/{path}",
+            headers=auth_headers(scope=_SCOPE[path]),
+            json={**body, "communityId": int(community_id)},
+        )
+        assert r.status_code in (400, 422)
+        assert spy == []
+
+    async def test_unknown_uuid_refused_like_foreign_community(
+        self, client: Any, auth_headers: Any, spy: Any
+    ) -> None:
+        r = await client.post(
+            "/api/v1/admin/ai-knowledge/search",
+            headers=auth_headers(scope=READ),
+            json={"query": "q", "communityId": "00000000-0000-4000-8000-00000000dead"},
+        )
+        assert r.status_code == 404
+        assert spy == []
+
+    async def test_numeric_list_query_rejected(
+        self, client: Any, auth_headers: Any, community_id: int
+    ) -> None:
+        r = await client.get(f"{BASE}?communityId={community_id}", headers=auth_headers(scope=READ))
+        assert (
+            r.status_code == 404
+        )  # unresolvable id: same answer as a foreign community (no oracle)
+
 
 class TestVendorOwnedConfusedDeputy:
     """A community admin must not drive a vendor-owned source, nor redirect its credential."""
@@ -508,10 +617,18 @@ class TestVendorOwnedConfusedDeputy:
         monkeypatch.setattr(bot_ai_knowledge, "index_source", fake)
         h = auth_headers(scope=WRITE)
         assert (
-            await client.put(f"{BASE}/{sid}", headers=h, json={"source_name": "x"})
+            await client.put(
+                f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+                headers=h,
+                json={"source_name": "x"},
+            )
         ).status_code == 404
-        assert (await client.post(f"{BASE}/{sid}/reindex", headers=h)).status_code == 404
-        assert (await client.delete(f"{BASE}/{sid}", headers=h)).status_code == 404
+        assert (
+            await client.post(f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}/reindex", headers=h)
+        ).status_code == 404
+        assert (
+            await client.delete(f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}", headers=h)
+        ).status_code == 404
         await asyncio.sleep(0)
         assert called == []
         assert _name(dal, sid) == "v"
@@ -523,7 +640,9 @@ class TestVendorOwnedConfusedDeputy:
         monkeypatch.setattr(bot_blueprint, "_is_super_admin_sync", lambda _d, _u: True)
         sid = _src(dal, community_id=community_id, vendor_id=users["vendor"])
         r = await client.put(
-            f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json={"source_name": "ok"}
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE),
+            json={"source_name": "ok"},
         )
         assert r.status_code == 200
 
@@ -547,7 +666,11 @@ class TestVendorOwnedConfusedDeputy:
             dal, community_id=community_id, source_url="https://docs.example.com/a",
             branch="main", docs_path="/docs", encrypted_token="sealed-ciphertext",
         )  # fmt: skip
-        r = await client.put(f"{BASE}/{sid}", headers=auth_headers(scope=WRITE), json=change)
+        r = await client.put(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=auth_headers(scope=WRITE),
+            json=change,
+        )
         assert r.status_code == 200
         dal.commit()
         assert dal.ai_knowledge_sources[sid].encrypted_token is None
@@ -560,7 +683,7 @@ class TestVendorOwnedConfusedDeputy:
             encrypted_token="old",
         )  # fmt: skip
         r = await client.put(
-            f"{BASE}/{sid}",
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
             headers=auth_headers(scope=WRITE),
             json={"source_url": "https://docs.example.com/b", "token": PLAINTEXT},
         )
@@ -576,10 +699,96 @@ class TestVendorOwnedConfusedDeputy:
             encrypted_token="keep",
         )  # fmt: skip
         r = await client.put(
-            f"{BASE}/{sid}",
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
             headers=auth_headers(scope=WRITE),
             json={"source_name": "n", "source_url": "https://docs.example.com/a"},
         )
         assert r.status_code == 200
         dal.commit()
         assert dal.ai_knowledge_sources[sid].encrypted_token == "keep"
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True
+
+
+class TestWriteRoutesDenyNonAdminWithRealGuards:
+    """A tenant-wide `bot.ai_knowledge:write` scope is NOT community admin authority.
+
+    Real guards, seeded `community_members` rows: a plain member (and a non-member) holding the
+    write scope is refused on every community-scoped mutation, and nothing is written/started.
+    """
+
+    @pytest.fixture(params=[COMMUNITY_MEMBER_UID, 43], ids=["plain-member", "non-member"])
+    def caller(self, request: Any, auth_headers: Any) -> dict[str, str]:
+        return dict(auth_headers(scope=WRITE, user_id=str(request.param)))
+
+    async def test_create_denied(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int
+    ) -> None:
+        r = await client.post(
+            BASE,
+            headers=caller,
+            json={
+                "source_name": "x",
+                "source_type": "manual",
+                "community_id": public_id(dal, community_id),
+            },
+        )
+        assert r.status_code == 403
+        dal.commit()
+        assert dal(dal.ai_knowledge_sources.community_id == community_id).count() == 0
+
+    async def test_update_denied_and_unchanged(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int
+    ) -> None:
+        sid = _src(dal, community_id=community_id, source_name="keep")
+        r = await client.put(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}",
+            headers=caller,
+            json={"source_name": "pwned"},
+        )
+        assert r.status_code == 404  # indistinguishable from a missing source
+        assert _name(dal, sid) == "keep"
+
+    async def test_delete_denied_and_row_kept(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int
+    ) -> None:
+        sid = _src(dal, community_id=community_id)
+        r = await client.delete(f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}", headers=caller)
+        assert r.status_code == 404
+        assert dal.ai_knowledge_sources[sid] is not None
+
+    async def test_reindex_denied_and_no_task(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int, monkeypatch: Any
+    ) -> None:
+        sid = _src(dal, community_id=community_id)
+        called: list[int] = []
+
+        async def fake(_d: Any, s: int) -> None:
+            called.append(s)
+
+        monkeypatch.setattr(bot_ai_knowledge, "index_source", fake)
+        r = await client.post(
+            f"{BASE}/{pid(dal, 'ai_knowledge_sources', sid)}/reindex", headers=caller
+        )
+        await asyncio.sleep(0)
+        assert r.status_code == 404
+        assert called == []
+
+    async def test_suggest_denied(
+        self, client: Any, caller: dict[str, str], dal: Any, community_id: int, monkeypatch: Any
+    ) -> None:
+        called: list[int] = []
+
+        async def fake_gen(_d: Any, _t: int, _x: str, *, community_id: int | None = None) -> None:
+            called.append(1)
+
+        monkeypatch.setattr(bot_ai_knowledge, "generate_suggestion", fake_gen)
+        r = await client.post(
+            "/api/v1/admin/ai-knowledge/suggest",
+            headers=caller,
+            json={"ticketId": 1, "ticketText": "t", "communityId": public_id(dal, community_id)},
+        )
+        assert r.status_code == 403
+        assert called == []

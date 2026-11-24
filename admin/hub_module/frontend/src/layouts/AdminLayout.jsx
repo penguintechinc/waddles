@@ -30,7 +30,6 @@ import {
   CommandLineIcon,
   SpeakerWaveIcon,
   LanguageIcon,
-  CalendarDaysIcon,
   TicketIcon,
   HashtagIcon,
   AdjustmentsHorizontalIcon,
@@ -40,7 +39,6 @@ import {
   HeartIcon,
   CubeIcon,
   InboxStackIcon,
-  ClipboardDocumentListIcon,
   UserPlusIcon,
   AcademicCapIcon,
   LinkIcon,
@@ -84,11 +82,8 @@ function AdminLayout() {
           label: 'Engagement',
           icon: HeartIcon,
           items: [
-            { to: `/admin/${communityId}/polls`, icon: ClipboardDocumentListIcon, label: 'Polls' },
-            { to: `/admin/${communityId}/forms`, icon: DocumentTextIcon, label: 'Forms' },
             { to: `/admin/${communityId}/shoutouts`, icon: SpeakerWaveIcon, label: 'Shoutouts' },
             { to: `/admin/${communityId}/leaderboard`, icon: TrophyIcon, label: 'Leaderboards' },
-            { to: `/admin/${communityId}/calendar/events`, icon: CalendarDaysIcon, label: 'Calendar Events' },
           ],
         },
         {
@@ -170,7 +165,10 @@ function AdminLayout() {
             { to: `/admin/${communityId}/analytics`, icon: ChartBarIcon, label: 'Analytics' },
             { to: `/admin/${communityId}/workflows`, icon: CommandLineIcon, label: 'Workflows', premium: true },
             ...(bundlesEnabled
-              ? [{ to: `/admin/${communityId}/bundles`, icon: PuzzlePieceIcon, label: 'Bundle Apps' }]
+              ? [
+                  { to: `/admin/${communityId}/bundles`, icon: PuzzlePieceIcon, label: 'Bundle Apps' },
+                  { to: `/admin/${communityId}/settings`, icon: AdjustmentsHorizontalIcon, label: 'App Settings' },
+                ]
               : []),
             { to: `/admin/${communityId}/domains`, icon: GlobeAltIcon, label: 'Custom Domains' },
             { to: `/admin/${communityId}/translation`, icon: LanguageIcon, label: 'Translation' },

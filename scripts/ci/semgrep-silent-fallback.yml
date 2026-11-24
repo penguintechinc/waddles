@@ -31,10 +31,27 @@ rules:
           { tracing::$LEVEL!(...); ... }
       - pattern-not-inside: |
           { log::$LEVEL!(...); ... }
+      # Mutex/RwLock poison recovery keeps the guard (the data is still there); it does not
+      # swap an error for a made-up default value.
+      - pattern-not: $X.unwrap_or_else(|$E| $E.into_inner())
+      # A closure that panics is loud, the opposite of a silent fallback.
+      - pattern-not: $X.unwrap_or_else(|$E| panic!(...))
+      # Inline unit-test modules (`#[cfg(test)] mod tests { .. }`) are not shipped code. Semgrep's
+      # Rust grammar cannot match the attribute, so this keys on the conventional module name.
+      - pattern-not-inside: |
+          mod tests {
+              ...
+          }
     paths:
       exclude:
         - "**/tests/**"
         - "**/*_test.rs"
+        # Test-only modules: children of `#[cfg(test)]` (`*_tests.rs`, `*_tests/`) or of a
+        # `test-support`-feature-gated module that no service build enables.
+        - "**/*_tests.rs"
+        - "**/*_tests/**"
+        - "**/test_support.rs"
+        - "**/mock_hub.rs"
 
   # --- Python: `except ...: return <default>` with no logger call in the except body ---
   - id: python-silent-except-return-default

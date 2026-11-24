@@ -34,6 +34,21 @@ if "flask_core" not in sys.modules:
 
 
 @pytest.fixture(autouse=True)
+def jwt_keyring():
+    """Install a fresh in-memory ES256 key ring for every test (T10: no shared secret exists).
+
+    Yields the ring so a test can sign hostile / rotated tokens with `jwt_keyring.active`.
+    """
+    from flask_core import jwt_keyring as jk
+
+    ring = jk.generate_test_keyring()
+    previous = jk.get_jwt_keyring()
+    jk.set_jwt_keyring(ring)
+    yield ring
+    jk.set_jwt_keyring(previous)
+
+
+@pytest.fixture(autouse=True)
 def _isolated_token_revocation():
     """Give every test its own empty, process-local revocation store.
 

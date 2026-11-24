@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.count
+app_id: penguintechinc.waddles.count
 name: Dynamic Counter Bundle (Python)
 # 1.0.0 retired -- fix/bump-command-bundles-1.0.1, see this bundle's hub-manifest.yaml for why.
 # 1.0.3: promoted from a trivial self-counter to dynamic, per-community named counters
@@ -8,8 +8,7 @@ name: Dynamic Counter Bundle (Python)
 # fix (gh-631, #638) -- app_versions is immutable per (app_id, version).
 # 1.0.7: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.8: activation-gated only -- removed the in-bundle waddles.command-count feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.10
-feature: waddles.core.example
+version: 1.0.13
 module: core
 provider: builtin
 author: github:penguintechinc

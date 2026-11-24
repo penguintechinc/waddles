@@ -7,7 +7,7 @@
 
 use std::sync::{Arc, Mutex};
 
-use chrono::{DateTime, Utc};
+use time::OffsetDateTime;
 
 use crate::pipeline::model::PipelineId;
 
@@ -26,8 +26,8 @@ pub struct RecordingSegment {
     /// Segment start time, parsed from the `strftime`-formatted filename
     /// ffmpeg wrote (see `RecordSink::ffmpeg_output_args`), not the upload
     /// time.
-    pub started_at: DateTime<Utc>,
-    pub uploaded_at: DateTime<Utc>,
+    pub started_at: OffsetDateTime,
+    pub uploaded_at: OffsetDateTime,
     pub size_bytes: u64,
 }
 
@@ -101,8 +101,8 @@ mod tests {
             profile: "1080p60".into(),
             filename: "20260911120000.ts".into(),
             key: format!("tenant-1/{community_id}/{}/20260911120000.ts", Uuid::nil()),
-            started_at: Utc::now(),
-            uploaded_at: Utc::now(),
+            started_at: OffsetDateTime::now_utc(),
+            uploaded_at: OffsetDateTime::now_utc(),
             size_bytes: 1024,
         }
     }

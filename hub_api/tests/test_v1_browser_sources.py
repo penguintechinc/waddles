@@ -13,6 +13,7 @@ from quart_schema import QuartSchema
 import blueprints.v1.overlay as overlay_module
 from blueprints.v1.overlay import SCOPE_ADMIN, overlay_bp
 from services import overlay_service
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
@@ -29,9 +30,10 @@ def app(overlay_db: Any) -> Quart:
     overlay_db.dal.commit()
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(overlay_bp)
     quart_app.config["dal"] = overlay_db.dal
     quart_app.config["async_dal"] = overlay_db
+    install_community_ids(quart_app, overlay_db.dal)
+    quart_app.register_blueprint(overlay_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
 
@@ -61,14 +63,17 @@ def _key(url: str) -> str:
 
 class TestGetBrowserSources:
     async def test_401_without_token(self, client: Any) -> None:
-        assert (await client.get("/api/v1/admin/1/browser-sources")).status_code == 401
+        assert (
+            await client.get(f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/browser-sources")
+        ).status_code == 401
 
     async def test_missing_scope_is_403(self, client: Any, overlay_db: Any) -> None:
         cid = seed_community(overlay_db)
         seed_membership(overlay_db, community_id=cid, user_id=42)
         token = make_user_token(user_id=42, scope="")
         r = await client.get(
-            f"/api/v1/admin/{cid}/browser-sources", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 403
 
@@ -77,7 +82,8 @@ class TestGetBrowserSources:
         seed_membership(overlay_db, community_id=cid, user_id=55)
         token = make_user_token(user_id=55, scope=SCOPE_ADMIN, tenant=OTHER_TENANT_SLUG)
         r = await client.get(
-            f"/api/v1/admin/{cid}/browser-sources", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 404
 
@@ -85,7 +91,8 @@ class TestGetBrowserSources:
         cid = seed_community(overlay_db)
         token = make_user_token(user_id=99, scope=SCOPE_ADMIN)
         r = await client.get(
-            f"/api/v1/admin/{cid}/browser-sources", headers={"Authorization": f"Bearer {token}"}
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources",
+            headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 404
         assert "key=" not in await r.get_data(as_text=True)
@@ -95,20 +102,26 @@ class TestGetBrowserSources:
     ) -> None:
         _flag_on.return_value = False
         headers, cid = _admin(overlay_db)
-        r = await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+        r = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+        )
         assert r.status_code == 402
 
     async def test_exact_field_set_and_url_scheme(self, client: Any, overlay_db: Any) -> None:
         headers, cid = _admin(overlay_db)
-        r = await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+        r = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+        )
         assert r.status_code == 200
         body = await r.get_json()
         assert set(body) == {"success", "sources"}
-        assert [s["sourceType"] for s in body["sources"]] == ["ticker", "media", "general"]
+        assert [s["sourceType"] for s in body["sources"]] == ["ticker", "media", "general", "scene"]
         code = overlay_db.dal.executesql(
             f"SELECT overlay_code FROM communities WHERE id = {cid}"  # noqa: S608
         )[0][0]
-        for s, surface in zip(body["sources"], ["ticker", "media", "full_screen"], strict=True):
+        for s, surface in zip(
+            body["sources"], ["ticker", "media", "full_screen", "scene"], strict=True
+        ):
             assert set(s) == {"sourceType", "url", "isActive", "createdAt"}
             assert s["isActive"] is True
             assert s["url"].startswith(f"https://overlay.example.test/{code}/{surface}?key=")
@@ -117,10 +130,14 @@ class TestGetBrowserSources:
     async def test_stable_across_calls(self, client: Any, overlay_db: Any) -> None:
         headers, cid = _admin(overlay_db)
         a = await (
-            await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+            )
         ).get_json()
         b = await (
-            await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+            )
         ).get_json()
         assert [x["url"] for x in a["sources"]] == [x["url"] for x in b["sources"]]
 
@@ -131,24 +148,28 @@ class TestRegenerate:
     ) -> None:
         headers, cid = _admin(overlay_db)
         before = await (
-            await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+            )
         ).get_json()
         token = make_user_token(user_id=99, scope=SCOPE_ADMIN)
         r = await client.post(
-            f"/api/v1/admin/{cid}/browser-sources/regenerate",
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources/regenerate",
             json={},
             headers={"Authorization": f"Bearer {token}"},
         )
         assert r.status_code == 404
         after = await (
-            await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+            )
         ).get_json()
         assert [x["url"] for x in before["sources"]] == [x["url"] for x in after["sources"]]
 
     async def test_unknown_source_type_is_400(self, client: Any, overlay_db: Any) -> None:
         headers, cid = _admin(overlay_db)
         r = await client.post(
-            f"/api/v1/admin/{cid}/browser-sources/regenerate",
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources/regenerate",
             json={"sourceType": "bogus"},
             headers=headers,
         )
@@ -160,7 +181,9 @@ class TestRegenerate:
         headers, cid = _admin(overlay_db)
         _flag_on.return_value = False
         r = await client.post(
-            f"/api/v1/admin/{cid}/browser-sources/regenerate", json={}, headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources/regenerate",
+            json={},
+            headers=headers,
         )
         assert r.status_code == 402
 
@@ -170,18 +193,24 @@ class TestRegenerate:
     ) -> None:
         headers, cid = _admin(overlay_db)
         old = await (
-            await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+            )
         ).get_json()
         old_key = _key(old["sources"][0]["url"])
         r = await client.post(
-            f"/api/v1/admin/{cid}/browser-sources/regenerate", json=payload, headers=headers
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources/regenerate",
+            json=payload,
+            headers=headers,
         )
         assert r.status_code == 200
         body = await r.get_json()
         assert set(body) == {"success", "message"}
         assert old_key not in str(body)
         new = await (
-            await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+            await client.get(
+                f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+            )
         ).get_json()
         new_key = _key(new["sources"][0]["url"])
         assert new_key != old_key
@@ -217,7 +246,9 @@ async def test_route_returns_503_and_logs_when_overlay_code_unavailable(
     overlay_db.dal.commit()
     headers, cid = _admin(overlay_db)
     with caplog.at_level("WARNING"):
-        r = await client.get(f"/api/v1/admin/{cid}/browser-sources", headers=headers)
+        r = await client.get(
+            f"/api/v1/admin/{public_id(overlay_db, cid)}/browser-sources", headers=headers
+        )
     assert r.status_code == 503
     rec = next(x for x in caplog.records if x.message == "overlay_api_error")
     assert rec.error_type == "ApiError"

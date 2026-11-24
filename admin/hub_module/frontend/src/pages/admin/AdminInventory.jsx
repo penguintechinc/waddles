@@ -6,6 +6,7 @@ import {
   ArrowPathIcon,
 } from '@heroicons/react/24/outline';
 import { inventoryApi } from '../../services/api';
+import { UpgradeNotice, isLicensedFeatureError } from '../../components/ui';
 
 const ITEM_TYPES = ['general', 'equipment', 'resource', 'consumable'];
 
@@ -40,6 +41,7 @@ function AdminInventory() {
   // Item create/edit modal
   const [showItemModal, setShowItemModal] = useState(false);
   const [editingItem, setEditingItem] = useState(null);
+  const [gated, setGated] = useState(false);
   const [itemForm, setItemForm] = useState(EMPTY_ITEM_FORM);
   const [itemFormError, setItemFormError] = useState('');
   const [itemFormLoading, setItemFormLoading] = useState(false);
@@ -61,6 +63,7 @@ function AdminInventory() {
       setItems(itemsRes.data?.items || []);
       setSummary(summaryRes.data?.summary || { total_items: 0, total_quantity: 0, available_quantity: 0, active_claims: 0 });
     } catch (err) {
+      if (isLicensedFeatureError(err)) setGated(true);
       console.error('Failed to load inventory items:', err);
       setItemsError('Failed to load inventory items.');
     } finally {
@@ -174,6 +177,10 @@ function AdminInventory() {
     { label: 'Available Qty',  value: summary.available_quantity,color: 'border-green-500',  textColor: 'text-green-400',  bgColor: 'bg-green-500/10' },
     { label: 'Active Claims',  value: summary.active_claims,     color: 'border-orange-500', textColor: 'text-orange-400', bgColor: 'bg-orange-500/10' },
   ];
+
+  if (gated) {
+    return <UpgradeNotice feature="Inventory" />;
+  }
 
   return (
     <div className="space-y-6">

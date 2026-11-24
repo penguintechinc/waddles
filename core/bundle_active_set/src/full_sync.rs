@@ -50,6 +50,12 @@ pub enum FullSyncReason {
     /// state out of sync even though the change-log watermark has not
     /// advanced -- the exact condition this regression's fix closes.
     Diverged,
+    /// A live executor session disappeared while placement is sharded: its
+    /// slots now have a new owner set, so surviving owners must pick up the
+    /// loads that restore the replica count -- without waiting for the next
+    /// change-log advance or full reconcile (new executors already force
+    /// [`FullSyncReason::Reconnect`]).
+    Rebalance,
 }
 
 impl FullSyncReason {
@@ -60,6 +66,7 @@ impl FullSyncReason {
             FullSyncReason::Reconnect => "reconnect",
             FullSyncReason::Reconcile => "reconcile",
             FullSyncReason::Diverged => "diverged",
+            FullSyncReason::Rebalance => "rebalance",
         }
     }
 }
@@ -133,6 +140,63 @@ pub fn any_session_diverged(
         .any(|&session| session_loaded_state_diverged(by_scope, loaded, session))
 }
 
+/// Routing-aware [`any_session_diverged`]: true when the placement planner
+/// still has work for any live session -- a TARGET session missing (or at the
+/// wrong digest for) an active bundle, or a NON-target session holding a
+/// bundle whose targets are all ready (make-before-break unload due).
+///
+/// Under executor sharding the plain per-session check is wrong: a session
+/// that is not an owner of an app legitimately never holds it, so it would
+/// read as "diverged" on every poll tick forever and force a spurious
+/// full-sync pass (INFO line + `bundle_full_sync_total{reason="diverged"}`)
+/// each time. `targets_of(scope, row)` is the router's target sessions for the
+/// scope's app. `live_sessions` empty is never diverged.
+pub fn any_session_diverged_routed(
+    by_scope: &HashMap<ScopeKey, ActiveSetRead>,
+    loaded: &SessionLoaded<AppScope>,
+    live_sessions: &[SessionId],
+    targets_of: impl Fn(&AppScope, &crate::query::ActiveBundleRow) -> Vec<SessionId>,
+) -> bool {
+    if live_sessions.is_empty() {
+        return false;
+    }
+    let active = scoped_active_rows(by_scope);
+    let plan = crate::session_sync::plan_sessions_routed(
+        loaded,
+        &active,
+        live_sessions,
+        targets_of,
+        |row| row.digest.as_str(),
+    );
+    // Stale (no-longer-active) keys are the diff path's business, exactly as
+    // with `any_session_diverged`; only ACTIVE keys count here.
+    !plan.to_load.is_empty()
+        || plan
+            .to_unload
+            .iter()
+            .any(|(_, scope, _)| active.contains_key(scope))
+}
+
+/// Decides whether a session-set change must schedule a
+/// [`FullSyncReason::Rebalance`] sync: only when at least one session was
+/// removed, at least one live session remains, placement is
+/// [`crate::sharding::RoutingMode::Sharded`], and no other full sync is already
+/// pending (a pending Reconnect/Reconcile already covers it, so repeated
+/// removals within one tick coalesce into the single pending sync). Returns the
+/// reason to schedule, or `None` to leave `pending` untouched.
+pub fn rebalance_sync_due(
+    removed_sessions: usize,
+    live_sessions: usize,
+    pending: Option<FullSyncReason>,
+    router: &crate::sharding::SessionRouter,
+) -> Option<FullSyncReason> {
+    (removed_sessions > 0
+        && live_sessions > 0
+        && pending.is_none()
+        && router.mode() == crate::sharding::RoutingMode::Sharded)
+        .then_some(FullSyncReason::Rebalance)
+}
+
 /// A short, stable-length prefix of a bundle digest for log lines -- never
 /// the full digest (noisy, and the full value is already available via
 /// `grep` against the per-bundle structured field when needed). Safe on any
@@ -160,6 +224,7 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
@@ -181,6 +246,7 @@ mod tests {
         assert_eq!(FullSyncReason::Reconnect.as_str(), "reconnect");
         assert_eq!(FullSyncReason::Reconcile.as_str(), "reconcile");
         assert_eq!(FullSyncReason::Diverged.as_str(), "diverged");
+        assert_eq!(FullSyncReason::Rebalance.as_str(), "rebalance");
     }
 
     #[test]
@@ -296,5 +362,166 @@ mod tests {
     #[test]
     fn digest_prefix_returns_the_whole_string_when_shorter_than_the_prefix() {
         assert_eq!(digest_prefix("short"), "short");
+    }
+
+    fn one_scope(app: &str, digest: &str) -> HashMap<ScopeKey, ActiveSetRead> {
+        let mut m = HashMap::new();
+        m.insert((1, 0), active_set(vec![row(app, digest)]));
+        m
+    }
+
+    /// Regression (sharding): a NON-owner session never holds the app, which
+    /// the plain check reads as diverged forever (a forced full-sync pass on
+    /// every poll tick); the routed check does not.
+    #[test]
+    fn routed_divergence_ignores_a_session_that_is_not_a_target() {
+        let by_scope = one_scope("waddles.a", "sha256:a");
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:a".into());
+        assert!(
+            any_session_diverged(&by_scope, &loaded, &[1, 2]),
+            "the unrouted check wrongly flags the non-owner"
+        );
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &[1, 2],
+            |_, _| vec![1]
+        ));
+    }
+
+    /// A TARGET session that lacks the digest (or has a stale one) IS diverged.
+    #[test]
+    fn routed_divergence_flags_a_target_missing_the_digest() {
+        let by_scope = one_scope("waddles.a", "sha256:new");
+        let mut loaded = SessionLoaded::new();
+        let live = [1, 2];
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:old".into());
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:new".into());
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+    }
+
+    /// Make-before-break: a leftover non-target holding an active bundle is due
+    /// an unload once every target is ready (diverged); the missing target's
+    /// load is what counts first while it is not.
+    #[test]
+    fn routed_divergence_flags_a_leftover_non_target() {
+        let by_scope = one_scope("waddles.a", "sha256:a");
+        let scope = (1, 0, "waddles.a".to_string());
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(2, scope.clone(), "sha256:a".into());
+        let live = [1, 2];
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+        loaded.mark_loaded(1, scope, "sha256:a".into());
+        assert!(any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &live,
+            |_, _| vec![1]
+        ));
+    }
+
+    /// Stale (deactivated) keys stay the change-diff path's business, and no
+    /// live session at all is never diverged.
+    #[test]
+    fn routed_divergence_ignores_stale_keys_and_empty_live_set() {
+        let by_scope = one_scope("waddles.a", "sha256:a");
+        let mut loaded = SessionLoaded::new();
+        loaded.mark_loaded(1, (1, 0, "waddles.a".to_string()), "sha256:a".into());
+        loaded.mark_loaded(1, (1, 0, "waddles.gone".to_string()), "sha256:g".into());
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &[1],
+            |_, _| vec![1]
+        ));
+        assert!(!any_session_diverged_routed(
+            &by_scope,
+            &loaded,
+            &[],
+            |_, _| vec![]
+        ));
+    }
+
+    fn router_of(n: u64, enabled: bool) -> crate::sharding::SessionRouter {
+        let live: Vec<SessionId> = (1..=n).collect();
+        let map: HashMap<SessionId, String> =
+            live.iter().map(|s| (*s, format!("exec-{s}"))).collect();
+        crate::sharding::SessionRouter::new(&live, &map, enabled, crate::sharding::DEFAULT_REPLICAS)
+    }
+
+    /// A removal under sharding schedules exactly one Rebalance sync, even when
+    /// several sessions vanish in the same tick (one decision, one reason).
+    #[test]
+    fn rebalance_due_when_sessions_removed_under_sharding() {
+        let r = router_of(2, true);
+        assert_eq!(
+            rebalance_sync_due(1, 2, None, &r),
+            Some(FullSyncReason::Rebalance)
+        );
+        assert_eq!(
+            rebalance_sync_due(3, 2, None, &r),
+            Some(FullSyncReason::Rebalance)
+        );
+        assert_eq!(FullSyncReason::Rebalance.as_str(), "rebalance");
+    }
+
+    /// Kill switch (broadcast), a missing executor id, nothing removed or no
+    /// survivor never schedule one; a single remaining executor still shards.
+    #[test]
+    fn rebalance_not_due_outside_sharding_or_without_removal() {
+        assert_eq!(rebalance_sync_due(1, 2, None, &router_of(2, false)), None);
+        assert_eq!(rebalance_sync_due(0, 2, None, &router_of(2, true)), None);
+        assert_eq!(rebalance_sync_due(1, 0, None, &router_of(0, true)), None);
+        let mut map = HashMap::new();
+        map.insert(1u64, "exec-1".to_string());
+        let missing_id = crate::sharding::SessionRouter::new(
+            &[1, 2],
+            &map,
+            true,
+            crate::sharding::DEFAULT_REPLICAS,
+        );
+        assert_eq!(rebalance_sync_due(1, 2, None, &missing_id), None);
+        assert_eq!(
+            rebalance_sync_due(1, 1, None, &router_of(1, true)),
+            Some(FullSyncReason::Rebalance)
+        );
+    }
+
+    /// Coalescing: any already-pending full sync (e.g. Reconnect from a joined
+    /// executor in the same tick) is kept, never overwritten by Rebalance.
+    #[test]
+    fn rebalance_coalesces_with_a_pending_full_sync() {
+        let r = router_of(2, true);
+        for pending in [
+            FullSyncReason::Reconnect,
+            FullSyncReason::Reconcile,
+            FullSyncReason::Diverged,
+            FullSyncReason::Rebalance,
+        ] {
+            assert_eq!(rebalance_sync_due(1, 2, Some(pending), &r), None);
+        }
     }
 }

@@ -56,7 +56,7 @@ use penguin_bundle_host::wire::{
 use sha2::{Digest, Sha256};
 use std::sync::Arc;
 
-const APP_ID: &str = "waddles.core.example.eightball";
+const APP_ID: &str = "penguintechinc.waddles.eightball";
 
 /// Legacy Docker-ENV flag-baseline variable the old `eightball` flag gate read
 /// (`waddles.command-8ball` -> `FLAG_WADDLES_COMMAND_8BALL`). App bundles are now
@@ -304,7 +304,7 @@ async fn drive_stage<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
                     (CapabilityKind::Context, "get-context") => serde_json::json!({
                         "tenant": "t1",
                         "app_id": APP_ID,
-                        "feature": "waddles.core.example",
+                        "feature": "penguintechinc.waddles.example",
                         "version": "1.0.0",
                         "message_id": "msg-e2e-1",
                         "config_json": "{}",
@@ -384,6 +384,7 @@ async fn run_one_transform(wasm: &[u8], digest: &str) -> serde_json::Value {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

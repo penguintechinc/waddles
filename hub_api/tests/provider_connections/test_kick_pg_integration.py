@@ -98,7 +98,7 @@ async def _create(
     return await service.create(
         tenant_id=ids.tenant,
         community_id=community,
-        actor_user_id=None,
+        actor_user_id=ids.owner,
         provider="kick",
         access_token=tokens[0],
         refresh_token=tokens[1],

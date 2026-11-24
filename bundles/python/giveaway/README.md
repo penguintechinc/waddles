@@ -2,7 +2,7 @@
 
 Timed, FREE open-entry giveaway with one random draw: `!giveaway start 5m`, viewers `!giveaway enter`,
 a mod runs `!giveaway draw`. First-party (`provider: builtin`,
-`app_id: waddles.core.example.giveaway`), kv-only, WASI component.
+`app_id: penguintechinc.waddles.giveaway`), kv-only, WASI component.
 
 | | |
 |---|---|

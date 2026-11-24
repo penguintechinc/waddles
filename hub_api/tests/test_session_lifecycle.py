@@ -17,6 +17,7 @@ import asyncio
 import dataclasses
 import logging
 import time
+import uuid
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -25,6 +26,7 @@ import jwt
 import pytest
 from flask_core import token_revocation as tr
 from flask_core.auth import ACCESS_TOKEN_TTL_SECONDS, verify_jwt_token
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -38,6 +40,7 @@ from services.auth_service import SessionUser, create_session_token
 from services.global_identity import grant_global_admin_sync, revoke_global_admin_sync
 from services.session_cookie import REFRESH_COOKIE_NAME, SESSION_COOKIE_NAME
 from tests.conftest import SECRET_KEY, TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 PASSWORD = "correcthorse"
 
@@ -54,8 +57,7 @@ def _config(**overrides: Any) -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key=SECRET_KEY,
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -129,6 +131,15 @@ def _cookie_value(response: Any, name: str) -> str | None:
     return raw.split("=", 1)[1].split(";", 1)[0] if raw else None
 
 
+_UNKNOWN_PUBLIC_ID = "00000000-0000-4000-8000-0000000000a1"
+
+
+def _session_public_id(auth_db: Any, session_pk: int) -> str:
+    """The `hub_sessions.public_id` UUID of session row `session_pk` (what the API now takes)."""
+    row = auth_db.dal(auth_db.dal.hub_sessions.id == session_pk).select().first()
+    return str(row.public_id)
+
+
 def _claims(token: str) -> dict[str, Any]:
     return jwt.decode(token, options={"verify_signature": False})  # type: ignore[no-any-return]
 
@@ -193,7 +204,7 @@ class TestLoginIssuesSessionCredentials:
         assert a["jti"] != b["jti"]
         sessions = _sessions(auth_db)
         assert [str(s.id) for s in sessions] == [a["sid"], b["sid"]]
-        assert verify_jwt_token(first, SECRET_KEY) is not None
+        assert verify_jwt_token(first) is not None
 
     async def test_the_database_never_holds_a_bearer_credential(
         self, browser: Any, auth_db: Any
@@ -261,7 +272,7 @@ class TestRefreshRotation:
         assert _cookie_value(response, SESSION_COOKIE_NAME) == new_access
         (after,) = _sessions(auth_db)
         assert after.session_token != before.session_token and after.is_active
-        assert verify_jwt_token(new_access, SECRET_KEY) is not None
+        assert verify_jwt_token(new_access) is not None
 
     async def test_a_session_survives_many_rotations_without_a_forced_logout(
         self, browser: Any, auth_db: Any
@@ -271,7 +282,7 @@ class TestRefreshRotation:
         for _ in range(6):
             response = await browser.post("/api/v1/auth/refresh")
             assert response.status_code == 200
-            assert verify_jwt_token((await response.get_json())["token"], SECRET_KEY) is not None
+            assert verify_jwt_token((await response.get_json())["token"]) is not None
         assert len(_sessions(auth_db)) == 1
 
     async def test_refresh_without_a_cookie_is_400(self, probe: Any) -> None:
@@ -559,7 +570,7 @@ class TestLogout:
         response = await browser.post("/api/v1/auth/logout")
         assert response.status_code == 200
         assert not await _alive(probe, access)
-        assert verify_jwt_token(access, SECRET_KEY) is None
+        assert verify_jwt_token(access) is None
 
     async def test_logout_clears_both_cookies_and_ends_refresh(
         self, browser: Any, probe: Any, auth_db: Any
@@ -752,8 +763,13 @@ class TestAuthenticatorChangesKeepTheCurrentSession:
         self, app: Quart, browser: Any, probe: Any, auth_db: Any
     ) -> None:
         user_id = _seed_user(auth_db)
-        passkey_id = auth_db.dal.user_passkeys.insert(
-            user_id=user_id, credential_id="cred-1", public_key="pk", device_name="key"
+        passkey_id = str(uuid.uuid4())
+        auth_db.dal.user_passkeys.insert(
+            user_id=user_id,
+            credential_id="cred-1",
+            public_key="pk",
+            device_name="key",
+            public_id=passkey_id,
         )
         auth_db.dal.commit()
         phone = app.test_client()
@@ -777,9 +793,10 @@ class TestAuthenticatorChangesKeepTheCurrentSession:
         phone_access = await _login_token(app.test_client(), tenant=TENANT_SLUG)
         mine = await _login_token(browser, tenant=TENANT_SLUG)
         response = await browser.delete(
-            "/api/v1/user/passkey/credentials/999", headers={"Authorization": f"Bearer {mine}"}
+            f"/api/v1/user/passkey/credentials/{_UNKNOWN_PUBLIC_ID}",
+            headers={"Authorization": f"Bearer {mine}"},
         )
-        assert response.status_code == 200
+        assert response.status_code == 404  # nothing removed: uniform 404, no session revoked
         assert await _alive(probe, phone_access)
 
     async def test_unlinking_an_identity_signs_out_the_other_devices_only(
@@ -847,11 +864,13 @@ class TestAdminRevocation:
         user_id = _seed_user(auth_db)
         await _login(browser)
         response = await probe.get(
-            f"/api/v1/superadmin/users/{user_id}/sessions", headers=_admin_headers(user_id=99)
+            f"/api/v1/superadmin/users/{uid(user_id)}/sessions", headers=_admin_headers(user_id=99)
         )
         assert response.status_code == 200
         (session,) = (await response.get_json())["sessions"]
         assert set(session) == {"id", "createdAt", "expiresAt", "isActive", "revokedAt"}
+        assert session["id"] == _session_public_id(auth_db, _sessions(auth_db)[0].id)
+        assert not str(session["id"]).isdigit()
         assert session["isActive"] is True
 
     async def test_revoke_one_session_ends_that_session_only(
@@ -861,10 +880,10 @@ class TestAdminRevocation:
         phone = app.test_client()
         phone_access = await _login_token(phone)
         mine = await _login_token(browser)
-        target = int(_claims(phone_access)["sid"])
+        target = _session_public_id(auth_db, int(_claims(phone_access)["sid"]))
 
         response = await probe.post(
-            f"/api/v1/superadmin/users/{user_id}/sessions/{target}/revoke",
+            f"/api/v1/superadmin/users/{uid(user_id)}/sessions/{target}/revoke",
             headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 200
@@ -878,14 +897,26 @@ class TestAdminRevocation:
         assert (await phone.post("/api/v1/auth/refresh")).status_code == 401
         assert await _alive(probe, mine)
 
+    @pytest.mark.parametrize("bad", ["1", "not-a-uuid", _UNKNOWN_PUBLIC_ID])
+    async def test_numeric_malformed_and_unknown_session_ids_are_404(
+        self, probe: Any, auth_db: Any, bad: str
+    ) -> None:
+        user_id = _seed_user(auth_db)
+        response = await probe.post(
+            f"/api/v1/superadmin/users/{uid(user_id)}/sessions/{bad}/revoke",
+            headers=_admin_headers(user_id=99),
+        )
+        assert response.status_code == 404
+
     async def test_a_session_of_another_user_is_404(
         self, app: Quart, probe: Any, auth_db: Any
     ) -> None:
         alice = _seed_user(auth_db)
         _seed_user(auth_db, email="bob@example.com")
         bob_access = await _login_token(app.test_client(), email="bob@example.com")
+        bob_sid = _session_public_id(auth_db, int(_claims(bob_access)["sid"]))
         response = await probe.post(
-            f"/api/v1/superadmin/users/{alice}/sessions/{_claims(bob_access)['sid']}/revoke",
+            f"/api/v1/superadmin/users/{uid(alice)}/sessions/{bob_sid}/revoke",
             headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 404
@@ -898,7 +929,7 @@ class TestAdminRevocation:
         tokens = [await _login_token(browser), await _login_token(app.test_client())]
         minted_elsewhere = make_user_token(user_id=user_id)
         response = await probe.post(
-            f"/api/v1/superadmin/users/{user_id}/revoke-sessions",
+            f"/api/v1/superadmin/users/{uid(user_id)}/revoke-sessions",
             headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 200
@@ -923,7 +954,7 @@ class TestAdminRevocation:
 
         monkeypatch.setattr(isolated_token_revocation._backend, "put_max", down)
         response = await probe.post(
-            f"/api/v1/superadmin/users/{user_id}/revoke-sessions",
+            f"/api/v1/superadmin/users/{uid(user_id)}/revoke-sessions",
             headers=_admin_headers(user_id=99),
         )
         body = await response.get_json()
@@ -933,16 +964,17 @@ class TestAdminRevocation:
 
     async def test_unknown_user_is_404(self, probe: Any) -> None:
         response = await probe.post(
-            "/api/v1/superadmin/users/424242/revoke-sessions", headers=_admin_headers(user_id=99)
+            f"/api/v1/superadmin/users/{uid(424242)}/revoke-sessions",
+            headers=_admin_headers(user_id=99),
         )
         assert response.status_code == 404
 
     @pytest.mark.parametrize(
         ("method", "path"),
         [
-            ("GET", "/api/v1/superadmin/users/1/sessions"),
-            ("POST", "/api/v1/superadmin/users/1/revoke-sessions"),
-            ("POST", "/api/v1/superadmin/users/1/sessions/1/revoke"),
+            ("GET", f"/api/v1/superadmin/users/{uid(1)}/sessions"),
+            ("POST", f"/api/v1/superadmin/users/{uid(1)}/revoke-sessions"),
+            ("POST", f"/api/v1/superadmin/users/{uid(1)}/sessions/{_UNKNOWN_PUBLIC_ID}/revoke"),
         ],
     )
     async def test_requires_the_users_admin_scope(
@@ -960,7 +992,7 @@ class TestAdminRevocation:
         user_id = _seed_user(auth_db)
         access = await _login_token(app.test_client())
         response = await probe.put(
-            f"/api/v1/superadmin/users/{user_id}",
+            f"/api/v1/superadmin/users/{uid(user_id)}",
             headers=_admin_headers(user_id=99),
             json={"isActive": False},
         )
@@ -973,7 +1005,7 @@ class TestAdminRevocation:
         user_id = _seed_user(auth_db)
         access = await _login_token(app.test_client())
         response = await probe.delete(
-            f"/api/v1/superadmin/users/{user_id}", headers=_admin_headers(user_id=99)
+            f"/api/v1/superadmin/users/{uid(user_id)}", headers=_admin_headers(user_id=99)
         )
         assert response.status_code == 200
         assert not await _alive(probe, access)
@@ -992,7 +1024,7 @@ class TestAdminRevocation:
             + await _login_token(app.test_client(), email="root@example.com", tenant=TENANT_SLUG)
         }
         response = await probe.post(
-            f"/api/v1/superadmin/users/{target}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(target)}/super-admin-role",
             headers=caller_headers,
             json={"grant": False},
         )

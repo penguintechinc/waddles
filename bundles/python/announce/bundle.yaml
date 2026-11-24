@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.announce
+app_id: penguintechinc.waddles.announce
 name: Saved Announcements Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !announce <key> (get) / !announce set <key> <message> (mod) /
 # !announce remove <key> (mod) / !announce list. See src/app.py's own module docstring for full
@@ -9,8 +9,7 @@ name: Saved Announcements Bundle (Python)
 # owner to resolve, not silently papered over.
 # 1.0.3: strict-boolean is_mod/is_broadcaster badge reads -- a string badge ("false") no longer passes the mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-announce feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.6
-feature: waddles.core.example
+version: 1.0.9
 module: core
 provider: builtin
 # Attribution: net-new Waddles content, NOT a literal port -- a generic "saved canned message"

@@ -47,7 +47,7 @@ def _headers(*, scope: str = "distribution:read", tenant: str = TENANT_SLUG) -> 
 def _seed_bundle(
     distribution_db: Any,
     *,
-    app_id: str = "waddles.core.demo.echo",
+    app_id: str = "penguintechinc.waddles.echo-pipeline",
     stages: dict[str, Any] | None = None,
 ) -> None:
     dal = distribution_db.dal
@@ -55,7 +55,7 @@ def _seed_bundle(
         app_id=app_id,
         manifest_version="1.0.0",
         module="core",
-        feature="waddles.core.demo",
+        feature="demo",
         provider="builtin",
         execution_model="native",
         platform_compatibility={},
@@ -155,7 +155,7 @@ class TestListBundles:
         dal = distribution_db.dal
         dal.app_tenant_availability.insert(
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             available=True,
             config_defaults={"greeting": "hi"},
         )
@@ -166,7 +166,7 @@ class TestListBundles:
         body = await response.get_json()
         assert len(body["bundles"]) == 1
         bundle = body["bundles"][0]
-        assert bundle["appId"] == "waddles.core.demo.echo"
+        assert bundle["appId"] == "penguintechinc.waddles.echo-pipeline"
         assert bundle["communityId"] is None
         assert bundle["entrypoint"] == "builtin_handlers.echo_ingest:normalize"
         assert bundle["config"] == {"greeting": "hi"}
@@ -180,14 +180,14 @@ class TestListBundles:
         dal = distribution_db.dal
         dal.app_tenant_availability.insert(
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             available=True,
             config_defaults={"greeting": "hi", "volume": 1},
         )
         dal.app_activations.insert(
             community_id=community_id,
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             enabled=True,
             config={"greeting": "yo"},
         )
@@ -206,6 +206,46 @@ class TestListBundles:
         assert bundle["communityId"] == community_id
         assert bundle["config"] == {"greeting": "yo"}
 
+    async def test_real_response_is_consumable_by_bundle_poller(
+        self, client: Any, distribution_db: Any
+    ) -> None:
+        """Machine endpoint: `BundlePoller` parses the REAL response (numeric id)."""
+        import httpx
+        from flask_core import stage_runner
+
+        _seed_bundle(distribution_db)
+        tenant_id, community_id = _seed_community(distribution_db)
+        distribution_db.dal.app_activations.insert(
+            community_id=community_id,
+            tenant_id=tenant_id,
+            app_id="penguintechinc.waddles.echo-pipeline",
+            enabled=True,
+            config={"greeting": "yo"},
+        )
+        distribution_db.dal.commit()
+
+        async def _serve(request: httpx.Request) -> httpx.Response:
+            real = await client.get(
+                f"/api/v1/distribution/bundles?{request.url.query.decode()}",
+                headers=_headers(),
+            )
+            return httpx.Response(real.status_code, json=await real.get_json())
+
+        async with httpx.AsyncClient(transport=httpx.MockTransport(_serve)) as http:
+            poller = stage_runner.BundlePoller(
+                http,
+                "http://hub-api/api/v1/distribution/bundles",
+                stage="ingest",
+                jwt_provider=lambda: "t.o.k",
+                community_id=community_id,
+            )
+            bundles = await poller.poll_once()
+
+        assert [(b.app_id, b.community_id) for b in bundles] == [
+            ("penguintechinc.waddles.echo-pipeline", community_id)
+        ]
+        assert isinstance(bundles[0].community_id, int)
+
     async def test_disabled_activation_is_excluded(self, client: Any, distribution_db: Any) -> None:
         _seed_bundle(distribution_db)
         tenant_id, community_id = _seed_community(distribution_db)
@@ -213,7 +253,7 @@ class TestListBundles:
         dal.app_activations.insert(
             community_id=community_id,
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             enabled=False,
             config={},
         )
@@ -239,7 +279,7 @@ class TestListBundles:
         """
         _seed_bundle(
             distribution_db,
-            app_id="waddles.core.demo.actiononly",
+            app_id="penguintechinc.waddles.actiononly",
             stages={
                 "action": {
                     "entrypoint": "builtin_handlers.echo_action:run",
@@ -253,7 +293,7 @@ class TestListBundles:
         dal.app_activations.insert(
             community_id=community_id,
             tenant_id=tenant_id,
-            app_id="waddles.core.demo.actiononly",
+            app_id="penguintechinc.waddles.actiononly",
             enabled=True,
             config={},
         )
@@ -272,15 +312,17 @@ class TestListBundles:
         )
         action_body = await action_response.get_json()
         assert len(action_body["bundles"]) == 1
-        assert action_body["bundles"][0]["appId"] == "waddles.core.demo.actiononly"
+        assert action_body["bundles"][0]["appId"] == "penguintechinc.waddles.actiononly"
 
     async def test_yanked_bundle_is_excluded(self, client: Any, distribution_db: Any) -> None:
         _seed_bundle(distribution_db)
         dal = distribution_db.dal
-        dal(dal.app_catalog.app_id == "waddles.core.demo.echo").update(status="yanked")
+        dal(dal.app_catalog.app_id == "penguintechinc.waddles.echo-pipeline").update(
+            status="yanked"
+        )
         tenant_id, _ = _seed_community(distribution_db)
         dal.app_tenant_availability.insert(
-            tenant_id=tenant_id, app_id="waddles.core.demo.echo", available=True
+            tenant_id=tenant_id, app_id="penguintechinc.waddles.echo-pipeline", available=True
         )
         dal.commit()
 
@@ -298,10 +340,10 @@ class TestListBundles:
         """
         dal = distribution_db.dal
         dal.app_catalog.insert(
-            app_id="waddles.core.demo.prelegacy",
+            app_id="penguintechinc.waddles.prelegacy",
             manifest_version="1.0.0",
             module="core",
-            feature="waddles.core.demo",
+            feature="demo",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
@@ -310,7 +352,7 @@ class TestListBundles:
         )
         tenant_id, _ = _seed_community(distribution_db)
         dal.app_tenant_availability.insert(
-            tenant_id=tenant_id, app_id="waddles.core.demo.prelegacy", available=True
+            tenant_id=tenant_id, app_id="penguintechinc.waddles.prelegacy", available=True
         )
         dal.commit()
 
@@ -346,10 +388,10 @@ class TestListBundles:
         bind_app_bundle_tables(replica_dal, migrate=True)
         tenant_row = replica_dal.tenants.insert(slug=TENANT_SLUG, is_active=True)
         replica_dal.app_catalog.insert(
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             manifest_version="1.0.0",
             module="core",
-            feature="waddles.core.demo",
+            feature="demo",
             provider="builtin",
             execution_model="native",
             platform_compatibility={},
@@ -363,7 +405,7 @@ class TestListBundles:
             },
         )
         replica_dal.app_tenant_availability.insert(
-            tenant_id=tenant_row, app_id="waddles.core.demo.echo", available=True
+            tenant_id=tenant_row, app_id="penguintechinc.waddles.echo-pipeline", available=True
         )
         replica_dal.commit()
 
@@ -375,7 +417,29 @@ class TestListBundles:
             assert response.status_code == 200
             body = await response.get_json()
             assert len(body["bundles"]) == 1
-            assert body["bundles"][0]["appId"] == "waddles.core.demo.echo"
+            assert body["bundles"][0]["appId"] == "penguintechinc.waddles.echo-pipeline"
         finally:
             distribution_db.read_dal = None
             replica_dal.close()
+
+
+class TestHumanCallerRefused:
+    """A viewer session (`*:read`, no literal `distribution:read`) is not a service identity."""
+
+    async def test_viewer_without_community_is_403(self, client: Any) -> None:
+        r = await client.get(
+            "/api/v1/distribution/bundles?stage=ingest", headers=_headers(scope="*:read")
+        )
+        assert r.status_code == 403
+
+    async def test_viewer_with_arbitrary_numeric_community_is_not_served(self, client: Any) -> None:
+        r = await client.get(
+            "/api/v1/distribution/bundles?stage=ingest&community_id=1",
+            headers=_headers(scope="*:read"),
+        )
+        assert r.status_code in (403, 404)
+
+    async def test_service_token_still_served(self, client: Any, distribution_db: Any) -> None:
+        _seed_bundle(distribution_db)
+        r = await client.get("/api/v1/distribution/bundles?stage=ingest", headers=_headers())
+        assert r.status_code == 200

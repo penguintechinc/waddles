@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.app.calendar
+app_id: penguintechinc.waddles.calendar
 name: Calendar Bundle (Rust)
-version: 1.0.0
-feature: waddles.core.app
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc
@@ -51,46 +50,65 @@ permissions:
     justification: "command replies to the invoking channel via the relay host import (relay.push -> chat.send:discord)"
   - id: "chat.send:twitch"
     justification: "command replies to the invoking channel via the relay host import (relay.push -> chat.send:twitch)"
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.create"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.create"
     justification: "push approved events to Discord scheduled events (sync is OFF until a community admin enables it)"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.update"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.update"
     justification: "push edits of synced events to Discord scheduled events"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.cancel"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.cancel"
     justification: "cancel the Discord scheduled event when a synced event is cancelled"
     params:
       write: true
-  - id: "tool.call:waddles.core.service.discord:discord.scheduled_event.delete"
+  - id: "tool.call:penguintechinc.waddles.discord:discord.scheduled_event.delete"
     justification: "remove the Discord scheduled event when an admin hard-deletes a synced event"
     params:
       write: true
 requested_tools:
   - tool: discord.scheduled_event.create
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.update
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.cancel
     access: write
-    target_app_id: waddles.core.service.discord
+    target_app_id: penguintechinc.waddles.discord
   - tool: discord.scheduled_event.delete
     access: write
-    target_app_id: waddles.core.service.discord
-config_schema:
+    target_app_id: penguintechinc.waddles.discord
+community_config_schema:
   type: object
   additionalProperties: false
   properties:
-    approval_required: {type: boolean, default: false}
-    default_tz: {type: string, default: UTC, description: IANA timezone}
-    default_duration_minutes: {type: integer, minimum: 1, maximum: 10080, default: 60}
-    default_location: {type: string, minLength: 1, maxLength: 100, default: Online}
-    sync_discord: {type: boolean, default: false}
-    sync_twitch: {type: boolean, default: false}
-    sync_wix: {type: boolean, default: false}
+    approval_required:
+      type: boolean
+      default: false
+    default_tz:
+      type: string
+      default: UTC
+      description: IANA timezone
+    default_duration_minutes:
+      type: integer
+      minimum: 1
+      maximum: 10080
+      default: 60
+    default_location:
+      type: string
+      minLength: 1
+      maxLength: 100
+      default: Online
+    sync_discord:
+      type: boolean
+      default: false
+    sync_twitch:
+      type: boolean
+      default: false
+    sync_wix:
+      type: boolean
+      default: false
 compatible_with: []
 incompatible_with: []
 platform_compatibility:

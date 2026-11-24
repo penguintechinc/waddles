@@ -16,14 +16,60 @@ use uuid::Uuid;
 
 use crate::scope::{InvokeScope, TenantTier};
 
-/// `waddles.core.*` app ids get the `app_core` schema; every other app id
+/// `penguintechinc.waddles.*` app ids get the `app_core` schema; every other app id
 /// gets `app_community` (spec SS1.1). Mirrors
 /// `hub_api/services/vendor_bundle_authz.py::CORE_NAMESPACE_PREFIX` --
 /// enforced at bundle submission on the hub-api side, so a vendor bundle can
-/// never reach this crate with a `waddles.core.*` app_id in the first place;
+/// never reach this crate with a `penguintechinc.waddles.*` app_id in the first place;
 /// this constant exists only so this crate's own schema derivation agrees
 /// with that already-enforced invariant, not to re-enforce it.
-pub const CORE_NAMESPACE_PREFIX: &str = "waddles.core.";
+pub const CORE_NAMESPACE_PREFIX: &str = "penguintechinc.waddles.";
+
+/// Maximum length of a bundle app id (`<github-org>.<repo>.<bundle-name>`).
+pub const APP_ID_MAX_LEN: usize = 127;
+
+/// One app-id segment: `[a-z0-9][a-z0-9-]*`. No `_` -- GitHub org/repo names map
+/// `_` -> `-` when lowercased (docs/BUNDLE-APP-IDS.md); this is the ONE grammar
+/// every service in both languages enforces (golden vectors in
+/// `testdata/bundle_app_id/vectors.json`).
+fn is_valid_segment(seg: &str) -> bool {
+    let mut chars = seg.chars();
+    matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
+        && chars.all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+}
+
+/// True only for a well-formed bundle app id: exactly three `.`-separated
+/// `[a-z0-9][a-z0-9-]*` segments, at most [`APP_ID_MAX_LEN`] bytes. The single
+/// Rust implementation of the app-id grammar; the Python twin is
+/// `hub_api/services/bundle_app_id.py::is_valid_app_id`.
+#[must_use]
+pub fn is_valid_app_id(app_id: &str) -> bool {
+    if app_id.len() > APP_ID_MAX_LEN {
+        return false;
+    }
+    let mut count = 0usize;
+    for seg in app_id.split('.') {
+        count += 1;
+        if !is_valid_segment(seg) {
+            return false;
+        }
+    }
+    count == 3
+}
+
+/// True only for a well-formed first-party core id: the reserved
+/// `penguintechinc.waddles.` prefix followed by exactly one valid trailing
+/// segment (so the whole id is a valid app id). A bare string prefix match would
+/// also trust ids such as `penguintechinc.waddles.x.y`; hub-api additionally
+/// refuses vendor submissions under this org, so trust never rests on the name
+/// alone.
+#[must_use]
+pub fn is_core_namespace(app_id: &str) -> bool {
+    match app_id.strip_prefix(CORE_NAMESPACE_PREFIX) {
+        Some(rest) => is_valid_segment(rest) && app_id.len() <= APP_ID_MAX_LEN,
+        None => false,
+    }
+}
 
 const POSTGRES_NAMEDATALEN_MAX: usize = 63;
 
@@ -126,7 +172,7 @@ pub enum ResourceRef {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ResolvedResource {
     /// `penguin_spine::Scope::state_key`-shaped prefix, e.g.
-    /// `waddles:app:{tenant}:{community}:{app_id}:state` (spec SS5.2).
+    /// `waddles:app:{tenant}:{community}:{bundle_storage_key}:state` (spec SS5.2).
     KvKeyPrefix(String),
     /// Postgres schema + the bundle's single table name within it (spec
     /// SS1.1) -- `schema_qualified()` gives the `schema.table` form PR #415's
@@ -170,54 +216,64 @@ pub struct AuthorizedCall {
     pub params: serde_json::Value,
 }
 
-/// Sanitizes an app_id into a Postgres-identifier-safe table name (spec
-/// SS1.1): non-`[a-z0-9_]` characters normalized to `_`, truncated with a
-/// SHA-256-derived hash suffix past the 63-byte `NAMEDATALEN` cap so two
-/// different long app_ids sharing a 63-byte prefix never collide.
+/// Hex chars of `sha256(app_id)` appended to every storage key.
+const STORAGE_KEY_HASH_LEN: usize = 16;
+
+/// The ONE derivation of a per-bundle storage key (table name, kv namespace,
+/// object prefix): `<readable>_<sha256(raw app_id)[..16 hex]>`.
 ///
-/// **Reconciliation note:** PR #415's hub-api schema compiler
-/// (`docs/superpowers/specs/2026-09-28-bundle-db-capability-and-schemas.md`)
-/// is the authoritative source for this algorithm; this is this crate's own
-/// resource-derivation copy, since no shared Rust implementation exists yet.
-/// A divergence here fails closed (Postgres errors on an unknown relation
-/// rather than writing to the wrong table) but must be reconciled
-/// byte-for-byte before `storage.tables` is wired into `svc_process`/
-/// `svc_action` (spec SS12 Phase 6).
-pub fn sanitized_app_id(app_id: &str) -> String {
-    let sanitized: String = app_id
+/// The readable part (lower-cased ASCII alphanumerics, every other char -> `_`,
+/// runs collapsed, ends trimmed, `b_`-prefixed if it would not start with an ASCII
+/// letter, `b` if empty,
+/// truncated to leave room for the suffix) is for humans only. Injectivity comes
+/// from the suffix hashing the EXACT app id, so `acme.bot.kv-store` and
+/// `acme.bot_kv.store` can never share a key. The result is always <= 63 bytes
+/// (Postgres `NAMEDATALEN` - 1), `[a-z][a-z0-9_]*`, never contains `__` or `:`.
+/// Byte-identical Python twin: `hub_api/services/bundle_app_id.py::bundle_storage_key`
+/// (proved by `testdata/bundle_app_id/vectors.json`).
+pub fn bundle_storage_key(app_id: &str) -> String {
+    let mut readable = String::with_capacity(POSTGRES_NAMEDATALEN_MAX);
+    if app_id
         .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-
-    if sanitized.len() <= POSTGRES_NAMEDATALEN_MAX {
-        return sanitized;
+        .next()
+        .is_some_and(|c| !c.is_ascii_alphabetic())
+    {
+        readable.push_str("b_");
     }
+    for c in app_id.chars() {
+        let mapped = if c.is_ascii_alphanumeric() {
+            c.to_ascii_lowercase()
+        } else {
+            '_'
+        };
+        if mapped == '_' && readable.ends_with('_') {
+            continue;
+        }
+        readable.push(mapped);
+    }
+    let keep = POSTGRES_NAMEDATALEN_MAX - STORAGE_KEY_HASH_LEN - 1;
+    readable.truncate(keep); // ASCII only, so byte truncation is char-safe
+    let readable = match readable.trim_end_matches('_') {
+        "" => "b",
+        trimmed => trimmed,
+    };
 
-    let mut hasher = Sha256::new();
-    hasher.update(app_id.as_bytes());
-    let digest = hasher.finalize();
-    let suffix = format!("_{:x}", digest)[..9].to_string(); // "_" + 8 hex chars
-    let keep = POSTGRES_NAMEDATALEN_MAX - suffix.len();
-    format!("{}{}", &sanitized[..keep], suffix)
+    let digest = Sha256::digest(app_id.as_bytes());
+    let hex = format!("{digest:x}");
+    format!("{readable}_{}", &hex[..STORAGE_KEY_HASH_LEN])
 }
 
 /// `storage.tables`' schema-qualified resource (spec SS1.1): `app_core` for
-/// `waddles.core.*` app ids, `app_community` otherwise.
+/// `penguintechinc.waddles.*` app ids, `app_community` otherwise.
 pub fn resolve_table(scope: &InvokeScope) -> ResolvedResource {
-    let schema = if scope.app_id().starts_with(CORE_NAMESPACE_PREFIX) {
+    let schema = if is_core_namespace(scope.app_id()) {
         "app_core"
     } else {
         "app_community"
     };
     ResolvedResource::Table {
         schema: schema.to_string(),
-        table_name: sanitized_app_id(scope.app_id()),
+        table_name: bundle_storage_key(scope.app_id()),
     }
 }
 
@@ -227,7 +283,7 @@ pub fn resolve_kv_key_prefix(scope: &InvokeScope) -> ResolvedResource {
         "waddles:app:{}:{}:{}:state",
         scope.tenant_id(),
         scope.community_id(),
-        scope.app_id()
+        bundle_storage_key(scope.app_id())
     ))
 }
 
@@ -238,7 +294,7 @@ pub fn resolve_object_prefix(scope: &InvokeScope) -> ResolvedResource {
     match scope.tenant_tier() {
         TenantTier::Enterprise => ResolvedResource::Objects {
             bucket: format!("waddles-bundle-objects-tenant-{}", scope.tenant_id()),
-            prefix: format!("app/{}/", scope.app_id()),
+            prefix: format!("app/{}/", bundle_storage_key(scope.app_id())),
         },
         TenantTier::Free | TenantTier::Professional => ResolvedResource::Objects {
             bucket: "waddles-bundle-objects".to_string(),
@@ -246,7 +302,7 @@ pub fn resolve_object_prefix(scope: &InvokeScope) -> ResolvedResource {
                 "tenant/{}/community/{}/app/{}/",
                 scope.tenant_id(),
                 scope.community_id(),
-                scope.app_id()
+                bundle_storage_key(scope.app_id())
             ),
         },
     }
@@ -277,66 +333,165 @@ mod tests {
     }
 
     #[test]
-    fn sanitized_app_id_lowercases_and_replaces_non_identifier_chars() {
-        assert_eq!(
-            sanitized_app_id("waddles.core.example_echo"),
-            "waddles_core_example_echo"
-        );
+    fn core_namespace_accepts_hyphenated_and_rejects_lookalikes() {
+        for ok in [
+            "penguintechinc.waddles.discord-invite",
+            "penguintechinc.waddles.wix-event-sync",
+        ] {
+            assert!(is_core_namespace(ok), "{ok}");
+        }
+        assert!(is_core_namespace("penguintechinc.waddles.x"));
+        for bad in [
+            "penguintechinc-waddles.x",
+            "penguintechinc.waddles.",
+            "penguintechinc.waddles.a.b",
+            "penguintechinc.waddles.-x",
+            "penguintechinc.waddles.X",
+            "penguintechinc.other.x",
+            "psychoboy.penguintwitchbot.roll",
+            "penguintechinc.waddlesx",
+        ] {
+            assert!(!is_core_namespace(bad), "{bad}");
+        }
+    }
+
+    const VECTORS: &str = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../testdata/bundle_app_id/vectors.json"
+    ));
+
+    fn vectors() -> serde_json::Value {
+        serde_json::from_str(VECTORS).expect("vectors.json parses")
+    }
+
+    fn strings(v: &serde_json::Value, key: &str) -> Vec<String> {
+        v[key]
+            .as_array()
+            .unwrap_or_else(|| panic!("{key} array"))
+            .iter()
+            .map(|x| x.as_str().expect("string").to_string())
+            .collect()
     }
 
     #[test]
-    fn sanitized_app_id_is_stable_and_deterministic() {
-        let a = sanitized_app_id("waddles.core.fishing-bundle");
-        let b = sanitized_app_id("waddles.core.fishing-bundle");
-        assert_eq!(a, b);
+    fn golden_vectors_grammar_accept_and_reject() {
+        let v = vectors();
+        let valid = strings(&v, "valid");
+        let invalid = strings(&v, "invalid");
+        assert!(!valid.is_empty() && !invalid.is_empty());
+        for id in &valid {
+            assert!(is_valid_app_id(id), "should accept {id:?}");
+        }
+        for id in &invalid {
+            assert!(!is_valid_app_id(id), "should reject {id:?}");
+        }
     }
 
     #[test]
-    fn sanitized_app_id_truncates_and_hash_suffixes_past_namedatalen() {
-        let long_app_id = format!("vendor.{}", "x".repeat(100));
-        let sanitized = sanitized_app_id(&long_app_id);
-        assert_eq!(sanitized.len(), POSTGRES_NAMEDATALEN_MAX);
-        assert!(sanitized.contains('_'));
+    fn golden_vectors_core_namespace() {
+        let v = vectors();
+        let yes = strings(&v["core"], "yes");
+        let no = strings(&v["core"], "no");
+        assert!(!yes.is_empty() && !no.is_empty());
+        for id in &yes {
+            assert!(is_core_namespace(id), "core {id:?}");
+        }
+        for id in &no {
+            assert!(!is_core_namespace(id), "not core {id:?}");
+        }
     }
 
     #[test]
-    fn sanitized_app_id_never_collides_for_two_ids_sharing_a_63_byte_prefix() {
+    fn golden_vectors_storage_keys_match_python() {
+        let v = vectors();
+        let cases = v["storage_keys"].as_array().expect("storage_keys");
+        assert!(!cases.is_empty());
+        for case in cases {
+            let id = case["app_id"].as_str().unwrap();
+            let want = case["expected"].as_str().unwrap();
+            assert_eq!(bundle_storage_key(id), want, "key for {id:?}");
+        }
+    }
+
+    #[test]
+    fn storage_key_is_injective_for_planted_collision() {
+        let a = bundle_storage_key("acme.bot.kv-store");
+        let b = bundle_storage_key("acme.bot_kv.store");
+        assert_ne!(a, b);
+        assert!(a.starts_with("acme_bot_kv_store_") && b.starts_with("acme_bot_kv_store_"));
+    }
+
+    #[test]
+    fn storage_key_is_bounded_charset_safe_and_deterministic() {
+        let long = format!("vendor.{}.x", "y".repeat(120));
+        for id in [
+            "penguintechinc.waddles.echo",
+            "1a.2b.3c",
+            "a.b.c",
+            "",
+            "..",
+            long.as_str(),
+            "UP.per.\u{dc}n\u{ef}",
+        ] {
+            let k = bundle_storage_key(id);
+            assert!(k.len() <= POSTGRES_NAMEDATALEN_MAX, "{id:?} -> {k}");
+            assert!(
+                k.chars()
+                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+                "{k}"
+            );
+            assert!(!k.contains("__") && !k.contains(':'), "{k}");
+            assert_eq!(k, bundle_storage_key(id));
+        }
+    }
+
+    #[test]
+    fn long_ids_sharing_a_prefix_never_collide() {
         let base = "vendor.".to_string() + &"x".repeat(80);
-        let a = sanitized_app_id(&format!("{base}-one"));
-        let b = sanitized_app_id(&format!("{base}-two"));
-        assert_ne!(
-            a, b,
-            "distinct long app_ids must not collide after truncation"
-        );
+        let a = bundle_storage_key(&format!("{base}-one"));
+        let b = bundle_storage_key(&format!("{base}-two"));
+        assert_ne!(a, b);
     }
 
     #[test]
     fn resolve_table_uses_app_core_schema_for_core_namespace() {
-        let scope = scope_with_app_id("waddles.core.example_echo");
+        let scope = scope_with_app_id("penguintechinc.waddles.echo");
         let resolved = resolve_table(&scope);
         assert_eq!(
             resolved.schema_qualified_table().unwrap(),
-            "app_core.waddles_core_example_echo"
+            format!(
+                "app_core.{}",
+                bundle_storage_key("penguintechinc.waddles.echo")
+            )
         );
     }
 
     #[test]
     fn resolve_table_uses_app_community_schema_for_vendor_bundles() {
-        let scope = scope_with_app_id("some_vendor.fishing_game");
+        let scope = scope_with_app_id("acme.bot.fishing-game");
         let resolved = resolve_table(&scope);
         assert_eq!(
             resolved.schema_qualified_table().unwrap(),
-            "app_community.some_vendor_fishing_game"
+            format!(
+                "app_community.{}",
+                bundle_storage_key("acme.bot.fishing-game")
+            )
         );
     }
 
     #[test]
     fn resolve_kv_key_prefix_embeds_tenant_community_and_app() {
-        let scope = scope_with_app_id("some_vendor.fishing_game");
+        let scope = scope_with_app_id("acme.bot.fishing-game");
         let ResolvedResource::KvKeyPrefix(prefix) = resolve_kv_key_prefix(&scope) else {
             panic!("expected KvKeyPrefix");
         };
-        assert_eq!(prefix, "waddles:app:7:3:some_vendor.fishing_game:state");
+        assert_eq!(
+            prefix,
+            format!(
+                "waddles:app:7:3:{}:state",
+                bundle_storage_key("acme.bot.fishing-game")
+            )
+        );
     }
 
     #[test]
@@ -344,7 +499,7 @@ mod tests {
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("some_vendor.fishing_game")
+            .app_id("acme.bot.fishing-game")
             .app_version(1)
             .tenant_tier(TenantTier::Enterprise)
             .build()
@@ -360,7 +515,7 @@ mod tests {
         let scope = HostInvokeScopeBuilder::new()
             .tenant_id(7)
             .community_id(3)
-            .app_id("some_vendor.fishing_game")
+            .app_id("acme.bot.fishing-game")
             .app_version(1)
             .tenant_tier(TenantTier::Professional)
             .build()
@@ -369,6 +524,12 @@ mod tests {
             panic!("expected Objects");
         };
         assert_eq!(bucket, "waddles-bundle-objects");
-        assert_eq!(prefix, "tenant/7/community/3/app/some_vendor.fishing_game/");
+        assert_eq!(
+            prefix,
+            format!(
+                "tenant/7/community/3/app/{}/",
+                bundle_storage_key("acme.bot.fishing-game")
+            )
+        );
     }
 }

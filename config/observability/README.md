@@ -6,7 +6,7 @@ Complete observability solution for Waddles microservices with OpenTelemetry, Co
 
 This observability infrastructure provides:
 
-- **Distributed Tracing**: OpenTelemetry integration with Jaeger/Zipkin
+- **Distributed Tracing**: standard OpenTelemetry SDK + OTLP (env-configured; hub-api: `hub_api/telemetry.py`, see `docs/observability/hub-api-telemetry.md`)
 - **Correlation IDs**: Request tracking across all services
 - **Custom Metrics**: Business metrics for Prometheus
 - **Centralized Logging**: AAA logging with correlation ID integration
@@ -50,7 +50,6 @@ docker-compose -f docker-compose.observability.yml up -d
 
 ```python
 from flask_core import (
-    init_tracing,
     init_correlation,
     init_metrics,
     setup_aaa_logging
@@ -60,13 +59,8 @@ from quart import Quart
 # Create app
 app = Quart(__name__)
 
-# Initialize observability
-tracing = init_tracing(
-    service_name="my-service",
-    service_version="1.0.0",
-    exporter_type="jaeger",  # or "zipkin", "otlp", "console"
-)
-
+# Tracing: configured from the standard OTEL_* env (OTEL_EXPORTER_OTLP_ENDPOINT, ...);
+# flask_core no longer ships a tracing manager -- see "OpenTelemetry Tracing" below.
 correlation = init_correlation(app)
 
 metrics = init_metrics(
@@ -78,9 +72,6 @@ logger = setup_aaa_logging(
     module_name="my-service",
     version="1.0.0"
 )
-
-# Instrument Flask app for automatic tracing
-tracing.instrument_app(app)
 
 # Setup correlation ID logging
 from flask_core import setup_correlation_logging
@@ -95,65 +86,50 @@ setup_correlation_logging(correlation)
 
 ## Components
 
-### 1. OpenTelemetry Tracing (`tracing.py`)
+### 1. OpenTelemetry Tracing
 
-Distributed tracing across all Waddles services.
+`flask_core.tracing` (`TracingManager`) was **retired**: it read non-standard variables
+(`OTLP_ENDPOINT`, `TRACING_EXPORTER`, ...) and hardcoded an insecure OTLP channel. Services
+use the OpenTelemetry API directly and the SDK/exporters are configured **only** from the
+standard `OTEL_*` environment (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`,
+`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_TRACES_SAMPLER[_ARG]`). hub-api's reference implementation is `hub_api/telemetry.py`
+(`docs/observability/hub-api-telemetry.md`).
 
 #### Basic Usage
 
 ```python
-from flask_core import get_tracing_manager
+from opentelemetry import trace
 
-tracing = get_tracing_manager()
+tracer = trace.get_tracer(__name__)
 
-# Manual span creation
-with tracing.start_span("process_command") as span:
-    span.set_attribute("command", "!help")
-    span.set_attribute("platform", "twitch")
+with tracer.start_as_current_span("process_command") as span:
+    span.set_attribute("platform", "twitch")  # never usernames/emails/tokens
     # ... do work ...
-```
-
-#### Decorator Usage
-
-```python
-@tracing.trace_function(
-    name="process_webhook",
-    attributes={"platform": "twitch"}
-)
-async def process_webhook(data: dict):
-    # Automatically traced
-    return result
 ```
 
 #### Context Propagation
 
+Outbound `httpx` and `grpc.aio` calls are instrumented (hub-api): W3C `traceparent` is
+injected automatically and only to cluster-internal hosts. Manual injection, when needed:
+
 ```python
-import httpx
+from opentelemetry import propagate
 
-# Inject trace context into outgoing requests
-headers = {}
-tracing.inject_context(headers)
-
-async with httpx.AsyncClient() as client:
-    response = await client.post(
-        "http://other-service/api",
-        headers=headers,
-        json=data
-    )
+headers: dict[str, str] = {}
+propagate.inject(headers)
 ```
 
 #### Configuration
 
-Environment variables:
+Standard OpenTelemetry environment variables only, for example:
 
 ```bash
-TRACING_ENABLED=true
-TRACING_EXPORTER=jaeger  # console, jaeger, zipkin, otlp
-JAEGER_HOST=localhost
-JAEGER_PORT=6831
-ZIPKIN_ENDPOINT=http://localhost:9411/api/v2/spans
-OTLP_ENDPOINT=http://localhost:4317
-TRACING_SAMPLE_RATE=1.0  # 0.0 to 1.0
+OTEL_EXPORTER_OTLP_ENDPOINT=http://signoz-otel-collector.signoz.svc.cluster.local:4317
+OTEL_EXPORTER_OTLP_PROTOCOL=grpc
+OTEL_SERVICE_NAME=my-service
+OTEL_TRACES_SAMPLER=parentbased_traceidratio
+OTEL_TRACES_SAMPLER_ARG=1.0
 ```
 
 ### 2. Correlation IDs (`correlation.py`)
@@ -332,7 +308,6 @@ METRICS_NAMESPACE=waddlebot
 ```python
 from quart import Quart
 from flask_core import (
-    init_tracing,
     init_correlation,
     init_metrics,
     setup_aaa_logging,
@@ -347,7 +322,6 @@ MODULE_NAME = "my-service"
 VERSION = "1.0.0"
 
 # Initialize observability
-tracing = init_tracing(MODULE_NAME, VERSION)
 correlation = init_correlation(app)
 metrics = init_metrics(MODULE_NAME, VERSION)
 logger = setup_aaa_logging(MODULE_NAME, VERSION)
@@ -355,16 +329,13 @@ logger = setup_aaa_logging(MODULE_NAME, VERSION)
 # Integrate correlation with logging
 setup_correlation_logging(correlation)
 
-# Instrument app
-tracing.instrument_app(app)
-
 # Add health/metrics endpoints
 health_bp = create_health_blueprint(MODULE_NAME, VERSION)
 app.register_blueprint(health_bp)
 
 @app.route('/api/command', methods=['POST'])
 async def handle_command():
-    # Automatic tracing via Flask instrumentation
+    # Automatic tracing via the OTel ASGI/httpx instrumentation (see hub_api/telemetry.py)
     # Automatic correlation IDs via middleware
     # Manual metrics tracking
 
@@ -375,7 +346,7 @@ async def handle_command():
     metrics.track_command(command, platform="twitch", status="success")
 
     # Manual span attributes
-    tracing.set_attribute("command", command)
+    trace.get_current_span().set_attribute("command", command)
 
     # Logging with correlation IDs
     logger.info(f"Processing command: {command}")
@@ -390,19 +361,20 @@ if __name__ == '__main__':
 
 ```python
 import httpx
+from opentelemetry import propagate, trace
+from opentelemetry.trace import SpanKind
 from flask_core import (
-    get_tracing_manager,
     get_correlation_manager,
     get_metrics_manager
 )
 
 async def call_other_service(data: dict):
-    tracing = get_tracing_manager()
+    tracer = trace.get_tracer(__name__)
     correlation = get_correlation_manager()
     metrics = get_metrics_manager()
 
     # Create span for this operation
-    with tracing.start_span(
+    with tracer.start_as_current_span(
         "call_identity_service",
         kind=SpanKind.CLIENT
     ) as span:
@@ -413,7 +385,7 @@ async def call_other_service(data: dict):
         }
 
         # Inject trace context
-        tracing.inject_context(headers)
+        propagate.inject(headers)
 
         # Inject correlation IDs
         correlation.inject_into_headers(headers)
@@ -525,12 +497,9 @@ grep "cid=550e8400-e29b-41d4-a716-446655440000" /var/log/waddlebotlog/*.log
 Sampling can reduce overhead:
 
 ```python
-# Sample 10% of traces
-tracing = init_tracing(
-    service_name="my-service",
-    service_version="1.0.0",
-    sample_rate=0.1  # 10%
-)
+# Sample 10% of traces (standard OTel env, no code)
+# OTEL_TRACES_SAMPLER=parentbased_traceidratio
+# OTEL_TRACES_SAMPLER_ARG=0.1
 ```
 
 ## Production Deployment
@@ -580,7 +549,7 @@ annotations:
 ### No Traces in Jaeger
 
 1. Check Jaeger is running: `docker ps | grep jaeger`
-2. Verify JAEGER_HOST environment variable
+2. Verify OTEL_EXPORTER_OTLP_ENDPOINT is set and reachable
 3. Check sampling rate (must be > 0)
 4. Review application logs for tracing errors
 
@@ -600,7 +569,7 @@ annotations:
 
 ## Files Reference
 
-- `/libs/flask_core/flask_core/tracing.py` - OpenTelemetry integration
+- `/hub_api/telemetry.py` - OpenTelemetry SDK bootstrap (hub-api reference implementation)
 - `/libs/flask_core/flask_core/correlation.py` - Correlation ID tracking
 - `/libs/flask_core/flask_core/custom_metrics.py` - Prometheus metrics
 - `/config/observability/prometheus.yml` - Prometheus configuration
@@ -610,13 +579,10 @@ annotations:
 ## Environment Variables Reference
 
 ### Tracing
-- `TRACING_ENABLED` - Enable/disable tracing (default: true)
-- `TRACING_EXPORTER` - Exporter type (console, jaeger, zipkin, otlp)
-- `JAEGER_HOST` - Jaeger agent host (default: localhost)
-- `JAEGER_PORT` - Jaeger agent port (default: 6831)
-- `ZIPKIN_ENDPOINT` - Zipkin endpoint URL
-- `OTLP_ENDPOINT` - OTLP collector endpoint
-- `TRACING_SAMPLE_RATE` - Sampling rate 0.0-1.0 (default: 1.0)
+Standard OpenTelemetry variables only (`OTEL_EXPORTER_OTLP_ENDPOINT`, `OTEL_EXPORTER_OTLP_PROTOCOL`,
+`OTEL_EXPORTER_OTLP_HEADERS`, `OTEL_SERVICE_NAME`, `OTEL_RESOURCE_ATTRIBUTES`,
+`OTEL_TRACES_SAMPLER`, `OTEL_TRACES_SAMPLER_ARG`). The former `TRACING_*`, `JAEGER_*`,
+`ZIPKIN_ENDPOINT` and `OTLP_ENDPOINT` variables are no longer read by anything.
 
 ### Correlation
 - `CORRELATION_HEADER` - Correlation ID header name (default: X-Correlation-ID)

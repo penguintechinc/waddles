@@ -49,7 +49,7 @@ spec:
         # API, see critical-rules.md Data Plane) now exists; no longer the shared
         # pipeline.pythonBaseImage skeleton placeholder. Bare module name "hub-api" is the
         # alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" (.Values.hubApi.imageTag | default .Values.global.imageTag)) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-api" "imageTag" .Values.hubApi.imageTag) }}"
         # Values-driven (.Values.global.imagePullPolicy, default IfNotPresent). Every deploy
         # now carries a unique per-deploy global.imageTag (alpha SHA8, beta beta-<epoch>), so
         # the old hardcoded Always (a workaround for a stale same-tag `alpha` push) is
@@ -60,6 +60,22 @@ spec:
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
           {{- toYaml .Values.securityContext | nindent 10 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        # F3 -- HTTPS-only HTTP listener (the plaintext bind is replaced, not supplemented). hypercorn
+        # floors TLS at 1.2 (1.3 negotiated when offered); ECDSA P-256 cert from the internal CA;
+        # AES-GCM/ChaCha20 suites; HTTP/2 via ALPN (hypercorn h2). A bad cert/key fails startup loud.
+        command:
+        - hypercorn
+        - app:app
+        - --bind
+        - 0.0.0.0:{{ .Values.pipeline.hubApi.port }}
+        - --certfile
+        - /etc/waddlebot/tls/tls.crt
+        - --keyfile
+        - /etc/waddlebot/tls/tls.key
+        - --ciphers
+        - ECDHE+AESGCM:ECDHE+CHACHA20
+        {{- end }}
         ports:
         - name: http
           containerPort: {{ .Values.pipeline.hubApi.port }}
@@ -109,6 +125,8 @@ spec:
         # kms.enabled -- the platform-managed baseline needs none of it.
         {{- with (include "waddlebot.kms.hubApiEnvFrom" .) }}{{ . | nindent 8 }}{{- end }}
         env:
+        {{- include "waddlebot.posthog.licenseKeyEnv" (dict "root" $ "name" "POSTHOG_API_KEY") | nindent 8 }}
+        {{- include "waddlebot.otel.env" (dict "root" $ "service" "hub-api") | nindent 8 }}
         {{- if .Values.hubApi.trustForwardedHost }}
         {{- range .Values.httproute.rules }}
         {{- if contains "hub-api" (.service | toString) }}{{ fail "hubApi.trustForwardedHost=true but an HTTPRoute rule targets hub-api directly; only hub-webui may front it" }}{{ end }}
@@ -148,6 +166,9 @@ spec:
         # config/postgres/service-roles.yaml). Overrides the envFrom block above; the database
         # owner/superuser credential is NOT in waddlebot-secrets any more.
 {{- include "waddlebot.dbEnv" (dict "root" . "role" "waddles_hub_api") | nindent 8 }}
+        # Reads default to the read replicas (hub_api/config.py database_read_replica_url -> init_database
+        # read_replica_uri); same role, -ro Service. Absent when no replica exists (primary only).
+{{- include "waddlebot.dbReplicaEnv" (dict "root" . "role" "waddles_hub_api" "name" "DATABASE_READ_REPLICA_URL") | nindent 8 }}
         {{- if .Values.bundleStorageV2.migrator.enabled }}
         # Bundle storage v2: DDL role (waddles_bundle_migrator) password; hub-api only, never
         # mounted into the data-plane pods. Operator-managed existingSecret, off by default.
@@ -162,12 +183,31 @@ spec:
         - name: SERVICE_JWT_PUBLIC_KEY_{{ $kid }}
           value: {{ $pem | quote }}
         {{- end }}
-        {{- if .Values.pipeline.svcStreaming.enabled }}
-        # hub_api/services/calls_proxy.py -- svc-streaming (RTC control plane) base URL. Rendered
-        # from the same Service name/port templates/svc-streaming.yaml creates; hub-api has NO
-        # in-code default and fails loud on the first proxied call when this is absent.
-        - name: STREAMING_RTC_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-svc-streaming:{{ .Values.pipeline.svcStreaming.port }}"
+        {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+        # hub_api/services/calls_proxy.py -- svc-streaming RoomsService gRPC target (HTTP/2 + mTLS,
+        # ES256 machine JWT per call). Rendered from the same Service name/port
+        # templates/svc-streaming.yaml creates; hub-api has NO in-code default and fails loud on the
+        # first call when this (or the mTLS file set) is absent. The server cert's SAN is the
+        # Service FQDN (waddlebot.hostApiTlsDesiredDnsNames) -- FQDN only: the name-constrained
+        # internal CA does not permit a bare <fullname>-svc-streaming SAN.
+        - name: STREAMING_RTC_GRPC_TARGET
+          value: "{{ include "waddlebot.fullname" . }}-svc-streaming.{{ .Values.namespace }}.svc.cluster.local:{{ .Values.pipeline.svcStreaming.grpcPort }}"
+        # hub-api's own allow-listed SPIFFE identity (serviceJwt.identities.hub-api) -- the `sub`
+        # of the machine JWT it mints for each RoomsService call.
+        - name: STREAMING_RTC_SERVICE_ID
+          value: {{ tpl (index .Values.serviceJwt.identities "hub-api").spiffeId . | quote }}
+        - name: STREAMING_RTC_GRPC_CA_FILE
+          value: /etc/waddlebot/host-api-tls/ca.crt
+        - name: STREAMING_RTC_GRPC_CLIENT_CERT_FILE
+          value: /etc/waddlebot/host-api-tls/tls.crt
+        - name: STREAMING_RTC_GRPC_CLIENT_KEY_FILE
+          value: /etc/waddlebot/host-api-tls/tls.key
+        # TLS server name verified against the svc-streaming cert SANs (waddlebot.hostApiTlsDesiredDnsNames);
+        # defaults to the Service name from the target, so it always matches a SAN.
+        - name: STREAMING_RTC_GRPC_SERVER_NAME
+          value: {{ .Values.pipeline.hubApi.streamingRtc.serverName | default (printf "%s-svc-streaming.%s.svc.cluster.local" (include "waddlebot.fullname" .) .Values.namespace) | quote }}
+        - name: STREAMING_RTC_TIMEOUT_SECONDS
+          value: {{ .Values.pipeline.hubApi.streamingRtc.timeoutSeconds | default 10 | quote }}
         {{- end }}
         - name: SERVICE_JWT_AUDIENCE
           value: {{ .Values.serviceJwt.audience | quote }}
@@ -182,6 +222,11 @@ spec:
         # hub-api trusts the peer-identity header below as a verified SVID, so the edge MUST
         # strip it on non-mTLS traffic and a per-identity community allow-list must exist first
         # (X-Connection-Community is NOT an entitlement check) -- docs/PROVIDER_CONNECTIONS.md.
+        # This deployment's SPIFFE env segment (spiffe://penguintech.io/<env>/<svc>): the stream
+        # DEK broker (hub_api/services/stream_dek_broker.py) pins callers to it and fails closed
+        # when unset, so an empty value is a render failure, never a silently-broken broker.
+        - name: SPIFFE_ENV
+          value: {{ required "spire.environment is required (SPIFFE env segment for hub-api SPIFFE_ENV)" .Values.spire.environment | quote }}
         - name: SPIFFE_PEER_TRUST
           value: {{ .Values.pipeline.hubApi.spiffePeerTrust | default false | quote }}
         - name: SPIFFE_PEER_ID_HEADER
@@ -200,8 +245,6 @@ spec:
           value: /etc/waddlebot/credential-manager/ca.crt
         {{- end }}
         - name: MODULE_NAME
-          value: "hub-api"
-        - name: PIPELINE_STAGE
           value: "hub-api"
         - name: MODULE_PORT
           value: {{ .Values.pipeline.hubApi.port | quote }}
@@ -223,6 +266,10 @@ spec:
         # above (shared -config/-secrets objects) -- same whole-object envFrom pattern
         # svc-action.yaml/svc-ingest.yaml use for the same keys; no per-key duplicates
         # added here.
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerEnv" . | nindent 8 }}
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
+        {{- end }}
         - name: CONNECTIONS_STATE_TTL_S
           value: {{ .Values.pipeline.hubApi.connectionsStateTtlS | quote }}
         # feature/seaweedfs-object-storage -- least-privilege "hub-api" S3 identity
@@ -242,6 +289,23 @@ spec:
             secretKeyRef:
               name: {{ include "waddlebot.fullname" . }}-secrets
               key: HUB_API_S3_SECRET_ACCESS_KEY
+        # T7 platform-secret escrow: dedicated bucket + dedicated identity (own Secret, never the
+        # envFrom'd one) -- hub_api/services/platform_secrets/escrow.py. No bundle or data-plane
+        # identity names this bucket.
+        {{- if .Values.infrastructure.seaweedfs.enabled }}
+        - name: PLATFORM_ESCROW_S3_BUCKET
+          value: {{ .Values.infrastructure.seaweedfs.escrow.bucketName | quote }}
+        - name: PLATFORM_ESCROW_S3_ACCESS_KEY_ID
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_ACCESS_KEY_ID
+        - name: PLATFORM_ESCROW_S3_SECRET_ACCESS_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ include "waddlebot.fullname" . }}-platform-escrow-s3
+              key: ESCROW_S3_SECRET_ACCESS_KEY
+        {{- end }}
         - name: CREDENTIAL_ENCRYPTION_KEY
           valueFrom:
             secretKeyRef:
@@ -279,6 +343,36 @@ spec:
             secretKeyRef:
               name: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretName }}
               key: {{ .Values.autoProvisionedKeys.oneTimeSecret.secretKey }}
+        # DSAR inbox requester-contact AES-256-GCM key (64 hex), auto-provisioned like the OTS key.
+        - name: DSAR_FINGERPRINT_KEY
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.autoProvisionedKeys.dsarFingerprint.secretName }}
+              key: {{ .Values.autoProvisionedKeys.dsarFingerprint.secretKey }}
+        # Third-party captcha secret (turnstile/recaptcha) for the PUBLIC DSAR form: opt-in,
+        # operator-supplied Secret `waddlebot-dsar-captcha`. The default provider (altcha) needs
+        # none: its HMAC key DSAR_ALTCHA_HMAC_KEY is chart-generated into waddlebot-secrets (envFrom).
+        - name: DSAR_CAPTCHA_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: waddlebot-dsar-captcha
+              key: DSAR_CAPTCHA_SECRET
+              optional: true
+        # DSAR verification-mail SMTP credentials (operator-supplied Secret; see values.yaml
+        # config.dsarSmtp). Optional: unauthenticated relays need neither key. Never auto-generated,
+        # never a placeholder -- an absent Secret simply means "no SMTP auth".
+        - name: DSAR_SMTP_USERNAME
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.config.dsarSmtp.existingSecret | default "waddlebot-dsar-smtp" }}
+              key: DSAR_SMTP_USERNAME
+              optional: true
+        - name: DSAR_SMTP_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: {{ .Values.config.dsarSmtp.existingSecret | default "waddlebot-dsar-smtp" }}
+              key: DSAR_SMTP_PASSWORD
+              optional: true
         # Enterprise SSO (hub_api/services/sso_*.py) -- encryption key (optional: SSO is
         # entitlement-gated), tuning, SSRF allowlist, shared Google client. See templates/_sso.tpl.
         {{- include "waddlebot.sso.hubApiEnv" . | nindent 8 }}
@@ -294,41 +388,28 @@ spec:
         # override this container inherits the plaintext VALKEY_URL from envFrom's
         # secretRef above and crashes the first time any of those call sites run, with
         # "VALKEY_URL must use rediss://" (SECURITY_TRANSPORT_TLS defaults true).
-        - name: VALKEY_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              # _TLS_AUTH (password+CA embedded): hub-api's RateLimiter/JWT-revocation connect
-              # straight from VALKEY_URL and never read VALKEY_PASSWORD -> credential-free URL
-              # = "HELLO must be called with the client already authenticated".
-              key: VALKEY_DURABLE_URL_TLS_AUTH
-        - name: VALKEY_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_PASSWORD
+        {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "hub-api" "url" "auth") | nindent 8 }}
         {{- end }}
-        {{- if .Values.modules.bot.enabled }}
-        - name: MODULE_LOAD_BOT
-          value: "true"
+        # GDPR Art. 17 erasure of per-user bundle kv (hub_api/services/erasure_external.py):
+        # bundle kv lives on the dedicated valkey-kv instance, NOT the durable one behind
+        # VALKEY_URL (regression: erasure scanned durable and silently erased nothing). Same
+        # wiring as svc-action-rust: kv on -> <fullname>-valkey-kv; kv off -> the cache instance
+        # that then holds bundle kv. The client never falls back to VALKEY_URL/REDIS_URL.
+        # As its OWN ACL user (hub-api: SCAN/UNLINK/EXISTS/DECRBY/DEL on bundlekv data/count keys only).
+        {{- include "waddlebot.valkeyAcl.kvEnv" (dict "root" . "user" "hub-api") | nindent 8 }}
+        # Per-environment env baseline (e.g. FLAG_<KEY> feature-flag fallbacks honoured by
+        # flask_core when PostHog is unresolved). Free-tier flags only -- license flags are
+        # never env-bypassable. Rendered last so an explicit entry here wins on collision.
+        {{- range $key, $value := .Values.pipeline.hubApi.extraEnv }}
+        - name: {{ $key }}
+          value: {{ $value | quote }}
         {{- end }}
-        {{- if .Values.modules.social.enabled }}
-        - name: MODULE_LOAD_SOCIAL
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.customer.enabled }}
-        - name: MODULE_LOAD_CUSTOMER
-          value: "true"
-        {{- end }}
-        {{- if .Values.modules.marketing.enabled }}
-        - name: MODULE_LOAD_MARKETING
-          value: "true"
-        {{- end }}
-        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http") | nindent 8 }}
+        {{- include "waddlebot.startupProbe" (dict "root" $ "path" "/ready" "port" "http" "scheme" (include "waddlebot.transitProbeScheme" .)) | nindent 8 }}
         livenessProbe:
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 30
           periodSeconds: 10
           timeoutSeconds: 5
@@ -342,6 +423,7 @@ spec:
           httpGet:
             path: /ready
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 10
           periodSeconds: 5
           timeoutSeconds: 3
@@ -358,6 +440,12 @@ spec:
         {{- include "waddlebot.valkeyTlsCaVolumeMount" . | nindent 8 }}
         {{- end }}
         {{- include "waddlebot.hubApiGrpcTlsVolumeMount" . | nindent 8 }}
+        {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+        {{- include "waddlebot.hostApiTlsVolumeMount" . | nindent 8 }}
+        {{- end }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
+        {{- end }}
         {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
         - name: credential-manager-ca
           mountPath: /etc/waddlebot/credential-manager
@@ -373,6 +461,12 @@ spec:
       {{- include "waddlebot.valkeyTlsCaVolume" . | nindent 6 }}
       {{- end }}
       {{- include "waddlebot.hubApiGrpcTlsVolume" . | nindent 6 }}
+      {{- if and .Values.pipeline.svcStreaming.enabled (eq (include "waddlebot.hostApiTlsMaterialAvailable" .) "true") }}
+      {{- include "waddlebot.hostApiTlsVolume" . | nindent 6 }}
+      {{- end }}
+      {{- if include "waddlebot.transitTlsEnabled" . }}
+      {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-api") | nindent 6 }}
+      {{- end }}
       {{- if .Values.pipeline.hubApi.credentialManager.caSecretName }}
       - name: credential-manager-ca
         secret:

@@ -533,7 +533,7 @@ mod tests {
 
     fn body(export: ExportKind, payload: serde_json::Value) -> InvokeBody {
         InvokeBody {
-            app_id: "waddles.core.example.echo".to_string(),
+            app_id: "penguintechinc.waddles.echo".to_string(),
             digest: "sha256:nope".to_string(),
             export,
             payload,

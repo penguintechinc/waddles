@@ -29,8 +29,10 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from typing import Any, cast
+from uuid import UUID
 
 from flask_core.api_utils import error_response
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
@@ -38,9 +40,12 @@ from quart import Blueprint, current_app, request
 
 from services import community_loyalty as loyalty_svc
 from services.community_common import community_in_tenant, is_valid_service_key
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_dals, reads_from_replica
 from services.errors import ApiError, bad_request, not_found
 from services.pagination import parse_limit
+from services.route_guards import community_admin_guard
 
 loyalty_bp = Blueprint("v1_community_loyalty", __name__, url_prefix="/api/v1/admin")
 
@@ -86,11 +91,11 @@ def _tenant_slug_for_community(dal: Any, community_id: int) -> str:
         .first()
     )
     if community_row is None:
-        return "default"
+        return DEFAULT_TENANT_SLUG
     tenant_row = (
         dal(dal.tenants.id == int(community_row.tenant_id)).select(dal.tenants.slug).first()
     )
-    return tenant_row.slug if tenant_row is not None else "default"
+    return tenant_row.slug if tenant_row is not None else DEFAULT_TENANT_SLUG
 
 
 def _parse_int(raw: str | None) -> int | None:
@@ -106,6 +111,13 @@ def _err(exc: ApiError) -> tuple[dict[str, object], int]:
     )
 
 
+async def _public_dict(dto: Any, community_id: int) -> dict[str, Any]:
+    """`asdict(dto)` with `community_id` swapped for the community's PUBLIC UUID."""
+    body = asdict(dto)
+    body["community_id"] = await lookup_public_id(community_id)
+    return body
+
+
 def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     return {"status": "success", "data": data, "meta": {"version": 1}}, 200
 
@@ -113,9 +125,10 @@ def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
 # ===== Admin: config =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/config", methods=["GET"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/config", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/config`."""
     ctx = get_tenant_context(request)
@@ -136,12 +149,13 @@ async def get_config(community_id: int) -> tuple[dict[str, Any], int]:
         config = await loyalty_svc.get_config(async_dal, dal, community_id=community_id)
     except ApiError as exc:
         return _err(exc)
-    return _envelope(asdict(config))
+    return _envelope(await _public_dict(config, community_id))
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/config", methods=["PUT"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/config", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
     """`PUT /api/v1/admin/<id>/loyalty/config` -- partial update, unset fields left unchanged."""
     if not _tenant_ok(community_id):
@@ -165,24 +179,31 @@ async def update_config(community_id: int) -> tuple[dict[str, Any], int]:
         )
     except ApiError as exc:
         return _err(exc)
-    return _envelope(asdict(config))
+    return _envelope(await _public_dict(config, community_id))
 
 
 # ===== Admin: leaderboard =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/leaderboard", methods=["GET"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/leaderboard", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
+@reads_from_replica("community_loyalty.get_leaderboard")
 async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/leaderboard?limit=`."""
     if not _tenant_ok(community_id):
         return _err(not_found("Community not found"))
 
     limit = parse_limit(request.args.get("limit"), default=10)
+    # `get_config` may lazily INSERT the default row, so it runs on the primary; the leaderboard
+    # itself is a pure aggregate read and tolerates replica lag.
     async_dal, dal = _dal()
     config = await loyalty_svc.get_config(async_dal, dal, community_id=community_id)
-    entries = await loyalty_svc.leaderboard(async_dal, dal, community_id=community_id, limit=limit)
+    read_async_dal, read_dal = get_read_dals()
+    entries = await loyalty_svc.leaderboard(
+        read_async_dal, read_dal, community_id=community_id, limit=limit
+    )
     return _envelope(
         {
             "entries": [asdict(entry) for entry in entries],
@@ -195,18 +216,18 @@ async def get_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
 # ===== Admin: balance adjustment =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/user/<platform_user_id>/balance", methods=["PUT"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/user/<uuid:user_uuid>/balance", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:admin")  # type: ignore[misc]
-async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict[str, Any], int]:
-    """`PUT /api/v1/admin/<id>/loyalty/user/<platformUserId>/balance` -- admin add/remove points.
+@community_admin_guard  # type: ignore[misc]
+async def adjust_balance(community_id: int, user_uuid: UUID) -> tuple[dict[str, Any], int]:
+    """`PUT /api/v1/admin/<id>/loyalty/user/<memberUuid>/balance` -- admin add/remove points.
 
-    `platform_user_id` replaces the pre-MVP `<int:user_id>` (hub identity)
-    path segment: `loyalty_balances` is keyed by `(community_id, platform,
-    platform_user_id)`, not a `hub_users.id` -- see
-    `services/schema.py::bind_loyalty_tables()`. `platform` is required in
-    the body since one path segment can't disambiguate it; `delta` may be
-    negative (removal).
+    The path carries the member's PUBLIC UUID (`community_members.user_uuid`), never a raw
+    platform handle. It is resolved server-side to the `(platform, platform_user_id)` row WITHIN
+    this community: `loyalty_balances` is keyed by `(community_id, platform, platform_user_id)`.
+    `platform` is required in the body (one UUID can span linked platform accounts); an unknown
+    or foreign member (or one without that platform) is a 404. `delta` may be negative.
     """
     if not _tenant_ok(community_id):
         return _err(not_found("Community not found"))
@@ -220,6 +241,11 @@ async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict
         return _err(bad_request("platform (string) and delta (int) are required"))
 
     async_dal, dal = _dal()
+    platform_user_id = loyalty_svc.resolve_member_identity(
+        dal, community_id=community_id, user_uuid=str(user_uuid), platform=platform
+    )
+    if platform_user_id is None:
+        return _err(not_found("Member not found"))
     try:
         actor_id = get_current_user_id(request)
         balance = await loyalty_svc.adjust(
@@ -235,15 +261,16 @@ async def adjust_balance(community_id: int, platform_user_id: str) -> tuple[dict
         )
     except ApiError as exc:
         return _err(exc)
-    return _envelope(asdict(balance))
+    return _envelope(await _public_dict(balance, community_id))
 
 
 # ===== Admin: wipe / stats =====
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/wipe", methods=["POST"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/wipe", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:admin")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
     """`POST /api/v1/admin/<id>/loyalty/wipe` -- zero every balance in the community."""
     if not _tenant_ok(community_id):
@@ -254,17 +281,19 @@ async def wipe_currency(community_id: int) -> tuple[dict[str, Any], int]:
     return _envelope({"affected": affected})
 
 
-@loyalty_bp.route("/<int:community_id>/loyalty/stats", methods=["GET"])
+@loyalty_bp.route("/<cuuid:community_id>/loyalty/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.loyalty:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
+@reads_from_replica("community_loyalty.get_stats")
 async def get_stats(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/admin/<id>/loyalty/stats`."""
     if not _tenant_ok(community_id):
         return _err(not_found("Community not found"))
 
-    async_dal, dal = _dal()
+    async_dal, dal = get_read_dals()
     stats = await loyalty_svc.get_stats(async_dal, dal, community_id=community_id)
-    return _envelope(asdict(stats))
+    return _envelope(await _public_dict(stats, community_id))
 
 
 # ===== Internal (service-to-service, X-Service-Key) =====
@@ -297,6 +326,7 @@ async def internal_get_balance() -> tuple[dict[str, Any], int]:
 
 
 @loyalty_internal_bp.route("/loyalty/leaderboard", methods=["GET"])
+@reads_from_replica("community_loyalty.internal_leaderboard")
 async def internal_leaderboard() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/internal/loyalty/leaderboard?community_id=&limit=`."""
     if not is_valid_service_key(request):
@@ -311,8 +341,12 @@ async def internal_leaderboard() -> tuple[dict[str, Any], int]:
         return _err(not_found("Community not found"))
 
     limit = parse_limit(request.args.get("limit"), default=10)
+    # `get_config` may lazily INSERT the default row (primary); the leaderboard read is replica.
     config = await loyalty_svc.get_config(async_dal, dal, community_id=community_id)
-    entries = await loyalty_svc.leaderboard(async_dal, dal, community_id=community_id, limit=limit)
+    read_async_dal, read_dal = get_read_dals()
+    entries = await loyalty_svc.leaderboard(
+        read_async_dal, read_dal, community_id=community_id, limit=limit
+    )
     return _envelope(
         {
             "entries": [asdict(entry) for entry in entries],
@@ -323,6 +357,7 @@ async def internal_leaderboard() -> tuple[dict[str, Any], int]:
 
 
 @loyalty_internal_bp.route("/loyalty/items", methods=["GET"])
+@reads_from_replica("community_loyalty.internal_list_items")
 async def internal_list_items() -> tuple[dict[str, Any], int]:
     """`GET /api/v1/internal/loyalty/items?community_id=` -- enabled items only (shop display)."""
     if not is_valid_service_key(request):
@@ -336,8 +371,9 @@ async def internal_list_items() -> tuple[dict[str, Any], int]:
     if not _community_exists(dal, community_id):
         return _err(not_found("Community not found"))
 
+    read_async_dal, read_dal = get_read_dals()  # existence gate above stays primary
     items = await loyalty_svc.list_items(
-        async_dal, dal, community_id=community_id, enabled_only=True
+        read_async_dal, read_dal, community_id=community_id, enabled_only=True
     )
     return _envelope({"items": [asdict(item) for item in items]})
 

@@ -62,6 +62,12 @@ pub struct ActorContext {
     pub actor: Option<String>,
     /// Sorted, deduplicated host-derived scopes.
     pub scopes: Vec<String>,
+    /// The actor's PER-COMMUNITY call-participant pseudonym
+    /// (`uuid5(NS, "<tenant>:<community>:<user>")`, host-derived; the same value
+    /// hub-api's REST layer uses). It is the only identity a call/media service
+    /// may send downstream: the global `user_uuid` in `actor` must not leave the
+    /// platform. `None` when the host could not derive it (fail closed).
+    pub participant: Option<String>,
 }
 
 impl ActorContext {
@@ -78,7 +84,15 @@ impl ActorContext {
                 .iter()
                 .map(|s| (*s).to_string())
                 .collect(),
+            participant: None,
         }
+    }
+
+    /// Attaches the host-derived per-community call-participant pseudonym.
+    #[must_use]
+    pub fn with_participant(mut self, participant: impl Into<String>) -> Self {
+        self.participant = Some(participant.into());
+        self
     }
 
     /// `true` only when the verified actor holds `scope` exactly.
@@ -99,11 +113,19 @@ impl ActorContext {
 ///
 /// | role | scopes |
 /// |---|---|
-/// | `community-owner`, `owner` | member, vip, moderate, ban, timeout, admin, owner |
-/// | `community-admin` | member, vip, moderate, ban, timeout, admin |
-/// | `moderator` | member, moderate, ban, timeout |
-/// | `vip` | member, vip |
-/// | `member` | member |
+/// | `community-owner`, `owner` | member, vip, moderate, ban, timeout, admin, owner, rooms:* + all music scopes |
+/// | `community-admin` | member, vip, moderate, ban, timeout, admin, rooms:* + all music scopes |
+/// | `moderator` | member, moderate, ban, timeout, rooms:kick, rooms:mute, rooms:lock, rooms:hands + all music scopes |
+/// | `vip` | member, vip + music read/write/stats |
+/// | `member` | member + music read/write/stats |
+///
+/// `rooms:*` = every dedicated room scope: management (`rooms:create`, `rooms:update`,
+/// `rooms:close`, `rooms:guests`) and moderation (`rooms:kick`, `rooms:mute`, `rooms:lock`,
+/// `rooms:hands`). A moderator holds exactly the moderation ones (what it can do today).
+///
+/// Music scopes (`penguintechinc.waddles.music-requests`): `music:requests.read`,
+/// `music:history.read`, `music:requests.write` and `music:stats.read` for every member; moderator and above also get
+/// `music:requests.manage`, `music:dj.manage` and `music:settings.write`.
 pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
     match role {
         // SuperadminService::create_community persists the initial member as
@@ -116,6 +138,21 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:timeout",
             "community:admin",
             "community:owner",
+            "rooms:create",
+            "rooms:update",
+            "rooms:close",
+            "rooms:guests",
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
         "community-admin" => &[
             "community:member",
@@ -124,15 +161,54 @@ pub fn scopes_for_role(role: &str) -> &'static [&'static str] {
             "community:ban",
             "community:timeout",
             "community:admin",
+            "rooms:create",
+            "rooms:update",
+            "rooms:close",
+            "rooms:guests",
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
         "moderator" => &[
             "community:member",
             "community:moderate",
             "community:ban",
             "community:timeout",
+            "rooms:kick",
+            "rooms:mute",
+            "rooms:lock",
+            "rooms:hands",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+            "music:requests.manage",
+            "music:dj.manage",
+            "music:settings.write",
         ],
-        "vip" => &["community:member", "community:vip"],
-        "member" => &["community:member"],
+        "vip" => &[
+            "community:member",
+            "community:vip",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+        ],
+        "member" => &[
+            "community:member",
+            "music:requests.read",
+            "music:history.read",
+            "music:requests.write",
+            "music:stats.read",
+        ],
         _ => &[],
     }
 }
@@ -237,22 +313,11 @@ pub struct ToolRequest {
     pub idempotency_key: Option<String>,
 }
 
-/// `waddles.<seg>.<seg>.<seg>`, each segment `[a-z][a-z0-9-]{0,..}`-ish --
-/// mirrors hub-api's `_APP_ID_RE` shape closely enough to reject anything that
-/// is not a plausible app id (the authoritative check is the snapshot lookup).
+/// `<org>.<repo>.<name>` -- the one shared app-id grammar
+/// ([`bundle_capability_gate::is_valid_app_id`]: three `[a-z0-9][a-z0-9-]*`
+/// segments, <= 127 bytes). The authoritative check is still the snapshot lookup.
 fn valid_app_id(s: &str) -> bool {
-    if s.len() > 128 {
-        return false;
-    }
-    let segs: Vec<&str> = s.split('.').collect();
-    segs.len() == 4
-        && segs[0] == "waddles"
-        && segs[1..].iter().all(|seg| {
-            !seg.is_empty()
-                && seg
-                    .bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
-        })
+    bundle_capability_gate::is_valid_app_id(s)
 }
 
 /// `^[a-z][a-z0-9_.]{0,63}$` (hub-api `_TOOL_NAME_RE`).
@@ -576,7 +641,8 @@ impl AuthorizedCall {
         if let Some(required) = &self.required_scope {
             if !actor.has_scope(required) {
                 return Err(ToolRefusal::Forbidden(
-                    "scope_denied: the verified actor lacks the scope this tool requires".to_string(),
+                    "scope_denied: the verified actor lacks the scope this tool requires"
+                        .to_string(),
                 ));
             }
         }
@@ -658,10 +724,12 @@ pub fn nested_payload(plan: &ToolPlan) -> Result<serde_json::Value, ToolRefusal>
     if let Some(obj) = args.as_object_mut() {
         obj.remove(CTX_ARG);
         if plan.actor.actor.is_some() {
-            obj.insert(
-                CTX_ARG.to_string(),
-                serde_json::json!({"actor": plan.actor.actor, "scopes": plan.actor.scopes}),
-            );
+            let mut ctx =
+                serde_json::json!({"actor": plan.actor.actor, "scopes": plan.actor.scopes});
+            if let Some(participant) = &plan.actor.participant {
+                ctx["participant"] = serde_json::Value::String(participant.clone());
+            }
+            obj.insert(CTX_ARG.to_string(), ctx);
         }
     } else if plan.actor.actor.is_some() {
         return Err(bad(

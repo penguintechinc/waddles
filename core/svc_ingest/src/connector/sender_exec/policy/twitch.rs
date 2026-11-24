@@ -119,7 +119,13 @@ fn schedule_kind(
         slots,
         max_body: has_body.then_some(4096),
         body_keys: if has_body {
-            vec!["start_time", "timezone", "duration", "is_recurring", "title"]
+            vec![
+                "start_time",
+                "timezone",
+                "duration",
+                "is_recurring",
+                "title",
+            ]
         } else {
             vec![]
         },

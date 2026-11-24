@@ -7,6 +7,8 @@ const APP_BUNDLE: &str = "app-bundle";
 /// Immutable host-written system tags (`<key>=<value>`); guests can never set them.
 pub const TAG_TENANT: &str = "waddles-tenant";
 pub const TAG_COMMUNITY: &str = "waddles-community";
+/// `waddles-sealed=1`: the body is a per-tenant sealed envelope (host-written, `crate::seal`).
+pub const TAG_SEALED: &str = "waddles-sealed";
 /// Provenance only (audit/correlation) -- NOT an access input in v3.0.
 pub const TAG_REQUEST_ID: &str = "waddles-request-id";
 

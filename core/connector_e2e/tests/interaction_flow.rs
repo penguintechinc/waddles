@@ -149,14 +149,14 @@ async fn rig() -> Rig {
     std::env::set_var("SECURITY_TRANSPORT_AUTH", "false");
     let conn = redis::Client::open(url)
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let store = InteractionStore::new(conn);
     let wire = WireRig::start_with_permissions(
         vec![RigConnector {
             platform: "discord".into(),
-            app_id: "waddles.core.service.discord".into(),
+            app_id: "penguintechinc.waddles.discord".into(),
             wasm: DISCORD_WASM,
             world: WitWorld::ConnectorTools,
         }],

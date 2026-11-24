@@ -8,7 +8,7 @@
 # (Express, house convention: never nginx), which listens on $PORT (default 8080) and
 # proxies /api to $HUB_API_URL. containerPort/PORT/liveness+readiness port must all
 # agree with .Values.pipeline.hubWebui.port. HUB_API_URL is wired to the in-cluster
-# hub-api-v3 Service (never the server's localhost:8060 dev default) -- server.js
+# hub-api-v3 Service (never the server's localhost:8204 dev default) -- server.js
 # fails fast at startup if it's unset in NODE_ENV=production.
 {{- if .Values.pipeline.hubWebui.enabled }}
 ---
@@ -44,11 +44,10 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: hub-webui
-        # fix/alpha-helm-deploy -- admin/hub_module/Dockerfile.webui already exists and
-        # already builds under CI as module "hub-webui" (containers.yml); no longer the
-        # shared pipeline.nodeBaseImage skeleton placeholder. Bare module name "hub-webui"
-        # is the alpha-local repo under global.imageRegistry -- see scripts/deploy-alpha.sh.
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui" "imageTag" .Values.global.imageTag) }}"
+        # admin/hub_module/Dockerfile.webui builds under CI as module "hub-webui" (containers.yml).
+        # Bare module name "hub-webui" is the alpha-local repo under global.imageRegistry --
+        # see scripts/deploy-alpha.sh.
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "hub-webui") }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         {{- include "waddlebot.preStop" $ | nindent 8 }}
         securityContext:
@@ -65,16 +64,24 @@ spec:
         # In-cluster hub-api-v3 Service -- never the server's localhost dev
         # default (see server.js). Same pattern as svc-ingest/svc-action/etc.
         - name: HUB_API_URL
-          value: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:{{ .Values.pipeline.hubApi.port }}"
+          value: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
         # Allowlist for the X-Forwarded-Host the proxy sets (license bypass-domain check).
         - name: PUBLIC_HOSTNAMES
           value: {{ join "," .Values.webui.publicHostnames | quote }}
+        # F3 -- internal CA (secretKeyRef) + plaintext refusal for every internal HTTP client in this pod.
+        {{- include "waddlebot.transitCaEnv" . | nindent 8 }}
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        # F4 -- webui serves HTTPS itself (server.js reads TLS_CERT_FILE/TLS_KEY_FILE) so the
+        # Gateway re-encrypts to it (BackendTLSPolicy, templates/httproute.yaml).
+        {{- include "waddlebot.transitServerEnv" . | nindent 8 }}
+        {{- end }}
         livenessProbe:
           # LOCAL only -- /health never calls out to hub-api, so a slow/down
           # upstream never kills this pod via liveness.
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 10
           periodSeconds: 10
           timeoutSeconds: 3
@@ -83,6 +90,7 @@ spec:
           httpGet:
             path: /health
             port: http
+            scheme: {{ include "waddlebot.transitProbeScheme" . }}
           initialDelaySeconds: 5
           periodSeconds: 5
           timeoutSeconds: 3
@@ -92,9 +100,15 @@ spec:
         volumeMounts:
         - name: tmp
           mountPath: /tmp
+        {{- if include "waddlebot.transitTlsEnabled" . }}
+        {{- include "waddlebot.transitServerVolumeMount" . | nindent 8 }}
+        {{- end }}
       volumes:
       - name: tmp
         emptyDir: {}
+      {{- if include "waddlebot.transitTlsEnabled" . }}
+      {{- include "waddlebot.transitServerVolume" (dict "root" . "component" "hub-webui") | nindent 6 }}
+      {{- end }}
 ---
 apiVersion: v1
 kind: Service

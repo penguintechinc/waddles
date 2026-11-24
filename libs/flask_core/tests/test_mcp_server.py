@@ -104,7 +104,7 @@ def make_app_registry(
     registry = AppRegistry()
     registry.load(
         {
-            "app_id": f"{feature}.default",
+            "app_id": f"penguintechinc.waddles.{feature.rsplit('.', 1)[-1]}",
             "name": "Default App",
             "version": "1.0.0",
             "feature": feature,
@@ -270,7 +270,7 @@ class TestAuthorizeAndResolveToolCall:
         )
 
         assert contract.id == "bot.shoutout"
-        assert app.app_id == "waddles.bot.shoutout.default"
+        assert app.app_id == "penguintechinc.waddles.shoutout"
         assert check.calls == [("waddles.bot.shoutout", "acme", None)]
 
     async def test_unknown_tool_name_shape_rejected(self) -> None:

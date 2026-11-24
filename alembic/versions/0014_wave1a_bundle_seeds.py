@@ -20,10 +20,10 @@ content already applied on alpha, most likely via the same T8/convergence
 work referenced in this branch's recent commit history (`d22af3a4`,
 `ef1b6465`, `b2191e81`) rather than through `schema_migrations`:
   - 084 (bot_process_entrypoint): `app_catalog.stages->process->entrypoint`
-    for both `waddles.bot.discord.default`/`waddles.bot.twitch.default`
+    for both `penguintechinc.waddles.discord-pipeline`/`penguintechinc.waddles.twitch-pipeline`
     is already `bundles.bot_process:transform`, not the echo-demo bundle
     084's UPDATE targets.
-  - 091 (community_forums_bundle): `waddles.community.forums.default`
+  - 091 (community_forums_bundle): `penguintechinc.waddles.forums-pipeline`
     already exists in `app_catalog`.
   - 095 (demo_seed): the `waddlebot` demo community (id=4), its Discord
     (Club Penguinz)/Twitch (penguinzplays) `community_servers` rows,
@@ -64,15 +64,15 @@ depends_on = None
 # (085, 086, 087, 088, 089, 090, 092, 093, 094) -- 084/091/095/096 are
 # bookkeeping-only (see module docstring), not in this list.
 SEEDED_APP_IDS = (
-    "waddles.social.quote.default",
-    "waddles.social.alias.default",
-    "waddles.social.welcome.default",
-    "waddles.community.chat.default",
-    "waddles.community.polls.default",
-    "waddles.community.announcements.default",
-    "waddles.marketing.engagement.default",
-    "waddles.streaming.stream.default",
-    "waddles.integrations.waddleai.default",
+    "penguintechinc.waddles.quote-pipeline",
+    "penguintechinc.waddles.alias-pipeline",
+    "penguintechinc.waddles.welcome-pipeline",
+    "penguintechinc.waddles.chat-pipeline",
+    "penguintechinc.waddles.polls-pipeline",
+    "penguintechinc.waddles.announcements-pipeline",
+    "penguintechinc.waddles.engagement-pipeline",
+    "penguintechinc.waddles.stream-pipeline",
+    "penguintechinc.waddles.waddleai",
 )
 
 # Every numbered legacy SQL file this revision accounts for -- ported
@@ -107,10 +107,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.social.quote.default',
+            'penguintechinc.waddles.quote-pipeline',
             '1.0.0',
             'social',
-            'waddles.social.quote',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -139,7 +139,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.social.quote.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.quote-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -154,10 +154,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.social.alias.default',
+            'penguintechinc.waddles.alias-pipeline',
             '1.0.0',
             'social',
-            'waddles.social.alias',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -185,7 +185,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.social.alias.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.alias-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -200,10 +200,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.social.welcome.default',
+            'penguintechinc.waddles.welcome-pipeline',
             '1.0.0',
             'social',
-            'waddles.social.welcome',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -231,7 +231,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.social.welcome.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.welcome-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -247,10 +247,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.community.chat.default',
+            'penguintechinc.waddles.chat-pipeline',
             '1.0.0',
             'community',
-            'waddles.community.chat',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -276,7 +276,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.community.chat.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.chat-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -292,10 +292,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.community.polls.default',
+            'penguintechinc.waddles.polls-pipeline',
             '1.0.0',
             'community',
-            'waddles.community.polls',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -323,7 +323,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.community.polls.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.polls-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -340,10 +340,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.community.announcements.default',
+            'penguintechinc.waddles.announcements-pipeline',
             '1.0.0',
             'community',
-            'waddles.community.announcements',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -384,7 +384,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.community.announcements.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.announcements-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -399,10 +399,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.marketing.engagement.default',
+            'penguintechinc.waddles.engagement-pipeline',
             '1.0.0',
             'marketing',
-            'waddles.marketing.engagement',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -431,7 +431,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.marketing.engagement.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.engagement-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -446,10 +446,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.streaming.stream.default',
+            'penguintechinc.waddles.stream-pipeline',
             '1.0.0',
             'streaming',
-            'waddles.streaming.stream',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -475,7 +475,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.streaming.stream.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.stream-pipeline', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING
@@ -491,10 +491,10 @@ def upgrade() -> None:
             app_id, manifest_version, module, feature, provider, execution_model,
             is_default, platform_compatibility, status, stages
         ) VALUES (
-            'waddles.integrations.waddleai.default',
+            'penguintechinc.waddles.waddleai',
             '1.0.0',
             'integrations',
-            'waddles.integrations.waddleai',
+            'penguintechinc.waddles',
             'builtin',
             'native',
             FALSE,
@@ -521,7 +521,7 @@ def upgrade() -> None:
     op.execute(
         """
         INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-        SELECT t.id, 'waddles.integrations.waddleai.default', TRUE
+        SELECT t.id, 'penguintechinc.waddles.waddleai', TRUE
         FROM tenants t
         WHERE t.slug = 'global'
         ON CONFLICT (tenant_id, app_id) DO NOTHING

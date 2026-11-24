@@ -49,6 +49,9 @@ pub struct Model {
     pub artifact_signature: Option<String>,
     pub artifact_signature_key_id: Option<String>,
     pub artifact_signed_approval_id: Option<i64>,
+    /// Bundle language (`app_versions.language`, NOT NULL) -- the executor
+    /// language-partition key (`crate::partition`).
+    pub language: String,
 }
 
 #[derive(Copy, Clone, Debug, EnumIter, DeriveRelation)]

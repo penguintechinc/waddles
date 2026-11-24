@@ -25,7 +25,7 @@ use bundle_host_db::v2::{
 };
 use bundle_host_db::{AppSchema, CapabilitySnapshot, ColumnDef, ColumnType, TableSchema};
 use penguin_bundle_host::wire::{CapabilityKind, HostCallBody};
-use redis::aio::MultiplexedConnection;
+use redis::aio::ConnectionManager;
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use svc_action::capabilities::{
     CapabilityHandler, DbV2Wiring, DbWiring, InvokeScope, RelayQueue, StageCapabilities,
@@ -45,7 +45,7 @@ const VALKEY_IMAGE: &str = "valkey/valkey:8.1.10-alpine";
 const SUPERUSER_PASSWORD: &str = "postgres_test_superuser_pw";
 const RUNTIME_PASSWORD: &str = "waddles_bundle_runtime_test_pw";
 const RUNTIME_ROLE: &str = "waddles_bundle_runtime";
-const APP: &str = "waddles.cal.test";
+const APP: &str = "penguintechinc.waddles.cal-test";
 
 /// The relay queue is not exercised here; every method fails loudly if reached.
 struct UnusedQueue;
@@ -297,9 +297,9 @@ async fn action_stage_serves_db_v2_and_kv_v2_against_real_postgres_and_valkey() 
         .await
         .expect("runtime connect");
 
-    let kv_conn: MultiplexedConnection = redis::Client::open(valkey_url.as_str())
+    let kv_conn: ConnectionManager = redis::Client::open(valkey_url.as_str())
         .expect("valkey client")
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .expect("valkey connection");
     let kv_caps = bundle_host_kv::CapabilitySnapshot::new();
@@ -318,7 +318,7 @@ async fn action_stage_serves_db_v2_and_kv_v2_against_real_postgres_and_valkey() 
             capabilities: Arc::new(CapabilitySnapshot::new()),
         },
     };
-    let caps = StageCapabilities::<_, MultiplexedConnection>::new(
+    let caps = StageCapabilities::<_, ConnectionManager>::new(
         UnusedQueue,
         egress(),
         Arc::new(Mutex::new(UsageBatcher::new())),

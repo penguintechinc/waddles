@@ -63,6 +63,8 @@ Users can update (`PATCH /api/v1/cookie/preferences`) or withdraw (`DELETE /api/
 
 A `Sec-GPC: 1` (Global Privacy Control) request header is honoured server-side: it forces `doNotSell` on and `marketing` off regardless of the request body. A missing header is never read as consent. ("Do Not Track" is not a supported signal.)
 
+**Analytics suppression list.** A do-not-sell opt-out, a GPC signal, a marketing-consent withdrawal and an erasure also write the subject's uuid token and a reason code (no PII) into `data_use_exclusions`, in the **same transaction** as the consent/erasure change, so the analytics pipeline never processes an opted-out or erased subject; an explicit opt-back-in or marketing re-grant removes only its own reason (an erasure exclusion is never removed). A default-OFF reconciler (`waddles.analytics-exclusions-reconcile`) re-creates any missing row. See `docs/analytics-foundation.md`.
+
 ---
 
 ## Data Deletion (GDPR Article 17 — Right to Erasure)
@@ -118,13 +120,13 @@ Net: 94 of the 178 tables are erased (75 delete + 4 scrub-only + 15 core; 79 of 
 
 **Economy ledgers.** `economy_balances` and `economy_ledger` rows keyed to the subject's uuid are deleted. On the *other* side of a transfer, `economy_ledger.counterparty_uuid` is nulled, so a surviving row no longer names the erased user.
 
-**Bundle KV (Valkey).** Per-user bundle state lives under `bundlekv:{tenant}:{community}:{app_id}:data:{guest_key}`; a bundle that keeps per-user state puts the user's uuid token in `guest_key`. Erasure `SCAN`s that namespace for each of the subject's uuid tokens (dashed and hex spellings), `UNLINK`s every hit and lowers the app's live-key counter. State keyed by a free-form handle or name (not a uuid) cannot be located this way — a bundle that does so should key by uuid.
+**Bundle KV (Valkey).** Per-user bundle state lives on the dedicated `valkey-kv` instance (hub-api connects via `VALKEY_KV_URL`, `VALKEY_KV_USERNAME`, `VALKEY_KV_PASSWORD`; never the durable delivery Valkey in `VALKEY_URL`) under `bundlekv:{tenant}:{community}:{app_id}:data:{guest_key}`; a bundle that keeps per-user state puts the user's uuid token in `guest_key`. Erasure `SCAN`s that namespace for each of the subject's uuid tokens (dashed and hex spellings), `UNLINK`s every hit and lowers the app's live-key counter. State keyed by a free-form handle or name (not a uuid) cannot be located this way — a bundle that does so should key by uuid.
 
 **Uploaded objects (SeaweedFS/S3).** The avatar and banner the user uploaded (`avatars/…` in this deployment's bucket) are deleted; their URLs are read from the user's rows *before* those rows are erased. A platform-CDN avatar URL (Discord, Twitch, …) is not ours and is skipped.
 
 **SSO subject.** `sso_identities` (the IdP's stable `sub` / `NameID` for the person — PII on its own, sometimes an e-mail) is deleted. Its `ON DELETE CASCADE` from `hub_users` never fired because erasure anonymizes `hub_users` in place instead of deleting it; that is how the subject used to survive.
 
-**External stores fail loud.** Object and KV deletes run first and any failure aborts the whole erasure: the database transaction rolls back, a `failed` ledger row is written, and the retry re-runs everything (every operation is idempotent). Erasure never reports "completed" while leaving a user's upload or KV state behind. An environment with no Valkey configured (`VALKEY_URL`/`REDIS_URL` unset) has no bundle KV to erase; that is logged as a warning, not raised.
+**External stores fail loud.** Object and KV deletes run first and any failure aborts the whole erasure: the database transaction rolls back, a `failed` ledger row is written, and the retry re-runs everything (every operation is idempotent). Erasure never reports "completed" while leaving a user's upload or KV state behind. An erasure with no `VALKEY_KV_URL` configured raises (the erasure fails and rolls back) rather than skipping: `VALKEY_URL`/`REDIS_URL` are never a fallback, because the durable instance holds no bundle KV and a fallback would report success while leaving the data behind (regression test `test_erasure_kv_instance_valkey.py`).
 
 **Every tier.** Erasure is a statutory right: nothing in the registry, the executor or the entry point consults a tier, a license or a feature flag (pinned by `test_erasure_is_never_tier_or_flag_gated`).
 
@@ -259,30 +261,41 @@ Every deletion attempt is recorded in `data_deletion_requests`. This table store
 
 Superadmins can view `{ requested_at, completed_at, status }` at `GET /api/v1/superadmin/users/:userId/deletion-request` for support inquiries. No PII is returned.
 
-### Admin / Bulk DSAR Console (Enterprise)
+### DSAR Handling: Two Levels (Inbox in every tier, Bulk/Automation Enterprise)
 
-Self-service data-subject rights (`GET`/`DELETE /api/v1/user/me/data`, above) are available in **every** tier — statutory rights are never tier-gated, and that path is unchanged. On top of it, a **tenant admin** on an Enterprise plan can run the same operations for a *caller-supplied* user, singly or in bulk. Feature contract `compliance.bulk_dsar` (Enterprise, flag `waddles.compliance.bulk_dsar`); the gate is the two-gate entitlement check (PostHog flag **and** license tier) and **fails closed** — either gate off or unreachable is a `402`.
+Self-service data-subject rights (`GET`/`DELETE /api/v1/user/me/data`, above) are available in **every** tier — statutory rights are never tier-gated, and that path is unchanged, except that the self-service export (like the admin export) now emits each community-keyed row's `community_id` as the community's public UUID, never the numeric id (a deleted community maps to `null`). Admin-side handling is split in two:
+
+| Level | Tiers | What | Gate |
+|-------|-------|------|------|
+| **1 — DSAR inbox + single-subject actions** | Free, Professional, Enterprise | Requests are received (signed-in user, public form, admin-entered), stored with a statutory SLA clock, and admins act on them **manually** with the single-subject export / erase / do-not-sell below | none (statutory). Only the *rollout* of the new inbox UI/API is behind flag `waddles.dsar-inbox`; the manual actions never consult it |
+| **2 — Bulk + automation** | Enterprise | At-scale operations (`POST /bulk`) and, later, rule-based automation | `compliance.bulk_dsar` (flag `waddles.compliance.bulk_dsar` AND Enterprise license; **fails closed**, `402`) |
+
+The inbox (statutory deadlines, extension, public captcha + email-verified form, retention) is documented in [dsar-inbox.md](dsar-inbox.md). The routes below are the single-subject actions the inbox's `act` endpoint re-uses, plus the Enterprise bulk route.
 
 | Method | Path (under `/api/v1/tenant/<slug>/privacy`) | Action |
 |--------|----------------------------------------------|--------|
-| `GET` | `/users/<id>/export` | Access export (GDPR Art. 15/20) |
-| `POST` | `/users/<id>/erase` `{"confirm": true}` | Erasure — same anonymize-in-place core as self-service |
-| `PUT` | `/users/<id>/do-not-sell` | CCPA/CPRA Do-Not-Sell opt-out |
-| `POST` | `/bulk` `{"action", "userIds", "confirm"}` | Any of the three over many users |
+| `GET` | `/users/<uuid>/export` | Access export (GDPR Art. 15/20) |
+| `POST` | `/users/<uuid>/erase` `{"confirm": true}` | Erasure — same anonymize-in-place core as self-service |
+| `PUT` | `/users/<uuid>/do-not-sell` | CCPA/CPRA Do-Not-Sell opt-out |
+| `POST` | `/bulk` `{"action", "userIds", "confirm"}` | Any of the three over many users (**Enterprise only**, `402` otherwise) |
 
-Bulk requests return `200` with a per-user `status` (`completed`, `already_done`, `not_found`, `conflict`, `failed`, `audit_unavailable`) — one user's failure never aborts the rest. Erasure deletes the target's memberships, which are what proves a user belongs to the admin's tenant, so a *repeat* erase of an already-erased user returns `not_found` (never a second erasure and never an existence oracle). Caps per request: 100 users (25 for `export`, which returns data inline).
+The three single-subject routes work in **every tier**; only `/bulk` is gated.
+
+**Subjects are identified by UUID** (`hub_users.uuid`) in the path and in `userIds`; the numeric `hub_users.id` never crosses the API (sequential ids are enumerable — IDOR) and is not accepted. A malformed, unknown or other-tenant UUID gets the same `404` (bulk: the same per-item `not_found`), so the routes are no existence oracle. Responses carry the UUID as `userId`, and the export's `account` row exposes `public_id` instead of the numeric `id`.
+
+Bulk requests return `200` with a per-user `status` (`completed`, `already_done`, `partial`, `not_found`, `conflict`, `failed`, `audit_unavailable`) — one user's failure never aborts the rest. Erasure deletes the target's memberships, which are what proves a user belongs to the admin's tenant, so a *repeat* erase of an already-erased user returns `not_found` (never a second erasure and never an existence oracle). Caps per request: 100 users (25 for `export`, which returns data inline), applied to the raw list (duplicates count); request bodies over 16 KiB are refused with 413. `partial` (export only) means some data was returned but at least one source failed: `incomplete` lists each with the bounded reason code `source_unavailable`, `success` is `false`, and the request must not be treated as fulfilled. Export rows carry the community's public UUID in `community_id`, never the numeric id. Do-Not-Sell is the user's global preference: `already_done` means the user is already opted out (by their own choice, a GPC signal or an earlier admin action).
 
 **Guardrails** (all enforced in `hub_api/services/admin_data_privacy_service.py`):
 
-1. **Authz order** — tenant (from the JWT, never a request field) → `tenant:admin` scope → URL slug must equal the JWT tenant → Enterprise gate.
+1. **Authz order** — tenant (from the JWT, never a request field) → `tenant:admin` scope → URL slug must equal the JWT tenant → (bulk route only) Enterprise gate.
 2. **Tenant fence** — the target must belong to the admin's own tenant (an active `tenant_admins` row, or membership of a community owned by that tenant). Anything else is `404`, never `403`, so the console is not a cross-tenant user-existence oracle.
 3. **Tenant-scoped export** — message/watch activity and chat rows are limited to the admin's tenant's communities; another tenant's rows are never disclosed.
 4. **Erasure rails** — `hub_users` is one global identity row, so an erase is refused (`conflict`) if the target is also a tenant admin or non-global community member of *another* tenant, is a platform super-admin, or is the acting admin (use self-service). Global-community membership is tenant-neutral and does not block. Erasure additionally requires `confirm: true`.
 5. **Mandatory audit, fail-closed** — every attempt writes an `audit_log` row **before** any data is touched; if that write fails the action is not performed (`503`, `audit_unavailable`). Rows are PII-free.
 
-`audit_log` row shape: `user_id` = acting admin; `action` = `dsar.export` / `dsar.erase` / `dsar.do_not_sell`; `target_type` = `user`; `target_id` = target `hub_users.id`; `details` = `{tenant_id, tenant_slug, bulk_id, outcome, ...}` where `outcome` is `attempted` → `completed` / `already_done` / `failed`, or `denied_not_in_tenant` / `denied_self` / `denied_super_admin` / `denied_shared_identity` for refused attempts (also audited). Exports add per-source `row_counts`; failures add `error_type` only.
+`audit_log` row shape: `user_id` = acting admin; `action` = `dsar.export` / `dsar.erase` / `dsar.do_not_sell`; `target_type` = `user`; `target_id` = target `hub_users.uuid` (the UUID as supplied for an unresolved target); `details` = `{tenant_id, tenant_slug, bulk_id, outcome, ...}` where `outcome` is `attempted` → `completed` / `already_done` / `failed`, or `denied_not_in_tenant` / `denied_unknown_user` / `denied_invalid_id` / `denied_self` / `denied_super_admin` / `denied_shared_identity` for refused attempts (also audited). Exports add per-source `row_counts`; failures add `error_type` only.
 
-**Do-Not-Sell** is stored where the opt-out already lives, `cookie_consent.preferences.doNotSell`, and is **one-way** (opt-out only, forces `marketing` off; mirrored into the subject-visible `cookie_audit_log` as `ADMIN_DO_NOT_SELL`). Withdrawing an opt-out is the subject's own consent decision. A user with no consent record gets a new privacy-maximal one (`consent_method = admin_dsar`). The opt-out is durable: later self-service consent writes merge key-by-key and never drop `doNotSell`.
+**Do-Not-Sell** is a **global per-user preference**, not a tenant setting: the admin action writes `doNotSell=true` (and `marketing=false`) into the user's own `cookie_consent.preferences` — the same record the cookie banner, self-service controls and GPC use — mirrored into the subject-visible `cookie_audit_log` as `ADMIN_DO_NOT_SELL`; a user with no consent record gets a new privacy-maximal one (`consent_method=admin_dsar`). The action is **opt-out only**: an admin can never opt a user back in, and re-applying is idempotent (`already_done`). A tenant admin can only act on users inside its own tenant (uniform `404` otherwise). The **subject stays in control**: they can withdraw the opt-out at any time with an explicit `doNotSell=false` through `PATCH /api/v1/cookie/preferences` (or the consent save route); an update that omits `doNotSell` keeps it, and a later admin re-apply sets it again. The user's global `doNotSell` state is part of the admin export (`cookie_consent`); nothing from another tenant is. Erasure retains the consent record and its audit log (Art. 5(2), `ERASURE_RETAINED_TABLES`). **Not yet enforced:** nothing in the backend currently gates a data-sale or sharing decision on this flag; any future sale/sharing/third-party-analytics decision must read the user's global preference.
 
 ---
 

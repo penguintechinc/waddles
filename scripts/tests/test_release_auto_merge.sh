@@ -59,8 +59,8 @@ expect() {
 echo "step timed out after 10 minutes" > "$SCRATCH/log-11"; echo "apt attempt 3 failed after 60s" > "$SCRATCH/log-12"
 echo "error[E0308]: mismatched types" > "$SCRATCH/log-13"
 
-mk "$H" "[$GATE_OK]";                                  expect "green unpinned: warn + full-sha merge" "would merge via release-merge.sh --expect-head $H" 5
-mk "$H" "[$GATE_OK]";                                  expect "green pinned matches" "would merge via release-merge.sh --expect-head $H" "5@$H"
+mk "$H" "[$GATE_OK]";                                  expect "green unpinned: warn + full-sha merge" "would merge via release-merge.sh pinned to $H" 5
+mk "$H" "[$GATE_OK]";                                  expect "green pinned matches" "would merge via release-merge.sh pinned to $H" "5@$H"
 mk "$OTHER" "[$GATE_OK]";                              expect "pinned head drift: skip" "head changed, needs human" "5@$H"
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 11)]";              expect "timeout job -> rerun" "would rerun --failed \(all failed jobs" 5
 mk "$H" "[$GATE_BAD,$(fail_chk a 7 12)]";              expect "apt attempt job -> rerun" "would rerun --failed \(all failed jobs" 5

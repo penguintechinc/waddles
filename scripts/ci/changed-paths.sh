@@ -207,7 +207,8 @@ while IFS= read -r -d '' f; do
   case "${f}" in
     *.py|*.pyi|*requirements*.txt|*requirements*.in|*constraints*.txt|*pyproject.toml|*setup.cfg|\
     *Pipfile|*Pipfile.lock|*poetry.lock|*uv.lock|alembic/*|alembic.ini|bundles/python/*|hub_api/*|libs/*|openapi/*|\
-    .flake8|.coveragerc|.bandit|.bandit.yaml)
+    .flake8|.coveragerc|.bandit|.bandit.yaml|\
+    scripts/tests/*|scripts/ops/*|scripts/*release*|Makefile)
       HIT[python]=true ;;
   esac
 
@@ -227,7 +228,9 @@ while IFS= read -r -d '' f; do
 
   # --- Helm / k8s -------------------------------------------------------------
   case "${f}" in
-    k8s/*|*/Chart.yaml|*/values*.yaml|*/templates/*|docker-compose*.yml)
+    k8s/*|*/Chart.yaml|*/values*.yaml|*/templates/*|docker-compose*.yml|\
+    scripts/check_wait_for_hub_api.py|scripts/check_helm_hook_phases.py|\
+    scripts/ci/audit-chart-values/*|scripts/ci/check-bundle-bucket-wiring.py)
       HIT[helm]=true ;;
   esac
 

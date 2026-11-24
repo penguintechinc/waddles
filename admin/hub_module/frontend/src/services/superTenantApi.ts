@@ -16,7 +16,7 @@ import { apiClient } from '../lib/apiClient';
  * deactivation for it).
  */
 export interface TenantDTO {
-  id: number;
+  id: string;
   slug: string;
   displayName: string;
   description: string | null;
@@ -58,7 +58,7 @@ export interface CreateTenantPayload {
 }
 
 export interface CreatedTenantDTO {
-  id: number;
+  id: string;
   slug: string;
   displayName: string;
   createdAt: string | null;
@@ -89,8 +89,8 @@ export const superTenantApi = {
     apiClient.get<ListTenantsResponse>('/api/v1/superadmin/tenants', { params }),
   create: (data: CreateTenantPayload) =>
     apiClient.post<CreateTenantResponse>('/api/v1/superadmin/tenants', data),
-  update: (id: number, data: UpdateTenantPayload) =>
+  update: (id: string, data: UpdateTenantPayload) =>
     apiClient.put<MessageResponse>(`/api/v1/superadmin/tenants/${id}`, data),
-  deactivate: (id: number) =>
+  deactivate: (id: string) =>
     apiClient.delete<MessageResponse>(`/api/v1/superadmin/tenants/${id}`),
 };

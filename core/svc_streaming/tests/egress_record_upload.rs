@@ -10,7 +10,7 @@
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use object_store::memory::InMemory;
 use object_store::path::Path as StorePath;
@@ -41,6 +41,26 @@ async fn write_segment(dir: &std::path::Path, name: &str, size_bytes: usize) {
         .expect("write fake segment file");
 }
 
+/// Polls until `sink` has indexed at least `expected` segments for
+/// `community`, or fails after a bounded deadline. The watcher records a
+/// segment in the index only after the upload and the local delete both
+/// finished, so this is the deterministic completion signal -- a fixed sleep
+/// races the watcher's poll cycle under CPU contention (e.g. `cargo llvm-cov`).
+async fn wait_for_indexed(sink: &RecordSink, community: &str, expected: usize) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let indexed = sink.index().list(community).len();
+        if indexed >= expected {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "timed out after 10s waiting for {expected} indexed segments, saw {indexed}"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn closed_segments_are_uploaded_deleted_locally_and_indexed_then_the_final_segment_uploads_on_stop(
 ) {
@@ -68,14 +88,14 @@ async fn closed_segments_are_uploaded_deleted_locally_and_indexed_then_the_final
     .expect("start must succeed");
 
     // ffmpeg's segment muxer: a new file only appears once the previous one
-    // is finalized -- write three segments in sequence, giving the watcher
-    // time to observe each transition.
+    // is finalized. Writing the next file is what closes the previous one,
+    // so wait for the watcher's completion signal (index entry) before
+    // moving on rather than sleeping a fixed time.
     write_segment(&dir, "20260911120000.ts", 1024).await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
     write_segment(&dir, "20260911120100.ts", 2048).await;
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    wait_for_indexed(&sink, "community-1", 1).await;
     write_segment(&dir, "20260911120200.ts", 4096).await;
-    tokio::time::sleep(Duration::from_millis(120)).await;
+    wait_for_indexed(&sink, "community-1", 2).await;
 
     // Only the first two are closed (a third, still-open file exists) --
     // both must already be uploaded, deleted locally, and indexed.

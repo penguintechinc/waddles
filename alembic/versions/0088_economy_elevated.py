@@ -53,6 +53,16 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     """Drop the audit table and restore the 0071 kind CHECK (fails if new-kind rows exist)."""
+    # Revoke the column-scoped SELECT the upgrade granted the economy runtime role on the grants
+    # table. Dropping `grant_id` removes only that column's privilege; the rest would linger and
+    # make the later `DROP ROLE waddles_economy_runtime` (0051 downgrade) fail with
+    # DependentObjectsStillExist.
+    op.execute(
+        "DO $$ BEGIN IF to_regclass('community_permission_grants') IS NOT NULL "
+        "AND EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'waddles_economy_runtime') THEN "
+        "REVOKE ALL ON community_permission_grants FROM waddles_economy_runtime; "
+        "END IF; END $$"
+    )
     op.execute("DROP TABLE IF EXISTS economy_elevated_audit")
     op.execute(
         "DO $$ BEGIN IF to_regclass('community_permission_grants') IS NOT NULL THEN "

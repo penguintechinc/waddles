@@ -26,7 +26,7 @@ use svc_process::ai::{AiWiring, OllamaBackend, OllamaConfig};
 use svc_process::capabilities::{CapabilityHandler, HttpEgressCatalog, StageCapabilities};
 use svc_process::license::FeatureGate;
 
-const APP_ID: &str = "waddles.ai.e2e";
+const APP_ID: &str = "penguintechinc.waddles.fixture-ai-e2e";
 /// A prompt secret that must appear in NO label, metric line or log-bound string.
 const SECRET_PROMPT_WORD: &str = "zebrafish-tango-7731";
 
@@ -128,7 +128,7 @@ fn caps(base: &str) -> StageCapabilities {
         request_timeout: Duration::from_secs(6),
     })
     .expect("loopback is a valid self-hosted endpoint");
-    StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+    StageCapabilities::<redis::aio::ConnectionManager>::new(
         "acme".to_string(),
         Some("main".to_string()),
         APP_ID.to_string(),

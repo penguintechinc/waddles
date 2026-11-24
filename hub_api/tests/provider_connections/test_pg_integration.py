@@ -57,6 +57,7 @@ from tests.provider_connections.conftest import (  # noqa: E402
 from tests.provider_connections.fake_twitch import (  # noqa: E402
     APP_CLIENT_ID,
     APP_CLIENT_SECRET,
+    FakeAccount,
     FakeTwitch,
 )
 
@@ -94,6 +95,8 @@ class Ids:
         """Hold the ids."""
         self.tenant, self.community, self.second = tenant, community, second
         self.other_tenant, self.other_community = other_tenant, other_comm
+        #: Hub user who OAuth-linked the Twitch AND Kick accounts owning both test channels.
+        self.owner = 0
 
 
 @pytest.fixture
@@ -111,7 +114,19 @@ def ids(pg_db: PgTestDatabase) -> Ids:
     c1 = _sql(pg_db, insert, (f"pc-a1-{suffix}", t1))[0][0]
     c2 = _sql(pg_db, insert, (f"pc-a2-{suffix}", t1))[0][0]
     c3 = _sql(pg_db, insert, (f"pc-b1-{suffix}", t2))[0][0]
-    return Ids(t1, c1, c2, t2, c3)
+    out = Ids(t1, c1, c2, t2, c3)
+    out.owner = _sql(
+        pg_db, "INSERT INTO hub_users (username) VALUES (%s) RETURNING id", (f"pc-owner-{suffix}",)
+    )[0][0]
+    for platform in ("twitch", "kick"):
+        for channel_id in (CHANNEL_ID, "7002"):
+            _sql(
+                pg_db,
+                "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "
+                "VALUES (%s, %s, %s)",
+                (out.owner, platform, channel_id),
+            )
+    return out
 
 
 @pytest.fixture
@@ -167,7 +182,7 @@ async def _create(
     params: dict[str, Any] = {
         "tenant_id": ids.tenant,
         "community_id": ids.community,
-        "actor_user_id": None,
+        "actor_user_id": ids.owner,
         "provider": "twitch",
         "access_token": tokens[0],
         "refresh_token": tokens[1],
@@ -238,7 +253,7 @@ class TestLifecycleOnPostgres:
         updated = await service.update(
             tenant_id=ids.tenant,
             community_id=ids.community,
-            actor_user_id=None,
+            actor_user_id=ids.owner,
             connection_id=cid,
             enabled=False,
             metadata=None,
@@ -249,7 +264,7 @@ class TestLifecycleOnPostgres:
         retarget = await service.update(
             tenant_id=ids.tenant,
             community_id=ids.community,
-            actor_user_id=None,
+            actor_user_id=ids.owner,
             connection_id=cid,
             enabled=None,
             metadata={"channel_login": OTHER_CHANNEL_LOGIN},
@@ -297,7 +312,11 @@ class TestLifecycleOnPostgres:
         pg_db: PgTestDatabase,
     ) -> None:
         with pytest.raises(ConnectionConflict, match="could not be stored"):
-            await _create(service, ids, slow_twitch.mint(account=BOT), actor_user_id=987654321)
+            # The broadcaster's own token proves ownership, so the bogus installer reaches the FK.
+            broadcaster = FakeAccount(user_id=CHANNEL_ID, login=CHANNEL_LOGIN)
+            await _create(
+                service, ids, slow_twitch.mint(account=broadcaster), actor_user_id=987654321
+            )
         assert _sql(
             pg_db, "SELECT count(*) FROM platform_connections WHERE tenant_id=%s", (ids.tenant,)
         ) == [(0,)]  # the half-written link was rolled back with its grant
@@ -404,7 +423,7 @@ class TestBindingFeedOnPostgres:
         await service.update(
             tenant_id=ids.tenant,
             community_id=ids.community,
-            actor_user_id=None,
+            actor_user_id=ids.owner,
             connection_id=link,
             enabled=None,
             metadata=None,

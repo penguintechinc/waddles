@@ -41,17 +41,25 @@ own docstring, not repeated here.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass
 from typing import Any, cast
 
-from flask_core.tenancy import tenant_middleware
+from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, Response, current_app, jsonify, request
 
 from services import github_sync_service as svc
-from services.community_authz import require_community_admin, require_valid_community_id
+from services.community_authz import (
+    community_belongs_to_tenant,
+    require_community_admin,
+    require_valid_community_id,
+)
+from services.community_public_id import lookup_public_ids
 from services.current_user import get_current_user_id
-from services.errors import ApiError, bad_request
-from services.schema import bind_github_sync_tables
+from services.errors import ApiError, bad_request, not_found
+from services.scope_registry import SCOPE_GITHUB_MANAGE
+
+logger = logging.getLogger(__name__)
 
 github_sync_webhook_bp = Blueprint(
     "v1_github_sync_webhook", __name__, url_prefix="/api/v1/github-sync"
@@ -77,8 +85,18 @@ async def _guard(raw_community_id: str) -> int | tuple[dict[str, object], int]:
     try:
         community_id = require_valid_community_id(raw_community_id)
         async_dal, dal = _dal()
-        await require_community_admin(async_dal, dal, request, community_id=community_id)
+        # SECURITY: the URL community must belong to the caller's own tenant. A foreign
+        # tenant's community is a 404 (never 403) so its existence is not confirmed.
+        ctx = get_tenant_context(request)
+        if ctx is None or not await community_belongs_to_tenant(
+            async_dal, dal, community_id=community_id, tenant_id=ctx.tenant_id
+        ):
+            raise not_found("Community not found")
+        await require_community_admin(
+            async_dal, dal, request, community_id=community_id, scope=SCOPE_GITHUB_MANAGE
+        )
     except ApiError as exc:
+        logger.debug("handled %s in github_sync: %s", type(exc).__name__, exc)
         return _err(exc)
     return community_id
 
@@ -153,7 +171,7 @@ async def receive_webhook() -> tuple[dict[str, object], int] | tuple[Response, i
 # ---------------------------------------------------------------------------
 
 
-@github_sync_admin_bp.route("/<community_id>/github-sync/connections", methods=["GET"])
+@github_sync_admin_bp.route("/<cuuid:community_id>/github-sync/connections", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 async def list_connections(community_id: str) -> tuple[dict[str, object], int]:
     """List connections."""
@@ -162,10 +180,16 @@ async def list_connections(community_id: str) -> tuple[dict[str, object], int]:
         return guard
     async_dal, dal = _dal()
     connections = await svc.get_repo_connections(async_dal, dal, community_id=guard)
-    return {"status": "success", "data": [_connection_dict(c) for c in connections]}, 200
+    public_ids = await lookup_public_ids(
+        c.community_id for c in connections if c.community_id is not None
+    )
+    return {
+        "status": "success",
+        "data": [_connection_dict(c, public_ids) for c in connections],
+    }, 200
 
 
-@github_sync_admin_bp.route("/<community_id>/github-sync/connections", methods=["POST"])
+@github_sync_admin_bp.route("/<cuuid:community_id>/github-sync/connections", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 async def create_connection(
     community_id: str,
@@ -193,11 +217,14 @@ async def create_connection(
         )
     except ApiError as exc:
         return _err(exc)
-    return _ok({"status": "success", "data": _connection_created_dict(connection)}, 201)
+    public_ids = await lookup_public_ids(
+        [] if connection.community_id is None else [connection.community_id]
+    )
+    return _ok({"status": "success", "data": _connection_created_dict(connection, public_ids)}, 201)
 
 
 @github_sync_admin_bp.route(
-    "/<community_id>/github-sync/connections/<connection_id>", methods=["DELETE"]
+    "/<cuuid:community_id>/github-sync/connections/<connection_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 async def delete_connection(
@@ -229,7 +256,7 @@ async def delete_connection(
 
 
 @github_sync_admin_bp.route(
-    "/<community_id>/github-sync/ticket/<ticket_id>/sync-status", methods=["GET"]
+    "/<cuuid:community_id>/github-sync/ticket/<ticket_id>/sync-status", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, object], int]:
@@ -243,37 +270,17 @@ async def get_sync_status(community_id: str, ticket_id: str) -> tuple[dict[str, 
         return _err(bad_request("Invalid ticket ID"))
 
     async_dal, dal = _dal()
-    bind_github_sync_tables(dal)
-    rows = await async_dal.select_async(
-        dal(dal.ticket_github_sync.ticket_id == tid),
-        dal.ticket_github_sync.ALL,
-        dal.github_repo_connections.ALL,
-        left=dal.github_repo_connections.on(
-            dal.ticket_github_sync.github_repo_connection_id == dal.github_repo_connections.id
-        ),
-        orderby=~dal.ticket_github_sync.created_at,
-    )
-    data = [
-        {
-            "id": r.ticket_github_sync.id,
-            "ticket_id": r.ticket_github_sync.ticket_id,
-            "github_issue_number": r.ticket_github_sync.github_issue_number,
-            "github_issue_node_id": r.ticket_github_sync.github_issue_node_id,
-            "sync_status": r.ticket_github_sync.sync_status,
-            "last_synced_at": r.ticket_github_sync.last_synced_at,
-            "last_error": r.ticket_github_sync.last_error,
-            "retry_count": r.ticket_github_sync.retry_count,
-            "created_at": r.ticket_github_sync.created_at,
-            "repo_owner": r.github_repo_connections.repo_owner,
-            "repo_name": r.github_repo_connections.repo_name,
-            "sync_mode": r.github_repo_connections.sync_mode,
-        }
-        for r in rows
-    ]
+    try:
+        data = await svc.get_ticket_sync_status(async_dal, dal, ticket_id=tid, community_id=guard)
+    except ApiError as exc:
+        logger.debug("handled %s in github_sync: %s", type(exc).__name__, exc.code)
+        return _err(exc)
     return {"status": "success", "data": data}, 200
 
 
-@github_sync_admin_bp.route("/<community_id>/github-sync/ticket/<ticket_id>/sync", methods=["POST"])
+@github_sync_admin_bp.route(
+    "/<cuuid:community_id>/github-sync/ticket/<ticket_id>/sync", methods=["POST"]
+)
 @tenant_middleware  # type: ignore[misc]
 async def trigger_sync(
     community_id: str, ticket_id: str
@@ -299,9 +306,14 @@ async def trigger_sync(
     async_dal, dal = _dal()
     try:
         record = await svc.sync_ticket_to_github(
-            async_dal, dal, ticket_id=tid, repo_connection_id=repo_connection_id
+            async_dal,
+            dal,
+            ticket_id=tid,
+            repo_connection_id=repo_connection_id,
+            community_id=guard,
         )
     except ApiError as exc:
+        logger.debug("handled %s in github_sync: %s", type(exc).__name__, exc.code)
         return _err(exc)
     return _ok(
         {
@@ -328,7 +340,7 @@ class RepoConnectionDTO:
     """
 
     id: int
-    community_id: int | None
+    community_id: str | None
     vendor_id: int | None
     module_id: int | None
     repo_owner: str
@@ -343,19 +355,24 @@ class RepoConnectionDTO:
     token_masked: str
 
 
-def _connection_created_dict(c: svc.RepoConnection) -> dict[str, object]:
+def _connection_created_dict(
+    c: svc.RepoConnection, public_ids: dict[int, str]
+) -> dict[str, object]:
     """Shape a freshly created connection, revealing `webhook_secret` once (never re-served)."""
-    body = _connection_dict(c)
+    body = _connection_dict(c, public_ids)
     body["webhook_secret"] = c.webhook_secret
     return body
 
 
-def _connection_dict(c: svc.RepoConnection) -> dict[str, object]:
-    """Shape a `RepoConnection` via `RepoConnectionDTO` (no raw token)."""
+def _connection_dict(c: svc.RepoConnection, public_ids: dict[int, str]) -> dict[str, object]:
+    """Shape a `RepoConnection` via `RepoConnectionDTO` (no raw token).
+
+    `community_id` is the community's PUBLIC UUID (from the batched `public_ids` map).
+    """
     return asdict(
         RepoConnectionDTO(
             id=c.id,
-            community_id=c.community_id,
+            community_id=None if c.community_id is None else public_ids[c.community_id],
             vendor_id=c.vendor_id,
             module_id=c.module_id,
             repo_owner=c.repo_owner,

@@ -65,8 +65,9 @@ pub use permission::{
 };
 pub use quota::{InMemoryQuotaLedger, QuotaDenial, QuotaLedger};
 pub use resource::{
-    AppScopedResource, AuthorizedCall, EconomyTarget, ReputationTarget, ResolvedResource,
-    ResourceRef, ScopeKind,
+    bundle_storage_key, is_core_namespace, is_valid_app_id, AppScopedResource, AuthorizedCall,
+    EconomyTarget, ReputationTarget, ResolvedResource, ResourceRef, ScopeKind, APP_ID_MAX_LEN,
+    CORE_NAMESPACE_PREFIX,
 };
 pub use scope::{
     GrantScopeKey, HostInvokeScopeBuilder, InvokeScope, InvokeScopeBuildError, TenantTier,

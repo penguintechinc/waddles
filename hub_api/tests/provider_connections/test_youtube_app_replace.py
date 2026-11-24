@@ -12,11 +12,13 @@ import logging
 from typing import Any
 
 import pytest
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.service_jwt import ServiceJwtIssuer
 
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import admin_headers
 from tests.provider_connections.fake_google import APP_CLIENT_ID, FakeGoogle
-from tests.provider_connections.support import raw_rows, set_column
+from tests.provider_connections.support import numeric_connection_id, raw_rows, set_column
 from tests.provider_connections.test_api import _bound
 from tests.provider_connections.test_youtube_flow import (
     INTERNAL,
@@ -106,13 +108,17 @@ async def test_a_tenant_admin_replace_expires_the_old_connections_and_drops_thei
     resolved = await yt_client.post(
         f"{INTERNAL}/communities/{yt_db.seed.community_id}/provider-connections/"
         f"{connection_id}/resolve",
-        headers=_bound(service_issuer, yt_db.seed.community_id, connection_id),
+        headers=_bound(
+            service_issuer,
+            yt_db.seed.community_id,
+            await numeric_connection_id(yt_db, connection_id),
+        ),
     )
     assert resolved.status_code == 409
     assert (await resolved.get_json())["reason"] == "app_replaced"
 
     listed = await yt_client.get(
-        f"/api/v1/communities/{yt_db.seed.community_id}/provider-connections",
+        f"/api/v1/communities/{public_id(yt_db, yt_db.seed.community_id)}/provider-connections",
         headers=admin_headers(yt_db),
     )
     (view,) = (await listed.get_json())["connections"]
@@ -156,7 +162,7 @@ async def test_first_write_and_same_client_rotation_need_no_confirmation(
 
 async def test_the_global_tenant_can_never_replace(yt_client: Any, yt_db: Any) -> None:
     headers = admin_headers(
-        yt_db, scope="tenant:admin", tenant="global", user_id=yt_db.global_admin_id
+        yt_db, scope="tenant:admin", tenant=DEFAULT_TENANT_SLUG, user_id=yt_db.global_admin_id
     )
     response = await _put(yt_client, headers, {**NEW_APP, "replace": True})
     assert response.status_code == 422

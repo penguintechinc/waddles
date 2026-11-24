@@ -113,7 +113,7 @@ impl AuditSink for DbAuditSink {
         community_id: Option<i32>,
         app_id: &'a str,
         record: &'a DispatchRecord,
-        envelope_ts: Option<chrono::DateTime<chrono::FixedOffset>>,
+        envelope_ts: Option<time::OffsetDateTime>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
         Box::pin(async move {
             if let Err(err) = crate::db::entities::action_dispatch_log::insert(
@@ -230,14 +230,14 @@ mod tests {
                 id: 1,
                 tenant_id: 1,
                 community_id: Some(2),
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 target_type: "irc_relay".to_string(),
                 status: "success".to_string(),
                 attempt: 1,
                 http_status: None,
                 detail: "ok".to_string(),
                 envelope_ts: None,
-                dispatched_at: chrono::Utc::now().into(),
+                dispatched_at: time::OffsetDateTime::now_utc(),
             }]])
             .into_connection();
         let sink = DbAuditSink::new(db);
@@ -248,8 +248,14 @@ mod tests {
             http_status: None,
             detail: "ok".to_string(),
         };
-        sink.record(1, Some(2), "waddles.bot.commands.default", &record, None)
-            .await;
+        sink.record(
+            1,
+            Some(2),
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            &record,
+            None,
+        )
+        .await;
     }
 
     #[tokio::test]
@@ -266,7 +272,13 @@ mod tests {
             detail: "bad".to_string(),
         };
         // Must not panic even though the insert fails.
-        sink.record(1, None, "waddles.bot.commands.default", &record, None)
-            .await;
+        sink.record(
+            1,
+            None,
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            &record,
+            None,
+        )
+        .await;
     }
 }

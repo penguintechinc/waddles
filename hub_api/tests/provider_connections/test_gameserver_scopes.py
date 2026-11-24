@@ -24,6 +24,7 @@ from blueprints.v1.gameserver_connections import gameserver_connections_bp
 from blueprints.v1.provider_connections import SERVICE_CONFIG_KEY
 from services.provider_connections import PlatformKeyVault, ProviderConnectionService
 from services.provider_connections.gameserver import GameServerAdapter
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import (
     SERVICE_AUDIENCE,
     FakeClock,
@@ -74,7 +75,7 @@ async def test_gameserver_scoped_credential_reaches_gameserver_rows_only(
     # Data-plane reads go over real gRPC (the REST internal routes were retired).
     client = GrpcRoutingClient(mixed_app.test_client())
     community = pc_db.seed.community_id
-    base = f"/api/v1/communities/{community}/gameserver-connections"
+    base = f"/api/v1/communities/{public_id(pc_db, community)}/gameserver-connections"
     body = {"host": HOST, "port": 27015, "rconPassword": PASSWORD, "game": "source"}
     created = await client.post(base, headers=admin_headers(pc_db), data=json.dumps(body))
     assert created.status_code == 201

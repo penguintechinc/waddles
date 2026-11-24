@@ -3,7 +3,7 @@
 Spec: `docs/superpowers/specs/2026-11-06-harness-media-generation.md` (PR3).
 
 * `media_byok_admin_bp` (`/api/v1/admin/<community_id>/media/byok-keys`) -- set/rotate, status,
-  delete. Community-admin only (`require_community_admin`, tenant-bound), Professional-or-higher
+  delete. Community-admin only (`require_community_admin`, tenant-bound), Premium-community
   required to SET (a downgraded community can still delete). The key is never returned: responses
   carry `key_last4` only. Audited by the HTTP audit hook (`audit_events._INLINE_AUTHZ_GROUPS`).
 
@@ -28,6 +28,7 @@ from services import media_byok_service as media
 from services.community_access import require_community_admin
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.scope_registry import SCOPE_BYOK_MANAGE
 
 logger = logging.getLogger(__name__)
 
@@ -104,12 +105,18 @@ async def _require_admin(community_id: int) -> tuple[int, int]:
     async_dal, dal = _dal()
     user_id = get_current_user_id(request)
     await require_community_admin(
-        async_dal, dal, request, ctx, community_id=community_id, user_id=user_id
+        async_dal,
+        dal,
+        request,
+        ctx,
+        community_id=community_id,
+        user_id=user_id,
+        scope=SCOPE_BYOK_MANAGE,
     )
     return int(ctx.tenant_id), user_id
 
 
-@media_byok_admin_bp.route("/<int:community_id>/media/byok-keys", methods=["GET"])
+@media_byok_admin_bp.route("/<cuuid:community_id>/media/byok-keys", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MediaByokStatusResponse)
 async def get_media_byok_status(
@@ -132,14 +139,14 @@ async def get_media_byok_status(
     )
 
 
-@media_byok_admin_bp.route("/<int:community_id>/media/byok-keys", methods=["PUT"])
+@media_byok_admin_bp.route("/<cuuid:community_id>/media/byok-keys", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(SetMediaByokRequest)
 @validate_response(MediaByokKeyDTO)
 async def set_media_byok_key(
     data: SetMediaByokRequest, community_id: int
 ) -> MediaByokKeyDTO | tuple[dict[str, object], int]:
-    """`PUT .../media/byok-keys` -- Professional+ required; validated against Gemini first.
+    """`PUT .../media/byok-keys` -- Premium community required; validated against Gemini first.
 
     Never logs or echoes `data.api_key`; the response is the masked record.
     """
@@ -161,7 +168,7 @@ async def set_media_byok_key(
     return _key_dto(info)
 
 
-@media_byok_admin_bp.route("/<int:community_id>/media/byok-keys/<provider>", methods=["DELETE"])
+@media_byok_admin_bp.route("/<cuuid:community_id>/media/byok-keys/<provider>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MediaMessageResponse)
 async def delete_media_byok_key(

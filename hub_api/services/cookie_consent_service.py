@@ -41,6 +41,7 @@ from uuid import uuid4
 
 from quart import Request
 
+from services import analytics_exclusions_service as exclusions
 from services.audit_service import report_write_failure
 from services.errors import not_found
 
@@ -178,6 +179,7 @@ async def save_consent(
     ip_address: str | None,
     user_agent: str | None,
     version: str,
+    gpc_applied: bool = False,
 ) -> ConsentRecord:
     """Insert-or-update the consent record for `consent_id` (a fresh UUID if absent).
 
@@ -193,26 +195,42 @@ async def save_consent(
 
     existing = await async_dal.select_async(dal(dal.cookie_consent.consent_id == final_consent_id))
     if existing:
-        await async_dal.update_async(
-            dal.cookie_consent.consent_id == final_consent_id,
-            user_id=user_id,
-            preferences=merge_preferences(dict(existing[0].preferences or {}), preferences),
-            updated_at=now,
-        )
+        previous = dict(existing[0].preferences or {})
+        merged = merge_preferences(previous, preferences)
+
+        def _write(d: Any) -> None:
+            d(d.cookie_consent.consent_id == final_consent_id).update(
+                user_id=user_id, preferences=merged, updated_at=now
+            )
     else:
-        await async_dal.insert_async(
-            dal.cookie_consent,
-            user_id=user_id,
-            consent_id=final_consent_id,
-            preferences=merge_preferences(default_preferences(), preferences),
-            consent_version=version,
-            consent_method=consent_method,
-            ip_address=ip_address,
-            user_agent=user_agent,
-            consented_at=now,
-            updated_at=now,
-            expires_at=expires_at,
-        )
+        previous = None
+        merged = merge_preferences(default_preferences(), preferences)
+
+        def _write(d: Any) -> None:
+            d.cookie_consent.insert(
+                user_id=user_id,
+                consent_id=final_consent_id,
+                preferences=merged,
+                consent_version=version,
+                consent_method=consent_method,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                consented_at=now,
+                updated_at=now,
+                expires_at=expires_at,
+            )
+
+    # Consent write + analytics exclusion in ONE transaction (no window where the opt-out is
+    # stored but the subject is still analysed; a rollback leaves neither).
+    await exclusions.apply_consent_change(
+        async_dal,
+        dal,
+        user_id=user_id,
+        write=_write,
+        previous=previous,
+        merged=merged,
+        gpc_applied=gpc_applied,
+    )
 
     await log_audit_event(
         async_dal,
@@ -239,7 +257,12 @@ async def save_consent(
 
 
 async def update_preferences(
-    async_dal: Any, dal: Any, *, user_id: int, preferences: dict[str, Any]
+    async_dal: Any,
+    dal: Any,
+    *,
+    user_id: int,
+    preferences: dict[str, Any],
+    gpc_applied: bool = False,
 ) -> ConsentRecord:
     """Update specific consent categories for the authenticated user (own record only).
 
@@ -267,8 +290,17 @@ async def update_preferences(
     version = row.consent_version
     now = datetime.now(UTC)
 
-    await async_dal.update_async(
-        dal.cookie_consent.user_id == user_id, preferences=merged, updated_at=now
+    def _write(d: Any) -> None:
+        d(d.cookie_consent.user_id == user_id).update(preferences=merged, updated_at=now)
+
+    await exclusions.apply_consent_change(
+        async_dal,
+        dal,
+        user_id=user_id,
+        write=_write,
+        previous=previous,
+        merged=merged,
+        gpc_applied=gpc_applied,
     )
 
     for category in _AUDIT_CATEGORIES:
@@ -317,13 +349,24 @@ async def revoke_consent(async_dal: Any, dal: Any, *, user_id: int) -> ConsentRe
     consent_id = existing[0].consent_id
     version = existing[0].consent_version
     now = datetime.now(UTC)
+    previous = dict(existing[0].preferences or {})
     revoked_preferences = merge_preferences(
-        dict(existing[0].preferences or {}),
+        previous,
         {"necessary": True, "functional": False, "analytics": False, "marketing": False},
     )
 
-    await async_dal.update_async(
-        dal.cookie_consent.user_id == user_id, preferences=revoked_preferences, updated_at=now
+    def _write(d: Any) -> None:
+        d(d.cookie_consent.user_id == user_id).update(
+            preferences=revoked_preferences, updated_at=now
+        )
+
+    await exclusions.apply_consent_change(
+        async_dal,
+        dal,
+        user_id=user_id,
+        write=_write,
+        previous=previous,
+        merged=revoked_preferences,
     )
     await log_audit_event(
         async_dal, dal, consent_id=consent_id, user_id=user_id, action="REVOKE", version=version

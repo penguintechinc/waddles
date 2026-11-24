@@ -46,6 +46,11 @@ token_refresh_counter = _meter.create_counter(
     "waddles_provider_connection_token_refresh_total",
     description="Token refreshes by provider and outcome (refreshed, rejected, unavailable...).",
 )
+ownership_counter = _meter.create_counter(
+    "waddles_provider_connection_ownership_total",
+    description="Channel-ownership proofs at bind time by provider and outcome "
+    "(token_owner, linked_account, rejected, live_chat_rejected).",
+)
 dataplane_list_size = _meter.create_histogram(
     "waddles_provider_connection_dataplane_list_size",
     description="Number of bindings returned to the data plane per list call, by provider.",

@@ -45,7 +45,7 @@ pub const SLOW_BUCKETS_S: [f64; 13] = [
 
 /// Every instrument name this module registers -- asserted against emitted
 /// data in tests and mirrored in `docs/observability/data-plane-metrics.md`.
-pub const METRIC_NAMES: [&str; 21] = [
+pub const METRIC_NAMES: [&str; 29] = [
     "waddles_executor_load_seconds",
     "waddles_executor_loads_total",
     "waddles_executor_unloads_total",
@@ -67,6 +67,16 @@ pub const METRIC_NAMES: [&str; 21] = [
     "waddles_executor_connector_call_seconds",
     "waddles_executor_wire_frames_shed_total",
     "waddles_executor_wire_backpressure_total",
+    // Executor-scale CONTRACT names (KEDA/alerts key on these exactly).
+    "executor_loaded_modules",
+    "executor_memory_bytes",
+    "executor_load_duration_seconds",
+    "executor_precompile_fallback_total",
+    "executor_module_evictions_total",
+    // Warm instance pool (latency suspect #2).
+    "waddles_executor_warm_pool_total",
+    "waddles_executor_warm_pool_size",
+    "waddles_executor_prewarm_seconds",
 ];
 
 /// The OTel instrument name behind a documented (Prometheus-form) metric
@@ -208,6 +218,14 @@ pub struct ExecutorMetrics {
     connector_call_seconds: Histogram<f64>,
     wire_frames_shed: Counter<u64>,
     wire_backpressure: Counter<u64>,
+    loaded_modules: Gauge<u64>,
+    memory_bytes: Gauge<u64>,
+    load_duration_seconds: Histogram<f64>,
+    precompile_fallback: Counter<u64>,
+    module_evictions: Counter<u64>,
+    warm_pool_total: Counter<u64>,
+    warm_pool_size: Gauge<u64>,
+    prewarm_seconds: Histogram<f64>,
 }
 
 /// Keeps `waddles_executor_invocations_active` accurate on every exit path
@@ -331,11 +349,110 @@ impl ExecutorMetrics {
                 "Connector-world export calls by export and outcome (ok, guest_error, fuel_exhausted, \
                  deadline, memory_limit, trap, pool_exhausted, instantiate_failed, internal)",
             ),
+            loaded_modules: meter
+                .u64_gauge(instrument_name("executor_loaded_modules"))
+                .with_description(
+                    "Compiled modules resident in the process-wide shared cache (all stages)",
+                )
+                .build(),
+            memory_bytes: meter
+                .u64_gauge(instrument_name("executor_memory_bytes"))
+                .with_description(
+                    "Estimated resident bytes of compiled code held by the shared module cache",
+                )
+                .with_unit("By")
+                .build(),
+            load_duration_seconds: hist(
+                "executor_load_duration_seconds",
+                "Time to make one module resident, by source (aot, compile) and result",
+                &SLOW_BUCKETS_S,
+            ),
+            precompile_fallback: counter(
+                "executor_precompile_fallback_total",
+                "Loads that could not use a precompiled .cwasm and JIT-compiled instead, by reason",
+            ),
+            module_evictions: counter(
+                "executor_module_evictions_total",
+                "Idle unpinned modules evicted from the shared cache to honour EXECUTOR_MEMORY_BUDGET_MB",
+            ),
+            warm_pool_total: counter(
+                "waddles_executor_warm_pool_total",
+                "Warm-pool lookups per invoke by result (hit, miss) and fill failures (fill_failed)",
+            ),
+            warm_pool_size: meter
+                .u64_gauge(instrument_name("waddles_executor_warm_pool_size"))
+                .with_description("Pre-instantiated guest instances currently ready in the warm pool")
+                .build(),
+            prewarm_seconds: hist(
+                "waddles_executor_prewarm_seconds",
+                "Off-request-path instantiation time of one warm-pool instance",
+                &LATENCY_BUCKETS_S,
+            ),
             connector_call_seconds: hist(
                 "waddles_executor_connector_call_seconds",
                 "Connector-world export call time (slot wait excluded), by export and outcome",
                 &LATENCY_BUCKETS_S,
             ),
+        }
+    }
+
+    /// Shared module cache residency (`executor_loaded_modules`,
+    /// `executor_memory_bytes`), recorded after every cache mutation.
+    pub fn set_module_cache(&self, modules: usize, bytes: u64) {
+        self.loaded_modules
+            .record(u64::try_from(modules).unwrap_or(u64::MAX), &[]);
+        self.memory_bytes.record(bytes, &[]);
+    }
+
+    /// One module made resident (`executor_load_duration_seconds`): `source`
+    /// is `aot` or `compile`, `result` `ok` or `error`.
+    pub fn record_module_load(
+        &self,
+        source: &'static str,
+        result: &'static str,
+        elapsed: Duration,
+    ) {
+        self.load_duration_seconds.record(
+            elapsed.as_secs_f64(),
+            &[
+                KeyValue::new("source", source),
+                KeyValue::new("result", result),
+            ],
+        );
+    }
+
+    /// One AOT miss that fell back to a JIT compile
+    /// (`executor_precompile_fallback_total{reason}`); `reason` is a closed
+    /// vocabulary: `fetch`, `signature`, `deserialize`.
+    pub fn record_precompile_fallback(&self, reason: &'static str) {
+        self.precompile_fallback
+            .add(1, &[KeyValue::new("reason", reason)]);
+    }
+
+    /// One warm-pool outcome (`waddles_executor_warm_pool_total{result}`): `hit` (an invoke took
+    /// a prewarmed instance), `miss` (pool enabled but empty -> cold instantiate), or
+    /// `fill_failed` (a background prewarm could not instantiate).
+    pub fn record_warm_pool(&self, result: &'static str) {
+        self.warm_pool_total
+            .add(1, &[KeyValue::new("result", result)]);
+    }
+
+    /// Ready warm instances right now (`waddles_executor_warm_pool_size`).
+    pub fn set_warm_pool_size(&self, ready: usize) {
+        self.warm_pool_size
+            .record(u64::try_from(ready).unwrap_or(u64::MAX), &[]);
+    }
+
+    /// Off-path instantiate time of one warm instance (`waddles_executor_prewarm_seconds`).
+    pub fn record_prewarm(&self, elapsed: Duration) {
+        self.prewarm_seconds.record(elapsed.as_secs_f64(), &[]);
+    }
+
+    /// `count` modules evicted for budget (`executor_module_evictions_total`).
+    pub fn record_module_evictions(&self, count: usize) {
+        if count > 0 {
+            self.module_evictions
+                .add(u64::try_from(count).unwrap_or(u64::MAX), &[]);
         }
     }
 
@@ -810,10 +927,30 @@ mod tests {
     #[test]
     fn load_phases_and_outcomes_are_recorded_with_second_scaled_buckets() {
         let (h, m) = fresh();
-        m.record_load_phase("waddles.t.a", "fetch", "ok", Duration::from_millis(120));
-        m.record_load_phase("waddles.t.a", "verify", "ok", Duration::from_millis(5));
-        m.record_load_phase("waddles.t.a", "precompile", "error", Duration::from_secs(3));
-        m.record_load_phase("waddles.t.a", "total", "ok", Duration::from_secs(4));
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "fetch",
+            "ok",
+            Duration::from_millis(120),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "verify",
+            "ok",
+            Duration::from_millis(5),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "precompile",
+            "error",
+            Duration::from_secs(3),
+        );
+        m.record_load_phase(
+            "penguintechinc.waddles.t-a",
+            "total",
+            "ok",
+            Duration::from_secs(4),
+        );
         m.record_load("ok");
         m.record_load("already_resident");
         m.record_load("already_resident");
@@ -828,7 +965,7 @@ mod tests {
                 h.count(
                     "waddles_executor_load_seconds",
                     &[
-                        ("app_id", "waddles.t.a"),
+                        ("app_id", "penguintechinc.waddles.t-a"),
                         ("phase", phase),
                         ("result", result)
                     ]
@@ -878,27 +1015,31 @@ mod tests {
     fn invoke_records_latency_and_a_sandbox_trip_only_when_one_occurred() {
         let (h, m) = fresh();
         m.record_invoke(
-            "waddles.t.b",
+            "penguintechinc.waddles.t-b",
             "transform",
             "ok",
             None,
             Duration::from_micros(300),
         );
         m.record_invoke(
-            "waddles.t.b",
+            "penguintechinc.waddles.t-b",
             "transform",
             "executor_deadline",
             Some("timeout"),
             Duration::from_millis(500),
         );
-        m.record_instantiate("waddles.t.b", Duration::from_micros(80));
-        m.record_guest("waddles.t.b", "transform", Duration::from_micros(200));
+        m.record_instantiate("penguintechinc.waddles.t-b", Duration::from_micros(80));
+        m.record_guest(
+            "penguintechinc.waddles.t-b",
+            "transform",
+            Duration::from_micros(200),
+        );
 
         assert_eq!(
             h.count(
                 "waddles_executor_invoke_seconds",
                 &[
-                    ("app_id", "waddles.t.b"),
+                    ("app_id", "penguintechinc.waddles.t-b"),
                     ("export", "transform"),
                     ("result", "ok")
                 ]
@@ -915,7 +1056,10 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_sandbox_trip_total",
-                &[("app_id", "waddles.t.b"), ("limit", "timeout")]
+                &[
+                    ("app_id", "penguintechinc.waddles.t-b"),
+                    ("limit", "timeout")
+                ]
             ),
             1.0
         );
@@ -928,14 +1072,17 @@ mod tests {
         assert_eq!(
             h.count(
                 "waddles_executor_instantiate_seconds",
-                &[("app_id", "waddles.t.b")]
+                &[("app_id", "penguintechinc.waddles.t-b")]
             ),
             1.0
         );
         assert_eq!(
             h.count(
                 "waddles_executor_guest_seconds",
-                &[("app_id", "waddles.t.b"), ("export", "transform")]
+                &[
+                    ("app_id", "penguintechinc.waddles.t-b"),
+                    ("export", "transform")
+                ]
             ),
             1.0
         );
@@ -1081,6 +1228,13 @@ mod tests {
         m.record_connector_call("a", "on-frame", "ok", Duration::from_millis(1));
         m.record_frame_shed("log");
         m.record_wire_backpressure("waited");
+        m.set_module_cache(1, 1024);
+        m.record_module_load("aot", "ok", Duration::from_millis(1));
+        m.record_precompile_fallback("signature");
+        m.record_module_evictions(1);
+        m.record_warm_pool("hit");
+        m.set_warm_pool_size(2);
+        m.record_prewarm(Duration::from_millis(3));
 
         let exported: std::collections::BTreeSet<String> =
             h.points().into_iter().map(|p| p.name).collect();
@@ -1092,7 +1246,7 @@ mod tests {
             );
         }
         // Verification Integrity: report the denominator, and fail on zero.
-        assert_eq!(METRIC_NAMES.len(), 21);
+        assert_eq!(METRIC_NAMES.len(), 29);
         assert!(
             exported.len() >= METRIC_NAMES.len(),
             "examined {} exported series for {} documented names",
@@ -1206,7 +1360,7 @@ mod tests {
         let b = executor_metrics();
         assert!(Arc::ptr_eq(&a, &b));
         a.record_load_phase(
-            "waddles.test.singleton",
+            "penguintechinc.waddles.test-singleton",
             "total",
             "ok",
             Duration::from_millis(1),
@@ -1214,7 +1368,7 @@ mod tests {
         assert_eq!(
             test_support::shared().count(
                 "waddles_executor_load_seconds",
-                &[("app_id", "waddles.test.singleton")]
+                &[("app_id", "penguintechinc.waddles.test-singleton")]
             ),
             1.0
         );

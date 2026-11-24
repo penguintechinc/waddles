@@ -4,6 +4,7 @@ import { Link } from 'react-router-dom';
 import { EmptyState } from './EmptyState';
 import { ErrorState } from './ErrorState';
 import { LoadingState } from './LoadingState';
+import { UpgradeNotice } from './UpgradeNotice';
 
 /** Which visible state a failed panel request maps to. */
 export type PanelErrorKind = 'upgrade' | 'unavailable' | 'error';
@@ -65,16 +66,7 @@ export function PanelErrorState({ feature, error, onRetry, className }: PanelErr
   const retry = onRetry ? { onRetry } : {};
   const cls = className ? { className } : {};
   if (info.kind === 'upgrade') {
-    return (
-      <div data-testid="panel-upgrade" data-feature={feature}>
-        <EmptyState
-          title={info.serverMessage ?? 'This feature requires a higher plan for this community'}
-          description={info.serverMessage ? undefined : `${feature} is not included in this community's current plan.`}
-          testId="panel-upgrade-body"
-          {...cls}
-        />
-      </div>
-    );
+    return <UpgradeNotice feature={feature} serverMessage={info.serverMessage} {...cls} />;
   }
   if (info.kind === 'unavailable') {
     return (

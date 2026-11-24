@@ -5,9 +5,8 @@
 //! - `music.<p>.search`        `{query, limit<=25}`            -> `{tracks, capability}`
 //! - `music.<p>.resolve`       `{url}`                         -> `{track, capability}`
 //! - `music.<p>.playlist.get`  `{playlist_id, limit, page_token}` -> `{tracks, next_page_token, capability}`
-//! - Spotify only: `music.spotify.player.play {uris}` (moderator scope, write) hands a
-//!   track to the streamer's Connect device. There is no generic playback tool;
-//!   other providers play through the Music Station / presentation.
+//!
+//! Playback is NOT the DJ's job: the music bundle / shared queue own it.
 //!
 //! Every returned track is untrusted third-party data: it is sanitized and
 //! provider-checked before it can enter state, and never interpreted as an
@@ -18,9 +17,9 @@ use serde_json::{Value, json};
 use crate::host::{Host, Level, ToolErr};
 use crate::model::{PROVIDERS, Track, WireTrack};
 
-/// Service-bundle app id for a provider (`waddles.core.service.music-<p>`).
+/// Service-bundle app id for a provider (`penguintechinc.waddles.music-<p>`).
 pub fn target(provider: &str) -> String {
-    format!("waddles.core.service.music-{provider}")
+    format!("penguintechinc.waddles.music-{provider}")
 }
 
 /// Tool name for a provider operation (`music.<p>.<op>`).
@@ -154,26 +153,6 @@ pub fn playlist(
     Ok(out)
 }
 
-/// Hands a Spotify track to the streamer's Connect device
-/// (`music.spotify.player.play`, moderator scope enforced host-side). Other
-/// providers have no player tool and play through the Music Station, so this
-/// is a no-op for them. `item_id` keys idempotency.
-pub fn handoff_play(host: &dyn Host, track: &Track, item_id: u64) -> Result<(), MusicError> {
-    if track.provider != "spotify" {
-        return Ok(());
-    }
-    let uri = format!("spotify:track:{}", track.id);
-    let key = format!("dj.play.{item_id}");
-    call(
-        host,
-        "spotify",
-        "player.play",
-        json!({"uris": [uri]}),
-        Some(&key),
-    )
-    .map(|_| ())
-}
-
 /// Maps a request URL to `(provider, url)` when the host is a known music site.
 /// Rejects userinfo (`user@host`) and non-http(s) schemes.
 pub fn provider_for_url(raw: &str) -> Option<&'static str> {
@@ -229,7 +208,7 @@ mod tests {
 
     #[test]
     fn targets_and_tools_follow_the_catalog_naming() {
-        assert_eq!(target("youtube"), "waddles.core.service.music-youtube");
+        assert_eq!(target("youtube"), "penguintechinc.waddles.music-youtube");
         assert_eq!(
             tool("spotify", "playlist.get"),
             "music.spotify.playlist.get"

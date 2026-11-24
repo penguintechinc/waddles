@@ -7,7 +7,9 @@
  * on Express instead of nginx per house convention.
  */
 import express from 'express';
+import https from 'node:https';
 import { createProxy } from './proxy.js';
+import { assertUpstreamUrl, resolveInternalTls, resolveServerTls } from './tls.js';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 
@@ -22,11 +24,11 @@ const NODE_ENV = process.env.NODE_ENV ?? 'development';
 if (!process.env.HUB_API_URL && NODE_ENV === 'production') {
   console.error(
     '[hub-webui] FATAL: HUB_API_URL is required when NODE_ENV=production ' +
-      '-- refusing to start with the localhost:8060 dev default',
+      '-- refusing to start with the localhost:8204 dev default',
   );
   process.exit(1);
 }
-const HUB_API_URL = process.env.HUB_API_URL ?? 'http://localhost:8060';
+const HUB_API_URL = process.env.HUB_API_URL ?? 'http://localhost:8204';
 const DIST_DIR = join(__dirname, 'dist');
 
 const app = express();
@@ -42,7 +44,11 @@ app.get('/health', (_req, res) => {
 // strips the '/api' mount prefix from req.url, so the proxy forwards
 // req.originalUrl -- hub-api routes are mounted at /api/v1, so the prefix
 // must be kept (e.g. /api/v1/auth/login stays /api/v1/auth/login).
-app.use('/api', createProxy(HUB_API_URL));
+// In-cluster HTTPS policy (INTERNAL_CA_FILE / INTERNAL_TLS_REQUIRED): throws at startup on any
+// misconfiguration -- an unreadable CA, REQUIRED without a CA, or a plaintext HUB_API_URL.
+const internalTls = resolveInternalTls();
+assertUpstreamUrl(HUB_API_URL, internalTls);
+app.use('/api', createProxy(HUB_API_URL, internalTls));
 
 app.use(express.static(DIST_DIR));
 
@@ -51,6 +57,12 @@ app.get('*', (_req, res) => {
   res.sendFile(join(DIST_DIR, 'index.html'));
 });
 
-app.listen(PORT, () => {
-  console.log(`[hub-webui] Listening { port: ${PORT}, hubApiUrl: "${HUB_API_URL}" }`);
+// Gateway -> webui hop: serve HTTPS when TLS_CERT_FILE/TLS_KEY_FILE are provided (the chart
+// sets them whenever global.internalTransitTls is on); otherwise plain HTTP for local dev.
+const serverTls = resolveServerTls();
+const server = serverTls ? https.createServer(serverTls, app) : app;
+server.listen(PORT, () => {
+  console.log(
+    `[hub-webui] Listening { port: ${PORT}, tls: ${Boolean(serverTls)}, hubApiUrl: "${HUB_API_URL}" }`,
+  );
 });

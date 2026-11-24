@@ -149,8 +149,8 @@ describe('UserDropdown content', () => {
       user: {
         username: 'alice',
         communities: [
-          { id: 4, name: 'Members', role: 'member' },
-          { id: 9, name: 'Mods', role: 'moderator' },
+          { id: '00000004-0000-4000-8000-000000000000', name: 'Members', role: 'member' },
+          { id: '00000009-0000-4000-8000-000000000000', name: 'Mods', role: 'moderator' },
         ],
       },
     });
@@ -158,7 +158,7 @@ describe('UserDropdown content', () => {
     open();
     expect(menu().getByText('Portals')).toBeInTheDocument();
     expect(menu().getByRole('menuitem', { name: 'Vendor Portal' })).toHaveAttribute('href', '/vendor/dashboard');
-    expect(menu().getByRole('menuitem', { name: 'Admin Panel' })).toHaveAttribute('href', '/admin/9');
+    expect(menu().getByRole('menuitem', { name: 'Admin Panel' })).toHaveAttribute('href', '/admin/00000009-0000-4000-8000-000000000000');
     expect(menu().getByRole('menuitem', { name: 'Super Admin' })).toHaveAttribute('href', '/superadmin');
   });
 
@@ -175,13 +175,13 @@ describe('UserDropdown content', () => {
     auth({
       user: {
         username: 'alice',
-        communities: [{ id: 1, name: 'One', role: 'member' }, { id: 2, role: 'member' }],
+        communities: [{ id: '00000001-0000-4000-8000-000000000000', name: 'One', role: 'member' }, { id: '00000002-0000-4000-8000-000000000000', role: 'member' }],
       },
     });
     mount();
     open();
-    expect(menu().getByRole('menuitem', { name: 'One' })).toHaveAttribute('href', '/dashboard/community/1');
-    expect(menu().getByRole('menuitem', { name: 'Community 2' })).toBeInTheDocument();
+    expect(menu().getByRole('menuitem', { name: 'One' })).toHaveAttribute('href', '/dashboard/community/00000001-0000-4000-8000-000000000000');
+    expect(menu().getByRole('menuitem', { name: 'Unnamed community' })).toBeInTheDocument();
     expect(menu().queryByText('View All Communities')).not.toBeInTheDocument();
   });
 

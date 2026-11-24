@@ -31,6 +31,8 @@ exception itself is still re-raised untouched for the caller to handle.
 """
 
 import asyncio
+import contextvars
+import functools
 import logging
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager, contextmanager
@@ -43,8 +45,20 @@ from pydal import (  # noqa: F401
 )
 
 from .db_errors import is_db_driver_error, log_db_error
+from .positional_sql import convert_positional
 
 logger = logging.getLogger(__name__)
+
+
+
+def _with_context(fn: Any) -> Any:
+    """Wrap `fn` so it runs inside a copy of the caller's `contextvars` context.
+
+    `loop.run_in_executor()` (unlike `asyncio.to_thread()`) does not propagate context, so
+    without this the OpenTelemetry span context of the awaiting request is lost on the pydal
+    worker thread and every DB span would start a new, unparented trace.
+    """
+    return functools.partial(contextvars.copy_context().run, fn)
 
 
 class AsyncDAL:
@@ -160,7 +174,7 @@ class AsyncDAL:
                 query.db.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _select)
+        return await loop.run_in_executor(self.executor, _with_context(_select))
 
     async def insert_async(self, table, **fields):
         """
@@ -192,7 +206,7 @@ class AsyncDAL:
                 self.dal.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _insert)
+        return await loop.run_in_executor(self.executor, _with_context(_insert))
 
     async def update_async(self, query, **update_fields):
         """
@@ -221,7 +235,7 @@ class AsyncDAL:
                 self.dal.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _update)
+        return await loop.run_in_executor(self.executor, _with_context(_update))
 
     async def delete_async(self, query):
         """
@@ -249,11 +263,11 @@ class AsyncDAL:
                 self.dal.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _delete)
+        return await loop.run_in_executor(self.executor, _with_context(_delete))
 
     async def count_async(self, query):
         """
-        Async count operation using read replica if available.
+        Async count operation on the DAL the query is bound to (primary unless built from the replica).
 
         Ends its own transaction (commit on success, rollback on failure)
         against whichever DAL actually ran the count -- see `select_async`'s
@@ -267,7 +281,11 @@ class AsyncDAL:
             Count of records matching query
         """
         loop = asyncio.get_event_loop()
-        dal = self.read_dal if self.read_dal else self.dal
+        # Run on the DAL the query's tables were built from (same rule as `select_async`),
+        # never an implicit swap to the read replica: a count that silently hopped to the
+        # replica would break read-after-write and auth paths. Callers opt in to the replica
+        # by building the query from the replica DAL (hub-api `services/db_routing.py`).
+        dal = query.db if getattr(query, "db", None) is not None else self.dal
 
         def _count():
             try:
@@ -279,7 +297,7 @@ class AsyncDAL:
                 dal.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _count)
+        return await loop.run_in_executor(self.executor, _with_context(_count))
 
     async def executesql_async(self, sql: str, params: list | None = None):
         """
@@ -308,7 +326,7 @@ class AsyncDAL:
                 self.dal.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _execute)
+        return await loop.run_in_executor(self.executor, _with_context(_execute))
 
     async def execute(self, sql: str, params: list | None = None):
         """
@@ -327,18 +345,20 @@ class AsyncDAL:
 
         def _execute():
             try:
-                # Convert $N placeholders to %s for psycopg2
+                # Convert $N placeholders to the adapter's native marker
+                # (tokenizer: repeated/out-of-order/$10-safe, skips literals)
                 if params:
-                    converted_sql = sql
-                    for i in range(len(params), 0, -1):
-                        converted_sql = converted_sql.replace(f"${i}", "%s")
+                    engine = str(getattr(self.dal._adapter, "dbengine", "")).lower()
+                    converted_sql, expanded = convert_positional(
+                        sql, params, "?" if engine == "sqlite" else "%s"
+                    )
 
                     # Convert special types for psycopg2
                     import json as json_module
                     from uuid import UUID
 
                     converted_params = []
-                    for param in params:
+                    for param in expanded:
                         if isinstance(param, UUID):
                             converted_params.append(str(param))
                         elif isinstance(param, (dict, list)):
@@ -383,7 +403,7 @@ class AsyncDAL:
                 self.dal.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _execute)
+        return await loop.run_in_executor(self.executor, _with_context(_execute))
 
     @asynccontextmanager
     async def transaction_async(self):
@@ -416,15 +436,15 @@ class AsyncDAL:
         loop = asyncio.get_event_loop()
 
         # Begin transaction
-        await loop.run_in_executor(self.executor, lambda: None)
+        await loop.run_in_executor(self.executor, _with_context(lambda: None))
 
         try:
             yield self
             # Commit transaction
-            await loop.run_in_executor(self.executor, self.dal.commit)
+            await loop.run_in_executor(self.executor, _with_context(self.dal.commit))
         except Exception as e:
             # Rollback on error
-            await loop.run_in_executor(self.executor, self.dal.rollback)
+            await loop.run_in_executor(self.executor, _with_context(self.dal.rollback))
             log_db_error(logger, "Transaction rolled back", e)
             raise
 
@@ -455,7 +475,7 @@ class AsyncDAL:
                 self.dal.rollback()
                 raise
 
-        return await loop.run_in_executor(self.executor, _bulk_insert)
+        return await loop.run_in_executor(self.executor, _with_context(_bulk_insert))
 
     async def close_async(self):
         """Close database connections and thread pool"""
@@ -477,7 +497,7 @@ class AsyncDAL:
             if self.read_dal:
                 _close_one(self.read_dal)
 
-        await loop.run_in_executor(self.executor, _close)
+        await loop.run_in_executor(self.executor, _with_context(_close))
         self.executor.shutdown(wait=True)
         logger.info("AsyncDAL connections closed")
 

@@ -18,7 +18,7 @@ use crate::host::{Host, Level, ToolErr};
 use crate::model::clean_text;
 use crate::policy::Rules;
 
-pub const AI_TARGET: &str = "waddles.core.service.ai";
+pub const AI_TARGET: &str = "penguintechinc.waddles.ai";
 pub const CLASSIFY_LABELS: [&str; 2] = ["allowed", "violates"];
 /// Minimum confidence for an AI verdict to be acted on; below it the request is held.
 pub const MIN_CONFIDENCE: f64 = 0.7;

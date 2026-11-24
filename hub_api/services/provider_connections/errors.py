@@ -89,6 +89,17 @@ class ConnectionConflict(ProviderConnectionError):
     code = "conflict"
 
 
+class OwnershipNotProven(ProviderConnectionError):
+    """The installer did not prove they own the resource (HTTP 403, never retried).
+
+    Default code ``ownership_not_proven``: neither the token nor the installer's OAuth-linked
+    platform account is the channel's owner. ``live_chat_not_owned``: a YouTube ``live_chat_id``
+    that is not one of the connected channel's own broadcasts.
+    """
+
+    code = "ownership_not_proven"
+
+
 class ConnectionNotUsable(ProviderConnectionError):
     """The connection exists but cannot be handed to the data plane right now.
 

@@ -130,7 +130,7 @@ return redis.call('PEXPIRE', KEYS[1], ARGV[2]) else return 0 end";
 
 /// Valkey [`ScheduleLease`] identified by a per-boot replica id.
 pub struct ValkeyScheduleLease {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     replica_id: String,
     extend: redis::Script,
 }
@@ -138,7 +138,7 @@ pub struct ValkeyScheduleLease {
 impl ValkeyScheduleLease {
     /// Wraps a connection with an explicit replica id.
     #[must_use]
-    pub fn with_replica_id(conn: redis::aio::MultiplexedConnection, replica_id: String) -> Self {
+    pub fn with_replica_id(conn: redis::aio::ConnectionManager, replica_id: String) -> Self {
         Self {
             conn,
             replica_id,
@@ -148,7 +148,7 @@ impl ValkeyScheduleLease {
 
     /// Wraps a connection with a fresh random replica id.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self::with_replica_id(conn, uuid::Uuid::new_v4().to_string())
     }
 }
@@ -681,7 +681,9 @@ mod tests {
             tenant_slug: "t".into(),
             community_name: None,
         };
-        assert!(BundleScheduleTarget::new(ok.clone(), "waddles.core.calendar", spec).is_ok());
+        assert!(
+            BundleScheduleTarget::new(ok.clone(), "penguintechinc.waddles.calendar", spec).is_ok()
+        );
         for bad in ["", "Has:Colon", "a b", &"x".repeat(129)] {
             assert_eq!(
                 BundleScheduleTarget::new(ok.clone(), bad, spec).unwrap_err(),

@@ -49,34 +49,17 @@ describe('multipart upload helpers', () => {
     const fd = new FormData();
     fd.append('manifest', 'name: demo');
 
-    await bundleApi.createVersion('waddles.integrations.vendor/42', fd);
+    await bundleApi.createVersion('acme.widgets/42', fd);
 
     const sent = lastCall();
     expect(sent.method).toBe('post');
-    expect(sent.url).toBe('/api/v1/apps/waddles.integrations.vendor%2F42/versions');
+    expect(sent.url).toBe('/api/v1/apps/acme.widgets%2F42/versions');
     expect(sent.data).toBe(fd);
     expect(sent.headers.get('Content-Type')).toBe('multipart/form-data');
   });
 });
 
 describe('default-valued parameters', () => {
-  it('verifyTicket defaults perform_checkin to true and honours false', async () => {
-    await adminApi.verifyTicket('TKT-1');
-    expect(JSON.parse(String(lastCall().data))).toEqual({ ticket_code: 'TKT-1', perform_checkin: true });
-
-    await adminApi.verifyTicket('TKT-1', false);
-    expect(JSON.parse(String(lastCall().data))).toEqual({ ticket_code: 'TKT-1', perform_checkin: false });
-  });
-
-  it('exportAttendance defaults to json and passes an explicit format', async () => {
-    await adminApi.exportAttendance(3, 9);
-    expect(lastCall().params).toEqual({ format: 'json' });
-    expect(lastCall().url).toBe('/api/v1/admin/3/calendar/events/9/attendance/export');
-
-    await adminApi.exportAttendance(3, 9, 'csv');
-    expect(lastCall().params).toEqual({ format: 'csv' });
-  });
-
   it('getPlatformGrowth defaults to a 30d period and honours an override', async () => {
     await analyticsApi.getPlatformGrowth();
     expect(lastCall().url).toBe('/api/v1/analytics/platform/growth?period=30d');
@@ -95,15 +78,6 @@ describe('default-valued parameters', () => {
 });
 
 describe('path-segment encoding', () => {
-  it('encodes call-room names that contain spaces and slashes', async () => {
-    await adminApi.getCallRoom(7, 'team room/1');
-    expect(lastCall().url).toBe('/api/v1/admin/7/calls/rooms/team%20room%2F1');
-
-    await adminApi.kickCallParticipant(7, 'team room/1', 'user-9');
-    expect(lastCall().url).toBe('/api/v1/admin/7/calls/rooms/team%20room%2F1/kick');
-    expect(JSON.parse(String(lastCall().data))).toEqual({ identity: 'user-9' });
-  });
-
   it('encodes both bundle app id and version', async () => {
     await bundleApi.getPermissions('a/b', '1.0.0+build 5');
     expect(lastCall().url).toBe('/api/v1/apps/a%2Fb/versions/1.0.0%2Bbuild%205/permissions');

@@ -60,5 +60,9 @@ jobs:
     with:
       crate_name: bundle-host-media
       working_directory: core/bundle_host_media
+      # protoc: hub_client (direct dep) pulls service_auth, whose build.rs
+      # runs tonic-prost-build -- same rationale as rust-svc-process.yml.
+      extra_apt_packages: protobuf-compiler
+      extra_apt_reason: 'for hub_client/service_auth build.rs (protoc)'
       # `tests/real_backends.rs` starts real Valkey + SeaweedFS containers via
       # the `docker` CLI helper (`core/test_support`) -- needs Docker, which `ubuntu-latest` ships.

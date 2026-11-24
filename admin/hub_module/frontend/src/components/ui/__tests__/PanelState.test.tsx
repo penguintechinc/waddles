@@ -51,7 +51,8 @@ describe('PanelState', () => {
 
   it('shows the plan message on 402', () => {
     setup({ isError: true, error: httpErr(402) });
-    expect(screen.getByText('This feature requires a higher plan for this community')).toBeInTheDocument();
+    expect(screen.getByText('Upgrade to Premium for this feature')).toBeInTheDocument();
+    expect(screen.getByTestId('upgrade-notice')).toBeInTheDocument();
   });
 
   it('prefers the server message on 402', () => {

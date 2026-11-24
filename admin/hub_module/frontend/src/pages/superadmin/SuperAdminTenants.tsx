@@ -2,7 +2,7 @@ import { useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import axios from 'axios';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import type { FormField } from '@penguintechinc/react-libs';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
 import { superTenantApi } from '../../services/superTenantApi';
@@ -11,6 +11,7 @@ import type {
   TenantDTO,
   UpdateTenantPayload,
 } from '../../services/superTenantApi';
+import TenantLicensePools from '../../components/superadmin/TenantLicensePools';
 import { useFeatureFlag } from '../../lib/useFeatureFlag';
 
 const LIMIT = 25;
@@ -38,6 +39,7 @@ function SuperAdminTenants() {
 
   const [createOpen, setCreateOpen] = useState(false);
   const [editingTenant, setEditingTenant] = useState<TenantDTO | null>(null);
+  const [poolsTenant, setPoolsTenant] = useState<TenantDTO | null>(null);
   const [deactivatingTenant, setDeactivatingTenant] = useState<TenantDTO | null>(null);
   const [confirmSlug, setConfirmSlug] = useState('');
 
@@ -67,7 +69,7 @@ function SuperAdminTenants() {
   });
 
   const updateMutation = useMutation({
-    mutationFn: ({ id, data }: { id: number; data: UpdateTenantPayload }) =>
+    mutationFn: ({ id, data }: { id: string; data: UpdateTenantPayload }) =>
       superTenantApi.update(id, data),
     onSuccess: (_response, variables) => {
       console.debug('[SuperTenants] Update', { tenantId: variables.id });
@@ -81,7 +83,7 @@ function SuperAdminTenants() {
   });
 
   const deactivateMutation = useMutation({
-    mutationFn: (id: number) => superTenantApi.deactivate(id),
+    mutationFn: (id: string) => superTenantApi.deactivate(id),
     onSuccess: (_response, id) => {
       console.debug('[SuperTenants] Deactivate', { tenantId: id });
       setDeactivatingTenant(null);
@@ -335,6 +337,13 @@ function SuperAdminTenants() {
                         Edit
                       </button>
                       <button
+                        onClick={() => setPoolsTenant(tenant)}
+                        className="text-sky-400 hover:text-sky-300 text-sm"
+                        aria-label={`License pools for ${tenant.displayName}`}
+                      >
+                        License pools
+                      </button>
+                      <button
                         onClick={() => setDeactivatingTenant(tenant)}
                         disabled={tenant.isGlobal}
                         className="text-red-400 hover:text-red-300 text-sm disabled:opacity-30 disabled:cursor-not-allowed"
@@ -404,6 +413,14 @@ function SuperAdminTenants() {
         themeMode="dark"
         colors={WADDLES_GOLD_COLORS}
       />
+
+      {poolsTenant && (
+        <TenantLicensePools
+          tenantId={poolsTenant.id}
+          tenantSlug={poolsTenant.slug}
+          onClose={() => setPoolsTenant(null)}
+        />
+      )}
 
       {deactivatingTenant && (
         <div className="fixed inset-0 bg-black/70 flex items-center justify-center z-50">

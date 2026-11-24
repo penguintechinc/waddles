@@ -46,15 +46,18 @@ from blueprints.v1.provider_connections import (
 from services import youtube_install as install
 from services.current_user import get_current_user_id
 from services.errors import ApiError, bad_request, forbidden, payment_required
+from services.provider_connections.public_ref import translate_connection_id
 from services.provider_connections.youtube import PROVIDER_ID
 
 logger = logging.getLogger(__name__)
 
 youtube_connections_bp = Blueprint("v1_youtube_connections", __name__, url_prefix="/api/v1")
+# `<puuid:connection_id>` -> numeric before the handler, resolved through the community's grant.
+youtube_connections_bp.before_request(translate_connection_id)
 
 #: Tenant-level scope (tenant-owner bundle) -- configuring the tenant's OAuth application.
 SCOPE_TENANT_ADMIN: Final = "tenant:admin"
-_BASE: Final = "/communities/<int:community_id>/provider-connections"
+_BASE: Final = "/communities/<cuuid:community_id>/provider-connections"
 _TOKEN_FIELD_RE: Final = re.compile(r"[\x21-\x7e]+")
 
 
@@ -210,7 +213,7 @@ async def authorize_youtube(
     return YoutubeAuthorizeResponse(success=True, authorizeUrl=url)
 
 
-@youtube_connections_bp.route(_BASE + "/<int:connection_id>/discover", methods=["POST"])
+@youtube_connections_bp.route(_BASE + "/<puuid:connection_id>/discover", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_CONNECTIONS_ADMIN)  # type: ignore[misc]
 @validate_response(ProviderConnectionResponse)

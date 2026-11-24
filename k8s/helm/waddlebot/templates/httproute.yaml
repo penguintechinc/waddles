@@ -1,4 +1,15 @@
 {{- if .Values.httproute.enabled -}}
+{{- /*
+Defence in depth: hub-api's /api/v1/internal prefix is service-to-service only (machine-JWT) and must
+never be reachable from the public Gateway. Refuse to render a rule that names that prefix, or a
+rule that sends a prefix covering it ("/", "/api", "/api/v1") straight to hub-api. hub-webui is
+the only public front door for hub-api, and its proxy additionally 404s the internal prefix.
+*/}}
+{{- range .Values.httproute.rules }}
+{{- $p := (.path | toString | lower | trimSuffix "/") }}
+{{- if regexMatch "^/api/v[0-9]+/internal" $p }}{{ fail (printf "httproute rule path %q exposes hub-api internal routes" .path) }}{{ end }}
+{{- if and (contains "hub-api" (.service | toString)) (regexMatch "^(/api(/v[0-9]+)?)?$" $p) }}{{ fail (printf "httproute rule path %q routes a prefix covering /api/v1/internal directly to hub-api" .path) }}{{ end }}
+{{- end }}
 apiVersion: gateway.networking.k8s.io/v1
 kind: HTTPRoute
 metadata:
@@ -26,6 +37,46 @@ spec:
       {{- end }}
       backendRefs:
         - name: {{ .service }}
-          port: {{ .port }}
+          port: {{ include "waddlebot.routeBackendPort" (dict "root" $ "route" .) }}
     {{- end }}
+{{- if include "waddlebot.transitTlsEnabled" . }}
+{{- /*
+F4 -- Gateway -> hub-webui re-encryption. hub-webui serves HTTPS (server.js, cert from
+templates/transit-tls-certificates.yaml); this policy makes the Gateway originate TLS to the
+backend and VERIFY it against the internal CA at the service FQDN (the only SAN the CA permits).
+The CA bundle ConfigMap is rendered from httproute.backendTls.caPem when set, otherwise it must
+pre-exist (operator step in k8s/dal2alpha/APPLY.md); if it is missing the policy is not
+Accepted and the Gateway fails closed (503) -- it never falls back to plaintext to the backend.
+*/}}
+{{- $bt := .Values.httproute.backendTls | default dict }}
+{{- $caName := $bt.caConfigMapName | default (printf "%s-internal-ca-bundle" (include "waddlebot.fullname" .)) }}
+{{- if $bt.caPem }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $caName }}
+  namespace: {{ include "waddlebot.namespace" . }}
+data:
+  ca.crt: |
+    {{- $bt.caPem | nindent 4 }}
+{{- end }}
+---
+apiVersion: {{ $bt.apiVersion | default "gateway.networking.k8s.io/v1" }}
+kind: BackendTLSPolicy
+metadata:
+  name: {{ include "waddlebot.fullname" . }}-hub-webui-backend-tls
+  namespace: {{ include "waddlebot.namespace" . }}
+spec:
+  targetRefs:
+    - group: ""
+      kind: Service
+      name: {{ include "waddlebot.fullname" . }}-hub-webui-v3
+  validation:
+    hostname: {{ include "waddlebot.svcFqdn" (dict "root" . "name" "hub-webui-v3") | quote }}
+    caCertificateRefs:
+      - group: ""
+        kind: ConfigMap
+        name: {{ $caName }}
+{{- end }}
 {{- end }}

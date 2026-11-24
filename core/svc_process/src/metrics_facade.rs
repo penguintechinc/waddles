@@ -258,14 +258,14 @@ mod tests {
         metrics::with_local_recorder(&recorder, || {
             metrics::counter!(
                 "waddles_bundle_capability_denied_total",
-                "app_id" => "waddles.test.facade",
+                "app_id" => "penguintechinc.waddles.test-facade",
                 "permission" => "storage.kv",
                 "reason" => "not_granted",
             )
             .increment(1);
             metrics::counter!(
                 "waddles_bundle_capability_denied_total",
-                "app_id" => "waddles.test.facade",
+                "app_id" => "penguintechinc.waddles.test-facade",
                 "permission" => "storage.kv",
                 "reason" => "not_granted",
             )
@@ -275,7 +275,7 @@ mod tests {
             h.count(
                 "waddles_bundle_capability_denied_total",
                 &[
-                    ("app_id", "waddles.test.facade"),
+                    ("app_id", "penguintechinc.waddles.test-facade"),
                     ("permission", "storage.kv"),
                     ("reason", "not_granted"),
                 ]
@@ -361,7 +361,7 @@ mod tests {
             for i in 0..50 {
                 metrics::counter!(
                     "waddles_bundle_capability_denied_total",
-                    "app_id" => "waddles.test.hostile",
+                    "app_id" => "penguintechinc.waddles.test-hostile",
                     "permission" => format!("net.http.fqdn:host-{i}.example"),
                     "reason" => "not_granted",
                 )
@@ -403,7 +403,7 @@ mod tests {
             GrantScopeKey {
                 tenant_id: 1,
                 community_id: 1,
-                app_id: "waddles.test.gatebridge".to_string(),
+                app_id: "penguintechinc.waddles.test-gatebridge".to_string(),
                 app_version: 1,
             },
             GrantSet {
@@ -443,10 +443,10 @@ mod tests {
             .expect("valid metric definition"),
             bundle_host_http::egress::boxed(bundle_host_http::egress::StaticFlag(true)),
         ));
-        let caps = StageCapabilities::<redis::aio::MultiplexedConnection>::new(
+        let caps = StageCapabilities::<redis::aio::ConnectionManager>::new(
             "acme".to_string(),
             Some("main".to_string()),
-            "waddles.test.gatebridge".to_string(),
+            "penguintechinc.waddles.test-gatebridge".to_string(),
             1,
             1,
             1,
@@ -454,7 +454,7 @@ mod tests {
             gate,
         );
         let call = |capability: CapabilityKind, op: &str, args: serde_json::Value| HostCallBody {
-            app_id: "waddles.test.gatebridge".to_string(),
+            app_id: "penguintechinc.waddles.test-gatebridge".to_string(),
             capability,
             op: op.to_string(),
             args,
@@ -490,7 +490,7 @@ mod tests {
         assert!(
             h.count(
                 "waddles_bundle_capability_authorized_total",
-                &[("app_id", "waddles.test.gatebridge")]
+                &[("app_id", "penguintechinc.waddles.test-gatebridge")]
             ) >= 1.0,
             "the gate's authorize() audit counter must reach OTel"
         );
@@ -498,7 +498,7 @@ mod tests {
             h.count(
                 "waddles_bundle_capability_denied_total",
                 &[
-                    ("app_id", "waddles.test.gatebridge"),
+                    ("app_id", "penguintechinc.waddles.test-gatebridge"),
                     ("permission", "net.http.fqdn"),
                     ("reason", "not_granted"),
                 ]

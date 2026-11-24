@@ -87,7 +87,7 @@ impl Default for FakeTools {
 }
 
 /// Minimal JSON-schema subset validator (type/required/properties/additionalProperties/
-/// minLength/maxLength/minimum/maximum/pattern) -- exactly what the contracts use.
+/// minLength/maxLength/minimum/maximum/pattern/enum) -- exactly what the contracts use.
 pub fn validate(schema: &Value, v: &Value, path: &str) -> Result<(), String> {
     let ty = schema["type"].as_str().unwrap_or("object");
     match ty {
@@ -123,6 +123,11 @@ pub fn validate(schema: &Value, v: &Value, path: &str) -> Result<(), String> {
                 && n > m
             {
                 return Err(format!("{path}: longer than {m}"));
+            }
+            if let Some(allowed) = schema["enum"].as_array()
+                && !allowed.iter().any(|a| a == v)
+            {
+                return Err(format!("{path}: not in enum"));
             }
             if let Some(p) = schema["pattern"].as_str()
                 && !Regex::new(p).unwrap().is_match(s)
@@ -189,13 +194,23 @@ impl ToolInvoker for FakeTools {
             return Ok(if tool.starts_with("twitch") {
                 json!({"segment_id": format!("seg{n}")})
             } else if tool.starts_with("wix") {
-                json!({"event_id": format!("wix{n}")})
+                // Wix returns the event object; ids are UUIDs, revision a string int64.
+                json!({"event": {"id": wix_id(*n), "revision": "1"}})
             } else {
                 json!({"event_id": n.to_string()})
             });
         }
+        if tool == "wix.event.update" {
+            let rev = args["revision"].as_i64().unwrap_or(0) + 1;
+            return Ok(json!({"event": {"id": args["event_id"], "revision": rev.to_string()}}));
+        }
         Ok(json!({}))
     }
+}
+
+/// Deterministic UUID-shaped Wix event id for fake remote object `n`.
+pub fn wix_id(n: u64) -> String {
+    format!("00000000-0000-4000-8000-{n:012}")
 }
 
 pub struct World {

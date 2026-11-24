@@ -34,13 +34,16 @@ from flask_core.service_jwt import (
     load_identities_from_env,
 )
 
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import SERVICE_AUDIENCE, admin_headers
+from tests.provider_connections.support import numeric_connection_id
 from tests.provider_connections.test_api import INTERNAL, _create
 
 _CHART_DIR = Path(__file__).resolve().parents[3] / "k8s" / "helm" / "waddlebot"
 _SVC_INGEST = "spiffe://penguintech.io/alpha/svc-ingest"
 _SCOPE = "connections:resolve"
 _LIST_SCOPE = "connections:list"
+_STREAM_DEK_SCOPE = "key:stream-dek:read"
 
 
 def _bound_headers(issuer: ServiceJwtIssuer, community_id: int) -> dict[str, str]:
@@ -125,9 +128,12 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
 ) -> None:
     identity = chart_identities[_SVC_INGEST]
     # Minimum: the data-plane scopes (connections, scope resolver, platform-user detokenizer,
-    # slash-command registry, per-user active context, bundle-schedule reconcile).
+    # slash-command registry, per-user active context, bundle-schedule reconcile) plus the
+    # always-rendered stream-DEK scope (#442: svc-ingest encrypts identity fields before publish).
     assert identity.allowed_scopes == frozenset(
         {
+            _STREAM_DEK_SCOPE,
+            "keys:tenant-dek:read",  # tenant-DEK broker (feature/tenant-key-provisioning)
             _SCOPE,
             _LIST_SCOPE,
             "dataplane:resolve-scope",
@@ -223,7 +229,7 @@ async def test_chart_minted_svc_ingest_token_reaches_the_internal_data_plane_rou
     )
     assert listed.status_code == 200
     (item,) = (await listed.get_json())["items"]
-    assert item["connectionId"] == connection_id
+    assert item["connectionId"] == await numeric_connection_id(pc_db, connection_id)
 
     resolved = await client.post(
         f"{INTERNAL}/communities/{pc_db.seed.community_id}"
@@ -267,7 +273,9 @@ async def test_a_freshly_created_binding_is_listed_with_no_further_approval_or_e
     )
     headers = {"Authorization": f"Bearer {service_issuer.issue(_SVC_INGEST, _LIST_SCOPE)}"}
     listed = await client.get(f"{INTERNAL}/provider-connections?provider=twitch", headers=headers)
-    assert [i["connectionId"] for i in (await listed.get_json())["items"]] == [body["id"]]
+    assert [i["connectionId"] for i in (await listed.get_json())["items"]] == [
+        await numeric_connection_id(pc_db, body["id"])
+    ]
 
 
 async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
@@ -282,27 +290,28 @@ async def test_an_admin_disabled_binding_is_hidden_until_re_enabled(
     assert (await (await client.get(url, headers=headers)).get_json())["items"] == []
 
     patched = await client.patch(
-        f"/api/v1/communities/{pc_db.seed.community_id}/provider-connections/{body['id']}",
+        f"/api/v1/communities/{public_id(pc_db, pc_db.seed.community_id)}/provider-connections/{body['id']}",
         headers=admin_headers(pc_db),
         data=json.dumps({"enabled": True}),
     )
     assert patched.status_code == 200
     items = (await (await client.get(url, headers=headers)).get_json())["items"]
-    assert [i["connectionId"] for i in items] == [body["id"]]
+    assert [i["connectionId"] for i in items] == [await numeric_connection_id(pc_db, body["id"])]
 
 
 def test_svc_ingest_grant_is_absent_when_dynamic_connections_is_disabled(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """F4: with svcIngest.dynamicConnections.enabled=false (beta/prod default) no svc-ingest identity exists."""
+    """F4: with dynamicConnections off (beta/prod default) svc-ingest keeps only the DEK scope."""
     env = _render_identities_env(
         "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false"
     )
     monkeypatch.setenv("SERVICE_JWT_IDENTITIES", env)
     identities = load_identities_from_env(env="alpha")
     assert len(identities) >= 3, "other identities must still render"  # denominator
-    ids = {identity.service_id for identity in identities}
-    assert _SVC_INGEST not in ids
+    by_id = {identity.service_id: identity for identity in identities}
+    assert _SVC_INGEST in by_id, "svc-ingest always renders (it needs the stream-DEK scope)"
+    assert by_id[_SVC_INGEST].allowed_scopes == frozenset({_STREAM_DEK_SCOPE})
     # Both flags off: no identity carries any connections:* scope at all.
     env_off = _render_identities_env(
         "pipeline.rustDataPlane.svcIngest.dynamicConnections.enabled=false",

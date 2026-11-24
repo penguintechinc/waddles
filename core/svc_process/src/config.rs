@@ -249,6 +249,13 @@ pub struct CliConfig {
     /// grants this role needs.
     #[arg(long, env = "DB_READER_USER", default_value = "svc_process_ro")]
     pub db_reader_user: String,
+    /// Postgres host for EVERY changelog-consumer read (safe-seq watermark, change rows, active-set /
+    /// scope / source-binding reads). Helm points it at the PRIMARY while `DB_READER_HOST` targets the
+    /// read replicas (`-ro`): a lagging replica could miss a row below the primary's safe_seq and the
+    /// tracker would then skip it forever, so the consumer never reads from a replica. Unset falls back
+    /// to `DB_READER_HOST` (single-endpoint deployments).
+    #[arg(long, env = "DB_WATERMARK_HOST")]
+    pub db_watermark_host: Option<String>,
 
     /// Production wiring for the bundle `db` host capability
     /// (`crate::capabilities::DbWiring`, `bundle_host_db::connect`) --
@@ -382,6 +389,17 @@ pub struct CliConfig {
         default_value = "http://seaweedfs:8333"
     )]
     pub media_bucket_endpoint: String,
+    /// svc-presentation's in-cluster gRPC address
+    /// (`waddles.presentation.internal.v1.SurfaceService`), e.g.
+    /// `https://waddlebot-svc-presentation:50051`. Empty (the default) leaves the bundle
+    /// `overlay.publish-surface` capability unwired: `surface.publish` then denies
+    /// `not_implemented`. `https://` needs [`Self::presentation_grpc_ca_file`]; plaintext is
+    /// accepted on loopback only.
+    #[arg(long, env = "PRESENTATION_GRPC_ENDPOINT", default_value = "")]
+    pub presentation_grpc_endpoint: String,
+    /// PEM CA bundle that signed svc-presentation's gRPC server certificate.
+    #[arg(long, env = "PRESENTATION_GRPC_CA_FILE", default_value = "")]
+    pub presentation_grpc_ca_file: String,
     /// Bundle bucket name for `media` outputs.
     #[arg(long, env = "MEDIA_BUCKET_NAME", default_value = "waddlebot-bundles")]
     pub media_bucket_name: String,
@@ -493,6 +511,20 @@ pub struct CliConfig {
     /// publicly-rooted endpoint instead.
     #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
     pub hub_api_grpc_ca_file: String,
+
+    /// Operator policy for reading pre-encryption plaintext `kv` values
+    /// (`bundle_host_kv::Sealing::with_legacy_plaintext_reads_allowed`).
+    /// Default `true` ONLY for the migration window; the planned flip to
+    /// `false` makes any non-envelope value an integrity error. Independent
+    /// of the per-scope sealed-since marker, which refuses plaintext in any
+    /// scope that already has a sealed write even while this is `true`.
+    #[arg(
+        long,
+        env = "KV_LEGACY_PLAINTEXT_READS_ALLOWED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub kv_legacy_plaintext_reads_allowed: bool,
 
     /// Plain env/values off-switch for inbound PII tokenization
     /// (`crate::build_hub_client`'s gate), independent of the
@@ -728,6 +760,12 @@ pub struct Config {
     /// unprovisioned deployment must start; the capability then denies
     /// `not_implemented`. Empty is treated as unset.
     pub bundle_platform_table_password: Option<Secret>,
+    /// The tenant stream-DEK source shared by every consumer (`crate::identity_crypto`),
+    /// built ONCE at startup by `crate::run_with_shutdown` (`crate::build_dek_provider`) --
+    /// it needs a live tokio runtime to open its lazy hub-api channel, so it cannot exist at
+    /// config-parse time. Empty until then; a consumer that finds it empty dead-letters every
+    /// event that carries an encrypted identity field (fail closed), never forwards them.
+    pub identity_dek: std::sync::Arc<std::sync::OnceLock<hub_client::dek::ConfiguredDekProvider>>,
 }
 
 impl fmt::Debug for Config {
@@ -836,12 +874,37 @@ impl Config {
             bundle_reputation_password,
             bundle_economy_password,
             bundle_platform_table_password,
+            identity_dek: std::sync::Arc::default(),
         })
     }
 }
 
 fn env_required(name: &'static str) -> Result<String, ConfigError> {
     std::env::var(name).map_err(|_| ConfigError::MissingEnv(name))
+}
+
+impl CliConfig {
+    /// Connection settings for the changelog consumer: same port/name/role as the reader, but host
+    /// `DB_WATERMARK_HOST` (the primary) when set, else `DB_READER_HOST`.
+    #[must_use]
+    pub fn changelog_primary_config(&self) -> bundle_active_set::ReaderConfig {
+        bundle_active_set::ReaderConfig {
+            host: self
+                .db_watermark_host
+                .clone()
+                .filter(|h| !h.trim().is_empty())
+                .unwrap_or_else(|| self.db_reader_host.clone()),
+            port: self.db_reader_port,
+            name: self.db_reader_name.clone(),
+            user: self.db_reader_user.clone(),
+        }
+    }
+
+    /// Whether the changelog consumer's host differs from the reader (replica) host.
+    #[must_use]
+    pub fn changelog_uses_primary_host(&self) -> bool {
+        self.changelog_primary_config().host != self.db_reader_host
+    }
 }
 
 #[cfg(test)]
@@ -961,9 +1024,12 @@ mod tests {
         let cli = CliConfig::parse_from([
             "svc-process",
             "--process-app-id",
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
         ]);
-        assert_eq!(cli.process_app_id, "waddles.bot.commands.default");
+        assert_eq!(
+            cli.process_app_id,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
     }
 
     #[test]
@@ -1257,5 +1323,39 @@ mod tests {
         assert!(!rendered.contains("super-secret-db-pass"));
         assert!(!rendered.contains("super-secret-api-key"));
         clear_secret_env();
+    }
+
+    /// regression: the watermark read must never resolve to the replica host (-ro).
+    #[test]
+    fn changelog_consumer_host_never_resolves_to_the_reader_replica_host() {
+        let cli = CliConfig::parse_from([
+            "svc-process",
+            "--db-reader-host",
+            "infra-postgres-ro.example.svc",
+            "--db-watermark-host",
+            "infra-postgres.example.svc",
+        ]);
+        let wm = cli.changelog_primary_config();
+        assert_eq!(wm.host, "infra-postgres.example.svc");
+        assert_ne!(wm.host, cli.db_reader_host);
+        assert!(cli.changelog_uses_primary_host());
+        assert_eq!(wm.user, cli.db_reader_user);
+        assert_eq!(wm.port, cli.db_reader_port);
+    }
+
+    /// Unset (or blank) `DB_WATERMARK_HOST` falls back to the reader host: single-endpoint deployments unchanged.
+    #[test]
+    fn changelog_consumer_host_falls_back_to_reader_host_when_unset_or_blank() {
+        let cli = CliConfig::parse_from(["svc-process", "--db-reader-host", "db.example.svc"]);
+        assert_eq!(cli.changelog_primary_config().host, "db.example.svc");
+        assert!(!cli.changelog_uses_primary_host());
+        let blank = CliConfig::parse_from([
+            "svc-process",
+            "--db-reader-host",
+            "db.example.svc",
+            "--db-watermark-host",
+            " ",
+        ]);
+        assert_eq!(blank.changelog_primary_config().host, "db.example.svc");
     }
 }

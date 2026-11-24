@@ -1,11 +1,10 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
-# waddles.core.example.event -- see bundles/python/pyping/hub-manifest.yaml's own header for why
+# penguintechinc.waddles.event -- see bundles/python/pyping/hub-manifest.yaml's own header for why
 # this is a separate file from this bundle's `bundle.yaml` (a different consumer's schema).
 schema_version: 2
-app_id: waddles.core.example.event
+app_id: penguintechinc.waddles.event
 name: Community Event + RSVP Bundle (Python)
-version: 1.0.4
-feature: waddles.core.example
+version: 1.0.7
 module: core
 provider: builtin
 author: github:penguintechinc

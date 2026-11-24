@@ -93,7 +93,6 @@ from typing import Any
 from flask_core.auth import verify_jwt_token
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
-from flask_core.secrets import require_secret_key
 from flask_core.tenancy import get_tenant_context, tenant_middleware
 from quart import Blueprint, current_app, request
 
@@ -101,8 +100,12 @@ from services import analytics_service as svc
 from services.analytics_proxy import AnalyticsCoreProxyClient
 from services.community_common import api_error, community_in_tenant
 from services.current_user import get_current_user_id
+from services.db_routing import get_read_async_dal, reads_from_replica
+from services.route_guards import platform_analytics_guard
+from services.user_public_id import use_user_public_ids
 
 analytics_bp = Blueprint("v1_analytics", __name__, url_prefix="/api/v1/analytics")
+use_user_public_ids(analytics_bp)
 
 #: Scenario 4 -- pre-existing scope name (security.md SCOPE_BUNDLES table's
 #: own `maintainer -> analytics:read` entry); see module docstring.
@@ -139,8 +142,7 @@ def _is_super_admin(req: Any) -> bool:
     auth_header = req.headers.get("Authorization")
     if not auth_header or not auth_header.startswith("Bearer "):
         return False
-    secret_key = require_secret_key()
-    payload = verify_jwt_token(auth_header[7:], secret_key)
+    payload = verify_jwt_token(auth_header[7:])
     if payload is None:
         return False
     roles = payload.get("roles") or []
@@ -189,7 +191,9 @@ async def get_my_reputation() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@analytics_bp.route("/community/<int:community_id>/members/<int:user_id>/stats", methods=["GET"])
+@analytics_bp.route(
+    "/community/<cuuid:community_id>/members/<uuuid:user_id>/stats", methods=["GET"]
+)
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]
 async def get_member_stats(community_id: int, user_id: int) -> Any:
@@ -206,7 +210,7 @@ async def get_member_stats(community_id: int, user_id: int) -> Any:
 
 
 @analytics_bp.route(
-    "/community/<int:community_id>/members/<int:user_id>/reputation", methods=["GET"]
+    "/community/<cuuid:community_id>/members/<uuuid:user_id>/reputation", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_COMMUNITY_ADMIN)  # type: ignore[misc]
@@ -231,22 +235,27 @@ async def get_member_reputation(community_id: int, user_id: int) -> Any:
 @analytics_bp.route("/platform/overview", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
+@reads_from_replica("analytics.get_platform_overview")
 async def get_platform_overview() -> Any:
     """`GET /api/v1/analytics/platform/overview`."""
-    return await svc.platform_overview(_proxy_client, current_app.config["async_dal"])
+    return await svc.platform_overview(_proxy_client, get_read_async_dal())
 
 
 @analytics_bp.route("/platform/reputation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
+@reads_from_replica("analytics.get_platform_reputation")
 async def get_platform_reputation() -> Any:
     """`GET /api/v1/analytics/platform/reputation`."""
-    return await svc.reputation_distribution(current_app.config["async_dal"])
+    return await svc.reputation_distribution(get_read_async_dal())
 
 
 @analytics_bp.route("/platform/growth", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 async def get_platform_growth() -> Any:
     """`GET /api/v1/analytics/platform/growth`."""
     period = request.args.get("period", "90d")
@@ -256,6 +265,7 @@ async def get_platform_growth() -> Any:
 @analytics_bp.route("/platform/activity", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 async def get_platform_activity() -> Any:
     """`GET /api/v1/analytics/platform/activity`."""
     return await svc.activity_breakdown(_proxy_client)
@@ -264,6 +274,7 @@ async def get_platform_activity() -> Any:
 @analytics_bp.route("/platform/community-health", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_PLATFORM_READ)  # type: ignore[misc]
+@platform_analytics_guard  # type: ignore[misc]
 async def get_platform_community_health() -> Any:
     """`GET /api/v1/analytics/platform/community-health`.
 
@@ -276,7 +287,11 @@ async def get_platform_community_health() -> Any:
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     if not await feature_enabled(FEATURE_COMMUNITY_HEALTH, tenant=ctx.tenant_slug):
-        return api_error("Community health analytics requires a Professional plan or higher", 402)
+        return svc.analytics_error(
+            "Community health analytics requires a Professional plan or higher",
+            402,
+            svc.CODE_FEATURE_NOT_ENABLED,
+        )
     limit = _clamp_limit(request.args.get("limit"))
     return await svc.community_health_summaries(_proxy_client, limit)
 
@@ -286,7 +301,7 @@ async def get_platform_community_health() -> Any:
 # ---------------------------------------------------------------------------
 
 
-@analytics_bp.route("/admin/users/<int:user_id>/stats", methods=["GET"])
+@analytics_bp.route("/admin/users/<uuuid:user_id>/stats", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_USERS_ADMIN)  # type: ignore[misc]
 async def get_admin_user_stats(user_id: int) -> Any:
@@ -295,7 +310,7 @@ async def get_admin_user_stats(user_id: int) -> Any:
     return await svc.user_self_stats(_proxy_client, user_id, caller_id, _caller_role(request))
 
 
-@analytics_bp.route("/admin/users/<int:user_id>/reputation", methods=["GET"])
+@analytics_bp.route("/admin/users/<uuuid:user_id>/reputation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope(SCOPE_USERS_ADMIN)  # type: ignore[misc]
 async def get_admin_user_reputation(user_id: int) -> Any:

@@ -1,7 +1,7 @@
 # about (Python)
 
 `!about` / `!bot` -- static bot name + version plus a per-community custom blurb. First-party
-(`provider: builtin`, `app_id: waddles.core.example.about`), kv-only, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.about`), kv-only, WASI component.
 
 | | |
 |---|---|

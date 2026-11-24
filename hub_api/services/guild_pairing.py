@@ -26,13 +26,44 @@ this port's other service modules assume.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
 from services.admin_service import VALID_MEMBER_ROLES
-from services.errors import bad_request, conflict, not_found
+from services.errors import ApiError, bad_request, conflict, not_found
 from services.schema import bind_guild_pairing_tables
+
+logger = logging.getLogger(__name__)
+
+#: Deliberately detail-free: a cross-tenant collision must not reveal another tenant's config.
+ROLE_UNAVAILABLE_MESSAGE = "This role can't be used for mirroring"
+
+
+def community_tenant_id(dal: Any, community_id: int) -> int | None:
+    """Tenant id owning `community_id` (`None` if the community row is missing).
+
+    Used to scope cross-community role conflicts to the caller's own tenant.
+    """
+    row = dal(dal.communities.id == community_id).select(dal.communities.tenant_id).first()
+    return int(row.tenant_id) if row is not None else None
+
+
+def role_unavailable(reason: str, community_id: int, other_community_id: int) -> ApiError:
+    """Generic 409 for a cross-tenant collision on the same physical Discord role.
+
+    The specific reason is logged server-side (numeric ids only, PII-free); the response
+    carries no ids or names from the other tenant.
+    """
+    logger.warning(
+        "role_conflict.cross_tenant reason=%s community_id=%s other_community_id=%s",
+        reason,
+        community_id,
+        other_community_id,
+    )
+    return ApiError(ROLE_UNAVAILABLE_MESSAGE, 409, "ROLE_UNAVAILABLE")
+
 
 #: `guild_tenant_pairings.direction` -- migration 0034's own CHECK constraint values.
 #: `discord_to_twitch` is the Discord -> platform direction's historical name (kept
@@ -58,6 +89,21 @@ VALID_SUBSCRIBER_TIERS: tuple[int, ...] = (1, 2, 3)
 #: `role_sync_service.py`'s owner-protection invariant).
 VALID_COMMUNITY_ROLES: tuple[str, ...] = VALID_MEMBER_ROLES
 
+#: The ONLY community roles an inbound (Discord -> Waddles) binding may target. Privileged
+#: roles (`community-admin`, `moderator`) are refused: anyone with Manage Roles in a paired
+#: guild could otherwise self-promote. Migration 0104's CHECK constraint is the DB backstop
+#: (kept equal by `test_role_sync_privilege_hardening.py`).
+INBOUND_COMMUNITY_ROLES: tuple[str, ...] = ("vip", "member")
+PRIVILEGED_COMMUNITY_ROLES: frozenset[str] = frozenset(VALID_MEMBER_ROLES) - frozenset(
+    INBOUND_COMMUNITY_ROLES
+)
+
+
+def privileged_target_error(message: str) -> ApiError:
+    """422 `privileged_target_role` -- the one refusal code for every privileged-binding path."""
+    return ApiError(message, 422, "privileged_target_role")
+
+
 _MAX_ROLE_NAME_PREFIX_LEN = 50
 _MAX_EXTERNAL_ID_LEN = 255
 
@@ -80,6 +126,8 @@ class GuildPairing:
     #: migration 0039_event_sync_enabled -- independent opt-in from `sync_enabled`
     #: (role-sync); gates `event_discord_sync_service.py`'s push engine.
     event_sync_enabled: bool
+    #: migration 0104 -- opt-in Twitch moderator -> Discord moderator propagation (default off).
+    propagate_moderators: bool
     created_by_user_id: int | None
     created_at: str | None
     updated_at: str | None
@@ -106,6 +154,105 @@ class RoleSyncBinding:
 
 def _ensure_tables(dal: Any) -> None:
     bind_guild_pairing_tables(dal)
+
+
+def _is_sqlite(dal: Any) -> bool:
+    return getattr(dal, "_dbname", "") == "sqlite"
+
+
+def _now_param(dal: Any) -> str:
+    """UTC "now" as a bound parameter (sqlite's timestamp converter wants `YYYY-MM-DD HH:MM:SS`)."""
+    now = datetime.now(UTC)
+    return now.strftime("%Y-%m-%d %H:%M:%S.%f") if _is_sqlite(dal) else now.isoformat()
+
+
+def _actor_uuid(dal: Any, actor_user_id: int | None) -> str | None:
+    """The actor's `hub_users.uuid` token (never a name), or None when unknown/unsupported."""
+    if actor_user_id is None or "uuid" not in dal.hub_users.fields:
+        return None
+    row = dal(dal.hub_users.id == actor_user_id).select(dal.hub_users.uuid).first()
+    return str(row.uuid) if row is not None and row.uuid else None
+
+
+def _lock_guild(dal: Any, discord_guild_id: str) -> None:
+    """Serialize claim/release for one guild on a transaction-scoped Postgres advisory lock.
+
+    Without it a same-tenant claim ("owner == me, fine") can interleave with the last-pairing
+    release (which deletes that very claim) and leave a pairing with no claim row. Both functions
+    take the lock FIRST, inside the caller's transaction, so it is held until the pairing
+    insert/delete commits or rolls back. sqlite (tests) has a single writer, so it is a no-op.
+    """
+    if _is_sqlite(dal):
+        return
+    dal.executesql(
+        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+        placeholders=["discord_guild_tenants:" + discord_guild_id],
+    )
+
+
+def claim_guild_for_tenant(
+    dal: Any, *, tenant_id: int, discord_guild_id: str, actor_user_id: int | None = None
+) -> bool:
+    """Atomically claim `discord_guild_id` for `tenant_id` (a guild belongs to ONE tenant).
+
+    One `INSERT ... ON CONFLICT DO NOTHING RETURNING` on `discord_guild_tenants` (alembic 0137,
+    guild id is the PRIMARY KEY): of two tenants racing for a fresh guild exactly one row is
+    inserted. Returns True when THIS call inserted it, False when the same tenant already held
+    it (N:M between that tenant's communities stays legal). A claim held by a DIFFERENT tenant
+    raises `conflict()` (409). NO commit -- the caller's transaction owns it, so a failed pairing
+    insert rolls the claim back with it.
+    """
+    _lock_guild(dal, discord_guild_id)
+    qmark = "?" if _is_sqlite(dal) else "%s"
+    uuid_cast = "" if _is_sqlite(dal) else "::uuid"
+    # Only the driver placeholder token is interpolated; every value is bound.
+    claim_sql = (
+        "INSERT INTO discord_guild_tenants "  # noqa: S608  # nosec B608
+        "(discord_guild_id, tenant_id, claimed_at, claimed_by_uuid) "
+        f"VALUES ({qmark}, {qmark}, {qmark}, {qmark}{uuid_cast}) "
+        "ON CONFLICT DO NOTHING RETURNING tenant_id"
+    )
+    rows = dal.executesql(
+        claim_sql,
+        placeholders=[
+            discord_guild_id,
+            int(tenant_id),
+            _now_param(dal),
+            _actor_uuid(dal, actor_user_id),
+        ],
+    )
+    if rows:
+        return True
+    owner = dal(dal.discord_guild_tenants.discord_guild_id == discord_guild_id).select().first()
+    if owner is not None and int(owner.tenant_id) == int(tenant_id):
+        return False
+    logger.warning(
+        "guild claim refused: guild already belongs to another tenant tenant_id=%s", tenant_id
+    )
+    raise conflict("This Discord server is already linked to a different tenant")
+
+
+def release_unused_guild_claim(dal: Any, *, tenant_id: int, discord_guild_id: str) -> None:
+    """Free `tenant_id`'s claim on the guild once its LAST pairing for it is gone.
+
+    A guarded `DELETE ... WHERE NOT EXISTS`: a no-op while any community of that tenant still has
+    a pairing for the guild. NO commit (the caller's transaction owns it). Takes the same
+    per-guild advisory lock as the claim, so it never deletes a claim a concurrent same-tenant
+    pairing is relying on.
+    """
+    _lock_guild(dal, discord_guild_id)
+    qmark = "?" if _is_sqlite(dal) else "%s"
+    release_sql = (
+        "DELETE FROM discord_guild_tenants "  # noqa: S608  # nosec B608
+        f"WHERE discord_guild_id = {qmark} AND tenant_id = {qmark} "
+        "AND NOT EXISTS (SELECT 1 FROM guild_tenant_pairings p "
+        "JOIN communities c ON c.id = p.community_id "
+        f"WHERE p.discord_guild_id = {qmark} AND c.tenant_id = {qmark})"
+    )
+    dal.executesql(
+        release_sql,
+        placeholders=[discord_guild_id, int(tenant_id), discord_guild_id, int(tenant_id)],
+    )
 
 
 def _validate_discord_guild_id(value: str) -> str:
@@ -155,6 +302,11 @@ def _validate_sync_scope_and_tier(
             raise bad_request("subscriber_tier must be omitted when sync_scope is 'community_role'")
         if community_role not in VALID_COMMUNITY_ROLES:
             raise bad_request(f"community_role must be one of {VALID_COMMUNITY_ROLES}")
+        if community_role not in INBOUND_COMMUNITY_ROLES:
+            raise privileged_target_error(
+                f"community_role '{community_role}' is privileged; inbound role-sync may only "
+                f"grant one of {INBOUND_COMMUNITY_ROLES}"
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +327,7 @@ def _pairing_from_row(row: Any) -> GuildPairing:
         sync_enabled=bool(row.sync_enabled),
         role_name_prefix=row.role_name_prefix,
         event_sync_enabled=bool(getattr(row, "event_sync_enabled", False)),
+        propagate_moderators=bool(getattr(row, "propagate_moderators", False)),
         created_by_user_id=row.created_by_user_id,
         created_at=_iso(row.created_at),
         updated_at=_iso(row.updated_at),
@@ -239,6 +392,8 @@ def create_pairing(
     role_name_prefix: str,
     sync_enabled: bool = False,
     event_sync_enabled: bool = False,
+    propagate_moderators: bool = False,
+    ownership_verified: bool = False,
     actor_user_id: int | None,
 ) -> GuildPairing:
     """Create a new N:M guild<->community pairing; opt-in by default (`sync_enabled=False`).
@@ -250,7 +405,9 @@ def create_pairing(
     Raises `conflict()` if this `(community_id, discord_guild_id)` pair
     already has a pairing -- `UNIQUE (community_id, discord_guild_id)` in
     migration 0034 is the production backstop, this check is the clear,
-    typed error path.
+    typed error path. Raises `conflict()` (409) when the guild already
+    belongs to a DIFFERENT tenant (`discord_guild_tenants`, migration 0137);
+    several communities of the SAME tenant may still pair one guild.
     """
     discord_guild_id = _validate_discord_guild_id(discord_guild_id)
     direction = _validate_direction(direction)
@@ -269,6 +426,14 @@ def create_pairing(
                 f"community {community_id} is already paired with guild {discord_guild_id}"
             )
 
+        tenant_id = community_tenant_id(dal, community_id)
+        if tenant_id is None:
+            raise not_found("Community not found")
+        # A guild belongs to exactly one tenant: atomic claim, rolled back with a failed insert.
+        claim_guild_for_tenant(
+            dal, tenant_id=tenant_id, discord_guild_id=discord_guild_id, actor_user_id=actor_user_id
+        )
+
         now = datetime.now(UTC)
         row_id = t.insert(
             community_id=community_id,
@@ -276,6 +441,8 @@ def create_pairing(
             direction=direction,
             sync_enabled=bool(sync_enabled),
             event_sync_enabled=bool(event_sync_enabled),
+            propagate_moderators=bool(propagate_moderators),
+            ownership_verified_at=now if ownership_verified else None,
             role_name_prefix=role_name_prefix,
             created_by_user_id=actor_user_id,
             created_at=now,
@@ -298,6 +465,7 @@ def update_pairing(
     event_sync_enabled: bool | None = None,
     direction: str | None = None,
     role_name_prefix: str | None = None,
+    propagate_moderators: bool | None = None,
 ) -> GuildPairing:
     """Partially update a pairing's opt-in toggle(s) / sync direction / role-name prefix.
 
@@ -325,6 +493,8 @@ def update_pairing(
             updates["event_sync_enabled"] = bool(event_sync_enabled)
         if direction is not None:
             updates["direction"] = direction
+        if propagate_moderators is not None:
+            updates["propagate_moderators"] = bool(propagate_moderators)
         if role_name_prefix is not None:
             updates["role_name_prefix"] = role_name_prefix
 
@@ -372,6 +542,11 @@ def delete_pairing(dal: Any, community_id: int, pairing_id: int) -> bool:
                 dal(dal.discord_role_mirror_grants.mapping_id == mapping_id).delete()
                 dal(m.id == mapping_id).delete()
         dal(t.id == pairing_id).delete()
+        tenant_id = community_tenant_id(dal, community_id)
+        if tenant_id is not None:
+            release_unused_guild_claim(
+                dal, tenant_id=tenant_id, discord_guild_id=existing.discord_guild_id
+            )
         dal.commit()
     except Exception:
         dal.rollback()
@@ -430,21 +605,23 @@ def create_binding(
     pairing = get_pairing(dal, community_id, pairing_id)
     if pairing is not None:
         m = dal.discord_role_mirror_mappings
-        used_by_mirror = dal(
-            (m.community_id == community_id)
-            & (
-                (
-                    (m.source_guild_id == pairing.discord_guild_id)
-                    & (m.source_role_id == discord_role_id)
-                )
-                | (
-                    (m.target_guild_id == pairing.discord_guild_id)
-                    & (m.target_role_id == discord_role_id)
-                )
+        mirror_rows = dal(
+            (
+                (m.source_guild_id == pairing.discord_guild_id)
+                & (m.source_role_id == discord_role_id)
             )
-        ).count()
-        if used_by_mirror:
-            raise conflict(f"discord role {discord_role_id} is used by a Discord role mirror")
+            | (
+                (m.target_guild_id == pairing.discord_guild_id)
+                & (m.target_role_id == discord_role_id)
+            )
+        ).select(m.community_id)
+        own_tenant = community_tenant_id(dal, community_id)
+        for row in mirror_rows:
+            other = int(row.community_id)
+            if community_tenant_id(dal, other) == own_tenant:
+                raise conflict(f"discord role {discord_role_id} is used by a Discord role mirror")
+        for row in mirror_rows:
+            raise role_unavailable("used_by_mirror", community_id, int(row.community_id))
     try:
         cross_direction = dal(
             (b.pairing_id == pairing_id) & (b.discord_role_id == discord_role_id)
@@ -510,3 +687,48 @@ def delete_binding(dal: Any, community_id: int, pairing_id: int, binding_id: int
         dal.rollback()
         raise
     return True
+
+
+async def create_binding_checked(
+    dal: Any,
+    community_id: int,
+    pairing_id: int,
+    *,
+    sync_scope: str,
+    discord_role_id: str,
+    subscriber_tier: int | None = None,
+    community_role: str | None = None,
+    list_roles: Any = None,
+) -> RoleSyncBinding:
+    """`create_binding()` plus the outbound privileged-role refusal (the API entry point).
+
+    Outbound bindings (`subscriber_tier`/`moderator`) make Waddles ADD a Discord role, so the
+    target role is looked up live and refused when it is managed or carries a privileged
+    permission -- the same rule `discord_role_mirror.create_mapping()` applies. `list_roles` is a
+    test seam defaulting to `discord_guild_roles.list_guild_roles`.
+    """
+    _validate_sync_scope_and_tier(sync_scope, subscriber_tier, community_role)
+    role_id = _validate_discord_role_id(discord_role_id)
+    if sync_scope in ("subscriber_tier", "moderator"):
+        pairing = get_pairing(dal, community_id, pairing_id)
+        if pairing is None:
+            raise not_found(f"no pairing {pairing_id} for community {community_id}")
+        if list_roles is None:
+            from services.discord_guild_roles import list_guild_roles as list_roles
+        roles = await list_roles(dal, community_id, guild_id=pairing.discord_guild_id)
+        found = next((r for r in roles if r.id == role_id), None)
+        if found is None:
+            raise not_found("That role does not exist in the paired Discord server")
+        if found.privileged:
+            raise privileged_target_error(
+                "That Discord role is privileged or managed and cannot be granted by role-sync"
+            )
+    return create_binding(
+        dal,
+        community_id,
+        pairing_id,
+        sync_scope=sync_scope,
+        discord_role_id=role_id,
+        subscriber_tier=subscriber_tier,
+        community_role=community_role,
+    )

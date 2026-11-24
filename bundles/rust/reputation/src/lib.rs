@@ -1,4 +1,4 @@
-//! Reputation SERVICE bundle (v1.1.0).
+//! Reputation SERVICE bundle (v1.1.2).
 //!
 //! An always-on `kind: service` bundle on `world stage-tools`: it exports
 //! `tool-provider` (the surface other bundles reach through `tool.invoke`) and
@@ -15,7 +15,7 @@ use std::sync::{Arc, OnceLock};
 
 use bindings::exports::waddle::bundle::tool_provider::Guest;
 use bindings::waddle::bundle::tool::ToolError as WitError;
-use bindings::waddle::bundle::{flags, kv, log, reputation, tool};
+use bindings::waddle::bundle::{context_v2, flags, kv, log, reputation, tool};
 use logic::{
     Applied, ConfigStore, Entry, Env, HistoryRow, HostError, Platform, RepHost, TenantPolicy,
     TenantScore,
@@ -174,15 +174,20 @@ impl ConfigStore for WasmKv {
 struct WasmPlatform;
 
 impl Platform for WasmPlatform {
+    /// The live per-community config JSON from the stage context.
+    fn community_config_json(&self) -> String {
+        context_v2::get_context().config_json
+    }
+
     /// Feature flag, default OFF.
     fn flag_enabled(&self, key: &str) -> bool {
         flags::enabled(key, false)
     }
 
-    /// Calls `waddles.core.service.<platform>`'s `<platform>.moderation.ban`
+    /// Calls `penguintechinc.waddles.<platform>`'s `<platform>.moderation.ban`
     /// tool; only a stable error code is returned.
     fn ban(&self, platform: &str, user: &str, reason: &str, key: &str) -> Result<(), String> {
-        let target = format!("waddles.core.service.{platform}");
+        let target = format!("penguintechinc.waddles.{platform}");
         let tool_name = format!("{platform}.moderation.ban");
         let args = serde_json::json!({ "user": user, "reason": reason }).to_string();
         tool::invoke(&target, &tool_name, args.as_bytes(), Some(key))

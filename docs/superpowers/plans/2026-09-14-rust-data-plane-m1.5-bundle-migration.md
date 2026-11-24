@@ -1,5 +1,7 @@
 # Milestone M1.5 — Bundle DAL Migration + `consumes` v2 Implementation Plan
 
+> **Historical document.** Written against the repository layout at the time; some paths named below (shown as plain text, not links) have since moved, been renamed or been removed. Not maintained as current architecture.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Migrate every existing Python App Bundle's database access from `flask_core.database.AsyncDAL` (a pydal wrapper) to `penguin-dal`; migrate today's ingest-stage `consumes` tags into the new `bundle.yaml` v2 `consumes` contract; add the Python side of the shared golden-fixture contract tests — all verified by each service's own pytest suite, natively, before any WASM compilation work begins (D21a).
@@ -135,9 +137,9 @@ The only per-bundle work under Pattern B is: rewrite `$1, $2, $3` positional pla
 - Test: `scripts/ci/tests/test_check_bundle_dal_imports.sh` (a small bats-free shell self-test)
 
 **Interfaces:**
-- Produces: `scripts/ci/check_bundle_dal_imports.sh` — exit 0 with `files_scanned=N legacy_hits=0` printed when clean; exit 1 and print every offending `path:line` when not. Scans exactly `core/svc_process/builtin_handlers`, `core/svc_action/builtin_handlers`, `core/svc_ingest/builtin_handlers` (today's real bundle locations — `bundles/python/` does not exist until M2/M6's directory move).
+- Produces: `scripts/ci/check_bundle_dal_imports.sh` — exit 0 with `files_scanned=N legacy_hits=0` printed when clean; exit 1 and print every offending `path:line` when not. Scans exactly core/svc_process/builtin_handlers, core/svc_action/builtin_handlers, core/svc_ingest/builtin_handlers (today's real bundle locations — `bundles/python/` does not exist until M2/M6's directory move).
 
-This task also fixes the milestone's own inventory number: a naive `grep -rl "get_bundle_dal"` over the bundle directories returns 17 files, but `core/svc_process/builtin_handlers/community_context_process.py` only *mentions* `get_bundle_dal()` inside a docstring comparing itself to a sibling bundle (line 12: "`community_reputation_process` calling `get_bundle_dal()` directly instead") — it never imports or calls it. The real, verified count is **16 bundles** (11 in `core/svc_process/builtin_handlers/`, 5 in `core/svc_action/builtin_handlers/`, 0 in `core/svc_ingest/builtin_handlers/`):
+This task also fixes the milestone's own inventory number: a naive `grep -rl "get_bundle_dal"` over the bundle directories returns 17 files, but `core/svc_process/builtin_handlers/community_context_process.py` only *mentions* `get_bundle_dal()` inside a docstring comparing itself to a sibling bundle (line 12: "`community_reputation_process` calling `get_bundle_dal()` directly instead") — it never imports or calls it. The real, verified count is **16 bundles** (11 in core/svc_process/builtin_handlers, 5 in core/svc_action/builtin_handlers, 0 in core/svc_ingest/builtin_handlers):
 
 | # | Bundle | Service | Legacy call sites |
 |---|---|---|---|
@@ -844,7 +846,7 @@ class TestIsFirstTime:
 
     async def test_returns_true_if_no_prior_events(self, dal) -> None:
         """User with no prior activity_message_events is a first-timer."""
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await _is_first_time("discord", "user123")
         assert result is True
 
@@ -857,7 +859,7 @@ class TestIsFirstTime:
                     "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
                 )
             )
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await _is_first_time("discord", "user123")
         assert result is False
 
@@ -870,7 +872,7 @@ class TestIsFirstTime:
                     "(community_id, platform, platform_user_id) VALUES (99, 'twitch', 'someone_else')"
                 )
             )
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await _is_first_time("discord", "user123")
         assert result is True
 ```
@@ -883,7 +885,7 @@ class TestTryMarkWelcomed:
 
     async def test_returns_true_if_insert_succeeded(self, dal) -> None:
         """Returning a row means this call won the race."""
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await _try_mark_welcomed("discord", "user123")
         assert result is True
 
@@ -896,7 +898,7 @@ class TestTryMarkWelcomed:
                     "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
                 )
             )
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await _try_mark_welcomed("discord", "user123")
         assert result is False
 
@@ -909,7 +911,7 @@ class TestTryMarkWelcomed:
                     "(community_id, platform, platform_user_id) VALUES (99, 'twitch', 'someone_else')"
                 )
             )
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await _try_mark_welcomed("discord", "user123")
         assert result is True
 ```
@@ -927,7 +929,7 @@ In `TestTransform`, replace every `set_bundle_dal(_mock_executor())` with the `d
                     "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
                 )
             )
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await transform(event)
         assert result is None
 
@@ -941,7 +943,7 @@ In `TestTransform`, replace every `set_bundle_dal(_mock_executor())` with the `d
                     "(community_id, platform, platform_user_id) VALUES (42, 'discord', 'user123')"
                 )
             )
-        with bundle_context(tenant="acme", community="42", app_id="waddles.social.welcome.default"):
+        with bundle_context(tenant="acme", community="42", app_id="penguintechinc.waddles.welcome-pipeline"):
             result = await transform(event)
         assert result is None
 ```
@@ -3486,22 +3488,22 @@ EOF
 
 | Bundle file | `app_id`(s) | Row exists today? |
 |---|---|---|
-| `bot_process.py` | `waddles.bot.discord.default`, `waddles.bot.twitch.default` | yes (2 rows, one file) |
-| `community_announcements_process.py` | `waddles.community.announcements.default` | yes |
-| `community_chat_process.py` | `waddles.community.chat.default` | yes |
-| `community_context_process.py` | `waddles.community.context.default` | **no — new row** |
-| `community_forums_process.py` | `waddles.community.forums.default` | yes |
-| `community_loyalty_process.py` | `waddles.community.loyalty.default` | yes |
-| `community_polls_process.py` | `waddles.community.polls.default` | yes |
-| `community_reputation_process.py` | `waddles.community.reputation.default` | **no — new row** |
-| `echo_process.py` | `waddles.core.demo.echo` | yes |
-| `inventory_process.py` | `waddles.community.inventory.default` | **no — new row** |
-| `marketing_engagement_process.py` | `waddles.marketing.engagement.default` | yes |
-| `social_alias_process.py` | `waddles.social.alias.default` | yes |
-| `social_music_process.py` | `waddles.social.music.default` | yes |
-| `social_quote_process.py` | `waddles.social.quote.default` | yes |
-| `social_shoutout_process.py` | `waddles.bot.shoutout.default` | yes |
-| `social_welcome_process.py` | `waddles.social.welcome.default` | yes |
+| `bot_process.py` | `penguintechinc.waddles.discord-pipeline`, `penguintechinc.waddles.twitch-pipeline` | yes (2 rows, one file) |
+| `community_announcements_process.py` | `penguintechinc.waddles.announcements-pipeline` | yes |
+| `community_chat_process.py` | `penguintechinc.waddles.chat-pipeline` | yes |
+| `community_context_process.py` | `penguintechinc.waddles.community-context` | **no — new row** |
+| `community_forums_process.py` | `penguintechinc.waddles.forums-pipeline` | yes |
+| `community_loyalty_process.py` | `penguintechinc.waddles.loyalty-pipeline` | yes |
+| `community_polls_process.py` | `penguintechinc.waddles.polls-pipeline` | yes |
+| `community_reputation_process.py` | `penguintechinc.waddles.community-reputation` | **no — new row** |
+| `echo_process.py` | `penguintechinc.waddles.echo-pipeline` | yes |
+| `inventory_process.py` | `penguintechinc.waddles.community-inventory` | **no — new row** |
+| `marketing_engagement_process.py` | `penguintechinc.waddles.engagement-pipeline` | yes |
+| `social_alias_process.py` | `penguintechinc.waddles.alias-pipeline` | yes |
+| `social_music_process.py` | `penguintechinc.waddles.music-pipeline` | yes |
+| `social_quote_process.py` | `penguintechinc.waddles.quote-pipeline` | yes |
+| `social_shoutout_process.py` | `penguintechinc.waddles.shoutout-pipeline` | yes |
+| `social_welcome_process.py` | `penguintechinc.waddles.welcome-pipeline` | yes |
 
 The three new-row app_ids/modules/features follow the exact naming convention `0016_moderation_enforce_app`/`0017_loyalty_shoutout_apps`/`0019_kick_app` already establish for "code shipped, no catalog row" gaps.
 
@@ -3531,8 +3533,8 @@ Command-word source: `core/svc_process/builtin_handlers/bot_process.py`'s own
 `_FEATURE_MODULES` dict (the single source of truth for which `!word`
 routes to which sibling bundle) plus each bundle's own module docstring for
 non-command (event-type-driven) bundles. Platform reach: today's
-`bot_process.py` is registered ONLY against `waddles.bot.discord.default`/
-`waddles.bot.twitch.default` (migrations 083/084) -- every feature bundle
+`bot_process.py` is registered ONLY against `penguintechinc.waddles.discord-pipeline`/
+`penguintechinc.waddles.twitch-pipeline` (migrations 083/084) -- every feature bundle
 reached only via `_dispatch_feature`'s in-process call is therefore
 reachable on Discord+Twitch only today, which is what these `consumes`
 rules declare. Legacy-tag translation per the M1.5 mapping table:
@@ -3555,78 +3557,78 @@ TENANT_SLUG = "global"
 
 # app_id -> `stages.process.consumes` JSON array (bundle.yaml v2 shape).
 _CONSUMES_BY_APP_ID: dict[str, str] = {
-    "waddles.bot.discord.default": (
+    "penguintechinc.waddles.discord-pipeline": (
         '[{"platform": "discord", "event_types": ["chat.message"]}]'
     ),
-    "waddles.bot.twitch.default": (
+    "penguintechinc.waddles.twitch-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"]}]'
     ),
-    "waddles.community.announcements.default": (
+    "penguintechinc.waddles.announcements-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!announce"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!announce"]}}]'
     ),
-    "waddles.community.chat.default": (
+    "penguintechinc.waddles.chat-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!chat-history", "!channels"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!chat-history", "!channels"]}}]'
     ),
-    "waddles.community.forums.default": (
+    "penguintechinc.waddles.forums-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!forum"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!forum"]}}]'
     ),
-    "waddles.community.loyalty.default": (
+    "penguintechinc.waddles.loyalty-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!points", "!top", "!shop", "!redeem"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!points", "!top", "!shop", "!redeem"]}}]'
     ),
-    "waddles.community.polls.default": (
+    "penguintechinc.waddles.polls-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!poll"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!poll"]}}]'
     ),
-    "waddles.social.alias.default": (
+    "penguintechinc.waddles.alias-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!alias", "!unalias"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!alias", "!unalias"]}}]'
     ),
-    "waddles.social.music.default": (
+    "penguintechinc.waddles.music-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!sr", "!songrequest", "!sq", "!songqueue"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!sr", "!songrequest", "!sq", "!songqueue"]}}]'
     ),
-    "waddles.social.quote.default": (
+    "penguintechinc.waddles.quote-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!quote"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!quote"]}}]'
     ),
-    "waddles.bot.shoutout.default": (
+    "penguintechinc.waddles.shoutout-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!so", "!shoutout", "!vso"]}}, '
         '{"platform": "discord", "event_types": ["chat.message"], '
         '"filters": {"command_prefix": ["!so", "!shoutout", "!vso"]}}]'
     ),
-    "waddles.marketing.engagement.default": (
+    "penguintechinc.waddles.engagement-pipeline": (
         '[{"platform": "waddles", "event_types": ["poll_create", "poll_vote", '
         '"form_submit", "engagement"]}]'
     ),
-    "waddles.social.welcome.default": (
+    "penguintechinc.waddles.welcome-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"]}, '
         '{"platform": "discord", "event_types": ["chat.message"]}]'
     ),
     # The echo demo bundle "consumed everything" -- per the M1.5 mapping
     # table, five explicit per-platform rules, never platform: "*", so this
     # migration does not require allow_wildcard_consumes anywhere.
-    "waddles.core.demo.echo": (
+    "penguintechinc.waddles.echo-pipeline": (
         '[{"platform": "twitch", "event_types": ["chat.message"]}, '
         '{"platform": "discord", "event_types": ["chat.message"]}, '
         '{"platform": "slack", "event_types": ["chat.message"]}, '
@@ -3643,7 +3645,7 @@ _CONSUMES_BY_APP_ID: dict[str, str] = {
 # 0016/0017/0019 each establish for other app_ids.
 _NEW_APP_ROWS: tuple[dict[str, str], ...] = (
     {
-        "app_id": "waddles.community.reputation.default",
+        "app_id": "penguintechinc.waddles.community-reputation",
         "module": "community",
         "feature": "waddles.community.reputation",
         "entrypoint": "bundles.community_reputation_process:transform",
@@ -3655,7 +3657,7 @@ _NEW_APP_ROWS: tuple[dict[str, str], ...] = (
         ),
     },
     {
-        "app_id": "waddles.community.context.default",
+        "app_id": "penguintechinc.waddles.community-context",
         "module": "community",
         "feature": "waddles.community.context",
         "entrypoint": "bundles.community_context_process:transform",
@@ -3667,7 +3669,7 @@ _NEW_APP_ROWS: tuple[dict[str, str], ...] = (
         ),
     },
     {
-        "app_id": "waddles.community.inventory.default",
+        "app_id": "penguintechinc.waddles.community-inventory",
         "module": "community",
         "feature": "waddles.community.inventory",
         "entrypoint": "bundles.inventory_process:transform",
@@ -4513,7 +4515,7 @@ grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/builtin_handlers/kick_ingest.
 grep -n "PlatformEvent(\|raw.get(" core/svc_ingest/builtin_handlers/echo_ingest.py
 ```
 
-For each file: (1) import `SourceRef` from `flask_core` and `Config` from `config` (same two-line addition as Steps 6–7); (2) hoist the existing `platform=raw.get("platform", "<default>")` expression (or whichever literal the file already passes as the `platform=` kwarg) into a local `platform = ...` variable reused by both the `PlatformEvent(platform=platform, ...)` kwarg and the new `source=SourceRef(platform=platform, ...)` kwarg; (3) add a `source=SourceRef(platform=platform, account_id=Config.<PLATFORM>_BOT_ACCOUNT_ID, channel_id=<the file's own channel-identifying raw field, per the spec's own mapping table: Slack -> the channel id; YouTube -> the live chat's video/broadcast id; Kick -> the channel slug; the echo demo bundle -> `None`, it has no real channel>)` kwarg to the `PlatformEvent(...)` call, following Steps 6–7's exact shape; (4) add the matching `<PLATFORM>_BOT_ACCOUNT_ID_REF`/`<PLATFORM>_BOT_ACCOUNT_ID` pair to `core/svc_ingest/config.py`, naming the `_REF` env var after whatever credential/identity env var that platform's own receiver (`receivers/slack_socket.py`/`receivers/youtube_poll.py`/`receivers/kick_*.py`) already reads for its own app/client identity (grep `core/svc_ingest/receivers/` for the platform's existing `_REF`/`os.getenv` constants first — reuse the existing one if an app/client-id env var is already read there, rather than inventing a second name for the same value).
+For each file: (1) import `SourceRef` from `flask_core` and `Config` from `config` (same two-line addition as Steps 6–7); (2) hoist the existing `platform=raw.get("platform", "<default>")` expression (or whichever literal the file already passes as the `platform=` kwarg) into a local `platform = ...` variable reused by both the `PlatformEvent(platform=platform, ...)` kwarg and the new `source=SourceRef(platform=platform, ...)` kwarg; (3) add a `source=SourceRef(platform=platform, account_id=Config.<PLATFORM>_BOT_ACCOUNT_ID, channel_id=<the file's own channel-identifying raw field, per the spec's own mapping table: Slack -> the channel id; YouTube -> the live chat's video/broadcast id; Kick -> the channel slug; the echo demo bundle -> `None`, it has no real channel>)` kwarg to the `PlatformEvent(...)` call, following Steps 6–7's exact shape; (4) add the matching `<PLATFORM>_BOT_ACCOUNT_ID_REF`/`<PLATFORM>_BOT_ACCOUNT_ID` pair to `core/svc_ingest/config.py`, naming the `_REF` env var after whatever credential/identity env var that platform's own receiver (`receivers/slack_socket.py`/`receivers/youtube_poll.py`/`receivers/kick_*.py`) already reads for its own app/client identity (grep core/svc_ingest/receivers for the platform's existing `_REF`/`os.getenv` constants first — reuse the existing one if an app/client-id env var is already read there, rather than inventing a second name for the same value).
 
 - [ ] **Step 9: Update each of the six ingest bundles' own test files**
 
@@ -4625,7 +4627,7 @@ def _base_envelope(**overrides) -> StageEnvelope:
     fields = {
         "tenant": "global",
         "community": None,
-        "app_id": "waddles.social.music.default",
+        "app_id": "penguintechinc.waddles.music-pipeline",
         "stage": "process",
         "event": _base_event(),
         "ts": "2026-09-14T12:00:00.123Z",
@@ -4641,7 +4643,7 @@ def _generate_valid_fixtures() -> dict[str, StageEnvelope]:
     return {
         "tenant_wide": _base_envelope(),
         "community_scoped": _base_envelope(community="42"),
-        "target_app_id_set": _base_envelope(target_app_id="waddles.community.forums.default"),
+        "target_app_id_set": _base_envelope(target_app_id="penguintechinc.waddles.forums-pipeline"),
         "source_absent": _base_envelope(event=_base_event(source=None)),
         "empty_payload": _base_envelope(event=_base_event(payload={})),
         "unicode_payload": _base_envelope(
@@ -4685,20 +4687,20 @@ def _generate_invalid_fixtures() -> dict[str, dict]:
 def _generate_key_fixtures() -> dict[str, dict]:
     return {
         "tenant_wide_stream_key": {
-            "input": {"tenant": "global", "community": None, "app_id": "waddles.social.music.default", "stage": "process"},
-            "expected": bundle_stream_key("global", None, "waddles.social.music.default", "process"),
+            "input": {"tenant": "global", "community": None, "app_id": "penguintechinc.waddles.music-pipeline", "stage": "process"},
+            "expected": bundle_stream_key("global", None, "penguintechinc.waddles.music-pipeline", "process"),
         },
         "community_scoped_stream_key": {
-            "input": {"tenant": "acme", "community": "42", "app_id": "waddles.social.music.default", "stage": "action"},
-            "expected": bundle_stream_key("acme", "42", "waddles.social.music.default", "action"),
+            "input": {"tenant": "acme", "community": "42", "app_id": "penguintechinc.waddles.music-pipeline", "stage": "action"},
+            "expected": bundle_stream_key("acme", "42", "penguintechinc.waddles.music-pipeline", "action"),
         },
         "config_key": {
-            "input": {"tenant": "global", "community": None, "app_id": "waddles.social.music.default"},
-            "expected": bundle_config_key("global", None, "waddles.social.music.default"),
+            "input": {"tenant": "global", "community": None, "app_id": "penguintechinc.waddles.music-pipeline"},
+            "expected": bundle_config_key("global", None, "penguintechinc.waddles.music-pipeline"),
         },
         "state_key": {
-            "input": {"tenant": "global", "community": None, "app_id": "waddles.social.music.default"},
-            "expected": bundle_state_key("global", None, "waddles.social.music.default"),
+            "input": {"tenant": "global", "community": None, "app_id": "penguintechinc.waddles.music-pipeline"},
+            "expected": bundle_state_key("global", None, "penguintechinc.waddles.music-pipeline"),
         },
     }
 

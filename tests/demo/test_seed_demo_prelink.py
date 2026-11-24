@@ -36,7 +36,10 @@ pg = _load("pg_docker_demo", "alembic/tests/pg_docker.py")
 pytestmark = pytest.mark.skipif(not pg.DOCKER_AVAILABLE, reason="docker not available")
 
 DDL = """
-CREATE TABLE communities (id SERIAL PRIMARY KEY, name TEXT);
+CREATE TABLE communities (id SERIAL PRIMARY KEY, name TEXT, tenant_id INTEGER NOT NULL DEFAULT 1);
+CREATE TABLE discord_guild_tenants (
+    discord_guild_id VARCHAR(255) PRIMARY KEY, tenant_id INTEGER NOT NULL,
+    claimed_at TIMESTAMPTZ NOT NULL DEFAULT now(), claimed_by_uuid UUID);
 CREATE TABLE hub_users (
     id SERIAL PRIMARY KEY, display_name VARCHAR(255), username VARCHAR(255) UNIQUE,
     is_active BOOLEAN DEFAULT true, uuid UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE);
@@ -47,7 +50,8 @@ CREATE TABLE hub_user_identities (
     UNIQUE(hub_user_id, platform), UNIQUE(platform, platform_user_id));
 CREATE TABLE community_roles (
     id SERIAL PRIMARY KEY, community_id INTEGER NOT NULL REFERENCES communities(id),
-    name VARCHAR(50) NOT NULL, UNIQUE(community_id, name));
+    name VARCHAR(50) NOT NULL, public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
+    UNIQUE(community_id, name));
 CREATE TABLE community_members (
     id SERIAL PRIMARY KEY, community_id INTEGER REFERENCES communities(id),
     user_id VARCHAR(255), platform VARCHAR(50), platform_user_id VARCHAR(255),
@@ -82,6 +86,7 @@ CREATE TABLE guild_tenant_pairings (
     sync_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     event_sync_enabled BOOLEAN NOT NULL DEFAULT FALSE,
     role_name_prefix VARCHAR(50) NOT NULL,
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
     UNIQUE (community_id, discord_guild_id));
 CREATE TABLE community_role_sync_bindings (
@@ -93,6 +98,7 @@ CREATE TABLE community_role_sync_bindings (
     community_role VARCHAR(20)
         CHECK (community_role IS NULL OR community_role IN
                ('community-admin','moderator','vip','member')),
+    public_id UUID NOT NULL DEFAULT gen_random_uuid() UNIQUE,
     updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW());
 CREATE UNIQUE INDEX uq_role_sync_binding_community_role
     ON community_role_sync_bindings (pairing_id, discord_role_id)
@@ -120,7 +126,8 @@ def conn(dsn: str) -> Iterator[psycopg2.extensions.connection]:
     c = psycopg2.connect(dsn)
     with c, c.cursor() as cur:
         cur.execute(
-            "TRUNCATE community_role_sync_bindings, guild_tenant_pairings, community_members, "
+            "TRUNCATE community_role_sync_bindings, guild_tenant_pairings, discord_guild_tenants, "
+            "community_members, "
             "hub_user_identities, hub_users RESTART IDENTITY CASCADE"
         )
     yield c
@@ -142,12 +149,14 @@ def test_seed_creates_all_links(conn: psycopg2.extensions.connection) -> None:
             "SELECT direction, sync_enabled, event_sync_enabled FROM guild_tenant_pairings"
         )
         assert cur.fetchall() == [("discord_to_twitch", True, True)]
+        cur.execute("SELECT discord_guild_id, tenant_id FROM discord_guild_tenants")
+        assert cur.fetchall() == [(cfg.guild_id, 1)], "the seed must claim the guild (0137)"
         cur.execute("SELECT role, user_id, is_active FROM community_members")
         assert cur.fetchall() == [("member", str(result.hub_user_id), True)]
         cur.execute(
             "SELECT sync_scope, community_role FROM community_role_sync_bindings"
         )
-        assert cur.fetchall() == [("community_role", "moderator")]
+        assert cur.fetchall() == [("community_role", "vip")]
     assert _count(conn, "hub_user_identities") == 1
 
 
@@ -319,17 +328,26 @@ def test_missing_community_and_baseline_fail_loud(
     with pytest.raises(seed_mod.SeedError, match="does not exist"):
         seed_mod.seed(conn, seed_mod.load_config({**_ENV, "DEMO_COMMUNITY_ID": "99"}))
     with pytest.raises(seed_mod.SeedError, match="baseline role"):
-        seed_mod.seed(conn, seed_mod.load_config({**_ENV, "DEMO_BASELINE_ROLE": "vip"}))
+        seed_mod.seed(
+            conn,
+            # "vip" has no community_roles row in the fixture; the community role must differ
+            # from it or load_config rejects the pair before the missing-baseline check runs.
+            seed_mod.load_config(
+                {**_ENV, "DEMO_BASELINE_ROLE": "vip", "DEMO_COMMUNITY_ROLE": "member"}
+            ),
+        )
 
 
 @pytest.mark.parametrize(
     "env",
     [
         {"DEMO_COMMUNITY_ROLE": "community-owner"},
+        {"DEMO_COMMUNITY_ROLE": "community-admin"},  # privileged inbound target (0104)
+        {"DEMO_COMMUNITY_ROLE": "moderator"},
         {"DEMO_DIRECTION": "sideways"},
         {"DEMO_GUILD_ID": "abc"},
         {"DEMO_COMMUNITY_ID": "0"},
-        {"DEMO_BASELINE_ROLE": "moderator"},
+        {"DEMO_BASELINE_ROLE": "vip"},
     ],
 )
 def test_invalid_config_rejected(env: dict[str, str]) -> None:

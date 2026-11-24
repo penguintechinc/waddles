@@ -14,6 +14,7 @@ import blueprints.v1.event_discord_sync as module
 from blueprints.v1.event_discord_sync import event_discord_sync_admin_bp
 from services.discord_install_service import DEFAULT_BOT_PERMISSIONS, MANAGE_EVENTS_PERMISSION
 from services.guild_pairing import create_pairing, list_pairings
+from tests.community_ids import install_community_ids, public_id
 
 
 @pytest.fixture
@@ -21,8 +22,9 @@ def app(event_sync_db: Any) -> Quart:
     dal, *_ = event_sync_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(event_discord_sync_admin_bp)
     quart_app.config["dal"] = dal
+    install_community_ids(quart_app, dal)
+    quart_app.register_blueprint(event_discord_sync_admin_bp)
     return quart_app
 
 
@@ -36,13 +38,13 @@ def _flag_on(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(module, "feature_enabled", AsyncMock(return_value=True))
 
 
-def _url(community_id: int) -> str:
-    return f"/api/v1/communities/{community_id}/calendar/event-sync"
+def _url(dal: Any, community_id: int) -> str:
+    return f"/api/v1/communities/{public_id(dal, community_id)}/calendar/event-sync"
 
 
 def _put(client: Any, headers: dict[str, str], community_id: int, body: dict[str, Any]) -> Any:
     return client.put(
-        _url(community_id),
+        _url(client.app.config["dal"], community_id),
         headers={**headers, "Content-Type": "application/json"},
         data=json_module.dumps(body),
     )
@@ -93,7 +95,7 @@ async def test_get_reflects_state(client: Any, auth_headers: Any, event_sync_db:
     dal, community_id, *_ = event_sync_db
     _pair(dal, community_id)
     resp = await client.get(
-        _url(community_id), headers=auth_headers(scope="community.guild_pairing:read")
+        _url(dal, community_id), headers=auth_headers(scope="community.guild_pairing:read")
     )
     assert resp.status_code == 200
     body = await resp.get_json()
@@ -158,3 +160,10 @@ async def test_no_pairings_is_404(client: Any, auth_headers: Any, event_sync_db:
         client, auth_headers(scope="community.guild_pairing:write"), community_id, {"enabled": True}
     )
     assert resp.status_code == 404
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

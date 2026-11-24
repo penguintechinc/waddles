@@ -11,6 +11,7 @@ never an error. R52: reads `current_app.config["install_dal"]` --
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import cast
@@ -22,9 +23,12 @@ from penguin_dal import AsyncDB
 from quart import Blueprint, current_app, request
 from quart_schema import validate_response
 
+from services.community_public_id import lookup_public_ids, resolve_public_community_id
 from services.errors import ApiError
 from services.tenant_service import require_matching_tenant
 from services.usage_query_service import query_usage
+
+logger = logging.getLogger(__name__)
 
 workstream_usage_bp = Blueprint(
     "v1_workstream_usage", __name__, url_prefix="/api/v1/tenant/<tenant_slug>/usage"
@@ -58,6 +62,20 @@ def _parse_int(raw: str | None, *, field_name: str, code: str) -> int | None:
         raise ApiError(f"{field_name} must be an integer", 422, code) from exc
 
 
+async def _parse_community_uuid(raw: str | None) -> int | None:
+    """`communityId` query arg is the community public UUID; returns the internal numeric id.
+
+    422 on a non-UUID (numeric ids are no longer accepted); an unknown UUID resolves to an id no
+    row holds, so the usage listing is empty exactly as for an unknown numeric id before.
+    """
+    if raw is None:
+        return None
+    resolved = await resolve_public_community_id(raw)
+    if resolved is None:
+        raise ApiError("communityId must be a community UUID", 422, "invalid_community_id")
+    return resolved
+
+
 def _parse_datetime(raw: str | None, *, field_name: str, code: str) -> datetime | None:
     if raw is None:
         return None
@@ -72,7 +90,7 @@ def _parse_datetime(raw: str | None, *, field_name: str, code: str) -> datetime 
 class UsageRowDTO:
     """One aggregated usage bucket on the wire."""
 
-    communityId: int | None
+    communityId: str | None
     workstreamId: str
     stage: str
     appId: str | None
@@ -113,9 +131,7 @@ async def list_usage(tenant_slug: str) -> UsageListResponse | tuple[dict[str, ob
     install_dal = _install_dal()
     try:
         tenant_id = _tenant_id(tenant_slug)
-        community_id = _parse_int(
-            request.args.get("communityId"), field_name="communityId", code="invalid_community_id"
-        )
+        community_id = await _parse_community_uuid(request.args.get("communityId"))
         limit = (
             _parse_int(request.args.get("limit"), field_name="limit", code="invalid_limit") or 50
         )
@@ -141,13 +157,15 @@ async def list_usage(tenant_slug: str) -> UsageListResponse | tuple[dict[str, ob
             offset=offset,
         )
     except ApiError as exc:
+        logger.warning("usage list refused: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
 
+    public_ids = await lookup_public_ids(r.community_id for r in rows if r.community_id is not None)
     return UsageListResponse(
         success=True,
         rows=[
             UsageRowDTO(
-                communityId=r.community_id,
+                communityId=None if r.community_id is None else public_ids[r.community_id],
                 workstreamId=r.workstream_id,
                 stage=r.stage,
                 appId=r.app_id,

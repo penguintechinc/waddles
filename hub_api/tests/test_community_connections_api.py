@@ -20,6 +20,7 @@ from unittest.mock import AsyncMock
 import pytest
 from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey, spiffe_id
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -35,6 +36,7 @@ from services.oauth_providers import (
     ProviderSpec,
     TokenResponse,
 )
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids, public_id
 
 CALLBACK_BASE = "http://localhost:19999"
 SERVICE_ID = spiffe_id("alpha", "svc-action")
@@ -52,8 +54,7 @@ def _test_hub_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -84,10 +85,10 @@ def app(community_db: Any) -> Quart:
     dal, _community_id = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(connections_bp)
     quart_app.register_blueprint(connections_internal_bp)
     quart_app.config["dal"] = dal
-    quart_app.config["async_dal"] = dal  # placeholder -- every connections_svc call is mocked
     quart_app.config["HUB_API_CONFIG"] = _test_hub_config()
     quart_app.config["SERVICE_JWT_ISSUER"] = _service_issuer()
     quart_app.config["SERVICE_JWT_VERIFIER"] = quart_app.config["SERVICE_JWT_ISSUER"].as_verifier()
@@ -149,7 +150,7 @@ class TestListConnections:
     async def test_success_includes_callback_base(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         statuses = [
             ConnectionStatus(
                 provider="youtube",
@@ -172,7 +173,7 @@ class TestListConnections:
         monkeypatch.setattr(connections_module.connections_svc, "list_connections", mock_list)
 
         response = await client.get(
-            f"/api/v1/communities/{community_id}/connections",
+            cpath(dal, "/api/v1/communities/{community_id}/connections", community_id),
             headers=user_auth_headers(user_id=1, scope="community.connections:read"),
         )
 
@@ -187,11 +188,11 @@ class TestListConnections:
     async def test_feature_disabled_is_402(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(connections_module, "feature_enabled", AsyncMock(return_value=False))
 
         response = await client.get(
-            f"/api/v1/communities/{community_id}/connections",
+            cpath(dal, "/api/v1/communities/{community_id}/connections", community_id),
             headers=user_auth_headers(user_id=1, scope="community.connections:read"),
         )
         assert response.status_code == 402
@@ -199,9 +200,9 @@ class TestListConnections:
     async def test_wrong_scope_is_403(
         self, client: Any, user_auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/communities/{community_id}/connections",
+            cpath(dal, "/api/v1/communities/{community_id}/connections", community_id),
             headers=user_auth_headers(user_id=1, scope="something:else"),
         )
         assert response.status_code == 403
@@ -212,7 +213,7 @@ class TestListConnections:
         dal, community_id = community_db
         _insert_other_tenant(dal)
         response = await client.get(
-            f"/api/v1/communities/{community_id}/connections",
+            cpath(dal, "/api/v1/communities/{community_id}/connections", community_id),
             headers=user_auth_headers(
                 user_id=1, scope="community.connections:read", tenant="other-corp"
             ),
@@ -224,7 +225,7 @@ class TestAuthorizeConnection:
     async def test_success_without_pkce_builds_redirect_uri_from_config(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(connections_module.providers_svc, "get_provider", lambda _name: _spec())
         captured: dict[str, Any] = {}
 
@@ -239,7 +240,11 @@ class TestAuthorizeConnection:
         monkeypatch.setattr(connections_module.state_svc, "create_state", mock_create_state)
 
         response = await client.post(
-            f"/api/v1/communities/{community_id}/connections/youtube/authorize",
+            cpath(
+                dal,
+                "/api/v1/communities/{community_id}/connections/youtube/authorize",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
 
@@ -259,7 +264,7 @@ class TestAuthorizeConnection:
     async def test_success_with_pkce_generates_verifier_and_challenge(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(
             connections_module.providers_svc, "get_provider", lambda _name: _spec(uses_pkce=True)
         )
@@ -281,7 +286,9 @@ class TestAuthorizeConnection:
         monkeypatch.setattr(connections_module.state_svc, "create_state", mock_create_state)
 
         response = await client.post(
-            f"/api/v1/communities/{community_id}/connections/kick/authorize",
+            cpath(
+                dal, "/api/v1/communities/{community_id}/connections/kick/authorize", community_id
+            ),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
 
@@ -292,7 +299,7 @@ class TestAuthorizeConnection:
     async def test_unsupported_provider_is_400(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
 
         def _get_provider(_name: str) -> ProviderSpec:
             raise ValueError("unsupported provider")
@@ -300,7 +307,11 @@ class TestAuthorizeConnection:
         monkeypatch.setattr(connections_module.providers_svc, "get_provider", _get_provider)
 
         response = await client.post(
-            f"/api/v1/communities/{community_id}/connections/not-a-provider/authorize",
+            cpath(
+                dal,
+                "/api/v1/communities/{community_id}/connections/not-a-provider/authorize",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
         assert response.status_code == 400
@@ -308,7 +319,7 @@ class TestAuthorizeConnection:
     async def test_provider_not_configured_is_503(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(connections_module.providers_svc, "get_provider", lambda _name: _spec())
         monkeypatch.setattr(
             connections_module.state_svc, "create_state", AsyncMock(return_value="s")
@@ -322,7 +333,11 @@ class TestAuthorizeConnection:
         )
 
         response = await client.post(
-            f"/api/v1/communities/{community_id}/connections/youtube/authorize",
+            cpath(
+                dal,
+                "/api/v1/communities/{community_id}/connections/youtube/authorize",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
         assert response.status_code == 503
@@ -332,11 +347,15 @@ class TestAuthorizeConnection:
     async def test_feature_disabled_is_402(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(connections_module, "feature_enabled", AsyncMock(return_value=False))
 
         response = await client.post(
-            f"/api/v1/communities/{community_id}/connections/youtube/authorize",
+            cpath(
+                dal,
+                "/api/v1/communities/{community_id}/connections/youtube/authorize",
+                community_id,
+            ),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
         assert response.status_code == 402
@@ -347,7 +366,11 @@ class TestAuthorizeConnection:
         dal, community_id = community_db
         _insert_other_tenant(dal)
         response = await client.post(
-            f"/api/v1/communities/{community_id}/connections/youtube/authorize",
+            cpath(
+                dal,
+                "/api/v1/communities/{community_id}/connections/youtube/authorize",
+                community_id,
+            ),
             headers=user_auth_headers(
                 user_id=1, scope="community.connections:write", tenant="other-corp"
             ),
@@ -541,12 +564,12 @@ class TestDeleteConnection:
     async def test_success_is_204(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(
             connections_module.connections_svc, "delete_connection", AsyncMock(return_value=True)
         )
         response = await client.delete(
-            f"/api/v1/communities/{community_id}/connections/youtube",
+            cpath(dal, "/api/v1/communities/{community_id}/connections/youtube", community_id),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
         assert response.status_code == 204
@@ -554,12 +577,12 @@ class TestDeleteConnection:
     async def test_nothing_active_is_404(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(
             connections_module.connections_svc, "delete_connection", AsyncMock(return_value=False)
         )
         response = await client.delete(
-            f"/api/v1/communities/{community_id}/connections/youtube",
+            cpath(dal, "/api/v1/communities/{community_id}/connections/youtube", community_id),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
         assert response.status_code == 404
@@ -567,14 +590,14 @@ class TestDeleteConnection:
     async def test_unsupported_provider_is_400(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(
             connections_module.connections_svc,
             "delete_connection",
             AsyncMock(side_effect=UnsupportedProvider("unsupported provider 'nope'")),
         )
         response = await client.delete(
-            f"/api/v1/communities/{community_id}/connections/nope",
+            cpath(dal, "/api/v1/communities/{community_id}/connections/nope", community_id),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
         assert response.status_code == 400
@@ -582,9 +605,9 @@ class TestDeleteConnection:
     async def test_wrong_scope_is_403(
         self, client: Any, user_auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.delete(
-            f"/api/v1/communities/{community_id}/connections/youtube",
+            cpath(dal, "/api/v1/communities/{community_id}/connections/youtube", community_id),
             headers=user_auth_headers(user_id=1, scope="community.connections:read"),
         )
         assert response.status_code == 403
@@ -592,10 +615,10 @@ class TestDeleteConnection:
     async def test_feature_disabled_is_402(
         self, client: Any, user_auth_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(connections_module, "feature_enabled", AsyncMock(return_value=False))
         response = await client.delete(
-            f"/api/v1/communities/{community_id}/connections/youtube",
+            cpath(dal, "/api/v1/communities/{community_id}/connections/youtube", community_id),
             headers=user_auth_headers(user_id=1, scope="community.connections:write"),
         )
         assert response.status_code == 402
@@ -606,7 +629,7 @@ class TestDeleteConnection:
         dal, community_id = community_db
         _insert_other_tenant(dal)
         response = await client.delete(
-            f"/api/v1/communities/{community_id}/connections/youtube",
+            cpath(dal, "/api/v1/communities/{community_id}/connections/youtube", community_id),
             headers=user_auth_headers(
                 user_id=1, scope="community.connections:write", tenant="other-corp"
             ),
@@ -618,7 +641,7 @@ class TestInternalGetToken:
     async def test_fresh_token_returned_without_refresh(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         tokens = DecryptedTokens(
             access_token="AT_FRESH",  # noqa: S106
             refresh_token="RT_FRESH",  # noqa: S106
@@ -634,7 +657,7 @@ class TestInternalGetToken:
         monkeypatch.setattr(connections_module.providers_svc, "refresh_access_token", mock_refresh)
 
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
 
@@ -646,7 +669,7 @@ class TestInternalGetToken:
     async def test_near_expiry_token_is_refreshed_and_persisted(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         tokens = DecryptedTokens(
             access_token="AT_OLD",  # noqa: S106
             refresh_token="RT_OLD",  # noqa: S106
@@ -677,7 +700,7 @@ class TestInternalGetToken:
         )
 
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
 
@@ -693,14 +716,14 @@ class TestInternalGetToken:
     async def test_not_connected_is_404(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(
             connections_module.connections_svc,
             "get_decrypted_tokens",
             AsyncMock(return_value=None),
         )
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
         assert response.status_code == 404
@@ -708,7 +731,7 @@ class TestInternalGetToken:
     async def test_refresh_failure_is_502(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         tokens = DecryptedTokens(
             access_token="AT_OLD",  # noqa: S106
             refresh_token="RT_OLD",  # noqa: S106
@@ -727,7 +750,7 @@ class TestInternalGetToken:
         )
 
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token",  # noqa: E501
             headers=bound_headers,
         )
         assert response.status_code == 502
@@ -735,30 +758,37 @@ class TestInternalGetToken:
         assert body == {"error": "refresh_failed"}
 
     async def test_missing_service_key_is_401(self, client: Any, community_db: Any) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/youtube/token"
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/youtube/token"
         )
         assert response.status_code == 401
 
     async def test_unknown_community_is_404(self, client: Any, mint_headers: Any) -> None:
         response = await client.get(
+            f"/api/v1/internal/communities/{UNKNOWN_PUBLIC_ID}/connections/youtube/token",
+            headers=mint_headers(999999),
+        )
+        # An unknown community UUID never equals the token's community binding: refused, never
+        # served (and a numeric id in the path no longer routes at all).
+        assert response.status_code in (403, 404)
+        numeric = await client.get(
             "/api/v1/internal/communities/999999/connections/youtube/token",
             headers=mint_headers(999999),
         )
-        assert response.status_code == 404
+        assert numeric.status_code == 404
 
     async def test_unsupported_provider_is_400(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(
             connections_module.connections_svc,
             "get_decrypted_tokens",
             AsyncMock(side_effect=UnsupportedProvider("unsupported provider 'nope'")),
         )
         response = await client.get(
-            f"/api/v1/internal/communities/{community_id}/connections/nope/token",
+            f"/api/v1/internal/communities/{public_id(dal, community_id)}/connections/nope/token",
             headers=bound_headers,
         )
         assert response.status_code == 400
@@ -773,30 +803,36 @@ class TestInternalGetTokenAuth:
         self, client: Any, service_key_headers: Any, community_db: Any
     ) -> None:
         # regression: HIGH-2 -- a valid shared X-Service-Key with NO Bearer must not authenticate.
-        _, community_id = community_db
-        response = await client.get(self.URL.format(cid=community_id), headers=service_key_headers)
+        dal, community_id = community_db
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=service_key_headers
+        )
         assert response.status_code == 401
 
     async def test_valid_service_key_plus_bearer_for_other_community_is_403(
         self, client: Any, service_key_headers: Any, mint_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         headers = {**service_key_headers, **mint_headers(community_id + 1)}
-        response = await client.get(self.URL.format(cid=community_id), headers=headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=headers
+        )
         assert response.status_code == 403
 
     async def test_unconfigured_verifier_is_503_not_open(
         self, client: Any, app: Quart, service_key_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         app.config["SERVICE_JWT_VERIFIER"] = None
-        response = await client.get(self.URL.format(cid=community_id), headers=service_key_headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=service_key_headers
+        )
         assert response.status_code == 503
 
     async def test_wrong_scope_is_401(
         self, client: Any, mint_headers: Any, community_db: Any, app: Quart
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         ident = app.config["SERVICE_JWT_ISSUER"].identities[SERVICE_ID]
         app.config["SERVICE_JWT_ISSUER"].identities[SERVICE_ID] = ServiceIdentity(
             ident.service_id,
@@ -806,7 +842,7 @@ class TestInternalGetTokenAuth:
             "system",
         )
         response = await client.get(
-            self.URL.format(cid=community_id),
+            self.URL.format(cid=public_id(dal, community_id)),
             headers=mint_headers(community_id, scope="other:scope"),
         )
         assert response.status_code == 401
@@ -814,7 +850,7 @@ class TestInternalGetTokenAuth:
     async def test_token_for_matching_community_returns_tokens_and_refreshes(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         tokens = DecryptedTokens(
             access_token="AT_OLD",  # noqa: S106
             refresh_token="RT_OLD",  # noqa: S106
@@ -842,14 +878,16 @@ class TestInternalGetTokenAuth:
         monkeypatch.setattr(
             connections_module.connections_svc, "store_refreshed_access_token", AsyncMock()
         )
-        response = await client.get(self.URL.format(cid=community_id), headers=bound_headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=bound_headers
+        )
         assert response.status_code == 200
         assert (await response.get_json())["data"]["access_token"] == "AT_NEW"
 
     async def test_endpoint_response_is_no_store(
         self, client: Any, bound_headers: Any, community_db: Any, monkeypatch: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(
             connections_module.connections_svc,
             "get_decrypted_tokens",
@@ -862,11 +900,13 @@ class TestInternalGetTokenAuth:
                 )
             ),
         )
-        response = await client.get(self.URL.format(cid=community_id), headers=bound_headers)
+        response = await client.get(
+            self.URL.format(cid=public_id(dal, community_id)), headers=bound_headers
+        )
         assert response.status_code == 200
         assert response.headers["Cache-Control"] == "no-store"
         # 401s carry it too: nothing under /internal may be cached.
-        denied = await client.get(self.URL.format(cid=community_id))
+        denied = await client.get(self.URL.format(cid=public_id(dal, community_id)))
         assert denied.status_code == 401
         assert denied.headers["Cache-Control"] == "no-store"
 
@@ -923,7 +963,7 @@ class TestCommunityScopeInvariant:
         write = user_auth_headers(
             user_id=1, scope="community.connections:write", tenant="other-corp"
         )
-        base = f"/api/v1/communities/{community_id}/connections"
+        base = cpath(dal, "/api/v1/communities/{community_id}/connections", community_id)
         assert (await client.get(base, headers=read)).status_code == 404
         assert (await client.delete(f"{base}/youtube", headers=write)).status_code == 404
         assert (await client.post(f"{base}/youtube/authorize", headers=write)).status_code == 404
@@ -937,7 +977,7 @@ class TestCommunityScopeInvariant:
         dal, community_id = community_db
         tenant_id = int(dal.communities[community_id].tenant_id)
         spies = self._spies(monkeypatch)
-        base = f"/api/v1/communities/{community_id}/connections"
+        base = cpath(dal, "/api/v1/communities/{community_id}/connections", community_id)
         read = user_auth_headers(user_id=1, scope="community.connections:read")
         write = user_auth_headers(user_id=1, scope="community.connections:write")
         assert (await client.get(base, headers=read)).status_code == 200
@@ -986,3 +1026,6 @@ class TestCommunityScopeInvariant:
         kwargs = spies["upsert_connection"].await_args.kwargs
         assert kwargs["tenant_id"] == 42
         assert spies["upsert_connection"].await_args.args[1] == 7  # server-side state, not query
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

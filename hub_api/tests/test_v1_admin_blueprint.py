@@ -25,7 +25,9 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.admin import admin_bp
 from services import community_reputation_service as reputation_svc
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import uid
 
 OTHER_TENANT_SLUG = "other-tenant"
 
@@ -34,9 +36,10 @@ OTHER_TENANT_SLUG = "other-tenant"
 def app(admin_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(admin_bp)
     quart_app.config["dal"] = admin_db.dal
     quart_app.config["async_dal"] = admin_db
+    install_community_ids(quart_app, admin_db.dal)
+    quart_app.register_blueprint(admin_bp)
     return quart_app
 
 
@@ -46,7 +49,7 @@ def client(app: Quart) -> Any:
 
 
 def _headers(
-    *, user_id: int = 1, scope: str = "community:admin", tenant: str = TENANT_SLUG
+    *, user_id: int = 1, scope: str = "community:admin users:admin", tenant: str = TENANT_SLUG
 ) -> dict[str, str]:
     token = make_user_token(user_id=user_id, scope=scope, tenant=tenant)
     return {"Authorization": f"Bearer {token}"}
@@ -138,14 +141,15 @@ def _fake_reputation_apply(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, An
 class TestScopeAndTenantEnforcement:
     async def test_get_members_no_token_is_401(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
-        response = await client.get(f"/api/v1/admin/{community_id}/members")
+        response = await client.get(f"/api/v1/admin/{public_id(admin_db, community_id)}/members")
         assert response.status_code == 401
 
     async def test_get_members_wrong_scope_is_403(self, client: Any, admin_db: Any) -> None:
         """The representative scope-check: a valid token WITHOUT community:admin is refused."""
         community_id = _seed_community(admin_db)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/members", headers=_headers(scope="community:read")
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members",
+            headers=_headers(scope="community:read"),
         )
         assert response.status_code == 403
 
@@ -153,7 +157,7 @@ class TestScopeAndTenantEnforcement:
         """The representative IDOR/tenant-isolation check."""
         other_community_id = _seed_community(admin_db, tenant_slug=OTHER_TENANT_SLUG)
         response = await client.get(
-            f"/api/v1/admin/{other_community_id}/members", headers=_headers()
+            f"/api/v1/admin/{public_id(admin_db, other_community_id)}/members", headers=_headers()
         )
         assert response.status_code == 404
 
@@ -161,7 +165,9 @@ class TestScopeAndTenantEnforcement:
 class TestCommunitySettings:
     async def test_get_settings(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db, description="hi")
-        response = await client.get(f"/api/v1/admin/{community_id}/settings", headers=_headers())
+        response = await client.get(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/settings", headers=_headers()
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["settings"]["description"] == "hi"
@@ -170,12 +176,14 @@ class TestCommunitySettings:
     async def test_update_settings(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/settings",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/settings",
             headers=_headers(),
             json={"displayName": "New Name", "joinMode": "approval"},
         )
         assert response.status_code == 200
-        follow_up = await client.get(f"/api/v1/admin/{community_id}/settings", headers=_headers())
+        follow_up = await client.get(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/settings", headers=_headers()
+        )
         body = await follow_up.get_json()
         assert body["settings"]["displayName"] == "New Name"
         assert body["settings"]["joinMode"] == "approval"
@@ -185,7 +193,7 @@ class TestCommunitySettings:
     ) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/settings",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/settings",
             headers=_headers(),
             json={"joinMode": "not-a-real-mode"},
         )
@@ -194,7 +202,9 @@ class TestCommunitySettings:
     async def test_update_settings_no_fields_is_400(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/settings", headers=_headers(), json={}
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/settings",
+            headers=_headers(),
+            json={},
         )
         assert response.status_code == 400
 
@@ -203,28 +213,46 @@ class TestMembers:
     async def test_get_members_lists_active(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
-        response = await client.get(f"/api/v1/admin/{community_id}/members", headers=_headers())
+        response = await client.get(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members", headers=_headers()
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["pagination"]["total"] == 1
-        assert body["members"][0]["userId"] == "42"
+        assert body["members"][0]["userId"] == uid(42)
         assert body["members"][0]["reputation"]["score"] == 600
 
     async def test_update_member_role_success(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
+        self._seed_role(admin_db, community_id, "moderator", 2, ["community:manage_channels"])
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
             json={"role": "moderator"},
         )
         assert response.status_code == 200
 
+    async def test_update_member_role_undefined_role_fails_closed(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """A valid role NAME with no role row in this community is refused, never assigned."""
+        community_id = _seed_community(admin_db)
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        response = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
+            headers=_headers(),
+            json={"role": "moderator"},
+        )
+        assert response.status_code == 400
+        row = admin_db.dal(admin_db.dal.community_members.user_id == "42").select().first()
+        assert row.role == "member"
+
     async def test_update_member_role_invalid_role_is_400(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
             json={"role": "not-a-role"},
         )
@@ -234,30 +262,204 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="community-owner")
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(),
             json={"role": "member"},
         )
         assert response.status_code == 403
 
-    async def test_update_member_role_promote_to_admin_requires_owner(
+    @staticmethod
+    def _seed_role(
+        admin_db: Any, community_id: int, name: str, kind: int, scopes: list[str]
+    ) -> int:
+        dal = admin_db.dal
+        role_id: int = dal.community_roles.insert(
+            community_id=community_id,
+            name=name,
+            is_system=True,
+            role_kind=kind,
+            base_claims={"scopes": scopes},
+        )
+        dal.commit()
+        return role_id
+
+    async def test_update_member_role_promote_to_admin_requires_admin_scopes(
         self, client: Any, admin_db: Any
     ) -> None:
         community_id = _seed_community(admin_db)
+        self._seed_role(admin_db, community_id, "community-admin", 1, [])
         _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
         # Caller (user_id=1) is not a member of this community at all --
-        # cannot promote someone to community-admin.
+        # cannot promote someone to an admin-kind role.
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/42/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
             headers=_headers(user_id=1),
             json={"role": "community-admin"},
         )
         assert response.status_code == 403
 
+    async def test_moderator_cannot_promote_to_admin_but_admin_can(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """Scope-based escalation guard: the assigner must hold every scope of the assigned role."""
+        community_id = _seed_community(admin_db)
+        admin_role = self._seed_role(admin_db, community_id, "community-admin", 1, [])
+        mod_role = self._seed_role(
+            admin_db, community_id, "moderator", 2, ["community:manage_channels"]
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=7,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=8,
+            role="community-admin",
+            community_role_id=admin_role,
+        )
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        by_mod = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
+            headers=_headers(user_id=7),
+            json={"role": "community-admin"},
+        )
+        assert by_mod.status_code == 403
+        by_admin = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
+            headers=_headers(user_id=8),
+            json={"role": "community-admin"},
+        )
+        assert by_admin.status_code == 200
+
+    async def test_member_admin_actions_need_their_own_scopes(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        """A moderator-seeded member can remove members but cannot assign roles (own scope each)."""
+        from services.scope_registry import MODERATOR_SEED_SCOPES
+
+        community_id = _seed_community(admin_db)
+        mod_role = self._seed_role(
+            admin_db,
+            community_id,
+            "moderator",
+            2,
+            ["community:manage_channels", *MODERATOR_SEED_SCOPES],
+        )
+        self._seed_role(admin_db, community_id, "vip", 0, ["community:read"])
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=7,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        headers = _headers(user_id=7, scope="community:admin")
+        denied = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
+            headers=headers,
+            json={"role": "vip"},
+        )
+        assert denied.status_code == 403
+        removed = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
+            headers=headers,
+            json={"reason": "spam"},
+        )
+        assert removed.status_code == 200
+
+    async def test_custom_role_without_remove_scope_cannot_remove_or_adjust(
+        self, client: Any, admin_db: Any
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        role = self._seed_role(admin_db, community_id, "custom", 0, ["community:manage_members"])
+        _seed_member(
+            admin_db, community_id=community_id, user_id=9, role="custom", community_role_id=role
+        )
+        _seed_member(admin_db, community_id=community_id, user_id=42, role="member")
+        headers = _headers(user_id=9, scope="community:admin")
+        removed = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
+            headers=headers,
+            json={},
+        )
+        assert removed.status_code == 403
+        adjusted = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
+            headers=headers,
+            json={"amount": 5},
+        )
+        assert adjusted.status_code == 403
+
+    async def test_moderator_cannot_act_on_admin_member(self, client: Any, admin_db: Any) -> None:
+        """Regression: moderator remove/reputation scopes must not reach an admin-kind target."""
+        from services.scope_registry import MODERATOR_SEED_SCOPES
+
+        community_id = _seed_community(admin_db)
+        mod_role = self._seed_role(
+            admin_db,
+            community_id,
+            "moderator",
+            2,
+            ["community:manage_channels", *MODERATOR_SEED_SCOPES],
+        )
+        admin_role = self._seed_role(admin_db, community_id, "community-admin", 1, [])
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=7,
+            role="moderator",
+            community_role_id=mod_role,
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=42,
+            role="community-admin",
+            community_role_id=admin_role,
+        )
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=8,
+            role="community-admin",
+            community_role_id=admin_role,
+        )
+        mod = _headers(user_id=7, scope="community:admin")
+        removed = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
+            headers=mod,
+            json={"reason": "x"},
+        )
+        assert removed.status_code == 403
+        adjusted = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
+            headers=mod,
+            json={"amount": 5},
+        )
+        assert adjusted.status_code == 403
+        demoted = await client.put(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/role",
+            headers=mod,
+            json={"role": "member"},
+        )
+        assert demoted.status_code == 403
+        # An admin-kind caller may still act on another admin.
+        allowed = await client.delete(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
+            headers=_headers(user_id=8, scope="community:admin"),
+            json={"reason": "x"},
+        )
+        assert allowed.status_code == 200
+
     async def test_update_member_role_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/9999/role",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(9999)}/role",
             headers=_headers(),
             json={"role": "moderator"},
         )
@@ -268,7 +470,7 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
         _seed_admin_actor(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=_headers(),
             json={"amount": 50, "reason": "helpful"},
         )
@@ -292,7 +494,7 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
         _seed_admin_actor(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=_headers(),
             json={"setTo": 900},
         )
@@ -307,7 +509,7 @@ class TestMembers:
         _seed_member(admin_db, community_id=community_id, user_id=42, reputation=600)
         _seed_admin_actor(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/members/42/reputation",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}/reputation",
             headers=_headers(),
             json={"amount": 0},
         )
@@ -317,7 +519,9 @@ class TestMembers:
         community_id = _seed_community(admin_db, member_count=2)
         _seed_member(admin_db, community_id=community_id, user_id=42)
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/members/42", headers=_headers(), json={"reason": "spam"}
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
+            headers=_headers(),
+            json={"reason": "spam"},
         )
         assert response.status_code == 200
 
@@ -325,14 +529,18 @@ class TestMembers:
         community_id = _seed_community(admin_db)
         _seed_member(admin_db, community_id=community_id, user_id=42, role="community-owner")
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/members/42", headers=_headers(), json={}
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(42)}",
+            headers=_headers(),
+            json={},
         )
         assert response.status_code == 403
 
     async def test_remove_member_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/members/9999", headers=_headers(), json={}
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/members/{uid(9999)}",
+            headers=_headers(),
+            json={},
         )
         assert response.status_code == 404
 
@@ -341,7 +549,7 @@ class TestTempPassword:
     async def test_generate_temp_password_success(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/temp-password",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/temp-password",
             headers=_headers(),
             json={"userIdentifier": "some-platform-user"},
         )
@@ -354,7 +562,9 @@ class TestTempPassword:
 class TestModules:
     async def test_get_modules_empty(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
-        response = await client.get(f"/api/v1/admin/{community_id}/modules", headers=_headers())
+        response = await client.get(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/modules", headers=_headers()
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["modules"] == []
@@ -367,7 +577,9 @@ class TestModules:
             community_id=community_id, module_id=str(mod_id), is_enabled=True, config={}
         )
         dal.commit()
-        response = await client.get(f"/api/v1/admin/{community_id}/modules", headers=_headers())
+        response = await client.get(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/modules", headers=_headers()
+        )
         body = await response.get_json()
         found = body["modules"][0]
         assert found["name"] == "Polls" or found["moduleId"] == str(mod_id)
@@ -381,7 +593,7 @@ class TestModules:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/admin/{community_id}/modules/{mod_id}/config",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/modules/{mod_id}/config",
             headers=_headers(),
             json={"isEnabled": False},
         )
@@ -390,7 +602,7 @@ class TestModules:
     async def test_update_module_config_not_found_is_404(self, client: Any, admin_db: Any) -> None:
         community_id = _seed_community(admin_db)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/modules/9999/config",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/modules/9999/config",
             headers=_headers(),
             json={"isEnabled": False},
         )
@@ -405,7 +617,9 @@ class TestModules:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/admin/{community_id}/modules/{mod_id}/config", headers=_headers(), json={}
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/modules/{mod_id}/config",
+            headers=_headers(),
+            json={},
         )
         assert response.status_code == 400
 
@@ -420,7 +634,7 @@ class TestModules:
         )
         dal.commit()
         response = await client.put(
-            f"/api/v1/admin/{community_id}/modules/{hub_mod_id}/config",
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/modules/{hub_mod_id}/config",
             headers=_headers(),
             json={"isEnabled": False},
         )
@@ -439,7 +653,8 @@ class TestConnectedPlatformsAndCommands:
         )
         dal.commit()
         response = await client.get(
-            f"/api/v1/admin/{community_id}/connected-platforms", headers=_headers()
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/connected-platforms",
+            headers=_headers(),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -451,9 +666,90 @@ class TestConnectedPlatformsAndCommands:
         community_id = _seed_community(admin_db)
         dal.commands.insert(command="!help", module_name="core", community_id=None, is_active=True)
         dal.commit()
-        response = await client.get(f"/api/v1/admin/{community_id}/commands", headers=_headers())
+        response = await client.get(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/commands", headers=_headers()
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert "success" not in body  # byte-faithful to Node: no success wrapper
         assert body["commands"][0]["command"] == "!help"
         assert body["commands"][0]["is_enabled"] is True
+
+
+class TestAdminDedicatedScopes:
+    """Each remaining admin route needs its own community scope, never the broad JWT scope."""
+
+    ROUTES = (
+        ("GET", "settings", "community.settings:manage"),
+        ("GET", "members", "community.members:view"),
+        ("GET", "modules", "community.modules:manage"),
+        ("GET", "connected-platforms", "community.platforms:manage"),
+        ("GET", "commands", "community.commands:manage"),
+    )
+
+    @staticmethod
+    def _member_with(admin_db: Any, community_id: int, user_id: int, scopes: list[str]) -> None:
+        dal = admin_db.dal
+        role_id = dal.community_roles.insert(
+            community_id=community_id,
+            name=f"custom{user_id}",
+            is_system=False,
+            role_kind=0,
+            base_claims={"scopes": scopes},
+        )
+        dal.commit()
+        _seed_member(
+            admin_db,
+            community_id=community_id,
+            user_id=user_id,
+            role="custom",
+            community_role_id=role_id,
+        )
+
+    @pytest.mark.parametrize(("method", "path", "scope"), ROUTES)
+    async def test_broad_scopes_and_jwt_admin_scope_are_refused(
+        self, client: Any, admin_db: Any, method: str, path: str, scope: str
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        self._member_with(
+            admin_db, community_id, 9, ["community:manage_members", "community:manage_channels"]
+        )
+        response = await client.open(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/{path}",
+            method=method,
+            headers=_headers(user_id=9, scope="community:admin"),
+        )
+        assert response.status_code == 403
+
+    @pytest.mark.parametrize(("method", "path", "scope"), ROUTES)
+    async def test_exact_scope_admits_and_only_that_route(
+        self, client: Any, admin_db: Any, method: str, path: str, scope: str
+    ) -> None:
+        community_id = _seed_community(admin_db)
+        self._member_with(admin_db, community_id, 10, [scope])
+        headers = _headers(user_id=10, scope="")
+        allowed = await client.open(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/{path}",
+            method=method,
+            headers=headers,
+        )
+        assert allowed.status_code != 403
+        for other_method, other_path, other_scope in self.ROUTES:
+            if other_scope == scope:
+                continue
+            denied = await client.open(
+                f"/api/v1/admin/{public_id(admin_db, community_id)}/{other_path}",
+                method=other_method,
+                headers=headers,
+            )
+            assert denied.status_code == 403, other_path
+
+    async def test_temp_password_needs_its_own_scope(self, client: Any, admin_db: Any) -> None:
+        community_id = _seed_community(admin_db)
+        self._member_with(admin_db, community_id, 11, ["community.members:view", "members:remove"])
+        response = await client.post(
+            f"/api/v1/admin/{public_id(admin_db, community_id)}/temp-password",
+            headers=_headers(user_id=11, scope=""),
+            json={"userId": 42},
+        )
+        assert response.status_code == 403

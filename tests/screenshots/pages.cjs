@@ -37,6 +37,7 @@ function buildPages({ communityId, tenantSlug }) {
   { name: 'vendor-request', path: '/vendor/request' },
   // ── Community Member ───────────────────────────────────────────────
   { name: 'community-dashboard', path: `/dashboard/community/${communityId}` },
+  { name: 'community-town-hall', path: `/community/${communityId}/town-hall` },
   { name: 'community-settings', path: `/dashboard/community/${communityId}/settings` },
   { name: 'community-chat', path: `/dashboard/community/${communityId}/chat` },
   { name: 'community-leaderboard', path: `/dashboard/community/${communityId}/leaderboard` },
@@ -51,6 +52,7 @@ function buildPages({ communityId, tenantSlug }) {
   { name: 'admin-overview', path: `/admin/${communityId}` },
   { name: 'admin-members', path: `/admin/${communityId}/members` },
   { name: 'admin-modules', path: `/admin/${communityId}/modules` },
+  { name: 'admin-app-settings', path: `/admin/${communityId}/settings` },
   { name: 'admin-stream-overlays', path: `/admin/${communityId}/stream-overlays` },
   { name: 'admin-domains', path: `/admin/${communityId}/domains` },
   { name: 'admin-servers', path: `/admin/${communityId}/servers` },

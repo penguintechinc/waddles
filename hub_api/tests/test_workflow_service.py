@@ -1,25 +1,25 @@
-"""`services/workflow_service.py` -- unit tests for the real HTTP client + owned license logic.
+"""`services/workflow_service.py` -- HTTP client + effective-tier license gate.
 
 `tests/test_v1_workflow_blueprint.py` monkeypatches `WorkflowCoreProxyClient`
 entirely (`FakeWorkflowCore`, no real network I/O) -- which means the
 actual `httpx` call and success/failure/timeout branching inside
 `WorkflowCoreProxyClient.request()` is exercised nowhere else. This file
 closes that gap with `httpx.MockTransport` (real `httpx` request/response
-objects, no real socket), mirroring `tests/test_event_calendar_proxy.py`'s
-own pattern for the sibling Event group's proxy client. Also covers
+objects, no real socket). Also covers
 `validate_license()`'s DB-driven branches directly (no HTTP involved).
 """
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
-from pydal import DAL, Field
 
+from services import community_tier_service as tier_svc
 from services.errors import ApiError
 from services.workflow_service import (
     ProxyResult,
@@ -27,6 +27,7 @@ from services.workflow_service import (
     error_from_proxy,
     validate_license,
 )
+from tests.ai_routing_helpers import ensure_tier_tables, patch_tenant_tier, set_tier
 
 
 def _patch_transport(
@@ -106,7 +107,7 @@ class TestWorkflowCoreProxyClientRequest:
         assert result.ok is True
         assert result.body is None
 
-    async def test_transport_error_raises_service_unavailable(
+    async def test_connect_timeout_raises_workflow_unavailable(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         def handler(request: httpx.Request) -> httpx.Response:
@@ -116,8 +117,37 @@ class TestWorkflowCoreProxyClientRequest:
         client = WorkflowCoreProxyClient(base_url="http://workflow-core:8070")
         with pytest.raises(ApiError) as exc_info:
             await client.request("GET", "/workflows")
-        assert exc_info.value.status_code == 500
-        assert exc_info.value.code == "SERVICE_UNAVAILABLE"
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.code == "WORKFLOW_UNAVAILABLE"
+
+    async def test_dns_failure_raises_workflow_unavailable(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """regression: alpha has no workflow-core -> `[Errno -2] Name or service not known` 500."""
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ConnectError("[Errno -2] Name or service not known", request=request)
+
+        _patch_transport(monkeypatch, handler)
+        client = WorkflowCoreProxyClient(base_url="http://workflow-core:8070")
+        with pytest.raises(ApiError) as exc_info:
+            await client.request("GET", "/workflows")
+        assert exc_info.value.status_code == 503
+        assert exc_info.value.code == "WORKFLOW_UNAVAILABLE"
+        assert "Errno" not in exc_info.value.message
+
+    async def test_read_timeout_is_a_real_upstream_error(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def handler(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("slow", request=request)
+
+        _patch_transport(monkeypatch, handler)
+        client = WorkflowCoreProxyClient(base_url="http://workflow-core:8070")
+        with pytest.raises(ApiError) as exc_info:
+            await client.request("GET", "/workflows")
+        assert exc_info.value.status_code == 502
+        assert exc_info.value.code == "WORKFLOW_UPSTREAM_ERROR"
 
     def test_base_url_defaults_to_env_var(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("WORKFLOW_CORE_URL", "http://workflow-core.svc:9000")
@@ -145,79 +175,147 @@ class TestErrorFromProxy:
         assert err.message == "Workflow service error"
 
 
+TENANT = "acme-corp"
+PREMIUM = tier_svc.TIER_CODE_PREMIUM
+
+
+@pytest.fixture(autouse=True)
+def _free_tenant(monkeypatch: pytest.MonkeyPatch) -> None:
+    patch_tenant_tier(monkeypatch, "free")
+
+
 @pytest.fixture
-def communities_dal() -> Any:
-    dal = DAL("sqlite:memory")
-    dal.define_table(
-        "communities",
-        Field("license_key", "string"),
-        Field("license_expires_at", "datetime"),
-        Field("license_tier", "string"),
-    )
-    yield dal
-    dal.close()
+def wf_db(automation_db: Any) -> Any:
+    """Real file-backed `AsyncDAL` (tenants + communities) with the tier-allocation tables."""
+    ensure_tier_tables(automation_db.dal)
+    return automation_db
 
 
-class _SyncAsAsync:
-    """Wraps a sync pydal `DAL` so `select_async(query)` works without a real `AsyncDAL`."""
-
-    def __init__(self, dal: Any) -> None:
-        self.dal = dal
-
-    async def select_async(self, query: Any) -> Any:
-        return query.select()
+def _community(db: Any, *, tenant_slug: str = TENANT, **extra: Any) -> int:
+    dal = db.dal
+    tenant_id = dal(dal.tenants.slug == tenant_slug).select().first().id
+    cid = int(dal.communities.insert(name="acme", tenant_id=tenant_id, **extra))
+    dal.commit()
+    return cid
 
 
 class TestValidateLicense:
-    async def test_community_not_found(self, communities_dal: Any) -> None:
-        async_dal = _SyncAsAsync(communities_dal)
-        result = await validate_license(async_dal, communities_dal, community_id=999)
-        assert result.valid is False
-        assert result.reason == "Community not found"
+    """Workflows gate on the community's Premium tier (allocation only); no license key."""
 
-    async def test_no_license_key(self, communities_dal: Any) -> None:
-        cid = communities_dal.communities.insert(license_key=None)
-        async_dal = _SyncAsAsync(communities_dal)
-        result = await validate_license(async_dal, communities_dal, community_id=cid)
+    async def test_community_not_found(self, wf_db: Any) -> None:
+        result = await validate_license(wf_db, wf_db.dal, community_id=999)
         assert result.valid is False
-        assert result.reason == "No license configured"
+        # Same denial as Free: no existence oracle for unknown communities.
+        assert result.reason == "Workflows not included in current license tier"
 
-    async def test_expired_license(self, communities_dal: Any) -> None:
-        cid = communities_dal.communities.insert(
-            license_key="lic-1",
-            license_expires_at=datetime.now(UTC) - timedelta(days=1),
-            license_tier="pro",
-        )
-        async_dal = _SyncAsAsync(communities_dal)
-        result = await validate_license(async_dal, communities_dal, community_id=cid)
-        assert result.valid is False
-        assert result.reason == "License expired"
-
-    async def test_unlicensed_tier_rejected(self, communities_dal: Any) -> None:
-        cid = communities_dal.communities.insert(license_key="lic-1", license_tier="free")
-        async_dal = _SyncAsAsync(communities_dal)
-        result = await validate_license(async_dal, communities_dal, community_id=cid)
+    async def test_inactive_community_denied_like_free(self, wf_db: Any) -> None:
+        cid = _community(wf_db)
+        await set_tier(wf_db, cid, PREMIUM)
+        assert (await validate_license(wf_db, wf_db.dal, community_id=cid)).valid is True
+        await wf_db.update_async(wf_db.dal.communities.id == cid, is_active=False)
+        result = await validate_license(wf_db, wf_db.dal, community_id=cid)
         assert result.valid is False
         assert result.reason == "Workflows not included in current license tier"
 
-    async def test_valid_license_passes(self, communities_dal: Any) -> None:
-        cid = communities_dal.communities.insert(
-            license_key="lic-1",
-            license_expires_at=datetime.now(UTC) + timedelta(days=30),
-            license_tier="enterprise",
-        )
-        async_dal = _SyncAsAsync(communities_dal)
-        result = await validate_license(async_dal, communities_dal, community_id=cid)
+    async def test_other_tenant_caller_gets_the_free_denial(self, wf_db: Any) -> None:
+        cid = _community(wf_db)
+        await set_tier(wf_db, cid, PREMIUM)
+        own = await validate_license(wf_db, wf_db.dal, community_id=cid, tenant=TENANT)
+        other = await validate_license(wf_db, wf_db.dal, community_id=cid, tenant="other-corp")
+        assert own.valid is True
+        assert other == await validate_license(wf_db, wf_db.dal, community_id=999, tenant=TENANT)
+        assert other.valid is False
+
+    async def test_require_workflow_tier_raises_403_for_free(self, wf_db: Any) -> None:
+        from services.workflow_service import require_workflow_tier
+
+        cid = _community(wf_db)
+        with pytest.raises(ApiError) as exc:
+            await require_workflow_tier(wf_db, wf_db.dal, community_id=cid)
+        assert exc.value.status_code == 403
+        await set_tier(wf_db, cid, PREMIUM)
+        await require_workflow_tier(wf_db, wf_db.dal, community_id=cid)
+
+    async def test_free_denied(self, wf_db: Any) -> None:
+        cid = _community(wf_db)
+        result = await validate_license(wf_db, wf_db.dal, community_id=cid)
+        assert result.valid is False
+        assert result.reason == "Workflows not included in current license tier"
+
+    async def test_allocated_premium_allowed_without_license_key(self, wf_db: Any) -> None:
+        """Allocation honored (tenant Free); no license_key / expiry anywhere on the row."""
+        cid = _community(wf_db, license_key=None, license_expires_at=None)
+        await set_tier(wf_db, cid, PREMIUM)
+        result = await validate_license(wf_db, wf_db.dal, community_id=cid)
         assert result.valid is True
         assert result.reason is None
 
-    async def test_naive_expires_at_does_not_crash(self, communities_dal: Any) -> None:
-        """`_is_expired()` handles a naive (non-tz-aware) `license_expires_at` too."""
-        cid = communities_dal.communities.insert(
+    async def test_expired_legacy_license_key_is_ignored(self, wf_db: Any) -> None:
+        """The dead per-community key checks are gone: an expired key neither grants nor denies."""
+        cid = _community(
+            wf_db,
             license_key="lic-1",
-            license_expires_at=datetime.now() + timedelta(days=30),  # noqa: DTZ005
-            license_tier="pro",
+            license_expires_at=datetime.now(UTC) - timedelta(days=1),
         )
-        async_dal = _SyncAsAsync(communities_dal)
-        result = await validate_license(async_dal, communities_dal, community_id=cid)
-        assert result.valid is True
+        await set_tier(wf_db, cid, PREMIUM)
+        assert (await validate_license(wf_db, wf_db.dal, community_id=cid)).valid is True
+
+    async def test_legacy_key_without_allocation_does_not_grant(self, wf_db: Any) -> None:
+        cid = _community(
+            wf_db,
+            license_key="lic-1",
+            license_expires_at=datetime.now(UTC) + timedelta(days=30),
+            license_tier="enterprise",
+            is_premium=True,
+        )
+        assert (await validate_license(wf_db, wf_db.dal, community_id=cid)).valid is False
+
+    @pytest.mark.parametrize("tenant_tier", ["free", "professional", "enterprise"])
+    async def test_tenant_tier_never_uplifts_a_community(
+        self, wf_db: Any, monkeypatch: pytest.MonkeyPatch, tenant_tier: str
+    ) -> None:
+        """Regression: a Professional/Enterprise TENANT with no allocation is still Free."""
+        cid = _community(wf_db)
+        patch_tenant_tier(monkeypatch, {TENANT: tenant_tier})
+        result = await validate_license(wf_db, wf_db.dal, community_id=cid)
+        assert result.valid is False
+
+    async def test_resolver_failure_denies_and_logs_error(
+        self, wf_db: Any, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """Tier lookup blows up -> Free for the gate (denied, no raise) and an ERROR record."""
+        cid = _community(wf_db)
+        await set_tier(wf_db, cid, PREMIUM)
+
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("allocation store down")
+
+        monkeypatch.setattr(tier_svc, "_community_active_row", _boom)
+        with caplog.at_level(logging.ERROR):
+            result = await validate_license(wf_db, wf_db.dal, community_id=cid)
+        assert result.valid is False
+        assert any(
+            r.levelno >= logging.ERROR and "RuntimeError" in r.getMessage() for r in caplog.records
+        )
+
+    async def test_two_tenants_sharing_a_display_name_cannot_cross_grant(self, wf_db: Any) -> None:
+        dal = wf_db.dal
+        dal.tenants.insert(slug="acme-twin", display_name="Acme Corp", is_active=True)
+        dal.commit()
+        granted = _community(wf_db)
+        twin = _community(wf_db, tenant_slug="acme-twin")
+        await set_tier(wf_db, granted, PREMIUM)
+        assert (await validate_license(wf_db, dal, community_id=granted)).valid is True
+        assert (await validate_license(wf_db, dal, community_id=twin)).valid is False
+
+    async def test_slug_change_keeps_allocation_and_old_slug_uplift_does_not_follow(
+        self, wf_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        dal = wf_db.dal
+        kept, free = _community(wf_db), _community(wf_db)
+        await set_tier(wf_db, kept, PREMIUM)
+        dal(dal.tenants.slug == TENANT).update(slug="acme-renamed")
+        dal.commit()
+        patch_tenant_tier(monkeypatch, {TENANT: "enterprise"})  # license keyed to the OLD slug
+        assert (await validate_license(wf_db, dal, community_id=kept)).valid is True
+        assert (await validate_license(wf_db, dal, community_id=free)).valid is False

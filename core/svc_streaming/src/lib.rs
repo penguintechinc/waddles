@@ -8,11 +8,13 @@
 pub mod api;
 pub mod billing;
 pub mod config;
+pub mod crypto;
 pub mod db;
 pub mod egress;
 pub mod error;
 pub mod http;
 pub mod ingest;
+pub mod jwt_keys;
 pub mod orchestrator;
 pub mod pipeline;
 pub mod redact;
@@ -22,6 +24,8 @@ pub mod spec_builder;
 pub mod store;
 pub mod stream_key;
 pub mod telemetry;
+pub mod timestamp;
+pub mod tls;
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -89,6 +93,14 @@ where
     // `WhipState` so a `POST /whip/{token}` hand-off reaches the same
     // dispatch loop as RTMP/SRT.
     let (ingest_tx, ingest_rx) = tokio::sync::mpsc::channel::<ingest::IngestSession>(256);
+
+    // --- Platform JWT verifying keys (ES256 public keys from `platform_vault`).
+    // Hard cutover: no shared secret exists any more; with no usable key every
+    // authenticated request is refused (`no_key`/`bad_kid`) and `/readyz`
+    // reports `jwt_keys` degraded. A seed failure is logged, never fatal --
+    // ingest must keep serving, and the poller keeps retrying.
+    let mut config = config;
+    config.jwt_keys = init_jwt_keys(&config).await;
 
     let state =
         http::AppState::new_with_ingest_tx(config.clone(), prom_registry, ingest_tx.clone());
@@ -193,11 +205,21 @@ where
     tokio::spawn(srt_listener.run(ingest_tx));
 
     // --- WebRTC rooms host-API (mTLS; off + logged when HOST_API_* unset).
+    // The same 5 s reaper also expires rooms left empty past their `empty_timeout_secs`.
+    let idle = state.rooms.idle_policy();
+    tracing::info!(
+        default_empty_timeout_secs = idle.default_secs,
+        max_empty_timeout_secs = idle.max_secs,
+        "rooms: idle-room expiry policy"
+    );
     state.rooms.spawn_sweeper(Duration::from_secs(5));
     state.whep_state.spawn_sweeper(Duration::from_secs(5));
     rooms::host_api::spawn_from_env(config.cli.bind_addr, state.rooms.clone())
         .await
         .context("starting the webrtc rooms host-API listener")?;
+    rooms::grpc::spawn_from_env(config.cli.bind_addr, state.rooms.clone())
+        .await
+        .context("starting the rooms gRPC listener")?;
 
     // --- HTTP + metrics.
     let http_addr = SocketAddr::new(config.cli.bind_addr, config.cli.http_port);
@@ -208,6 +230,44 @@ where
 
     tracing::info!(%http_addr, %metrics_addr, "listening");
 
+    // One stop signal fans out to the plaintext listener and the TLS listener.
+    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+    tokio::spawn(async move {
+        http_shutdown.await;
+        let _ = stop_tx.send(true);
+    });
+    let mut plain_stop = stop_rx.clone();
+    let http_shutdown = async move {
+        let _ = plain_stop.wait_for(|stopped| *stopped).await;
+    };
+
+    // Optional in-cluster TLS control-plane listener (hub-api -> svc-streaming).
+    // Misconfigured material is a startup error, never a silent plaintext-only boot.
+    let tls_server = match (
+        config.cli.tls_port,
+        &config.cli.tls_cert_file,
+        &config.cli.tls_key_file,
+    ) {
+        (Some(port), Some(cert), Some(key)) => {
+            let server_config = tls::build_server_config(cert, key)
+                .context("building the TLS control-plane server config")?;
+            let tls_addr = SocketAddr::new(config.cli.bind_addr, port);
+            let tls_listener = tokio::net::TcpListener::bind(tls_addr).await?;
+            tracing::info!(%tls_addr, "tls control plane listening");
+            let mut tls_stop = stop_rx.clone();
+            let router = http::router(state.clone());
+            Some(tls::serve(
+                tls_listener,
+                server_config,
+                router,
+                async move {
+                    let _ = tls_stop.wait_for(|stopped| *stopped).await;
+                },
+            ))
+        }
+        _ => None,
+    };
+
     let http_server = axum::serve(http_listener, http::router(state.clone()))
         .with_graceful_shutdown(http_shutdown);
     let metrics_server = axum::serve(metrics_listener, http::metrics_router(state))
@@ -216,9 +276,57 @@ where
     tokio::try_join!(
         async { http_server.await.map_err(anyhow::Error::from) },
         async { metrics_server.await.map_err(anyhow::Error::from) },
+        async {
+            match tls_server {
+                Some(server) => server.await,
+                None => Ok(()),
+            }
+        },
     )?;
 
     Ok(())
+}
+
+/// Env override for the connection string of the read-only role that can
+/// `SELECT` `platform_vault.public_keys`; unset = the service's own DB URL.
+const PLATFORM_KEYS_DATABASE_URL_ENV: &str = "PLATFORM_KEYS_DATABASE_URL";
+
+/// How long startup waits for the first key snapshot before serving anyway.
+const JWT_KEYS_SEED_WAIT: Duration = Duration::from_secs(10);
+
+/// Per-query timeout of the key loader's connection.
+const JWT_KEYS_DB_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// Builds the ES256 verifying-key cache over `platform_vault.public_keys`
+/// (type `JWT_SIGNING`), seeds it with a bounded wait and starts the poller.
+/// Never panics and never logs the connection string.
+async fn init_jwt_keys(config: &config::Config) -> jwt_keys::JwtKeys {
+    let url = std::env::var(PLATFORM_KEYS_DATABASE_URL_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .unwrap_or_else(|| db::connection_url(config));
+    let loader = Arc::new(platform_keys::pg::PgKeyLoader::new(
+        url,
+        JWT_KEYS_DB_TIMEOUT,
+    ));
+    let cache = match platform_keys::KeyCache::new(loader, jwt_keys::JwtKeys::cache_config()) {
+        Ok(cache) => Arc::new(cache),
+        Err(err) => {
+            tracing::error!(error = %err, "platform JWT key cache misconfigured; all authenticated requests will be refused");
+            return jwt_keys::JwtKeys::None;
+        }
+    };
+    match cache.seed(JWT_KEYS_SEED_WAIT).await {
+        Ok(()) => tracing::info!("platform JWT verifying keys loaded"),
+        Err(err) => tracing::error!(
+            error = %err,
+            "platform JWT verifying keys not available at startup; authenticated requests refused until the poller loads them"
+        ),
+    }
+    // Detached for the process lifetime: the poller stops when the runtime exits.
+    let (stop, _poller) = cache.spawn_poller();
+    std::mem::forget(stop);
+    jwt_keys::JwtKeys::from_cache(cache)
 }
 
 /// Waits for SIGINT (Ctrl-C) or SIGTERM (Kubernetes pod termination) and
@@ -304,14 +412,17 @@ mod record_status_tests {
     use http_body_util::BodyExt;
     use tower::ServiceExt as _;
 
-    async fn readyz(readiness: http::RecordReadiness) -> serde_json::Value {
+    async fn readyz(
+        readiness: http::RecordReadiness,
+        jwt_keys: crate::jwt_keys::JwtKeys,
+    ) -> serde_json::Value {
         let cli = config::CliConfig::parse_from(["svc-streaming"]);
         let cfg = config::Config {
             cli,
             db_password: config::Secret::new("x"),
             cache_password: None,
             service_api_key: config::Secret::new("x"),
-            jwt_hmac_secret: None,
+            jwt_keys,
         };
         let mut state = http::AppState::new(cfg, prometheus::Registry::new());
         state.record = readiness;
@@ -332,7 +443,7 @@ mod record_status_tests {
     async fn disabled_sink_reports_degraded_with_the_reason() {
         let (sink, readiness) = record_status(Err(anyhow::anyhow!("S3_ENDPOINT is not set")));
         assert!(sink.is_none());
-        let body = readyz(readiness).await;
+        let body = readyz(readiness, crate::jwt_keys::JwtKeys::None).await;
         assert_eq!(body["status"], "degraded");
         let record = &body["dependencies"][3];
         assert_eq!(record["name"], "record");
@@ -354,7 +465,14 @@ mod record_status_tests {
         );
         let (got, readiness) = record_status(Ok(sink));
         assert!(got.is_some());
-        let body = readyz(readiness).await;
+        // `ok` also needs a loaded JWT key set (readiness gates on both), so give it one.
+        use crate::jwt_keys::{test_support::TestKey, JwtKeys};
+        let keys = JwtKeys::in_memory(vec![TestKey::generate().active_row("k1")]);
+        let JwtKeys::Cache(cache) = &keys else {
+            panic!("in_memory builds a cache");
+        };
+        cache.refresh().await.unwrap();
+        let body = readyz(readiness, keys).await;
         assert_eq!(body["status"], "ok");
         assert_eq!(body["dependencies"][3]["configured"], true);
     }

@@ -183,7 +183,7 @@ mod tests {
         });
         bridge
             .call(
-                "waddles.core.service.x",
+                "penguintechinc.waddles.service-x",
                 9,
                 CapabilityKind::Flags,
                 "enabled",

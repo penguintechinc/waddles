@@ -1,4 +1,4 @@
-# Catalog of first-party waddles.core.* App Bundles the core-bundle-seeder
+# Catalog of first-party penguintechinc.waddles.* App Bundles the core-bundle-seeder
 # (hub_api/cli/seed_core_bundles.py) activates at deploy time, under the platform's SYSTEM
 # identity -- no human global-admin approval (that stays reserved for third-party vendor
 # bundles, services/vendor_bundle_authz.py::CORE_NAMESPACE_PREFIX).
@@ -67,8 +67,8 @@ bundles:
   # app_versions.artifact_digest's own UNIQUE constraint rejects the INSERT outright (a raw
   # IntegrityError, caught by seed_core_bundles.py::_run()'s generic exception handler --
   # logged with type+message, nonzero exit, never a silent success with stale manifest_json).
-  - app_id: waddles.core.example.ping
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.ping
+    version: "1.0.8"
     language: rust
     source_dir: rust/ping
     manifest_path: ping.manifest.yaml
@@ -76,8 +76,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.pyping
-    version: "1.0.2"
+  - app_id: penguintechinc.waddles.pyping
+    version: "1.0.4"
     language: python
     source_dir: python/pyping
     manifest_path: pyping.manifest.yaml
@@ -97,8 +97,8 @@ bundles:
   # per (app_id, version), so re-seeding 1.0.0 now 409s as digest_conflict. 1.0.1 is the first
   # version built from the corrected Dockerfile. Mirrors
   # bundles/rust/ping/hub-manifest.yaml's own 1.0.0/1.0.1 retirement comment.
-  - app_id: waddles.core.example.csping
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.csping
+    version: "1.0.4"
     language: csharp
     source_dir: csharp/csping
     manifest_path: csping.manifest.yaml
@@ -124,8 +124,8 @@ bundles:
   # failing loudly. 1.0.1 is the first version built from the flags-enabled source, forcing a
   # fresh publish+activate. Mirrors bundles/csharp/csping/hub-manifest.yaml's own 1.0.0/1.0.1
   # retirement (fix/csping-version-bump, #575).
-  - app_id: waddles.core.example.eightball
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.eightball
+    version: "1.0.8"
     language: python
     source_dir: python/eightball
     manifest_path: eightball.manifest.yaml
@@ -133,8 +133,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.roll
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.roll
+    version: "1.0.8"
     language: python
     source_dir: python/roll
     manifest_path: roll.manifest.yaml
@@ -155,8 +155,8 @@ bundles:
   # 1.0.6 (this task): dispatch() now FUNCTIONS under the tenant-wide sentinel
   # (`community_id: null` below) instead of only erroring -- scoped under
   # `waddle_sdk.community_kv.TENANT_WIDE_SENTINEL`, see src/app.py's module docstring.
-  - app_id: waddles.core.example.lurk
-    version: "1.0.13"
+  - app_id: penguintechinc.waddles.lurk
+    version: "1.0.16"
     language: python
     source_dir: python/lurk
     manifest_path: lurk.manifest.yaml
@@ -169,8 +169,8 @@ bundles:
   # 1.0.4 (fix/bump-count-lurk-1.0.4): version-only bump to republish the colon-free `kv` key
   # fix (gh-631, #638) -- app_versions is immutable per (app_id, version), so 1.0.3's digest
   # still points at the pre-fix wasm; this bump is the only way the fixed build reaches alpha.
-  - app_id: waddles.core.example.count
-    version: "1.0.10"
+  - app_id: penguintechinc.waddles.count
+    version: "1.0.13"
     language: python
     source_dir: python/count
     manifest_path: count.manifest.yaml
@@ -184,8 +184,8 @@ bundles:
   # deviation -- see bundles/python/command/src/app.py's own module docstring for why). Timer
   # firing has no scheduler yet (gh-613) -- `timer ...` persists config and replies saying so, loud
   # not silent; static command CRUD does not depend on that gap.
-  - app_id: waddles.core.example.command
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.command
+    version: "1.0.9"
     language: python
     source_dir: python/command
     manifest_path: command.manifest.yaml
@@ -208,8 +208,8 @@ bundles:
   # failed with `InvalidKvKeyError` before the fix); re-keyed to `.`-separated
   # (`"rps.wins.<hash>"`, `"music.queue"`) before registration here, matching
   # `count`'s own `"count.registry"` convention. Fixed in this PR, not on the source branches.
-  - app_id: waddles.core.example.rps
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.rps
+    version: "1.0.9"
     language: python
     source_dir: python/rps
     manifest_path: rps.manifest.yaml
@@ -217,17 +217,18 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.music
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.music
+    version: "1.1.1"
     language: python
+    wit_world: stage-next-tools
     source_dir: python/music
     manifest_path: music.manifest.yaml
     artifact_path: music.wasm
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.coinflip
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.coinflip
+    version: "1.0.9"
     language: python
     source_dir: python/coinflip
     manifest_path: coinflip.manifest.yaml
@@ -241,8 +242,8 @@ bundles:
   # registered here (installed) but its flag MUST stay OFF in PostHog until the migration
   # owner resolves the overlap; `feature_enabled(FLAG_KEY, default=False)` in its own
   # `transform()` keeps it silent by default either way.
-  - app_id: waddles.core.example.announce
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.announce
+    version: "1.0.9"
     language: python
     source_dir: python/announce
     manifest_path: announce.manifest.yaml
@@ -250,8 +251,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.raffle
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.raffle
+    version: "1.0.9"
     language: python
     source_dir: python/raffle
     manifest_path: raffle.manifest.yaml
@@ -259,8 +260,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.social
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.social
+    version: "1.0.8"
     language: python
     source_dir: python/social
     manifest_path: social.manifest.yaml
@@ -268,8 +269,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.socials
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.socials
+    version: "1.0.7"
     language: python
     source_dir: python/socials
     manifest_path: socials.manifest.yaml
@@ -277,8 +278,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.wheel
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.wheel
+    version: "1.0.9"
     language: python
     source_dir: python/wheel
     manifest_path: wheel.manifest.yaml
@@ -286,8 +287,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.love
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.love
+    version: "1.0.8"
     language: python
     source_dir: python/love
     manifest_path: love.manifest.yaml
@@ -295,8 +296,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.roulette
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.roulette
+    version: "1.0.9"
     language: python
     source_dir: python/roulette
     manifest_path: roulette.manifest.yaml
@@ -304,8 +305,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.joke
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.joke
+    version: "1.0.9"
     language: python
     source_dir: python/joke
     manifest_path: joke.manifest.yaml
@@ -313,8 +314,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.first
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.first
+    version: "1.0.9"
     language: python
     source_dir: python/first
     manifest_path: first.manifest.yaml
@@ -330,8 +331,8 @@ bundles:
   # comment). Same pattern as batch 1: each gates its own reply behind a
   # `waddles.command-<name>` PostHog flag (default OFF) inside `transform()` -- this catalog
   # entry only installs the bundle, it does not make it respond.
-  - app_id: waddles.core.example.about
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.about
+    version: "1.0.9"
     language: python
     source_dir: python/about
     manifest_path: about.manifest.yaml
@@ -339,8 +340,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.compliment
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.compliment
+    version: "1.0.9"
     language: python
     source_dir: python/compliment
     manifest_path: compliment.manifest.yaml
@@ -348,8 +349,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.rules
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.rules
+    version: "1.0.9"
     language: python
     source_dir: python/rules
     manifest_path: rules.manifest.yaml
@@ -357,8 +358,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.trivia
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.trivia
+    version: "1.0.8"
     language: python
     source_dir: python/trivia
     manifest_path: trivia.manifest.yaml
@@ -366,8 +367,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.hangman
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.hangman
+    version: "1.0.8"
     language: python
     source_dir: python/hangman
     manifest_path: hangman.manifest.yaml
@@ -375,8 +376,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.countdown
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.countdown
+    version: "1.0.8"
     language: python
     source_dir: python/countdown
     manifest_path: countdown.manifest.yaml
@@ -384,8 +385,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.remind
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.remind
+    version: "1.0.8"
     language: python
     source_dir: python/remind
     manifest_path: remind.manifest.yaml
@@ -393,8 +394,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.duel
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.duel
+    version: "1.0.9"
     language: python
     source_dir: python/duel
     manifest_path: duel.manifest.yaml
@@ -402,8 +403,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.slots
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.slots
+    version: "1.0.9"
     language: python
     source_dir: python/slots
     manifest_path: slots.manifest.yaml
@@ -411,8 +412,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.fish
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.fish
+    version: "1.0.9"
     language: python
     source_dir: python/fish
     manifest_path: fish.manifest.yaml
@@ -420,8 +421,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.poll
-    version: "1.0.5"
+  - app_id: penguintechinc.waddles.poll
+    version: "1.0.8"
     language: python
     source_dir: python/poll
     manifest_path: poll.manifest.yaml
@@ -429,8 +430,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.shoutout
-    version: "1.0.7"
+  - app_id: penguintechinc.waddles.shoutout
+    version: "1.0.10"
     language: python
     source_dir: python/shoutout
     manifest_path: shoutout.manifest.yaml
@@ -446,8 +447,8 @@ bundles:
   # minigames/utilities (choose, dadjoke, wave, slap). Same pattern as prior batches: each
   # gates its own reply behind a `waddles.command-<name>` PostHog flag (default OFF) inside
   # `transform()` -- this catalog entry only installs the bundle, it does not make it respond.
-  - app_id: waddles.core.example.rank
-    version: "1.0.7"
+  - app_id: penguintechinc.waddles.rank
+    version: "1.0.10"
     language: python
     wit_world: stage-next-tools
     source_dir: python/rank
@@ -456,8 +457,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.quote
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.quote
+    version: "1.0.9"
     language: python
     source_dir: python/quote
     manifest_path: quote.manifest.yaml
@@ -465,8 +466,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.loyalty
-    version: "1.0.7"
+  - app_id: penguintechinc.waddles.loyalty
+    version: "1.0.10"
     language: python
     wit_world: stage-next-tools
     source_dir: python/loyalty
@@ -475,8 +476,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.inventory
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.inventory
+    version: "1.0.9"
     language: python
     source_dir: python/inventory
     manifest_path: inventory.manifest.yaml
@@ -484,8 +485,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.choose
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.choose
+    version: "1.0.7"
     language: python
     source_dir: python/choose
     manifest_path: choose.manifest.yaml
@@ -493,8 +494,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.dadjoke
-    version: "1.0.6"
+  - app_id: penguintechinc.waddles.dadjoke
+    version: "1.0.9"
     language: python
     source_dir: python/dadjoke
     manifest_path: dadjoke.manifest.yaml
@@ -502,8 +503,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.wave
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.wave
+    version: "1.0.7"
     language: python
     source_dir: python/wave
     manifest_path: wave.manifest.yaml
@@ -511,8 +512,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.slap
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.slap
+    version: "1.0.7"
     language: python
     source_dir: python/slap
     manifest_path: slap.manifest.yaml
@@ -520,8 +521,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.hug
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.hug
+    version: "1.0.6"
     language: python
     source_dir: python/hug
     manifest_path: hug.manifest.yaml
@@ -529,8 +530,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.boop
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.boop
+    version: "1.0.6"
     language: python
     source_dir: python/boop
     manifest_path: boop.manifest.yaml
@@ -538,8 +539,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.highfive
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.highfive
+    version: "1.0.6"
     language: python
     source_dir: python/highfive
     manifest_path: highfive.manifest.yaml
@@ -549,8 +550,8 @@ bundles:
         community_id: null
   # Facts pack: three stateless, self-contained random-content bundles (no kv, no external
   # API calls), each gated behind its own `waddles.command-<name>` flag (default OFF).
-  - app_id: waddles.core.example.catfact
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.catfact
+    version: "1.0.6"
     language: python
     source_dir: python/catfact
     manifest_path: catfact.manifest.yaml
@@ -558,8 +559,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.dogfact
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.dogfact
+    version: "1.0.6"
     language: python
     source_dir: python/dogfact
     manifest_path: dogfact.manifest.yaml
@@ -567,8 +568,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.advice
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.advice
+    version: "1.0.6"
     language: python
     source_dir: python/advice
     manifest_path: advice.manifest.yaml
@@ -576,8 +577,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.scramble
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.scramble
+    version: "1.0.6"
     language: python
     source_dir: python/scramble
     manifest_path: scramble.manifest.yaml
@@ -585,8 +586,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.guess
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.guess
+    version: "1.0.6"
     language: python
     source_dir: python/guess
     manifest_path: guess.manifest.yaml
@@ -594,8 +595,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.rip
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.rip
+    version: "1.0.7"
     language: python
     source_dir: python/rip
     manifest_path: rip.manifest.yaml
@@ -603,8 +604,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.hype
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.hype
+    version: "1.0.7"
     language: python
     source_dir: python/hype
     manifest_path: hype.manifest.yaml
@@ -612,8 +613,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.cringe
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.cringe
+    version: "1.0.7"
     language: python
     source_dir: python/cringe
     manifest_path: cringe.manifest.yaml
@@ -621,8 +622,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.gamble
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.gamble
+    version: "1.0.7"
     language: python
     source_dir: python/gamble
     manifest_path: gamble.manifest.yaml
@@ -630,8 +631,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.greeter
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.greeter
+    version: "1.0.6"
     language: python
     source_dir: python/greeter
     manifest_path: greeter.manifest.yaml
@@ -639,8 +640,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.giveaway
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.giveaway
+    version: "1.0.7"
     language: python
     wit_world: stage-next
     source_dir: python/giveaway
@@ -649,8 +650,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.heist
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.heist
+    version: "1.0.7"
     language: python
     source_dir: python/heist
     manifest_path: heist.manifest.yaml
@@ -658,8 +659,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.dice
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.dice
+    version: "1.0.6"
     language: python
     source_dir: python/dice
     manifest_path: dice.manifest.yaml
@@ -667,8 +668,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.discord
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.discord-invite
+    version: "1.0.7"
     language: python
     source_dir: python/discord
     manifest_path: discord.manifest.yaml
@@ -676,8 +677,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.vote
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.vote
+    version: "1.0.7"
     language: python
     source_dir: python/vote
     manifest_path: vote.manifest.yaml
@@ -685,8 +686,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.fortune
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.fortune
+    version: "1.0.6"
     language: python
     source_dir: python/fortune
     manifest_path: fortune.manifest.yaml
@@ -694,8 +695,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.event
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.event
+    version: "1.0.7"
     language: python
     source_dir: python/event
     manifest_path: event.manifest.yaml
@@ -703,11 +704,11 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  # Wix integration (#485): `!wix` membership status/link over the Wix REST API (GET), with
-  # default-off plan-role / event-sync modules driven by the Wix webhook connector, calling the Discord
-  # service tools (tool.call grants => stage-next-tools world).
-  - app_id: waddles.core.integration.wix
-    version: "1.1.0"
+  # Wix integration (#485): EVENT-ONLY (no chat command). Wix events -> community events only (subscriptions/licensing
+  # = PenguinTech license server), driven by the Wix webhook connector, calling the Discord service tools (tool.call grants =>
+  # stage-next-tools world).
+  - app_id: penguintechinc.waddles.wix-event-sync
+    version: "1.1.3"
     language: python
     wit_world: stage-next-tools
     source_dir: python/wix
@@ -716,8 +717,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.echo
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.echo
+    version: "1.0.6"
     language: python
     source_dir: python/echo
     manifest_path: echo.manifest.yaml
@@ -725,8 +726,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.waddle
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.waddle
+    version: "1.0.6"
     language: python
     source_dir: python/waddle
     manifest_path: waddle.manifest.yaml
@@ -734,8 +735,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.hello
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.hello
+    version: "1.0.6"
     language: python
     source_dir: python/hello
     manifest_path: hello.manifest.yaml
@@ -743,8 +744,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.bot
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.bot
+    version: "1.0.6"
     language: python
     source_dir: python/bot
     manifest_path: bot.manifest.yaml
@@ -752,8 +753,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.time
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.time
+    version: "1.0.6"
     language: python
     source_dir: python/time
     manifest_path: time.manifest.yaml
@@ -761,8 +762,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.bookmark
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.bookmark
+    version: "1.0.7"
     language: python
     source_dir: python/bookmark
     manifest_path: bookmark.manifest.yaml
@@ -770,8 +771,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.lfg
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.lfg
+    version: "1.0.7"
     language: python
     source_dir: python/lfg
     manifest_path: lfg.manifest.yaml
@@ -779,8 +780,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.ticket
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.ticket
+    version: "1.0.7"
     language: python
     source_dir: python/ticket
     manifest_path: ticket.manifest.yaml
@@ -788,8 +789,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.label
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.label
+    version: "1.0.7"
     language: python
     source_dir: python/label
     manifest_path: label.manifest.yaml
@@ -797,8 +798,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.faq
-    version: "1.0.2"
+  - app_id: penguintechinc.waddles.faq
+    version: "1.0.5"
     language: python
     source_dir: python/faq
     manifest_path: faq.manifest.yaml
@@ -806,8 +807,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.death
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.death
+    version: "1.0.7"
     language: python
     source_dir: python/death
     manifest_path: death.manifest.yaml
@@ -815,8 +816,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.roast
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.roast
+    version: "1.0.6"
     language: python
     source_dir: python/roast
     manifest_path: roast.manifest.yaml
@@ -824,8 +825,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.ship
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.ship
+    version: "1.0.7"
     language: python
     source_dir: python/ship
     manifest_path: ship.manifest.yaml
@@ -833,8 +834,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.iq
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.iq
+    version: "1.0.7"
     language: python
     source_dir: python/iq
     manifest_path: iq.manifest.yaml
@@ -842,8 +843,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.mood
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.mood
+    version: "1.0.6"
     language: python
     source_dir: python/mood
     manifest_path: mood.manifest.yaml
@@ -851,8 +852,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.winner
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.winner
+    version: "1.0.7"
     language: python
     source_dir: python/winner
     manifest_path: winner.manifest.yaml
@@ -863,12 +864,12 @@ bundles:
   # Utility pack (2026-10-09, feature/bundles-utility-pack): alias / lastseen / dailycounter /
   # weather. All gate behind `waddles.command-<name>` flags (default OFF) inside `transform()`;
   # this entry only installs the bundles. Original logic (no PenguinTwitchBot port), so
-  # waddles.core.example.* rather than waddles.integrations.superpenguin.*. `weather` declares
+  # penguintechinc.waddles.<name> (platform-authored) rather than psychoboy.penguintwitchbot.<name>. `weather` declares
   # `net.http.fqdn:api.weatherapi.com` (GET) and reads its key via secret-ref WEATHER_API_KEY
   # (operator-provisioned, never in the repo). `lastseen` supports self + Discord @mention +
   # literal UUID only -- free-text name lookup needs #429.
-  - app_id: waddles.core.example.alias
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.alias
+    version: "1.0.7"
     language: python
     source_dir: python/alias
     manifest_path: alias.manifest.yaml
@@ -876,8 +877,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.lastseen
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.lastseen
+    version: "1.0.7"
     language: python
     source_dir: python/lastseen
     manifest_path: lastseen.manifest.yaml
@@ -885,8 +886,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.memories
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.memories
+    version: "1.0.6"
     language: python
     source_dir: python/memories
     manifest_path: memories.manifest.yaml
@@ -894,8 +895,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.dailycounter
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.dailycounter
+    version: "1.0.7"
     language: python
     source_dir: python/dailycounter
     manifest_path: dailycounter.manifest.yaml
@@ -903,8 +904,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.uptime
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.uptime
+    version: "1.0.6"
     language: python
     source_dir: python/uptime
     manifest_path: uptime.manifest.yaml
@@ -912,8 +913,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.weather
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.weather
+    version: "1.0.6"
     language: python
     source_dir: python/weather
     manifest_path: weather.manifest.yaml
@@ -921,8 +922,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.pronouns
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.pronouns
+    version: "1.0.6"
     language: python
     source_dir: python/pronouns
     manifest_path: pronouns.manifest.yaml
@@ -930,8 +931,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.secret
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.secret
+    version: "1.0.4"
     language: python
     source_dir: python/secret
     manifest_path: secret.manifest.yaml
@@ -939,8 +940,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.donate
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.donate
+    version: "1.0.6"
     language: python
     source_dir: python/donate
     manifest_path: donate.manifest.yaml
@@ -948,8 +949,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.merch
-    version: "1.0.3"
+  - app_id: penguintechinc.waddles.merch
+    version: "1.0.6"
     language: python
     source_dir: python/merch
     manifest_path: merch.manifest.yaml
@@ -957,8 +958,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.birthday
-    version: "1.0.4"
+  - app_id: penguintechinc.waddles.birthday
+    version: "1.0.7"
     language: python
     source_dir: python/birthday
     manifest_path: birthday.manifest.yaml
@@ -982,8 +983,8 @@ bundles:
   # row's manifest declares a stage-next-only permission while the row resolves to `stage`.
   #
   # 25 bundles on the default `stage` world:
-  - app_id: waddles.core.example.affirmation
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.affirmation
+    version: "1.0.4"
     language: python
     source_dir: python/affirmation
     manifest_path: affirmation.manifest.yaml
@@ -991,8 +992,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.clap
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.clap
+    version: "1.0.4"
     language: python
     source_dir: python/clap
     manifest_path: clap.manifest.yaml
@@ -1000,8 +1001,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.commands
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.commands
+    version: "1.0.4"
     language: python
     source_dir: python/commands
     manifest_path: commands.manifest.yaml
@@ -1009,8 +1010,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.dance
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.dance
+    version: "1.0.4"
     language: python
     source_dir: python/dance
     manifest_path: dance.manifest.yaml
@@ -1018,8 +1019,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.emojify
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.emojify
+    version: "1.0.4"
     language: python
     source_dir: python/emojify
     manifest_path: emojify.manifest.yaml
@@ -1027,8 +1028,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.fact
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.fact
+    version: "1.0.4"
     language: python
     source_dir: python/fact
     manifest_path: fact.manifest.yaml
@@ -1036,8 +1037,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.horoscope
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.horoscope
+    version: "1.0.4"
     language: python
     source_dir: python/horoscope
     manifest_path: horoscope.manifest.yaml
@@ -1045,8 +1046,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.insult
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.insult
+    version: "1.0.4"
     language: python
     source_dir: python/insult
     manifest_path: insult.manifest.yaml
@@ -1054,8 +1055,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.kiss
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.kiss
+    version: "1.0.4"
     language: python
     source_dir: python/kiss
     manifest_path: kiss.manifest.yaml
@@ -1063,8 +1064,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.mock
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.mock
+    version: "1.0.4"
     language: python
     source_dir: python/mock
     manifest_path: mock.manifest.yaml
@@ -1072,8 +1073,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.motivate
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.motivate
+    version: "1.0.4"
     language: python
     source_dir: python/motivate
     manifest_path: motivate.manifest.yaml
@@ -1081,8 +1082,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.numberfact
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.numberfact
+    version: "1.0.4"
     language: python
     source_dir: python/numberfact
     manifest_path: numberfact.manifest.yaml
@@ -1090,8 +1091,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.pat
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.pat
+    version: "1.0.4"
     language: python
     source_dir: python/pat
     manifest_path: pat.manifest.yaml
@@ -1099,8 +1100,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.pickup
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.pickup
+    version: "1.0.4"
     language: python
     source_dir: python/pickup
     manifest_path: pickup.manifest.yaml
@@ -1108,8 +1109,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.poke
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.poke
+    version: "1.0.4"
     language: python
     source_dir: python/poke
     manifest_path: poke.manifest.yaml
@@ -1117,8 +1118,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.rate
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.rate
+    version: "1.0.4"
     language: python
     source_dir: python/rate
     manifest_path: rate.manifest.yaml
@@ -1126,8 +1127,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.reverse
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.reverse
+    version: "1.0.4"
     language: python
     source_dir: python/reverse
     manifest_path: reverse.manifest.yaml
@@ -1135,8 +1136,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.riddle
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.riddle
+    version: "1.0.4"
     language: python
     source_dir: python/riddle
     manifest_path: riddle.manifest.yaml
@@ -1144,8 +1145,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.say
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.say
+    version: "1.0.4"
     language: python
     source_dir: python/say
     manifest_path: say.manifest.yaml
@@ -1153,8 +1154,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.truthordare
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.truthordare
+    version: "1.0.4"
     language: python
     source_dir: python/truthordare
     manifest_path: truthordare.manifest.yaml
@@ -1162,8 +1163,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.uwu
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.uwu
+    version: "1.0.4"
     language: python
     source_dir: python/uwu
     manifest_path: uwu.manifest.yaml
@@ -1171,8 +1172,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.vibecheck
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.vibecheck
+    version: "1.0.4"
     language: python
     source_dir: python/vibecheck
     manifest_path: vibecheck.manifest.yaml
@@ -1180,8 +1181,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.wordcount
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.wordcount
+    version: "1.0.4"
     language: python
     source_dir: python/wordcount
     manifest_path: wordcount.manifest.yaml
@@ -1189,8 +1190,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.wouldyourather
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.wouldyourather
+    version: "1.0.4"
     language: python
     source_dir: python/wouldyourather
     manifest_path: wouldyourather.manifest.yaml
@@ -1198,8 +1199,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.yomama
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.yomama
+    version: "1.0.4"
     language: python
     source_dir: python/yomama
     manifest_path: yomama.manifest.yaml
@@ -1208,8 +1209,8 @@ bundles:
       - tenant_slug: default
         community_id: null
   # 12 bundles on `stage-next` (economy + AI):
-  - app_id: waddles.core.example.ask
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.ask
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/ask
@@ -1218,8 +1219,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.define
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.define
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/define
@@ -1228,8 +1229,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.defuse
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.defuse
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/defuse
@@ -1238,8 +1239,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.eli5
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.eli5
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/eli5
@@ -1248,8 +1249,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.jackpot
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.jackpot
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/jackpot
@@ -1258,8 +1259,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.rephrase
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.rephrase
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/rephrase
@@ -1268,8 +1269,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.sentiment
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.sentiment
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/sentiment
@@ -1278,8 +1279,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.steal
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.steal
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/steal
@@ -1288,8 +1289,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.summarize
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.summarize
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/summarize
@@ -1298,8 +1299,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.tldr
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.tldr
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/tldr
@@ -1308,8 +1309,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.top
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.top
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/top
@@ -1318,8 +1319,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.translate
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.translate
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/translate
@@ -1345,8 +1346,8 @@ bundles:
   #
   # 8 bundles on the default `stage` world (customcommand is the exception: `wit_world: stage-next`
   # because it authorizes writes via the `authz` import):
-  - app_id: waddles.core.example.customcommand
-    version: "1.0.2"
+  - app_id: penguintechinc.waddles.customcommand
+    version: "1.0.7"
     language: python
     wit_world: stage-next
     source_dir: python/customcommand
@@ -1355,8 +1356,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.counter
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.counter
+    version: "1.0.4"
     language: python
     source_dir: python/counter
     manifest_path: counter.manifest.yaml
@@ -1364,8 +1365,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.queue
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.queue
+    version: "1.0.4"
     language: python
     source_dir: python/queue
     manifest_path: queue.manifest.yaml
@@ -1373,8 +1374,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.timer
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.timer
+    version: "1.0.4"
     language: python
     source_dir: python/timer
     manifest_path: timer.manifest.yaml
@@ -1382,8 +1383,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.level
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.level
+    version: "1.0.4"
     language: python
     source_dir: python/level
     manifest_path: level.manifest.yaml
@@ -1391,8 +1392,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.hypetrain
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.hypetrain
+    version: "1.0.4"
     language: python
     source_dir: python/hypetrain
     manifest_path: hypetrain.manifest.yaml
@@ -1400,8 +1401,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.keywordgiveaway
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.keywordgiveaway
+    version: "1.0.4"
     language: python
     source_dir: python/keywordgiveaway
     manifest_path: keywordgiveaway.manifest.yaml
@@ -1409,8 +1410,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.bingo
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.bingo
+    version: "1.0.4"
     language: python
     source_dir: python/bingo
     manifest_path: bingo.manifest.yaml
@@ -1419,8 +1420,8 @@ bundles:
       - tenant_slug: default
         community_id: null
   # 4 bundles on `stage-next` (economy + identity.resolve host capabilities):
-  - app_id: waddles.core.example.prediction
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.prediction
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/prediction
@@ -1429,8 +1430,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.lottery
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.lottery
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/lottery
@@ -1439,8 +1440,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.blackjack
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.blackjack
+    version: "1.0.4"
     language: python
     wit_world: stage-next
     source_dir: python/blackjack
@@ -1449,8 +1450,8 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  - app_id: waddles.core.example.chatguard
-    version: "1.1.0"
+  - app_id: penguintechinc.waddles.chatguard
+    version: "1.1.3"
     language: python
     wit_world: stage-next-tools
     source_dir: python/chatguard
@@ -1459,28 +1460,11 @@ bundles:
     activation_targets:
       - tenant_slug: default
         community_id: null
-  # bundle-MCP-tools P5: reputation SERVICE bundle (Rust, always-on `kind: service`). Built by
-  # bundles/Dockerfile.core-bundles's rust-bundle-builder stage (cargo-component, NOT the Python
-  # loop); `wit_world: stage-tools` is documentation here -- the Rust build takes its world from
-  # the crate's own Cargo.toml `[package.metadata.component.target] world`. The seeder installs
-  # it with trusted_source=True (the only path allowed to declare `kind: service`).
-  - app_id: waddles.core.service.reputation
-    version: "1.1.0"
-    language: rust
-    wit_world: stage-tools
-    kind: service
-    source_dir: rust/reputation
-    manifest_path: reputation.manifest.yaml
-    artifact_path: reputation.wasm
-    activation_targets:
-      - tenant_slug: default
-        community_id: null
-
   # Catalog bundle `ai` (P0b): AI SERVICE (Rust, always-on `kind: service`, world stage-tools).
   # Tools ai.complete/ai.classify over host ai.generate; ai.rag.* fail loud until the host
-  # exposes a RAG capability. Built by rust-bundle-builder like reputation above.
-  - app_id: waddles.core.service.ai
-    version: "1.0.0"
+  # exposes a RAG capability. Built by rust-bundle-builder like reputation (below).
+  - app_id: penguintechinc.waddles.ai
+    version: "1.0.3"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1492,8 +1476,8 @@ bundles:
         community_id: null
 
   # Atomic community currency service, installed by the trusted core seeder.
-  - app_id: waddles.core.service.economy
-    version: "1.0.1"
+  - app_id: penguintechinc.waddles.economy
+    version: "1.0.5"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1506,8 +1490,8 @@ bundles:
 
   # bundle-MCP-tools P6b: twitch platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-twitch defaults OFF.
-  - app_id: waddles.core.service.twitch
-    version: "1.3.0"
+  - app_id: penguintechinc.waddles.twitch
+    version: "1.3.3"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1520,8 +1504,8 @@ bundles:
 
   # bundle-MCP-tools P6b: discord platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-discord defaults OFF.
-  - app_id: waddles.core.service.discord
-    version: "1.0.7"
+  - app_id: penguintechinc.waddles.discord
+    version: "1.0.9"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1534,8 +1518,8 @@ bundles:
 
   # bundle-MCP-tools P6b: youtube platform CONNECTOR (Rust `kind: service`, `connector-tools` world).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-youtube defaults OFF.
-  - app_id: waddles.core.service.youtube
-    version: "1.1.0"
+  - app_id: penguintechinc.waddles.youtube
+    version: "1.1.1"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1546,11 +1530,28 @@ bundles:
       - tenant_slug: default
         community_id: null
 
+  # bundle-MCP-tools P5: reputation SERVICE bundle (Rust, always-on `kind: service`). Built by
+  # bundles/Dockerfile.core-bundles's rust-bundle-builder stage (cargo-component, NOT the Python
+  # loop); `wit_world: stage-tools` is documentation here -- the Rust build takes its world from
+  # the crate's own Cargo.toml `[package.metadata.component.target] world`. The seeder installs
+  # it with trusted_source=True (the only path allowed to declare `kind: service`).
+  - app_id: penguintechinc.waddles.reputation
+    version: "1.1.6"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/reputation
+    manifest_path: reputation.manifest.yaml
+    artifact_path: reputation.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
   # Kick platform service bundle (`kind: service`, `connector-tools` world): Pusher chat + signed
   # webhook normalization, chat send/delete templates, `kick.live.channels`. Cutover flag
   # waddles.connector-kick defaults OFF.
-  - app_id: waddles.core.service.kick
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.kick
+    version: "1.0.4"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1563,8 +1564,8 @@ bundles:
 
   # Community feed reader (#484): `!feed` events/info from a per-community configured public
   # JSON feed url; the operator grants net.http.fqdn:<host> per community (no fixed host).
-  - app_id: waddles.core.community.feed
-    version: "1.0.2"
+  - app_id: penguintechinc.waddles.feed
+    version: "1.0.5"
     language: python
     source_dir: python/community_feed
     manifest_path: community-feed.manifest.yaml
@@ -1576,8 +1577,8 @@ bundles:
   # Wix connector (Rust `kind: service`, `connector-tools` world): inbound webhooks (verified by svc-ingest
   # Scheme::WixJwt) + outbound `wix.event.*` Events V3 tools (host-executed templates; creds host-side).
   # The cutover flag waddles.connector-wix defaults OFF.
-  - app_id: waddles.core.service.wix
-    version: "1.1.0"
+  - app_id: penguintechinc.waddles.wix
+    version: "1.1.2"
     language: rust
     wit_world: connector-tools
     kind: service
@@ -1590,8 +1591,8 @@ bundles:
 
   # RSI Spectrum platform CONNECTOR (gh #486, Rust `kind: service`, `connector` world, inbound-only).
   # Built by rust-bundle-builder; the cutover flag waddles.connector-spectrum defaults OFF.
-  - app_id: waddles.core.service.spectrum
-    version: "0.1.1"
+  - app_id: penguintechinc.waddles.spectrum
+    version: "0.1.2"
     language: rust
     wit_world: connector
     kind: service
@@ -1605,8 +1606,8 @@ bundles:
   # Twitch clips APP bundle (Rust, `stage-next-tools` world): `!clip`/`!clips` over the Twitch
   # service bundle's twitch.clip.{create,get,list} tools. Needs those tools (twitch bundle) to be
   # ACTIVATED + granted before commands work; until then create fails loud with a viewer notice.
-  - app_id: waddles.core.example.twitch-clips
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.twitch-clips
+    version: "1.0.4"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/twitch-clips
@@ -1617,8 +1618,8 @@ bundles:
   # service's network tools fail loud (target-unavailable) until the host `gameserver-net` capability
   # lands (bundles/rust/gameserver/README.md "Needs from S0"). The service installs first so the app's
   # requested tools resolve.
-  - app_id: waddles.core.service.gameserver
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.gameserver
+    version: "1.0.3"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1629,8 +1630,8 @@ bundles:
       - tenant_slug: default
         community_id: null
 
-  - app_id: waddles.core.example.game-servers
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.game-servers
+    version: "1.0.2"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/game-servers
@@ -1642,8 +1643,8 @@ bundles:
 
   # AI Teammates APP bundle (Rust, `stage-next-tools` world): Researcher, Receptionist, Producer --
   # each default OFF per community, configured via config_schema. Consumes the AI service tools.
-  - app_id: waddles.core.example.ai-teammates
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.ai-teammates
+    version: "1.0.4"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/ai-teammates
@@ -1657,8 +1658,8 @@ bundles:
   # commands, and event sync to Discord scheduled events by CALLING `discord.scheduled_event.*`
   # (sync OFF until a community admin enables it). Built by rust-bundle-builder; the world comes
   # from the crate's Cargo.toml. The Python `!event` bundle stays until parity is proven.
-  - app_id: waddles.core.app.calendar
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.calendar
+    version: "1.0.4"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/calendar
@@ -1668,10 +1669,11 @@ bundles:
       - tenant_slug: default
         community_id: null
 
-  # DJ app bundle (Rust, `stage-next-tools`): playlists, !sr song requests, mod queue controls,
-  # deterministic song policy + optional AI DJ. Flag waddles.command-dj defaults OFF.
-  - app_id: waddles.core.example.dj
-    version: "1.0.0"
+  # DJ app bundle (Rust, `stage-next-tools`): OPTIONAL AI DJ layer over the shared
+  # music-requests queue (picks, playlists, policy, `!dj` only; no request commands).
+  # Flag waddles.command-dj defaults OFF.
+  - app_id: penguintechinc.waddles.dj
+    version: "1.1.1"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/dj
@@ -1684,8 +1686,8 @@ bundles:
   # Reputation ACCRUAL app (Rust, `stage-next-tools`, `provides: reputation-logic`): default logic
   # turning platform events into reputation deltas via the reputation service's adjust /
   # apply_moderation tools. Flag waddles.reputation-accrual defaults OFF.
-  - app_id: waddles.core.app.reputation-accrual
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.reputation-accrual
+    version: "1.0.2"
     language: rust
     wit_world: stage-next-tools
     kind: app
@@ -1693,13 +1695,13 @@ bundles:
     manifest_path: reputation-accrual.manifest.yaml
     artifact_path: reputation-accrual.wasm
     activation_targets:
-      - tenant_slug: global
+      - tenant_slug: default
         community_id: null
 
   # SoundCloud music SERVICE (Rust `kind: service`, world stage-tools): music.soundcloud.{search,
   # track,playlist.get,resolve}. Metadata + license flags only; OAuth token is a host-side secret ref.
-  - app_id: waddles.core.service.music-soundcloud
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.music-soundcloud
+    version: "1.0.3"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1712,8 +1714,8 @@ bundles:
 
   # WebRTC control-plane SERVICE bundle (Rust `kind: service`, `stage-tools-webrtc` world): tools over
   # svc-streaming's rooms/SFU. Host seams for the `webrtc` capability are pending (see PR body).
-  - app_id: waddles.core.service.webrtc
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.webrtc
+    version: "1.4.2"
     language: rust
     wit_world: stage-tools-webrtc
     kind: service
@@ -1726,8 +1728,8 @@ bundles:
 
   # Rooms APP bundle (Rust, `stage-next-tools` world): per-community / per-event / virtual rooms over
   # the webrtc service's tools. Replaces hub_api calls.py + calls_proxy.py and Go module_rtc.
-  - app_id: waddles.core.app.rooms
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.rooms
+    version: "1.4.1"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/rooms
@@ -1737,8 +1739,8 @@ bundles:
   # Music YouTube SERVICE bundle (Rust `kind: service`, world stage-tools): common music tool
   # contract music.youtube.{search,track,playlist.get,resolve} over the YouTube Data API v3.
   # Built by rust-bundle-builder; credentials are host-side secret refs.
-  - app_id: waddles.core.service.music-youtube
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.music-youtube
+    version: "1.0.3"
     language: rust
     wit_world: stage-tools
     kind: service
@@ -1749,11 +1751,26 @@ bundles:
       - tenant_slug: default
         community_id: null
 
+  # music-requests SERVICE bundle (Rust, stage-tools): the single per-community song-request queue,
+  # history, play counters and DMCA-safe mode (db-v2 tables). The music app owns the user commands;
+  # the optional AI DJ layer reads/adds through these tools. Contract: docs/music-requests-service.md.
+  - app_id: penguintechinc.waddles.music-requests
+    version: "1.0.3"
+    language: rust
+    wit_world: stage-tools
+    kind: service
+    source_dir: rust/music-requests
+    manifest_path: music-requests.manifest.yaml
+    artifact_path: music-requests.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
   # live-now APP bundle (Rust, stage-next-tools): community who's-live + !live + go-live announcements,
   # consuming <platform>.live.channels from the platform service bundles (live-channels contract v1).
   # Chat commands/announcements gated by PostHog flags live-now.command / live-now.announce (default OFF).
-  - app_id: waddles.core.app.live-now
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.live-now
+    version: "1.0.4"
     language: rust
     wit_world: stage-next-tools
     source_dir: rust/live-now
@@ -1763,11 +1780,35 @@ bundles:
       - tenant_slug: default
         community_id: null
 
+  # Stream alerts APP bundle (Rust, world stage-next-tools): follow/sub/cheer/raid/donation alerts published to its own namespaced overlay surface.
+  - app_id: penguintechinc.waddles.stream-alerts
+    version: "1.0.3"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/stream-alerts
+    manifest_path: stream-alerts.manifest.yaml
+    artifact_path: stream-alerts.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
+  # Galactic avatars APP bundle (Rust, world stage-next-tools): anonymous faction avatars on the overlay stage strip, published to its own namespaced surface.
+  - app_id: penguintechinc.waddles.galactic-avatars
+    version: "1.0.3"
+    language: rust
+    wit_world: stage-next-tools
+    source_dir: rust/galactic-avatars
+    manifest_path: galactic-avatars.manifest.yaml
+    artifact_path: galactic-avatars.wasm
+    activation_targets:
+      - tenant_slug: default
+        community_id: null
+
   # Spotify music SERVICE bundle (Rust `kind: service`, world stage-tools): music.spotify.*
   # metadata + Connect player tools. Credentials are host-resolved secret-refs
   # (spotify.app / spotify.oauth); built by rust-bundle-builder.
-  - app_id: waddles.core.service.music-spotify
-    version: "1.0.0"
+  - app_id: penguintechinc.waddles.music-spotify
+    version: "1.0.3"
     language: rust
     wit_world: stage-tools
     kind: service

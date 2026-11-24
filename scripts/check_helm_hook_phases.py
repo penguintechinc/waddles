@@ -29,6 +29,7 @@ it's a broken one (critical-rules.md Verification Integrity).
 
 from __future__ import annotations
 
+import argparse
 import json
 import subprocess
 import sys
@@ -40,12 +41,17 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 CHART_DIR = REPO_ROOT / "k8s" / "helm" / "waddlebot"
 
 
-def _render() -> list[dict]:
+def _render(chart_dir: Path) -> list[dict]:
     result = subprocess.run(
         [
-            "helm", "template", "waddlebot", str(CHART_DIR),
-            "-f", str(CHART_DIR / "values-alpha.yaml"),
-            "--kube-version", "1.30.0",
+            "helm",
+            "template",
+            "waddlebot",
+            str(chart_dir),
+            "-f",
+            str(chart_dir / "values-alpha.yaml"),
+            "--kube-version",
+            "1.30.0",
         ],
         capture_output=True,
         text=True,
@@ -55,16 +61,32 @@ def _render() -> list[dict]:
 
 
 def _needs_db(doc: dict) -> bool:
-    text = json.dumps(doc)
-    return any(marker in text for marker in ("DATABASE_URL", "POSTGRES_PASSWORD", "db-migrate-secret"))
+    # Only what the Job's POD consumes counts. Metadata is excluded on purpose: the provision-secrets
+    # hook's `waddles.penguintech.io/provisions-secrets` annotation NAMES db-migrate-secret because it
+    # CREATES it (it never connects to the DB), which a whole-document scan misreads as a dependency.
+    text = json.dumps(((doc.get("spec") or {}).get("template")) or doc)
+    return any(
+        marker in text
+        for marker in ("DATABASE_URL", "POSTGRES_PASSWORD", "db-migrate-secret")
+    )
 
 
-def main() -> int:
-    docs = _render()
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    parser.add_argument(
+        "--chart-dir",
+        type=Path,
+        default=CHART_DIR,
+        help="chart to render with its values-alpha.yaml (default: waddlebot)",
+    )
+    docs = _render(parser.parse_args(argv).chart_dir)
     jobs = [doc for doc in docs if doc.get("kind") == "Job"]
 
     if not jobs:
-        print("FAIL: examined 0 Jobs in rendered chart output -- scanner is broken or chart path moved", file=sys.stderr)
+        print(
+            "FAIL: examined 0 Jobs in rendered chart output -- scanner is broken or chart path moved",
+            file=sys.stderr,
+        )
         return 1
 
     print(f"Examined {len(jobs)} Job(s) in rendered chart output.")
@@ -76,11 +98,16 @@ def main() -> int:
         hook = job.get("metadata", {}).get("annotations", {}).get("helm.sh/hook", "")
         if _needs_db(job) and "pre-install" in hook.split(","):
             violations.append(f"{name} (hook={hook!r}) carries pre-install")
-        if job.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component") == "db-migrate":
+        if (
+            job.get("metadata", {}).get("labels", {}).get("app.kubernetes.io/component")
+            == "db-migrate"
+        ):
             migrate_job = (name, hook)
 
     if migrate_job is None:
-        print("FAIL: db-migrate Job not found in rendered chart output", file=sys.stderr)
+        print(
+            "FAIL: db-migrate Job not found in rendered chart output", file=sys.stderr
+        )
         return 1
 
     name, hook = migrate_job
@@ -96,7 +123,9 @@ def main() -> int:
             print(f"  - {v}", file=sys.stderr)
         return 1
 
-    print("PASS: no DB-dependent Job carries pre-install, and db-migrate is exactly post-install,pre-upgrade.")
+    print(
+        "PASS: no DB-dependent Job carries pre-install, and db-migrate is exactly post-install,pre-upgrade."
+    )
     return 0
 
 

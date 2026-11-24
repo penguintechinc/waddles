@@ -12,6 +12,7 @@ import time
 from typing import Any
 
 import pytest
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from pydal import Field
 from quart import Quart
 
@@ -27,6 +28,7 @@ from tests.provider_connections.fake_google import (
     APP_CLIENT_SECRET,
     FakeChannel,
     FakeGoogle,
+    broadcast,
 )
 from tests.provider_connections.fake_twitch import FakeTwitch
 from tests.provider_connections.grpc_internal_client import GrpcRoutingClient
@@ -75,8 +77,15 @@ class FakeRedis:
 
 @pytest.fixture
 def fake_google() -> FakeGoogle:
-    """A fake Google (no broadcasts until a test adds some)."""
-    return FakeGoogle()
+    """A fake Google whose channel owns :data:`YT_CHAT` (bind-time ownership check).
+
+    The broadcast is COMPLETED, so discovery still finds nothing live until a test adds one.
+    """
+    google = FakeGoogle()
+    google.broadcasts[YT_CHANNEL.channel_id] = [
+        broadcast(YT_CHAT, channel_id=YT_CHANNEL.channel_id, status="complete")
+    ]
+    return google
 
 
 @pytest.fixture
@@ -108,7 +117,9 @@ def yt_db(pc_db: Any) -> Any:
         Field("updated_at", "datetime"),
     )
     pc_db.global_tenant_id = int(
-        dal.tenants.insert(slug="global", display_name="Global", is_active=True, is_global=True)
+        dal.tenants.insert(
+            slug=DEFAULT_TENANT_SLUG, display_name="Default", is_active=True, is_global=True
+        )
     )
     pc_db.global_community_id = int(
         dal.communities.insert(name="global-main", tenant_id=pc_db.global_tenant_id)

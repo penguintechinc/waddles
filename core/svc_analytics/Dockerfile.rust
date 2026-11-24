@@ -1,0 +1,63 @@
+# svc-analytics (Rust) -- Waddles analytics layer-A writer (Valkey stream -> analytics_fp).
+#
+# Build (context = `core/`, the parent of this directory, like every other core Rust service;
+# this crate has no sibling path dependencies, so only `svc_analytics/` is copied):
+#   docker build -f svc_analytics/Dockerfile.rust -t localhost:32000/waddlebot/svc-analytics:alpha-<epoch> core/
+#
+# Not yet registered in scripts/ci/image-inputs.yaml / the Helm chart (deploy work is a later
+# work item); the crate path is listed under `ignore:` there until then.
+#
+# gRPC health only (grpc.health.v1 on 50209), no REST. Rootless (USER appuser, uid 10001) and
+# read-only-rootfs compatible: the service writes nothing to the filesystem.
+
+FROM rust:1.97-slim-bookworm@sha256:2775a09d208ff0d7c1f50490c45b62db929e87ba1dcbc3f2132ac71a704bcdd3 AS builder
+
+# cmake + a C/C++ toolchain are required by aws-lc-sys (pulled in by the license client's
+# reqwest); build-essential brings the compilers the slim base lacks.
+RUN apt-get update \
+    && apt-get install --no-install-recommends -y cmake build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+COPY svc_analytics/Cargo.toml svc_analytics/Cargo.lock svc_analytics/rust-toolchain.toml ./svc_analytics/
+COPY svc_analytics/src ./svc_analytics/src
+WORKDIR /build/svc_analytics
+# Bump CACHE_EPOCH (workflow build-arg, repo variable ALPHA_CACHE_EPOCH) to abandon every cache mount id
+# below and force a clean rebuild; the value is also part of the RUN layer cache key.
+ARG CACHE_EPOCH=1
+# Cache mounts are private to this image (id carries the image name, sharing=locked) and
+# `--locked` makes every crate re-verify against Cargo.lock checksums -- see
+# core/svc_ingest/Dockerfile.rust for the full rationale.
+RUN --mount=type=cache,id=waddles-cargo-registry-svc-analytics-v${CACHE_EPOCH},target=/usr/local/cargo/registry,sharing=locked \
+    --mount=type=cache,id=waddles-cargo-git-svc-analytics-v${CACHE_EPOCH},target=/usr/local/cargo/git,sharing=locked \
+    --mount=type=cache,id=waddles-target-svc-analytics-v${CACHE_EPOCH},target=/build/svc_analytics/target,sharing=locked \
+    cargo build --release --locked \
+    && install -D -m 0755 target/release/svc-analytics /out/svc-analytics
+
+FROM debian:bookworm-slim@sha256:734a72b3d6142a71993b4bc580ca01d8ca687f77a2c422d96a961d3376b179bc AS runtime
+
+# ca-certificates for rustls on outbound TLS (OTLP, license/flag server, rediss://, Postgres TLS).
+RUN apt-get update \
+    && apt-get upgrade -y --no-install-recommends \
+    && apt-get install --no-install-recommends -y \
+        ca-certificates=20250419~deb12u2 \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --home-dir /nonexistent \
+       --shell /usr/sbin/nologin appuser
+
+COPY --from=builder --chown=appuser:appuser /out/svc-analytics /app/svc-analytics
+
+WORKDIR /app
+USER appuser
+
+ENV GRPC_HEALTH_PORT=50209
+
+# Native Rust healthcheck (one grpc.health.v1 Check) -- never curl.
+HEALTHCHECK --interval=30s --timeout=3s --retries=3 \
+    CMD ["/app/svc-analytics", "--healthcheck"]
+
+EXPOSE 50209
+
+ENTRYPOINT ["/app/svc-analytics"]

@@ -29,7 +29,15 @@ from services.audit_events import AuditAction, AuditCategory
 from services.errors import bad_request, not_found
 from services.platform_account import guard_platform_account
 
-_VALID_ROLES: tuple[str | None, ...] = ("platform-admin", "support", None)
+#: Roles assignable through `PUT /platform/users/{id}/role`. Clearing a role is NOT a role value:
+#: removal is `DELETE /platform/users/{id}` (deactivate), so a null/empty role is never valid.
+VALID_ROLES: tuple[str, ...] = ("platform-admin", "support")
+
+
+async def _require_hub_user(async_dal: Any, dal: Any, user_id: int) -> None:
+    """Raise 404 unless `user_id` is an existing `hub_users` row (never a silent no-op)."""
+    if not await async_dal.count_async(dal.hub_users.id == user_id):
+        raise not_found("User not found")
 
 
 async def list_users(
@@ -138,18 +146,27 @@ async def get_user(async_dal: Any, dal: Any, *, user_id: int) -> dict[str, Any]:
     }
 
 
-async def update_user_role(async_dal: Any, dal: Any, *, user_id: int, role: str | None) -> None:
-    """Update (or clear) a user's platform-admin role -- upsert into `platform_admins`."""
-    if role not in _VALID_ROLES:
-        raise bad_request("Invalid role")
+async def update_user_role(
+    async_dal: Any, dal: Any, *, user_id: int, role: str | None, actor_id: int | None = None
+) -> None:
+    """Set a user's platform-admin role -- upsert into `platform_admins`.
 
-    if role is None:
-        await async_dal.update_async(
-            dal.platform_admins.user_id == user_id,
-            is_active=False,
-            deactivated_at=datetime.now(UTC),
-        )
-        return
+    `role` is required and must be one of `VALID_ROLES` (400 otherwise, never a no-op write); an
+    unknown `hub_users` id is 404; the bootstrap platform account is refused (typed 403) like every
+    other demotion path.
+    """
+    if role not in VALID_ROLES:
+        raise bad_request("Invalid role")
+    await _require_hub_user(async_dal, dal, user_id)
+    await guard_platform_account(
+        async_dal,
+        dal,
+        user_id=user_id,
+        actor_user_id=actor_id,
+        category=AuditCategory.USER,
+        action=AuditAction.USER_UPDATED,
+        operation="demote",
+    )
 
     existing = await async_dal.select_async(dal(dal.platform_admins.user_id == user_id))
     if existing:
@@ -173,7 +190,11 @@ async def update_user_role(async_dal: Any, dal: Any, *, user_id: int, role: str 
 async def deactivate_user(
     async_dal: Any, dal: Any, *, user_id: int, reason: str | None, actor_id: int
 ) -> None:
-    """Deactivate a user across every community + revoke sessions + platform-admin role."""
+    """Deactivate a user across every community + revoke sessions + platform-admin role.
+
+    404 for an unknown `hub_users` id; the bootstrap platform account is refused (typed 403).
+    """
+    await _require_hub_user(async_dal, dal, user_id)
     await guard_platform_account(
         async_dal,
         dal,

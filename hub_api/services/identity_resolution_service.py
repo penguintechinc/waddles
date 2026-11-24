@@ -142,6 +142,12 @@ _NON_USER_AT_REFS = frozenset({"@everyone", "@here"})
 #: A fail-closed allow-list: an unknown platform gets the strict behaviour.
 LOGIN_HANDLE_PLATFORMS = frozenset({"twitch"})
 
+#: A Twitch handle only matches when an ingest event for that NUMERIC id asserted it within
+#: this window (``ephemeral_pseudonyms.handle_seen_at``, alembic 0100). Twitch logins can be
+#: renamed and re-claimed, so neither an OAuth-time ``platform_username`` nor an old pseudonym
+#: handle is trusted: ``@oldname`` must never route to the person who used to hold it.
+TWITCH_HANDLE_FRESHNESS_DAYS = 30
+
 #: Characters that render as nothing (or nearly) yet are not whitespace, beyond the whole
 #: Unicode "Cf" format category: combining grapheme joiner, Hangul / Khmer / Mongolian
 #: fillers, braille blank, halfwidth Hangul filler. Dropped from display names and refused
@@ -460,7 +466,9 @@ SELECT DISTINCT hu.uuid::text, hui.platform_username
 #: pseudonym is re-pointed at the hub user once the platform account is linked (the
 #: precedence ``resolve_identity_uuid()`` applies, so a stale pseudonym cannot collide with
 #: its own linked identity), and the account must be a CURRENT member of the tenant. A
-#: wiped (erased) handle is NULL and never matches. Params: ``[tenant_id, platform, handle]``.
+#: wiped (erased) handle is NULL and never matches, and the handle must have been re-asserted by
+#: an ingest event for that id within :data:`TWITCH_HANDLE_FRESHNESS_DAYS`.
+#: Params: ``[tenant_id, platform, handle, freshness_days]``.
 _PSEUDONYM_LOGIN_CANDIDATES_SQL = _with_current_member(
     """
 SELECT DISTINCT COALESCE(hu.uuid, ep.pseudonym)::text, ep.handle
@@ -472,6 +480,7 @@ SELECT DISTINCT COALESCE(hu.uuid, ep.pseudonym)::text, ep.handle
    AND ep.platform_user_id NOT LIKE 'handle:%%'
    AND (hu.id IS NULL OR hu.is_active IS NOT FALSE)
    AND lower(normalize(ep.handle, NFKC)) = lower(normalize(%s, NFKC))
+   AND ep.handle_seen_at > now() - make_interval(days => %s)
    AND EXISTS (
         SELECT 1 FROM community_members cm JOIN communities c ON c.id = cm.community_id
          WHERE c.tenant_id = ep.tenant_id AND cm.platform = ep.platform
@@ -647,12 +656,19 @@ async def _resolve_handle(
 ) -> ResolvedTarget:
     """Resolve a free-text handle to exactly one verified, current-member identity."""
     folded = _fold_handle(handle)
-    candidates = await _login_candidates(
-        async_dal, _LINKED_LOGIN_CANDIDATES_SQL, [platform, handle, tenant_pk], folded
-    )
     if platform in LOGIN_HANDLE_PLATFORMS:
-        candidates |= await _login_candidates(
-            async_dal, _PSEUDONYM_LOGIN_CANDIDATES_SQL, [tenant_pk, platform, handle], folded
+        # Renameable login: resolve only through a handle FRESHLY asserted by ingest for a
+        # numeric id (which maps to the linked hub user, if any) -- never the OAuth-time
+        # ``platform_username``, which goes stale on rename and could hit the old owner.
+        candidates = await _login_candidates(
+            async_dal,
+            _PSEUDONYM_LOGIN_CANDIDATES_SQL,
+            [tenant_pk, platform, handle, TWITCH_HANDLE_FRESHNESS_DAYS],
+            folded,
+        )
+    else:
+        candidates = await _login_candidates(
+            async_dal, _LINKED_LOGIN_CANDIDATES_SQL, [platform, handle, tenant_pk], folded
         )
     logger.debug(
         "handle candidates collected",

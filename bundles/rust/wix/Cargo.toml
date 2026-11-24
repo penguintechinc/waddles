@@ -1,11 +1,11 @@
 [package]
 name = "waddle-bundle-wix-service"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 rust-version = "1.97.0"
 license = "AGPL-3.0-or-later"
 publish = false
-description = "Wix webhook connector service bundle: an inbound-only `kind: service` connector on the `connector-tools` world (no tools exported). The host verifies the RS256 webhook JWT against the connection's app public key (svc-ingest `Scheme::WixJwt`); this component only maps the VERIFIED event envelope into normalized member/subscription/event records, tokenizing the Wix member id through identity.lookup. No egress, no sender."
+description = "Wix webhook connector service bundle: an inbound-only `kind: service` connector on the `connector-tools` world (no tools exported). The host verifies the RS256 webhook JWT against the connection's app public key (svc-ingest `Scheme::WixJwt`); this component only maps the VERIFIED event envelope into normalized calendar-event records (no member/subscription/plan/order records; no identity lookup). No egress, no sender."
 
 [lib]
 crate-type = ["cdylib", "rlib"]

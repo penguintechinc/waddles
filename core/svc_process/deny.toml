@@ -13,8 +13,11 @@ feature-depth = 1
 
 [advisories]
 version = 2
-ignore = []
-
+ignore = [
+  # Time-boxed, user-approved 2026-11-18. Expires 2027-01-31.
+  { id = "RUSTSEC-2026-0542", reason = "chrono unmaintained upstream; no direct chrono usage remains (penguin-licensing moved to time); transitive copies via object_store/sea-orm/sqlx/arrow cannot be removed until upstream drops chrono; humantime only wraps chrono - expires 2027-01-31" },
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained upstream; no direct chrono usage remains (penguin-licensing moved to time); transitive copies via object_store/sea-orm/sqlx/arrow cannot be removed until upstream drops chrono - expires 2027-01-31" },
+]
 [licenses]
 version = 2
 confidence-threshold = 0.8

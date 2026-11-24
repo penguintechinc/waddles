@@ -1,11 +1,10 @@
 schema_version: 2
-app_id: waddles.core.example.keywordgiveaway
+app_id: penguintechinc.waddles.keywordgiveaway
 name: Keyword Giveaway Bundle (Python)
 # 1.0.0: initial kv-only v1 -- !kgiveaway open <keyword> [prize] / enter / close / draw / reroll /
 # status, plus keyword-typed entries. Distinct from `giveaway` (timed, PR #853) and `raffle`; see
 # src/app.py's module docstring. Activation-gated only (no feature flag).
-version: 1.0.1
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc

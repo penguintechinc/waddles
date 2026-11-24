@@ -79,7 +79,11 @@ def _load() -> tuple[dict[str, set[str]], set[str], int]:
                 prefixes = (consume.get("filters") or {}).get("command_prefix") or []
                 for prefix in prefixes:
                     triggers[str(prefix).strip().lower()].add(manifest.parent.name)
-                if not prefixes:  # ANY rule that sees every line makes the bundle "unfiltered"
+                # ANY rule that sees every CHAT line makes the bundle "unfiltered". A consume of
+                # non-chat events (e.g. `platform: wix` subscription webhooks) never carries a chat
+                # command, so it cannot collide with one.
+                sees_chat = "chat.message" in (consume.get("event_types") or ["chat.message"])
+                if not prefixes and sees_chat:
                     unfiltered.add(manifest.parent.name)
     return triggers, unfiltered, scanned
 

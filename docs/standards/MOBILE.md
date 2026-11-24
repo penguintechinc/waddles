@@ -320,7 +320,7 @@ A: Yes. Both form factors on both platforms. Design responsive layouts from the 
 A: When you've confirmed Flutter can't do it. Check pub.dev first, try the available plugins, and only go native as a last resort. Document your reasoning.
 
 **Q: How does the mobile app relate to the WebUI?**
-A: They're separate clients hitting the same backend API. Same endpoints, same auth, different UI. The mobile app lives in `services/mobile/`, the WebUI in `services/webui/`.
+A: They're separate clients hitting the same backend API. Same endpoints, same auth, different UI. The mobile app lives in the `penguinm` macro-repo, the WebUI in `admin/hub_module/frontend/`.
 
 ---
 

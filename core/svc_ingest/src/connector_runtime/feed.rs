@@ -200,40 +200,108 @@ fn claim_fingerprint(c: &Claim) -> String {
         .collect()
 }
 
+/// Binding-metadata key hub-api sets to `"true"` when the binder proved channel ownership.
+pub const META_OWNERSHIP_VERIFIED: &str = "ownership_verified";
+
+/// `true` only for an explicit `"true"`: a missing/garbled flag is unverified (fail closed).
+fn ownership_verified(meta: &BTreeMap<String, String>) -> bool {
+    meta.get(META_OWNERSHIP_VERIFIED).map(String::as_str) == Some("true")
+}
+
 /// Counts of what the dedup pass dropped.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct DedupReport {
     duplicate: u32,
     conflict: u32,
+    unverified: u32,
 }
 
-/// Groups by claim: a claim held by several communities is dropped for ALL of
-/// them (fail closed, alerts with a fingerprint); within one community the
-/// lowest `connection_id` wins. Output is sorted by key for determinism.
-fn dedup(all: Vec<DesiredConnection>) -> (Vec<DesiredConnection>, DedupReport) {
-    let mut by_claim: BTreeMap<Claim, Vec<DesiredConnection>> = BTreeMap::new();
-    for d in all {
-        by_claim.entry(claim_of(&d)).or_default().push(d);
+/// Keeps the lowest `connection_id` per community of `group`; counts the rest as duplicates.
+fn lowest_per_community(
+    group: Vec<DesiredConnection>,
+    report: &mut DedupReport,
+    out: &mut Vec<DesiredConnection>,
+) {
+    let mut by_community: BTreeMap<i64, Vec<DesiredConnection>> = BTreeMap::new();
+    for d in group {
+        by_community.entry(d.key.community_id).or_default().push(d);
+    }
+    for (_, mut list) in by_community {
+        list.sort_by_key(|g| g.key.connection_id);
+        report.duplicate += saturating_u32(list.len() - 1);
+        out.extend(list.into_iter().take(1));
+    }
+}
+
+/// Groups by claim. A channel may be bound to MANY communities (N:M, across tenants), so:
+/// * any VERIFIED claimant (binder proved ownership at bind time) -> every verified community
+///   keeps its binding (lowest `connection_id` per community); every UNVERIFIED claimant of that
+///   claim is dropped with a WARN and the `unverified` skip metric -- a squatter can never
+///   displace or silence the owner;
+/// * no verified claimant (legacy rows, pre-0103) -> one community keeps its lowest connection;
+///   several communities are dropped for ALL of them (fail closed, alerts with a fingerprint).
+///
+/// Output is sorted by key for determinism.
+/// With `strict` (`waddles.disable-unverified-binding-routing` ON) unverified bindings never
+/// route: each is dropped with its own WARN and counted under the `unverified` skip metric.
+fn dedup_verified(
+    all: Vec<(DesiredConnection, bool)>,
+    strict: bool,
+) -> (Vec<DesiredConnection>, DedupReport) {
+    let mut by_claim: BTreeMap<Claim, Vec<(DesiredConnection, bool)>> = BTreeMap::new();
+    for (d, v) in all {
+        by_claim.entry(claim_of(&d)).or_default().push((d, v));
     }
     let mut out = Vec::new();
     let mut report = DedupReport::default();
-    for (claim, mut group) in by_claim {
-        let mut communities: Vec<i64> = group.iter().map(|g| g.key.community_id).collect();
+    for (claim, group) in by_claim {
+        let (verified, unverified): (Vec<_>, Vec<_>) = group.into_iter().partition(|(_, v)| *v);
+        let verified: Vec<DesiredConnection> = verified.into_iter().map(|(d, _)| d).collect();
+        let unverified: Vec<DesiredConnection> = unverified.into_iter().map(|(d, _)| d).collect();
+        if !verified.is_empty() {
+            if !unverified.is_empty() {
+                let mut dropped: Vec<i64> = unverified.iter().map(|g| g.key.community_id).collect();
+                dropped.sort_unstable();
+                dropped.dedup();
+                tracing::warn!(
+                    platform = unverified[0].key.platform,
+                    dropped_communities = ?dropped,
+                    claim_hash = %claim_fingerprint(&claim),
+                    "unverified binding of an owner-verified resource; dropping unverified claimants"
+                );
+                report.unverified += saturating_u32(unverified.len());
+            }
+            lowest_per_community(verified, &mut report, &mut out);
+            continue;
+        }
+        if strict {
+            for g in &unverified {
+                tracing::warn!(
+                    platform = g.key.platform,
+                    community_id = g.key.community_id,
+                    connection_id = g.key.connection_id,
+                    claim_hash = %claim_fingerprint(&claim),
+                    flag = super::unverified_gate::DISABLE_UNVERIFIED_BINDING_ROUTING_FLAG,
+                    "unverified binding skipped; unverified-binding routing is disabled"
+                );
+            }
+            report.unverified += saturating_u32(unverified.len());
+            continue;
+        }
+        let mut communities: Vec<i64> = unverified.iter().map(|g| g.key.community_id).collect();
         communities.sort_unstable();
         communities.dedup();
         if communities.len() > 1 {
             tracing::warn!(
-                platform = group[0].key.platform,
+                platform = unverified[0].key.platform,
                 communities = ?communities,
                 claim_hash = %claim_fingerprint(&claim),
-                "resource claimed by multiple communities; skipping all claimants"
+                "unverified resource claimed by multiple communities; skipping all claimants"
             );
             report.conflict += 1;
             continue;
         }
-        group.sort_by_key(|g| g.key.connection_id);
-        report.duplicate += saturating_u32(group.len() - 1);
-        out.extend(group.into_iter().take(1));
+        lowest_per_community(unverified, &mut report, &mut out);
     }
     out.sort_by(|a, b| a.key.cmp(&b.key));
     (out, report)
@@ -248,6 +316,7 @@ pub struct HubBindingFeed<R: ConnectionResolve, P: ConnectorProfile> {
     metrics: Option<RuntimeMetrics>,
     self_echo: Option<SelfEchoRegistry>,
     lane_verifier: Option<Arc<dyn WebhookLaneVerifier>>,
+    unverified_gate: Option<Arc<dyn super::unverified_gate::UnverifiedRoutingGate>>,
 }
 
 impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
@@ -261,7 +330,19 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
             metrics: None,
             self_echo: None,
             lane_verifier: None,
+            unverified_gate: None,
         }
+    }
+
+    /// Consults `gate` on every discovery: ON means unverified bindings never route.
+    /// Without a gate the legacy behaviour holds (a sole unverified claimant routes).
+    #[must_use]
+    pub fn with_unverified_gate(
+        mut self,
+        gate: Arc<dyn super::unverified_gate::UnverifiedRoutingGate>,
+    ) -> Self {
+        self.unverified_gate = Some(gate);
+        self
     }
 
     /// Gates every Kick webhook lane on `verifier` (see [`WebhookLaneVerifier`]). Without one a
@@ -312,7 +393,7 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
     }
 
     /// Pages the binding list to completion and plans each binding.
-    async fn collect(&self) -> Result<(Vec<DesiredConnection>, u32), FeedError> {
+    async fn collect(&self) -> Result<(Vec<(DesiredConnection, bool)>, u32), FeedError> {
         let platform = self.profile.platform();
         let mut planned = Vec::new();
         let mut echo_entries = Vec::new();
@@ -372,7 +453,7 @@ impl<R: ConnectionResolve, P: ConnectorProfile> HubBindingFeed<R, P> {
                                 }
                                 echo_entries.push((d.key.clone(), ids));
                             }
-                            planned.push(d);
+                            planned.push((d, ownership_verified(&item.metadata)));
                         }
                     }
                     Err(e) => {
@@ -407,11 +488,20 @@ impl<R: ConnectionResolve, P: ConnectorProfile> BindingFeed for HubBindingFeed<R
             return Err(FeedError::UnknownPlatform(platform.to_owned()));
         }
         let (planned, malformed) = self.collect().await?;
-        let (out, report) = dedup(planned);
+        let strict = match &self.unverified_gate {
+            Some(g) => g.disabled().await,
+            None => false,
+        };
+        let (out, report) = dedup_verified(planned, strict);
         if let Some(m) = &self.metrics {
             m.skipped(platform, SkipReason::Malformed, u64::from(malformed));
             m.skipped(platform, SkipReason::Duplicate, u64::from(report.duplicate));
             m.skipped(platform, SkipReason::Conflict, u64::from(report.conflict));
+            m.skipped(
+                platform,
+                SkipReason::Unverified,
+                u64::from(report.unverified),
+            );
         }
         Ok(out)
     }

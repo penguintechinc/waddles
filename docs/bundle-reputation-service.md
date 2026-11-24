@@ -4,8 +4,8 @@ Two cooperating bundles, split on purpose:
 
 | Bundle | Kind | Owns | Does NOT own |
 |---|---|---|---|
-| `waddles.core.service.reputation` (v1.1.0) | `service`, always-on, ONE per platform | the store access, tools, caps/idempotency/ledger/audit (host capability), soft-ban state, FLOOR ENFORCEMENT (community soft/hard + tenant), floor/threshold config, tiers (display) | scoring weights, event->delta mapping |
-| `waddles.core.app.reputation-accrual` (v1.0.0) | `app`, `provides: reputation-logic` | event->delta mapping, weights, cooldowns, low-score notice; per-community config in its own kv | the store, caps, floors, bans |
+| `penguintechinc.waddles.reputation` (v1.1.0) | `service`, always-on, ONE per platform | the store access, tools, caps/idempotency/ledger/audit (host capability), soft-ban state, FLOOR ENFORCEMENT (community soft/hard + tenant), floor/threshold config, tiers (display) | scoring weights, event->delta mapping |
+| `penguintechinc.waddles.reputation-accrual` (v1.0.0) | `app`, `provides: reputation-logic` | event->delta mapping, weights, cooldowns, low-score notice; per-community config in its own kv | the store, caps, floors, bans |
 
 Floors are admin limits, not scoring logic, so they live with the store. Scoring is replaceable: any approved
 app bundle that `provides: reputation-logic` can take the accrual bundle's place (contract below).
@@ -37,7 +37,7 @@ a human-originated invocation additionally needs the verified actor to hold `com
 only a SYSTEM-originated invocation is exempt (host-derived from an allowlist of platform event types:
 `channel.follow|followed|subscribe|cheer|raid|ban|unban|moderate`, `channel.subscription.{gift,gifts,new,renewal}`,
 `moderation.ban|timeout` (internal types such as `reputation.floor_check` are never system-origin; svc-ingest drops reserved `reputation.*`/`internal.*` types); `message`, `interaction.command`, `chat.*` and every unknown
-type are human; the flag never survives a hop through a non-`waddles.core.` bundle).
+type are human; the flag never survives a hop through a non-`penguintechinc.` bundle).
 
 ## Service tools
 
@@ -69,10 +69,68 @@ default **350**), `tenant_at_risk_threshold`. After every applied change, behind
 4. tenant: the user's tenant aggregate `<` tenant floor (policy enabled) -> ban (`tenant_floor`).
 
 The result carries `floors:{community,tenant}` (`disabled|none|ban|soft_ban|soft_ban_lifted|ban_failed:<code>`); a
-failed ban never fails the already-applied score change and is never silent. Known limits: a human-less platform
-ban needs a host-asserted automated actor for the platform moderation tool (it is `required_scope:
-community:moderate`) - until that lands a floor ban reports `ban_failed:forbidden`; tenant-floor ban fan-out
-runs in the current community only. Kill switch: `waddles.disable-bundle-reputation`.
+failed ban never fails the already-applied score change and is never silent (`floors.community` reports the
+enqueue result; delivery is asynchronous on the action stage). Kill switch: `waddles.disable-bundle-reputation`.
+
+#### Erasure (GDPR Art. 17) of automated hard-ban rows
+
+`bundle_reputation_floor_bans` is both the audit trail of enforced automated bans and the durable queue of
+undelivered ones, so hub-api (SELECT only on the table) erases a subject through the SECURITY DEFINER function
+`reputation_floor_ban_erase_subject(uuid, bigint, text, bytea)` and nothing else:
+
+| Status | Erasure |
+|---|---|
+| 6 refused (never enforced) | deleted |
+| 2 done (sender-confirmed ban) | **never deleted**; `user_uuid` replaced by `sha256(suppression code ‖ row id)` so the row no longer names the person |
+| 8 lifted (an admin reversed the ban) | **never deleted**; `user_uuid` replaced by a random pseudonym (no suppression code needed) |
+| 1 queued, 3 retry, 4 dead, 5 rate limited, 7 dispatched | untouched -- erasure never cancels an unsent ban |
+
+#### Lifting a floor ban (a lifted user regains normal access)
+
+Status `8` = **lifted** (alembic 0139; `lifted_at`, `lifted_by` = the acting admin's hub UUID). Statuses 1-5 and 7
+deny (`ban_suppression.FLOOR_BAN_ACTIVE_STATUSES`); 6 (refused) and 8 never do, so a lifted user is treated exactly as if
+never banned and a later enqueue re-bans normally. Lift = `DELETE /api/v1/admin/{community}/reputation/floor-bans/{user_uuid}` (the member's hub public UUID, resolved server-side)
+(tenant admins only -- a floor ban is tenant-wide; community admins get 403), which calls the SECURITY DEFINER
+`reputation_floor_ban_lift(tenant, user_uuids[], lifted_by)`. It emits the `admin.floor_ban_lifted` audit event, the
+`waddles_hub_floor_ban_lift_total{result}` counter and a PII-free log line. A lift is **sticky** for its ban occurrence: the same idempotency key never re-bans, and a NEW event key is refused
+(`lift_sticky`) until the user's score has recovered to/above the floor (`recovered_at`, set by score triggers or at lift
+time if already above); a later fall below the floor is a new crossing and bans normally. The platform unban is delivered asynchronously by the dispatcher (Platform sync, below). Hard bans have no automatic recovery path by design. Soft bans need no status: clearing deletes the row and every check also ignores rows past `expires_at`.
+
+Before any row is touched, `ban_suppression.collect_active_restrictions` counts every row with status 1-5 or 7 as an
+active `AUTO_BAN` restriction, so the keyed suppression code is written (same transaction) and the erased user cannot
+re-join. A confirmed ban with no suppression code (no linked identity on that platform) fails the whole erasure
+(rolled back) instead of leaving the identifier behind.
+
+### Platform sync (both directions, alembic 0140)
+
+- **Waddles -> platform**: lifting a ban whose platform command was delivered (status 2 done, or 7 in flight) enqueues
+  exactly one UNBAN (`action = 2`, key `unban:<ban id>`) in the SAME outbox; the action-stage dispatcher claims, retries
+  with backoff and dead-letters it (ERROR alert) like a ban, emitting a signed `mod.unban` over the same sender path
+  (the community's own bound guild/credentials). Unban rows never deny access, are not throttled by the hourly ban
+  quota and are not cancelled by a recovered score. Undelivered bans (1/3/4/5) enqueue no unban.
+- **Platform -> Waddles**: after the sender CONFIRMS a platform `mod.unban`, svc_action calls
+  `reputation_floor_ban_lift_from_platform(tenant, community, platform, user, source_app)` -- but ONLY for a trusted
+  caller: a core moderation bundle on svc_action's explicit allowlist (`penguintechinc.waddles.chatguard`, i.e. `!unban`),
+  or a bundle holding the per-action permission `reputation.floor_ban.lift` in that community (dangerous; core-reviewed).
+  A vendor bundle's `mod.unban` still reaches the platform but lifts NOTHING in Waddles. Tenant + community come from the
+  invoke scope (never an event field); only COMMUNITY-scope bans (scope 1) of that community and platform are lifted
+  (tenant-scope bans lift only via the tenant-admin route); `lifted_by` is the fixed `system:platform_sync` UUID,
+  `lift_origin = 2`, and the calling app id is recorded (`lift_source_app`, ledger `source_event`). The community soft ban
+  is cleared only when the same call lifted a ban row of that platform, and only a floor-set soft ban (reason 1), never a
+  manual one. The platform has already unbanned the user, so this lift also CANCELS the community's undelivered bans
+  (statuses 1 queued, 3 retry, 4 dead, 5 rate limited, 7 in flight): they become lifted and are never sent. The calling app
+  is mandatory (no default; the pre-source-app overload is dropped). NO unban is enqueued back (no echo); replays are no-ops.
+  Both directions are sticky.
+- **Outbox namespaces**: ban and unban rows live in separate idempotency namespaces (`action` is part of the unique key;
+  the `unban:` key prefix is reserved and rejected for bans by SQL and by the host). `reputation_floor_ban_lift` fails
+  loudly (`unban_shortfall`, whole lift rolled back) if a delivered ban could not get its unban.
+- **Re-arm on a new low**: a lift records `score_at_lift`. A later score at least `lift_rearm_drop` below it (policy
+  column on `bundle_reputation_policy` / `bundle_reputation_tenant_policy`, default 5 = the largest single activity delta
+  the host accepts, i.e. one maximal ordinary penalty step; no other per-offence penalty knob exists) bans again, provided
+  the floor is still breached; recover-then-cross also bans; the same score stays lifted. Only the most recent lift
+  governs.
+- **Not yet wired**: native platform events (Discord `GUILD_BAN_REMOVE`, Twitch EventSub `channel.unban`) -- ingest does not
+  consume them yet; the floor-ban path supports Discord only (Twitch bans are refused `platform_not_supported`).
 
 ### Soft ban
 
@@ -122,7 +180,7 @@ A third-party bundle may replace the default logic. Contract:
 * Every cap still applies: per-call, per user/day, per community/day (host, durable), idempotency by event id,
   membership, floors (the service enforces them after your delta), and the kill switch.
 
-## Default logic spec (from legacy v2: `core/reputation_module`, `svc_process/services/activity_accrual.py`)
+## Default logic spec (from legacy v2 `reputation_module`, `core/svc_process/`)
 
 The accrual bundle reproduces the legacy BEHAVIOR (values configurable per community in the bundle's kv key
 `accrual`; absent = defaults, present-but-invalid = loud skip):
@@ -194,5 +252,41 @@ map to `rate_limited`, non-members to `not_a_member`). Consequences for the bund
   chain's origin is the tenant's single active reputation-logic app
   (`reputation_active_logic_app`; none or ambiguous fails closed) or the core service itself.
 - Unscored members read as `COALESCE(balance, community policy score_default, 600)` everywhere.
+- **Automated hard ban** (`waddles.reputation-auto-ban`, default OFF), delivered through an OUTBOX and the
+  EXISTING outbound moderation path (the platform service bundle runs on another stage, so a nested
+  `tool.invoke` can never reach Discord):
+
+  ```text
+  process stage (svc_process floor_ban.rs)      action stage (svc_action floor_ban_dispatch.rs)
+   ONLY IF core service, chain [logic, service],  claim (lease token) -> recheck breach in SQL
+   a really-APPLIED (applied==true) apply of the  -> signed outbound `mod.ban` (guild:- , {user:uuid})
+   SAME user+community in this invocation, flag   -> svc_ingest sender_exec -> Discord
+   ON, platform deliverable (discord)             -> ack ok  => complete(done)   [only on the ack]
+   -> reputation_floor_ban_enqueue (SQL re-verify,   ack/err => failed (backoff) | refused | dead
+      per-community lock, hourly quota) = QUEUED row
+  ```
+
+  The row id is the correlation id (sender op id `fb-<row>-<attempt>-<nonce>`). The idempotency key is
+  HOST-derived (`fb:` + hash of the ROOT spine event id, user and scope; the root id is preserved across tool
+  hops, never the per-hop mutation namespace that derives from a guest retry token). A user with 2 bans already
+  in the quota window is capped (`user_capped`, nothing recorded) so one user cannot exhaust the community quota.
+  The hourly quota is enforced AT CLAIM under the per-community advisory lock, counting `dispatched_at` over the
+  last hour: over-quota rows stay/become status 5 with a jittered retry after the window, retries and promoted
+  rows can never exceed it. KILL SWITCH: the PostHog flag gates the process-stage enqueue AND the action-stage
+  sweep (flag OFF = no reap/claim/send, rows stay queued); the durable SQL switch
+  (`bundle_reputation_floor_ban_control.halted`, set via `reputation_floor_ban_set_halted`, a missing row = halted)
+  is read by enqueue (refuse), claim (nothing) and the pre-send recheck (row released to the queue). Backlog
+  alert: pending > 100 or oldest > 15 min -> ERROR + `waddles_floor_ban_dispatch_total{result="backlog_alert"}`. Statuses:
+  1 queued, 2 done (sender-confirmed), 3 failed (backoff retry), 4 dead (8 attempts: ERROR log +
+  `waddles_floor_ban_dispatch_total{result="dead"}` alert), 5 rate-limited (retried after the quota window;
+  `waddles_floor_ban_enqueue_total{result="rate_limited"}` + ERROR log), 6 refused (not breached / protected
+  target / no linked account), 7 dispatched (lease). An expired lease is reclaimed; only the current lease
+  token can complete a row (no double fire; a platform ban is idempotent anyway). Tenant floor fans out over
+  every live community (`reputation_tenant_communities`); a partial fan-out is `target_unavailable`, never
+  success. The caller's per-community `tool.call` grant is checked at enqueue; the platform bundle's
+  `moderation.<platform>` grant, the protected-target check (owner/admin/mod) and drain readiness at dispatch.
+  Limit: only Discord has an outbound floor-ban path today (other platforms are refused up front).
 - Migrations: `alembic/versions/0072_reputation_host_ops.py` (score clamp CHECK + ledger columns),
+  `alembic/versions/0114_reputation_floor_ban.py` + `scripts/db/bundle_reputation_floor_ban.sql`
+  (automated hard ban outbox; tests `alembic/tests/test_0114_reputation_floor_ban.py`),
   `alembic/versions/0097_reputation_unify.py` + `scripts/db/bundle_reputation_unify.sql` (PR #1236, authoritative).

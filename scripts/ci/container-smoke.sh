@@ -7,9 +7,10 @@
 # Fails when the container exits before answering, or after MAX_RETRIES polls.
 #
 # Per-module runtime prerequisites (the image fails fast without them, by design):
-#   hub-api    NODE_ENV=production requires JWT_SECRET + SERVICE_API_KEY, and
-#              initializeDatabase() requires a reachable Postgres. A throwaway
-#              postgres sidecar on a private docker network supplies the DB.
+#   hub-api    Python/Quart (hypercorn binds 0.0.0.0:8204, see hub_api/Dockerfile);
+#              requires SESSION_MAC_KEY + SERVICE_API_KEY and a reachable Postgres.
+#              A throwaway postgres sidecar on a private docker network supplies the DB.
+#              <port> must equal the image's bind port: -p maps <port>:<port>.
 #   hub-webui  NODE_ENV=production requires HUB_API_URL (no localhost fallback).
 #
 # Secrets are ephemeral (openssl rand), written to 0600 env-files, never echoed.
@@ -62,7 +63,7 @@ case "$MODULE" in
     umask 077
     DB_PASS="$(openssl rand -hex 24)"
     {
-      echo "JWT_SECRET=$(openssl rand -hex 32)"
+      echo "SESSION_MAC_KEY=$(openssl rand -hex 32)"
       echo "SERVICE_API_KEY=$(openssl rand -hex 32)"
       echo "DATABASE_URL=postgresql://smoke:${DB_PASS}@${DB_NAME}:5432/smoke"
     } > "$APP_ENV"
@@ -87,7 +88,7 @@ case "$MODULE" in
     NET_ARGS=(--network "$NET")
     ;;
   hub-webui)
-    echo "HUB_API_URL=http://127.0.0.1:8060" > "$APP_ENV"
+    echo "HUB_API_URL=http://127.0.0.1:8204" > "$APP_ENV"
     ;;
 esac
 

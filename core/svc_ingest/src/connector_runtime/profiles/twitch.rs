@@ -31,7 +31,7 @@ use crate::connector_runtime::plan::{ConnectorProfile, PlanError, RuntimeEnv};
 /// Platform slug.
 pub const PLATFORM: &str = "twitch";
 /// Connector bundle `app_id` (host constant, as in `outbound_boot::app_id`).
-pub const APP_ID: &str = "waddles.core.service.twitch";
+pub const APP_ID: &str = "penguintechinc.waddles.twitch";
 /// Provider name as hub-api's binding list knows it.
 pub const PROVIDER: &str = "twitch";
 /// Capability the binding list is scoped to.
@@ -532,7 +532,7 @@ mod tests {
             (p.platform(), p.app_id(), p.provider(), p.capability()),
             (
                 "twitch",
-                "waddles.core.service.twitch",
+                "penguintechinc.waddles.twitch",
                 "twitch",
                 "chat_ingest"
             )

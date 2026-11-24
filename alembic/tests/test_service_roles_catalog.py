@@ -25,15 +25,27 @@ CHART = REPO_ROOT / "k8s" / "helm" / "waddlebot"
 MIGRATION_SQL_DIR = REPO_ROOT / "config" / "postgres" / "migrations"
 ALEMBIC_VERSIONS = REPO_ROOT / "alembic" / "versions"
 
+_SCHEMA = r"(?:([a-z_][a-z0-9_]*)\.)?"
 _CREATE_TABLE = re.compile(
-    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?(?:public\.)?\"?([a-z_][a-z0-9_]*)\"?",
+    r"CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?"
+    + _SCHEMA
+    + r"\"?([a-z_][a-z0-9_]*)\"?",
     re.IGNORECASE,
 )
 _CREATE_VIEW = re.compile(
-    r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+(?:public\.)?\"?([a-z_][a-z0-9_]*)\"?",
+    r"CREATE\s+(?:OR\s+REPLACE\s+)?VIEW\s+" + _SCHEMA + r"\"?([a-z_][a-z0-9_]*)\"?",
     re.IGNORECASE,
 )
 _OP_CREATE_TABLE = re.compile(r"create_table\(\s*[\"']([a-z_][a-z0-9_]*)[\"']")
+
+
+def _relation_names(pattern: re.Pattern[str], text: str) -> set[str]:
+    """Relation names a CREATE pattern finds: bare for `public`, `schema.name` otherwise."""
+    names: set[str] = set()
+    for m in pattern.finditer(text):
+        schema, name = (m.group(1) or "public").lower(), m.group(2).lower()
+        names.add(name if schema == "public" else f"{schema}.{name}")
+    return names
 
 
 def _created_relations() -> tuple[set[str], set[str]]:
@@ -43,9 +55,9 @@ def _created_relations() -> tuple[set[str], set[str]]:
     assert len(files) > 100, "migration scan found too few files (wrong root?)"
     for path in files:
         text = path.read_text(encoding="utf-8")
-        tables |= {m.group(1).lower() for m in _CREATE_TABLE.finditer(text)}
+        tables |= _relation_names(_CREATE_TABLE, text)
         tables |= {m.group(1).lower() for m in _OP_CREATE_TABLE.finditer(text)}
-        views |= {m.group(1).lower() for m in _CREATE_VIEW.finditer(text)}
+        views |= _relation_names(_CREATE_VIEW, text)
     return tables, views
 
 

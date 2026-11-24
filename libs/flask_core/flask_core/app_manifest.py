@@ -10,10 +10,9 @@ must declare, and the validator that keeps a bad manifest from ever reaching
 the registry.
 
 Naming is deliberately load-bearing: ``app_id`` is namespaced
-``waddles.<module>.<feature>.<app>`` so the App's Feature and Module are
-recoverable from the id alone, and ``feature`` (``waddles.<module>.<feature>``)
-must be the exact prefix of ``app_id`` minus its trailing App segment — the
-manifest cannot claim to implement one Feature while being named for another.
+``<github-org>.<repo>.<bundle-name>`` (lowercase, exactly three segments).
+``feature`` is optional and descriptive only (it defaults to the app_id's
+``<org>.<repo>`` prefix) and has no structural relation to ``app_id``.
 
 Extended per docs/plans/2026-08-31-app-bundle-sdk-design.md §3 (App Bundle
 SDK): a bundle's ``bundle.yaml`` may declare a richer ``stages`` map in
@@ -124,11 +123,15 @@ KNOWN_EXECUTION_MODELS = frozenset({"native", "thirdparty"})
 # competing vocabulary.
 KNOWN_COMMUNICATION_MODELS = frozenset({"webhook_push", "rest_pull"})
 
-_SEGMENT = r"[a-z0-9][a-z0-9_-]*"
-# waddles.<module>.<feature>.<app> -- exactly four dot-separated tokens.
-_APP_ID_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}\.{_SEGMENT}$")
-# waddles.<module>.<feature> -- exactly three dot-separated tokens.
-_FEATURE_RE = re.compile(rf"^waddles\.{_SEGMENT}\.{_SEGMENT}$")
+# Same single grammar as hub_api `services.bundle_app_id` / Rust `is_valid_app_id`: segments
+# `[a-z0-9][a-z0-9-]*` (NO `_`; GitHub org/repo `_` maps to `-`), exactly three, <= 127 bytes.
+_SEGMENT = r"[a-z0-9][a-z0-9-]*"
+# <github-org>.<repo>.<bundle-name> -- exactly three dot-separated tokens.
+_APP_ID_RE = re.compile(rf"(?:{_SEGMENT})\.(?:{_SEGMENT})\.(?:{_SEGMENT})")
+_APP_ID_MAX_LEN = 127
+# feature is descriptive only (optional): dotted lowercase tokens, unrelated to app_id.
+_FEATURE_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*(\.[a-z0-9][a-z0-9_-]*)*$")
+_FEATURE_MAX_LEN = 128
 # SemVer 2.0.0 core + optional pre-release/build metadata.
 _SEMVER_RE = re.compile(
     r"^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)"
@@ -155,7 +158,6 @@ REASON_MISSING_FIELD = "missing_field"
 REASON_BAD_SEMVER = "bad_semver"
 REASON_NOT_NAMESPACED = "not_namespaced"
 REASON_UNKNOWN_MODULE = "unknown_module"
-REASON_FEATURE_PREFIX_MISMATCH = "feature_prefix_mismatch"
 REASON_INVALID_PROVIDER = "invalid_provider"
 REASON_UNKNOWN_SURFACE = "unknown_surface"
 # App Bundle SDK spec §3.5 -- three new validation steps, run in the same
@@ -203,7 +205,7 @@ def _infer_kind(app_id: str, module: str) -> str:
     return "app"
 
 
-_REQUIRED_STR_FIELDS = ("app_id", "name", "version", "feature", "module", "provider")
+_REQUIRED_STR_FIELDS = ("app_id", "name", "version", "module", "provider")
 
 
 @dataclass(slots=True, frozen=True)
@@ -420,10 +422,9 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
 
     1. missing/empty required fields
     2. ``version`` that is not valid SemVer 2.0.0
-    3. ``app_id`` that is not namespaced ``waddles.<module>.<feature>.<app>``
+    3. ``app_id`` that is not ``<github-org>.<repo>.<bundle-name>``
     4. ``module`` not one of the known Modules
-    5. ``app_id``'s feature-prefix (``app_id`` minus its trailing App
-       segment) not equal to ``feature``
+    5. a present ``feature`` that is not dotted lowercase tokens
     6. ``provider`` outside ``{builtin, thirdparty}``
     7. any ``surfaces``/``stages`` entry outside
        ``{ingest, process, action, presentation}``
@@ -463,36 +464,34 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
     app_id = data["app_id"]
     name = data["name"]
     version = data["version"]
-    feature = data["feature"]
+    feature = data.get("feature")
+    if feature is None:
+        feature = app_id.rsplit(".", 1)[0] if isinstance(app_id, str) else ""
     module = data["module"]
     provider = data["provider"]
 
     if not _SEMVER_RE.match(version):
         raise ManifestError(REASON_BAD_SEMVER, f"{version!r} is not valid SemVer 2.0.0")
 
-    if not _APP_ID_RE.match(app_id):
+    if len(app_id) > _APP_ID_MAX_LEN or not _APP_ID_RE.fullmatch(app_id):
         raise ManifestError(
             REASON_NOT_NAMESPACED,
-            f"app_id {app_id!r} must be namespaced 'waddles.<module>.<feature>.<app>'",
+            f"app_id {app_id!r} must be '<github-org>.<repo>.<bundle-name>'",
         )
 
-    if not _FEATURE_RE.match(feature):
+    if (
+        not isinstance(feature, str)
+        or len(feature) > _FEATURE_MAX_LEN
+        or not _FEATURE_RE.match(feature)
+    ):
         raise ManifestError(
             REASON_NOT_NAMESPACED,
-            f"feature {feature!r} must be namespaced 'waddles.<module>.<feature>'",
+            f"feature {feature!r} must be dotted lowercase tokens",
         )
 
     if module not in KNOWN_MODULES:
         raise ManifestError(
             REASON_UNKNOWN_MODULE, f"module {module!r} is not one of {sorted(KNOWN_MODULES)}"
-        )
-
-    app_id_feature_prefix = app_id.rsplit(".", 1)[0]
-    if app_id_feature_prefix != feature:
-        raise ManifestError(
-            REASON_FEATURE_PREFIX_MISMATCH,
-            f"app_id {app_id!r} implies feature {app_id_feature_prefix!r}, "
-            f"but manifest declares feature {feature!r}",
         )
 
     if provider not in KNOWN_PROVIDERS:
@@ -533,11 +532,11 @@ def parse_manifest(data: Dict[str, Any]) -> AppManifest:
     compatible_with = tuple(data.get("compatible_with", ()))
     incompatible_with = tuple(data.get("incompatible_with", ()))
     for other_app_id in (*compatible_with, *incompatible_with):
-        if not _APP_ID_RE.match(other_app_id):
+        if len(other_app_id) > _APP_ID_MAX_LEN or not _APP_ID_RE.fullmatch(other_app_id):
             raise ManifestError(
                 REASON_INVALID_COMPAT_APP_ID,
                 f"compatible_with/incompatible_with entry {other_app_id!r} must be "
-                "namespaced 'waddles.<module>.<feature>.<app>'",
+                "'<github-org>.<repo>.<bundle-name>'",
             )
 
     # requires_scopes (bundle.yaml's name, spec §3.3) aliases the existing

@@ -30,10 +30,10 @@ INSERT INTO app_catalog (
     status,
     stages
 ) VALUES (
-    'waddles.streaming.stream.default',
+    'penguintechinc.waddles.stream-pipeline',
     '1.0.0',
     'streaming',
-    'waddles.streaming.stream',
+    'penguintechinc.waddles',
     'builtin',
     'native',
     FALSE,
@@ -48,7 +48,7 @@ ON CONFLICT (app_id) DO NOTHING;
 
 -- Activate for all communities in the global tenant (tenant-wide availability).
 INSERT INTO app_tenant_availability (tenant_id, app_id, available)
-SELECT t.id, 'waddles.streaming.stream.default', TRUE
+SELECT t.id, 'penguintechinc.waddles.stream-pipeline', TRUE
 FROM tenants t
 WHERE t.slug = 'global'
 ON CONFLICT (tenant_id, app_id) DO NOTHING;

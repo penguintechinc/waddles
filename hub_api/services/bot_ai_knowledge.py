@@ -35,6 +35,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 from flask_core.safe_logging import log_exc_safe, url_host
@@ -537,6 +538,18 @@ def _to_source(row: Any) -> KnowledgeSource:
 # ── Source management ────────────────────────────────────────────────────
 
 
+def _redacted_origin(url: str) -> str:
+    """`scheme://hostname` only -- userinfo, port, path and query (credential carriers) dropped."""
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname
+    except ValueError as exc:
+        # Log the type only -- str(exc) can quote the raw URL.
+        logger.warning("source_url_unparseable", extra={"error_type": type(exc).__name__})
+        return "unparseable url"
+    return f"{parts.scheme}://{host}" if parts.scheme and host else "no host"
+
+
 def _validate_source_url(source_url: str | None) -> None:
     """Write-time SSRF guard -- reject a bad `source_url` before it's ever stored.
 
@@ -550,7 +563,11 @@ def _validate_source_url(source_url: str | None) -> None:
     try:
         validate_url(source_url)
     except SSRFError as exc:
-        raise KnowledgeServiceError(f"source_url rejected: {exc}", status=400) from exc
+        # Never echo the raw URL (userinfo / query secrets) into the error body or logs.
+        raise KnowledgeServiceError(
+            f"source_url rejected ({_redacted_origin(source_url)}): {exc}",
+            status=400,
+        ) from exc
 
 
 def add_knowledge_source(dal: Any, payload: KnowledgeSourceCreate) -> KnowledgeSource:
@@ -938,7 +955,8 @@ def validate_feedback(feedback: str) -> None:
 
 def get_suggestion_scope(dal: Any, suggestion_id: int) -> tuple[bool, int | None]:
     """Return `(exists, owning community_id)` for a suggestion; NULL owner = super-admin only."""
-    row = dal.ai_ticket_suggestions[suggestion_id]
+    # Query form: `table[-1]` (the unknown-UUID sentinel) raises KeyError in pydal instead of None.
+    row = dal(dal.ai_ticket_suggestions.id == suggestion_id).select().first()
     if row is None:
         return False, None
     return True, row.community_id

@@ -69,6 +69,10 @@ pub(crate) struct MapSlots {
     pub(crate) map: HashMap<String, String>,
     pub(crate) err: Option<SlotError>,
     pub(crate) seen: Arc<Mutex<Vec<SeenReq>>>,
+    /// The channel the community's verified binding owns (`SlotSource::bound_channel`).
+    pub(crate) bound: Option<String>,
+    /// uuid -> raw platform id for `SlotSource::resolve_user`.
+    pub(crate) users: HashMap<String, String>,
 }
 
 impl MapSlots {
@@ -92,6 +96,29 @@ impl MapSlots {
 }
 
 impl SlotSource for MapSlots {
+    async fn resolve_user(
+        &self,
+        _platform: &str,
+        _tenant_id: i64,
+        _community_id: i64,
+        user_uuid: &str,
+    ) -> Result<SlotValue, SlotError> {
+        self.users
+            .get(user_uuid)
+            .map(|raw| SlotValue::new(raw.clone()))
+            .ok_or(SlotError::Refused("user_not_in_community"))
+    }
+
+    async fn bound_channel(
+        &self,
+        _platform: &str,
+        _community_id: Option<i64>,
+    ) -> Result<String, SlotError> {
+        self.bound
+            .clone()
+            .ok_or(SlotError::Refused("no_connection"))
+    }
+
     async fn resolve(
         &self,
         req: &SlotRequest<'_>,
@@ -169,6 +196,7 @@ fn chat_send(platform_channel: &str, origin: Option<&str>, text: &str) -> Outbou
         channel: platform_channel.to_string(),
         text: text.to_string(),
         origin_channel: origin.map(str::to_string),
+        tenant_id: None,
     }
 }
 
@@ -1486,5 +1514,248 @@ async fn a_malformed_header_credential_is_refused_and_never_sent() {
             .unwrap_err();
         assert_eq!(e, ExecError::Subst(SubstError::ShapeInvalid), "{bad:?}");
         assert!(sent(&r).await.is_empty());
+    }
+}
+
+fn kv_pairs(v: &[(&str, &str)]) -> Vec<(String, String)> {
+    v.iter()
+        .map(|(a, b)| ((*a).to_string(), (*b).to_string()))
+        .collect()
+}
+
+fn twitch_ban_tpl(unban: bool) -> RequestTpl {
+    let url = "https://api.twitch.tv/helix/moderation/bans?broadcaster_id={{TWITCH_BROADCASTER_ID}}&moderator_id={{TWITCH_SENDER_ID}}";
+    RequestTpl {
+        method: if unban { "DELETE" } else { "POST" }.into(),
+        url: if unban {
+            format!("{url}&user_id=999")
+        } else {
+            url.to_string()
+        },
+        headers: kv_pairs(&[
+            ("Authorization", "Bearer {{TWITCH_TOKEN}}"),
+            ("Client-Id", "{{TWITCH_CLIENT_ID}}"),
+            ("Content-Type", "application/json"),
+        ]),
+        body: (!unban).then(|| {
+            serde_json::json!({"data": {"user_id": "999", "reason": "Waddles reputation floor"}})
+                .to_string()
+                .into_bytes()
+        }),
+        secret_refs: kv_pairs(&[
+            ("{{TWITCH_TOKEN}}", "token"),
+            ("{{TWITCH_CLIENT_ID}}", "client_id"),
+            ("{{TWITCH_BROADCASTER_ID}}", "broadcaster_id"),
+            ("{{TWITCH_SENDER_ID}}", "sender_id"),
+        ]),
+    }
+}
+
+const BAN_UUID: &str = "123e4567-e89b-12d3-a456-426614174000";
+
+fn ban_slots() -> MapSlots {
+    let mut slots = MapSlots::twitch();
+    slots.bound = Some("#bound_chan".to_string());
+    slots.users.insert(BAN_UUID.to_string(), "999".to_string());
+    slots
+}
+
+fn bound_scope_op(op: &'static str, channel: Option<&str>, origin: &str) -> OutboundAction {
+    OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
+        op,
+        channel: channel.map(str::to_string),
+        text: (op == "mod.ban").then(|| r#"{"reason":"Waddles reputation floor"}"#.to_string()),
+        message_id: None,
+        user_id: Some(format!("{{user:{BAN_UUID}}}")),
+        origin_channel: Some(origin.to_string()),
+        tenant_id: Some(1),
+    })
+}
+
+/// A floor ban / lift names no channel: the host pins the community's DB-bound channel and the
+/// slot resolver is asked to prove ownership of THAT channel only.
+#[tokio::test]
+async fn twitch_bound_scope_ban_and_unban_pin_the_channel_from_the_binding() {
+    for (op, unban) in [("mod.ban", false), ("mod.unban", true)] {
+        let r = rig(
+            PlatformPolicy::twitch(),
+            twitch_ban_tpl(unban),
+            ban_slots(),
+            true,
+        )
+        .await;
+        let a = bound_scope_op(op, None, "channel:-");
+        let out = r.exec.execute(&req("twitch", &a, Some(7))).await.unwrap();
+        assert_eq!(out.status, 200, "{op}");
+        let got = sent(&r).await;
+        assert_eq!(got.len(), 1, "{op}");
+        assert_eq!(
+            got[0].method.as_str(),
+            if unban { "DELETE" } else { "POST" }
+        );
+        let q: HashMap<_, _> = got[0].url.query_pairs().into_owned().collect();
+        assert_eq!(
+            (q["broadcaster_id"].as_str(), q["moderator_id"].as_str()),
+            ("111", "222")
+        );
+        // The resolver was asked about the binding's channel, not anything from the payload.
+        let seen = r.slots.seen.lock().unwrap().clone();
+        assert_eq!(seen[0].1.as_deref(), Some("#bound_chan"), "{op}");
+    }
+}
+
+/// regression: a payload-named channel can never ride the bound scope, and the bound scope is
+/// refused for any other op (the channel must come from the DB binding, never the wire).
+#[tokio::test]
+async fn twitch_bound_scope_ignores_no_payload_channel_and_is_ban_ops_only() {
+    // No binding -> refused loudly, nothing sent.
+    let r = rig(
+        PlatformPolicy::twitch(),
+        twitch_ban_tpl(false),
+        MapSlots::twitch(),
+        true,
+    )
+    .await;
+    let a = bound_scope_op("mod.ban", None, "channel:-");
+    let e = r
+        .exec
+        .execute(&req("twitch", &a, Some(7)))
+        .await
+        .unwrap_err();
+    assert_eq!(e, ExecError::Slot(SlotError::Refused("no_connection")));
+    assert!(sent(&r).await.is_empty());
+    // A payload channel next to the scope is not the bound scope: the ordinary pin refuses it.
+    let r = rig(
+        PlatformPolicy::twitch(),
+        twitch_ban_tpl(false),
+        ban_slots(),
+        true,
+    )
+    .await;
+    let a = bound_scope_op("mod.ban", Some("#evil"), "channel:-");
+    assert!(matches!(
+        r.exec.execute(&req("twitch", &a, Some(7))).await,
+        Err(ExecError::Pin(_))
+    ));
+    assert!(sent(&r).await.is_empty());
+    assert!(r.slots.seen.lock().unwrap().is_empty());
+    // Other ops never get the bound scope.
+    let a = bound_scope_op("mod.timeout", None, "channel:-");
+    assert!(r.exec.execute(&req("twitch", &a, Some(7))).await.is_err());
+    assert!(sent(&r).await.is_empty());
+}
+
+async fn helix_400(message: &str) -> MockServer {
+    let s = MockServer::start().await;
+    Mock::given(any())
+        .respond_with(ResponseTemplate::new(400).set_body_json(
+            serde_json::json!({"error": "Bad Request", "status": 400, "message": message}),
+        ))
+        .mount(&s)
+        .await;
+    s
+}
+
+/// Helix's exact "already banned" / "not banned" 400s are idempotent SUCCESS (counted under
+/// their own outcome label); any other 400, or the message on the wrong op, still fails loudly.
+#[tokio::test]
+async fn twitch_ban_and_unban_idempotent_400s_are_delivered_and_other_400s_fail() {
+    use super::{HELIX_ALREADY_BANNED, HELIX_NOT_BANNED};
+    let run = |unban: bool, msg: &'static str| async move {
+        let slots = ban_slots();
+        let server = helix_400(msg).await;
+        let r = rig_on(
+            server,
+            PlatformPolicy::twitch(),
+            twitch_ban_tpl(unban),
+            slots,
+            true,
+        );
+        let a = bound_scope_op(
+            if unban { "mod.unban" } else { "mod.ban" },
+            None,
+            "channel:-",
+        );
+        r.exec.execute(&req("twitch", &a, Some(7))).await
+    };
+    let before_u = exec_count("twitch", "mod.unban", "already_unbanned");
+    let before_b = exec_count("twitch", "mod.ban", "already_banned");
+    assert_eq!(
+        run(true, HELIX_NOT_BANNED).await.unwrap().idempotent,
+        Some("already_unbanned")
+    );
+    assert_eq!(
+        run(false, HELIX_ALREADY_BANNED).await.unwrap().idempotent,
+        Some("already_banned")
+    );
+    assert!(exec_count("twitch", "mod.unban", "already_unbanned") > before_u);
+    assert!(exec_count("twitch", "mod.ban", "already_banned") > before_b);
+    // Any other 400 fails loudly.
+    assert_eq!(
+        run(true, "The user_id is invalid.").await.unwrap_err(),
+        ExecError::Upstream(400)
+    );
+    assert_eq!(
+        run(false, "Missing scope moderator:manage:banned_users")
+            .await
+            .unwrap_err(),
+        ExecError::Upstream(400)
+    );
+    // The idempotent message only counts on its own op.
+    assert_eq!(
+        run(false, HELIX_NOT_BANNED).await.unwrap_err(),
+        ExecError::Upstream(400)
+    );
+    assert_eq!(
+        run(true, HELIX_ALREADY_BANNED).await.unwrap_err(),
+        ExecError::Upstream(400)
+    );
+}
+
+/// PII: the bound scope carries ONLY `{user:<uuid>}`; the raw id is resolved per send and is
+/// what reaches the connector payload. A raw id, a bare uuid or an unknown uuid is refused
+/// before anything is built or sent.
+#[tokio::test]
+async fn twitch_bound_scope_detokenizes_the_user_and_refuses_raw_or_unknown_ids() {
+    let r = rig(
+        PlatformPolicy::twitch(),
+        twitch_ban_tpl(false),
+        ban_slots(),
+        true,
+    )
+    .await;
+    let a = bound_scope_op("mod.ban", None, "channel:-");
+    r.exec.execute(&req("twitch", &a, Some(7))).await.unwrap();
+    let payload = r.builder.calls.lock().unwrap()[0].payload_json.clone();
+    let v: serde_json::Value = serde_json::from_str(&payload).unwrap();
+    assert_eq!(v["user_id"], "999", "the connector gets the resolved id");
+
+    for bad in [
+        "999".to_string(),
+        BAN_UUID.to_string(),
+        "{user:not-a-uuid}".to_string(),
+        "{user:00000000-0000-4000-8000-000000000000}".to_string(),
+    ] {
+        let a = OutboundAction::PolicyOp(crate::outbound_ops::PolicyOp {
+            op: "mod.unban",
+            channel: None,
+            text: None,
+            message_id: None,
+            user_id: Some(bad.clone()),
+            origin_channel: Some("channel:-".to_string()),
+            tenant_id: Some(1),
+        });
+        let r = rig(
+            PlatformPolicy::twitch(),
+            twitch_ban_tpl(true),
+            ban_slots(),
+            true,
+        )
+        .await;
+        assert!(
+            r.exec.execute(&req("twitch", &a, Some(7))).await.is_err(),
+            "{bad}"
+        );
+        assert!(sent(&r).await.is_empty(), "{bad}");
     }
 }

@@ -23,6 +23,7 @@ from quart_schema import QuartSchema
 
 from blueprints.v1.live_activity import live_activity_bp
 from services import live_activity as svc
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 
 
 @pytest.fixture
@@ -37,6 +38,7 @@ def app(community_db: Any) -> Quart:
     svc._ensure_table(dal, migrate=True)
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(live_activity_bp)
     quart_app.config["dal"] = dal
     return quart_app
@@ -67,7 +69,9 @@ def _seed_event(dal: Any, *, community_id: int, **overrides: Any) -> int:
 class TestListLiveActivity:
     async def test_no_auth_header_is_401(self, client: Any, community_db: Any) -> None:
         _, community_id = community_db
-        response = await client.get(f"/api/v1/community/{community_id}/live-activity")
+        response = await client.get(
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/live-activity"
+        )
         assert response.status_code == 401
 
     async def test_wrong_scope_is_403(
@@ -75,14 +79,14 @@ class TestListLiveActivity:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/live-activity",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/live-activity",
             headers=auth_headers(scope="community.live_activity:write"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/community/9999/live-activity",
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/live-activity",
             headers=auth_headers(scope="community.live_activity:read"),
         )
         assert response.status_code == 404
@@ -92,7 +96,7 @@ class TestListLiveActivity:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/live-activity",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/live-activity",
             headers=auth_headers(scope="community.live_activity:read"),
         )
         assert response.status_code == 200
@@ -107,7 +111,7 @@ class TestListLiveActivity:
         second_id = _seed_event(dal, community_id=community_id, actor="bob")
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/live-activity?limit=1",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/live-activity?limit=1",
             headers=auth_headers(scope="community.live_activity:read"),
         )
         assert response.status_code == 200
@@ -126,7 +130,7 @@ class TestListLiveActivity:
         _seed_event(dal, community_id=other_id, actor="eve")
 
         response = await client.get(
-            f"/api/v1/community/{community_id}/live-activity",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/live-activity",
             headers=auth_headers(scope="community.live_activity:read"),
         )
         body = await response.get_json()
@@ -136,7 +140,9 @@ class TestListLiveActivity:
 class TestStreamLiveActivity:
     async def test_no_auth_header_is_401(self, client: Any, community_db: Any) -> None:
         _, community_id = community_db
-        response = await client.get(f"/api/v1/community/{community_id}/live-activity/stream")
+        response = await client.get(
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/live-activity/stream"
+        )
         assert response.status_code == 401
 
     async def test_wrong_scope_is_403(
@@ -144,14 +150,14 @@ class TestStreamLiveActivity:
     ) -> None:
         _, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/live-activity/stream",
+            f"/api/v1/community/{public_id(community_db[0], community_id)}/live-activity/stream",
             headers=auth_headers(scope="community.live_activity:write"),
         )
         assert response.status_code == 403
 
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/community/9999/live-activity/stream",
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/live-activity/stream",
             headers=auth_headers(scope="community.live_activity:read"),
         )
         assert response.status_code == 404
@@ -168,7 +174,8 @@ class TestStreamLiveActivity:
         """
         _, community_id = community_db
         connection = client.request(
-            path=f"/api/v1/community/{community_id}/live-activity/stream",
+            path=f"/api/v1/community/{public_id(community_db[0], community_id)}"
+            f"/live-activity/stream",
             headers=auth_headers(scope="community.live_activity:read"),
         )
         async with connection as live:
@@ -184,3 +191,6 @@ class TestStreamLiveActivity:
             assert live.headers["Content-Type"].startswith("text/event-stream")
             assert live.headers["Cache-Control"] == "no-cache"
             await live.disconnect()
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

@@ -108,31 +108,34 @@ mod tests {
 
     #[test]
     fn authorize_db_grants_when_the_app_declares_storage_tables() {
-        let scope = DbScope::new(7, 3, "waddles.bot.a");
-        let snapshot = snapshot_granting("waddles.bot.a");
+        let scope = DbScope::new(7, 3, "penguintechinc.waddles.fixture-bot-a");
+        let snapshot = snapshot_granting("penguintechinc.waddles.fixture-bot-a");
         assert_eq!(authorize_db(&scope, &snapshot), Ok(()));
     }
 
     #[test]
     fn authorize_db_denies_when_the_app_never_declared_storage_tables() {
-        let scope = DbScope::new(7, 3, "waddles.bot.a");
+        let scope = DbScope::new(7, 3, "penguintechinc.waddles.fixture-bot-a");
         let snapshot = CapabilitySnapshot::new();
-        snapshot.update("waddles.bot.a", ["context".to_string()]);
+        snapshot.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            ["context".to_string()],
+        );
         let err = authorize_db(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");
     }
 
     #[test]
     fn authorize_db_denies_an_app_id_the_snapshot_has_never_seen() {
-        let scope = DbScope::new(7, 3, "waddles.bot.unknown");
-        let snapshot = snapshot_granting("waddles.bot.a");
+        let scope = DbScope::new(7, 3, "penguintechinc.waddles.bot-unknown");
+        let snapshot = snapshot_granting("penguintechinc.waddles.fixture-bot-a");
         let err = authorize_db(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");
     }
 
     #[test]
     fn authorize_db_denies_against_a_completely_empty_snapshot() {
-        let scope = DbScope::new(7, 0, "waddles.bot.a");
+        let scope = DbScope::new(7, 0, "penguintechinc.waddles.fixture-bot-a");
         let snapshot = CapabilitySnapshot::new();
         let err = authorize_db(&scope, &snapshot).unwrap_err();
         assert_eq!(err.code, "not_granted");

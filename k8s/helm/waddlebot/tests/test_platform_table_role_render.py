@@ -3,8 +3,8 @@
 EXPLICIT OPT-IN (`infrastructure.postgresql.platformTable.enabled`, default false). Disabled:
 no password anywhere (role stays NOLOGIN via alembic 0079) and no svc-process env. Enabled:
 the password lives ONLY in `<release>-db-credentials` (key PW_WADDLES_PLATFORM_TABLE, generated
-on alpha/local via `waddlebot.autoSecretValue`, required elsewhere) and the db-migrate hook
-Secret -- never in the envFrom'd `waddlebot-secrets` -- and only svc-process-rust (secretKeyRef)
+at RUNTIME in every tier by the provision-secrets hook -- asserted here by running the real hook
+via tests/provision_harness.py) and the db-migrate Secret -- never in the envFrom'd `waddlebot-secrets` -- and only svc-process-rust (secretKeyRef)
 and the migrate Job reference it. Zero documents / matches is a hard failure.
 """
 
@@ -17,16 +17,17 @@ from typing import Any
 
 import pytest
 import yaml
+from provision_harness import spec_of, with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parents[1]
 _KEY = "PW_WADDLES_PLATFORM_TABLE"
 _ENABLE = "infrastructure.postgresql.platformTable.enabled=true"
 
 
-def _render(*sets: str) -> list[dict[str, Any]]:
+def _render(*sets: str, values: str = "values-alpha.yaml") -> list[dict[str, Any]]:
     argv = [
         "helm", "template", "waddlebot", str(_CHART), "--kube-version", "1.30.0",
-        "--values", str(_CHART / "values-alpha.yaml"),
+        "--values", str(_CHART / values),
     ]  # fmt: skip
     for s in sets:
         argv += ["--set", s]
@@ -35,7 +36,7 @@ def _render(*sets: str) -> list[dict[str, Any]]:
         pytest.fail(f"helm template failed:\n{out.stderr}")
     docs = [d for d in yaml.safe_load_all(out.stdout) if d]
     assert docs, "helm template produced zero documents"
-    return docs
+    return with_provisioned(docs)
 
 
 def _secret(docs: list[dict[str, Any]], suffix: str) -> dict[str, str]:
@@ -91,7 +92,11 @@ def test_disabled_by_default_renders_no_credential_anywhere(
 ) -> None:
     docs = _render()
     text = yaml.safe_dump_all(docs)
-    assert "PLATFORM_TABLE" not in text and _KEY not in text
+    # Broad check restored: nothing containing PLATFORM_TABLE may render, except the single exact
+    # flag key FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY (alpha flag baseline, not a credential).
+    allowed = "FLAG_WADDLES_BUNDLE_PLATFORM_TABLE_CAPABILITY"
+    assert "PLATFORM_TABLE" not in text.replace(allowed, ""), "credential-like PLATFORM_TABLE leaked"
+    assert "DB_PLATFORM_TABLE" not in text and _KEY not in text
     assert "DB_PLATFORM_TABLE_PASSWORD" not in _secret(docs, "-db-migrate-secret")
     assert not [k for k in _process_env(docs) if k.startswith("BUNDLE_PLATFORM_TABLE")]
 
@@ -144,8 +149,10 @@ def test_explicit_value_wins(helm_available: None) -> None:
     )
 
 
-def test_outside_alpha_local_the_value_is_required_via_the_shared_policy() -> None:
-    src = (_CHART / "templates" / "secrets.yaml").read_text(encoding="utf-8")
-    assert f'"key" "{_KEY}"' in src
-    helper = (_CHART / "templates" / "_helpers.tpl").read_text(encoding="utf-8")
-    assert "outside alpha/local -- auto-generation is alpha/local only" in helper
+def test_generated_in_every_tier_by_the_runtime_hook(helm_available: None) -> None:
+    """Formerly 'required outside alpha/local'; owner policy now generates it on first run everywhere."""
+    docs = _render(_ENABLE, values="values-production.yaml")
+    assert f"key|{_KEY}|gen|b64url:32|urlsafe;nodefaults;min=16;strict-kept" in spec_of(docs)
+    creds = _secret(docs, "-db-credentials")[_KEY]
+    assert len(creds) == 43
+    assert _secret(docs, "-db-migrate-secret")["DB_PLATFORM_TABLE_PASSWORD"] == creds

@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 
 from app import create_app
@@ -39,8 +40,7 @@ def _test_config(**overrides: Any) -> HubAPIConfig:
         "db_max_retries": 1,
         "db_retry_delay": 1,
         "secret_key": "change-me-in-production",
-        "jwt_algorithm": "HS256",
-        "default_tenant_slug": "global",
+        "default_tenant_slug": DEFAULT_TENANT_SLUG,
         "posthog_api_key": None,
         "posthog_host": "https://license.penguintech.io",
         "license_server_url": "https://license.penguintech.io",
@@ -239,3 +239,15 @@ class TestClientIpSpoofResistance:
     ) -> None:
         async with app_standard_tier.test_request_context("/"):
             assert _client_ip(trusted_proxy_hops=2) == "unknown"
+
+
+class TestDiscountCodeValidationIsRateLimited:
+    """`POST .../discount-codes/validate` is a guessable-secret oracle: auth-tier bucket."""
+
+    async def test_validate_trips_the_auth_tier_limit(self, app_auth_tier: Quart) -> None:
+        async with app_auth_tier.test_app():
+            client = app_auth_tier.test_client()
+            path = "/api/v1/marketplace/vendor/discount-codes/validate"
+            statuses = [(await client.post(path, json={})).status_code for _ in range(3)]
+            assert 429 not in statuses[:2]
+            assert statuses[2] == 429

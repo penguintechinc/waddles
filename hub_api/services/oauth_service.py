@@ -30,9 +30,9 @@ from urllib.parse import urlencode
 import httpx
 
 from config import HubAPIConfig
-from services import ban_suppression, login_providers, session_service
+from services import ban_suppression, identity_audit, login_providers, session_service
 from services.auth_service import SessionUser, create_session_token
-from services.errors import ApiError, bad_request, conflict
+from services.errors import ApiError, bad_request, conflict, not_found
 from services.global_identity import is_global_admin
 from services.install_state_binding import (
     ERR_STATE,
@@ -630,6 +630,9 @@ async def link_callback(
         linked_at=datetime.now(UTC),
         last_used=datetime.now(UTC),
     )
+    await identity_audit.record_identity_event(
+        async_dal, dal, user_id=user_id, platform=platform, action="identity.linked", via="oauth"
+    )
     # A banned person may join a community first and link the banned platform account later:
     # re-apply any matching suppression to this user's memberships now that the id is known.
     await ban_suppression.reapply_for_hub_user_async(async_dal, dal, hub_user_id=user_id)
@@ -647,13 +650,23 @@ async def unlink_account(
 
     A login method removed because it is compromised (a hijacked Discord account) must not leave
     the sessions that method opened alive, so every OTHER login session ends -- `keep_session_id`
-    (the caller's own) stays signed in.
+    (the caller's own) stays signed in. A platform outside `VALID_PLATFORMS` is 400; a platform the
+    caller has no link for is 404 (never a silent success).
     """
+    if platform not in VALID_PLATFORMS:
+        raise bad_request("Unsupported platform")
+    linked = await async_dal.count_async(
+        (dal.hub_user_identities.hub_user_id == user_id)
+        & (dal.hub_user_identities.platform == platform)
+    )
+    if not linked:
+        raise not_found("No linked account for this platform")
+
     user_rows = await async_dal.select_async(dal(dal.hub_users.id == user_id))
     has_password = bool(user_rows) and user_rows.first().password_hash
 
     if not has_password:
-        count = await async_dal.count_async(dal(dal.hub_user_identities.hub_user_id == user_id))
+        count = await async_dal.count_async(dal.hub_user_identities.hub_user_id == user_id)
         if count <= 1:
             raise bad_request(
                 "Cannot unlink last platform without a password. Please set a password first."
@@ -663,11 +676,20 @@ async def unlink_account(
         (dal.hub_user_identities.hub_user_id == user_id)
         & (dal.hub_user_identities.platform == platform)
     )
-    if removed:
-        await session_service.revoke_other_sessions(
-            async_dal,
-            dal,
-            user_id=user_id,
-            keep_session_id=keep_session_id,
-            reason="identity_unlinked",
-        )
+    if not removed:
+        raise not_found("No linked account for this platform")
+    await session_service.revoke_other_sessions(
+        async_dal,
+        dal,
+        user_id=user_id,
+        keep_session_id=keep_session_id,
+        reason="identity_unlinked",
+    )
+    await identity_audit.record_identity_event(
+        async_dal,
+        dal,
+        user_id=user_id,
+        platform=platform,
+        action="identity.unlinked",
+        via="oauth",
+    )

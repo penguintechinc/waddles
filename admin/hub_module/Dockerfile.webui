@@ -6,7 +6,7 @@
 # node:20 reached upstream EOL 2026-04-30; bumped to node:24 (same interim pin as
 # the former hub backend image) -- org target node:26 not yet adopted here.
 # Stage 1: Build frontend
-FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS frontend-build
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54 AS frontend-build
 
 WORKDIR /build/admin/hub_module/frontend
 
@@ -14,14 +14,18 @@ COPY admin/hub_module/frontend/package*.json ./
 
 # @penguintechinc packages are published to npmjs.com, so no registry auth
 # is needed and no token ever enters the build.
-RUN npm ci --ignore-scripts && npm rebuild esbuild
+# npm download cache mount (id waddles-npm): `npm ci` still verifies every tarball against the
+# lockfile integrity hashes; the cache is not part of any image layer.
+ARG CACHE_EPOCH=1
+RUN --mount=type=cache,id=waddles-npm-hub-webui-v${CACHE_EPOCH},target=/root/.npm,sharing=locked \
+    npm ci --ignore-scripts && npm rebuild esbuild
 
 COPY admin/hub_module/frontend/ ./
 
 RUN npm run build
 
 # Stage 2: Express runtime -- static serving + /api proxy only
-FROM node:24-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20
+FROM node:24-bookworm-slim@sha256:dc26ae92c9fb15cf6b1d63e20f0944b2efe0f115b20e00be48fb23fceb061c54
 
 WORKDIR /app
 
@@ -42,12 +46,14 @@ COPY admin/hub_module/webui-server/package*.json ./
 # The runtime entrypoint is `node server.js` -- npm/npx/corepack are never invoked after
 # this point, and npm's vendored node_modules (tar, brace-expansion, sigstore, undici, ...)
 # carry independent CVEs unrelated to this lockfile, so they are removed in the same layer.
-RUN npm ci --omit=dev --ignore-scripts \
+ARG CACHE_EPOCH=1
+RUN --mount=type=cache,id=waddles-npm-hub-webui-v${CACHE_EPOCH},target=/root/.npm,sharing=locked \
+    npm ci --omit=dev --ignore-scripts \
     && rm -rf /usr/local/lib/node_modules/npm /usr/local/lib/node_modules/corepack \
     /usr/local/bin/npm /usr/local/bin/npx /usr/local/bin/corepack
 
 # Copy the proxy/static server and the built frontend assets
-COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js admin/hub_module/webui-server/proxy.js ./
+COPY --chown=nodejs:nodejs admin/hub_module/webui-server/server.js admin/hub_module/webui-server/proxy.js admin/hub_module/webui-server/tls.js admin/hub_module/webui-server/internal-guard.js ./
 COPY --chown=nodejs:nodejs --from=frontend-build /build/admin/hub_module/frontend/dist ./dist
 
 ENV NODE_ENV=production
@@ -58,7 +64,7 @@ USER nodejs
 EXPOSE 8080
 
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
-    CMD curl -f http://localhost:8080/health || exit 1
+    CMD if [ -n "$TLS_CERT_FILE" ]; then curl -fsk "https://localhost:${PORT:-8080}/health"; else curl -f "http://localhost:${PORT:-8080}/health"; fi || exit 1
 
 ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "server.js"]

@@ -1,8 +1,8 @@
 schema_version: 2
-app_id: waddles.integrations.superpenguin.raidtracker
+app_id: psychoboy.penguintwitchbot.raidtracker
 name: Raid Tracker (SuperPenguinTV)
 version: 1.0.0
-feature: waddles.integrations.superpenguin
+feature: psychoboy.penguintwitchbot
 module: integrations
 provider: thirdparty
 language: csharp

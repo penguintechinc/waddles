@@ -16,7 +16,7 @@ Chat commands that ship as first-party App Bundles. This page covers how they be
 | State scope | kv state is scoped to tenant, community and bundle. No bundle shares state with another. |
 | Mod-only verbs | Checked against the caller's moderator/broadcaster role. If the platform supplies no role information the check fails closed (the verb is refused). |
 | Logging | PII-free. Logs carry platform, operation, counts and exception type, never chat text or usernames. |
-| App id | `waddles.core.example.<name>`, version `1.0.0`. |
+| App id | `penguintechinc.waddles.<name>`, version `1.0.0`. |
 
 Turn a command on by activating its bundle for the community.
 
@@ -136,6 +136,8 @@ Warnings are logged after commit by code only (no command or user text). Under R
 ## Source
 
 Bundle source: `bundles/python/<name>/`. Catalog: `bundles/core-bundles.yaml` (the seeder's input -- every bundle needs a row; `scripts/ci/tests/test_bundle_wit_world.py` fails on a missing one).
+
+**Seeder digest policy.** `app_versions` is keyed by `(app_id, version)`. The seeder's byte-identical digest check (a different digest at the same version is a hard 409 `digest_conflict`) is enforced for **compiled** bundles only (`language: rust|csharp|go`). Scripted bundles (`language: python|javascript|nodejs|typescript|ruby`; `javascript` and `nodejs` are aliases of the same Node.js class; matching is case-insensitive) are not byte-checked -- python is built by `componentize-py`, which is not byte-reproducible (gh-521) -- so a scripted digest mismatch is a logged, counted no-op (`digest_drift_not_enforced` in the seeder summary) that keeps the existing row; it is never a conflict or failure. Signature and hash verification for all packages is planned for v3.2.x.
 
 **WIT world.** `bundles/build_python_bundles.py` builds each row against `world stage` unless the row says `wit_world: stage-next`. Economy (`economy.*`, `identity.resolve`) and AI (`ai.generate`) bundles need `stage-next` -- those host imports do not exist in `stage` -- and the build fails if a manifest declares one of them while the row resolves to `stage`.
 

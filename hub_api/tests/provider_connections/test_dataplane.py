@@ -76,6 +76,7 @@ class TestListForDataPlane:
             CHANNEL_ID,
         )
         assert item.metadata == {
+            "ownership_verified": "true",
             "channel_login": CHANNEL_LOGIN,
             "channel_id": CHANNEL_ID,
             "bot_login": BOT.login,

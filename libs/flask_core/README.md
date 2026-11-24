@@ -63,7 +63,7 @@ denied a Professional/Enterprise feature.
 | Concept | Rule |
 |---|---|
 | Required tier | Stricter of: explicit `EntitlementClient.tier_requirements`, the registered `FeatureContract.min_tier` (live `FeatureRegistry`), and the static `tier_catalog.FEATURE_MIN_TIERS` snapshot. No source can lower another; unlisted flag = `free`; an unrecognised tier is unsatisfiable (denies), never free. |
-| Effective tier | `max(tenant_tier, community_tier)`, cascading down: a tenant's tier lifts every community in it; a community can be allocated *above* its tenant (optional `CommunityTierSource`), never below. Tenant-wide checks (`community=None`) use the tenant tier only. `feature_flags.get_tier()` exposes it (`free` on any doubt). |
+| Effective tier | The TENANT's licence tier (`free`/`professional`/`enterprise`). A community's own Free/Premium tier is resolved in hub-api and never uplifted by the tenant tier. Tenant-wide checks (`community=None`) use the same tenant tier. `feature_flags.get_tier()` exposes it (`free` on any doubt). |
 | Tenant tier source | `penguin_licensing.LicenseClient.validate().tier` against `license.penguintech.io` (`community` == `free`). |
 | Fail closed | Tier is a hard veto over flag state, the degradation cache and the caller's `default`. License gate unreachable -> last-known tier within `ENTITLEMENT_TIER_GRACE_SECONDS` (default 72h); never seen/expired -> a licensed feature is **denied**, not defaulted. Only Free-tier flags degrade to `default`. |
 | Bypass | Hardcoded domains only (`*.penguincloud.io`, `*.penguintech.cloud` = every scope; `*.waddles.app` = tenant-wide only). Skips the tier check, never the flag. **No env var, CLI flag or config switch lifts a tier** -- env baselines exist for plain FEATURE flags only. |
@@ -219,7 +219,7 @@ token = create_jwt_token(
 payload = verify_jwt_token(token, app.config['SECRET_KEY'])
 ```
 
-`verify_jwt_token` pins one algorithm (HS256), rejects `alg: none` and `jku`/`jwk`/`x5u`/`x5c`
+`verify_jwt_token` pins one algorithm (ES256, key chosen by `kid` from the installed `jwt_keyring`), rejects `alg: none` and `jku`/`jwk`/`x5u`/`x5c`
 headers, and requires `sub iss aud iat exp scope tenant`; each call emits
 `waddles_jwt_verifications_total{verifier,alg,outcome}`. See
 [`docs/JWT_VERIFICATION.md`](../../docs/JWT_VERIFICATION.md).

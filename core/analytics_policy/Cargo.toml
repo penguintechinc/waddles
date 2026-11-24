@@ -1,0 +1,16 @@
+[package]
+name = "analytics-policy"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.97.0"
+license = "AGPL-3.0-or-later"
+publish = false
+description = "Pure-logic ExportPolicy guard for the analytics foundation (Phase 1): deny-by-default, fail-closed evaluation of every gate a tenant-wide anonymized trend dataset must pass before any export. No IO, no DB, no HTTP, no async runtime; v3.0 hard-codes EXPORT_NOT_IMPLEMENTED so no export path exists."
+
+[lib]
+name = "analytics_policy"
+path = "src/lib.rs"
+
+# Deliberately EMPTY: zero dependencies so the crate cannot grow an IO path
+# (enforced by tests/no_io_deps.rs). Exact-pin rule: rules/critical-rules.md.
+[dependencies]

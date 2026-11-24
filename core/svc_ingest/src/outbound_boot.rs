@@ -27,7 +27,7 @@ use crate::connector::sender_exec::app_credentials::PlatformAppCredentials;
 use crate::connector::sender_exec::discord_duties::DiscordDuties;
 use crate::connector::sender_exec::discord_slots::DiscordSlots;
 use crate::connector::sender_exec::kick_slots::KickSlots;
-use crate::connector::sender_exec::twitch_slots::TwitchSlots;
+use crate::connector::sender_exec::twitch_slots::{TwitchSlots, TwitchUserResolver};
 use crate::connector::sender_exec::youtube_duties::{self, WithYoutube, YoutubeDuties};
 use crate::connector::sender_exec::youtube_slots::YoutubeSlots;
 use crate::connector::sender_exec::{
@@ -67,10 +67,10 @@ pub const DEFAULT_HOST_API_PORT: u16 = 8301;
 /// connector world is core-namespace only and the digest pins the content).
 fn app_id(platform: &str) -> Option<&'static str> {
     match platform {
-        "twitch" => Some("waddles.core.service.twitch"),
-        "discord" => Some("waddles.core.service.discord"),
-        "youtube" => Some("waddles.core.service.youtube"),
-        "kick" => Some("waddles.core.service.kick"),
+        "twitch" => Some("penguintechinc.waddles.twitch"),
+        "discord" => Some("penguintechinc.waddles.discord"),
+        "youtube" => Some("penguintechinc.waddles.youtube"),
+        "kick" => Some("penguintechinc.waddles.kick"),
         _ => None,
     }
 }
@@ -332,6 +332,7 @@ pub type ProdExecutor = SenderExecutor<WireTemplateBuilder, ProdSlots, CachedFla
 /// an unset variable uses the default, a malformed one is logged and the default is used.
 fn youtube_daily_budget() -> u32 {
     match std::env::var("YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS") {
+        // nosemgrep: rust-silent-unwrap-or-default -- closure logs via tracing::warn! before returning default budget
         Ok(v) => v.trim().parse().unwrap_or_else(|_| {
             tracing::warn!("YOUTUBE_COMMUNITY_DAILY_QUOTA_UNITS is not an integer; using default");
             youtube_duties::DEFAULT_DAILY_BUDGET_UNITS
@@ -432,11 +433,13 @@ pub fn build_with_link(
     let link = shared_link
         .unwrap_or_else(|| Arc::new(ExecutorLink::new().with_enabled_flags(CONNECTOR_FLAGS)));
     let builder = WireTemplateBuilder::new(Arc::clone(&link), Arc::new(registry(cfg)?));
+    let users = Arc::new(users);
     let slots = PlatformSlotRouter::new(
         TwitchSlots::new(
             ResolverTwitchCredentials::new(resolver(cli)?),
             cfg.twitch_client_id.clone(),
-        ),
+        )
+        .with_user_resolver(Arc::clone(&users) as Arc<dyn TwitchUserResolver>),
         DiscordSlots::new(ResolverDiscordCredentials::new(resolver(cli)?)),
         YoutubeSlots::new(ResolverYoutubeCredentials::new(resolver(cli)?)),
         KickSlots::new(ResolverKickCredentials::new(resolver(cli)?)),
@@ -445,7 +448,6 @@ pub fn build_with_link(
         PlatformAppCredentials::from_env()
             .map_err(|e| anyhow::anyhow!("app credentials unavailable: {e}"))?,
     );
-    let users = Arc::new(users);
     let duties = WithYoutube::new(
         DiscordDuties::new(
             ResolverDiscordCredentials::new(resolver(cli)?),
@@ -620,7 +622,7 @@ mod tests {
         let reg = registry(&cfg).unwrap();
         assert_eq!(
             reg.resolve("kick").unwrap().app_id,
-            "waddles.core.service.kick"
+            "penguintechinc.waddles.kick"
         );
 
         env.insert("SENDER_EXEC_DIGEST_KICK", "   ".to_string());
@@ -794,7 +796,7 @@ mod tests {
         ] {
             let c = reg.resolve(p).unwrap();
             assert_eq!(c.digest, digest);
-            assert_eq!(c.app_id, format!("waddles.core.service.{p}"));
+            assert_eq!(c.app_id, format!("penguintechinc.waddles.{p}"));
         }
         assert!(reg.resolve("slack").is_err());
     }

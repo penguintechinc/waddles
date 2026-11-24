@@ -2,7 +2,7 @@
 
 `!cc` -- per-community custom text commands. A moderator teaches the bot `!cc add welcome Hi
 $(user)!`; afterwards `!welcome` replies with that text, variables substituted. First-party
-(`provider: builtin`, `app_id: waddles.core.example.customcommand`), kv-only, WASI component.
+(`provider: builtin`, `app_id: penguintechinc.waddles.customcommand`), kv-only, WASI component.
 Idea-inspired by the custom-command features of popular chat bots (concepts only, no code or
 branding shared).
 

@@ -99,8 +99,8 @@ ingress:
         - path: /
           pathType: Prefix
           backend:
-            service: hub
-            port: 8060
+            service: hub-webui-v3
+            port: 8080
   tls:
     - secretName: waddlebot-tls
       hosts:
@@ -143,7 +143,6 @@ The following table lists the main configurable parameters of the WaddleBot char
 | `global.imageRegistry` | Global Docker image registry | `docker.io/waddlebot` |
 | `global.imagePullPolicy` | Image pull policy for **every** workload container, including `hub-api`, `svc-{action,ingest,process}-rust`, `svc-presentation` and both `svc-bundles-executor` Deployments (no template hardcodes a policy) | `IfNotPresent` |
 | `global.imagePullSecrets` | Global image pull secrets | `[]` |
-| `global.storageClass` | Global storage class for PVCs | `standard` |
 
 #### Image pull policy
 
@@ -163,23 +162,6 @@ Set `--set global.imagePullPolicy=Always` per deployment only when deploying a m
 | `namespace.create` | Create namespace automatically | `true` |
 | `namespace.name` | Namespace name | `waddlebot` |
 
-### Resource Presets
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `resourcePresets.small.cpu` | Small preset CPU request | `100m` |
-| `resourcePresets.small.memory` | Small preset memory request | `128Mi` |
-| `resourcePresets.small.cpuLimit` | Small preset CPU limit | `500m` |
-| `resourcePresets.small.memoryLimit` | Small preset memory limit | `512Mi` |
-| `resourcePresets.medium.cpu` | Medium preset CPU request | `250m` |
-| `resourcePresets.medium.memory` | Medium preset memory request | `256Mi` |
-| `resourcePresets.medium.cpuLimit` | Medium preset CPU limit | `1000m` |
-| `resourcePresets.medium.memoryLimit` | Medium preset memory limit | `1Gi` |
-| `resourcePresets.large.cpu` | Large preset CPU request | `500m` |
-| `resourcePresets.large.memory` | Large preset memory request | `512Mi` |
-| `resourcePresets.large.cpuLimit` | Large preset CPU limit | `2000m` |
-| `resourcePresets.large.memoryLimit` | Large preset memory limit | `2Gi` |
-
 ### Infrastructure Services
 
 #### PostgreSQL
@@ -192,8 +174,53 @@ Set `--set global.imagePullPolicy=Always` per deployment only when deploying a m
 | `infrastructure.postgresql.replicas` | Number of replicas | `1` |
 | `infrastructure.postgresql.persistence.enabled` | Enable persistence | `true` |
 | `infrastructure.postgresql.persistence.size` | PVC size | `20Gi` |
-| `infrastructure.postgresql.readReplicas.enabled` | Enable read replicas | `false` |
+| `infrastructure.postgresql.readReplicas.enabled` | Enable read replicas | `true` |
+| `infrastructure.postgresql.readReplicas.optOut` | Required `true` to run with no replicas (enabled=false or count=0); otherwise the render fails | `false` |
+| `infrastructure.postgresql.readReplicas.maxLagSeconds` | Replica readiness lag threshold | `30` |
 | `infrastructure.postgresql.readReplicas.count` | Number of read replicas | `2` |
+
+#### PostgreSQL topology
+
+Default = **primary + read replicas** (physical streaming replication, TLS verify-full, one slot per replica).
+
+```
+ writers (hub-api DATABASE_URL, svc-* DATABASE_URL, migrations)
+        |                                      readers (hub-api DATABASE_READ_REPLICA_URL,
+        v                                       svc-process/svc-action DATABASE_REPLICA_URL + DB_READER_HOST)
+ Service infra-postgres (rw)                          |
+        |                                             v
+ StatefulSet postgres (1 pod, PVC postgres-data)   Service infra-postgres-ro  (ready replicas only)
+   + replication-bootstrap sidecar                     |        |
+        ^   WAL stream (slot replica_0..N-1)           v        v
+        +------------------------------------ postgres-replica-0 .. N-1 (own PVC each)
+```
+
+| Item | Default / behaviour |
+|------|---------------------|
+| Primary | StatefulSet `postgres`, replicas 1, RollingUpdate (delete-then-create, never two postmasters); mounts the standalone PVC `postgres-data` by `claimName` (`helm.sh/resource-policy: keep`) |
+| Replicas | StatefulSet `postgres-replica`, `readReplicas.count` = 2 (one per node via preferred anti-affinity, HA for reads); PDB minAvailable 1 when count >= 2; seeded by `pg_basebackup -R -S replica_<ordinal>` only when PGDATA is empty |
+| Replication role | `waddles_replicator` (REPLICATION LOGIN), password `PW_WADDLES_REPLICATOR` in Secret `<fullname>-db-replication` (generated create-if-absent by the provision-secrets hook, mounted only into postgres pods); role + slots (re)asserted every 5 min by the primary sidecar |
+| Readiness (replica) | in recovery AND WAL receiver `streaming` AND (received LSN == replayed LSN OR replay age < `maxLagSeconds`) — a lagging replica leaves the `-ro` Service automatically |
+| Read endpoint | `<service.name>-ro` FQDN (in TLS SANs); `readReplicas.host` overrides |
+| Opt-out | `readReplicas.optOut: true` together with `enabled: false` or `count: 0`; otherwise the render fails. Reads then fall back to the primary |
+| WAL bound | `walKeepSize` 512MB, `maxSlotWalKeepSize` 4GB: a dead replica cannot fill the primary disk; an invalidated replica is rebuilt by deleting its PVC + pod |
+
+**Replication-lag metric and alert.** The chart ships no postgres_exporter and no in-chart collector, so lag is exposed through the external SigNoz collector's `postgresql` receiver (see `docs/observability/sending-telemetry-to-signoz.md`): point it at the primary (`infra-postgres`) with a monitoring role and enable `postgresql.replication.data_delay` / `postgresql.wal.lag`. Alert: `postgresql.wal.lag` (or `replay_lag` from `pg_stat_replication`) > `maxLagSeconds` for 5 minutes, per replica. Quick check: `kubectl -n waddlebot exec postgres-0 -c postgres -- psql -U waddlebot -c "select application_name, state, replay_lag from pg_stat_replication"`.
+
+**Read policy.** Reads default to replicas where the code has a seam (hub-api read pool, svc-process/svc-action reader). Writes and read-your-own-write paths stay on the primary.
+
+##### Alpha upgrade (existing Deployment `postgres` -> StatefulSet; PVC preserved)
+
+No manual step is required: the `<release>-postgres-handover` pre-install/pre-upgrade hook Job scales the legacy `Deployment/postgres` to 0 and waits (default 300s, `infrastructure.postgresql.handover.timeoutSeconds`) until its pods are gone, failing the release loudly on timeout; it is a no-op when the Deployment is absent. It has a resourceName-scoped Role (deployments + deployments/scale on `postgres` only; read-only pod list/watch). Helm creates new resources before deleting removed ones, which is why the hook (not Helm) must stop the old pod before `postgres-0` starts.
+
+1. (Optional manual pre-step, same effect as the hook) `kubectl --context dal2alpha -n waddlebot scale deploy/postgres --replicas=0`.
+2. `helm3 upgrade waddlebot k8s/helm/waddlebot -f values-alpha.yaml --kube-context dal2alpha -n waddlebot` (Helm v3.17.3). Hooks: handover (-6), provision-secrets creates `<fullname>-db-replication` and, because the SAN identity changed, re-issues the transit CA + leaves (postgres, postgres-replica, seaweedfs).
+3. Verify: `get sts postgres postgres-replica`; on postgres-0 `select application_name,state,replay_lag from pg_stat_replication` shows 2 `streaming` rows; `get endpoints infra-postgres-ro` lists both replica IPs; `select slot_name,active from pg_replication_slots` shows replica_0/1 active.
+4. Rollback: scale both StatefulSets to 0, `helm3 rollback waddlebot <prev>` (recreates the Deployment on the same, untouched PVC). Replica PVCs are disposable copies.
+
+**Replication credential and TLS isolation.** Replicas authenticate with a `.pgpass` (0600, tmpfs emptyDir) built from the Secret at every start; `primary_conninfo` in `postgresql.auto.conf` carries only `passfile=` (the init script rewrites it on every start and fails if a `password=` survives, so replicas bootstrapped by an earlier revision are cleaned). Replicas serve with their own key/cert whose SANs are only `-ro`, the headless Service and the replica pod names; the primary key/cert never reaches a replica pod, so a compromised replica cannot impersonate the writer. In static mode both leaves live in the transit Secret (the provisioning CA key is per-run, so leaves are minted together with their CA) and each pod projects only its own keys; cert-manager mode uses a dedicated `<fullname>-postgres-replica-tls` Secret. libpq clients (psycopg2/psql/alembic) additionally set `PGCHANNELBINDING=require`; asyncpg 0.30 and sqlx 0.9 have no such option and are left as is.
+
+**Changelog consumer / read routing.** svc-process/svc-action run EVERY changelog-consumer read (watermark, change rows, active-set/scope/binding reads) on the PRIMARY (`DB_WATERMARK_HOST`); svc-ingest display-name/detokenization stays on the primary. Full per-path table: `docs/dataplane-db-routing.md`.
 
 #### Redis
 
@@ -280,8 +307,7 @@ MinIO's own KMS backend configuration.
 |-----------|-------------|---------|
 | `infrastructure.qdrant.enabled` | Enable Qdrant vector DB | `true` |
 | `infrastructure.qdrant.image` | Qdrant image | `qdrant/qdrant:latest` |
-| `infrastructure.qdrant.port` | Qdrant HTTP port | `6333` |
-| `infrastructure.qdrant.grpcPort` | Qdrant gRPC port | `6334` |
+| `infrastructure.qdrant.service.port` | Qdrant HTTP port | `6333` |
 | `infrastructure.qdrant.persistence.size` | PVC size | `10Gi` |
 
 ### Processing Module (Router)
@@ -305,7 +331,7 @@ MinIO's own KMS backend configuration.
 | `admin.hub.enabled` | Enable hub module | `true` |
 | `admin.hub.image` | Hub image name | `waddlebot-hub` |
 | `admin.hub.tag` | Hub image tag | `latest` |
-| `admin.hub.port` | Hub port | `8060` |
+| `pipeline.hubApi.port` | hub-api HTTP port (Service, containerPort, routes) | `8204` |
 | `admin.hub.replicas` | Number of replicas | `2` |
 
 ### Core Modules
@@ -362,20 +388,6 @@ MinIO's own KMS backend configuration.
 | `ingress.hosts` | Ingress hosts configuration | See values.yaml |
 | `ingress.tls` | TLS configuration | See values.yaml |
 
-### Shared Environment Variables
-
-| Parameter | Description | Default |
-|-----------|-------------|---------|
-| `sharedEnv.DB_HOST` | Database host | `postgresql` |
-| `sharedEnv.DB_PORT` | Database port | `5432` |
-| `sharedEnv.DB_NAME` | Database name | `waddlebot` |
-| `sharedEnv.REDIS_HOST` | Redis host | `redis` |
-| `sharedEnv.REDIS_PORT` | Redis port | `6379` |
-| `sharedEnv.ROUTER_URL` | Router service URL | `http://router:8000` |
-| `sharedEnv.HUB_URL` | Hub service URL | `http://hub:8060` |
-| `sharedEnv.LOG_LEVEL` | Logging level | `INFO` |
-| `sharedEnv.RELEASE_MODE` | Enable license enforcement | `false` |
-
 ### Security
 
 | Parameter | Description | Default |
@@ -398,7 +410,7 @@ template so the policies exist exactly when the workload does). Tests:
 | securityContext | Every container (init containers too) of every Deployment/StatefulSet/Job/CronJob: non-root, no privilege escalation, `drop: [ALL]`, `RuntimeDefault` seccomp. Collectors, postgres (uid 999), redis/valkey (uid 999), qdrant and ollama (uid 1000, model store moved to `$HOME/.ollama` on the same PVC) are now rootless with a **read-only root filesystem** (emptyDirs for `/tmp`, socket/snapshot dirs) | `infrastructure.{postgresql,redis,qdrant,ollama}.{podSecurityContext,securityContext}`; app pods use the global `podSecurityContext`/`securityContext` |
 | Pod Security Admission | `pod-security.kubernetes.io/{enforce,audit,warn}: restricted` (+ `-version: latest`) on the chart-managed Namespace. **Only when `namespaceCreate: true`** -- operators who pre-create the namespace must apply the same labels. beta enforces `privileged` (audit/warn stay `restricted`) because the SPIRE agent is an approved ROOT EXCEPTION (uid 0 + hostPath) that PSA rejects at every level; the chart `fail`s if you set restricted/baseline with `spire.enabled=true`. local enforces `baseline` | `podSecurity.{enabled,enforce,audit,warn,version}` |
 | Tetragon | One `TracingPolicyNamespaced` per app workload: `sys_execve` kprobe, **Sigkill** on any binary outside the workload's runtime allowlist (interpreter/entrypoint only; shells only for the documented legacy `sh -c` images). Needs the Tetragon agent + CRD in the cluster. Infra images (postgres/redis/qdrant/ollama/seaweedfs/posthog) are not covered (multi-process entrypoints). alpha/local/ci: off | `tetragon.{enabled,action,commonBinaries,runtimes,shellBinaries,runcInit}`; per-workload `binaries`/`shell` args at the include. `runcInit` (default on) keeps exec probes + `kubectl exec` working: runc >= 1.2 execs `/proc/self/fd/<N>` for `runc init`, so a second selector exempts that prefix ONLY when the caller binary is in `runcInit.callerBinaries` (runc paths) and SIGKILLs it from anything else (no fileless memfd exec) -- the allowlist itself gains no binaries. `action: Post` is an audit-only escape hatch for validating a new image's exec set -- never ship it |
-| Default-deny egress | Every long-running workload is selected by a `CiliumNetworkPolicy` with an `egress` section: DNS + own namespace (the destination's ingress policy scopes the port) + one outbound profile -- `internal` (nothing else), `https` (TCP/443 to public addresses, or pinned FQDNs), `world` (any port, public only: svc-streaming, svc-rtc). Data-plane pods stay governed by `<release>-dataplane-egress-deny` (egress-proxy only). **RFC1918, CGNAT, link-local/169.254.169.254, loopback and the cluster CIDRs are never reachable** through the world rules; only the egress-proxy's per-tenant private-ip grants reach private space. Jobs/CronJobs are not covered (no long-running listener) | `egressPolicy.{workloadEgress.enabled,privateCidrs,httpsFqdns}`, `networkPolicy.egressProfileOverrides.<component>` (e.g. `seaweedfs: https` with an external KMS) |
+| Default-deny egress | Every long-running workload is selected by a `CiliumNetworkPolicy` with an `egress` section: DNS + own namespace (the destination's ingress policy scopes the port) + one outbound profile -- `internal` (nothing else), `https` (TCP/443 to public addresses, or pinned FQDNs), `world` (any port, public only: svc-streaming). Data-plane pods stay governed by `<release>-dataplane-egress-deny` (egress-proxy only). **RFC1918, CGNAT, link-local/169.254.169.254, loopback and the cluster CIDRs are never reachable** through the world rules; only the egress-proxy's per-tenant private-ip grants reach private space. Jobs/CronJobs are not covered (no long-running listener) | `egressPolicy.{workloadEgress.enabled,privateCidrs,httpsFqdns}`, `networkPolicy.egressProfileOverrides.<component>` (e.g. `seaweedfs: https` with an external KMS) |
 | Port-scoped ingress | `default-deny-ingress` CNP for the namespace, plus a per-workload CNP admitting only that workload's declared `containerPort`(s) from the same namespace. `networkPolicy.externalIngressComponents` additionally admit the ingress controller (and Gateway API, when `httproute.enabled`) **on those ports only**. hub-api's internal gRPC port is deliberately not in the namespace-wide rule: only the callers in `<release>-hub-api-grpc` reach it (this closes the previously documented gap) | `networkPolicy.{enabled,ingressNamespace,externalIngressComponents}` |
 | Cilium only | No plain `NetworkPolicy` is rendered anywhere (the old `default-deny-ingress` / `allow-same-namespace-and-ingress` pair is replaced) | -- |
 
@@ -537,79 +549,99 @@ kubectl delete namespace waddlebot
 No workload connects as the database owner/superuser. Every Deployment/Job/CronJob gets its own
 least-privilege Postgres role through `{{ include "waddlebot.dbEnv" (dict "root" . "role" "<role>") }}`;
 role names/grants live in `config/postgres/service-roles.yaml` and are mirrored in
-`infrastructure.postgresql.serviceRoles.roles`. Passwords are generated in alpha/local and **required**
-(`serviceRoles.existingSecret`, or `serviceRoles.passwords` from an out-of-git file) in beta/gamma/
-production. The owner credential is a separate Secret (`<release>-db-admin`) read only by Postgres and
+`infrastructure.postgresql.serviceRoles.roles`. Passwords are generated at runtime on first run in **every tier** (see
+"Secrets: generated on first run"); `serviceRoles.existingSecret` / `serviceRoles.passwords` remain as overrides. The owner credential is a separate Secret (`<release>-db-admin`) read only by Postgres and
 the db-migrate hook. See [`docs/DATABASE_CREDENTIALS.md`](../../../docs/DATABASE_CREDENTIALS.md) for rotation,
 the burned-credential list, and the upgrade path.
 
-## Self-provisioned platform keys (feature/helm-auto-provision-keys)
+## Secrets: generated on first run
 
-Deploys must never require a human to run a script before `helm install`/`helm upgrade`
-succeeds. Four platform key Secrets are self-provisioned by this chart:
+Every secret the platform generates and consumes itself is created **at runtime, create-if-absent, in
+every tier** (alpha, beta, gamma, production, local) by two pre-install/pre-upgrade hook Jobs. A fresh
+`helm install` needs no manual secret in any tier; only external credentials (below) are supplied by the owner.
 
-| Secret | Values key | Consumer | Mechanism |
-|---|---|---|---|
-| `minio-kms` | `autoProvisionedKeys.minioKms` | MinIO static-KMS (PR #439) | `templates/auto-provisioned-secrets.yaml` -- pure Helm template |
-| `waddlebot-tenant-kek` | `autoProvisionedKeys.tenantKek` | hub-api tenant DEK broker (PR #442) | `templates/auto-provisioned-secrets.yaml` -- pure Helm template |
-| `<fullname>-bundle-signing` | `autoProvisionedKeys.bundleSigning` | hub-api bundle signing (PR #431) | `templates/auto-provisioned-keys-job.yaml` -- pre-install/pre-upgrade hook Job (openssl) |
-| `service-jwt-signing-key` | `autoProvisionedKeys.serviceJwt` | hub-api machine JWTs (PR #438) | `templates/auto-provisioned-keys-job.yaml` -- pre-install/pre-upgrade hook Job (openssl) |
+* `templates/provision-secrets.yaml` + `files/provision-secrets.sh` -- every symmetric secret, password and HMAC ring.
+* `templates/auto-provisioned-keys-job.yaml` -- Ed25519 bundle-signing and ECDSA P-256 service-JWT key pairs (+ public-key ConfigMaps).
 
-**Policy, every Secret:**
-1. **Keep** -- if the Secret already exists, it is left completely untouched (never
-   regenerated/rotated by this chart). It is also annotated `helm.sh/resource-policy:
-   keep` when this chart creates it, so it survives `helm uninstall`.
-2. **Generate** -- on a miss, auto-generated ONLY when `global.deploymentTier` is
-   `alpha` or `local`.
-3. **Fail** -- on a miss anywhere else (beta/gamma/production), the release
-   render-fails with an explicit message, UNLESS `autoProvisionedKeys.<key>.
-   externalSecret: true` is set (an ExternalSecret/SealedSecret/other out-of-band
-   controller owns that Secret name) or an operator pre-creates it directly.
+**Why not Helm `lookup`:** `lookup` is empty under `helm template | kubectl apply` / ArgoCD, so a template-time
+generator would regenerate *every* value (all DB passwords, the root KEK) on each sync. The chart now contains **no**
+`lookup`-based generation; Helm never owns these Secrets' data. (TLS/CA certificate Secrets -- `transit-tls`, `host-api-tls`,
+`hub-api-grpc-tls`, `valkey-tls`, connector runtime -- still use template-time `lookup`; they are a separate follow-up.)
 
-The two symmetric keys (`minioKms`, `tenantKek`) use `lookup` + Helm's own
-cryptographically-secure `randBytes`/`sha256sum` template functions -- no extra
-tooling needed. The two asymmetric keys (`bundleSigning`: Ed25519, `serviceJwt`: ECDSA P-256 / ES256) need an
-`openssl`-equipped hook Job instead: Sprig/Helm has no function to derive an Ed25519
-public key from a private key, which both public-key-flow requirements below need.
+**Policy (enforced in the script, proven by `tests/test_provision_secrets_script.py`):**
+1. Existing real value => untouched. Never overwritten, never rotated by an upgrade. A different explicit values override is ignored with a warning (no values logged); to re-seed a key, delete that key from the Secret.
+2. A key is *unset* only if absent, empty or `REPLACE_ME*`, and only for the keys listed below (the chart-owned keys); other keys in the same Secret are never touched. `waddlebot-platform-credentials` is owner-supplied and never touched.
+3. Unset key: explicit value from values (`global.*`, `infrastructure.*.password`, ...) > validated import from a *named* legacy Secret (Postgres owner password from `waddlebot-secrets`, so an existing PVC keeps working; placeholder/default-looking values are refused, never imported) > fresh CSPRNG value.
+4. Concurrency-safe: a missing Secret is written with `kubectl create` (AlreadyExists => adopt the winner), an existing one with a merge patch carrying `resourceVersion` (Conflict => re-read). Two runs never leave two values.
+5. Opt-outs kept: `autoProvisionedKeys.<key>.externalSecret`, `sso.encryptionKey.externalSecret`, `postgresql.admin.existingSecret`, `serviceRoles.existingSecret`, `*.existingSecret` => logged, never touched.
+6. Created Secrets carry `helm.sh/resource-policy: keep` and ArgoCD `Prune=false` / `IgnoreExtraneous`. Existing ones get those annotations on the first run (so Helm does not delete the no-longer-rendered object on the first upgrade).
+7. No value ever reaches argv, stdout/stderr or a ConfigMap: values move through bash variables, a memory-backed `emptyDir` and stdin/`--patch-file`; only Secret and key *names* are logged. No `set -x`.
+8. Entropy: OpenSSL `rand` (DRBG seeded from the OS CSPRNG, `/dev/urandom`). Passwords/keys: 32 bytes (256 bit) base64url (43 chars, never a leading `-`); legacy JWT/module/service keys 48 bytes; KEKs/HMAC keys 32 bytes hex (64 chars; rings `kid:<64 hex>`); S3 access key ids 16 alphanumerics; bootstrap admin password 24 alphanumerics (~143 bit).
+9. Root-of-trust marker: `waddlebot-tenant-kek` is stamped with annotation `waddles.penguintech.io/root-marker = v1.<kek_id>.<hmac>` where `kek_id` = first 8 bytes of SHA-256(KEK) as hex (identical to hub-api `envelope.crypto.kek_id`) and `hmac` = hex HMAC-SHA256(key = the 32 raw KEK bytes, message = `waddles-root-check`). A present-but-different marker makes the hook (and so the release) **fail** -- a replaced root is never accepted silently. hub-api stores the matching value in its DB marker.
+10. Hook RBAC (`<fullname>-provision-secrets`, weight -10, deleted after the pre-* phase succeeds): `get`,`patch` only on the named Secrets below; `create` on Secrets without a name restriction -- **residual risk:** Kubernetes ignores `resourceNames` on `create`, so for the seconds the hook lives it could create a Secret of any name. No list/watch/update/delete, no ConfigMaps, token automounted on the Job pod only. Image pinned by digest (`autoProvisionedKeys.hookImage`).
 
-**Public keys flow to consumers automatically, private keys never do:** the hook Job
-derives each Ed25519 public key from its Secret and publishes it to a plain
-ConfigMap (`<fullname>-bundle-signing-public`, `<fullname>-service-jwt-public` by
-default) containing ONLY public key material -- safe for any pod to mount via
-`envFrom`/`configMapKeyRef`. The private key Secret itself is read only by this hook
-Job (to derive the public key) and by hub-api (the sole signer/issuer); no other
-Deployment's RBAC or volume mounts reference it. See `templates/
-auto-provisioned-keys-job-rbac.yaml` for the least-privilege Role backing this.
+### Generated secrets (name -> keys)
+
+| Secret | Keys (generated if unset) | Consumers |
+|---|---|---|
+| `<fullname>-db-admin` | `POSTGRES_PASSWORD` | Postgres only (skipped if `postgresql.admin.existingSecret`) |
+| `<fullname>-db-credentials` | `PW_<ROLE>` per service role, `PW_WADDLES_PLATFORM_TABLE` (if enabled) | each pod's own key |
+| `waddlebot-secrets` | `DB_READER_PASSWORD`, `DB_REPUTATION_PASSWORD`, `REDIS_PASSWORD`, `REDIS_ADMIN_PASSWORD`, `REDIS_{ROUTER,HUB,WORKFLOW,AI,ANALYTICS,SECURITY,LOYALTY,SPOTIFY,YTMUSIC,TWITCH,DISCORD,SLACK}_PASSWORD`, `VALKEY_DURABLE_PASSWORD`, S3 identities `{HUB_API,DATAPLANE,BUCKET_INIT,STREAMING,BUNDLE_STORAGE}_S3_{ACCESS_KEY_ID,SECRET_ACCESS_KEY}`, `SESSION_MAC_KEY` (independent session/refresh-MAC key; no JWT secret exists), `MODULE_SECRET_KEY`, `SERVICE_API_KEY`, `CREDENTIAL_ENCRYPTION_KEY`, `ENVELOPE_BINDING_KEYS`, `ALTCHA_HMAC_KEY` (dedicated login-ALTCHA MAC key; auto-generated, hub-api fails closed 503 without it), `DSAR_ALTCHA_HMAC_KEY` (public DSAR form ALTCHA key; auto-generated create-if-absent, never overwritten) | envFrom (~40 workloads) |
+| same | derived every run (not generated): `REDIS_URL`, `VALKEY_URL`, `VALKEY_URL_TLS`, `VALKEY_DURABLE_URL[_TLS[_AUTH]]`, chart config keys (`AWS_REGION`, `OPENWHISK_*`, ...) | |
+| `<fullname>-valkey-durable-admin` | `VALKEY_DURABLE_ADMIN_PASSWORD` | durable Valkey only |
+| `<fullname>-valkey-kv` | `VALKEY_KV_PASSWORD` (+ derived URLs) | bundle-kv Valkey, svc-action/process |
+| `<fullname>-hub-admin-bootstrap` | `INITIAL_ADMIN_PASSWORD` | hub-admin-seed |
+| `seaweedfs-sse-kek` | `WEED_S3_SSE_KEK` | SeaweedFS SSE-S3 |
+| `waddlebot-tenant-kek` | `TENANT_KEK_HEX` (root KEK, root marker) | hub-api |
+| `waddlebot-ots-encryption-key` | `ONE_TIME_SECRET_ENCRYPTION_KEY` | hub-api |
+| `waddlebot-sso-encryption-key` | `SSO_ENCRYPTION_KEY` (if `sso.enabled`) | hub-api |
+| `<fullname>-bundle-admin-request`, `-outbound-pin`, `-event-sync-request` | `BUNDLE_ADMIN_REQUEST_KEYS`, `OUTBOUND_PIN_KEYS`, `EVENT_SYNC_REQUEST_KEYS` (HMAC rings) | hub-api / svc-* |
+| `posthog-secrets` | `SECRET_KEY`, `POSTGRES_PASSWORD`, `CLICKHOUSE_PASSWORD` (if in-cluster PostHog without `existingSecret`) | PostHog |
+| `<fullname>-bundle-signing` | `BUNDLE_SIGNING_PRIVATE_KEY` (Ed25519) + public ConfigMap | hub-api / executor |
+| `service-jwt-signing-key` | `SERVICE_JWT_PRIVATE_KEY_<kid>` (ES256) + public ConfigMap | hub-api |
+| `<fullname>-db-migrate-secret` | derived (`DATABASE_URL`, role passwords JSON, ...) re-applied every run | db-migrate |
+
+Placeholder handling: keys above holding `REPLACE_ME*` or an empty string are treated as unset and replaced; nothing else is.
+
+**Owner-supplied (never generated):** Discord / Twitch / YouTube app credentials and the Discord bot token (Secret `waddlebot-platform-credentials`, see `docs/PLATFORM_CREDENTIALS.md`); per-tenant own-app credentials (tenant settings / `platform_connections`); Google OAuth and SAML SSO provider credentials (`sso.google.existingSecret`, IdP metadata); PostHog API key; license server key; Odoo and OpenWhisk credentials; registry pull credentials (`imagePullSecrets`); Cloudflare / DigitalOcean / CI credentials; TLS certificates for beta/gamma/production (`global.*Tls`, cert-manager or ExternalSecret).
+
+**Seam for the platform secret store:** these class-A K8s Secrets stay generated here. hub-api escrows a sealed copy + keyed fingerprint into the `platform_secrets` table / S3 escrow at bootstrap and alerts on drift -- it never writes these Secrets (its ServiceAccount has no Secret write).
+
+**Existing alpha clusters:** the Secrets already hold real values, so the first upgrade is a no-op for values: the hook logs `unchanged`/`patched (annotations only)` per Secret. Verify with `kubectl logs job/<fullname>-provision-secrets` (a failed Job is kept; a successful one is deleted -- check `helm get hooks` or run with `--debug`).
 
 **Validating (no live cluster required):**
 ```bash
-helm lint k8s/helm/waddlebot
-helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-alpha.yaml --kube-version 1.30.0   # renders, keys generated
-helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-local.yaml --kube-version 1.30.0   # renders, keys generated
-helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-beta.yaml  --kube-version 1.30.0   # FAILS closed (no external secret / pre-existing Secret)
+helm lint k8s/helm/waddlebot -f k8s/helm/waddlebot/values-production.yaml
+helm template waddlebot k8s/helm/waddlebot -f k8s/helm/waddlebot/values-production.yaml --kube-version 1.30.0   # renders in every tier, no manual secrets
+helm template ... | python3 scripts/ci/check-helm-hook-dependency-ordering.py
+python3 -m pytest k8s/helm/waddlebot/tests/test_provision_secrets_script.py k8s/helm/waddlebot/tests/test_provision_secrets_render.py
 ```
-`lookup` always returns empty in `helm template`/`--dry-run` (no live API server to
-query), so every `helm template` run takes the "not found" branch -- this validates
-that generation renders correctly and that the fail-guard fires, but it does NOT by
-itself prove keep-on-second-run behavior against a real release (two `helm template`
-runs will in fact mint two *different* random secret values each time, since both
-independently take the "generate" branch -- that's expected, not a bug). Real
-keep/idempotency is exercised by `lookup` against the live cluster during an actual
-`helm install`/`helm upgrade`, i.e. it is proven at deploy time, not template time.
+
+## Self-provisioned platform keys (feature/helm-auto-provision-keys)
+
+Key-pair Secrets (`<fullname>-bundle-signing`: Ed25519, `service-jwt-signing-key`: ECDSA P-256 / ES256) are generated by
+`templates/auto-provisioned-keys-job.yaml`, an `openssl`-equipped pre-install/pre-upgrade hook Job (Sprig/Helm has no
+function to derive an Ed25519 public key). Same create-if-absent policy as above, in every tier (the former alpha/local-only
+gate is removed); `externalSecret: true` opts out. See "Secrets: generated on first run" for the symmetric secrets.
+
+**Public keys flow to consumers automatically, private keys never do:** the hook Job
+derives each public key from its Secret and publishes it to a plain
+ConfigMap (`<fullname>-bundle-signing-public`, `<fullname>-service-jwt-public` by
+default) containing ONLY public key material -- safe for any pod to mount via
+`envFrom`/`configMapKeyRef`. The private key Secret itself is read only by this hook
+Job (to derive the public key) and by hub-api (the sole signer/issuer). See `templates/
+auto-provisioned-keys-job-rbac.yaml` for the least-privilege Role backing this.
 
 ### Enterprise SSO key (`sso.*`, `templates/sso.yaml`)
 
 hub-api's enterprise SSO (SAML 2.0 / OIDC / Google; see `docs/SSO.md`) needs one more symmetric
 key, `SSO_ENCRYPTION_KEY` (64 lowercase hex chars) in Secret `waddlebot-sso-encryption-key`. It follows the
-same keep/generate mechanism as `tenantKek`/`oneTimeSecret` above -- `lookup` + `randBytes`, generated
-in `alpha`/`local` only, `helm.sh/resource-policy: keep`, never rotated by the chart -- with one
-deliberate difference: **a miss in beta/gamma/production does NOT fail the release.** SSO is
-entitlement-gated, so a deployment that never enables it must still install. hub-api consumes the key
+same runtime create-if-absent mechanism as `tenantKek`/`oneTimeSecret` above (generated in every tier by the
+provision-secrets hook, `helm.sh/resource-policy: keep`, never rotated) when `sso.enabled`. hub-api consumes the key
 through an `optional: true` `secretKeyRef` (one `include "waddlebot.sso.hubApiEnv"` in
 `templates/hub-api.yaml`; the env block lives in `templates/_sso.tpl`), and SSO fails loudly at request
-time (HTTP 503 `SSO_UNAVAILABLE`) until the Secret exists. Enable SSO outside alpha/local by
-pre-creating the Secret, or by pointing an ExternalSecret at it and setting
-`sso.encryptionKey.externalSecret=true`. Other values: `sso.allowedPrivateHosts` (operator allowlist for
+time (HTTP 503 `SSO_UNAVAILABLE`) if the Secret is missing. To manage the key yourself, point an
+ExternalSecret at it and set `sso.encryptionKey.externalSecret=true`. Other values: `sso.allowedPrivateHosts` (operator allowlist for
 on-prem IdPs behind the SSRF guard), `sso.stateTtlSeconds`, `sso.clockSkewSeconds`, and
 `sso.google.existingSecret` (optional shared Google OAuth client -- never inline the values).
 Tests: `tests/test_sso_render.py`.
@@ -738,7 +770,7 @@ kubectl exec -it -n waddlebot <pod-name> -- curl http://router:8000/health
 
 3. Port forward for direct access:
 ```bash
-kubectl port-forward -n waddlebot svc/waddlebot-hub 8060:8060
+kubectl port-forward -n waddlebot svc/waddlebot-hub-api-v3 8204:8204
 ```
 
 ### Storage issues
@@ -845,7 +877,7 @@ curl http://localhost:8000/metrics
 kubectl exec -it -n waddlebot <router-pod> -- curl http://localhost:8000/health
 
 # Hub health
-kubectl exec -it -n waddlebot <hub-pod> -- curl http://localhost:8060/health
+kubectl exec -it -n waddlebot <hub-pod> -- curl http://localhost:8204/health
 ```
 
 ## Production Best Practices
@@ -923,8 +955,8 @@ instantiating any component and fail closed with no configured key.
 every environment** -- `templates/auto-provisioned-keys-job.yaml`'s pre-install/
 pre-upgrade hook keeps the `<release>-bundle-signing` Secret and
 `<release>-bundle-signing-public` ConfigMap in sync on every `helm install`/
-`helm upgrade` (generating the Secret itself on a miss in alpha/local; requiring
-a pre-created Secret or `externalSecret: true` elsewhere), and
+`helm upgrade` (generating the Secret itself on a miss in every tier; `externalSecret: true`
+opts out), and
 `svc-bundles-executor` now source `BUNDLE_SIGNING_PUBLIC_KEYS`
 from that ConfigMap by default -- see "Self-provisioned platform keys" above.
 `make generate-bundle-signing-key` and
@@ -984,3 +1016,138 @@ The executor boot-pins `connectors/<p>/<digest>.wasm` plus a signed sidecar
   needs `BUNDLE_SIGNING_KEY_FILE` (0600 file with the base64 seed -- user-held), `BUNDLE_SIGNING_KEY_ID`,
   `S3_ENDPOINT_URL`, `S3_ACCESS_KEY_ID`, `S3_SECRET_ACCESS_KEY`.
 - Digests are build outputs and are not committed per environment. Verify with `make test-connector-publish`.
+
+## Bundle executors (`svc-bundles-executor`): pools, sizing, language classes
+
+The executor is the credential-less WASM sandbox host. It runs as **one StatefulSet per pool**
+(`pipeline.rustDataPlane.bundleExecutor`): pod name = `EXECUTOR_ID` (downward API), a port-less
+headless Service, `podManagementPolicy: Parallel`, and a per-pool PDB (`maxUnavailable: 1`).
+
+### Why executors are separate (exception, to be revisited)
+
+> **ARCHITECTURE EXCEPTION (approved 2026-11-14, revisit):** bundle executors run as separate
+> pods instead of inside the three primary workflow services (gateway/ingest, processor, action).
+> The owner has not settled whether this separation is right; it is an approved exception until
+> revisited.
+
+| Reason | What the separation buys |
+|---|---|
+| Isolation | Untrusted bundle code never shares a process, token mount or Secret with a stage. The pod has no `envFrom`, no API token, no listener (egress only to the stage host-API ports, the bundle bucket and DNS) and can optionally run in a Kata micro-VM (`bundleExecutor.runtimeClass`) without moving the stages. |
+| Scaling | Executors scale on their own signals (stage queue-wait p95, pool exhaustion) via KEDA or HPA-external, independent of ingest/process/action replica counts. Slot sharding needs stable pod names, hence a StatefulSet. |
+| Compile cost | Cranelift compiles are CPU/memory heavy and bursty (an alpha executor was OOMKilled at 16Gi). Keeping them out of the stages protects stage latency; AOT `.cwasm` artifacts make the cost a one-off. |
+
+Cost of the exception: an extra network hop (mTLS host-API round trip) on every bundle
+invocation, extra pods (and their idle requests), a second scaling/PDB surface, and the
+slot-ownership protocol between stages and executors.
+
+### Sizing policy (all environments)
+
+- **Requests are the bare minimum that schedules and runs the pod healthily** (500m CPU / 1Gi
+  memory; the idle footprint is not measured: dal2alpha has no metrics API). **Limits carry the headroom.**
+- `EXECUTOR_MEMORY_BUDGET_MB` (the LRU ceiling for resident compiled modules) is checked against
+  the memory **limit**, never the request: render fails unless `0 < budget < limit`. The request
+  is only checked to be `<=` the limit.
+- Overlays: dal2alpha 8 CPU / 24Gi limit per pod (budget 15360); beta/gamma/production 4 CPU /
+  8Gi (budget 5120); local alpha 4 CPU / 2560Mi (budget 1536).
+- Trade-off of low requests: pods are Burstable and the scheduler no longer reserves their
+  working set, so a node under memory pressure evicts them first once the LRU cache has grown
+  past the request. Executors therefore carry a soft `topologySpreadConstraints` on
+  `kubernetes.io/hostname` (`spreadAcrossNodes`, default true) so replicas land on different
+  nodes (a lost node must not take both owners of a slot).
+
+### Language classes (`languageClasses`, values-driven)
+
+```yaml
+pipeline:
+  rustDataPlane:
+    bundleExecutor:
+      languageClasses:
+        compiled: [rust, csharp, go]
+        scripted: [python, javascript, nodejs, typescript, ruby]
+      pools:
+        - { name: native, languageClass: compiled, stages: [svc-process-rust, svc-action-rust] }
+        - { name: script, languageClass: scripted, stages: [svc-process-rust, svc-action-rust] }
+```
+
+- Languages are lower-case tokens; **a language may appear in exactly one class** (render fails
+  otherwise). Adding a scripted language (for example `ruby`) is a values change only.
+- A pool has `languageClass: compiled | scripted | any` (default `any`). Each executor pod gets
+  `EXECUTOR_LANGUAGE_CLASS` and `EXECUTOR_LANGUAGES` (comma-separated; `any` = union of both
+  classes). The executor validates them at startup (a typo or an empty list for a partitioned
+  pool refuses to start) and reports a class-qualified `executor_id` (`compiled:<pod>` /
+  `scripted:<pod>`) in `hello`; the stages (`bundle_active_set::partition`) read the same table
+  from `EXECUTOR_LANGUAGE_CLASSES` (rendered from `languageClasses`) and only ever load/dispatch
+  a bundle onto an executor whose class accepts its `app_versions.language`. A bundle whose
+  language is in no class, or whose class has no live executor, is placed nowhere: the stage
+  logs ERROR and counts `executor_partition_unroutable_total` (never a fallback to the other
+  class). Nothing else changes for the default single `any` pool.
+- alpha and dal2alpha ship both pools (`native` compiled, `script` scripted) with their own
+  replicas, resources, PDB, `warmPoolSize` and memory budget; beta/gamma/production keep one `any`
+  pool until their values opt in.
+- **Warm instance pool** (`warmPoolSize`, `warmPoolMaxTotal`, `warmPoolIdleSecs`, per pool): the
+  executor keeps up to `warmPoolSize` one-shot pre-instantiated guests per digest so an invoke
+  skips instantiation. `0` = off (default). Each guest serves exactly one invocation, so no state
+  crosses tenants. Worst-case warm memory is `warmPoolMaxTotal x EXECUTOR_MEMORY_LIMIT_MB`; keep it
+  inside `limit - memoryBudgetMb` (a render test enforces this for the shipped envs). Kill switch:
+  `FLAG_WADDLES_DISABLE_EXECUTOR_WARM_POOL=true`.
+- **Drain concurrency** (`pipeline.rustDataPlane.drainConcurrency`, `drainOrdering`): svc-process and
+  svc-action handle up to N ordering groups of a drained batch at once. Bundle kv/db/economy have no
+  atomic compare-and-set, so the default key is the app scope `(tenant, community, app)`: a stateful
+  app is strictly serial per scope and concurrency exists only across scopes. `drainOrdering: actor`
+  additionally lets a provably stateless bundle (manifest declares only context/flags/log/clock/http/
+  relay) overlap per actor; stateful or unknown bundles stay scope-serial. `1` = the old serial loop.
+- **Coverage rule:** every stage must be served by exactly one pool **per language class**; an
+  `any` pool covers both classes. So the same stage may be listed by a compiled pool and a
+  scripted pool, but not by two pools of the same class, and never by none. The rule lives in one
+  helper (`waddlebot.executorPools`), the single place the partition layer extends.
+- No ingest, build or seeding workflow for any language is part of the chart; this only
+  classifies languages and renders the lists.
+
+### AOT precompile prerequisites the executor consumes
+
+Executors verify signed AOT `.cwasm` artifacts before loading them. Pods read
+`PRECOMPILE_SIGNING_PUBLIC_KEYS` from the ConfigMap `<fullname>-executor-precompile-signing-public`
+(`optional: false`: a missing ConfigMap fails the pod loudly with `CreateContainerConfigError`
+instead of running unverified) and `EXECUTOR_PRECOMPILED_PREFIX` (default `precompiled`) names the
+object prefix inside the bundle bucket. The ConfigMap is published by the key-provisioning hook;
+on alpha/local the keypair is generated, on beta/gamma/production the private-key Secret must
+be pre-created or delegated (`autoProvisionedKeys.precompileSigning.externalSecret: true`).
+## Kata isolation for the bundle executor (`bundleExecutor.runtimeClass`, default OFF)
+
+The `svc-bundles-executor` StatefulSet pools run untrusted WASM bundles and can optionally run
+inside Kata Containers micro-VMs. Every other data-plane pod stays on standard containers with
+enforced Tetragon exec allowlists (unchanged). **No values file enables Kata** (a test pins it).
+
+```yaml
+bundleExecutor:
+  runtimeClass: { enabled: true, name: kata }
+  nodeSelector: { katacontainers.io/kata-runtime: "true" }   # KVM-capable nodes
+```
+
+- Renders `runtimeClassName` on every executor pool only when enabled; enabled with an empty
+  `name` fails the render (never a silent fallback to runc; a missing RuntimeClass leaves the pod Pending).
+- `nodeSelector` / `affinity` apply to the executor only, and only when enabled (default empty).
+- `runtimeClass.resources` + `runtimeClass.memoryBudgetMb` replace the per-pool executor
+  resources and LRU budget when enabled; the budget is checked against the override's memory
+  LIMIT, so size both together per cluster. The RuntimeClass `overhead` (guest kernel + agent) is
+  added to the pod request by Kubernetes automatically; size resources for the workload only.
+- Tetragon: inside a Kata guest the host's Tetragon cannot see the executor's `execve` calls, so
+  a Kata executor **omits** its `TracingPolicyNamespaced` (the micro-VM boundary is the control)
+  and **keeps** its `CiliumNetworkPolicy`. Policies on all other data-plane pods are untouched.
+- Extension seam: the Kata switch is global to the executor. Per-pool Kata (for example only the
+  scripted pools) needs the executor Tetragon policy selected per pool label first; both are
+  localised to `waddlebot.executorEffective` and the `workloadPolicies` call in
+  `templates/svc-bundles-executor.yaml`.
+- Prerequisite: the `RuntimeClass` and KVM nodes are cluster-admin managed (not by this chart).
+## Helm matrix gate (`make test-helm-matrix`)
+
+One command runs what CI and review need for this chart: for every helm major present (v3 and v4,
+the chart must work with both) and every environment (alpha, dal2alpha, beta, gamma, production,
+local, ci) it runs `helm lint`, `helm template` and `kubeconform -strict`, then the render
+scripts in `scripts/ci/` (hook dependency ordering, placeholder credentials, manifest invariants,
+seeder Valkey TLS), `check_helm_hook_phases.py`, `check_wait_for_hub_api.py`, the executor render
+test and the chart tests. It prints counts, and zero items examined (no helm, no documents, no
+hooks, no passing tests) is a failure. `make test-helm-matrix-quick` skips the chart tests.
+Point it at specific binaries with `HELM3=` / `HELM4=`; keep renders and logs with
+`HELM_MATRIX_OUT=dir`. Beta/gamma/production/ci render with `--set global.deploymentTier=alpha`,
+as CI does, because those tiers need real secrets.

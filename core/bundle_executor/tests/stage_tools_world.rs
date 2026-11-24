@@ -17,7 +17,7 @@ const FIXTURE: &[u8] = include_bytes!("fixtures/stage_tools_fixture.wasm");
 
 fn manifest(world: WitWorld) -> VerifiedManifest {
     VerifiedManifest::new(
-        "waddles.test.stage-tools-fixture",
+        "penguintechinc.waddles.test-stage-tools-fixture",
         "sha256:aa",
         world,
         Default::default(),
@@ -62,7 +62,7 @@ use penguin_bundle_host::wire::{
     InvokeBody, LoadBody, LoadLimits, Message, SandboxInfo, ShutdownBody,
 };
 
-const APP: &str = "waddles.test.stage-tools-fixture";
+const APP: &str = "penguintechinc.waddles.test-stage-tools-fixture";
 
 /// Loads the fixture then runs one `ToolCall` per payload; returns each outcome.
 async fn tool_calls(
@@ -146,6 +146,7 @@ async fn tool_calls(
             runtime: "runc".into(),
             verified: false,
         },
+        executor_id: None,
     };
     let exec = tokio::spawn(run_connection(
         executor_io,

@@ -3,10 +3,9 @@
 # exported_tools (agreement check). Credentials: secret-ref names spotify.app / spotify.oauth,
 # host-resolved; never in the guest.
 schema_version: 2
-app_id: waddles.core.service.music-spotify
+app_id: penguintechinc.waddles.music-spotify
 name: Spotify Music Service Bundle (Rust)
-version: 1.0.0
-feature: waddles.core.service
+version: 1.0.3
 module: core
 provider: builtin
 author: github:penguintechinc

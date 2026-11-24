@@ -58,9 +58,17 @@ fn the_manifest_declares_exactly_the_moderation_host_ops_behind_the_moderate_sco
             .find(|t| t.name == name)
             .unwrap_or_else(|| panic!("{name} missing from the manifest"));
         let d = t.host_op.as_ref().expect("filtered to host-op tools");
-        assert_eq!((d.platform.as_str(), d.op.as_str()), ("twitch", op), "{name}");
+        assert_eq!(
+            (d.platform.as_str(), d.op.as_str()),
+            ("twitch", op),
+            "{name}"
+        );
         assert!(t.write, "{name} is a write tool");
-        assert_eq!(t.required_scope.as_deref(), Some("community:moderate"), "{name}");
+        assert_eq!(
+            t.required_scope.as_deref(),
+            Some("community:moderate"),
+            "{name}"
+        );
     }
 }
 
@@ -86,7 +94,10 @@ async fn ban_and_timeout_detokenize_host_side_and_carry_params_in_text() {
     .unwrap_or_else(|e| panic!("{e}"));
     let envs = c.relay_queue.envelopes();
     assert_eq!(envs.len(), 2);
-    assert_eq!((envs[0]["op"].as_str(), envs[0]["user_id"].as_str()), (Some("mod.ban"), Some("999000111")));
+    assert_eq!(
+        (envs[0]["op"].as_str(), envs[0]["user_id"].as_str()),
+        (Some("mod.ban"), Some("999000111"))
+    );
     assert_eq!(envs[0]["text"], r#"{"reason":"spam"}"#);
     assert_eq!(envs[1]["op"], "mod.timeout");
     let text: Value = serde_json::from_str(envs[1]["text"].as_str().unwrap_or_default())
@@ -94,16 +105,24 @@ async fn ban_and_timeout_detokenize_host_side_and_carry_params_in_text() {
     assert_eq!(text, json!({"duration": 60, "reason": "cool off"}));
     for e in &envs {
         assert_eq!(e["channel"], "#somechannel");
-        assert!(!e.to_string().contains(UUID_B), "the user UUID never leaves the host");
+        assert!(
+            !e.to_string().contains(UUID_B),
+            "the user UUID never leaves the host"
+        );
     }
 }
 
 #[tokio::test]
 async fn unban_and_delete_message_map_their_wire_fields() {
     let c = stage();
-    call(&c, "500", "twitch.moderation.unban", json!({"user": UUID_B}))
-        .await
-        .unwrap_or_else(|e| panic!("{e}"));
+    call(
+        &c,
+        "500",
+        "twitch.moderation.unban",
+        json!({"user": UUID_B}),
+    )
+    .await
+    .unwrap_or_else(|e| panic!("{e}"));
     call(
         &c,
         "500",
@@ -114,7 +133,10 @@ async fn unban_and_delete_message_map_their_wire_fields() {
     .unwrap_or_else(|e| panic!("{e}"));
     let envs = c.relay_queue.envelopes();
     assert_eq!(envs.len(), 2);
-    assert_eq!((envs[0]["op"].as_str(), envs[0]["user_id"].as_str()), (Some("mod.unban"), Some("999000111")));
+    assert_eq!(
+        (envs[0]["op"].as_str(), envs[0]["user_id"].as_str()),
+        (Some("mod.unban"), Some("999000111"))
+    );
     assert_eq!(envs[1]["op"], "chat.delete");
     assert_eq!(envs[1]["message_id"], "abc-123");
     assert!(envs[1].get("user_id").is_none(), "delete names no user");
@@ -127,12 +149,24 @@ async fn invalid_calls_are_refused_loudly_and_queue_nothing() {
         ("twitch.moderation.ban", json!({})),
         ("twitch.moderation.ban", json!({"user": "1234"})),
         // `duration` is not mapped on ban: an unmapped argument is refused, never ignored.
-        ("twitch.moderation.ban", json!({"user": UUID_B, "duration": 60})),
+        (
+            "twitch.moderation.ban",
+            json!({"user": UUID_B, "duration": 60}),
+        ),
         ("twitch.moderation.timeout", json!({"user": UUID_B})),
-        ("twitch.moderation.unban", json!({"user": UUID_B, "broadcaster_id": "9"})),
-        ("twitch.moderation.ban", json!({"user": UUID_B, "moderator_id": "9"})),
+        (
+            "twitch.moderation.unban",
+            json!({"user": UUID_B, "broadcaster_id": "9"}),
+        ),
+        (
+            "twitch.moderation.ban",
+            json!({"user": UUID_B, "moderator_id": "9"}),
+        ),
         ("twitch.moderation.delete_message", json!({})),
-        ("twitch.moderation.delete_message", json!({"message_id": "x", "channel": "c"})),
+        (
+            "twitch.moderation.delete_message",
+            json!({"message_id": "x", "channel": "c"}),
+        ),
         ("twitch.moderation.ban", json!([])),
     ];
     for (tool, args) in cases {
@@ -149,19 +183,29 @@ async fn only_a_verified_moderator_may_call_and_protected_targets_are_refused() 
     let err = call(&c, "501", "twitch.moderation.ban", json!({"user": UUID_A}))
         .await
         .unwrap_err();
-    assert!(err.starts_with("forbidden") && err.contains("scope_denied"), "{err}");
+    assert!(
+        err.starts_with("forbidden") && err.contains("scope_denied"),
+        "{err}"
+    );
     // 500 is a moderator, but UUID_C resolves to platform id 600, a community admin.
     for tool in ["twitch.moderation.ban", "twitch.moderation.unban"] {
         let args = json!({"user": UUID_C});
         let r = call(&c, "500", tool, args).await;
         if tool.ends_with("ban") && !tool.ends_with("unban") {
             let err = r.unwrap_err();
-            assert!(err.starts_with("forbidden") && err.contains("protected_target"), "{err}");
+            assert!(
+                err.starts_with("forbidden") && err.contains("protected_target"),
+                "{err}"
+            );
         } else {
             r.unwrap_or_else(|e| panic!("unban of a protected user is allowed: {e}"));
         }
     }
-    assert_eq!(c.relay_queue.envelopes().len(), 1, "only the unban was queued");
+    assert_eq!(
+        c.relay_queue.envelopes().len(),
+        1,
+        "only the unban was queued"
+    );
 }
 
 #[tokio::test]
@@ -175,7 +219,11 @@ async fn chat_clear_queues_a_parameterless_op_pinned_to_the_origin_channel() {
     assert_eq!(envs.len(), 1);
     let e = &envs[0];
     assert_eq!(
-        (e["op"].as_str(), e["platform"].as_str(), e["channel"].as_str()),
+        (
+            e["op"].as_str(),
+            e["platform"].as_str(),
+            e["channel"].as_str()
+        ),
         (Some("chat.clear"), Some("twitch"), Some("#somechannel"))
     );
     for k in ["user_id", "text", "message_id"] {
@@ -193,7 +241,9 @@ async fn chat_clear_queues_a_parameterless_op_pinned_to_the_origin_channel() {
         assert!(err.starts_with("invalid_args"), "{args}: {err}");
     }
     // A plain member lacks the moderate scope.
-    let err = call(&c, "501", "twitch.chat.clear", json!({})).await.unwrap_err();
+    let err = call(&c, "501", "twitch.chat.clear", json!({}))
+        .await
+        .unwrap_err();
     assert!(err.contains("scope_denied"), "{err}");
     assert_eq!(c.relay_queue.envelopes().len(), 1);
 }
@@ -211,7 +261,12 @@ async fn chat_clear_needs_the_service_bundles_own_clear_grant() {
         manifest_tools("twitch"),
         FakeRelayQueue::with_live_drain(),
     );
-    let err = call(&c, "500", "twitch.chat.clear", json!({})).await.unwrap_err();
-    assert!(err.starts_with("forbidden") && err.contains("scope_denied"), "{err}");
+    let err = call(&c, "500", "twitch.chat.clear", json!({}))
+        .await
+        .unwrap_err();
+    assert!(
+        err.starts_with("forbidden") && err.contains("scope_denied"),
+        "{err}"
+    );
     assert!(c.relay_queue.envelopes().is_empty());
 }

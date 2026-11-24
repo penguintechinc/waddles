@@ -39,14 +39,14 @@ use svc_ingest::connector_runtime::boot::{
 };
 use svc_ingest::connector_runtime::feed::{DesiredConnection, DynFeed, FeedError, TransportPlan};
 use svc_ingest::connector_runtime::scoped::ScopeLookup;
-use svc_ingest::identity_crypto::LocalDevDekProvider;
+use svc_ingest::identity_crypto::{ConfiguredDekProvider, LocalDevDekProvider};
 use svc_ingest::scope_resolver::{ResolvedScope, Unresolved};
 use tokio::sync::oneshot;
 use wiremock::matchers::method;
 use wiremock::{Mock, MockServer, Request, ResponseTemplate};
 
 const WASM: &[u8] = include_bytes!("../../bundle_executor/tests/fixtures/youtube_connector.wasm");
-const APP: &str = "waddles.core.service.youtube";
+const APP: &str = "penguintechinc.waddles.youtube";
 const CHAT_A: &str = "ChatA_ended-1";
 const CHAT_B: &str = "ChatB_live-2";
 const CHAT_DECOY: &str = "Decoy_other-3";
@@ -360,7 +360,7 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
     );
     let lease_conn = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let settings = RuntimeSettings {
@@ -393,7 +393,9 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
                 vec![7u8; 32],
             )])),
             active_kid: "k1".into(),
-            dek: Arc::new(LocalDevDekProvider::new("local", "YT_REDISC_KEK").unwrap()),
+            dek: Arc::new(ConfiguredDekProvider::local_dev(
+                LocalDevDekProvider::new("local", "YT_REDISC_KEK").unwrap(),
+            )),
             identity_metrics: prometheus::IntCounterVec::new(
                 prometheus::Opts::new("yt_rediscovery_identity_total", "test"),
                 &["tenant", "status"],
@@ -526,7 +528,7 @@ async fn an_ended_live_chat_waits_then_rediscovers_the_new_stream_of_the_same_ch
     exec_conn.abort();
     let mut kc = redis::Client::open(valkey.as_str())
         .unwrap()
-        .get_multiplexed_async_connection()
+        .get_connection_manager()
         .await
         .unwrap();
     let keys: Vec<String> = redis::cmd("KEYS")

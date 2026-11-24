@@ -24,7 +24,11 @@ header only, never decoded client-side; see `AuthContext.jsx`).
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
+import re
 import secrets
 import time
 from dataclasses import dataclass, field
@@ -35,18 +39,20 @@ from urllib.parse import urlencode
 import bcrypt
 import httpx
 from flask_core.auth import (
+    DEFAULT_TENANT_SLUG,
     JWT_CLOCK_SKEW_SECONDS,
     SCOPE_BUNDLES,
     create_jwt_token,
     verify_jwt_token,
 )
 from flask_core.token_revocation import get_token_revocation
+from opentelemetry import metrics
 from quart import has_request_context
 
 from config import HubAPIConfig
 from services import session_service
 from services.audit_http import record_session_issued, record_session_revoked
-from services.errors import bad_request, conflict, forbidden, not_found, unauthorized
+from services.errors import ApiError, bad_request, conflict, forbidden, not_found, unauthorized
 from services.global_identity import is_global_admin
 from services.session_cookie import issue_refresh_cookie
 
@@ -104,10 +110,157 @@ async def get_hub_settings_map(async_dal: Any, dal: Any) -> dict[str, str]:
     return {row.setting_key: row.setting_value for row in rows}
 
 
+_ALTCHA_MAX_NUMBER = 50_000
+_ALTCHA_TTL_SECONDS = 300
+_ALTCHA_EXPIRY_SLACK_SECONDS = 30
+_ALTCHA_MAC_PERSON = b"login-altcha-v1"
+_ALTCHA_USED_PREFIX = "hub_api:altcha:used:"
+_ALTCHA_RATE_PREFIX = "hub_api:altcha:rl:"
+ALTCHA_CHALLENGE_RATE_LIMIT = 20
+ALTCHA_CHALLENGE_RATE_WINDOW_SECONDS = 60
+#: `<24 hex>?expires=<digits>&` -- the `&` terminator makes the salt/number boundary
+#: unambiguous, so digits cannot be shifted from the number into the signed expiry.
+_ALTCHA_SALT_RE = re.compile(r"[0-9a-f]{24}\?expires=([0-9]{1,12})&", re.ASCII)
+_ALTCHA_HEX64_RE = re.compile(r"[0-9a-f]{64}", re.ASCII)
+
+
+def _no_altcha_store() -> Any:
+    """Default store provider before a blueprint registers one: no shared store (fail closed)."""
+    return None
+
+
+#: Resolver for the shared Valkey client; `blueprints/v1/auth.py` swaps in the real one.
+altcha_store_provider: Any = _no_altcha_store
+
+
+def altcha_unavailable() -> ApiError:
+    """Uniform fail-closed 503 for a missing secret or an unavailable shared store."""
+    return ApiError("CAPTCHA service unavailable", 503, "SERVICE_UNAVAILABLE")
+
+
+def altcha_signature(secret: str, salt: str, challenge: str) -> str:
+    """Keyed BLAKE2b-256 MAC over `salt` AND `challenge`, domain-separated for login ALTCHA.
+
+    Fields are length-prefixed so the (salt, challenge) split is unambiguous. The secret is
+    pre-hashed so any-length config values fit BLAKE2b's 64-byte key limit. Server-issued and
+    server-verified; the widget treats the signature as opaque.
+    """
+    key = hashlib.blake2b(secret.encode(), digest_size=32, person=_ALTCHA_MAC_PERSON).digest()
+    salt_b, challenge_b = salt.encode(), challenge.encode()
+    message = len(salt_b).to_bytes(4, "big") + salt_b + len(challenge_b).to_bytes(4, "big")
+    return hashlib.blake2b(
+        message + challenge_b, digest_size=32, key=key, person=_ALTCHA_MAC_PERSON
+    ).hexdigest()
+
+
+def create_altcha_challenge(
+    hmac_key: str,
+    *,
+    max_number: int = _ALTCHA_MAX_NUMBER,
+    ttl_seconds: int = _ALTCHA_TTL_SECONDS,
+) -> dict[str, Any]:
+    """Build an ALTCHA SHA-256 proof-of-work challenge signed with `hmac_key` (503 if unset)."""
+    if not hmac_key:
+        raise altcha_unavailable()
+    expires = int(time.time()) + ttl_seconds
+    salt = f"{secrets.token_hex(12)}?expires={expires}&"
+    secret_number = secrets.randbelow(max_number + 1)
+    challenge = hashlib.sha256(f"{salt}{secret_number}".encode()).hexdigest()
+    return {
+        "algorithm": "SHA-256",
+        "challenge": challenge,
+        "maxnumber": max_number,
+        "salt": salt,
+        "signature": altcha_signature(hmac_key, salt, challenge),
+    }
+
+
+async def enforce_altcha_rate_limit(store: Any, client_ip: str) -> None:
+    """Per-IP fixed-window limit on challenge issuance; 429 when exceeded, 503 on store error."""
+    key = f"{_ALTCHA_RATE_PREFIX}{client_ip}"
+    try:
+        async with store.pipeline(transaction=True) as pipe:
+            pipe.incr(key)
+            pipe.expire(key, ALTCHA_CHALLENGE_RATE_WINDOW_SECONDS, nx=True)
+            results = await pipe.execute()
+    except Exception as exc:
+        logger.error("altcha rate-limit store failure: %s", type(exc).__name__)
+        raise altcha_unavailable() from exc
+    if int(results[0]) > ALTCHA_CHALLENGE_RATE_LIMIT:
+        raise ApiError("Rate limit exceeded. Please try again later.", 429, "RATE_LIMIT_EXCEEDED")
+
+
+def _decode_altcha_payload(payload_b64: str) -> dict[str, Any] | None:
+    """Decode the widget payload to a dict, or None if it is not well-formed."""
+    try:
+        data = json.loads(base64.b64decode(payload_b64, validate=True).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError):
+        return None
+    return data if isinstance(data, dict) else None
+
+
+async def verify_altcha_payload(payload_b64: str, hmac_key: str, store: Any) -> bool:
+    """Verify and consume (single-use) a base64 ALTCHA widget payload.
+
+    Returns False for any invalid payload. Raises a 503 `ApiError` when the dedicated secret is
+    unset or the shared single-use store errors (fail closed, never open).
+    """
+    if not hmac_key:
+        raise altcha_unavailable()
+    if not payload_b64:
+        return False
+    data = _decode_altcha_payload(payload_b64)
+    if data is None:
+        return False
+
+    challenge = data.get("challenge")
+    salt = data.get("salt")
+    signature = data.get("signature")
+    number = data.get("number")
+    if (
+        data.get("algorithm") != "SHA-256"
+        or not isinstance(challenge, str)
+        or not isinstance(salt, str)
+        or not isinstance(signature, str)
+        or isinstance(number, bool)
+        or not isinstance(number, int)
+        or not 0 <= number <= _ALTCHA_MAX_NUMBER
+        or not _ALTCHA_HEX64_RE.fullmatch(challenge)
+    ):
+        return False
+
+    salt_match = _ALTCHA_SALT_RE.fullmatch(salt)
+    if salt_match is None:
+        return False
+    now = int(time.time())
+    expires = int(salt_match.group(1))
+    if not now <= expires <= now + _ALTCHA_TTL_SECONDS + _ALTCHA_EXPIRY_SLACK_SECONDS:
+        return False
+
+    expected = altcha_signature(hmac_key, salt, challenge)
+    if not secrets.compare_digest(signature.encode(), expected.encode()):
+        return False
+    computed = hashlib.sha256(f"{salt}{number}".encode()).hexdigest()
+    if not secrets.compare_digest(computed.encode(), challenge.encode()):
+        return False
+
+    ttl = expires - now + _ALTCHA_EXPIRY_SLACK_SECONDS
+    try:
+        first_use = await store.set(f"{_ALTCHA_USED_PREFIX}{challenge}", "1", nx=True, ex=ttl)
+    except Exception as exc:
+        logger.error("altcha single-use store failure: %s", type(exc).__name__)
+        raise altcha_unavailable() from exc
+    return bool(first_use)
+
+
 async def validate_captcha(
-    provider: str, secret_key: str, token: str, remote_ip: str | None
+    provider: str, secret_key: str, token: str, remote_ip: str | None, store: Any = None
 ) -> bool:
-    """Validate a CAPTCHA token against Turnstile or reCAPTCHA. Fails closed on any error."""
+    """Validate a CAPTCHA token (ALTCHA, Turnstile, or reCAPTCHA). Fails closed on any error."""
+    if provider == "altcha":
+        if store is None:
+            raise altcha_unavailable()
+        return await verify_altcha_payload(token, secret_key, store)
     url = (
         "https://challenges.cloudflare.com/turnstile/v0/siteverify"
         if provider == "turnstile"
@@ -199,8 +352,14 @@ def _mint_access_token(
     tenant: str,
     session_id: int | None,
     issued_at: int | None = None,
+    amr: list[str] | None = None,
+    auth_time: int | None = None,
 ) -> str:
-    """Mint the short-lived (15 min) access JWT: `jti` always, `sid` when in a session."""
+    """Mint the short-lived (15 min) access JWT: `jti` always, `sid` when in a session.
+
+    `amr` / `auth_time` (OIDC) describe the authentication EVENT that opened this token; a
+    refresh re-mints without them, so a step-up never outlives its own 5-minute window.
+    """
     # flask_core is `follow_imports = "skip"` -- create_jwt_token() is typed Any from mypy's
     # perspective; cast to the real, stable return type.
     return cast(
@@ -210,11 +369,12 @@ def _mint_access_token(
             username=(user.username if user is not None else username_override) or "",
             email=(user.email if user is not None else None) or "",
             roles=roles,
-            secret_key=cfg.secret_key,
             tenant=tenant,
             scope=" ".join(sorted(scopes)),
             session_id=str(session_id) if session_id is not None else None,
             issued_at=issued_at,
+            amr=amr,
+            auth_time=auth_time,
         ),
     )
 
@@ -230,6 +390,7 @@ async def create_session_token(
     tenant_slug: str | None = None,
     requires_oauth_link: bool = False,
     auth_method: str = "unspecified",
+    amr: list[str] | None = None,
 ) -> str:
     """Open a login session and mint its first access JWT (`flask_core.auth.create_jwt_token`).
 
@@ -253,7 +414,7 @@ async def create_session_token(
     session the audit log cannot account for is never issued (entitled tenants only).
     """
     roles, scopes = await _scopes_for(async_dal, dal, user=user, tenant_id=tenant_id)
-    resolved_tenant = tenant_slug or "default"
+    resolved_tenant = tenant_slug or DEFAULT_TENANT_SLUG
 
     await record_session_issued(
         user_id=user.id if user is not None else None,
@@ -289,6 +450,8 @@ async def create_session_token(
         tenant=resolved_tenant,
         session_id=session_id,
         issued_at=await _issued_at_after_revocations(user),
+        amr=amr,
+        auth_time=int(time.time()) if amr is not None else None,
     )
 
 
@@ -338,6 +501,7 @@ async def register(
     username: str | None,
     captcha_token: str | None,
     remote_ip: str | None,
+    altcha_store: Any = None,
 ) -> tuple[bool, LoginResult | None]:
     """Register a local user. Returns `(requires_verification, result)`."""
     if not email or not password:
@@ -349,10 +513,18 @@ async def register(
 
     captcha_provider = settings.get("captcha_provider", "none")
     captcha_secret = settings.get("captcha_secret_key", "")
-    if captcha_provider != "none" and captcha_secret:
+    if captcha_provider == "altcha" or (captcha_provider != "none" and captcha_secret):
+        # ALTCHA uses the DEDICATED `ALTCHA_HMAC_KEY` (never hub_settings / the app secret).
+        secret_for_check = cfg.altcha_hmac_key if captcha_provider == "altcha" else captcha_secret
         if not captcha_token:
             raise bad_request("CAPTCHA verification required")
-        if not await validate_captcha(captcha_provider, captcha_secret, captcha_token, remote_ip):
+        if not await validate_captcha(
+            captcha_provider,
+            secret_for_check,
+            captcha_token,
+            remote_ip,
+            altcha_store if altcha_store is not None else altcha_store_provider(),
+        ):
             raise bad_request("CAPTCHA verification failed")
 
     allowed_domains = [
@@ -488,7 +660,7 @@ async def login(
     *,
     email: str,
     password: str,
-    tenant_slug: str = "default",
+    tenant_slug: str = DEFAULT_TENANT_SLUG,
 ) -> LoginResult:
     """Login."""
     if not email or not password:
@@ -538,6 +710,7 @@ async def login(
         tenant_id=tenant_id,
         tenant_slug=tenant_slug,
         auth_method="password",
+        amr=["pwd"],
     )
     return LoginResult(
         token=token,
@@ -738,7 +911,7 @@ async def logout(
         tenant_slug = parsed.tenant_slug
 
     if access_token:
-        payload = verify_jwt_token(access_token, cfg.secret_key)
+        payload = verify_jwt_token(access_token)
         if payload is not None:
             jti = payload.get("jti")
             if isinstance(jti, str):
@@ -781,6 +954,13 @@ async def logout_all(
     return outcome
 
 
+def _require_public_id(value: Any) -> str:
+    """`communities.public_id` as text; NOT NULL since alembic 0084, so absent is a bug."""
+    if not value:
+        raise RuntimeError("communities row has no public_id (alembic 0084 not applied?)")
+    return str(value)
+
+
 @dataclass(slots=True, frozen=True)
 class CommunityMembership:
     """Community membership."""
@@ -789,6 +969,9 @@ class CommunityMembership:
     name: str
     display_name: str
     role: str
+    license_tier: int = 1
+    #: `communities.public_id` UUID: the only community id that crosses the API boundary.
+    public_id: str = ""
 
 
 @dataclass(slots=True, frozen=True)
@@ -814,6 +997,70 @@ class CurrentUserResult:
     has_password: bool
     linked_platforms: list[LinkedIdentitySummary]
     communities: list[CommunityMembership]
+
+
+_TIER_LOOKUP_CHUNK = 500
+_TIER_LOOKUP_FAILED = metrics.get_meter("waddles.hub_api.auth").create_counter(
+    "waddles.auth.me.tier_lookup_failed",
+    unit="1",
+    description="/auth/me community-tier lookups that failed (display falls back to Free).",
+)
+
+
+#: Community tier codes `/auth/me` reports: 1 Free, 2 Premium (anything else displays as Free).
+_TIER_CODE_FREE = 1
+_KNOWN_TIER_CODES = frozenset({1, 2})
+
+
+async def _community_tier_codes(
+    async_dal: Any,
+    dal: Any,
+    community_ids: list[int],
+    *,
+    tenant_by_community: dict[int, int] | None = None,
+) -> dict[int, int]:
+    """Map community id -> active allocated tier code (1 Free / 2 Premium), chunked + batched.
+
+    Callers pass only the CALLER'S OWN community ids (their memberships). When
+    `tenant_by_community` is given, an allocation whose `tenant_id` differs from the community's
+    own tenant is ignored (same rule as `resolve_effective_tier`). Communities with no active
+    allocation are absent (callers treat that as Free = 1); any other stored code is
+    coerced to 1 with a DEBUG log. Fails safe for display: any lookup
+    error logs ERROR (exception type only), bumps `waddles_auth_me_tier_lookup_failed_total` and
+    returns ``{}`` so ``/auth/me`` never fails on it -- never silently.
+    """
+    if not community_ids:
+        return {}
+    try:
+        from services.schema import bind_community_tier_tables  # noqa: PLC0415 - avoid import cycle
+
+        bind_community_tier_tables(dal)
+        t = dal.community_tier_allocations
+        out: dict[int, int] = {}
+        for start in range(0, len(community_ids), _TIER_LOOKUP_CHUNK):
+            chunk = community_ids[start : start + _TIER_LOOKUP_CHUNK]
+            rows = await async_dal.select_async(
+                dal(t.community_id.belongs(chunk) & (t.released_at == None)),  # noqa: E711
+                t.community_id,
+                t.tier_code,
+                t.tenant_id,
+            )
+            for r in rows:
+                cid = int(r.community_id)
+                if tenant_by_community is not None and tenant_by_community.get(cid) != int(
+                    r.tenant_id
+                ):
+                    continue
+                code = int(r.tier_code)
+                if code not in _KNOWN_TIER_CODES:
+                    logger.debug("community_tier_code_unknown community_id=%d code=%d", cid, code)
+                    code = _TIER_CODE_FREE
+                out[cid] = code
+        return out
+    except Exception as exc:  # noqa: BLE001 - display hint only; never fail /auth/me
+        logger.error("community_tier_lookup_failed error_type=%s", type(exc).__name__)
+        _TIER_LOOKUP_FAILED.add(1, {"error_type": type(exc).__name__})
+        return {}
 
 
 async def get_current_user(
@@ -846,9 +1093,21 @@ async def get_current_user(
             & (dal.communities.is_active == True)  # noqa: E712 - pydal Field comparison
         ),
         dal.communities.id,
+        dal.communities.public_id,
         dal.communities.name,
         dal.communities.display_name,
+        dal.communities.tenant_id,
         dal.community_members.role,
+    )
+    tiers = await _community_tier_codes(
+        async_dal,
+        dal,
+        [int(r.communities.id) for r in community_rows],
+        tenant_by_community={
+            int(r.communities.id): int(r.communities.tenant_id)
+            for r in community_rows
+            if r.communities.tenant_id is not None
+        },
     )
     communities = [
         CommunityMembership(
@@ -856,6 +1115,8 @@ async def get_current_user(
             name=r.communities.name,
             display_name=r.communities.display_name or r.communities.name,
             role=r.community_members.role,
+            license_tier=tiers.get(int(r.communities.id), 1),
+            public_id=_require_public_id(r.communities.public_id),
         )
         for r in community_rows
     ]

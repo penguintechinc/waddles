@@ -31,6 +31,8 @@ from unittest.mock import patch
 import psycopg2
 import psycopg2.extensions
 import pytest
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from pg_docker import DOCKER_AVAILABLE, PgTestDatabase, _free_port, _wait_ready
 
 requires_docker = pytest.mark.skipif(
@@ -55,6 +57,22 @@ def _load_migration() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _ancestor_revision_paths() -> list[Path]:
+    """Files of every revision strictly before 0047 in the real chain (0047 excluded).
+
+    Walked through Alembic's own ScriptDirectory so the set tracks re-pointed
+    `down_revision`s instead of file-name ordering.
+    """
+    cfg = Config(str(_REPO_ROOT / "alembic.ini"))
+    cfg.set_main_option("script_location", str(_ALEMBIC_DIR))
+    script = ScriptDirectory.from_config(cfg)
+    return [
+        Path(rev.path)
+        for rev in script.iterate_revisions("0047_builtin_handler_paths", "base")
+        if rev.revision != "0047_builtin_handler_paths" and rev.path is not None
+    ]
 
 
 @pytest.fixture
@@ -91,13 +109,8 @@ class TestMigrationMetadata:
 
 
 class TestModuleAllowlist:
-    def test_every_allowlisted_module_ships_under_builtin_handlers(
-        self, migration: ModuleType
-    ) -> None:
-        """The "coded but not routable" guard: a stale name would rewrite to a dead entrypoint."""
-        shipped = {p.stem for d in _HANDLER_DIRS.values() for p in d.glob("*.py")}
-        missing = sorted(set(migration._MODULES) - shipped)
-        assert not missing, f"allowlisted modules not under any builtin_handlers/: {missing}"
+    def test_allowlist_has_no_duplicates(self, migration: ModuleType) -> None:
+        """The on-disk "ships under builtin_handlers/" check was retired with that Python data plane (08e67f47f)."""
         assert len(migration._MODULES) == len(set(migration._MODULES)) == 45
 
     def test_old_bundles_directories_no_longer_exist(self) -> None:
@@ -112,15 +125,19 @@ class TestModuleAllowlist:
     def test_every_historically_seeded_entrypoint_module_is_covered(
         self, migration: ModuleType
     ) -> None:
-        """Every `bundles.<module>:` any earlier revision/legacy SQL seeded must be rewritten."""
+        """Every `bundles.<module>:` an EARLIER revision/legacy SQL seeded must be rewritten.
+
+        0047 only ever sees rows written before it runs, so the evidence set is its ancestor
+        revisions (walked from the real chain) plus the legacy SQL baseline -- not later
+        revisions, whose `bundles.<x>:<y>` text can be unrelated (e.g. the OIDC scope
+        `bundles.admin:moderate` in 0117). Later revisions are guarded separately below.
+        """
         pattern = re.compile(r"\bbundles\.([a-z][a-z0-9_]*):")
         historical: set[str] = set()
         files_scanned = 0
-        sources = [
-            p
-            for p in sorted(_VERSIONS.glob("*.py")) + sorted(_LEGACY_SQL_DIR.glob("*.sql"))
-            if p.name != "0047_builtin_handler_paths.py"
-        ]
+        ancestors = _ancestor_revision_paths()
+        assert len(ancestors) >= 40, f"suspiciously short 0047 ancestry: {len(ancestors)}"
+        sources = sorted(ancestors) + sorted(_LEGACY_SQL_DIR.glob("*.sql"))
         for path in sources:
             files_scanned += 1
             historical.update(pattern.findall(path.read_text(encoding="utf-8")))
@@ -129,6 +146,19 @@ class TestModuleAllowlist:
         assert len(historical) >= 20, f"suspiciously few historical entrypoints: {historical}"
         uncovered = sorted(historical - set(migration._MODULES))
         assert not uncovered, f"historical entrypoint modules the rewrite would miss: {uncovered}"
+
+    def test_no_later_revision_seeds_an_old_form_entrypoint(self) -> None:
+        """A revision after 0047 seeding `"entrypoint": "bundles.<m>:"` would never be rewritten."""
+        ancestors = {p.resolve() for p in _ancestor_revision_paths()}
+        later = [
+            p
+            for p in sorted(_VERSIONS.glob("*.py"))
+            if p.name != "__init__.py" and p.resolve() not in ancestors
+        ]
+        assert len(later) >= 1, "no post-0047 revisions found; scanner pointed at the wrong root"
+        pattern = re.compile(r"entrypoint[^\n]{0,8}\bbundles\.[a-z][a-z0-9_]*:")
+        offenders = [p.name for p in later if pattern.search(p.read_text(encoding="utf-8"))]
+        assert not offenders, f"post-0047 revisions seeding old-form entrypoints: {offenders}"
 
 
 class TestEmittedSql:
@@ -171,7 +201,7 @@ CREATE TABLE app_catalog (
 _ROWS: dict[str, dict | None] = {
     # Fully populated built-in app: ingest + process + action, with sibling keys that
     # must survive byte-for-byte.
-    "waddles.bot.twitch.default": {
+    "penguintechinc.waddles.twitch-pipeline": {
         "ingest": {
             "entrypoint": "bundles.twitch_ingest:normalize",
             "consumes": ["twitch.message"],
@@ -186,27 +216,27 @@ _ROWS: dict[str, dict | None] = {
         },
     },
     # A module this migration does not own (e.g. a WASI bundle's own `bundles` package).
-    "waddles.core.example.foreign": {
+    "penguintechinc.waddles.foreign": {
         "process": {"entrypoint": "bundles.not_a_builtin_module:transform"},
     },
     # A look-alike that merely starts with an owned name: the trailing `:` must pin it.
-    "waddles.core.example.lookalike": {
+    "penguintechinc.waddles.lookalike": {
         "process": {"entrypoint": "bundles.bot_process_v2:transform"},
     },
     # Already in the new form (e.g. seeded by a post-rename migration): must be a no-op.
-    "waddles.bot.discord.already_new": {
+    "penguintechinc.waddles.bot-discord-already-new": {
         "ingest": {"entrypoint": "builtin_handlers.discord_ingest:normalize"},
     },
     # Presentation-style stage with no script entrypoint, JSON-null entrypoint, empty and NULL.
-    "waddles.core.example.presentation": {"presentation": {"html_entrypoint": "overlay.html"}},
-    "waddles.core.example.null_entry": {"process": {"entrypoint": None}},
-    "waddles.core.example.empty": {},
-    "waddles.core.example.null_stages": None,
+    "penguintechinc.waddles.presentation": {"presentation": {"html_entrypoint": "overlay.html"}},
+    "penguintechinc.waddles.null-entry": {"process": {"entrypoint": None}},
+    "penguintechinc.waddles.empty": {},
+    "penguintechinc.waddles.null-stages": None,
 }
 
 _EXPECTED_AFTER_UPGRADE = {
     **_ROWS,
-    "waddles.bot.twitch.default": {
+    "penguintechinc.waddles.twitch-pipeline": {
         "ingest": {
             "entrypoint": "builtin_handlers.twitch_ingest:normalize",
             "consumes": ["twitch.message"],
@@ -321,7 +351,7 @@ class TestAgainstRealPostgres:
         # module in the new form); every other row must round-trip exactly.
         expected = {
             **_ROWS,
-            "waddles.bot.discord.already_new": {
+            "penguintechinc.waddles.bot-discord-already-new": {
                 "ingest": {"entrypoint": "bundles.discord_ingest:normalize"}
             },
         }
@@ -340,14 +370,14 @@ class TestAgainstRealPostgres:
                 }
                 cur.execute(
                     "INSERT INTO app_catalog (app_id, stages) VALUES (%s, %s::jsonb)",
-                    (f"waddles.core.example.m{index}", json.dumps(stages)),
+                    (f"penguintechinc.waddles.m{index}", json.dumps(stages)),
                 )
         rows_before = _snapshot(conn)
         assert len(rows_before) == len(migration._MODULES)
         _run(conn, "upgrade", migration)
         rewritten = 0
         for index, module in enumerate(migration._MODULES):
-            stages = _snapshot(conn)[f"waddles.core.example.m{index}"]
+            stages = _snapshot(conn)[f"penguintechinc.waddles.m{index}"]
             assert stages is not None
             for stage in ("ingest", "process", "action"):
                 assert stages[stage]["entrypoint"] == f"builtin_handlers.{module}:fn"

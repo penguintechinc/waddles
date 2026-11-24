@@ -221,7 +221,7 @@ def _transform(event: PlatformEvent, community: str | None = COMMUNITY) -> Platf
 
     async def go() -> PlatformEvent | None:
         with bundle_context(
-            tenant="t", community=community, app_id="waddles.core.example.blackjack"
+            tenant="t", community=community, app_id="penguintechinc.waddles.blackjack"
         ):
             return await transform(event)
 
@@ -758,7 +758,7 @@ def _gather(*events: PlatformEvent) -> list[PlatformEvent | None]:
 
     async def go() -> list[PlatformEvent | None]:
         with bundle_context(
-            tenant="t", community=COMMUNITY, app_id="waddles.core.example.blackjack"
+            tenant="t", community=COMMUNITY, app_id="penguintechinc.waddles.blackjack"
         ):
             return list(await asyncio.gather(*(transform(e) for e in events)))
 
@@ -1174,7 +1174,7 @@ def _envelope(platform: str = "twitch", **payload: Any) -> StageEnvelope:
     return StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.blackjack",
+        app_id="penguintechinc.waddles.blackjack",
         stage="action",
         event=PlatformEvent(
             platform=platform,
@@ -1216,7 +1216,7 @@ def test_end_to_end_transform_then_dispatch(host: _Host, monkeypatch: pytest.Mon
     env = StageEnvelope(
         tenant="t",
         community=COMMUNITY,
-        app_id="waddles.core.example.blackjack",
+        app_id="penguintechinc.waddles.blackjack",
         stage="action",
         event=out,
         ts="x",

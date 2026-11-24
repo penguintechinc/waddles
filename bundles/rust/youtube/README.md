@@ -1,4 +1,4 @@
-# waddles.core.service.youtube -- YouTube platform connector (Rust, `connector-tools`)
+# penguintechinc.waddles.youtube -- YouTube platform connector (Rust, `connector-tools`)
 
 P6b Task 3. A `kind: service` connector service bundle: the **host** owns the poll transport, SSRF pinning and
 credentials; this component owns the **YouTube knowledge** -- frame parsing, normalization, page-token /

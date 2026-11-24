@@ -116,9 +116,7 @@ pub fn try_start_twitch_sessions(
     config: &Config,
     metrics: Arc<telemetry::IngestMetrics>,
     readiness: Arc<ReceiverReadiness>,
-    dek_provider: crate::identity_crypto::ConfiguredDekProvider<
-        crate::identity_crypto::UnimplementedMachineJwtProvider,
-    >,
+    dek_provider: crate::identity_crypto::ConfiguredDekProvider,
 ) -> anyhow::Result<()> {
     let cli = &config.cli;
     validate_dynamic_prereqs(cli, publish::scope_resolver_installed())?;
@@ -174,7 +172,7 @@ pub fn try_start_twitch_sessions(
             );
             std::process::exit(1);
         };
-        let conn = match redis_client.get_multiplexed_async_connection().await {
+        let conn = match redis_client.get_connection_manager().await {
             Ok(conn) => conn,
             Err(err) => {
                 readiness.twitch_irc.set_ready(false);

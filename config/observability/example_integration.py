@@ -13,11 +13,9 @@ for any Waddles module.
 
 import os
 import time
+from opentelemetry import propagate, trace
 from quart import Quart, request, jsonify
 from flask_core import (
-    # Tracing
-    init_tracing,
-    get_tracing_manager,
     # Correlation
     init_correlation,
     get_correlation_manager,
@@ -54,13 +52,9 @@ def init_observability():
     """
     print(f"Initializing observability for {MODULE_NAME}:{VERSION}")
 
-    # 1. Initialize Tracing
-    tracing = init_tracing(
-        service_name=MODULE_NAME,
-        service_version=VERSION,
-        exporter_type=os.getenv('TRACING_EXPORTER', 'console')
-    )
-    print(f"✓ Tracing initialized with {os.getenv('TRACING_EXPORTER', 'console')} exporter")
+    # 1. Tracing: the OTel SDK/exporters are configured only from the standard OTEL_* env
+    #    (OTEL_EXPORTER_OTLP_ENDPOINT, OTEL_SERVICE_NAME, ...); see hub_api/telemetry.py.
+    #    flask_core no longer ships a tracing manager.
 
     # 2. Initialize Correlation IDs
     correlation = init_correlation(app)
@@ -84,15 +78,11 @@ def init_observability():
     setup_correlation_logging(correlation)
     print("✓ Correlation logging integrated")
 
-    # 6. Instrument Flask app for automatic tracing
-    tracing.instrument_app(app)
-    print("✓ Flask app instrumented for tracing")
-
-    return tracing, correlation, metrics, logger
+    return correlation, metrics, logger
 
 
 # Initialize observability
-tracing, correlation, metrics, logger = init_observability()
+correlation, metrics, logger = init_observability()
 
 
 # Register health/metrics endpoints
@@ -160,11 +150,10 @@ async def traced_endpoint():
     data = await request.get_json()
     command = data.get('command', 'unknown')
 
-    # Get tracing manager
-    tracer = get_tracing_manager()
+    tracer = trace.get_tracer(__name__)
 
     # Create manual span for specific operation
-    with tracer.start_span("process_command") as span:
+    with tracer.start_as_current_span("process_command") as span:
         # Add custom attributes to span
         span.set_attribute("command", command)
         span.set_attribute("platform", "http")
@@ -174,7 +163,7 @@ async def traced_endpoint():
         time.sleep(0.1)
 
         # Add event to span
-        tracer.add_event("command_validated", {
+        span.add_event("command_validated", {
             "command": command,
             "valid": True
         })
@@ -253,12 +242,12 @@ async def service_call_endpoint():
     data = await request.get_json()
     target_service = data.get('target_service', 'http://router-service:8000')
 
-    tracer = get_tracing_manager()
+    tracer = trace.get_tracer(__name__)
     corr_mgr = get_correlation_manager()
     metrics_mgr = get_metrics_manager()
 
     # Create span for service call
-    with tracer.start_span(
+    with tracer.start_as_current_span(
         "call_downstream_service",
         kind=trace.SpanKind.CLIENT
     ) as span:
@@ -269,7 +258,7 @@ async def service_call_endpoint():
         }
 
         # Inject trace context
-        tracer.inject_context(headers)
+        propagate.inject(headers)
 
         # Inject correlation IDs
         corr_mgr.inject_into_headers(headers)
@@ -367,9 +356,9 @@ async def slow_endpoint():
     Slow endpoint for testing latency tracking.
     Useful for testing histogram metrics and trace analysis.
     """
-    tracer = get_tracing_manager()
+    tracer = trace.get_tracer(__name__)
 
-    with tracer.start_span("slow_operation") as span:
+    with tracer.start_as_current_span("slow_operation") as span:
         # Simulate slow operation
         delay = float(request.args.get('delay', 2.0))
         span.set_attribute("delay_seconds", delay)
@@ -399,9 +388,9 @@ async def database_endpoint():
     Endpoint demonstrating database operation tracking.
     Shows how to track database queries in metrics.
     """
-    tracer = get_tracing_manager()
+    tracer = trace.get_tracer(__name__)
 
-    with tracer.start_span("database_query") as span:
+    with tracer.start_as_current_span("database_query") as span:
         # Simulate database query
         start_time = time.time()
 
@@ -464,11 +453,7 @@ async def shutdown():
     """Application shutdown - cleanup observability."""
     logger.system("Application shutting down")
 
-    # Shutdown tracing (flush pending spans)
-    tracer = get_tracing_manager()
-    if tracer:
-        tracer.shutdown()
-        logger.system("Tracing shut down")
+    # Tracing providers are flushed by the service's own telemetry shutdown (see hub_api/telemetry.py)
 
 
 if __name__ == '__main__':

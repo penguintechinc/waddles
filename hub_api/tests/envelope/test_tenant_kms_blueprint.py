@@ -82,6 +82,7 @@ async def app(bundle_install_db: Any, install_dal: Any, harness: Any) -> Quart:
     quart_app.config["install_dal"] = install_dal
     quart_app.config["envelope_runtime"] = EnvelopeRuntime(
         service=harness.service,
+        stream_service=harness.service,
         providers=harness.providers,
         enabled_providers=(PROVIDER_AWS, PROVIDER_AZURE, PROVIDER_GCP),
         platform_principals={

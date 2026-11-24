@@ -33,7 +33,7 @@ describe('ReputationLeaderboardTab', () => {
         ],
       },
     }));
-    renderWithProviders(<ReputationLeaderboardTab communityId={5} />);
+    renderWithProviders(<ReputationLeaderboardTab communityId={'00000005-0000-4000-8000-000000000000'} />);
     expect(await screen.findByText('Legend')).toBeInTheDocument();
     for (const tier of ['Trusted', 'Fair', 'Newcomer']) expect(screen.getByText(tier)).toBeInTheDocument();
     expect(screen.getByText('#4')).toBeInTheDocument();
@@ -42,7 +42,7 @@ describe('ReputationLeaderboardTab', () => {
 
 describe('MyCommunityCard', () => {
   it('renders from membership alone, and shows platform/logo/description when details exist', () => {
-    const community = { id: 3, name: 'n', displayName: 'Name', role: 'vip' };
+    const community = { id: '00000003-0000-4000-8000-000000000000', name: 'n', displayName: 'Name', role: 'vip' };
     const { rerender } = render(<MemoryRouter><MyCommunityCard community={community} /></MemoryRouter>);
     expect(screen.getByText('Name')).toBeInTheDocument();
     expect(screen.queryByText(/members$/)).not.toBeInTheDocument();
@@ -50,7 +50,7 @@ describe('MyCommunityCard', () => {
       <MemoryRouter>
         <MyCommunityCard
           community={community}
-          details={{ id: 3, name: 'n', displayName: 'Name', description: null, logoUrl: 'https://x/l.png', bannerUrl: null, platform: 'discord', memberCount: 2, joinMode: null, createdAt: null }}
+          details={{ id: '00000003-0000-4000-8000-000000000000', name: 'n', displayName: 'Name', description: null, logoUrl: 'https://x/l.png', bannerUrl: null, platform: 'discord', memberCount: 2, joinMode: null, createdAt: null }}
         />
       </MemoryRouter>,
     );
@@ -72,7 +72,7 @@ describe('MemberRow', () => {
 });
 
 describe('CommunityHeader', () => {
-  const membership = { id: 7, name: 'acme', displayName: 'Acme', role: 'community-owner' };
+  const membership = { id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role: 'community-owner' };
   it('prefers public details, falls back to membership, and gates the admin link', () => {
     const { rerender } = render(<MemoryRouter><CommunityHeader membership={membership} details={undefined} canAdminister={false} /></MemoryRouter>);
     expect(screen.getByRole('heading', { name: 'Acme' })).toBeInTheDocument();
@@ -82,12 +82,12 @@ describe('CommunityHeader', () => {
         <CommunityHeader
           membership={membership}
           canAdminister
-          details={{ id: 7, name: 'acme', displayName: 'HQ', description: null, logoUrl: 'https://x/l.png', bannerUrl: null, platform: null, memberCount: 1, joinMode: null, createdAt: null }}
+          details={{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'HQ', description: null, logoUrl: 'https://x/l.png', bannerUrl: null, platform: null, memberCount: 1, joinMode: null, createdAt: null }}
         />
       </MemoryRouter>,
     );
     expect(screen.getByRole('heading', { name: 'HQ' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Admin Panel' })).toHaveAttribute('href', '/admin/7');
+    expect(screen.getByRole('link', { name: 'Admin Panel' })).toHaveAttribute('href', '/admin/00000007-0000-4000-8000-000000000000');
   });
 });
 
@@ -105,19 +105,19 @@ describe('AnnouncementsPanel', () => {
 
   it('renders types, pinned marker, fallbacks and the manage link for admins', async () => {
     mockApiGet(() => ({ data: [item(), item({ id: 2, title: 'Pinned', announcement_type: 'update', is_pinned: true, created_by_name: 'Ann', created_at: '2026-10-01T00:00:00Z' })] }));
-    renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    renderWithProviders(<AnnouncementsPanel communityId={'00000007-0000-4000-8000-000000000000'} canManage />);
     expect(await screen.findByText('Hello')).toBeInTheDocument();
     expect(screen.getByLabelText('Pinned')).toBeInTheDocument();
     expect(screen.getByText('Event')).toBeInTheDocument();
     expect(screen.getByText('Update')).toBeInTheDocument();
     expect(screen.getByText('Admin')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Manage' })).toHaveAttribute('href', '/admin/7/announcements');
+    expect(screen.getByRole('link', { name: 'Manage' })).toHaveAttribute('href', '/admin/00000007-0000-4000-8000-000000000000/announcements');
   });
 
   it('renders nothing and makes no request for non-managers', async () => {
     const get = mockApiGet(() => ({ data: [] }));
     get.mockClear();
-    const view = renderWithProviders(<AnnouncementsPanel communityId={7} canManage={false} />);
+    const view = renderWithProviders(<AnnouncementsPanel communityId={'00000007-0000-4000-8000-000000000000'} canManage={false} />);
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(view.container).toBeEmptyDOMElement();
     expect(get.mock.calls.some(([url]) => String(url).includes('announcements'))).toBe(false);
@@ -125,16 +125,16 @@ describe('AnnouncementsPanel', () => {
 
   it('shows an empty state with a connections CTA for an empty feed', async () => {
     mockApiGet(() => ({ data: [] }));
-    renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    renderWithProviders(<AnnouncementsPanel communityId={'00000007-0000-4000-8000-000000000000'} canManage />);
     expect(await screen.findByText('No announcements yet')).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Connect Discord or Twitch' })).toHaveAttribute('href', '/admin/7/connections');
+    expect(screen.getByRole('link', { name: 'Connect Discord or Twitch' })).toHaveAttribute('href', '/admin/00000007-0000-4000-8000-000000000000/connections');
   });
 
   it('shows a visible error with retry on a non-HTTP failure', async () => {
     mockApiGet(() => {
       throw new Error('network down');
     });
-    renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    renderWithProviders(<AnnouncementsPanel communityId={'00000007-0000-4000-8000-000000000000'} canManage />);
     expect(await screen.findByText('We could not load Announcements')).toBeInTheDocument();
     expect(screen.getByText('network down')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
@@ -144,13 +144,13 @@ describe('AnnouncementsPanel', () => {
     mockApiGet(() => {
       throw httpError(402, { error: 'plan' });
     });
-    const first = renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
-    expect(await screen.findByText('This feature requires a higher plan for this community')).toBeInTheDocument();
+    const first = renderWithProviders(<AnnouncementsPanel communityId={'00000007-0000-4000-8000-000000000000'} canManage />);
+    expect(await screen.findByText('Upgrade to Premium for this feature')).toBeInTheDocument();
     first.unmount();
     mockApiGet(() => {
       throw httpError(503, { error: 'service_unavailable' });
     });
-    renderWithProviders(<AnnouncementsPanel communityId={7} canManage />);
+    renderWithProviders(<AnnouncementsPanel communityId={'00000007-0000-4000-8000-000000000000'} canManage />);
     expect(await screen.findByText('Announcements is temporarily unavailable')).toBeInTheDocument();
   });
 });

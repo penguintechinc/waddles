@@ -161,6 +161,10 @@ KICK_SPEC: Final = AdapterSpec(
         }
     ),
     refreshable=True,
+    requires_ownership=True,
+    # No Kick account-linking flow exists yet (oauth_service.VALID_PLATFORMS): only a token
+    # minted by the broadcaster proves ownership until one does.
+    ownership_identity_platform="kick",
     binding_metadata=(
         BindingKey("chatroom_id", "chatroom_id", required=True),
         BindingKey("broadcaster_user_id", "broadcaster_user_id", required=True),
@@ -297,6 +301,8 @@ class KickAdapter:
             raise ResourceUnresolvable("Kick returned inconsistent channel identifiers")
         return ResolvedResource(
             resource_id=broadcaster_id,
+            owner_platform_user_id=broadcaster_id,
+            owner_proven_by_token=broadcaster_id == account.account_id,
             facts={
                 "channel_slug": slug,
                 "broadcaster_user_id": broadcaster_id,

@@ -23,8 +23,15 @@ from services.provider_connections.adapter import AdapterRegistry
 from services.provider_connections.errors import InvalidConnectionInput, VaultCorrupt
 from services.provider_connections.static_secret import ExternalHttpAdapter
 from services.provider_connections.wix import WixAdapter
+from tests.community_ids import public_id
 from tests.provider_connections.conftest import FakeClock, admin_headers
-from tests.provider_connections.support import open_row, raw_rows, seal_for_row, set_column
+from tests.provider_connections.support import (
+    numeric_connection_id,
+    open_row,
+    raw_rows,
+    seal_for_row,
+    set_column,
+)
 from tests.provider_connections.test_resolve_v2 import STATIC_SCOPE, _bound, _url
 
 API_KEY = "IST.fake-wix-api-key-0123456789"
@@ -59,7 +66,7 @@ def wix_service(pc_db: Any, pc_app: Quart, clock: FakeClock) -> ProviderConnecti
 
 
 def _base(db: Any) -> str:
-    return f"/api/v1/communities/{db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, db.seed.community_id)}/provider-connections"
 
 
 def _body(public_key: str, **overrides: Any) -> str:
@@ -259,10 +266,14 @@ class TestResolverExposure:
         )
         with pytest.raises(VaultCorrupt):
             await wix_service.resolve(
-                community_id=community, connection_id=conn, static_allowed=True
+                community_id=community,
+                connection_id=await numeric_connection_id(pc_db, conn),
+                static_allowed=True,
             )
         # Without the static scope the broken optional credential is never opened.
-        resolved = await wix_service.resolve(community_id=community, connection_id=conn)
+        resolved = await wix_service.resolve(
+            community_id=community, connection_id=await numeric_connection_id(pc_db, conn)
+        )
         assert resolved.secret_scheme is None
 
 
@@ -290,7 +301,9 @@ class TestRotation:
         assert after["access_token"] == before["access_token"]
         assert json.loads(open_row(after, "sealed_api_credential"))["api_key"] == NEW_KEY
         resolved = await wix_service.resolve(
-            community_id=pc_db.seed.community_id, connection_id=conn, static_allowed=True
+            community_id=pc_db.seed.community_id,
+            connection_id=await numeric_connection_id(pc_db, conn),
+            static_allowed=True,
         )
         assert resolved.secret_fields == {"apiKey": NEW_KEY, "siteId": SITE_ID}
 
@@ -334,7 +347,7 @@ class TestRotation:
         created = await _create(client, pc_db, public_key_b64)
         conn = (await created.get_json())["connection"]["id"]
         response = await client.patch(
-            f"/api/v1/communities/{pc_db.seed.other_community_id}/provider-connections/{conn}",
+            f"/api/v1/communities/{public_id(pc_db, pc_db.seed.other_community_id)}/provider-connections/{conn}",
             headers=admin_headers(pc_db),
             json={"api_credential": DOC},
         )

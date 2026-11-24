@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.inventory
+app_id: penguintechinc.waddles.inventory
 name: Inventory Bundle (Python)
 # 1.0.0: initial DB-backed v1 -- !inventory|!inv (own items)/!inv <user>/
 # !inv give <item> <user>/!inv add|remove <item> <user>. See src/app.py's own module docstring
@@ -7,8 +7,7 @@ name: Inventory Bundle (Python)
 # documented grammar extensions.
 # 1.0.3: integrity: lossless give (refund on failed credit), per-user directory lock (no lost updates), item-name/count/quantity bounds, normalized caller identity, strict boolean mod gate (fix/bundle-defects-wave).
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-inventory feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.6
-feature: waddles.core.example
+version: 1.0.9
 module: core
 provider: builtin
 # Attribution: the general shape of "every viewer accrues a per-user collection of items a

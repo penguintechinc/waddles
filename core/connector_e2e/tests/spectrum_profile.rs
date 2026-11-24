@@ -251,7 +251,7 @@ async fn rig() -> Rig {
     let executor = Arc::new(Executor::new(&cfg, NoSource).unwrap());
     let digest = digest_of(WASM);
     let manifest = VerifiedManifest::new(
-        "waddles.core.service.spectrum",
+        "penguintechinc.waddles.spectrum",
         digest.clone(),
         WitWorld::Connector,
         HashSet::from([PERM_CONNECTOR_PII_READ.to_string()]),
@@ -270,7 +270,7 @@ async fn rig() -> Rig {
     registry
         .register(PinnedConnector::new(
             "spectrum".to_owned(),
-            "waddles.core.service.spectrum".to_owned(),
+            "penguintechinc.waddles.spectrum".to_owned(),
             digest,
             262_144,
         ))

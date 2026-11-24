@@ -22,12 +22,12 @@ fn url() -> String {
         .expect("VALKEY_URL must be set: scheduler tests need a REAL Valkey (no silent skip)")
 }
 
-async fn conn() -> redis::aio::MultiplexedConnection {
+async fn conn() -> redis::aio::ConnectionManager {
     let client = redis::Client::open(url()).expect("client");
-    let cfg =
-        redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(2)));
+    let cfg = redis::aio::ConnectionManagerConfig::new()
+        .set_response_timeout(Some(Duration::from_secs(2)));
     client
-        .get_multiplexed_async_connection_with_config(&cfg)
+        .get_connection_manager_with_config(cfg)
         .await
         .expect("connect")
 }
@@ -49,7 +49,7 @@ impl EventAppender for Recorder {
 struct NoDek;
 
 impl DekProvider for NoDek {
-    async fn get_dek(&self, _t: &str) -> Result<(Dek, u32), DekUnavailableError> {
+    async fn get_dek(&self, _t: i64) -> Result<(Dek, u32), DekUnavailableError> {
         panic!("a bundle.reconcile event carries no identity field, so no DEK may be requested");
     }
 }
@@ -82,7 +82,7 @@ fn runner(
     ScheduleRunner::new(lease, sink)
 }
 
-fn futures_conn() -> redis::aio::MultiplexedConnection {
+fn futures_conn() -> redis::aio::ConnectionManager {
     // Connections are opened once per test via `block_in_place` so `runner` stays synchronous.
     tokio::task::block_in_place(|| tokio::runtime::Handle::current().block_on(conn()))
 }
@@ -103,7 +103,10 @@ fn target(app: &str, interval_s: u64) -> BundleScheduleTarget {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn two_replicas_publish_exactly_one_verified_reconcile_event_per_slot() {
-    let app = format!("waddles.test.sched.{}", uuid::Uuid::new_v4().simple());
+    let app = format!(
+        "penguintechinc.waddles.test-sched-{}",
+        uuid::Uuid::new_v4().simple()
+    );
     let t = target(&app, 30);
     let rec = Recorder::default();
     let (a, b) = (runner("replica-a", &rec), runner("replica-b", &rec));
@@ -146,11 +149,17 @@ async fn distinct_bundles_and_communities_are_independent_slots() {
     let rec = Recorder::default();
     let a = runner("replica-a", &rec);
     let t1 = target(
-        &format!("waddles.test.sched.{}", uuid::Uuid::new_v4().simple()),
+        &format!(
+            "penguintechinc.waddles.test-sched-{}",
+            uuid::Uuid::new_v4().simple()
+        ),
         30,
     );
     let t2 = target(
-        &format!("waddles.test.sched.{}", uuid::Uuid::new_v4().simple()),
+        &format!(
+            "penguintechinc.waddles.test-sched-{}",
+            uuid::Uuid::new_v4().simple()
+        ),
         30,
     );
     assert_eq!(a.tick(&t1).await, TickOutcome::Fired);

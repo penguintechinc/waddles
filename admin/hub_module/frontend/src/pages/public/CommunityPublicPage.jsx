@@ -2,7 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams, Link, useNavigate } from 'react-router-dom';
 import { publicApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { Alert } from '../../components/ui';
 import { getErrorMessage } from '../../components/ui/errors';
 import { useJoinOpenCommunity, useMyJoinRequest, useSubmitJoinRequest } from '../../hooks/useJoinRequests';
@@ -39,7 +39,7 @@ function CommunityPublicPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   const [showJoinModal, setShowJoinModal] = useState(false);
-  const communityId = Number(id);
+  const communityId = id; // opaque community UUID route param; hub-api validates it
   // hub-api serves join REQUESTS for approval-mode communities only; there is no direct-join
   // route for open communities (see UNSERVED_FEATURES['community-open-join']).
   const requiresApproval = community?.joinMode === 'approval';
@@ -57,7 +57,8 @@ function CommunityPublicPage() {
         if (err.response?.status === 403) {
           setError('restricted');
         } else {
-          setError(err.response?.data?.error || 'Community not found');
+          // hub-api's error body is `{ error: { code, message } }`; render its message, never the object.
+          setError(getErrorMessage(err, 'Community not found'));
         }
       } finally {
         setLoading(false);

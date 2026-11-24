@@ -1,4 +1,4 @@
-# waddles.core.service.reputation
+# penguintechinc.waddles.reputation
 
 Always-on `kind: service` bundle (Rust, `world stage-tools`) that will own community
 reputation behind tool calls (bundle-MCP-tools P5). It exports `tool-provider` and holds the
@@ -7,7 +7,7 @@ reputation behind tool calls (bundle-MCP-tools P5). It exports `tool-provider` a
 
 v1.1.0: the service owns the store, tools, soft-ban state and FLOOR ENFORCEMENT (soft/hard community floors + tenant
 floor, behind flag `waddles.reputation-auto-ban`, default OFF). It holds NO scoring weights: the default logic app
-bundle `waddles.core.app.reputation-accrual` (or an approved replacement that `provides: reputation-logic`) names the
+bundle `penguintechinc.waddles.reputation-accrual` (or an approved replacement that `provides: reputation-logic`) names the
 deltas. Tools, floors, caps and the third-party contract: `docs/bundle-reputation-service.md`.
 
 Tools: `get_score`, `get_many`, `rep`, `leaderboard` (community only), `adjust {user, delta, reason, platform?}`,
@@ -17,3 +17,10 @@ Tools: `get_score`, `get_many`, `rep`, `leaderboard` (community only), `adjust {
 
 Build: `cargo component build --release --target wasm32-wasip2 --locked`
 (the core-bundle image does this in `bundles/Dockerfile.core-bundles`).
+
+## Per-community opt-out (`accrual_enabled`)
+
+Community config accepts `accrual_enabled` (boolean, default `true`). An explicit `false` makes `adjust` and
+`apply_moderation` fail `forbidden` for that community (reads, overrides and policy tools are unaffected). Only an
+explicit `false` disables; absent / `{}` / unparseable keeps accrual ON. Added in 1.1.2 (see
+`docs/observability/command-latency.md`).

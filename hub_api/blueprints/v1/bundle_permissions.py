@@ -37,6 +37,7 @@ from services.access_grant_dto import AccessGrantsResponse, access_grants_respon
 from services.community_authz import authorize_community
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.scope_registry import SCOPE_BUNDLE_PERMISSIONS
 from services.tenant_service import require_matching_tenant
 
 logger = logging.getLogger(__name__)
@@ -189,7 +190,7 @@ async def get_version_access_grants(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/access-grants", methods=["GET"]
+    "/community/<cuuid:community_id>/<app_id>/access-grants", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(AccessGrantsResponse)
@@ -202,7 +203,14 @@ async def get_community_access_grants(
         return _err(ApiError("version query param is required", 400, "BAD_REQUEST"))
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_PERMISSIONS,
+        )
         blocks, requested, approved, dangerous = await svc.get_access_grants(
             _install_dal(), app_id=app_id, version=version
         )
@@ -268,7 +276,7 @@ async def restrict_permissions(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/permissions/grant", methods=["POST"]
+    "/community/<cuuid:community_id>/<app_id>/permissions/grant", methods=["POST"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_request(GrantPermissionsRequest)
@@ -282,7 +290,14 @@ async def grant_permissions(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_PERMISSIONS,
+        )
         manifest = await svc.manifest_for_version(install_dal, app_id=app_id, version=data.version)
         await _reject_instance_denied(install_dal, frozenset(data.grantedPermissions))
         new_version = await svc.grant_community_permissions(
@@ -310,7 +325,7 @@ async def grant_permissions(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/permissions/<permission_id>", methods=["DELETE"]
+    "/community/<cuuid:community_id>/<app_id>/permissions/<permission_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(GrantVersionResponse)
@@ -326,7 +341,14 @@ async def revoke_permission(
     if not version:
         return _err(ApiError("version query param is required", 400, "BAD_REQUEST"))
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_PERMISSIONS,
+        )
         new_version = await svc.deactivate_permission(
             install_dal,
             tenant_id=ctx.tenant_id,
@@ -350,7 +372,7 @@ async def revoke_permission(
 
 
 @bundle_permissions_bp.route(
-    "/community/<int:community_id>/<app_id>/permissions/granted", methods=["GET"]
+    "/community/<cuuid:community_id>/<app_id>/permissions/granted", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(PermissionListResponse)

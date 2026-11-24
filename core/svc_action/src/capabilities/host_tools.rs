@@ -345,7 +345,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
         }
         // Host ops run ONLY from the registered platform service bundle: a manifest naming a
         // platform op on any other target is refused, whatever its declaration says.
-        let service = format!("waddles.core.service.{}", decl.platform);
+        let service = format!("penguintechinc.waddles.{}", decl.platform);
         if plan.target_app_id != service {
             return Err(ToolRefusal::Forbidden(format!(
                 "{NOT_SUPPORTED}: host ops of platform {:?} are served only by {service}",
@@ -508,6 +508,11 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
             platform = %decl.platform, op = what, app_id = %scope.app_id,
             community_id = scope.community_id, "host platform tool confirmed"
         );
+        if what == "mod.unban" {
+            if let Some(u) = &wire.user_uuid {
+                self.sync_confirmed_unban(scope, &decl.platform, u).await;
+            }
+        }
         shape_result(decl, what, &ack)
     }
 
@@ -539,7 +544,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
 
     /// Resolves the tokenized user UUID to the platform id, community-scoped, HOST-side.
     /// Any failure refuses the call (nothing queued); the raw id is never logged.
-    async fn detokenize_user(
+    pub(super) async fn detokenize_user(
         &self,
         scope: &InvokeScope,
         platform: &str,
@@ -578,7 +583,7 @@ impl<Q: RelayQueue, K: KvBackend> StageCapabilities<Q, K> {
     /// well permit it, the host never does. The strict default has no mod-on-mod exemption (no
     /// community-config source is wired). Fails closed: with no directory, or on a directory
     /// failure, the call is refused as unavailable -- an unverifiable target is not attacked.
-    async fn refuse_protected_target(
+    pub(super) async fn refuse_protected_target(
         &self,
         scope: &InvokeScope,
         platform: &str,

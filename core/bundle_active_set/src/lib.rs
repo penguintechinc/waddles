@@ -17,7 +17,7 @@
 //!   own `bundle_loader` module (`core/svc_process/src/bundle_loader.rs`,
 //!   `core/svc_action/src/bundle_loader.rs`) drives the actual calls.
 //! - Gate on the PostHog-compatible feature flag
-//!   (`waddles.core.db-bundle-config`) -- that is `penguin_licensing`,
+//!   (`penguintechinc.waddles.db-bundle-config`) -- that is `penguin_licensing`,
 //!   already a per-service dependency; see each service's own
 //!   `license.rs` for the flag-gate wiring, mirroring the existing
 //!   `waddles.core.rust-data-plane` gate.
@@ -61,14 +61,18 @@
 
 pub mod bindings;
 pub mod changelog;
+pub mod concurrent;
 pub mod diff;
 pub mod entities;
 pub mod full_sync;
+pub mod load_tracker;
 pub mod multi_tenant;
+pub mod partition;
 pub mod query;
 pub mod reader;
 pub mod scope;
 pub mod session_sync;
+pub mod sharding;
 pub mod snapshot;
 pub mod tools;
 
@@ -79,12 +83,20 @@ pub use changelog::{
 };
 pub use diff::{plan, plan_scoped, DiffPlan, ScopedDiffPlan};
 pub use full_sync::{
-    any_session_diverged, digest_prefix, loaded_state_diverged, session_loaded_state_diverged,
-    should_send_full_sync, FullSyncReason,
+    any_session_diverged, any_session_diverged_routed, digest_prefix, loaded_state_diverged,
+    rebalance_sync_due, session_loaded_state_diverged, should_send_full_sync, FullSyncReason,
+};
+pub use load_tracker::{
+    cap_loads_per_session, full_jitter_delay, jitter_unit, LoadAdmission, LoadBackoff, LoadTracker,
+    MAX_LOADS_PER_SESSION_PER_TICK,
 };
 pub use multi_tenant::{
     read_active_set_all, read_source_bindings_all, scoped_active_rows, tenant_active_app_counts,
     AppScope, ScopeKey,
+};
+pub use partition::{
+    init_table_from_env, parse_executor_id, qualify_executor_id, table as language_table,
+    ExecutorClass, LanguageClass, LanguageTable, PartitionError, Placement,
 };
 pub use query::{
     canonical_digest, derive_component_keys, read_active_set, read_watermark, ActiveBundleRow,
@@ -94,10 +106,15 @@ pub use query::{
 pub use reader::ReaderConfig;
 pub use scope::{resolve_scope, ResolvedScope};
 pub use session_sync::{
-    pick_session_with_digest, plan_sessions, SessionId, SessionLoaded, SessionSyncPlan,
+    pick_session_with_digest, plan_sessions, plan_sessions_routed, SessionId, SessionLoaded,
+    SessionSyncPlan,
+};
+pub use sharding::{
+    count_owner_changes, owners, slot, slot_owner_table, stream_entry_age, RoutingMode,
+    RoutingObserver, SessionRouter, DEFAULT_REPLICAS, SLOT_COUNT,
 };
 pub use snapshot::{ActiveVersionSnapshot, ToolTargetEntry};
 pub use tools::{
-    ExportedToolInfo, HostOpDecl, HostOpOrigin, HostOpUserWire, RequestedToolInfo, ToolManifestInfo,
-    MCP_TOOLS_CAPABILITY,
+    ExportedToolInfo, HostOpDecl, HostOpOrigin, HostOpUserWire, RequestedToolInfo,
+    ToolManifestInfo, MCP_TOOLS_CAPABILITY,
 };

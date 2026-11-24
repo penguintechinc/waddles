@@ -46,6 +46,13 @@ async fn default_boot_starts_nothing_new() {
         // SAFETY: the only test in this process, before any other thread reads env.
         unsafe { std::env::remove_var(name) };
     }
+    // The data plane refuses to start without a tenant-DEK source (#1252); the hard-gated
+    // dev/alpha KEK stands in for hub-api's key broker (read by `Config::from_cli`).
+    // SAFETY: as above -- single test, before any other thread reads env.
+    unsafe {
+        std::env::set_var("WADDLES_ENV", "local");
+        std::env::set_var("INGEST_DEV_KEK", "k".repeat(48));
+    }
 
     // ---- default: serve, probe, stop ----
     let (http, metrics) = (free_port(), free_port());

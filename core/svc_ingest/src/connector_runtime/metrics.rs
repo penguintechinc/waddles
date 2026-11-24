@@ -144,6 +144,8 @@ pub enum SkipReason {
     Duplicate,
     /// Resource claimed by several communities; all claimants dropped.
     Conflict,
+    /// Unverified binding of a resource whose owner-verified binding exists; dropped.
+    Unverified,
 }
 
 impl SkipReason {
@@ -154,6 +156,7 @@ impl SkipReason {
             Self::Malformed => "malformed",
             Self::Duplicate => "duplicate",
             Self::Conflict => "conflict",
+            Self::Unverified => "unverified",
         }
     }
 }
@@ -329,6 +332,7 @@ mod tests {
             (SkipReason::Malformed.as_str(), "malformed"),
             (SkipReason::Duplicate.as_str(), "duplicate"),
             (SkipReason::Conflict.as_str(), "conflict"),
+            (SkipReason::Unverified.as_str(), "unverified"),
         ] {
             assert_eq!(got, want);
         }

@@ -24,6 +24,7 @@ publishes.
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -40,9 +41,18 @@ from services.dto_response import jsonify_dto
 from services.errors import ApiError, bad_request, payment_required
 from services.music_service import MusicProviderDTO, MusicSettingsDTO, RadioStationDTO
 from services.pagination import parse_limit
+from services.public_ids import PublicIdTarget, build_view_arg_translator
 from services.schema import bind_streaming_tables
+from services.scope_registry import SCOPE_MUSIC_STATION
+
+logger = logging.getLogger(__name__)
 
 music_bp = Blueprint("v1_music", __name__, url_prefix="/api/v1/admin")
+
+#: `<puuid:station_id>` -> numeric id inside the URL community (unknown/foreign/malformed -> 404).
+music_bp.before_request(
+    build_view_arg_translator({"station_id": PublicIdTarget("community_radio_stations")})
+)
 
 #: Two-gate Feature flag -- `libs/streaming_module/features.py`'s
 #: `streaming.music_station` Feature contract, free tier.
@@ -174,7 +184,7 @@ class RadioStationResponse:
 # ---------------------------------------------------------------------------
 
 
-@music_bp.route("/<int:community_id>/music/settings", methods=["GET"])
+@music_bp.route("/<cuuid:community_id>/music/settings", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MusicSettingsResponse)
 async def get_music_settings(
@@ -183,18 +193,26 @@ async def get_music_settings(
     """Get music settings for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         ctx = get_tenant_context(request)
         assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
         if not await feature_enabled(FEATURE_STREAMING_MUSIC_STATION, tenant=ctx.tenant_slug):
             raise payment_required("The Music Station is not enabled for this plan")
         settings = await svc.get_music_settings(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MusicSettingsResponse(success=True, settings=settings)
 
 
-@music_bp.route("/<int:community_id>/music/settings", methods=["PUT"])
+@music_bp.route("/<cuuid:community_id>/music/settings", methods=["PUT"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(UpdateMusicSettingsRequest)
 # NOT @validate_response -- update_music_settings() calls update_async then
@@ -204,7 +222,14 @@ async def update_music_settings(data: UpdateMusicSettingsRequest, community_id: 
     """Update music settings for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         fields = {
             "defaultProvider": data.defaultProvider,
             "autoplayEnabled": data.autoplayEnabled,
@@ -218,11 +243,12 @@ async def update_music_settings(data: UpdateMusicSettingsRequest, community_id: 
             async_dal, dal, community_id=community_id, fields=fields
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(MusicSettingsResponse(success=True, settings=settings))
 
 
-@music_bp.route("/<int:community_id>/music/providers", methods=["GET"])
+@music_bp.route("/<cuuid:community_id>/music/providers", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MusicProvidersResponse)
 async def get_providers(
@@ -231,14 +257,22 @@ async def get_providers(
     """List configured music providers for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         providers = await svc.get_providers(async_dal, dal, community_id=community_id)
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MusicProvidersResponse(success=True, providers=providers)
 
 
-@music_bp.route("/<int:community_id>/music/providers/<provider>/oauth", methods=["POST"])
+@music_bp.route("/<cuuid:community_id>/music/providers/<provider>/oauth", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(StartOAuthRequest)
 @validate_response(StartOAuthResponse)
@@ -248,7 +282,14 @@ async def start_oauth(
     """Start OAuth flow for a music provider."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         auth_url, state_token = await svc.start_oauth(
             async_dal,
             dal,
@@ -257,11 +298,12 @@ async def start_oauth(
             redirect_uri=data.redirectUri,
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return StartOAuthResponse(success=True, authUrl=auth_url, stateToken=state_token)
 
 
-@music_bp.route("/<int:community_id>/music/providers/<provider>", methods=["DELETE"])
+@music_bp.route("/<cuuid:community_id>/music/providers/<provider>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def disconnect_provider(
@@ -270,14 +312,22 @@ async def disconnect_provider(
     """Disconnect a music provider."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         await svc.disconnect_provider(async_dal, dal, community_id=community_id, provider=provider)
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message=f"{provider} provider disconnected")
 
 
-@music_bp.route("/<int:community_id>/music/radio-stations", methods=["GET"])
+@music_bp.route("/<cuuid:community_id>/music/radio-stations", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(RadioStationsResponse)
 async def get_radio_stations(
@@ -286,15 +336,24 @@ async def get_radio_stations(
     """Get radio stations for a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         page = int(request.args.get("page", "1"))
         limit = parse_limit(request.args.get("limit"), default=25)
         stations, page, limit, total = await svc.get_radio_stations(
             async_dal, dal, community_id=community_id, page=page, limit=limit
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
-    except ValueError:
+    except ValueError as exc:
+        logger.debug("rejected non-integer page/limit in music: %s", exc)
         return _err(bad_request("page/limit must be integers"))
     pages = (total + limit - 1) // limit if limit else 0
     return RadioStationsResponse(
@@ -304,7 +363,7 @@ async def get_radio_stations(
     )
 
 
-@music_bp.route("/<int:community_id>/music/radio-stations", methods=["POST"])
+@music_bp.route("/<cuuid:community_id>/music/radio-stations", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(AddRadioStationRequest)
 # NOT @validate_response -- add_radio_station() calls insert_async then
@@ -313,7 +372,14 @@ async def add_radio_station(data: AddRadioStationRequest, community_id: int) -> 
     """Add a radio station to a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         created_by = get_optional_current_user_id(request)
         station = await svc.add_radio_station(
             async_dal,
@@ -327,11 +393,12 @@ async def add_radio_station(data: AddRadioStationRequest, community_id: int) -> 
             created_by=created_by,
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return jsonify_dto(RadioStationResponse(success=True, station=station), 201)
 
 
-@music_bp.route("/<int:community_id>/music/radio-stations/<int:station_id>", methods=["DELETE"])
+@music_bp.route("/<cuuid:community_id>/music/radio-stations/<puuid:station_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_radio_station(
@@ -340,11 +407,19 @@ async def remove_radio_station(
     """Remove a radio station from a community."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_MUSIC_STATION,
+        )
         await svc.remove_radio_station(
             async_dal, dal, community_id=community_id, station_id=station_id
         )
     except ApiError as exc:
+        logger.debug("handled %s in music: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message="Radio station removed")
 

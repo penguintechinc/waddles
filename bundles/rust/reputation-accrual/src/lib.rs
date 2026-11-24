@@ -1,4 +1,4 @@
-//! Reputation ACCRUAL app bundle (`waddles.core.app.reputation-accrual`).
+//! Reputation ACCRUAL app bundle (`penguintechinc.waddles.reputation-accrual`).
 //!
 //! The default reputation LOGIC bundle (`provides: reputation-logic`): it maps
 //! platform events to reputation deltas and applies them through the
@@ -53,6 +53,10 @@ mod component {
         /// Host-verified resolution of a payload user token.
         fn resolve_mention(&self, token: &str) -> Option<String> {
             identity::resolve_mention(token).ok()
+        }
+        /// The live per-community config JSON from the stage context.
+        fn community_config_json(&self) -> String {
+            context::get_context().config_json
         }
         /// Monotonic nanoseconds for duration measurement.
         fn monotonic_nanos(&self) -> u64 {

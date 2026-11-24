@@ -41,6 +41,7 @@ from services.global_identity import (
     is_global_user_sync,
 )
 from tests.conftest import TENANT_SLUG, make_user_token, seed_super_admin
+from tests.user_ids import uid
 
 _ALEMBIC_TESTS_DIR = Path(__file__).resolve().parents[2] / "alembic" / "tests"
 if str(_ALEMBIC_TESTS_DIR) not in sys.path:
@@ -135,7 +136,7 @@ class TestRevokeLastAdmin:
     ) -> None:
         seed_super_admin(auth_db, user_id=1)
         response = await client.post(
-            "/api/v1/superadmin/users/1/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(1)}/super-admin-role",
             headers=_headers(1),
             json={"grant": False},
         )
@@ -151,7 +152,7 @@ class TestRevokeLastAdmin:
         grant_global_admin_sync(auth_db.dal, second)
         auth_db.dal.commit()
         response = await client.post(
-            f"/api/v1/superadmin/users/{second}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(second)}/super-admin-role",
             headers=_headers(1),
             json={"grant": False},
         )
@@ -167,7 +168,7 @@ class TestRevokeLastAdmin:
         seed_super_admin(auth_db, user_id=1)
         impostor = _seed_user(auth_db, "impostor@example.com")  # not a global admin
         response = await client.post(
-            "/api/v1/superadmin/users/1/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(1)}/super-admin-role",
             headers=_headers(impostor),
             json={"grant": False},
         )
@@ -180,7 +181,7 @@ class TestRevokeLastAdmin:
         seed_super_admin(auth_db, user_id=1, bootstrap=True)
         target = _seed_user(auth_db, "t@example.com")
         response = await client.post(
-            f"/api/v1/superadmin/users/{target}/super-admin-role",
+            f"/api/v1/superadmin/users/{uid(target)}/super-admin-role",
             headers=_headers(1),
             json={"grant": True},
         )
@@ -205,7 +206,7 @@ class TestDeactivateDeleteLastAdmin:
     ) -> None:
         seed_super_admin(auth_db, user_id=1)
         response = await client.put(
-            "/api/v1/superadmin/users/1", headers=_headers(1), json={"isActive": False}
+            f"/api/v1/superadmin/users/{uid(1)}", headers=_headers(1), json={"isActive": False}
         )
         assert response.status_code == 409
         assert is_global_admin_sync(auth_db.dal, 1) is True
@@ -217,7 +218,9 @@ class TestDeactivateDeleteLastAdmin:
         """Even an admin-scoped token held by a non-admin cannot delete the last admin."""
         seed_super_admin(auth_db, user_id=1)
         other = _seed_user(auth_db, "o@example.com")
-        response = await client.delete("/api/v1/superadmin/users/1", headers=_headers(other))
+        response = await client.delete(
+            f"/api/v1/superadmin/users/{uid(1)}", headers=_headers(other)
+        )
         assert response.status_code == 409
         assert is_global_admin_sync(auth_db.dal, 1) is True
         revoked.assert_not_awaited()
@@ -228,7 +231,7 @@ class TestDeactivateDeleteLastAdmin:
         seed_super_admin(auth_db, user_id=1)
         other = _seed_user(auth_db, "o@example.com")
         response = await client.put(
-            "/api/v1/superadmin/users/1", headers=_headers(other), json={"isActive": False}
+            f"/api/v1/superadmin/users/{uid(1)}", headers=_headers(other), json={"isActive": False}
         )
         assert response.status_code == 409
         assert is_global_admin_sync(auth_db.dal, 1) is True
@@ -240,12 +243,12 @@ class TestDeactivateDeleteLastAdmin:
         second = _seed_user(auth_db, "second@example.com")
         grant_global_admin_sync(auth_db.dal, second)
         auth_db.dal.commit()
-        ok = await client.delete(f"/api/v1/superadmin/users/{second}", headers=_headers(1))
+        ok = await client.delete(f"/api/v1/superadmin/users/{uid(second)}", headers=_headers(1))
         assert ok.status_code == 200
         assert global_admin_ids(auth_db.dal) == {1}
         assert revoked.await_args.kwargs["reason"] == "user_deleted"
         again = await client.put(
-            "/api/v1/superadmin/users/1", headers=_headers(1), json={"isActive": False}
+            f"/api/v1/superadmin/users/{uid(1)}", headers=_headers(1), json={"isActive": False}
         )
         assert again.status_code == 409
 
@@ -280,7 +283,7 @@ class TestDeactivateDeleteLastAdmin:
         seed_super_admin(auth_db, user_id=1)
         target = _seed_user(auth_db, "victim@example.com")
         response = await client.put(
-            f"/api/v1/superadmin/users/{target}", headers=_headers(1), json={"isActive": False}
+            f"/api/v1/superadmin/users/{uid(target)}", headers=_headers(1), json={"isActive": False}
         )
         assert response.status_code == 200
         assert revoked.await_args.kwargs == {"user_id": target, "reason": "user_deactivated"}
@@ -315,7 +318,7 @@ class TestReactivationRestoresPrivilege:
         grant_global_admin_sync(auth_db.dal, second)
         auth_db.dal.commit()
         off = await client.put(
-            f"/api/v1/superadmin/users/{second}", headers=_headers(1), json={"isActive": False}
+            f"/api/v1/superadmin/users/{uid(second)}", headers=_headers(1), json={"isActive": False}
         )
         assert off.status_code == 200
         assert is_global_admin_sync(auth_db.dal, second) is False
@@ -327,7 +330,7 @@ class TestReactivationRestoresPrivilege:
         second = await self._deactivated_admin(client, auth_db)
         plain = _seed_user(auth_db, "plain@example.com")
         response = await client.put(
-            f"/api/v1/superadmin/users/{second}",
+            f"/api/v1/superadmin/users/{uid(second)}",
             headers=_headers(plain),
             json={"isActive": True},
         )
@@ -340,7 +343,7 @@ class TestReactivationRestoresPrivilege:
         second = await self._deactivated_admin(client, auth_db)
         audit.events.clear()
         response = await client.put(
-            f"/api/v1/superadmin/users/{second}", headers=_headers(1), json={"isActive": True}
+            f"/api/v1/superadmin/users/{uid(second)}", headers=_headers(1), json={"isActive": True}
         )
         assert response.status_code == 200
         assert is_global_admin_sync(auth_db.dal, second) is True
@@ -357,7 +360,7 @@ class TestReactivationRestoresPrivilege:
         plain = _seed_user(auth_db, "plain@example.com")
         audit.events.clear()
         await client.put(
-            f"/api/v1/superadmin/users/{second}",
+            f"/api/v1/superadmin/users/{uid(second)}",
             headers=_headers(plain),
             json={"isActive": True},
         )

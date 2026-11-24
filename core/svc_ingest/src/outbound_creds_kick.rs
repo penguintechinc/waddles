@@ -76,9 +76,7 @@ pub trait KickCredentialSource: Send + Sync {
 fn epoch_now() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_or(i64::MAX, |d| {
-            i64::try_from(d.as_secs()).map_or(i64::MAX, |s| s)
-        })
+        .map_or(i64::MAX, |d| i64::try_from(d.as_secs()).unwrap_or(i64::MAX))
 }
 
 /// Production [`KickCredentialSource`] over `connection_resolver`.

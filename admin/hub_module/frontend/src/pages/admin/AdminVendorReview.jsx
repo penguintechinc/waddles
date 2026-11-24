@@ -23,6 +23,12 @@ export default function AdminVendorReview() {
   const [publishImmediate, setPublishImmediate] = useState(false);
 
   useEffect(() => {
+    // The bare `/superadmin/vendor-submissions` route has no `:submissionId`; never request
+    // `vendor-submissions/undefined` -- wait for a real id instead.
+    if (!submissionId) {
+      setLoading(false);
+      return;
+    }
     fetchSubmission();
   }, [submissionId]);
 
@@ -77,6 +83,18 @@ export default function AdminVendorReview() {
     }
   };
 
+  if (!submissionId) {
+    return (
+      <div className="admin-vendor-review" data-testid="no-submission-selected">
+        <h1>Vendor Module Submission Review</h1>
+        <p>No submission selected. Open a vendor request to review its submission.</p>
+        <button onClick={() => navigate('/superadmin/vendor-requests')} className="btn btn-primary">
+          Back to Vendor Requests
+        </button>
+      </div>
+    );
+  }
+
   if (loading) {
     return <div className="admin-vendor-review loading">Loading submission...</div>;
   }
@@ -87,7 +105,7 @@ export default function AdminVendorReview() {
         <div className="error-message">
           <h2>Error</h2>
           <p>{error}</p>
-          <button onClick={() => navigate('/admin/vendor-submissions')} className="btn btn-primary">
+          <button onClick={() => navigate('/superadmin/vendor-requests')} className="btn btn-primary">
             Back to Submissions
           </button>
         </div>
@@ -192,7 +210,7 @@ export default function AdminVendorReview() {
           <div className="scopes-list">
             {submission.scopes && submission.scopes.length > 0 ? (
               submission.scopes.map((scope) => (
-                <div key={scope.id} className="scope-item" style={{borderLeftColor: RISK_COLORS[scope.risk_level]}}>
+                <div key={scope.scopeName ?? scope.scope_name ?? scope.id} className="scope-item" style={{borderLeftColor: RISK_COLORS[scope.risk_level]}}>
                   <div className="scope-header">
                     <h4>{scope.scope_name}</h4>
                     <span className={`risk-badge risk-${scope.risk_level}`}>
@@ -408,7 +426,7 @@ export default function AdminVendorReview() {
 
       <div className="review-footer">
         <button
-          onClick={() => navigate('/admin/vendor-submissions')}
+          onClick={() => navigate('/superadmin/vendor-requests')}
           className="btn btn-secondary"
         >
           ← Back to Submissions

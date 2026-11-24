@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import uuid
 from typing import Any
 
 from flask_core import (
@@ -31,6 +30,7 @@ from flask_core import (
     install_security_headers,
     setup_aaa_logging,
 )
+from flask_core.jwt_keyring import NoSigningKeyError, get_jwt_keyring, set_jwt_keyring
 from flask_core.mcp_routes import create_mcp_blueprint
 from flask_core.service_jwt import (
     ServiceJwtError,
@@ -38,16 +38,19 @@ from flask_core.service_jwt import (
     load_issuer_from_env,
 )
 from flask_core.token_revocation import get_token_revocation
-from pydal import Field
 from quart import Quart, request
 from quart_schema import Info, QuartSchema
 from werkzeug.exceptions import HTTPException
 
+import telemetry as hub_telemetry
 from blueprints import register_blueprints
 from bootstrap import BootstrapState, BootstrapStatus, run_bootstrap_loop
 from config import HubAPIConfig
 from grpc_internal.server import start_internal_grpc_server, stop_internal_grpc_server
 from openapi.routes import register_openapi_docs
+from services.analytics_exclusions_service import (
+    run_reconcile_loop as run_exclusions_reconcile_loop,
+)
 from services.audit_http import AUDIT_SERVICE_CONFIG_KEY, install_audit_hooks
 from services.audit_service import get_audit_service
 from services.ban_suppression import run_purge_loop
@@ -55,9 +58,16 @@ from services.bundle_active_set_watermark_job import BundleActiveSetWatermarkJob
 from services.bundle_install_dal import build_install_dal
 from services.bundle_version_service import BUNDLE_MAX_REQUEST_BYTES
 from services.community_common import api_error
+from services.community_public_id import CommunityOpenAPIProvider, install_community_public_ids
+from services.db_routing import mark_replica
+from services.default_tenant import verify_default_tenant_at_startup
+from services.dsar_outbox import run_worker_loop as dsar_outbox_worker_loop
+from services.dsar_service import run_maintenance_loop as dsar_run_maintenance_loop
 from services.envelope.runtime import build_envelope_runtime
 from services.identity_resolution_service import run_uuid_availability_monitor
 from services.object_storage_kms import get_object_storage_sse
+from services.platform_secrets.bootstrap import get_process_cache
+from services.platform_secrets.jwt_keyring import PlatformVaultJwtKeyring
 from services.rate_limiting import install_rate_limiting
 from services.schema import (
     bind_ai_routing_tables,
@@ -66,9 +76,13 @@ from services.schema import (
     bind_marketplace_module_tables,
     bind_music_tables,
     bind_platform_tables,
+    bind_reference_tenants_table,
     bind_token_billing_tables,
 )
 from services.session_cookie import bearer_token_from_cookie
+from services.source_group_reconciler import run_reconcile_loop
+from services.tenant_key_provisioning import run_startup_provisioning
+from services.user_public_id import install_user_public_ids
 
 logger = logging.getLogger(__name__)
 
@@ -87,6 +101,11 @@ def _install_error_handlers(app: Quart) -> None:
         """Log the exception, then return the JSON 500 envelope."""
         if isinstance(exc, HTTPException):
             return exc
+        if isinstance(exc, NoSigningKeyError):
+            # The platform vault has not produced a JWT signing key yet (boot, kill-switch ON,
+            # vault refused): sign-in is unavailable, not broken -- never a shared-secret fallback.
+            logger.error("jwt_signing_unavailable path=%s", request.path)
+            return api_error("Sign-in is temporarily unavailable", 503)
         logger.exception("unhandled_exception path=%s method=%s", request.path, request.method)
         return api_error("An unexpected error occurred", 500)
 
@@ -122,17 +141,7 @@ def _bind_reference_tables(dal: Any) -> None:
     function; M3 is the first group after M1 with its own new tables, so
     this is a net-new call site, not a redefinition of M1's own tables.
     """
-    dal.define_table(
-        "tenants",
-        Field("slug", "string", length=100),
-        Field("public_id", "string", length=36, default=lambda: str(uuid.uuid4())),
-        Field("display_name", "string", length=255),
-        Field("logo_url", "text"),
-        Field("is_global", "boolean", default=False),
-        Field("is_active", "boolean", default=True),
-        Field("config", "json"),
-        migrate=False,
-    )
+    bind_reference_tenants_table(dal)
     bind_platform_tables(dal)
     # Shared marketplace/module table family (hub_modules, reviews,
     # installations, marketplace_catalog, subscriptions, settings, discount
@@ -204,6 +213,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     app = Quart(__name__)
     app.config["HUB_API_CONFIG"] = cfg
     app.secret_key = cfg.secret_key
+    if get_jwt_keyring() is None:
+        # ES256 platform JWTs: private key sealed in platform_vault, public keys by `kid`
+        # (docs/PLATFORM_VAULT.md). Fails closed until the vault bootstrap has seeded the cache.
+        set_jwt_keyring(PlatformVaultJwtKeyring(get_process_cache()))
+    # OpenTelemetry request hooks + late-bound ASGI middleware shim (telemetry.py). Registered
+    # FIRST so its before_request runs before every other hook (the rate limiter can short-circuit
+    # later ones) and its after_request runs last, seeing the final status. Providers/exporters
+    # are built in startup() below; until then (and whenever telemetry is disabled) this is a
+    # passthrough.
+    hub_telemetry.install(app)
     # security.md Input Validation -- this app never set its own cap, so
     # Quart's built-in default (16 MiB) was the only thing standing between
     # a request and unbounded memory use, and it happens to sit exactly at
@@ -225,6 +244,7 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         swagger_ui_path=None,
         redoc_ui_path=None,
         scalar_ui_path=None,
+        openapi_provider_class=CommunityOpenAPIProvider,
         info=Info(title=cfg.module_name, version=cfg.module_version),
     )
 
@@ -245,6 +265,10 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     # recurring InFailedSqlTransaction). Registered before the DAL exists is
     # fine -- the teardown hook reads current_app.config lazily.
     install_db_resilience(app)
+    # Same teardown net for the read-replica connection (config key "read_dal", set at startup
+    # only when DATABASE_READ_REPLICA_URL is configured; a no-op while it is None). Without it a
+    # replica read would leave its pooled connection idle-in-transaction on the hot standby.
+    install_db_resilience(app, dal_key="read_dal")
 
     # security.md A04 hardening -- global before_request hook covering
     # every route registered below, not a per-blueprint decorator (see
@@ -252,6 +276,11 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     # before the blueprints so it's unmistakably "the whole app", not
     # scoped to whichever blueprint happens to be registered first.
     rate_limiter = install_rate_limiting(app, cfg)
+    # Community path ids are public UUIDs (`<cuuid:community_id>`); translated to the internal
+    # numeric id after rate limiting, before any blueprint/auth hook runs.
+    install_community_public_ids(app)
+    # User path ids are hub-user public UUIDs (`<uuuid:user_id>`), translated the same way.
+    install_user_public_ids(app)
 
     app.register_blueprint(create_health_blueprint(cfg.module_name, cfg.module_version))
     app.register_blueprint(create_mcp_blueprint())
@@ -283,11 +312,13 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
     @app.route("/ready")
     async def ready() -> tuple[dict[str, str], int]:
         """K8s readinessProbe target -- 200 only once the schema is confirmed at head."""
-        code = 200 if bootstrap_status.is_ready else 503
-        return {
-            "status": bootstrap_status.state.value,
-            "detail": bootstrap_status.detail,
-        }, code
+        code = 200 if bootstrap_status.serving_ready else 503
+        detail = bootstrap_status.detail
+        status_name = bootstrap_status.state.value
+        if bootstrap_status.is_ready and not bootstrap_status.tenant_keys_ready:
+            status_name = "provisioning_tenant_keys"
+            detail = detail or "provisioning per-tenant encryption keys"
+        return {"status": status_name, "detail": detail}, code
 
     @app.before_serving
     async def startup() -> None:
@@ -295,6 +326,11 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
 
         Also binds reference tables.
         """
+        # Telemetry first: SQLAlchemy/gRPC instrumentation must be installed before the DAL
+        # engines and the internal gRPC server are created below. Never raises; a missing
+        # endpoint, the `waddles.disable-hub-api-otel` kill switch or a bad config just leaves it
+        # a logged no-op.
+        app.config["telemetry_runtime"] = await hub_telemetry.start(app, cfg)
         logger.system("Starting hub-api", action="startup", extra={"port": cfg.module_port})
         # Fired as a background task, not awaited to completion: a fresh/behind
         # schema can legitimately take longer than any reasonable startup
@@ -312,6 +348,8 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         else:
             bootstrap_status.state = BootstrapState.READY
             bootstrap_status.detail = "non-Postgres DATABASE_URL -- bootstrap skipped"
+            # No keystore schema off Postgres (test harness only): nothing to provision.
+            bootstrap_status.tenant_keys_ready = True
         # Per-service ES256 machine JWT issuance (flask_core.service_jwt,
         # feature/eddsa-machine-jwt) -- built from the `service-jwt-
         # signing-key` Secret (SERVICE_JWT_ACTIVE_KID/SERVICE_JWT_PRIVATE_
@@ -362,8 +400,26 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # the wrapper for any future async-offloaded query helpers.
         dal = async_dal.dal
         _bind_reference_tables(dal)
+        if async_dal.read_dal is not None:
+            # Replica-eligible reads build queries from the replica's own table objects, so it
+            # needs the same startup table bindings (schema is owned by migrations: migrate=False).
+            mark_replica(async_dal.read_dal)
+            app.config["read_dal"] = async_dal.read_dal
+            _bind_reference_tables(async_dal.read_dal)
+            logger.info("hub-api read replica configured; replica-eligible reads will use it")
+        else:
+            logger.info(
+                "hub-api read replica NOT configured (DATABASE_READ_REPLICA_URL unset); "
+                "replica-eligible reads fall back to the primary"
+            )
         app.config["async_dal"] = async_dal
         app.config["dal"] = dal
+        # Fail loud on a bad DEFAULT_TENANT_SLUG: logs an ERROR (slug + the reserved tenants that
+        # exist) and records the outcome; never crashes boot (the schema may still be bootstrapping
+        # -- first use of the default tenant re-checks and returns a structured 5xx).
+        app.config["DEFAULT_TENANT_STATUS"] = await verify_default_tenant_at_startup(
+            async_dal, dal, cfg.default_tenant_slug
+        )
         # penguin-dal (R52): a SEPARATE AsyncDB/pool against the same
         # DATABASE_URL, reflecting the ingest_sources/workstreams/
         # workstream_usage_hourly tables migrations 0020-0021 create
@@ -382,7 +438,16 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
         # set and the platform KEK is resolved lazily, so the platform-managed
         # baseline needs zero configuration. An ENABLED provider with bad platform
         # credentials raises here -- a loud startup failure, not a first-request one.
-        app.config["envelope_runtime"] = build_envelope_runtime(install_dal)
+        envelope_runtime = build_envelope_runtime(install_dal)
+        app.config["envelope_runtime"] = envelope_runtime
+        # Per-tenant at-rest keys (spec 2026-11-08): after the schema is at head, ensure the
+        # global + system tenants and backfill every existing tenant. Postgres only (the key store
+        # is a Postgres schema); a failure marks hub-api FAILED/not-ready, never silently skipped.
+        app.config["tenant_key_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["tenant_key_task"] = asyncio.create_task(
+                run_startup_provisioning(bootstrap_status, install_dal, envelope_runtime.service)
+            )
         # Object-storage SSE posture (baseline AES256 unless kms.objectStorage.mode=kms): a
         # misconfigured KMS mode raises here; an unentitled one logs a loud ERROR (never silent).
         await get_object_storage_sse().startup_check()
@@ -446,6 +511,45 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             app.config["suppression_purge_task"] = asyncio.create_task(
                 run_purge_loop(async_dal, dal, is_ready=lambda: bootstrap_status.is_ready)
             )
+        # DSAR inbox maintenance: expires unverified public requests (and purges their contact
+        # PII), blanks retained contact PII after closure, refreshes the overdue gauge. Idempotent,
+        # runs in every replica; a failed pass is logged and retried. Waits for schema readiness.
+        app.config["dsar_maintenance_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["dsar_maintenance_task"] = asyncio.create_task(
+                dsar_run_maintenance_loop(
+                    async_dal, dal, is_ready=lambda: bootstrap_status.is_ready
+                )
+            )
+        # DSAR verification-mail worker: drains the durable `dsar_mail_outbox` (public routes only
+        # enqueue). Every replica runs one; rows are leased by conditional UPDATE so each mail is
+        # claimed once. A failed pass is logged and retried. Waits for schema readiness.
+        app.config["dsar_outbox_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["dsar_outbox_task"] = asyncio.create_task(
+                dsar_outbox_worker_loop(
+                    async_dal, dal, app=app, is_ready=lambda: bootstrap_status.is_ready
+                )
+            )
+        # Level-triggered reconcile of every app_source_bindings row to a live Valkey consumer
+        # group (a slug/name rename or a missed best-effort provision otherwise leaves
+        # svc-process on NOGROUP forever). Runs in every replica (idempotent); a failed pass is
+        # logged at ERROR + counted and retried, never a request failure. Waits for schema
+        # readiness. Postgres-only: sqlite configs are test harnesses with no Valkey.
+        app.config["source_group_reconcile_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["source_group_reconcile_task"] = asyncio.create_task(
+                run_reconcile_loop(install_dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
+        # Rebuilds MISSING analytics exclusions (data_use_exclusions) from the consent rows and the
+        # erasure ledger so a dropped write self-heals. Add-only, bounded batches, advisory-locked
+        # so one replica works at a time; the pass itself is gated by the default-OFF flag
+        # `waddles.analytics-exclusions-reconcile`. A failed pass is logged at ERROR and retried.
+        app.config["analytics_exclusions_reconcile_task"] = None
+        if cfg.database_url.startswith("postgres"):
+            app.config["analytics_exclusions_reconcile_task"] = asyncio.create_task(
+                run_exclusions_reconcile_loop(async_dal, is_ready=lambda: bootstrap_status.is_ready)
+            )
         logger.system("hub-api started", action="startup", result="SUCCESS")
 
     @app.after_serving
@@ -479,6 +583,14 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping identity uuid monitor on shutdown: {exc}")
+        tenant_key_task = app.config.get("tenant_key_task")
+        if tenant_key_task is not None:
+            tenant_key_task.cancel()
+            try:
+                await tenant_key_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Tenant key provisioning ended with an error: {exc}")
         purge_task = app.config.get("suppression_purge_task")
         if purge_task is not None:
             purge_task.cancel()
@@ -487,6 +599,40 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
                 if not isinstance(exc, asyncio.CancelledError):
                     logger.warning(f"Error stopping suppression purge task on shutdown: {exc}")
+        dsar_task = app.config.get("dsar_maintenance_task")
+        if dsar_task is not None:
+            dsar_task.cancel()
+            try:
+                await dsar_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping DSAR maintenance task on shutdown: {exc}")
+        outbox_task = app.config.get("dsar_outbox_task")
+        if outbox_task is not None:
+            outbox_task.cancel()
+            try:
+                await outbox_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping DSAR outbox worker on shutdown: {exc}")
+        reconcile_task = app.config.get("source_group_reconcile_task")
+        if reconcile_task is not None:
+            reconcile_task.cancel()
+            try:
+                await reconcile_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(f"Error stopping source group reconcile task on shutdown: {exc}")
+        exclusions_task = app.config.get("analytics_exclusions_reconcile_task")
+        if exclusions_task is not None:
+            exclusions_task.cancel()
+            try:
+                await exclusions_task
+            except (asyncio.CancelledError, Exception) as exc:  # noqa: BLE001 - shutdown must not raise
+                if not isinstance(exc, asyncio.CancelledError):
+                    logger.warning(
+                        f"Error stopping analytics exclusions reconcile on shutdown: {exc}"
+                    )
         watermark_job = app.config.get("bundle_active_set_watermark_job")
         if watermark_job is not None:
             try:
@@ -526,6 +672,11 @@ def create_app(config: HubAPIConfig | None = None) -> Quart:
             except Exception as exc:  # noqa: BLE001 - shutdown must not raise
                 logger.warning(f"Error stopping internal gRPC server on shutdown: {exc}")
         logger.system("hub-api shutdown complete", action="shutdown", result="SUCCESS")
+        telemetry_runtime = app.config.get("telemetry_runtime")
+        if telemetry_runtime is not None:
+            # Last, so every shutdown log/span above is still exported; bounded flush (a dead
+            # collector cannot hold shutdown).
+            await telemetry_runtime.shutdown()
 
     return app
 

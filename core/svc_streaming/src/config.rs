@@ -14,6 +14,7 @@ use std::path::PathBuf;
 use clap::Parser;
 use thiserror::Error;
 
+use crate::jwt_keys::JwtKeys;
 use crate::pipeline::encoder::EncoderPreference;
 
 /// Errors that can occur while loading configuration.
@@ -63,6 +64,20 @@ pub struct CliConfig {
     /// Control-plane HTTP port (axum router: /health, /readyz, /api/v1/*).
     #[arg(long, env = "MODULE_PORT", default_value_t = 8208)]
     pub http_port: u16,
+
+    /// Optional TLS control-plane port: the same router as the plaintext HTTP port,
+    /// served over rustls (TLS 1.3 preferred, 1.2 floor, HTTP/2 + HTTP/1.1 via ALPN).
+    /// In-cluster callers (hub-api) dial this one; requires `TLS_CERT_FILE`/`TLS_KEY_FILE`.
+    #[arg(long, env = "STREAMING_TLS_PORT")]
+    pub tls_port: Option<u16>,
+
+    /// PEM server certificate chain for the TLS control-plane listener.
+    #[arg(long, env = "TLS_CERT_FILE")]
+    pub tls_cert_file: Option<PathBuf>,
+
+    /// PEM private key (PKCS#8/SEC1) for the TLS control-plane listener.
+    #[arg(long, env = "TLS_KEY_FILE")]
+    pub tls_key_file: Option<PathBuf>,
 
     /// Prometheus `/metrics` exposition port.
     #[arg(long, env = "METRICS_PORT", default_value_t = 9090)]
@@ -142,10 +157,6 @@ pub struct CliConfig {
     /// Expected JWT `aud` claim.
     #[arg(long, env = "JWT_AUDIENCE", default_value = "svc-streaming")]
     pub jwt_audience: String,
-    /// JWKS endpoint for RS256 verification; when unset, HS256 with
-    /// `JWT_HMAC_SECRET` (env-only, see [`Config::load`]) is used instead.
-    #[arg(long, env = "JWT_JWKS_URL")]
-    pub jwt_jwks_url: Option<String>,
 
     /// Base URL of hub-api's token ledger (`POST
     /// /api/v1/marketplace/communities/{id}/tokens/debit`) -- see
@@ -153,6 +164,21 @@ pub struct CliConfig {
     /// this backs. Not a secret: it's a plain service address.
     #[arg(long, env = "HUB_API_URL", default_value = "http://hub-api:8204")]
     pub hub_api_url: String,
+
+    /// hub-api's internal gRPC endpoint serving `ServiceAuthService.MintServiceToken`
+    /// (`https://host:port`; CA from `HUB_API_GRPC_CA_FILE`). Unset = no service credential: every
+    /// transcode-admission debit then fails loud (`credential_unavailable`) and the stream falls
+    /// back to passthrough -- see `crate::billing::token_ledger`.
+    #[arg(long, env = "SERVICE_JWT_TOKEN_ENDPOINT")]
+    pub service_jwt_token_endpoint: Option<String>,
+
+    /// Projected ServiceAccount token (audience-scoped to hub-api) used to bootstrap the machine JWT.
+    #[arg(
+        long,
+        env = "SERVICE_JWT_SA_TOKEN_PATH",
+        default_value = "/var/run/secrets/waddlebot/service-jwt/service-jwt-bootstrap-token"
+    )]
+    pub service_jwt_sa_token_path: String,
 
     /// Tokens debited per transcode-admission attempt. Mirrors the Python
     /// alpha's `Config.transcode_token_cost`.
@@ -167,6 +193,11 @@ pub struct CliConfig {
         default_value = "transcoding_minutes"
     )]
     pub transcode_product_key: String,
+
+    /// Allowed CORS origins for WebRTC media signaling routes (`/whip/*`, `/whep/*`,
+    /// `/rtc/rooms/*`). Empty = no cross-origin headers emitted.
+    #[arg(long, env = "SVC_STREAMING_CORS_ORIGINS", value_delimiter = ',')]
+    pub cors_allowed_origins: Vec<String>,
 }
 
 impl CliConfig {
@@ -180,8 +211,50 @@ impl CliConfig {
                 reason: "port 0 is not a valid bind port".to_string(),
             });
         }
+        validate_cors_origins(&self.cors_allowed_origins)?;
+        match (self.tls_port, &self.tls_cert_file, &self.tls_key_file) {
+            (None, None, None) => {}
+            (Some(port), Some(_), Some(_)) if port != 0 => {}
+            _ => {
+                return Err(ConfigError::InvalidValue {
+                    field: "tls_port/tls_cert_file/tls_key_file",
+                    reason: "STREAMING_TLS_PORT (non-zero), TLS_CERT_FILE and TLS_KEY_FILE must \
+                             be set together or not at all"
+                        .to_string(),
+                });
+            }
+        }
         Ok(())
     }
+}
+
+/// Validates the media CORS allowlist: every entry must be a bare `http(s)://host[:port]`
+/// origin (no wildcard, no path/query, no trailing slash). Fail loud, never skip an entry.
+pub fn validate_cors_origins(origins: &[String]) -> Result<(), ConfigError> {
+    for raw in origins {
+        let o = raw.trim();
+        if o.is_empty() {
+            continue;
+        }
+        let rest = o
+            .strip_prefix("https://")
+            .or_else(|| o.strip_prefix("http://"));
+        let ok = rest.is_some_and(|r| {
+            !r.is_empty()
+                && !r.contains(['/', '?', '#', '*', '@', ' '])
+                && r.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || ".-:[]".contains(c))
+        });
+        if !ok {
+            return Err(ConfigError::InvalidValue {
+                field: "cors_allowed_origins",
+                reason: format!(
+                    "{o:?} is not an exact http(s)://host[:port] origin (wildcards are not allowed)"
+                ),
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Parses `"<start>-<end>"` into an inclusive `(u16, u16)` range, validating
@@ -221,7 +294,9 @@ pub struct Config {
     pub db_password: Secret,
     pub cache_password: Option<Secret>,
     pub service_api_key: Secret,
-    pub jwt_hmac_secret: Option<Secret>,
+    /// ES256 verifying keys for the platform user/session JWT (public keys from
+    /// `platform_vault`, wired in `run_with_shutdown`; [`JwtKeys::None`] until then).
+    pub jwt_keys: JwtKeys,
 }
 
 impl fmt::Debug for Config {
@@ -234,10 +309,7 @@ impl fmt::Debug for Config {
                 &self.cache_password.as_ref().map(|_| Secret::new("")),
             )
             .field("service_api_key", &Secret::new(""))
-            .field(
-                "jwt_hmac_secret",
-                &self.jwt_hmac_secret.as_ref().map(|_| Secret::new("")),
-            )
+            .field("jwt_keys", &self.jwt_keys)
             .finish()
     }
 }
@@ -259,13 +331,12 @@ impl Config {
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let cache_password = std::env::var("CACHE_PASSWORD").ok().map(Secret::new);
         let service_api_key = Secret::new(env_required("SERVICE_API_KEY")?);
-        let jwt_hmac_secret = std::env::var("JWT_HMAC_SECRET").ok().map(Secret::new);
         Ok(Self {
             cli,
             db_password,
             cache_password,
             service_api_key,
-            jwt_hmac_secret,
+            jwt_keys: JwtKeys::None,
         })
     }
 }
@@ -284,12 +355,7 @@ mod tests {
     static ENV_LOCK: Mutex<()> = Mutex::new(());
 
     fn clear_secret_env() {
-        for var in [
-            "DB_PASSWORD",
-            "CACHE_PASSWORD",
-            "SERVICE_API_KEY",
-            "JWT_HMAC_SECRET",
-        ] {
+        for var in ["DB_PASSWORD", "CACHE_PASSWORD", "SERVICE_API_KEY"] {
             // SAFETY: serialized by ENV_LOCK, no concurrent readers/writers
             // of these specific variables within the test process.
             unsafe { std::env::remove_var(var) };
@@ -334,6 +400,32 @@ mod tests {
     #[test]
     fn parse_udp_range_rejects_non_numeric() {
         assert!(parse_udp_range("abc-def").is_err());
+    }
+
+    #[test]
+    fn tls_settings_must_be_all_or_nothing() {
+        let none = CliConfig::parse_from(["svc-streaming"]);
+        assert!(none.validate().is_ok());
+        let port_only = CliConfig::parse_from(["svc-streaming", "--tls-port", "8448"]);
+        assert!(port_only.validate().is_err());
+        let files_only = CliConfig::parse_from([
+            "svc-streaming",
+            "--tls-cert-file",
+            "/c.crt",
+            "--tls-key-file",
+            "/c.key",
+        ]);
+        assert!(files_only.validate().is_err());
+        let all = CliConfig::parse_from([
+            "svc-streaming",
+            "--tls-port",
+            "8448",
+            "--tls-cert-file",
+            "/c.crt",
+            "--tls-key-file",
+            "/c.key",
+        ]);
+        assert!(all.validate().is_ok());
     }
 
     #[test]
@@ -391,5 +483,39 @@ mod tests {
         assert!(!rendered.contains("super-secret-db-pass"));
         assert!(!rendered.contains("super-secret-api-key"));
         clear_secret_env();
+    }
+
+    #[test]
+    fn cors_origins_must_be_exact_origins_never_wildcards() {
+        let ok = |v: &[&str]| {
+            validate_cors_origins(&v.iter().map(|s| s.to_string()).collect::<Vec<_>>())
+        };
+        assert!(ok(&[]).is_ok());
+        assert!(ok(&["", "  "]).is_ok(), "blank entries are ignored");
+        assert!(ok(&["https://app.waddles.gg", "http://localhost:5173"]).is_ok());
+        for bad in [
+            "*",
+            "https://*.waddles.gg",
+            "app.waddles.gg",
+            "https://app.waddles.gg/",
+            "https://app.waddles.gg/path",
+            "ftp://app.waddles.gg",
+            "https://",
+            "https://a b",
+            "https://user@host",
+        ] {
+            assert!(ok(&[bad]).is_err(), "{bad:?} must be refused");
+        }
+        // One bad entry among good ones still fails the whole list (never silently skipped).
+        assert!(ok(&["https://app.waddles.gg", "*"]).is_err());
+    }
+
+    #[test]
+    fn cli_validate_rejects_a_wildcard_cors_origin() {
+        let mut cli = CliConfig::parse_from(["svc-streaming"]);
+        cli.cors_allowed_origins = vec!["*".into()];
+        assert!(cli.validate().is_err());
+        cli.cors_allowed_origins = vec!["https://app.waddles.gg".into()];
+        assert!(cli.validate().is_ok());
     }
 }

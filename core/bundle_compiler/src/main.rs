@@ -57,6 +57,7 @@ enum Command {
 }
 
 fn main() -> ExitCode {
+    bundle_compiler::crypto::install_default_provider_or_exit();
     bundle_compiler::logging::init_logging();
     let cli = Cli::parse();
     let result = match cli.command {

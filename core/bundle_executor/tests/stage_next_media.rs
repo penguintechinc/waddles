@@ -16,7 +16,7 @@ use bundle_executor::manifest::{VerifiedManifest, WitWorld};
 use common::{run_many, test_config, Scenario, StageAnswer};
 
 const FIXTURE_WASM: &[u8] = include_bytes!("fixtures/media_fixture.wasm");
-const APP_ID: &str = "waddles.test.media-fixture";
+const APP_ID: &str = "penguintechinc.waddles.fixture-test-media-fixture";
 
 /// One load (one wasm compile) and one invoke per `(event, payload, answer)`.
 async fn run_all(

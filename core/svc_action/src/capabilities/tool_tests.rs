@@ -26,9 +26,9 @@ use super::*;
 use crate::capabilities::CapabilityHandler;
 use crate::usage::UsageBatcher;
 
-const APP: &str = "waddles.test.app.caller";
-const SVC: &str = "waddles.core.economy.svc";
-const SVC2: &str = "waddles.core.other.svc";
+const APP: &str = "penguintechinc.waddles.fixture-test-app-caller";
+const SVC: &str = "penguintechinc.waddles.economy-svc";
+const SVC2: &str = "penguintechinc.waddles.other-svc";
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
@@ -45,6 +45,7 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,
@@ -103,7 +104,7 @@ fn gate(grants: &[(&str, i64, &str, &str)]) -> Arc<CapabilityGate> {
     // The Discord SERVICE bundle itself holds `moderation.discord` (its manifest permission):
     // host-executed role/event ops require it of the service, not just `tool.call` of the caller.
     by_scope
-        .entry(("waddles.core.service.discord".to_string(), 44))
+        .entry(("penguintechinc.waddles.discord".to_string(), 44))
         .or_default()
         .insert(
             "moderation.discord".to_string(),
@@ -215,6 +216,7 @@ async fn world_scoped(
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 }),
             ),
         )
@@ -562,7 +564,12 @@ async fn e_depth_three_is_refused_and_depth_two_runs() {
         true,
     )
     .await;
-    let deep = scope_for(APP, APP_VERSION, &["waddles.x.y.z", SVC2, APP], None);
+    let deep = scope_for(
+        APP,
+        APP_VERSION,
+        &["penguintechinc.waddles.fixture-x-y-z", SVC2, APP],
+        None,
+    );
     assert_eq!(
         run(&w, &deep, tool_call(SVC, "get_balance", None))
             .await
@@ -749,7 +756,7 @@ async fn pool_exhaustion_and_malformed_envelope_are_typed() {
 
 #[tokio::test]
 async fn unwired_tool_and_unknown_op_fail_loudly() {
-    let bare = StageCapabilities::<_, redis::aio::MultiplexedConnection>::new(
+    let bare = StageCapabilities::<_, redis::aio::ConnectionManager>::new(
         FakeRelayQueue::default(),
         test_egress(),
         Arc::new(Mutex::new(UsageBatcher::new())),

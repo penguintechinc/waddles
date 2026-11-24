@@ -24,6 +24,7 @@ from blueprints.v1.community_interaction import (
     interaction_internal_bp,
     interaction_member_bp,
 )
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 
 
 @pytest.fixture
@@ -31,6 +32,7 @@ def app(community_db: Any) -> Quart:
     dal, _ = community_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(interaction_admin_bp)
     quart_app.register_blueprint(interaction_member_bp)
     quart_app.register_blueprint(interaction_internal_bp)
@@ -67,21 +69,54 @@ async def _post_json(
     )
 
 
+UNKNOWN_ROLE = "00000000-0000-4000-8000-00000000dead"
+
+
+def _pid(dal: Any, table: str, numeric_id: int) -> str:
+    """Public UUID of a seeded row (route paths and bodies never carry the numeric id)."""
+    return str(dal[table][numeric_id].public_id)
+
+
 class TestScopeAndTenant:
     async def test_wrong_scope_is_403(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels",
-            headers=auth_headers(scope="community.interaction:write"),
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
+            headers=auth_headers(scope="community.interaction:read", user_id="1"),
         )
         assert response.status_code == 403
 
+    async def test_broad_jwt_scopes_do_not_grant_channel_or_forum_admin(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        """Dedicated community scopes are required; the old broad JWT scopes no longer admit."""
+        dal, community_id = community_db
+        headers = auth_headers(
+            scope="community.interaction:read community.interaction:write "
+            "community.interaction:manage_channels community:admin",
+            user_id="1",
+        )
+        for method, path in (
+            ("GET", "interaction/channels"),
+            ("POST", "interaction/channels"),
+            ("DELETE", "interaction/channels/00000000-0000-4000-8000-00000000dead"),
+            ("DELETE", "interaction/forum/replies/00000000-0000-4000-8000-00000000dead"),
+            ("PUT", "interaction/channels/00000000-0000-4000-8000-00000000dead/permissions"),
+            ("GET", "interaction/roles"),
+        ):
+            response = await client.open(
+                cpath(dal, "/api/v1/admin/{community_id}/{path}", community_id, path=path),
+                method=method,
+                headers=headers,
+            )
+            assert response.status_code == 403, (method, path)
+
     async def test_unknown_community_is_404(self, client: Any, auth_headers: Any) -> None:
         response = await client.get(
-            "/api/v1/admin/9999/interaction/channels",
-            headers=auth_headers(scope="community.interaction:read"),
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/interaction/channels",
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 404
 
@@ -93,8 +128,8 @@ class TestChannelCrudAndAutoProvision:
         dal, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
+            auth_headers(scope="users:admin", user_id="1"),
             {"name": "general-chat", "channel_type": "chat"},
         )
         assert response.status_code == 201
@@ -115,18 +150,18 @@ class TestChannelCrudAndAutoProvision:
     async def test_list_channels_returns_seeded_channel(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "listable"},
         )
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels",
-            headers=auth_headers(scope="community.interaction:read"),
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -136,13 +171,19 @@ class TestChannelCrudAndAutoProvision:
     async def test_duplicate_channel_name_is_409(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        headers = auth_headers(scope="users:admin", user_id="1")
         await _post_json(
-            client, f"/api/v1/admin/{community_id}/interaction/channels", headers, {"name": "dupe"}
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
+            headers,
+            {"name": "dupe"},
         )
         response = await _post_json(
-            client, f"/api/v1/admin/{community_id}/interaction/channels", headers, {"name": "dupe"}
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
+            headers,
+            {"name": "dupe"},
         )
         assert response.status_code == 409
 
@@ -151,12 +192,14 @@ class TestForumFlow:
     async def test_create_post_then_reply_then_read(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
 
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "forum-general", "channel_type": "forum"},
         )
@@ -164,7 +207,12 @@ class TestForumFlow:
 
         post_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": "Welcome thread", "body": "Say hi!"},
         )
@@ -173,14 +221,25 @@ class TestForumFlow:
 
         reply_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+                community_id,
+                post_id=post_id,
+            ),
             write_headers,
             {"content": "Hi there!"},
         )
         assert reply_resp.status_code == 201
 
         get_resp = await client.get(
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts/{post_id}",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts/{post_id}",
+                community_id,
+                channel_id=channel_id,
+                post_id=post_id,
+            ),
             headers=auth_headers(scope="community.interaction:read"),
         )
         assert get_resp.status_code == 200
@@ -193,31 +252,48 @@ class TestForumFlow:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         dal, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "locked-forum", "channel_type": "forum"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
         post_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": "Locked topic"},
         )
         post_id = (await post_resp.get_json())["post"]["id"]
 
         await client.put(
-            f"/api/v1/admin/{community_id}/interaction/forum/posts/{post_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/forum/posts/{post_id}",
+                community_id,
+                post_id=post_id,
+            ),
             headers={**write_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"is_locked": True}),
         )
 
         reply_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+                community_id,
+                post_id=post_id,
+            ),
             write_headers,
             {"content": "too late"},
         )
@@ -228,11 +304,11 @@ class TestCommunityRoles:
     async def test_priority_out_of_range_is_400(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/roles",
-            auth_headers(scope="community.interaction:manage_roles"),
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/roles", community_id),
+            auth_headers(scope="users:admin", user_id="1"),
             {"name": "vip", "priority": 99},
         )
         assert response.status_code == 400
@@ -248,10 +324,10 @@ class TestCommunityRoles:
         )
         dal.commit()
 
-        manage_headers = auth_headers(scope="community.interaction:manage_roles")
+        manage_headers = auth_headers(scope="users:admin", user_id="1")
         create_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/roles",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/roles", community_id),
             manage_headers,
             {"name": "VIP", "priority": 20, "scopes": ["channels:read"]},
         )
@@ -260,11 +336,17 @@ class TestCommunityRoles:
         assert role["name"] == "vip"
 
         delete_resp = await client.delete(
-            f"/api/v1/admin/{community_id}/interaction/roles/{role['id']}", headers=manage_headers
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/roles/{role__id}",
+                community_id,
+                role__id=role["id"],
+            ),
+            headers=manage_headers,
         )
         assert delete_resp.status_code == 200
 
-    async def test_delete_system_role_is_403(
+    async def test_delete_system_role_is_409(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         dal, community_id = community_db
@@ -274,10 +356,15 @@ class TestCommunityRoles:
         dal.commit()
 
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/interaction/roles/{role_id}",
-            headers=auth_headers(scope="community.interaction:manage_roles"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/roles/{role_id}",
+                community_id,
+                role_id=_pid(dal, "community_roles", role_id),
+            ),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
-        assert response.status_code == 403
+        assert response.status_code == 409
 
 
 class TestInternalRelay:
@@ -340,23 +427,57 @@ class TestUnknownCommunity404Sweep:
         "method,path_suffix,scope",
         [
             ("POST", "interaction/channels", "community.interaction:write"),
-            ("PUT", "interaction/channels/1", "community.interaction:write"),
-            ("DELETE", "interaction/channels/1", "community.interaction:write"),
-            ("PUT", "interaction/forum/posts/1", "community.interaction:write"),
-            ("DELETE", "interaction/forum/replies/1", "community.interaction:write"),
+            (
+                "PUT",
+                "interaction/channels/00000000-0000-4000-8000-00000000dead",
+                "community.interaction:write",
+            ),
+            (
+                "DELETE",
+                "interaction/channels/00000000-0000-4000-8000-00000000dead",
+                "community.interaction:write",
+            ),
+            (
+                "PUT",
+                "interaction/forum/posts/00000000-0000-4000-8000-00000000dead",
+                "community.interaction:write",
+            ),
+            (
+                "DELETE",
+                "interaction/forum/replies/00000000-0000-4000-8000-00000000dead",
+                "community.interaction:write",
+            ),
             ("GET", "interaction/roles", "community.interaction:read"),
             ("POST", "interaction/roles", "community.interaction:manage_roles"),
-            ("PUT", "interaction/roles/1", "community.interaction:manage_roles"),
-            ("DELETE", "interaction/roles/1", "community.interaction:manage_roles"),
-            ("GET", "interaction/channels/1/permissions", "community.interaction:read"),
-            ("PUT", "interaction/channels/1/permissions", "community.interaction:manage_channels"),
+            (
+                "PUT",
+                "interaction/roles/00000000-0000-4000-8000-00000000dead",
+                "community.interaction:manage_roles",
+            ),
+            (
+                "DELETE",
+                "interaction/roles/00000000-0000-4000-8000-00000000dead",
+                "community.interaction:manage_roles",
+            ),
+            (
+                "GET",
+                "interaction/channels/00000000-0000-4000-8000-00000000dead/permissions",
+                "community.interaction:read",
+            ),
+            (
+                "PUT",
+                "interaction/channels/00000000-0000-4000-8000-00000000dead/permissions",
+                "community.interaction:manage_channels",
+            ),
         ],
     )
     async def test_admin_route_404s_on_unknown_community(
         self, client: Any, auth_headers: Any, method: str, path_suffix: str, scope: str
     ) -> None:
         response = await client.open(
-            f"/api/v1/admin/9999/{path_suffix}", method=method, headers=auth_headers(scope=scope)
+            f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/{path_suffix}",
+            method=method,
+            headers=auth_headers(scope=scope),
         )
         assert response.status_code == 404
 
@@ -365,10 +486,13 @@ class TestUnknownCommunity404Sweep:
         [
             ("GET", "interact/channels"),
             ("POST", "interact/channels"),
-            ("GET", "interact/forum/1/posts"),
-            ("GET", "interact/forum/1/posts/1"),
-            ("POST", "interact/forum/1/posts"),
-            ("POST", "interact/forum/posts/1/replies"),
+            ("GET", "interact/forum/00000000-0000-4000-8000-00000000dead/posts"),
+            (
+                "GET",
+                "interact/forum/00000000-0000-4000-8000-00000000dead/posts/00000000-0000-4000-8000-00000000dead",
+            ),
+            ("POST", "interact/forum/00000000-0000-4000-8000-00000000dead/posts"),
+            ("POST", "interact/forum/posts/00000000-0000-4000-8000-00000000dead/replies"),
         ],
     )
     async def test_member_route_404s_on_unknown_community(
@@ -376,7 +500,7 @@ class TestUnknownCommunity404Sweep:
     ) -> None:
         scope = "community.interaction:write" if method == "POST" else "community.interaction:read"
         response = await client.open(
-            f"/api/v1/community/9999/{path_suffix}",
+            f"/api/v1/community/{UNKNOWN_PUBLIC_ID}/{path_suffix}",
             method=method,
             headers=auth_headers(scope=scope, user_id="1"),
         )
@@ -387,18 +511,23 @@ class TestChannelUpdateDelete:
     async def test_update_channel_success_and_not_found(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "chan-a"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
 
         update_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}",
+                community_id,
+                channel_id=channel_id,
+            ),
             headers={**write_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"description": "updated"}),
         )
@@ -406,7 +535,7 @@ class TestChannelUpdateDelete:
         assert (await update_resp.get_json())["channel"]["description"] == "updated"
 
         missing_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/channels/9999",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels/9999", community_id),
             headers={**write_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"description": "x"}),
         )
@@ -415,23 +544,30 @@ class TestChannelUpdateDelete:
     async def test_delete_channel_success_and_not_found(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "chan-b"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
 
         delete_resp = await client.delete(
-            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}", headers=write_headers
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}",
+                community_id,
+                channel_id=channel_id,
+            ),
+            headers=write_headers,
         )
         assert delete_resp.status_code == 200
 
         missing_resp = await client.delete(
-            f"/api/v1/admin/{community_id}/interaction/channels/9999", headers=write_headers
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels/9999", community_id),
+            headers=write_headers,
         )
         assert missing_resp.status_code == 404
 
@@ -440,63 +576,93 @@ class TestForumModerationAndReplies:
     async def test_delete_reply_success_and_not_found(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "reply-forum", "channel_type": "forum"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
         post_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": "topic"},
         )
         post_id = (await post_resp.get_json())["post"]["id"]
         reply_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+                community_id,
+                post_id=post_id,
+            ),
             write_headers,
             {"content": "to be deleted"},
         )
         reply_id = (await reply_resp.get_json())["reply"]["id"]
 
         delete_resp = await client.delete(
-            f"/api/v1/admin/{community_id}/interaction/forum/replies/{reply_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/forum/replies/{reply_id}",
+                community_id,
+                reply_id=reply_id,
+            ),
             headers=write_headers,
         )
         assert delete_resp.status_code == 200
 
         missing_resp = await client.delete(
-            f"/api/v1/admin/{community_id}/interaction/forum/replies/9999", headers=write_headers
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/forum/replies/9999", community_id),
+            headers=write_headers,
         )
         assert missing_resp.status_code == 404
 
     async def test_moderate_post_no_action_specified_is_400(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "mod-forum", "channel_type": "forum"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
         post_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": "topic"},
         )
         post_id = (await post_resp.get_json())["post"]["id"]
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/forum/posts/{post_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/forum/posts/{post_id}",
+                community_id,
+                post_id=post_id,
+            ),
             headers={**write_headers, "Content-Type": "application/json"},
             data=json_module.dumps({}),
         )
@@ -505,32 +671,50 @@ class TestForumModerationAndReplies:
     async def test_moderate_post_delete_action(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "del-forum", "channel_type": "forum"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
         post_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": "topic"},
         )
         post_id = (await post_resp.get_json())["post"]["id"]
 
         response = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/forum/posts/{post_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/forum/posts/{post_id}",
+                community_id,
+                post_id=post_id,
+            ),
             headers={**write_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"delete": True}),
         )
         assert response.status_code == 200
 
         get_resp = await client.get(
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts/{post_id}",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts/{post_id}",
+                community_id,
+                channel_id=channel_id,
+                post_id=post_id,
+            ),
             headers=auth_headers(scope="community.interaction:read"),
         )
         assert get_resp.status_code == 404
@@ -538,11 +722,13 @@ class TestForumModerationAndReplies:
     async def test_create_forum_post_requires_title(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "notitle-forum", "channel_type": "forum"},
         )
@@ -550,7 +736,12 @@ class TestForumModerationAndReplies:
 
         response = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": ""},
         )
@@ -559,18 +750,25 @@ class TestForumModerationAndReplies:
     async def test_create_forum_reply_requires_content(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "nocontent-forum", "channel_type": "forum"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
         post_resp = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": "topic"},
         )
@@ -578,7 +776,12 @@ class TestForumModerationAndReplies:
 
         response = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+                community_id,
+                post_id=post_id,
+            ),
             write_headers,
             {"content": ""},
         )
@@ -587,11 +790,17 @@ class TestForumModerationAndReplies:
     async def test_create_forum_reply_unknown_post_is_404(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         response = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/posts/9999/replies",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/posts/9999/replies",
+                community_id,
+            ),
             write_headers,
             {"content": "hi"},
         )
@@ -600,24 +809,36 @@ class TestForumModerationAndReplies:
     async def test_list_forum_posts_and_get_unknown_post(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        dal, community_id = community_db
+        write_headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin", user_id="1"
+        )
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "list-forum", "channel_type": "forum"},
         )
         channel_id = (await channel_resp.get_json())["channel"]["id"]
         await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             write_headers,
             {"title": "topic 1"},
         )
 
         list_resp = await client.get(
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                community_id,
+                channel_id=channel_id,
+            ),
             headers=auth_headers(scope="community.interaction:read"),
         )
         assert list_resp.status_code == 200
@@ -626,7 +847,12 @@ class TestForumModerationAndReplies:
         assert len(list_body["posts"]) == 1
 
         missing_resp = await client.get(
-            f"/api/v1/community/{community_id}/interact/forum/{channel_id}/posts/9999",
+            cpath(
+                dal,
+                "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts/9999",
+                community_id,
+                channel_id=channel_id,
+            ),
             headers=auth_headers(scope="community.interaction:read"),
         )
         assert missing_resp.status_code == 404
@@ -641,8 +867,8 @@ class TestRolesAdditional:
         dal.commit()
 
         response = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/roles",
-            headers=auth_headers(scope="community.interaction:read"),
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/roles", community_id),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -657,17 +883,26 @@ class TestRolesAdditional:
             community_id=community_id, name="vip", is_system=False, priority=5
         )
         dal.commit()
-        manage_headers = auth_headers(scope="community.interaction:manage_roles")
+        manage_headers = auth_headers(scope="users:admin", user_id="1")
 
         update_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/roles/{role_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/roles/{role_id}",
+                community_id,
+                role_id=_pid(dal, "community_roles", role_id),
+            ),
             headers={**manage_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"displayName": "VIP Member", "scopes": ["channels:read"]}),
         )
         assert update_resp.status_code == 200
 
         missing_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/roles/9999",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/roles/00000000-0000-4000-8000-00000000dead",
+                community_id,
+            ),
             headers={**manage_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"displayName": "x"}),
         )
@@ -676,10 +911,14 @@ class TestRolesAdditional:
     async def test_delete_unknown_role_is_404(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/interaction/roles/9999",
-            headers=auth_headers(scope="community.interaction:manage_roles"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/roles/00000000-0000-4000-8000-00000000dead",
+                community_id,
+            ),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 404
 
@@ -688,28 +927,40 @@ class TestChannelPermissionOverrides:
     async def test_get_overrides_unknown_channel_is_404(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels/9999/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/00000000-0000-4000-8000-00000000dead/permissions",
+                community_id,
+            ),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert response.status_code == 404
 
     async def test_update_overrides_rejects_non_array_and_unknown_channel(
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
-        _, community_id = community_db
-        manage_headers = auth_headers(scope="community.interaction:manage_channels")
+        dal, community_id = community_db
+        manage_headers = auth_headers(scope="users:admin", user_id="1")
 
         bad_shape_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/channels/1/permissions",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/00000000-0000-4000-8000-00000000dead/permissions",
+                community_id,
+            ),
             headers={**manage_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"overrides": "not-a-list"}),
         )
         assert bad_shape_resp.status_code == 400
 
         missing_channel_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/channels/9999/permissions",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/00000000-0000-4000-8000-00000000dead/permissions",
+                community_id,
+            ),
             headers={**manage_headers, "Content-Type": "application/json"},
             data=json_module.dumps({"overrides": []}),
         )
@@ -719,10 +970,10 @@ class TestChannelPermissionOverrides:
         self, client: Any, auth_headers: Any, community_db: Any
     ) -> None:
         dal, community_id = community_db
-        write_headers = auth_headers(scope="community.interaction:write", user_id="1")
+        write_headers = auth_headers(scope="users:admin", user_id="1")
         channel_resp = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/interaction/channels",
+            cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
             write_headers,
             {"name": "perm-chan"},
         )
@@ -731,23 +982,33 @@ class TestChannelPermissionOverrides:
         dal.commit()
 
         empty_resp = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+                community_id,
+                channel_id=channel_id,
+            ),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert empty_resp.status_code == 200
         assert (await empty_resp.get_json())["overrides"] == []
 
         update_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+                community_id,
+                channel_id=channel_id,
+            ),
             headers={
-                **auth_headers(scope="community.interaction:manage_channels"),
+                **auth_headers(scope="users:admin", user_id="1"),
                 "Content-Type": "application/json",
             },
             data=json_module.dumps(
                 {
                     "overrides": [
                         {
-                            "communityRoleId": role_id,
+                            "communityRoleId": _pid(dal, "community_roles", role_id),
                             "grantScopes": ["channels:read"],
                             "denyScopes": [],
                         }
@@ -758,8 +1019,13 @@ class TestChannelPermissionOverrides:
         assert update_resp.status_code == 200
 
         after_resp = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+                community_id,
+                channel_id=channel_id,
+            ),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         after_body = await after_resp.get_json()
         assert len(after_body["overrides"]) == 1
@@ -767,19 +1033,157 @@ class TestChannelPermissionOverrides:
 
         # An override entry with no communityRoleId is skipped, not inserted.
         skip_resp = await client.put(
-            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+                community_id,
+                channel_id=channel_id,
+            ),
             headers={
-                **auth_headers(scope="community.interaction:manage_channels"),
+                **auth_headers(scope="users:admin", user_id="1"),
                 "Content-Type": "application/json",
             },
             data=json_module.dumps({"overrides": [{"grantScopes": []}]}),
         )
         assert skip_resp.status_code == 200
         final_resp = await client.get(
-            f"/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
-            headers=auth_headers(scope="community.interaction:read"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+                community_id,
+                channel_id=channel_id,
+            ),
+            headers=auth_headers(scope="users:admin", user_id="1"),
         )
         assert (await final_resp.get_json())["overrides"] == []
+
+
+class TestChannelOverrideEscalation:
+    """Regression: a channel-override editor may not grant/deny scopes they do not hold."""
+
+    async def _setup(self, community_db: Any) -> tuple[int, int, int]:
+        dal, community_id = community_db
+        self._dal = dal  # `_put` addresses the community by its public UUID
+        channel_id = int(dal.hub_channels.insert(community_id=community_id, name="c1"))
+        role_id = int(dal.community_roles.insert(community_id=community_id, name="vip", priority=5))
+        mod_role = dal.community_roles.insert(
+            community_id=community_id,
+            name="chan-mod",
+            is_system=False,
+            role_kind=0,
+            base_claims={"scopes": ["community.channels:manage"]},
+        )
+        dal.community_members.insert(
+            community_id=community_id,
+            user_id="7",
+            role="chan-mod",
+            is_active=True,
+            community_role_id=mod_role,
+        )
+        dal.commit()
+        return community_id, channel_id, role_id
+
+    async def _put(
+        self, client: Any, auth_headers: Any, ids: tuple[int, int, int], override: dict[str, Any]
+    ) -> Any:
+        community_id, channel_id, role_id = ids
+        role_ref = UNKNOWN_ROLE if role_id == 99999 else _pid(self._dal, "community_roles", role_id)
+        return await client.put(
+            cpath(
+                self._dal,
+                "/api/v1/admin/{community_id}/interaction/channels/{channel_id}/permissions",
+                community_id,
+                channel_id=_pid(self._dal, "hub_channels", channel_id),
+            ),
+            headers={**auth_headers(scope="", user_id="7"), "Content-Type": "application/json"},
+            data=json_module.dumps({"overrides": [{"communityRoleId": role_ref, **override}]}),
+        )
+
+    async def test_grant_or_deny_scope_not_held_is_403(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        ids = await self._setup(community_db)
+        assert (
+            await self._put(client, auth_headers, ids, {"grantScopes": ["billing:manage"]})
+        ).status_code == 403
+        assert (
+            await self._put(client, auth_headers, ids, {"denyScopes": ["billing:manage"]})
+        ).status_code == 403
+
+    async def test_unknown_scope_foreign_role_and_bad_scope_field_are_400(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        ids = await self._setup(community_db)
+        assert (
+            await self._put(client, auth_headers, ids, {"grantScopes": ["nope:nope"]})
+        ).status_code == 400
+        assert (
+            await self._put(client, auth_headers, ids, {"scope": "everything"})
+        ).status_code == 400
+        community_id, channel_id, _ = ids
+        foreign = await self._put(
+            client, auth_headers, (community_id, channel_id, 99999), {"grantScopes": []}
+        )
+        assert foreign.status_code == 400
+
+    async def test_scope_the_editor_holds_is_allowed(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        ids = await self._setup(community_db)
+        response = await self._put(
+            client, auth_headers, ids, {"grantScopes": ["community.channels:manage"]}
+        )
+        assert response.status_code == 200
+
+    async def test_moderator_cannot_touch_admin_role_overrides(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        """Privilege inversion: no deny on an admin role, and a PUT never strips its override."""
+        community_id, channel_id, role_id = await self._setup(community_db)
+        dal, _ = community_db
+        admin_role = int(
+            dal.community_roles.insert(
+                community_id=community_id,
+                name="community-admin",
+                is_system=True,
+                role_kind=1,
+                base_claims={"scopes": []},
+                priority=100,
+            )
+        )
+        dal.hub_channel_permission_overrides.insert(
+            hub_channel_id=channel_id,
+            community_role_id=admin_role,
+            grant_scopes=["channels:read"],
+            deny_scopes=[],
+            scope="both",
+        )
+        dal.commit()
+        denied = await self._put(
+            client,
+            auth_headers,
+            (community_id, channel_id, admin_role),
+            {"denyScopes": ["community.channels:manage"]},  # a scope the editor DOES hold
+        )
+        assert denied.status_code == 403
+        assert (
+            await self._put(
+                client,
+                auth_headers,
+                (community_id, channel_id, admin_role),
+                {"grantScopes": ["community.channels:manage"]},
+            )
+        ).status_code == 403
+        # A PUT that omits the admin role's override (entries for a covered role only) keeps it.
+        ok = await self._put(
+            client, auth_headers, (community_id, channel_id, role_id), {"grantScopes": []}
+        )
+        assert ok.status_code == 200
+        rows = dal(dal.hub_channel_permission_overrides.hub_channel_id == channel_id).select()
+        by_role = {int(r.community_role_id): r for r in rows}
+        assert admin_role in by_role
+        assert list(by_role[admin_role].grant_scopes) == ["channels:read"]
+        assert list(by_role[admin_role].deny_scopes) == []
 
 
 class TestMemberChannels:
@@ -790,9 +1194,9 @@ class TestMemberChannels:
 
         is `None` when the caller doesn't have write scope's `auth_required` chain.
         """
-        _, community_id = community_db
+        dal, community_id = community_db
         response = await client.get(
-            f"/api/v1/community/{community_id}/interact/channels",
+            cpath(dal, "/api/v1/community/{community_id}/interact/channels", community_id),
             headers=auth_headers(scope="community.interaction:read"),
         )
         assert response.status_code == 200
@@ -819,8 +1223,11 @@ class TestMemberChannels:
 
         response = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            cpath(dal, "/api/v1/community/{community_id}/interact/channels", community_id),
+            auth_headers(
+                scope="community.interaction:write community.interaction:read users:admin",
+                user_id="1",
+            ),
             {"name": "self-created"},
         )
         assert response.status_code == 403
@@ -846,8 +1253,11 @@ class TestMemberChannels:
 
         response = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            cpath(dal, "/api/v1/community/{community_id}/interact/channels", community_id),
+            auth_headers(
+                scope="community.interaction:write community.interaction:read users:admin",
+                user_id="1",
+            ),
             {"name": "self-created-2"},
         )
         assert response.status_code == 201
@@ -864,14 +1274,157 @@ class TestMemberChannels:
         """
         import blueprints.v1.community_interaction as bp_module
 
-        _, community_id = community_db
+        dal, community_id = community_db
         monkeypatch.setattr(bp_module, "can_create_channel", lambda *a, **k: True)
 
         response = await _post_json(
             client,
-            f"/api/v1/community/{community_id}/interact/channels",
-            auth_headers(scope="community.interaction:write", user_id="1"),
+            cpath(dal, "/api/v1/community/{community_id}/interact/channels", community_id),
+            auth_headers(
+                scope="community.interaction:write community.interaction:read users:admin",
+                user_id="1",
+            ),
             {"name": "self-created-3"},
         )
         assert response.status_code == 201
         assert (await response.get_json())["channel"]["name"] == "self-created-3"
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")
+
+
+class TestInteractionPublicUuids:
+    """Channel/post/reply/role ids are public UUIDs, scoped to the URL community."""
+
+    async def _world(self, client: Any, auth_headers: Any, community_db: Any) -> dict[str, Any]:
+        from tests.entity_uuid_support import assert_uuid, second_community
+
+        dal, community_id = community_db
+        other = second_community(dal, community_id)
+        headers = auth_headers(
+            scope="community.interaction:write community.interaction:read users:admin",
+            user_id="1",
+        )
+        channel = (
+            await (
+                await _post_json(
+                    client,
+                    cpath(dal, "/api/v1/admin/{community_id}/interaction/channels", community_id),
+                    headers,
+                    {"name": "forum-x", "channel_type": "forum"},
+                )
+            ).get_json()
+        )["channel"]
+        post = (
+            await (
+                await _post_json(
+                    client,
+                    cpath(
+                        dal,
+                        "/api/v1/community/{community_id}/interact/forum/{channel_id}/posts",
+                        community_id,
+                        channel_id=channel["id"],
+                    ),
+                    headers,
+                    {"title": "t", "body": "b"},
+                )
+            ).get_json()
+        )["post"]
+        reply = (
+            await (
+                await _post_json(
+                    client,
+                    cpath(
+                        dal,
+                        "/api/v1/community/{community_id}/interact/forum/posts/{post_id}/replies",
+                        community_id,
+                        post_id=post["id"],
+                    ),
+                    headers,
+                    {"content": "r"},
+                )
+            ).get_json()
+        )["reply"]
+        role = _pid(
+            dal,
+            "community_roles",
+            int(dal.community_roles.insert(community_id=community_id, name="vip", priority=5)),
+        )
+        dal.commit()
+        for value in (channel["id"], post["id"], reply["id"], role):
+            assert_uuid(value)
+        return {
+            "dal": dal,
+            "cid": community_id,
+            "other": other,
+            "headers": headers,
+            "channel": channel["id"],
+            "post": post["id"],
+            "reply": reply["id"],
+            "role": role,
+        }
+
+    async def test_uuid_resolves_in_url_community(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        w = await self._world(client, auth_headers, community_db)
+        base = cpath(w["dal"], "/api/v1/admin/{community_id}/interaction", w["cid"])
+        member = cpath(w["dal"], "/api/v1/community/{community_id}/interact", w["cid"])
+        json_headers = {**w["headers"], "Content-Type": "application/json"}
+        put = await client.put(
+            f"{base}/channels/{w['channel']}", headers=json_headers, data='{"name": "renamed"}'
+        )
+        assert put.status_code == 200
+        assert (await put.get_json())["channel"]["id"] == w["channel"]
+        got = await client.get(
+            f"{member}/forum/{w['channel']}/posts/{w['post']}", headers=w["headers"]
+        )
+        body = (await got.get_json())["post"]
+        assert (got.status_code, body["id"], body["hub_channel_id"]) == (
+            200,
+            w["post"],
+            w["channel"],
+        )
+        assert body["replies"][0]["id"] == w["reply"]
+        role = await client.put(
+            f"{base}/roles/{w['role']}", headers=json_headers, data='{"displayName": "VIP"}'
+        )
+        assert role.status_code == 200
+        reply = await client.delete(f"{base}/forum/replies/{w['reply']}", headers=w["headers"])
+        assert reply.status_code == 200
+
+    async def test_foreign_community_and_numeric_ids_are_404(
+        self, client: Any, auth_headers: Any, community_db: Any
+    ) -> None:
+        w = await self._world(client, auth_headers, community_db)
+        dal = w["dal"]
+        foreign_admin = cpath(dal, "/api/v1/admin/{community_id}/interaction", w["other"])
+        foreign_member = cpath(dal, "/api/v1/community/{community_id}/interact", w["other"])
+        base = cpath(dal, "/api/v1/admin/{community_id}/interaction", w["cid"])
+        numeric = {
+            "channel": dal.hub_channels(public_id=w["channel"]).id,
+            "post": dal.hub_forum_posts(public_id=w["post"]).id,
+            "reply": dal.hub_forum_replies(public_id=w["reply"]).id,
+            "role": dal.community_roles(public_id=w["role"]).id,
+        }
+        h = {**w["headers"], "Content-Type": "application/json"}
+        cases = [
+            ("DELETE", f"{foreign_admin}/channels/{w['channel']}"),
+            ("PUT", f"{foreign_admin}/forum/posts/{w['post']}"),
+            ("DELETE", f"{foreign_admin}/forum/replies/{w['reply']}"),
+            ("DELETE", f"{foreign_admin}/roles/{w['role']}"),
+            ("GET", f"{foreign_member}/forum/{w['channel']}/posts/{w['post']}"),
+            ("DELETE", f"{base}/channels/{numeric['channel']}"),
+            ("PUT", f"{base}/forum/posts/{numeric['post']}"),
+            ("DELETE", f"{base}/forum/replies/{numeric['reply']}"),
+            ("DELETE", f"{base}/roles/{numeric['role']}"),
+        ]
+        for method, url in cases:
+            resp = await client.open(url, method=method, headers=h, data="{}")
+            assert resp.status_code == 404, (method, url, resp.status_code)
+        assert dal(dal.hub_forum_replies).count() == 1
+        assert dal(dal.community_roles.id == numeric["role"]).count() == 1

@@ -9,7 +9,8 @@ const request = require('supertest');
 const API_BASE_URL = global.TEST_CONFIG.API_BASE_URL;
 const ADMIN_USER = global.TEST_CONFIG.ADMIN_USER;
 
-const COMMUNITY_ID = 1;
+// Community ids are public UUIDs on the API (never the numeric id).
+const COMMUNITY_ID = process.env.TEST_COMMUNITY_ID || '00000001-0000-4000-8000-000000000000';
 
 describe('Interaction API', () => {
   let authToken;
@@ -689,7 +690,7 @@ describe('Interaction API', () => {
             expect(Array.isArray(response.body.rooms)).toBe(true);
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });
@@ -720,7 +721,7 @@ describe('Interaction API', () => {
             createdVoiceRoomName = roomName;
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });
@@ -749,7 +750,7 @@ describe('Interaction API', () => {
             expect(response.body).toHaveProperty('url');
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });
@@ -776,7 +777,7 @@ describe('Interaction API', () => {
             expect(response.body).toHaveProperty('success', true);
           }
         } catch (err) {
-          // module_rtc may not be available; skip gracefully
+          // the RTC backend may not be available; skip gracefully
         }
       });
     });

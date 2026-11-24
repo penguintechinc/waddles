@@ -68,7 +68,7 @@ describe('vendor pages hit /api/v1/marketplace/vendor/*', () => {
     vi.spyOn(AuthContext, 'useAuth').mockReturnValue({ user: { id: 1 } });
     stub({});
     mount(<VendorDashboard />);
-    expect(await screen.findByText('Failed to load dashboard')).toBeInTheDocument();
+    expect(await screen.findByText(/No vendor profile yet|Failed to load dashboard/)).toBeInTheDocument();
   });
 
   it('VendorModules -> GET modules', async () => {
@@ -280,6 +280,8 @@ describe('SuperAdminAnalytics -> /api/v1/analytics/platform/*', () => {
   it('surfaces a failed call instead of silently falling back', async () => {
     stub({});
     mount(<SuperAdminAnalytics />);
-    expect(await screen.findByText(/Failed to load analytics/)).toBeInTheDocument();
+    // Per-widget errors (one per failed call), each with its own Retry; the page is not blanked.
+    expect((await screen.findAllByRole('alert')).length).toBe(5);
+    expect(screen.getAllByRole('button', { name: 'Retry' })).toHaveLength(5);
   });
 });

@@ -54,8 +54,10 @@ import httpx
 from cryptography.exceptions import InvalidTag
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from services.community_authz import get_caller_community_role
 from services.errors import ApiError, bad_request, forbidden, not_found
 from services.schema import bind_github_sync_tables
+from services.scope_registry import SCOPE_GITHUB_MANAGE
 
 logger = logging.getLogger(__name__)
 
@@ -363,60 +365,141 @@ async def delete_repo_connection(
 ) -> None:
     """Port of `deleteRepoConnection()`.
 
-    Re-verifies ownership against the row's REAL `community_id`.
-    Faithful to Node's own defense-in-depth: looks the connection up by
-    id first and checks ITS `community_id`, rather than trusting the
-    route's `community_id` path param alone -- catches a connection_id
-    belonging to a different community than the one in the URL.
+    SECURITY: the lookup is `WHERE id = ? AND community_id = ?` -- a connection
+    owned by another community returns 404 (foreign-resource convention).
     """
     bind_github_sync_tables(dal)
-    rows = await async_dal.select_async(
-        dal(
-            (dal.github_repo_connections.id == connection_id)
-            & (dal.github_repo_connections.is_active == True)  # noqa: E712
-        )
+    # Scoped to the URL community in the query itself -- a foreign connection id is
+    # indistinguishable from a missing one (404), never a 403 that confirms it exists.
+    await get_owned_connection(
+        async_dal, dal, connection_id=connection_id, community_id=community_id
     )
-    if not rows:
-        raise not_found("Connection not found")
-    conn = rows.first()
-    if conn.community_id != community_id:
-        raise forbidden("Forbidden")
 
-    member_rows = await async_dal.select_async(
-        dal(
-            (dal.community_members.community_id == community_id)
-            & (dal.community_members.user_id == str(user_id))
-            & (dal.community_members.is_active == True)  # noqa: E712
-            & (dal.community_members.role.belongs(["admin", "owner"]))
-        )
+    caller_role = await get_caller_community_role(
+        async_dal, dal, community_id=community_id, user_id=user_id
     )
-    if not member_rows:
+    if caller_role is None or SCOPE_GITHUB_MANAGE not in caller_role.scopes:
         raise forbidden("Forbidden")
 
     await async_dal.update_async(dal.github_repo_connections.id == connection_id, is_active=False)
 
 
-async def sync_ticket_to_github(
-    async_dal: Any, dal: Any, *, ticket_id: int, repo_connection_id: int
-) -> SyncRecord:
-    """Port of `syncTicketToGithub()` -- pushes a support ticket to GitHub as a new issue."""
-    bind_github_sync_tables(dal)
-    ticket_rows = await async_dal.select_async(dal(dal.support_tickets.id == ticket_id))
-    if not ticket_rows:
-        raise not_found("Ticket not found")
-    ticket = ticket_rows.first()
+async def get_owned_ticket(async_dal: Any, dal: Any, *, ticket_id: int, community_id: int) -> Any:
+    """Return the support ticket `ticket_id` iff it belongs to `community_id`, else 404.
 
-    conn_rows = await async_dal.select_async(
+    SECURITY (cross-community IDOR): `WHERE id = ? AND community_id = ?` -- a ticket of
+    another community is indistinguishable from a missing one.
+    """
+    bind_github_sync_tables(dal)
+    rows = await async_dal.select_async(
         dal(
-            (dal.github_repo_connections.id == repo_connection_id)
-            & (dal.github_repo_connections.is_active == True)  # noqa: E712
+            (dal.support_tickets.id == ticket_id)
+            & (dal.support_tickets.community_id == community_id)
         )
     )
-    if not conn_rows:
-        raise not_found("Repo connection not found or inactive")
-    conn = conn_rows.first()
+    if not rows:
+        raise not_found("Ticket not found")
+    return rows.first()
 
-    token = decrypt_token(conn.encrypted_token)
+
+async def get_owned_connection(
+    async_dal: Any,
+    dal: Any,
+    *,
+    connection_id: int,
+    community_id: int,
+    active_only: bool = True,
+) -> Any:
+    """Return the repo connection `connection_id` iff owned by `community_id`, else 404.
+
+    SECURITY (cross-community IDOR): `WHERE id = ? AND community_id = ?`; the row is
+    the only thing whose `encrypted_token` may later be decrypted for this caller.
+    """
+    bind_github_sync_tables(dal)
+    query = (dal.github_repo_connections.id == connection_id) & (
+        dal.github_repo_connections.community_id == community_id
+    )
+    if active_only:
+        query &= dal.github_repo_connections.is_active == True  # noqa: E712
+    rows = await async_dal.select_async(dal(query))
+    if not rows:
+        raise not_found("Repo connection not found or inactive")
+    return rows.first()
+
+
+def _decrypt_for_community(conn: Any, community_id: int) -> str:
+    """Decrypt `conn`'s PAT, but only when `conn` is owned by `community_id`.
+
+    The single decrypt choke point for caller-driven syncs: a connection of another
+    community never reaches `decrypt_token()` even if a lookup above regresses.
+    """
+    if conn.community_id is None or conn.community_id != community_id:
+        logger.warning(
+            "githubSync: refused decrypt for connection outside URL community",
+            extra={"connection_id": conn.id, "community_id": community_id},
+        )
+        raise not_found("Repo connection not found or inactive")
+    return decrypt_token(conn.encrypted_token)
+
+
+def _redact(text: str, token: str) -> str:
+    """Strip any occurrence of the PAT from `text` before it is stored or returned."""
+    return text.replace(token, "****") if token else text
+
+
+async def get_ticket_sync_status(
+    async_dal: Any, dal: Any, *, ticket_id: int, community_id: int
+) -> list[dict[str, Any]]:
+    """Sync rows for a ticket of `community_id`; 404 for a foreign/missing ticket.
+
+    Both the ticket and each joined connection are bound to `community_id`.
+    """
+    await get_owned_ticket(async_dal, dal, ticket_id=ticket_id, community_id=community_id)
+    rows = await async_dal.select_async(
+        dal(
+            (dal.ticket_github_sync.ticket_id == ticket_id)
+            & (dal.github_repo_connections.community_id == community_id)
+        ),
+        dal.ticket_github_sync.ALL,
+        dal.github_repo_connections.ALL,
+        left=dal.github_repo_connections.on(
+            dal.ticket_github_sync.github_repo_connection_id == dal.github_repo_connections.id
+        ),
+        orderby=~dal.ticket_github_sync.created_at,
+    )
+    return [
+        {
+            "id": r.ticket_github_sync.id,
+            "ticket_id": r.ticket_github_sync.ticket_id,
+            "github_issue_number": r.ticket_github_sync.github_issue_number,
+            "github_issue_node_id": r.ticket_github_sync.github_issue_node_id,
+            "sync_status": r.ticket_github_sync.sync_status,
+            "last_synced_at": r.ticket_github_sync.last_synced_at,
+            "last_error": r.ticket_github_sync.last_error,
+            "retry_count": r.ticket_github_sync.retry_count,
+            "created_at": r.ticket_github_sync.created_at,
+            "repo_owner": r.github_repo_connections.repo_owner,
+            "repo_name": r.github_repo_connections.repo_name,
+            "sync_mode": r.github_repo_connections.sync_mode,
+        }
+        for r in rows
+    ]
+
+
+async def sync_ticket_to_github(
+    async_dal: Any, dal: Any, *, ticket_id: int, repo_connection_id: int, community_id: int
+) -> SyncRecord:
+    """Port of `syncTicketToGithub()` -- pushes a support ticket to GitHub as a new issue.
+
+    SECURITY: ticket AND connection must both belong to `community_id` (the URL community);
+    either mismatch is a 404 raised before any decrypt or outbound GitHub call.
+    """
+    ticket = await get_owned_ticket(async_dal, dal, ticket_id=ticket_id, community_id=community_id)
+    conn = await get_owned_connection(
+        async_dal, dal, connection_id=repo_connection_id, community_id=community_id
+    )
+
+    token = _decrypt_for_community(conn, community_id)
     issue_body = "\n".join(
         [
             ticket.description or "",
@@ -441,7 +524,7 @@ async def sync_ticket_to_github(
             github_repo_connection_id=repo_connection_id,
             github_issue_number=0,
             sync_status="failed",
-            last_error=f"GitHub API {status}: {data}",
+            last_error=_redact(f"GitHub API {status}: {data}", token),
         )
         await _write_sync_log(
             async_dal,
@@ -451,7 +534,7 @@ async def sync_ticket_to_github(
             event_type="issue_created",
             payload={"ticketId": ticket_id, "repoConnectionId": repo_connection_id},
             success=False,
-            error_message=f"GitHub API {status}: {data}",
+            error_message=_redact(f"GitHub API {status}: {data}", token),
         )
         raise ApiError(f"GitHub API error {status}", 502, "GITHUB_API_ERROR")
 
@@ -491,7 +574,13 @@ async def sync_ticket_to_github(
 
 
 async def sync_comment_to_github(
-    async_dal: Any, dal: Any, *, ticket_id: int, comment_text: str, author_name: str
+    async_dal: Any,
+    dal: Any,
+    *,
+    ticket_id: int,
+    comment_text: str,
+    author_name: str,
+    community_id: int,
 ) -> None:
     """Port of `syncCommentToGithub()`.
 
@@ -502,6 +591,7 @@ async def sync_comment_to_github(
         dal(
             (dal.ticket_github_sync.ticket_id == ticket_id)
             & (dal.ticket_github_sync.sync_status != "failed")
+            & (dal.github_repo_connections.community_id == community_id)
         ),
         dal.ticket_github_sync.ALL,
         dal.github_repo_connections.ALL,
@@ -515,7 +605,7 @@ async def sync_comment_to_github(
 
     sync_row, conn_row = match.ticket_github_sync, match.github_repo_connections
     try:
-        token = decrypt_token(conn_row.encrypted_token)
+        token = _decrypt_for_community(conn_row, community_id)
     except ApiError:
         return
 
@@ -534,7 +624,7 @@ async def sync_comment_to_github(
         event_type="comment_added",
         payload={"ticketId": ticket_id, "issueNumber": sync_row.github_issue_number},
         success=ok,
-        error_message=None if ok else f"GitHub API {status}: {data}",
+        error_message=None if ok else _redact(f"GitHub API {status}: {data}", token),
     )
 
 
@@ -563,9 +653,13 @@ async def handle_github_webhook(
     )
     if not conn_rows:
         return
-    conn = conn_rows.first()
-
-    if not verify_webhook_signature(raw_body, signature, conn.webhook_secret):
+    # The same repo may be connected by several communities (UNIQUE is per community):
+    # the HMAC secret decides which connection -- and so which community -- owns the event.
+    conn = next(
+        (c for c in conn_rows if verify_webhook_signature(raw_body, signature, c.webhook_secret)),
+        None,
+    )
+    if conn is None:
         raise ApiError("Invalid webhook signature", 401, "UNAUTHORIZED")
 
     issue = payload.get("issue") if isinstance(payload, dict) else None
@@ -582,6 +676,18 @@ async def handle_github_webhook(
     if not sync_rows:
         return
     sync_row = sync_rows.first()
+
+    # Defense in depth: the synced ticket must belong to the connection's own community.
+    try:
+        await get_owned_ticket(
+            async_dal, dal, ticket_id=sync_row.ticket_id, community_id=conn.community_id
+        )
+    except ApiError:
+        logger.warning(
+            "githubSync: webhook ticket outside connection community",
+            extra={"sync_id": sync_row.id, "connection_id": conn.id},
+        )
+        return
 
     action = payload.get("action")
     if event == "issue_comment" and action == "created":
@@ -661,7 +767,9 @@ async def process_inbound_issue_close(
 
         still_open = ~dal.support_tickets.status.belongs(["closed", "resolved"])
         await async_dal.update_async(
-            (dal.support_tickets.id == ticket_id) & still_open,
+            (dal.support_tickets.id == ticket_id)
+            & (dal.support_tickets.community_id == conn_row.community_id)
+            & still_open,
             status="closed",
         )
         await _write_sync_log(
@@ -744,6 +852,7 @@ async def retry_failed_syncs(async_dal: Any, dal: Any) -> RetryResult:
                 dal,
                 ticket_id=sync_row.ticket_id,
                 repo_connection_id=sync_row.github_repo_connection_id,
+                community_id=record.github_repo_connections.community_id,
             )
             succeeded += 1
         except ApiError as exc:

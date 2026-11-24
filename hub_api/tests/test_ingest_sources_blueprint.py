@@ -1,4 +1,7 @@
-"""Blueprint tests for `/api/v1/communities/<id>/ingest-sources` (ingest_sources registry).
+"""Blueprint tests for `/api/v1/communities/<uuid>/ingest-sources` (ingest_sources registry).
+
+Every id on the wire (community path segment, source path segment, DTO `id`/`communityId`,
+list cursor) is a `public_id` UUID; the numeric surrogate keys never cross the boundary.
 
 Not to be confused with `/api/v1/communities/<id>/connections/...`
 (`blueprints/v1/community_connections.py`) -- the pre-existing, unrelated
@@ -8,6 +11,7 @@ docstring for the full reconciliation note.
 
 from __future__ import annotations
 
+import uuid
 from typing import Any
 
 import pytest
@@ -30,8 +34,22 @@ async def app(bundle_install_db: Any, install_dal: Any) -> Quart:
     return quart_app
 
 
-async def _make_community(install_dal: Any, tenant_id: int, name: str = "acme-community") -> int:
-    return int(await install_dal.communities.async_insert(tenant_id=tenant_id, name=name))
+async def _make_community_ids(
+    install_dal: Any, tenant_id: int, name: str = "acme-community"
+) -> tuple[int, str]:
+    """Insert a community; returns `(internal id, public_id UUID)`."""
+    public_id = str(uuid.uuid4())
+    internal = int(
+        await install_dal.communities.async_insert(
+            tenant_id=tenant_id, name=name, public_id=public_id
+        )
+    )
+    return internal, public_id
+
+
+async def _make_community(install_dal: Any, tenant_id: int, name: str = "acme-community") -> str:
+    """Insert a community; returns its public UUID (the only id the API accepts)."""
+    return (await _make_community_ids(install_dal, tenant_id, name))[1]
 
 
 def _admin_token() -> str:
@@ -307,7 +325,7 @@ async def test_list_never_returns_another_tenants_sources(app: Quart) -> None:
     dal.commit()
     install_dal = app.config["install_dal"]
     community_id = await _make_community(install_dal, tenant_id=1)
-    other_community_id = await _make_community(install_dal, tenant_id=other_tenant_id)
+    other_community_id, _ = await _make_community_ids(install_dal, tenant_id=other_tenant_id)
     await install_dal.ingest_sources.async_insert(
         tenant_id=other_tenant_id,
         community_id=other_community_id,
@@ -382,7 +400,7 @@ async def test_patch_missing_returns_404(app: Quart) -> None:
     install_dal = app.config["install_dal"]
     community_id = await _make_community(install_dal, tenant_id=1)
     response = await app.test_client().patch(
-        f"/api/v1/communities/{community_id}/ingest-sources/999999",
+        f"/api/v1/communities/{community_id}/ingest-sources/{uuid.uuid4()}",
         headers={"Authorization": f"Bearer {_admin_token()}"},
         json={"label": "x"},
     )
@@ -397,7 +415,7 @@ async def test_patch_another_tenants_source_returns_404(app: Quart) -> None:
     dal.commit()
     install_dal = app.config["install_dal"]
     community_id = await _make_community(install_dal, tenant_id=1)
-    other_community_id = await _make_community(install_dal, tenant_id=other_tenant_id)
+    other_community_id, _ = await _make_community_ids(install_dal, tenant_id=other_tenant_id)
     other_id = await install_dal.ingest_sources.async_insert(
         tenant_id=other_tenant_id,
         community_id=other_community_id,
@@ -409,8 +427,11 @@ async def test_patch_another_tenants_source_returns_404(app: Quart) -> None:
         mapping=None,
         enabled=True,
     )
+    other_public_id = str(
+        (await install_dal(install_dal.ingest_sources.id == other_id).select()).first().public_id
+    )
     response = await app.test_client().patch(
-        f"/api/v1/communities/{community_id}/ingest-sources/{other_id}",
+        f"/api/v1/communities/{community_id}/ingest-sources/{other_public_id}",
         headers={"Authorization": f"Bearer {_admin_token()}"},
         json={"label": "hijacked"},
     )
@@ -453,7 +474,186 @@ async def test_delete_missing_returns_404(app: Quart) -> None:
     install_dal = app.config["install_dal"]
     community_id = await _make_community(install_dal, tenant_id=1)
     response = await app.test_client().delete(
-        f"/api/v1/communities/{community_id}/ingest-sources/999999",
+        f"/api/v1/communities/{community_id}/ingest-sources/{uuid.uuid4()}",
         headers={"Authorization": f"Bearer {_admin_token()}"},
     )
     assert response.status_code == 404
+
+
+# -- public_id-only boundary (numeric surrogate keys never cross the API) ---------------------
+
+_DTO_FIELDS = {
+    "id",
+    "platform",
+    "sourceId",
+    "label",
+    "enabled",
+    "communityId",
+    "createdAt",
+    "updatedAt",
+}
+
+
+async def _create(app: Quart, community_public_id: str, source_id: str = "g-1") -> dict[str, Any]:
+    response = await app.test_client().post(
+        f"/api/v1/communities/{community_public_id}/ingest-sources",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"platform": "discord", "sourceId": source_id, "label": "Main"},
+    )
+    assert response.status_code == 201
+    body: dict[str, Any] = (await response.get_json())["ingestSource"]
+    return body
+
+
+async def test_dto_exact_field_set_and_uuid_ids(app: Quart) -> None:
+    """regression: the DTO is exactly this field set; `id`/`communityId` are public UUIDs."""
+    install_dal = app.config["install_dal"]
+    community_internal, community_public = await _make_community_ids(install_dal, tenant_id=1)
+    dto = await _create(app, community_public)
+    assert set(dto) == _DTO_FIELDS
+    assert str(uuid.UUID(dto["id"])) == dto["id"]
+    assert dto["communityId"] == community_public
+    assert dto["communityId"] != str(community_internal)
+    row = (await install_dal(install_dal.ingest_sources.public_id == dto["id"]).select()).first()
+    assert str(dto["id"]) != str(row.id)
+
+
+async def test_list_dto_exact_field_set_and_cursor_is_a_uuid(app: Quart) -> None:
+    install_dal = app.config["install_dal"]
+    community_public = await _make_community(install_dal, tenant_id=1)
+    created = [await _create(app, community_public, f"g-{i}") for i in range(3)]
+    headers = {"Authorization": f"Bearer {_admin_token()}"}
+    page1 = await (
+        await app.test_client().get(
+            f"/api/v1/communities/{community_public}/ingest-sources?limit=2", headers=headers
+        )
+    ).get_json()
+    assert all(set(item) == _DTO_FIELDS for item in page1["ingestSources"])
+    cursor = page1["meta"]["nextCursor"]
+    assert cursor == created[1]["id"]
+    page2 = await (
+        await app.test_client().get(
+            f"/api/v1/communities/{community_public}/ingest-sources?limit=2&cursor={cursor}",
+            headers=headers,
+        )
+    ).get_json()
+    assert [i["id"] for i in page2["ingestSources"]] == [created[2]["id"]]
+    assert page2["meta"]["nextCursor"] is None
+
+
+@pytest.mark.parametrize("cursor", ["1", "not-a-uuid", str(uuid.UUID(int=7))])
+async def test_list_rejects_a_numeric_or_unknown_cursor(app: Quart, cursor: str) -> None:
+    install_dal = app.config["install_dal"]
+    community_public = await _make_community(install_dal, tenant_id=1)
+    await _create(app, community_public)
+    response = await app.test_client().get(
+        f"/api/v1/communities/{community_public}/ingest-sources?cursor={cursor}",
+        headers={"Authorization": f"Bearer {_viewer_token()}"},
+    )
+    assert response.status_code == 422
+    assert (await response.get_json())["error"]["code"] == "invalid_cursor"
+
+
+@pytest.mark.parametrize("method", ["get", "post"])
+async def test_numeric_community_id_in_path_is_404(app: Quart, method: str) -> None:
+    install_dal = app.config["install_dal"]
+    internal, _ = await _make_community_ids(install_dal, tenant_id=1)
+    client = app.test_client()
+    headers = {"Authorization": f"Bearer {_admin_token()}"}
+    url = f"/api/v1/communities/{internal}/ingest-sources"
+    if method == "get":
+        response = await client.get(url, headers=headers)
+    else:
+        response = await client.post(
+            url, headers=headers, json={"platform": "discord", "sourceId": "a", "label": "a"}
+        )
+    assert response.status_code == 404
+
+
+@pytest.mark.parametrize("method", ["patch", "delete"])
+async def test_numeric_source_id_in_path_is_404_and_changes_nothing(
+    app: Quart, method: str
+) -> None:
+    install_dal = app.config["install_dal"]
+    community_public = await _make_community(install_dal, tenant_id=1)
+    dto = await _create(app, community_public)
+    row = (await install_dal(install_dal.ingest_sources.public_id == dto["id"]).select()).first()
+    client = app.test_client()
+    headers = {"Authorization": f"Bearer {_admin_token()}"}
+    url = f"/api/v1/communities/{community_public}/ingest-sources/{row.id}"
+    if method == "patch":
+        response = await client.patch(url, headers=headers, json={"label": "x"})
+    else:
+        response = await client.delete(url, headers=headers)
+    assert response.status_code == 404
+    still = (await install_dal(install_dal.ingest_sources.id == row.id).select()).first()
+    assert still is not None and still.label == "Main"
+
+
+async def test_uuid_routes_round_trip_patch_and_delete(app: Quart) -> None:
+    install_dal = app.config["install_dal"]
+    community_public = await _make_community(install_dal, tenant_id=1)
+    dto = await _create(app, community_public)
+    client = app.test_client()
+    headers = {"Authorization": f"Bearer {_admin_token()}"}
+    url = f"/api/v1/communities/{community_public}/ingest-sources/{dto['id']}"
+    patched = await client.patch(url, headers=headers, json={"label": "Renamed"})
+    assert patched.status_code == 200
+    body = (await patched.get_json())["ingestSource"]
+    assert set(body) == _DTO_FIELDS and body["id"] == dto["id"] and body["label"] == "Renamed"
+    assert (await client.delete(url, headers=headers)).status_code == 204
+    assert (await client.delete(url, headers=headers)).status_code == 404
+
+
+async def test_source_of_another_community_in_same_tenant_is_404(app: Quart) -> None:
+    install_dal = app.config["install_dal"]
+    community_a = await _make_community(install_dal, tenant_id=1, name="community-a")
+    community_b = await _make_community(install_dal, tenant_id=1, name="community-b")
+    dto = await _create(app, community_a)
+    response = await app.test_client().patch(
+        f"/api/v1/communities/{community_b}/ingest-sources/{dto['id']}",
+        headers={"Authorization": f"Bearer {_admin_token()}"},
+        json={"label": "hijacked"},
+    )
+    assert response.status_code == 404
+
+
+async def test_cross_tenant_source_uuid_is_404_for_patch_delete_and_cursor(app: Quart) -> None:
+    dal = app.config["dal"]
+    other_tenant_id = int(
+        dal.tenants.insert(slug="other-corp-uuid", display_name="O", is_active=True)
+    )
+    dal.commit()
+    install_dal = app.config["install_dal"]
+    community_public = await _make_community(install_dal, tenant_id=1)
+    other_internal, other_public = await _make_community_ids(
+        install_dal, tenant_id=other_tenant_id, name="other"
+    )
+    await install_dal.ingest_sources.async_insert(
+        tenant_id=other_tenant_id,
+        community_id=other_internal,
+        platform="discord",
+        source_id="other-guild-uuid",
+        label="other",
+        enabled=True,
+    )
+    other_row = (
+        await install_dal(install_dal.ingest_sources.tenant_id == other_tenant_id).select()
+    ).first()
+    client = app.test_client()
+    headers = {"Authorization": f"Bearer {_admin_token()}"}
+    victim = str(other_row.public_id)
+    # Source uuid under the caller's own community, and under the foreign community's uuid.
+    for comm in (community_public, other_public):
+        url = f"/api/v1/communities/{comm}/ingest-sources/{victim}"
+        assert (await client.patch(url, headers=headers, json={"label": "x"})).status_code == 404
+        assert (await client.delete(url, headers=headers)).status_code == 404
+    cursor_resp = await client.get(
+        f"/api/v1/communities/{community_public}/ingest-sources?cursor={victim}", headers=headers
+    )
+    assert cursor_resp.status_code == 422
+    untouched = (await install_dal(install_dal.ingest_sources.id == other_row.id).select()).first()
+    assert untouched is not None and untouched.label == "other"
+
+
+pytestmark = pytest.mark.usefixtures("bypass_route_guards")

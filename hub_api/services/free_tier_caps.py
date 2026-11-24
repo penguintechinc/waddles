@@ -56,16 +56,18 @@ from typing import Any
 from flask_core.feature_flags import feature_enabled, get_tier
 from flask_core.tier_catalog import TIER_FREE, TIER_PROFESSIONAL, tier_level
 
+from services.bundle_install_dal import raw_sql_write
 from services.errors import ApiError
 from services.global_identity import global_admin_ids, grant_global_admin_sync
+from services.member_roles import require_valid_member_role
 
 logger = logging.getLogger(__name__)
 
 FLAG_DISABLE_FREE_TIER_CAPS = "waddles.disable-free-tier-entity-caps"
 SYSTEM_TENANT_SLUG = "system"
 # Only the operator-plane tenant is excluded from the tenant cap. The catch-all tenant
-# (slug `global`, `is_global=TRUE` per migration 058) COUNTS: a free deployment whose
-# only tenant is the catch-all is already at the cap (multi-tenancy is paid).
+# (slug `DEFAULT_TENANT_SLUG` = "default" since migration 0098, `is_global=TRUE`) COUNTS:
+# a free deployment whose only tenant is the catch-all is already at the cap.
 RESERVED_TENANT_SLUGS: frozenset[str] = frozenset({SYSTEM_TENANT_SLUG})
 FREE_TIER_CAP = 1
 CAP_ERROR_CODE = "FREE_TIER_CAP_REACHED"
@@ -223,7 +225,9 @@ async def create_community_capped(
     def _write(d: Any) -> int:
         new_id = int(d.communities.insert(**values))
         if member_values is not None:
-            d.community_members.insert(**member_values(new_id))
+            member = member_values(new_id)
+            require_valid_member_role(member["role"])
+            d.community_members.insert(**member)
         return new_id
 
     return int(
@@ -239,6 +243,21 @@ async def create_community_capped(
             ),
             write=_write,
         )
+    )
+
+
+async def ensure_system_tenant(install_dal: Any) -> None:
+    """Idempotently create the reserved operator-plane ``system`` tenant row (startup only).
+
+    This is the one tenant insert outside :func:`create_tenant_capped`, and it is exempt from the
+    cap by design (``RESERVED_TENANT_SLUGS``): the ``system`` tenant must exist to own its at-rest
+    key, is never user-created, and is excluded from the free-tier tenant count.
+    """
+    await raw_sql_write(
+        install_dal,
+        "INSERT INTO tenants (slug, display_name, is_global) "
+        "VALUES (:slug, 'System', FALSE) ON CONFLICT (slug) DO NOTHING",
+        {"slug": SYSTEM_TENANT_SLUG},
     )
 
 

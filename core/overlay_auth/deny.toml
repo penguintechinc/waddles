@@ -17,7 +17,6 @@ feature-depth = 1
 [advisories]
 version = 2
 ignore = []
-
 [licenses]
 version = 2
 confidence-threshold = 0.8

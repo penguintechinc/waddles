@@ -315,6 +315,13 @@ pub struct CliConfig {
     /// grants this role needs.
     #[arg(long, env = "DB_READER_USER", default_value = "svc_action_ro")]
     pub db_reader_user: String,
+    /// Postgres host for EVERY changelog-consumer read (safe-seq watermark, change rows, active-set /
+    /// scope / source-binding reads). Helm points it at the PRIMARY while `DB_READER_HOST` targets the
+    /// read replicas (`-ro`): a lagging replica could miss a row below the primary's safe_seq and the
+    /// tracker would then skip it forever, so the consumer never reads from a replica. Unset falls back
+    /// to `DB_READER_HOST` (single-endpoint deployments).
+    #[arg(long, env = "DB_WATERMARK_HOST")]
+    pub db_watermark_host: Option<String>,
     /// Bundle `db` host capability connection (`crate::capabilities::DbWiring`):
     /// same env names/defaults as `core/svc_process::config::CliConfig` -- the
     /// shared `waddles` Postgres instance. The role is the DML-only
@@ -354,12 +361,10 @@ pub struct CliConfig {
     /// hub-api's internal gRPC endpoint (`waddles.hub.internal.v1`,
     /// `core/hub_client::HubClient::connect`'s `endpoint`), e.g.
     /// `https://waddlebot-hub-api-v3:50204`. Empty (the default) means "not
-    /// configured" -- [`crate::build_hub_client`] fails loud at startup
-    /// rather than starting and silently showing the neutral label for
-    /// every egress send when PII detokenization is enabled and this is
-    /// unset (user requirement: "fail loud, not silent degraded-UX").
-    /// Field shape mirrors `core/svc_process::config::CliConfig`'s
-    /// identical addition -- same env var names across both services.
+    /// configured": host tools that name a user are then refused
+    /// ([`crate::build_platform_user_resolver`]). This service never
+    /// detokenizes display names -- svc-ingest's outbound drain does.
+    /// Same env var names across the services that dial hub-api.
     #[arg(long, env = "HUB_API_GRPC_ENDPOINT", default_value = "")]
     pub hub_api_grpc_endpoint: String,
     /// hub-api's machine-JWT bootstrap endpoint: its internal gRPC address
@@ -391,22 +396,30 @@ pub struct CliConfig {
     #[arg(long, env = "HUB_API_GRPC_CA_FILE", default_value = "")]
     pub hub_api_grpc_ca_file: String,
 
-    /// Plain env/values off-switch for outbound PII detokenization
-    /// (`crate::build_hub_client`'s gate), independent of the
-    /// `waddles.core.disable-pii-detokenization` PostHog kill-switch --
-    /// field-for-field mirror of `core/svc_process::config::CliConfig::
-    /// pii_tokenization_enabled_override`'s identical rationale (same env
-    /// var naming convention, `PII_DETOKENIZATION_ENABLED` for this
-    /// service's detokenization pass). `None` (unset, the default) leaves
-    /// the existing PostHog-gated, default-ENABLED, fail-loud-when-
-    /// unreachable behavior unchanged; `Some(false)` is the only value this
-    /// crate's startup gate treats specially (see [`crate::run_with_shutdown`]'s
-    /// call site): detokenization runs disabled, `hub_client` is never
-    /// connected, and startup never fails loud. Explicit, loudly-logged
-    /// operator escape hatch for dev/air-gapped deployments -- never a
-    /// silent bypass, never the default in a production tenant.
-    #[arg(long, env = "PII_DETOKENIZATION_ENABLED")]
-    pub pii_detokenization_enabled_override: Option<bool>,
+    /// Operator policy for reading pre-encryption plaintext `kv` values
+    /// (`bundle_host_kv::Sealing::with_legacy_plaintext_reads_allowed`).
+    /// Default `true` ONLY for the migration window; the planned flip to
+    /// `false` makes any non-envelope value an integrity error. Independent
+    /// of the per-scope sealed-since marker, which refuses plaintext in any
+    /// scope that already has a sealed write even while this is `true`.
+    #[arg(
+        long,
+        env = "KV_LEGACY_PLAINTEXT_READS_ALLOWED",
+        default_value_t = true,
+        action = clap::ArgAction::Set
+    )]
+    pub kv_legacy_plaintext_reads_allowed: bool,
+    /// svc-presentation's in-cluster gRPC address
+    /// (`waddles.presentation.internal.v1.SurfaceService`), e.g.
+    /// `https://waddlebot-svc-presentation:50051`. Empty (the default) leaves the bundle
+    /// `overlay.publish-surface` capability unwired: `surface.publish` then denies
+    /// `not_implemented`. `https://` needs [`Self::presentation_grpc_ca_file`]; plaintext is
+    /// accepted on loopback only.
+    #[arg(long, env = "PRESENTATION_GRPC_ENDPOINT", default_value = "")]
+    pub presentation_grpc_endpoint: String,
+    /// PEM CA bundle that signed svc-presentation's gRPC server certificate.
+    #[arg(long, env = "PRESENTATION_GRPC_CA_FILE", default_value = "")]
+    pub presentation_grpc_ca_file: String,
 }
 
 impl CliConfig {
@@ -560,20 +573,6 @@ pub struct Config {
     /// without it rather than silently accepting every envelope (a missing
     /// keyring must never fail open).
     pub envelope_binding_keys: Option<Secret>,
-    /// `DISCORD_BOT_TOKEN` (env-only, optional): the bot token
-    /// `crate::capabilities::StageCapabilities::with_discord` authenticates
-    /// the Discord relay send with (`Authorization: Bot <token>`). This is
-    /// the **same secret key** `templates/secrets.yaml` already renders for
-    /// the legacy Python `svc-action` and for `svc-ingest-rust`'s Discord
-    /// Gateway connection (`.Values.oauth.discord.botToken` -> the
-    /// `DISCORD_BOT_TOKEN` key in the shared `{fullname}-secrets` Secret) --
-    /// wiring the Discord relay provider onto this pod needs only a new env
-    /// mount in `templates/svc-action-rust.yaml` pointing at that existing
-    /// key, no new chart secret. `None` when unset -- not every deployment
-    /// enables Discord, and a relay send for "discord" is then refused
-    /// `relay_unavailable` (graceful degradation, not a startup failure;
-    /// mirrors `envelope_binding_keys` above).
-    pub discord_bot_token: Option<Secret>,
     /// `DB_READER_PASSWORD` for the DB-driven active-bundle loader's
     /// read-only Postgres role (`crate::bundle_loader`). Deliberately
     /// `Option`, unlike `db_password`: this loader is enabled by default
@@ -583,7 +582,7 @@ pub struct Config {
     /// unset the same as a genuinely-disabled DB path, falling back to the
     /// legacy `ACTION_BUNDLE_*` env override (mutual exclusion, `crate::lib`'s
     /// top doc), the same graceful-degradation contract as
-    /// `envelope_binding_keys`/`discord_bot_token` above.
+    /// `envelope_binding_keys` above.
     pub db_reader_password: Option<Secret>,
     /// `BUNDLE_DB_PASSWORD` for the bundle `db` host capability's
     /// `waddles_bundle_runtime` connection. `Option` (empty == unset): the
@@ -602,10 +601,6 @@ impl fmt::Debug for Config {
             .field(
                 "envelope_binding_keys",
                 &self.envelope_binding_keys.as_ref().map(|_| "<redacted>"),
-            )
-            .field(
-                "discord_bot_token",
-                &self.discord_bot_token.as_ref().map(|_| "<redacted>"),
             )
             .field(
                 "db_reader_password",
@@ -635,7 +630,6 @@ impl Config {
         cli.validate()?;
         let db_password = Secret::new(env_required("DB_PASSWORD")?);
         let envelope_binding_keys = std::env::var("ENVELOPE_BINDING_KEYS").ok().map(Secret::new);
-        let discord_bot_token = std::env::var("DISCORD_BOT_TOKEN").ok().map(Secret::new);
         // Security review fix: Helm always renders the DB_READER_PASSWORD
         // secret key (`templates/secrets.yaml`), defaulting to "" until the
         // RO Postgres role is actually provisioned -- so the env var is
@@ -656,7 +650,6 @@ impl Config {
             cli,
             db_password,
             envelope_binding_keys,
-            discord_bot_token,
             db_reader_password,
             bundle_db_password,
         })
@@ -665,6 +658,30 @@ impl Config {
 
 fn env_required(name: &'static str) -> Result<String, ConfigError> {
     std::env::var(name).map_err(|_| ConfigError::MissingEnv(name))
+}
+
+impl CliConfig {
+    /// Connection settings for the changelog consumer: same port/name/role as the reader, but host
+    /// `DB_WATERMARK_HOST` (the primary) when set, else `DB_READER_HOST`.
+    #[must_use]
+    pub fn changelog_primary_config(&self) -> bundle_active_set::ReaderConfig {
+        bundle_active_set::ReaderConfig {
+            host: self
+                .db_watermark_host
+                .clone()
+                .filter(|h| !h.trim().is_empty())
+                .unwrap_or_else(|| self.db_reader_host.clone()),
+            port: self.db_reader_port,
+            name: self.db_reader_name.clone(),
+            user: self.db_reader_user.clone(),
+        }
+    }
+
+    /// Whether the changelog consumer's host differs from the reader (replica) host.
+    #[must_use]
+    pub fn changelog_uses_primary_host(&self) -> bool {
+        self.changelog_primary_config().host != self.db_reader_host
+    }
 }
 
 #[cfg(test)]
@@ -681,7 +698,6 @@ mod tests {
         // these specific variables within the test process.
         unsafe {
             std::env::remove_var("DB_PASSWORD");
-            std::env::remove_var("DISCORD_BOT_TOKEN");
             std::env::remove_var("DB_READER_PASSWORD");
         }
     }
@@ -1004,36 +1020,6 @@ mod tests {
         unsafe { std::env::remove_var("ENVELOPE_BINDING_KEYS") };
     }
 
-    #[test]
-    fn discord_bot_token_is_none_when_unset() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_secret_env();
-        unsafe {
-            std::env::set_var("DB_PASSWORD", "test-db-pass");
-        }
-        let cli = CliConfig::parse_from(["svc-action"]);
-        let cfg = Config::from_cli(cli).expect("secrets are set");
-        assert!(cfg.discord_bot_token.is_none());
-        clear_secret_env();
-    }
-
-    #[test]
-    fn discord_bot_token_loaded_from_env_when_present() {
-        let _guard = ENV_LOCK.lock().unwrap();
-        clear_secret_env();
-        unsafe {
-            std::env::set_var("DB_PASSWORD", "test-db-pass");
-            std::env::set_var("DISCORD_BOT_TOKEN", "test-discord-bot-token");
-        }
-        let cli = CliConfig::parse_from(["svc-action"]);
-        let cfg = Config::from_cli(cli).expect("secrets are set");
-        assert_eq!(
-            cfg.discord_bot_token.as_ref().map(Secret::expose),
-            Some("test-discord-bot-token")
-        );
-        clear_secret_env();
-    }
-
     /// Security review fix: Helm always renders `DB_READER_PASSWORD` (empty
     /// by default until the RO role is provisioned, `templates/
     /// secrets.yaml`) -- an empty value must load as `None`, the same as
@@ -1154,13 +1140,45 @@ mod tests {
         // SAFETY: serialized by ENV_LOCK above.
         unsafe {
             std::env::set_var("DB_PASSWORD", "super-secret-db-pass");
-            std::env::set_var("DISCORD_BOT_TOKEN", "super-secret-discord-bot-token");
         }
         let cli = CliConfig::parse_from(["svc-action"]);
         let cfg = Config::from_cli(cli).expect("secrets are set");
         let rendered = format!("{cfg:?}");
         assert!(!rendered.contains("super-secret-db-pass"));
-        assert!(!rendered.contains("super-secret-discord-bot-token"));
         clear_secret_env();
+    }
+
+    /// regression: the watermark read must never resolve to the replica host (-ro).
+    #[test]
+    fn changelog_consumer_host_never_resolves_to_the_reader_replica_host() {
+        let cli = CliConfig::parse_from([
+            "svc-action",
+            "--db-reader-host",
+            "infra-postgres-ro.example.svc",
+            "--db-watermark-host",
+            "infra-postgres.example.svc",
+        ]);
+        let wm = cli.changelog_primary_config();
+        assert_eq!(wm.host, "infra-postgres.example.svc");
+        assert_ne!(wm.host, cli.db_reader_host);
+        assert!(cli.changelog_uses_primary_host());
+        assert_eq!(wm.user, cli.db_reader_user);
+        assert_eq!(wm.port, cli.db_reader_port);
+    }
+
+    /// Unset (or blank) `DB_WATERMARK_HOST` falls back to the reader host: single-endpoint deployments unchanged.
+    #[test]
+    fn changelog_consumer_host_falls_back_to_reader_host_when_unset_or_blank() {
+        let cli = CliConfig::parse_from(["svc-action", "--db-reader-host", "db.example.svc"]);
+        assert_eq!(cli.changelog_primary_config().host, "db.example.svc");
+        assert!(!cli.changelog_uses_primary_host());
+        let blank = CliConfig::parse_from([
+            "svc-action",
+            "--db-reader-host",
+            "db.example.svc",
+            "--db-watermark-host",
+            " ",
+        ]);
+        assert_eq!(blank.changelog_primary_config().host, "db.example.svc");
     }
 }

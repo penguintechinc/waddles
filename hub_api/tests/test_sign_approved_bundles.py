@@ -17,7 +17,7 @@ import pytest
 from cli import sign_approved_bundles as backfill
 from cli.sign_approved_bundles import _select_unsigned_approved_versions, sign_one
 
-_APP_ID = "waddles.socials.music.default"
+_APP_ID = "penguintechinc.waddles.socials-music"
 _VERSION = "3.0.1"
 _DIGEST = "a" * 64
 
@@ -215,8 +215,12 @@ async def test_run_signs_every_unsigned_approved_row_and_returns_zero(
     await _seed_version(install_dal)
     await _seed_current_approval(install_dal)
     # A second, already-signed version must be left alone (no-op).
-    other_version_id = await _seed_version(install_dal, app_id="waddles.other.app", version="1.0.0")
-    await _seed_current_approval(install_dal, app_id="waddles.other.app", version="1.0.0")
+    other_version_id = await _seed_version(
+        install_dal, app_id="penguintechinc.waddles.other-app", version="1.0.0"
+    )
+    await _seed_current_approval(
+        install_dal, app_id="penguintechinc.waddles.other-app", version="1.0.0"
+    )
     from sqlalchemy import update as sa_update
 
     versions_table = install_dal.metadata.tables["app_versions"]
@@ -264,6 +268,9 @@ async def test_run_reports_nonzero_exit_when_a_row_fails(
     monkeypatch.setattr(backfill, "build_install_dal", _fake_build_install_dal)
     monkeypatch.setattr(backfill.HubAPIConfig, "from_env", staticmethod(lambda: _FakeConfig()))
     monkeypatch.setattr(install_dal, "close", AsyncMock())
+    from services.platform_secrets.bootstrap import get_process_cache
+
+    get_process_cache().seed(())
     monkeypatch.delenv("BUNDLE_SIGNING_PRIVATE_KEY", raising=False)
     monkeypatch.delenv("BUNDLE_SIGNING_KEY_ID", raising=False)
 

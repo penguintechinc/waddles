@@ -39,13 +39,11 @@ entitlement.
   hub-api image). No source can lower another; a flag in none of them
   requires `"free"`. An unrecognised required tier is unsatisfiable (denies),
   never free.
-* **Effective tier** -- ``max(tenant_tier, community_tier)``, cascading down
-  (critical-rules.md: a tenant's tier lifts every community in it; a
-  community can be allocated *above* its tenant by the tenant admin, never
-  below). The tenant tier is `LicenseGate.resolve_tier()` (the
-  `penguin_licensing` client against ``license.penguintech.io``); the
-  optional community allocation comes from a `CommunityTierSource`. A
-  tenant-wide check (``community=None``) uses the tenant tier only.
+* **Effective tier** -- the TENANT's licence tier (`LicenseGate.resolve_tier()`, the
+  `penguin_licensing` client against ``license.penguintech.io``). A community's own
+  Free/Premium tier is a separate concept resolved in hub-api
+  (`community_tier_service.resolve_effective_tier`); the tenant tier never uplifts it and
+  nothing here consults it.
 * **Fail closed** -- tier is a hard veto: a known-insufficient tier denies
   regardless of flag state, the degradation cache, or the caller's
   ``default``. If the tier cannot be resolved and was never seen, a licensed
@@ -419,21 +417,6 @@ class LicenseGate(Protocol):
         ...
 
 
-class CommunityTierSource(Protocol):
-    """Adapter contract for the tier a tenant admin allocated to one community.
-
-    The tenant tier is the floor for every community in it
-    (`LicenseGate.resolve_tier`); this source supplies the *optional* uplift --
-    a community the admin allocated Professional/Enterprise from the tenant's
-    pool. It is async because the natural implementation is a DAL read
-    (`communities.license_tier`) and must not be run through a thread.
-    """
-
-    async def community_tier(self, tenant: str, community: int) -> Optional[str]:
-        """Return the tier allocated to `community` under `tenant`, or None if none is allocated."""
-        ...
-
-
 def env_flag_var_name(flag_key: str) -> str:
     """Env var for a flag key: `FLAG_` + upper-cased key, `.`/`-` -> `_` (matches the Rust services)."""
     return "FLAG_" + flag_key.upper().replace(".", "_").replace("-", "_")
@@ -479,8 +462,14 @@ class PostHogFlagGate:
         """
         api_key = os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY", "")
         host = os.getenv("POSTHOG_HOST", "https://license.penguintech.io")
+        # Bounded request timeout: an unreachable host (egress blocked) must not stall
+        # a request path for the SDK's 15s default; failure -> None -> degraded chain.
+        timeout = float(os.getenv("POSTHOG_TIMEOUT_SECONDS", "3"))
         client = Posthog(
-            project_api_key=api_key or "disabled", host=host, disabled=not api_key
+            project_api_key=api_key or "disabled",
+            host=host,
+            disabled=not api_key,
+            timeout=timeout,
         )
         return cls(client)
 
@@ -587,9 +576,7 @@ class EntitlementClient:
     map, the live `feature_registry` contract's `min_tier`, and the static
     `tier_catalog.FEATURE_MIN_TIERS`; a flag in none of them needs only "free"
     (critical-rules.md: "Free: no gated functionality"). `feature_registry`
-    defaults to the process-wide registry. `community_tier_source`, when set,
-    supplies the per-community allocation that cascades with the tenant tier
-    as ``max(tenant, community)``. See the module docstring for the full tier
+    defaults to the process-wide registry. See the module docstring for the full tier
     model and fail-closed behaviour.
     """
 
@@ -598,7 +585,6 @@ class EntitlementClient:
         default_factory=lambda: PenguinLicenseGate.from_env()
     )
     tier_requirements: Mapping[str, str] = field(default_factory=dict)
-    community_tier_source: Optional[CommunityTierSource] = None
     feature_registry: Optional[FeatureRegistry] = None
     cache_ttl_seconds: float = field(
         default_factory=lambda: float(
@@ -670,6 +656,7 @@ class EntitlementClient:
         community: Optional[int] = None,
         default: bool = False,
         request_host: Optional[str] = None,
+        tenant_id: Optional[int] = None,
     ) -> bool:
         """
         Resolve `flag_key` for `tenant` (optionally narrower per `community`).
@@ -688,6 +675,7 @@ class EntitlementClient:
                 community=community,
                 default=default,
                 request_host=request_host,
+                tenant_id=tenant_id,
             )
         except Exception as exc:  # noqa: BLE001 - entitlement must never crash a request path
             logger.exception(
@@ -720,6 +708,7 @@ class EntitlementClient:
         community: Optional[int],
         default: bool,
         request_host: Optional[str],
+        tenant_id: Optional[int] = None,
     ) -> bool:
         if not tenant:
             raise ValueError("tenant is required for entitlement evaluation")
@@ -743,7 +732,11 @@ class EntitlementClient:
             True
             if tier_check_bypassed(request_host, community)
             else await self._check_tier(
-                flag_key, required, tenant=tenant, community=community
+                flag_key,
+                required,
+                tenant=tenant,
+                community=community,
+                tenant_id=tenant_id,
             )
         )
 
@@ -776,20 +769,6 @@ class EntitlementClient:
             self._record_decision(False, "tier_unverifiable", required)
             return False
 
-        # ENV BASELINE (PostHog -> ENV -> default). Only when PostHog could not
-        # define the flag AND the flag is a plain FEATURE flag (free tier, no
-        # licence requirement). Licensed/tiered flags never reach this branch's
-        # result: `licensed` is True for them, so they stay licence-server-only.
-        if flag_result is None and not licensed:
-            env_value = env_flag_value(flag_key)
-            if env_value is not None:
-                logger.info(
-                    "entitlement.env_baseline",
-                    extra={"flag_key": flag_key, "tenant": tenant, "value": env_value},
-                )
-                self._record_decision(env_value, "env_baseline", required)
-                return env_value
-
         if flag_result is None or tier_result is None:
             cached = self._cache.get(cache_key)
             if cached is not None and cached.expires_at > now:
@@ -803,6 +782,19 @@ class EntitlementClient:
                 )
                 self._record_decision(cached.value, "degraded_cache", required)
                 return cached.value
+            # ENV BASELINE (PostHog -> last-known -> ENV -> default). Only when PostHog could not
+            # define the flag AND the flag is a plain FEATURE flag (free tier, no
+            # licence requirement). Licensed/tiered flags never reach this branch's
+            # result: `licensed` is True for them, so they stay licence-server-only.
+            if flag_result is None and not licensed:
+                env_value = env_flag_value(flag_key)
+                if env_value is not None:
+                    logger.info(
+                        "entitlement.env_baseline",
+                        extra={"flag_key": flag_key, "tenant": tenant, "value": env_value},
+                    )
+                    self._record_decision(env_value, "env_baseline", required)
+                    return env_value
             logger.info(
                 "entitlement.degraded_default",
                 extra={"flag_key": flag_key, "tenant": tenant, "default": default},
@@ -845,11 +837,17 @@ class EntitlementClient:
             return None
 
     async def _check_tier(
-        self, flag_key: str, required: str, *, tenant: str, community: Optional[int]
+        self,
+        flag_key: str,
+        required: str,
+        *,
+        tenant: str,
+        community: Optional[int],
+        tenant_id: Optional[int] = None,
     ) -> Optional[bool]:
         """Does the effective tier meet `required`? None if the tier can't be determined."""
         effective = await self.effective_tier(
-            tenant=tenant, community=community, flag_key=flag_key
+            tenant=tenant, community=community, flag_key=flag_key, tenant_id=tenant_id
         )
         if effective is None:
             return None
@@ -865,35 +863,25 @@ class EntitlementClient:
         return satisfied
 
     async def effective_tier(
-        self, *, tenant: str, community: Optional[int] = None, flag_key: str = ""
+        self,
+        *,
+        tenant: str,
+        community: Optional[int] = None,
+        flag_key: str = "",
+        tenant_id: Optional[int] = None,
     ) -> Optional[str]:
         """
-        ``max(tenant_tier, community_tier)`` -- the tier `tenant` (and `community`) is licensed at.
+The TENANT licence tier `tenant` is licensed at; `community` never changes it.
 
-        Tiers cascade down: the tenant tier is the floor for every community
-        in the tenant, and a community allocation can only raise it. A
-        tenant-wide check (``community=None``) never consults the community
-        source. Returns None only when the tenant tier itself is unknown -- the
-        licence gate is unreachable and no tier was seen within
-        `tier_grace_seconds` -- because the community allocation is drawn from
-        the tenant's licensed pool and can't be trusted without it. A failing
-        community source degrades to "no uplift" (a *lower* tier: fail closed).
-        `flag_key` is optional log context only. Does not apply the bypass
+        Returns None only when the tenant tier itself is unknown -- the licence gate is
+        unreachable and no tier was seen within `tier_grace_seconds`. `tenant_id` and
+        `community` are accepted for call-site compatibility and unused (a community's own
+        Free/Premium tier lives in hub-api, not here). `flag_key` is optional log context only. Does not apply the bypass
         domains -- see `tier_check_bypassed` -- so it reports the licensed tier.
         """
         if not tenant:
             raise ValueError("tenant is required for tier resolution")
-        tenant_tier = await self._tenant_tier(flag_key, tenant)
-        if tenant_tier is None:
-            return None
-        if community is None or self.community_tier_source is None:
-            return tenant_tier
-        community_tier = await self._community_tier(flag_key, tenant, community)
-        if community_tier is not None and tier_level(community_tier) > tier_level(
-            tenant_tier
-        ):
-            return community_tier
-        return tenant_tier
+        return await self._tenant_tier(flag_key, tenant)
 
     async def _tenant_tier(self, flag_key: str, tenant: str) -> Optional[str]:
         """Resolve the tenant tier off the event loop; last-known tier (within grace) on failure."""
@@ -915,41 +903,6 @@ class EntitlementClient:
                 time.monotonic() - started, {"source": "license_gate"}
             )
         tier = normalize_tier(str(raw))
-        self._tier_cache[key] = _TierEntry(tier=tier, observed_at=time.monotonic())
-        return tier
-
-    async def _community_tier(
-        self, flag_key: str, tenant: str, community: int
-    ) -> Optional[str]:
-        """Resolve a community's allocated tier; None means no uplift (none, or source down)."""
-        source = self.community_tier_source
-        if (
-            source is None
-        ):  # pragma: no cover - guarded by the caller; kept for type narrowing
-            return None
-        key: TierCacheKey = (_SCOPE_COMMUNITY, tenant, community)
-        started = time.monotonic()
-        try:
-            raw = await source.community_tier(tenant, community)
-        except Exception as exc:  # noqa: BLE001 - a failing allocation source must not raise
-            logger.warning(
-                "entitlement.community_tier_source_unreachable flag_key=%s tenant=%s "
-                "community=%s error=%s: %s",
-                flag_key,
-                tenant,
-                community,
-                type(exc).__name__,
-                exc,
-                exc_info=True,
-            )
-            return self._last_known_tier(key)
-        finally:
-            _tier_resolution_histogram.record(
-                time.monotonic() - started, {"source": "community_tier_source"}
-            )
-        # A successful "nothing allocated" answer is remembered as the free rung
-        # so a later outage can't resurrect an allocation that was since removed.
-        tier = TIER_FREE if raw is None else normalize_tier(str(raw))
         self._tier_cache[key] = _TierEntry(tier=tier, observed_at=time.monotonic())
         return tier
 

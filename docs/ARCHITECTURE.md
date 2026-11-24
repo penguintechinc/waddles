@@ -38,9 +38,8 @@ hub-api**, not its own container.
 auth/entitlement checks rather than going through a Valkey queue, since those calls block the
 caller and can't tolerate queue latency.
 
-A ninth container, **`svc-rtc`** (Go, WebRTC/SFU via LiveKit, port 8206), still runs standalone.
-It is the design's absorption target into `svc-streaming` (RTC capability) but that merge has not
-happened — `svc-rtc` and `svc-streaming` are two containers today, gated independently in Helm.
+The former standalone Go `svc-rtc` container (WebRTC/SFU via LiveKit) is retired: its room, join,
+moderation and raised-hand surface now lives in `svc-streaming` (Rust, native WHIP/WHEP SFU).
 
 ## Pipeline flow
 
@@ -234,15 +233,9 @@ Read this before assuming a container is production-ready:
   its own `Dockerfile`.
 - **Helm chart wiring lags the code**: every pipeline container's Deployment template still pins
   `image:` to a shared placeholder base digest (`pipeline.pythonBaseImage` /
-  `pipeline.nodeBaseImage` in `values.yaml`) — no CI build publishes a per-container image yet.
-- **`svc-core` is the exception** — no consolidated container exists. Identity, security, and
-  credential logic still run as three separate module services (`core/identity_core_module`,
-  `core/security_core_module`, `core/credential_manager_module`); `svc-core.yaml` is a Helm
-  skeleton with no backing app code.
-- **The 8-container Helm templates coexist with ~31 legacy per-module Deployments** carried over
-  from v2.2.x (router, per-platform collectors, action-platforms, etc.) — nothing has been deleted.
-  The legacy set still serves most live functionality during cutover. Full 31→8 mapping:
-  [`k8s/helm/waddlebot/PIPELINE_MAPPING.md`](../k8s/helm/waddlebot/PIPELINE_MAPPING.md).
+  formerly `pipeline.nodeBaseImage`, removed) — no CI build publishes a per-container image yet.
+- **`svc-core` is folded into `hub-api`**: identity, security, and credential logic live in `hub_api/` rather than separate module containers; `svc-core.yaml` is a retired Helm skeleton.
+- **v2.2.x legacy per-module Deployments have been retired** (full historical 31→8 mapping: [`k8s/helm/waddlebot/PIPELINE_MAPPING.md`](../k8s/helm/waddlebot/PIPELINE_MAPPING.md)).
 - **`svc-streaming` fronts external engines**, it does not implement its own media transport: an
   internal RTMP/AV1 transcode proxy and LiveKit (SFU) sit behind it today. A native Rust data
   plane is a documented future direction (`docs/plans/2026-08-31-svc-streaming-design.md`).

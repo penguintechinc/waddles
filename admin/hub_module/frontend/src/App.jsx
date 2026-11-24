@@ -1,5 +1,5 @@
 import { lazy, Suspense } from 'react';
-import { Routes, Route, Navigate, useParams } from 'react-router-dom';
+import { Routes, Route, Navigate, Outlet, useParams } from 'react-router-dom';
 import { useAuth } from './contexts/AuthContext';
 import { LoadingState, ServedFeature } from './components/ui';
 
@@ -7,6 +7,7 @@ import { LoadingState, ServedFeature } from './components/ui';
 // bundle, each page loads on demand behind the layout's <RouteOutlet />.
 const TenantBundleCatalog = lazy(() => import('./pages/tenant/TenantBundleCatalog'));
 const AdminCommunityBundles = lazy(() => import('./pages/admin/AdminCommunityBundles'));
+const AdminBundleSettings = lazy(() => import('./pages/admin/AdminBundleSettings'));
 const SuperAdminSuperCommunities = lazy(() => import('./pages/superadmin/SuperAdminSuperCommunities'));
 const SecretPullPage = lazy(() => import('./pages/secret/SecretPullPage'));
 const AdminRoleSyncMapping = lazy(() => import('./pages/admin/AdminRoleSyncMapping'));
@@ -22,7 +23,6 @@ const CommunitiesPage = lazy(() => import('./pages/public/CommunitiesPage'));
 const CommunityPublicPage = lazy(() => import('./pages/public/CommunityPublicPage'));
 const LiveStreamsPage = lazy(() => import('./pages/public/LiveStreamsPage'));
 const UserPublicProfile = lazy(() => import('./pages/public/UserPublicProfile'));
-const MusicQueuePage = lazy(() => import('./pages/public/MusicQueuePage'));
 
 // Auth pages
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
@@ -33,12 +33,9 @@ const OAuthCallback = lazy(() => import('./pages/auth/OAuthCallback'));
 // Cookie Policy page
 const CookiePolicy = lazy(() => import('./pages/CookiePolicy'));
 const PrivacyRights = lazy(() => import('./pages/PrivacyRights'));
+const PublicPrivacyRequest = lazy(() => import('./pages/privacy/PublicPrivacyRequest'));
+const PublicPrivacyVerify = lazy(() => import('./pages/privacy/PublicPrivacyVerify'));
 
-// Calendar pages
-const CalendarSettings = lazy(() => import('./pages/calendar/CalendarSettings'));
-const BookingPages = lazy(() => import('./pages/calendar/BookingPages'));
-const MyBookings = lazy(() => import('./pages/calendar/MyBookings'));
-const BookingPagePublic = lazy(() => import('./pages/calendar/BookingPagePublic'));
 
 // Dashboard pages
 const DashboardHome = lazy(() => import('./pages/dashboard/DashboardHome'));
@@ -62,12 +59,14 @@ const AdminDomains = lazy(() => import('./pages/admin/AdminDomains'));
 const AdminServers = lazy(() => import('./pages/admin/AdminServers'));
 const AdminConnectedPlatforms = lazy(() => import('./pages/admin/AdminConnectedPlatforms'));
 const LiveActivity = lazy(() => import('./pages/community/LiveActivity'));
+const MusicQueue = lazy(() => import('./pages/community/MusicQueue'));
 const AdminMirrorGroups = lazy(() => import('./pages/admin/AdminMirrorGroups'));
 const AdminLeaderboardConfig = lazy(() => import('./pages/admin/AdminLeaderboardConfig'));
 const AdminCommunityProfile = lazy(() => import('./pages/admin/AdminCommunityProfile'));
 const CommunityReputationPolicy = lazy(() => import('./pages/admin/CommunityReputationPolicy'));
 const CommunityReputationBans = lazy(() => import('./pages/admin/CommunityReputationBans'));
 const CommunityReputationHistory = lazy(() => import('./pages/admin/CommunityReputationHistory'));
+const TenantDiscordApp = lazy(() => import('./pages/tenant/TenantDiscordApp'));
 const TenantReputationSettings = lazy(() => import('./pages/tenant/TenantReputationSettings'));
 const AdminAIInsights = lazy(() => import('./pages/admin/AdminAIInsights'));
 const AdminAIResearcherConfig = lazy(() => import('./pages/admin/AdminAIResearcherConfig'));
@@ -92,14 +91,9 @@ const AdminMusicSettings = lazy(() => import('./pages/admin/AdminMusicSettings')
 const AdminMusicProviders = lazy(() => import('./pages/admin/AdminMusicProviders'));
 const AdminRadioStations = lazy(() => import('./pages/admin/AdminRadioStations'));
 const AdminVendorReview = lazy(() => import('./pages/admin/AdminVendorReview'));
-const AdminCalendarEvents = lazy(() => import('./pages/admin/AdminCalendarEvents'));
-const AdminCalendarTicketing = lazy(() => import('./pages/admin/AdminCalendarTicketing'));
-const AdminCalendarScanner = lazy(() => import('./pages/admin/AdminCalendarScanner'));
-const AdminCalendarAttendance = lazy(() => import('./pages/admin/AdminCalendarAttendance'));
 const AdminLiveStreams = lazy(() => import('./pages/admin/AdminLiveStreams'));
 const AdminCommunityCalls = lazy(() => import('./pages/admin/AdminCommunityCalls'));
-const AdminPolls = lazy(() => import('./pages/admin/AdminPolls'));
-const AdminForms = lazy(() => import('./pages/admin/AdminForms'));
+const TownHall = lazy(() => import('./pages/community/TownHall'));
 const AdminSupportDashboard = lazy(() => import('./pages/admin/AdminSupportDashboard'));
 const AdminSupportTicketDetail = lazy(() => import('./pages/admin/AdminSupportTicketDetail'));
 const AdminJoinRequests = lazy(() => import('./pages/admin/AdminJoinRequests'));
@@ -157,8 +151,14 @@ const SuperAdminTenants = lazy(() => import('./pages/superadmin/SuperAdminTenant
 
 // Tenant admin pages
 const TenantDashboard = lazy(() => import('./pages/tenant/TenantDashboard'));
+const TenantSettings = lazy(() => import('./pages/tenant/TenantSettings'));
+const TenantPrivacy = lazy(() => import('./pages/tenant/TenantPrivacy'));
+const TenantKms = lazy(() => import('./pages/tenant/TenantKms'));
+const TenantIngestSources = lazy(() => import('./pages/tenant/TenantIngestSources'));
 const TenantAdmins = lazy(() => import('./pages/tenant/TenantAdmins'));
 const TenantCommunities = lazy(() => import('./pages/tenant/TenantCommunities'));
+const TenantCommunityTiers = lazy(() => import('./pages/tenant/TenantCommunityTiers'));
+const TenantLicense = lazy(() => import('./pages/tenant/TenantLicense'));
 
 // Admin pages (new)
 const AdminCommunityRoles = lazy(() => import('./pages/admin/AdminCommunityRoles'));
@@ -174,6 +174,13 @@ function ReputationRedirect() {
   return <Navigate to={`/admin/${communityId}/reputation/policy`} replace />;
 }
 
+// Legacy public song-queue URL (`/c/:id/music/queue`); the music-station REST API is gone, so
+// send bookmarks/links to the member music page instead of 404ing.
+export function MusicQueueRedirect() {
+  const { communityId } = useParams();
+  return <Navigate to={`/community/${communityId}/music`} replace />;
+}
+
 // Legacy "modules" URLs were superseded by app bundles; redirect so bookmarks do not 404.
 function CommunityBundlesRedirect() {
   const { communityId } = useParams();
@@ -185,8 +192,31 @@ function TenantBundlesRedirect() {
   return <Navigate to={`/tenant/${tenantSlug}/bundles`} replace />;
 }
 
+/**
+ * Tenant-admin scope boundary. Keys the outlet by the URL slug so every tenant page remounts (and
+ * drops cleartext exports, pending erasure IDs, form state) when the slug changes, and refuses to
+ * render for a non-superadmin whose session tenant differs from the route slug. UX guard only:
+ * the server enforces the same tenant boundary.
+ */
+export function TenantScope() {
+  const { tenantSlug } = useParams();
+  const { hasScope, tenantSlug: ownSlug, loading } = useAuth();
+  if (loading) return <LoadingState fullPage label="Checking your session" />;
+  // Global admins are identified by the `tenants:admin` scope (server-enforced), never a role name.
+  if (!hasScope('tenants:admin') && typeof ownSlug === 'string' && ownSlug !== tenantSlug) {
+    return (
+      <div role="alert" data-testid="tenant-not-authorized" className="p-6">
+        <h2 className="text-lg font-semibold">Not authorized</h2>
+        <p className="text-sm">You do not have access to this tenant.</p>
+        <a href={`/tenant/${encodeURIComponent(ownSlug)}`} className="underline">Go to your tenant</a>
+      </div>
+    );
+  }
+  return <Outlet key={tenantSlug} />;
+}
+
 // Protected route wrapper
-function ProtectedRoute({ children, requireCommunityAdmin = false, requirePlatformAdmin = false, requireSuperAdmin = false, requireAnalyticsConsumerOrSuperAdmin = false }) {
+export function ProtectedRoute({ children, requireCommunityAdmin = false, requirePlatformAdmin = false, requireSuperAdmin = false, requireAnalyticsConsumerOrSuperAdmin = false }) {
   const { user, loading, hasRole, isAnalyticsConsumer } = useAuth();
 
   if (loading) {
@@ -225,6 +255,10 @@ function ProtectedRoute({ children, requireCommunityAdmin = false, requirePlatfo
 function App() {
   return (
     <Routes>
+      {/* Public privacy-request pages: standalone layout, no auth, no site chrome */}
+      <Route path="/privacy-request/verify" element={<Suspense fallback={<LoadingState fullPage label="Loading" />}><PublicPrivacyVerify /></Suspense>} />
+      <Route path="/privacy-request/:tenantSlug" element={<Suspense fallback={<LoadingState fullPage label="Loading" />}><PublicPrivacyRequest /></Suspense>} />
+
       {/* Public routes */}
       <Route element={<PublicLayout />}>
         <Route path="/" element={<HomePage />} />
@@ -250,10 +284,9 @@ function App() {
         <Route path="/privacy-rights" element={<PrivacyRights />} />
 
         {/* Public booking page (no auth required) */}
-        <Route path="/book/:slug" element={<BookingPagePublic />} />
 
         {/* Public song-queue page (no auth required) -- linked from chat via !sq */}
-        <Route path="/c/:communityId/music/queue" element={<MusicQueuePage />} />
+        <Route path="/c/:communityId/music/queue" element={<MusicQueueRedirect />} />
 
         {/* Vendor submission routes (public) */}
         <Route path="/vendor/submit" element={<VendorSubmissionForm />} />
@@ -285,7 +318,9 @@ function App() {
         {/* Inventory (Quartermaster) routes (authenticated) */}
         <Route path="/community/:communityId/inventory" element={<InventoryBrowse />} />
         <Route path="/community/:communityId/inventory/my-items" element={<InventoryMyItems />} />
+        <Route path="/community/:communityId/music" element={<MusicQueue />} />
         <Route path="/community/:communityId/game-servers" element={<GameServers />} />
+        <Route path="/community/:communityId/town-hall" element={<TownHall />} />
         <Route path="/community/:communityId/interact" element={<CommunityInteraction />} />
         <Route path="/community/:communityId/interact/:channelId" element={<CommunityInteraction />} />
 
@@ -296,10 +331,6 @@ function App() {
         {/* My Analytics */}
         <Route path="/dashboard/my-analytics" element={<MyAnalytics />} />
 
-        {/* Calendar routes (authenticated) */}
-        <Route path="/calendar/settings" element={<CalendarSettings />} />
-        <Route path="/calendar/booking-pages" element={<BookingPages />} />
-        <Route path="/calendar/my-bookings" element={<MyBookings />} />
 
         {/* Vendor dashboard routes (authenticated vendors) */}
         <Route path="/vendor/dashboard" element={<VendorDashboard />} />
@@ -366,14 +397,8 @@ function App() {
         <Route path="/admin/:communityId/music/settings" element={<AdminMusicSettings />} />
         <Route path="/admin/:communityId/music/providers" element={<AdminMusicProviders />} />
         <Route path="/admin/:communityId/music/radio" element={<AdminRadioStations />} />
-        <Route path="/admin/:communityId/calendar/events" element={<AdminCalendarEvents />} />
-        <Route path="/admin/:communityId/calendar/events/:eventId/tickets" element={<AdminCalendarTicketing />} />
-        <Route path="/admin/:communityId/calendar/events/:eventId/scanner" element={<AdminCalendarScanner />} />
-        <Route path="/admin/:communityId/calendar/events/:eventId/attendance" element={<AdminCalendarAttendance />} />
         <Route path="/admin/:communityId/live-streaming" element={<AdminLiveStreams />} />
         <Route path="/admin/:communityId/calls" element={<AdminCommunityCalls />} />
-        <Route path="/admin/:communityId/polls" element={<AdminPolls />} />
-        <Route path="/admin/:communityId/forms" element={<AdminForms />} />
         <Route path="/admin/:communityId/support" element={<AdminSupportDashboard />} />
         <Route path="/admin/:communityId/support/tickets/:ticketId" element={<AdminSupportTicketDetail />} />
         <Route path="/admin/:communityId/join-requests" element={<AdminJoinRequests />} />
@@ -388,6 +413,8 @@ function App() {
         <Route path="/admin/:communityId/ai-knowledge" element={<ServedFeature feature="ai-knowledge"><AdminAIKnowledge /></ServedFeature>} />
         {/* Wave-1 stub: community bundles slice */}
         <Route path="/admin/:communityId/bundles" element={<AdminCommunityBundles />} />
+        <Route path="/admin/:communityId/settings" element={<AdminBundleSettings />} />
+        <Route path="/admin/:communityId/settings/:appId" element={<AdminBundleSettings />} />
         <Route path="/admin/:communityId/role-sync" element={<AdminRoleSyncMapping />} />
       </Route>
 
@@ -454,13 +481,22 @@ function App() {
           </ProtectedRoute>
         }
       >
-        <Route path="/tenant/:tenantSlug" element={<TenantDashboard />} />
-        <Route path="/tenant/:tenantSlug/modules" element={<TenantBundlesRedirect />} />
-        <Route path="/tenant/:tenantSlug/admins" element={<TenantAdmins />} />
-        <Route path="/tenant/:tenantSlug/reputation" element={<TenantReputationSettings />} />
-        <Route path="/tenant/:tenantSlug/communities" element={<TenantCommunities />} />
-        {/* Wave-1 stub: tenant bundle catalog slice */}
-        <Route path="/tenant/:tenantSlug/bundles" element={<TenantBundleCatalog />} />
+        <Route path="/tenant/:tenantSlug" element={<TenantScope />}>
+          <Route index element={<TenantDashboard />} />
+          <Route path="modules" element={<TenantBundlesRedirect />} />
+          <Route path="settings" element={<TenantSettings />} />
+          <Route path="admins" element={<TenantAdmins />} />
+          <Route path="reputation" element={<TenantReputationSettings />} />
+          <Route path="discord-app" element={<TenantDiscordApp />} />
+          <Route path="communities" element={<TenantCommunities />} />
+          <Route path="community-tiers" element={<TenantCommunityTiers />} />
+          <Route path="license" element={<TenantLicense />} />
+          <Route path="privacy" element={<TenantPrivacy />} />
+          <Route path="kms" element={<TenantKms />} />
+          <Route path="ingest-sources" element={<TenantIngestSources />} />
+          {/* Wave-1 stub: tenant bundle catalog slice */}
+          <Route path="bundles" element={<TenantBundleCatalog />} />
+        </Route>
       </Route>
 
       {/* Catch all - redirect to home */}

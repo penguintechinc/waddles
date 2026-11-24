@@ -191,6 +191,18 @@ pub enum QuotaOutcome<T> {
     QuotaExceeded,
 }
 
+/// Outcome of [`KvBackend::compare_and_set_with_quota`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ByteCasOutcome {
+    /// The stored value matched `expected` and the new value was written.
+    Written,
+    /// A new key was refused: the app already holds the maximum live keys.
+    QuotaExceeded,
+    /// The stored value no longer equals `expected` (a concurrent writer won);
+    /// nothing was written and the caller must re-read and retry.
+    Conflict,
+}
+
 /// Outcome of [`KvBackend::reconcile_count_if_missing`] (self-heal, low-
 /// severity fix on PR #425's security review: the live index has no TTL,
 /// but an `allkeys-*` `maxmemory-policy` -- see `crate::policy` -- can still
@@ -257,6 +269,47 @@ pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;
 pub trait KvBackend: Send + Sync {
     /// Plain `GET` -- reads never touch the live index.
     fn get<'a>(&'a self, data_key: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>>;
+
+    /// Persists the scope's sealed-since marker (`SET marker_key 1`, no
+    /// TTL, idempotent). The default fails loud: a backend that cannot
+    /// persist the marker must not be used with sealing attached.
+    fn mark_sealed<'a>(&'a self, marker_key: &'a str) -> BoxFuture<'a, Result<(), String>> {
+        let _ = marker_key;
+        Box::pin(async {
+            Err("this kv backend cannot persist the sealed-since marker".to_string())
+        })
+    }
+
+    /// Atomically: only if the stored value of `data_key` is byte-for-byte
+    /// `expected` (`None` = the key must be absent), performs exactly what
+    /// [`Self::set_with_quota`] does. This is the compare-and-swap that keeps
+    /// sealed `increment` (read, decrypt, add, re-seal) atomic: a concurrent
+    /// writer makes it return [`ByteCasOutcome::Conflict`] instead of losing an
+    /// update. The default fails loud for backends that cannot do it.
+    #[allow(clippy::too_many_arguments)]
+    fn compare_and_set_with_quota<'a>(
+        &'a self,
+        data_key: &'a str,
+        live_key: &'a str,
+        legacy_count_key: &'a str,
+        expected: Option<&'a [u8]>,
+        value: &'a [u8],
+        ttl_seconds: u32,
+        max_keys: u64,
+    ) -> BoxFuture<'a, Result<ByteCasOutcome, String>> {
+        let _ = (
+            data_key,
+            live_key,
+            legacy_count_key,
+            expected,
+            value,
+            ttl_seconds,
+            max_keys,
+        );
+        Box::pin(async {
+            Err("this kv backend cannot compare-and-set (sealed increment)".to_string())
+        })
+    }
 
     /// Atomically: trims lapsed members from the live index, admits a *new*
     /// key (one not already in the index) only if fewer than `max_keys` live
@@ -440,6 +493,48 @@ else
 end
 redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
 redis.call('ZADD', KEYS[4], 0, KEYS[1])
+if existed == 0 then
+  legacy_incr(KEYS[3])
+end
+return 0
+"#
+);
+
+/// Compare-and-set variant of [`SET_WITH_QUOTA_SCRIPT`].
+/// `KEYS` as there; `ARGV[1]` = value, `ARGV[2]` = ttl_seconds, `ARGV[3]` =
+/// max_keys, `ARGV[4]` = `'1'` if a value is expected (else the key must be
+/// absent), `ARGV[5]` = the expected stored bytes. Returns `2` on a
+/// mismatch (nothing written), `1` if quota-exceeded, `0` if written. The
+/// whole script is atomic, so the compare and the write cannot interleave
+/// with another writer.
+const CAS_SET_WITH_QUOTA_SCRIPT: &str = concat!(
+    lua_prelude!(),
+    lua_legacy_counter!(),
+    r#"
+trim(KEYS[2])
+local current = redis.call('GET', KEYS[1])
+if ARGV[4] == '1' then
+  if current ~= ARGV[5] then
+    return 2
+  end
+else
+  if current then
+    return 2
+  end
+end
+local existed = redis.call('EXISTS', KEYS[1])
+if not redis.call('ZSCORE', KEYS[2], KEYS[1]) then
+  if live_count(KEYS[2]) >= tonumber(ARGV[3]) then
+    return 1
+  end
+end
+local ttl = tonumber(ARGV[2])
+if ttl > 0 then
+  redis.call('SET', KEYS[1], ARGV[1], 'EX', ARGV[2])
+else
+  redis.call('SET', KEYS[1], ARGV[1])
+end
+redis.call('ZADD', KEYS[2], expiry_score(ttl), KEYS[1])
 if existed == 0 then
   legacy_incr(KEYS[3])
 end
@@ -708,267 +803,318 @@ return total
 /// Production [`KvBackend`] over the same connection type
 /// `core/svc_action::usage::connect`/`core/svc_action::capabilities`
 /// already use for `relay`/usage metering.
-impl KvBackend for redis::aio::MultiplexedConnection {
-    fn get_versioned<'a>(
-        &'a self,
-        data_key: &'a str,
-    ) -> BoxFuture<'a, Result<Option<Versioned>, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let reply: Vec<redis::Value> = redis::Script::new(GET_VERSIONED_SCRIPT)
-                .key(data_key)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            if reply.is_empty() {
-                return Ok(None);
+macro_rules! impl_kv_backend {
+    ($t:ty) => {
+        impl KvBackend for $t {
+            fn get_versioned<'a>(
+                &'a self,
+                data_key: &'a str,
+            ) -> BoxFuture<'a, Result<Option<Versioned>, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let reply: Vec<redis::Value> = redis::Script::new(GET_VERSIONED_SCRIPT)
+                        .key(data_key)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    if reply.is_empty() {
+                        return Ok(None);
+                    }
+                    let value: Vec<u8> =
+                        redis::from_redis_value(reply[0].clone()).map_err(|e| e.to_string())?;
+                    let version: String =
+                        redis::from_redis_value(reply[1].clone()).map_err(|e| e.to_string())?;
+                    Ok(Some((
+                        value,
+                        version.parse::<u64>().map_err(|e| e.to_string())?,
+                    )))
+                })
             }
-            let value: Vec<u8> =
-                redis::from_redis_value(reply[0].clone()).map_err(|e| e.to_string())?;
-            let version: String =
-                redis::from_redis_value(reply[1].clone()).map_err(|e| e.to_string())?;
-            Ok(Some((
-                value,
-                version.parse::<u64>().map_err(|e| e.to_string())?,
-            )))
-        })
-    }
 
-    fn cas_with_quota<'a>(
-        &'a self,
-        data_key: &'a str,
-        live_key: &'a str,
-        legacy_count_key: &'a str,
-        expected_version: u64,
-        value: &'a [u8],
-        ttl_seconds: u32,
-        max_keys: u64,
-    ) -> BoxFuture<'a, Result<CasOutcome, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let (status, version): (i64, String) = redis::Script::new(CAS_SCRIPT)
-                .key(data_key)
-                .key(live_key)
-                .key(legacy_count_key)
-                .key(lex_key(live_key))
-                .arg(expected_version)
-                .arg(value)
-                .arg(ttl_seconds)
-                .arg(max_keys)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            let version = version.parse::<u64>().map_err(|e| e.to_string())?;
-            Ok(match status {
-                0 => CasOutcome::Swapped(version),
-                1 => CasOutcome::Conflict(version),
-                _ => CasOutcome::QuotaExceeded,
-            })
-        })
-    }
+            fn cas_with_quota<'a>(
+                &'a self,
+                data_key: &'a str,
+                live_key: &'a str,
+                legacy_count_key: &'a str,
+                expected_version: u64,
+                value: &'a [u8],
+                ttl_seconds: u32,
+                max_keys: u64,
+            ) -> BoxFuture<'a, Result<CasOutcome, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let (status, version): (i64, String) = redis::Script::new(CAS_SCRIPT)
+                        .key(data_key)
+                        .key(live_key)
+                        .key(legacy_count_key)
+                        .key(lex_key(live_key))
+                        .arg(expected_version)
+                        .arg(value)
+                        .arg(ttl_seconds)
+                        .arg(max_keys)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    let version = version.parse::<u64>().map_err(|e| e.to_string())?;
+                    Ok(match status {
+                        0 => CasOutcome::Swapped(version),
+                        1 => CasOutcome::Conflict(version),
+                        _ => CasOutcome::QuotaExceeded,
+                    })
+                })
+            }
 
-    fn delete_if<'a>(
-        &'a self,
-        data_key: &'a str,
-        live_key: &'a str,
-        legacy_count_key: &'a str,
-        expected_version: u64,
-    ) -> BoxFuture<'a, Result<CasDelete, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let (status, version): (i64, String) = redis::Script::new(DELETE_IF_SCRIPT)
-                .key(data_key)
-                .key(live_key)
-                .key(legacy_count_key)
-                .key(lex_key(live_key))
-                .arg(expected_version)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(if status == 0 {
-                CasDelete::Deleted
-            } else {
-                CasDelete::Conflict(version.parse::<u64>().map_err(|e| e.to_string())?)
-            })
-        })
-    }
+            fn delete_if<'a>(
+                &'a self,
+                data_key: &'a str,
+                live_key: &'a str,
+                legacy_count_key: &'a str,
+                expected_version: u64,
+            ) -> BoxFuture<'a, Result<CasDelete, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let (status, version): (i64, String) = redis::Script::new(DELETE_IF_SCRIPT)
+                        .key(data_key)
+                        .key(live_key)
+                        .key(legacy_count_key)
+                        .key(lex_key(live_key))
+                        .arg(expected_version)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(if status == 0 {
+                        CasDelete::Deleted
+                    } else {
+                        CasDelete::Conflict(version.parse::<u64>().map_err(|e| e.to_string())?)
+                    })
+                })
+            }
 
-    fn list_keys<'a>(
-        &'a self,
-        live_key: &'a str,
-        data_prefix: &'a str,
-        after: &'a str,
-        limit: u32,
-    ) -> BoxFuture<'a, Result<Vec<String>, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            redis::Script::new(LIST_KEYS_SCRIPT)
-                .key(live_key)
-                .key(lex_key(live_key))
-                .arg(data_prefix)
-                .arg(after)
-                .arg(limit)
-                .arg(crate::limits::LIST_SCAN_CAP)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
+            fn list_keys<'a>(
+                &'a self,
+                live_key: &'a str,
+                data_prefix: &'a str,
+                after: &'a str,
+                limit: u32,
+            ) -> BoxFuture<'a, Result<Vec<String>, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    redis::Script::new(LIST_KEYS_SCRIPT)
+                        .key(live_key)
+                        .key(lex_key(live_key))
+                        .arg(data_prefix)
+                        .arg(after)
+                        .arg(limit)
+                        .arg(crate::limits::LIST_SCAN_CAP)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            }
 
-    fn add_budget<'a>(
-        &'a self,
-        budget_key: &'a str,
-        window_seconds: u64,
-        amount: u64,
-    ) -> BoxFuture<'a, Result<u64, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let total: i64 = redis::Script::new(ADD_BUDGET_SCRIPT)
-                .key(budget_key)
-                .arg(window_seconds)
-                .arg(amount)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(total.max(0) as u64)
-        })
-    }
+            fn add_budget<'a>(
+                &'a self,
+                budget_key: &'a str,
+                window_seconds: u64,
+                amount: u64,
+            ) -> BoxFuture<'a, Result<u64, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let total: i64 = redis::Script::new(ADD_BUDGET_SCRIPT)
+                        .key(budget_key)
+                        .arg(window_seconds)
+                        .arg(amount)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(total.max(0) as u64)
+                })
+            }
 
-    fn get<'a>(&'a self, data_key: &'a str) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            AsyncCommands::get::<_, Option<Vec<u8>>>(&mut conn, data_key)
-                .await
-                .map_err(|e| e.to_string())
-        })
-    }
+            fn get<'a>(
+                &'a self,
+                data_key: &'a str,
+            ) -> BoxFuture<'a, Result<Option<Vec<u8>>, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    AsyncCommands::get::<_, Option<Vec<u8>>>(&mut conn, data_key)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            }
 
-    fn set_with_quota<'a>(
-        &'a self,
-        data_key: &'a str,
-        live_key: &'a str,
-        legacy_count_key: &'a str,
-        value: &'a [u8],
-        ttl_seconds: u32,
-        max_keys: u64,
-    ) -> BoxFuture<'a, Result<QuotaOutcome<()>, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let quota_exceeded: i64 = redis::Script::new(SET_WITH_QUOTA_SCRIPT)
-                .key(data_key)
-                .key(live_key)
-                .key(legacy_count_key)
-                .key(lex_key(live_key))
-                .arg(value)
-                .arg(ttl_seconds)
-                .arg(max_keys)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(if quota_exceeded == 1 {
-                QuotaOutcome::QuotaExceeded
-            } else {
-                QuotaOutcome::Admitted(())
-            })
-        })
-    }
+            fn mark_sealed<'a>(&'a self, marker_key: &'a str) -> BoxFuture<'a, Result<(), String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    AsyncCommands::set::<_, _, ()>(&mut conn, marker_key, 1u8)
+                        .await
+                        .map_err(|e| e.to_string())
+                })
+            }
 
-    fn delete<'a>(
-        &'a self,
-        data_key: &'a str,
-        live_key: &'a str,
-        legacy_count_key: &'a str,
-    ) -> BoxFuture<'a, Result<bool, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let deleted: i64 = redis::Script::new(DELETE_SCRIPT)
-                .key(data_key)
-                .key(live_key)
-                .key(legacy_count_key)
-                .key(lex_key(live_key))
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(deleted == 1)
-        })
-    }
+            fn compare_and_set_with_quota<'a>(
+                &'a self,
+                data_key: &'a str,
+                live_key: &'a str,
+                legacy_count_key: &'a str,
+                expected: Option<&'a [u8]>,
+                value: &'a [u8],
+                ttl_seconds: u32,
+                max_keys: u64,
+            ) -> BoxFuture<'a, Result<ByteCasOutcome, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let status: i64 = redis::Script::new(CAS_SET_WITH_QUOTA_SCRIPT)
+                        .key(data_key)
+                        .key(live_key)
+                        .key(legacy_count_key)
+                        .arg(value)
+                        .arg(ttl_seconds)
+                        .arg(max_keys)
+                        .arg(if expected.is_some() { "1" } else { "0" })
+                        .arg(expected.unwrap_or(&[]))
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(match status {
+                        0 => ByteCasOutcome::Written,
+                        1 => ByteCasOutcome::QuotaExceeded,
+                        _ => ByteCasOutcome::Conflict,
+                    })
+                })
+            }
 
-    fn increment_with_quota<'a>(
-        &'a self,
-        data_key: &'a str,
-        live_key: &'a str,
-        legacy_count_key: &'a str,
-        delta: i64,
-        ttl_seconds: u32,
-        max_keys: u64,
-    ) -> BoxFuture<'a, Result<QuotaOutcome<i64>, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let (quota_exceeded, new_value): (i64, i64) =
-                redis::Script::new(INCREMENT_WITH_QUOTA_SCRIPT)
-                    .key(data_key)
-                    .key(live_key)
-                    .key(legacy_count_key)
-                    .key(lex_key(live_key))
-                    .arg(delta)
-                    .arg(ttl_seconds)
-                    .arg(max_keys)
-                    .invoke_async(&mut conn)
-                    .await
-                    .map_err(|e| e.to_string())?;
-            Ok(if quota_exceeded == 1 {
-                QuotaOutcome::QuotaExceeded
-            } else {
-                QuotaOutcome::Admitted(new_value)
-            })
-        })
-    }
+            fn set_with_quota<'a>(
+                &'a self,
+                data_key: &'a str,
+                live_key: &'a str,
+                legacy_count_key: &'a str,
+                value: &'a [u8],
+                ttl_seconds: u32,
+                max_keys: u64,
+            ) -> BoxFuture<'a, Result<QuotaOutcome<()>, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let quota_exceeded: i64 = redis::Script::new(SET_WITH_QUOTA_SCRIPT)
+                        .key(data_key)
+                        .key(live_key)
+                        .key(legacy_count_key)
+                        .key(lex_key(live_key))
+                        .arg(value)
+                        .arg(ttl_seconds)
+                        .arg(max_keys)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(if quota_exceeded == 1 {
+                        QuotaOutcome::QuotaExceeded
+                    } else {
+                        QuotaOutcome::Admitted(())
+                    })
+                })
+            }
 
-    fn increment_rate<'a>(
-        &'a self,
-        rate_key: &'a str,
-        window_seconds: u64,
-    ) -> BoxFuture<'a, Result<u64, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let count: i64 = redis::Script::new(INCREMENT_RATE_SCRIPT)
-                .key(rate_key)
-                .arg(window_seconds)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(count.max(0) as u64)
-        })
-    }
+            fn delete<'a>(
+                &'a self,
+                data_key: &'a str,
+                live_key: &'a str,
+                legacy_count_key: &'a str,
+            ) -> BoxFuture<'a, Result<bool, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let deleted: i64 = redis::Script::new(DELETE_SCRIPT)
+                        .key(data_key)
+                        .key(live_key)
+                        .key(legacy_count_key)
+                        .key(lex_key(live_key))
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(deleted == 1)
+                })
+            }
 
-    fn reconcile_count_if_missing<'a>(
-        &'a self,
-        live_key: &'a str,
-        data_scan_pattern: &'a str,
-        lock_key: &'a str,
-        lock_ttl_ms: u64,
-        scan_limit: u64,
-    ) -> BoxFuture<'a, Result<ReconcileOutcome, String>> {
-        let mut conn = self.clone();
-        Box::pin(async move {
-            let (status, count): (i64, u64) = redis::Script::new(RECONCILE_SCRIPT)
-                .key(live_key)
-                .key(lock_key)
-                .key(lex_key(live_key))
-                .arg(data_scan_pattern)
-                .arg(lock_ttl_ms)
-                .arg(scan_limit)
-                .invoke_async(&mut conn)
-                .await
-                .map_err(|e| e.to_string())?;
-            Ok(match status {
-                0 => ReconcileOutcome::AlreadyPresent,
-                2 => ReconcileOutcome::Locked,
-                _ => ReconcileOutcome::Reconciled(count),
-            })
-        })
-    }
+            fn increment_with_quota<'a>(
+                &'a self,
+                data_key: &'a str,
+                live_key: &'a str,
+                legacy_count_key: &'a str,
+                delta: i64,
+                ttl_seconds: u32,
+                max_keys: u64,
+            ) -> BoxFuture<'a, Result<QuotaOutcome<i64>, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let (quota_exceeded, new_value): (i64, i64) =
+                        redis::Script::new(INCREMENT_WITH_QUOTA_SCRIPT)
+                            .key(data_key)
+                            .key(live_key)
+                            .key(legacy_count_key)
+                            .key(lex_key(live_key))
+                            .arg(delta)
+                            .arg(ttl_seconds)
+                            .arg(max_keys)
+                            .invoke_async(&mut conn)
+                            .await
+                            .map_err(|e| e.to_string())?;
+                    Ok(if quota_exceeded == 1 {
+                        QuotaOutcome::QuotaExceeded
+                    } else {
+                        QuotaOutcome::Admitted(new_value)
+                    })
+                })
+            }
+
+            fn increment_rate<'a>(
+                &'a self,
+                rate_key: &'a str,
+                window_seconds: u64,
+            ) -> BoxFuture<'a, Result<u64, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let count: i64 = redis::Script::new(INCREMENT_RATE_SCRIPT)
+                        .key(rate_key)
+                        .arg(window_seconds)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(count.max(0) as u64)
+                })
+            }
+
+            fn reconcile_count_if_missing<'a>(
+                &'a self,
+                live_key: &'a str,
+                data_scan_pattern: &'a str,
+                lock_key: &'a str,
+                lock_ttl_ms: u64,
+                scan_limit: u64,
+            ) -> BoxFuture<'a, Result<ReconcileOutcome, String>> {
+                let mut conn = self.clone();
+                Box::pin(async move {
+                    let (status, count): (i64, u64) = redis::Script::new(RECONCILE_SCRIPT)
+                        .key(live_key)
+                        .key(lock_key)
+                        .key(lex_key(live_key))
+                        .arg(data_scan_pattern)
+                        .arg(lock_ttl_ms)
+                        .arg(scan_limit)
+                        .invoke_async(&mut conn)
+                        .await
+                        .map_err(|e| e.to_string())?;
+                    Ok(match status {
+                        0 => ReconcileOutcome::AlreadyPresent,
+                        2 => ReconcileOutcome::Locked,
+                        _ => ReconcileOutcome::Reconciled(count),
+                    })
+                })
+            }
+        }
+    };
 }
+impl_kv_backend!(redis::aio::MultiplexedConnection);
+// Auto-reconnecting variant: survives a Valkey restart without a process restart.
+impl_kv_backend!(redis::aio::ConnectionManager);
 
 #[cfg(test)]
 /// An in-memory [`KvBackend`] fake -- exercises `crate::KvHost`'s
@@ -1378,6 +1524,11 @@ pub(crate) mod fake {
             Box::pin(async move { Ok(value) })
         }
 
+        fn mark_sealed<'a>(&'a self, marker_key: &'a str) -> BoxFuture<'a, Result<(), String>> {
+            self.seed_unindexed(marker_key, b"1", None);
+            Box::pin(async { Ok(()) })
+        }
+
         fn set_with_quota<'a>(
             &'a self,
             data_key: &'a str,
@@ -1409,6 +1560,44 @@ pub(crate) mod fake {
                 st.legacy_incr(legacy_count_key);
             }
             Box::pin(async move { Ok(QuotaOutcome::Admitted(())) })
+        }
+
+        fn compare_and_set_with_quota<'a>(
+            &'a self,
+            data_key: &'a str,
+            live_key: &'a str,
+            legacy_count_key: &'a str,
+            expected: Option<&'a [u8]>,
+            value: &'a [u8],
+            ttl_seconds: u32,
+            max_keys: u64,
+        ) -> BoxFuture<'a, Result<ByteCasOutcome, String>> {
+            let mut st = self.state.lock().unwrap();
+            st.trim(live_key);
+            let current = st.live_value(data_key).map(|e| e.value.clone());
+            if current.as_deref() != expected {
+                return Box::pin(async move { Ok(ByteCasOutcome::Conflict) });
+            }
+            let existed = current.is_some();
+            if !st.is_indexed(live_key, data_key) && st.live_count(live_key) >= max_keys {
+                return Box::pin(async move { Ok(ByteCasOutcome::QuotaExceeded) });
+            }
+            let expires_at_ms = st.expiry_for(ttl_seconds);
+            st.data.insert(
+                data_key.to_string(),
+                Entry {
+                    value: value.to_vec(),
+                    expires_at_ms,
+                },
+            );
+            st.live
+                .entry(live_key.to_string())
+                .or_default()
+                .insert(data_key.to_string(), expires_at_ms);
+            if !existed {
+                st.legacy_incr(legacy_count_key);
+            }
+            Box::pin(async move { Ok(ByteCasOutcome::Written) })
         }
 
         fn delete<'a>(
@@ -1554,7 +1743,11 @@ mod mixed_version_tests {
     const SCAN_LIMIT: u64 = MAX * 2;
 
     fn scope() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     /// A new (post-fix) pod's write: reconcile-if-missing, then the quota

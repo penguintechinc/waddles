@@ -90,7 +90,7 @@ def _sample_envelope(
     return StageEnvelope(
         tenant="tenant-1",
         community=community,
-        app_id="waddles.core.example.raffle",
+        app_id="penguintechinc.waddles.raffle",
         stage="action",
         event=PlatformEvent(
             platform=platform,
@@ -588,7 +588,7 @@ def test_dispatch_raises_when_channel_id_is_missing(fake_host: _FakeExtras) -> N
     envelope = StageEnvelope(
         tenant="tenant-1",
         community="comm-1",
-        app_id="waddles.core.example.raffle",
+        app_id="penguintechinc.waddles.raffle",
         stage="action",
         event=PlatformEvent(
             platform="twitch",

@@ -21,6 +21,7 @@ Fail-first proofs (executed, not narrated):
 
 from __future__ import annotations
 
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock
@@ -32,6 +33,7 @@ from quart_schema import QuartSchema
 from blueprints.v1.tenant import tenant_bp
 from services import branding_service
 from tests.conftest import TENANT_SLUG, make_user_token
+from tests.user_ids import row_uuid, uid
 
 OTHER_TENANT_SLUG = "other-tenant"
 
@@ -269,6 +271,41 @@ class TestTenantCommunities:
         names = [c["name"] for c in body["communities"]]
         assert names == ["mine"]
 
+    async def test_community_dto_exact_field_set_and_public_id(
+        self, client: Any, tenant_admin_db: Any
+    ) -> None:
+        # regression: community DTO exposes the public_id UUID, nothing extra
+        tenant_row = (
+            tenant_admin_db.dal(tenant_admin_db.dal.tenants.slug == TENANT_SLUG).select().first()
+        )
+        tenant_admin_db.dal.communities.insert(
+            name="mine", display_name="Mine", tenant_id=tenant_row.id, is_active=True
+        )
+        tenant_admin_db.dal.commit()
+        stored = (
+            tenant_admin_db.dal(tenant_admin_db.dal.communities.name == "mine").select().first()
+        )
+
+        response = await client.get(
+            f"/api/v1/tenant/{TENANT_SLUG}/communities", headers=_admin_headers()
+        )
+        body = await response.get_json()
+        assert len(body["communities"]) == 1
+        dto = body["communities"][0]
+        assert set(dto) == {
+            "id",
+            "publicId",
+            "name",
+            "displayName",
+            "memberCount",
+            "isActive",
+            "isPublic",
+            "communityType",
+            "createdAt",
+        }
+        assert dto["publicId"] == str(stored.public_id)
+        assert str(uuid.UUID(dto["publicId"])) == dto["publicId"]
+
 
 class TestTenantAdmins:
     async def test_get_admins_empty(self, client: Any) -> None:
@@ -285,7 +322,7 @@ class TestTenantAdmins:
         add_response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-admin"},
+            json={"userId": uid(user_id), "role": "tenant-admin"},
         )
         assert add_response.status_code == 200
 
@@ -294,7 +331,7 @@ class TestTenantAdmins:
         )
         body = await list_response.get_json()
         assert len(body["admins"]) == 1
-        assert body["admins"][0]["userId"] == user_id
+        assert body["admins"][0]["userId"] == row_uuid(tenant_admin_db, user_id)
         assert body["admins"][0]["role"] == "tenant-admin"
 
     async def test_add_admin_invalid_role_is_400(self, client: Any, tenant_admin_db: Any) -> None:
@@ -302,7 +339,7 @@ class TestTenantAdmins:
         response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "not-a-real-role"},
+            json={"userId": uid(user_id), "role": "not-a-real-role"},
         )
         assert response.status_code == 400
 
@@ -310,7 +347,7 @@ class TestTenantAdmins:
         response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": 9999, "role": "tenant-admin"},
+            json={"userId": uid(9999), "role": "tenant-admin"},
         )
         assert response.status_code == 404
 
@@ -319,10 +356,10 @@ class TestTenantAdmins:
         await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-admin"},
+            json={"userId": uid(user_id), "role": "tenant-admin"},
         )
         response = await client.delete(
-            f"/api/v1/tenant/{TENANT_SLUG}/admins/{user_id}", headers=_admin_headers()
+            f"/api/v1/tenant/{TENANT_SLUG}/admins/{uid(user_id)}", headers=_admin_headers()
         )
         assert response.status_code == 200
 
@@ -337,12 +374,12 @@ class TestTenantAdmins:
         await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-admin"},
+            json={"userId": uid(user_id), "role": "tenant-admin"},
         )
         second_response = await client.post(
             f"/api/v1/tenant/{TENANT_SLUG}/admins",
             headers=_admin_headers(),
-            json={"userId": user_id, "role": "tenant-owner"},
+            json={"userId": uid(user_id), "role": "tenant-owner"},
         )
         assert second_response.status_code == 200
 
@@ -355,6 +392,6 @@ class TestTenantAdmins:
 
     async def test_remove_admin_not_found_is_404(self, client: Any) -> None:
         response = await client.delete(
-            f"/api/v1/tenant/{TENANT_SLUG}/admins/9999", headers=_admin_headers()
+            f"/api/v1/tenant/{TENANT_SLUG}/admins/{uid(9999)}", headers=_admin_headers()
         )
         assert response.status_code == 404

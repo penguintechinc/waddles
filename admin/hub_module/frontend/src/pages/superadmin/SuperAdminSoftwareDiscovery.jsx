@@ -14,7 +14,7 @@ import {
   ExternalLink,
   Loader2,
 } from 'lucide-react';
-import { FormModalBuilder } from '@penguintechinc/react-libs';
+import { FormModalBuilder } from '../../components/FormModal';
 import { WADDLES_GOLD_COLORS } from '../../theme/waddlebotTheme';
 
 // Git provider icons

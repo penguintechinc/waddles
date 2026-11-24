@@ -14,6 +14,7 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
@@ -22,7 +23,8 @@ from blueprints.v1.streaming import streaming_bp
 from config import HubAPIConfig
 from services import stream_keys_service as svc
 from services.platform_integrations_crypto import decrypt_value, stream_destination_aad
-from tests.conftest import TENANT_SLUG, make_user_token
+from tests.community_ids import install_community_ids, public_id
+from tests.conftest import TENANT_SLUG, make_user_token, role_kind_fields
 
 _ENC_KEY = "11" * 32
 _DEST = {
@@ -45,8 +47,7 @@ def _test_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -60,10 +61,11 @@ def _test_config() -> HubAPIConfig:
 def app(streaming_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(streaming_bp)
     quart_app.config["dal"] = streaming_db.dal
     quart_app.config["async_dal"] = streaming_db
     quart_app.config["HUB_API_CONFIG"] = _test_config()
+    install_community_ids(quart_app, streaming_db.dal)
+    quart_app.register_blueprint(streaming_bp)
     return quart_app
 
 
@@ -82,10 +84,15 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     return stub
 
 
+#: numeric seed id -> the community's public UUID (URLs take the UUID, never the numeric id).
+_PUBLIC_IDS: dict[int, str] = {}
+
+
 def _community(db: Any, name: str = "acme-community") -> int:
     tenant = db.dal(db.dal.tenants.slug == TENANT_SLUG).select().first()
     cid: int = db.dal.communities.insert(name=name, tenant_id=int(tenant.id))
     db.dal.commit()
+    _PUBLIC_IDS[cid] = public_id(db, cid)
     return cid
 
 
@@ -94,6 +101,7 @@ def _admin(db: Any, *, community_id: int, user_id: int = 1) -> dict[str, str]:
         community_id=community_id,
         name="community-admin",
         base_claims={"scopes": ["community:manage_members"]},
+        **role_kind_fields("community-admin"),
     )
     db.dal.community_members.insert(
         community_id=community_id,
@@ -107,7 +115,7 @@ def _admin(db: Any, *, community_id: int, user_id: int = 1) -> dict[str, str]:
 
 
 def _url(cid: int, tail: str = "") -> str:
-    return f"/api/v1/admin/{cid}/streams{tail}"
+    return f"/api/v1/admin/{_PUBLIC_IDS[cid]}/streams{tail}"
 
 
 async def _create(client: Any, cid: int, headers: dict[str, str]) -> dict[str, Any]:
@@ -139,6 +147,25 @@ class TestAuth:
         assert (await client.get(_url(a), headers=headers)).status_code == 403
         assert (await client.post(_url(a), headers=headers)).status_code == 403
         assert (await client.post(_url(a, "/key/regenerate"), headers=headers)).status_code == 403
+
+
+class TestUnknownCommunity:
+    async def test_global_admin_on_unknown_community_is_404_not_fk_500(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        """Regression: unknown community UUID must 404, not hit the streaming_configs FK.
+
+        Unknown UUID -> id -1; a global admin passed authz and the insert hit
+        `streaming_configs_community_id_fkey` (500 on alpha). Must be a clean 404, no row.
+        """
+        import uuid
+
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=1, scope='users:admin')}"}
+        url = f"/api/v1/admin/{uuid.uuid4()}/streams"
+        for method in ("get", "post"):
+            response = await getattr(client, method)(url, headers=headers)
+            assert response.status_code == 404, method
+        assert streaming_db.dal(streaming_db.dal.streaming_configs).count() == 0
 
 
 class TestKeyLifecycle:
@@ -441,6 +468,7 @@ class TestDestinations:
             community_id=b,
             name="community-admin",
             base_claims={"scopes": ["community:manage_members"]},
+            **role_kind_fields("community-admin"),
         )
         streaming_db.dal.community_members.insert(
             community_id=b,

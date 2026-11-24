@@ -285,7 +285,8 @@ def test_a_role_cannot_reach_another_services_tables(pg_db: PgTestDatabase) -> N
         ("waddles_svc_presentation", "SELECT 1 FROM streaming_targets"),
         ("waddles_svc_presentation", "SELECT 1 FROM action_dispatch_log"),
         ("waddles_svc_presentation", "UPDATE overlay_view_credentials SET id = id"),
-        ("waddles_svc_process", "SELECT 1 FROM communities"),
+        # 0132 grants ONLY (id, tenant_id, public_id); every other column stays denied.
+        ("waddles_svc_process", "SELECT name FROM communities"),
         ("waddles_svc_process", "SELECT 1 FROM action_dispatch_log"),
         ("waddles_svc_ingest", "SELECT 1 FROM tenants"),
         ("waddles_svc_core", "SELECT 1 FROM tenants"),

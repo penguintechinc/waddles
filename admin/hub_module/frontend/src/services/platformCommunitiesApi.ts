@@ -24,7 +24,8 @@ export interface PlatformPaginationDTO {
 }
 
 export interface PlatformCommunityDTO {
-  id: number;
+  /** Community public_id (UUID). */
+  id: string;
   name: string | null;
   displayName: string | null;
   description: string | null;
@@ -97,17 +98,17 @@ export const platformCommunitiesApi = {
       })
       .then((res) => res.data),
 
-  get: (communityId: number) =>
+  get: (communityId: string) =>
     apiClient
       .get<GetPlatformCommunityResponse>(`/api/v1/platform/communities/${communityId}`)
       .then((res) => res.data),
 
-  update: (communityId: number, payload: UpdatePlatformCommunityPayload) =>
+  update: (communityId: string, payload: UpdatePlatformCommunityPayload) =>
     apiClient
       .put<MessageResponse>(`/api/v1/platform/communities/${communityId}`, payload)
       .then((res) => res.data),
 
-  deactivate: (communityId: number, reason?: string) =>
+  deactivate: (communityId: string, reason?: string) =>
     apiClient
       .delete<MessageResponse>(`/api/v1/platform/communities/${communityId}`, {
         data: reason ? ({ reason } satisfies DeactivatePlatformCommunityPayload) : {},

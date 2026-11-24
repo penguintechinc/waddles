@@ -91,8 +91,8 @@ run_counted_check "npm-audit" node "$pkg_count" count_vulnerable_npm
 
 go_mods=$(discover -name "go.mod")
 go_count=$(count_lines "$go_mods")
-# core/module_rtc is the only Go left (822 lines) and is slated for a Rust
-# rewrite at P3. These checks skip themselves once the last go.mod is gone.
+# No Go modules remain in-tree (Go phase-out complete). These checks skip
+# themselves when no go.mod exists.
 count_gosec() {
   local total=0 dir n out
   for mod in $go_mods; do

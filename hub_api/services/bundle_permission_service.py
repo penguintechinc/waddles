@@ -38,9 +38,14 @@ from sqlalchemy import func, select
 from services import bundle_audit, valkey_admin_client
 from services.bundle_access_grants import is_access_grant_id, summarize_access_grants
 from services.bundle_access_grants import kinds as access_grant_kinds
+from services.bundle_app_id import is_core_namespace
 from services.bundle_approval_service import _reparse_trusted
 from services.bundle_manifest_v2 import BundleManifestV2, PermissionDeclaration
-from services.bundle_permission_catalog import CORE_NAMESPACE_PREFIX, is_dangerous
+from services.bundle_permission_catalog import (
+    CORE_NAMESPACE_PREFIX,
+    is_dangerous,
+    is_known_permission,
+)
 from services.errors import ApiError, forbidden, not_found
 
 logger = logging.getLogger(__name__)
@@ -106,7 +111,7 @@ ECONOMY_ELEVATED_IDS = frozenset({"economy.transfer_from", "economy.app_mint"})
 #: The economy SERVICE bundle itself holds `economy.transfer_from` as the host's
 #: own gate for exposing the primitive (the grant that matters is the CALLING
 #: app's); it is the only bundle the seeder may grant an elevated id.
-ECONOMY_SERVICE_APP_ID = "waddles.core.service.economy"
+ECONOMY_SERVICE_APP_ID = "penguintechinc.waddles.economy"
 _ECONOMY_SERVICE_SELF_GRANTS = frozenset({"economy.transfer_from"})
 
 
@@ -284,7 +289,7 @@ async def record_permission_requests(
     by its own caller, never a human review gate.
     """
     if approval_source == _SYSTEM_APPROVAL_SOURCE:
-        if not app_id.startswith(CORE_NAMESPACE_PREFIX):
+        if not is_core_namespace(app_id):
             raise forbidden(
                 f"approval_source={_SYSTEM_APPROVAL_SOURCE!r} is reserved for "
                 f"{CORE_NAMESPACE_PREFIX!r} bundles"
@@ -343,7 +348,7 @@ async def record_permission_requests(
 async def seed_core_permission_requests(
     install_dal: AsyncDB, *, app_id: str, version: str, manifest: BundleManifestV2
 ) -> None:
-    """Sec3.6: pre-grant every permission a `waddles.core.*` bundle's manifest declares.
+    """Sec3.6: pre-grant every permission a `penguintechinc.waddles.*` bundle's manifest declares.
 
     Called from `seed_core_bundles.py` alongside its existing
     `install_version_globally(install_source="system:core-seeder")` call
@@ -572,6 +577,13 @@ async def grant_community_permissions(
     app) grant version and publishes the push-invalidation event (Sec4).
     Returns the new `grant_version`.
     """
+    not_in_catalog = sorted(p for p in granted_permission_ids if not is_known_permission(p))
+    if not_in_catalog:
+        raise ApiError(
+            f"cannot grant permissions that are not catalog ids: {not_in_catalog}",
+            422,
+            "unknown_permission",
+        )
     approved = await get_approved_permission_ids(install_dal, app_id=app_id, version=version)
     restricted = await get_tenant_restricted_ids(install_dal, tenant_id=tenant_id, app_id=app_id)
     allowed = approved - restricted

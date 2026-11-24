@@ -104,12 +104,12 @@ pub trait UsageSink: Send + Sync {
 /// and DLQ streams respectively).
 #[derive(Debug)]
 pub struct RedisUsageSink {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
     maxlen: u64,
 }
 
 impl RedisUsageSink {
-    pub fn new(conn: redis::aio::MultiplexedConnection, maxlen: u64) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager, maxlen: u64) -> Self {
         Self { conn, maxlen }
     }
 }
@@ -140,7 +140,7 @@ impl UsageSink for RedisUsageSink {
 /// `XADD waddles:usage` is not envelope-typed (module doc).
 pub async fn connect(
     cfg: &penguin_spine::SpineConfig,
-) -> Result<redis::aio::MultiplexedConnection, UsageError> {
+) -> Result<redis::aio::ConnectionManager, UsageError> {
     let info: redis::ConnectionInfo = cfg.valkey_url.as_str().into_connection_info()?;
     let mut settings = info.redis_settings().clone();
     if let Some(username) = &cfg.valkey_username {
@@ -164,7 +164,7 @@ pub async fn connect(
     } else {
         redis::Client::open(info)?
     };
-    Ok(client.get_multiplexed_async_connection().await?)
+    Ok(client.get_connection_manager().await?)
 }
 
 /// Convenience wrapper around [`connect`] that also builds the
@@ -355,7 +355,12 @@ mod tests {
 
     #[test]
     fn usage_delta_to_json_has_expected_shape() {
-        let mut delta = UsageDelta::new("acme", Some("main".to_string()), "ws-1", "waddles.a.b.c");
+        let mut delta = UsageDelta::new(
+            "acme",
+            Some("main".to_string()),
+            "ws-1",
+            "penguintechinc.waddles.a-b-c",
+        );
         delta.actions_delivered = 3;
         let json = delta.to_json();
         assert_eq!(json["tenant_id"], "acme");
@@ -381,24 +386,55 @@ mod tests {
     #[test]
     fn batcher_merges_multiple_records_for_the_same_key() {
         let mut batcher = UsageBatcher::new();
-        batcher.record_action_delivered("acme", Some("main"), "ws-1", "waddles.a.b.c");
-        batcher.record_action_delivered("acme", Some("main"), "ws-1", "waddles.a.b.c");
+        batcher.record_action_delivered(
+            "acme",
+            Some("main"),
+            "ws-1",
+            "penguintechinc.waddles.a-b-c",
+        );
+        batcher.record_action_delivered(
+            "acme",
+            Some("main"),
+            "ws-1",
+            "penguintechinc.waddles.a-b-c",
+        );
         assert_eq!(batcher.pending_len(), 1);
     }
 
     #[test]
     fn batcher_tracks_distinct_keys_separately() {
         let mut batcher = UsageBatcher::new();
-        batcher.record_action_delivered("acme", Some("main"), "ws-1", "waddles.a.b.c");
-        batcher.record_action_delivered("acme", Some("other"), "ws-2", "waddles.a.b.c");
+        batcher.record_action_delivered(
+            "acme",
+            Some("main"),
+            "ws-1",
+            "penguintechinc.waddles.a-b-c",
+        );
+        batcher.record_action_delivered(
+            "acme",
+            Some("other"),
+            "ws-2",
+            "penguintechinc.waddles.a-b-c",
+        );
         assert_eq!(batcher.pending_len(), 2);
     }
 
     #[tokio::test]
     async fn flush_writes_every_pending_delta_and_drains_the_batch() {
         let mut batcher = UsageBatcher::new();
-        batcher.record_action_delivered("acme", Some("main"), "ws-1", "waddles.a.b.c");
-        batcher.record_relay_call("acme", Some("main"), "ws-1", "waddles.a.b.c", 42);
+        batcher.record_action_delivered(
+            "acme",
+            Some("main"),
+            "ws-1",
+            "penguintechinc.waddles.a-b-c",
+        );
+        batcher.record_relay_call(
+            "acme",
+            Some("main"),
+            "ws-1",
+            "penguintechinc.waddles.a-b-c",
+            42,
+        );
         let sink = FakeSink::default();
         let flushed = batcher.flush(&sink).await;
         assert_eq!(flushed, 1);
@@ -420,15 +456,15 @@ mod tests {
     #[tokio::test]
     async fn flush_drops_a_failed_key_without_blocking_the_others() {
         let mut batcher = UsageBatcher::new();
-        batcher.record_action_delivered("acme", None, "ws-1", "waddles.bad.app");
-        batcher.record_action_delivered("acme", None, "ws-2", "waddles.good.app");
+        batcher.record_action_delivered("acme", None, "ws-1", "penguintechinc.waddles.bad-app");
+        batcher.record_action_delivered("acme", None, "ws-2", "penguintechinc.waddles.good-app");
         let sink = FakeSink {
-            fail_for_app: Some("waddles.bad.app".to_string()),
+            fail_for_app: Some("penguintechinc.waddles.bad-app".to_string()),
             ..Default::default()
         };
         let flushed = batcher.flush(&sink).await;
         assert_eq!(flushed, 1);
         let written = sink.written.lock().unwrap();
-        assert_eq!(written[0].app_id, "waddles.good.app");
+        assert_eq!(written[0].app_id, "penguintechinc.waddles.good-app");
     }
 }

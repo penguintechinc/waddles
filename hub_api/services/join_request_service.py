@@ -22,13 +22,10 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
 
-from services import ban_suppression
+from services import ban_suppression, dsar_rate_limit
 from services.community_authz import require_community_scope
-from services.errors import bad_request, conflict, forbidden, not_found
-
-#: OR-check, mirrors `requireCommunityAdmin`'s own
-#: `scopes.includes('community:manage_members') || scopes.includes('community:manage_channels')`.
-_ADMIN_SCOPES = ("community:manage_members", "community:manage_channels")
+from services.errors import ApiError, bad_request, conflict, forbidden, not_found
+from services.scope_registry import SCOPE_MEMBERS_MANAGE
 
 
 @dataclass(slots=True, frozen=True)
@@ -72,18 +69,53 @@ class JoinRequestListItem:
     avatarUrl: str | None
 
 
-async def _get_community(dal: Any, async_dal: Any, community_id: int) -> Any:
-    rows = await async_dal.select_async(dal(dal.communities.id == community_id))
+#: Per-user cap on join-request submissions (any community) per window -- the intake is open to
+#: non-members by design, so it is bounded here on top of the global per-IP/user limiter.
+JOIN_REQUEST_LIMIT = 10
+JOIN_REQUEST_WINDOW_SECONDS = 3600
+
+
+async def _get_tenant_community(dal: Any, async_dal: Any, community_id: int, tenant_id: int) -> Any:
+    """The community iff it is in `tenant_id` (a foreign tenant looks identical to absent)."""
+    rows = await async_dal.select_async(
+        dal((dal.communities.id == community_id) & (dal.communities.tenant_id == tenant_id))
+    )
     return rows.first() if rows else None
 
 
+async def _enforce_submit_rate_limit(user_id: int) -> None:
+    """429 once `user_id` exhausts the join-request budget; 503 (fail closed) if store is down."""
+    try:
+        allowed = await dsar_rate_limit.allow(
+            f"joinreq:{user_id}", JOIN_REQUEST_LIMIT, JOIN_REQUEST_WINDOW_SECONDS
+        )
+    except ApiError as exc:
+        raise ApiError(
+            "Join requests are temporarily unavailable", exc.status_code, "JOIN_UNAVAILABLE"
+        ) from exc
+    if not allowed:
+        raise ApiError("Too many join requests. Please try again later.", 429, "RATE_LIMITED")
+
+
 async def submit_request(
-    async_dal: Any, dal: Any, *, community_id: int, user_id: int, message: str | None
+    async_dal: Any,
+    dal: Any,
+    *,
+    community_id: int,
+    user_id: int,
+    tenant_id: int,
+    message: str | None,
 ) -> SubmittedJoinRequest:
-    """Submit a join request (self-service, own resource)."""
-    community = await _get_community(dal, async_dal, community_id)
+    """Submit a join request (self-service, own resource).
+
+    Non-members are the intended callers, so membership is NOT required -- but the community must
+    belong to the caller's tenant (404 otherwise), the per-user rate limit applies, a deactivated
+    member is refused (403), and a second submission while one is still pending is a 409.
+    """
+    community = await _get_tenant_community(dal, async_dal, community_id, tenant_id)
     if community is None:
         raise not_found("Community not found")
+    await _enforce_submit_rate_limit(user_id)
     if (community.join_mode or "open") != "approval":
         raise bad_request("This community does not require approval to join")
 
@@ -94,6 +126,8 @@ async def submit_request(
         )
     )
     if existing_member:
+        if existing_member.first().is_active is False:
+            raise ApiError("Membership is restricted", 403, "MEMBERSHIP_RESTRICTED")
         raise conflict("Already a member")
 
     now = datetime.now(UTC)
@@ -105,6 +139,8 @@ async def submit_request(
     )
     if existing_request:
         row = existing_request.first()
+        if row.status == "pending":
+            raise conflict("A join request is already pending")
         await async_dal.update_async(
             dal.community_join_requests.id == row.id,
             status="pending",
@@ -164,9 +200,13 @@ async def list_requests(
     page: int,
     limit: int,
 ) -> tuple[list[JoinRequestListItem], int]:
-    """List join requests for a community (admin, `community:manage_members|_channels`)."""
+    """List join requests for a community (needs `community.members:manage`)."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=admin_user_id, any_of=_ADMIN_SCOPES
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=admin_user_id,
+        any_of=(SCOPE_MEMBERS_MANAGE,),
     )
 
     page = max(1, page)
@@ -212,9 +252,13 @@ async def list_requests(
 async def approve_request(
     async_dal: Any, dal: Any, *, community_id: int, request_id: int, reviewer_id: int
 ) -> None:
-    """Approve a pending join request (admin, `community:manage_members|_channels`)."""
+    """Approve a pending join request (needs `community.members:manage`)."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=reviewer_id, any_of=_ADMIN_SCOPES
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=reviewer_id,
+        any_of=(SCOPE_MEMBERS_MANAGE,),
     )
 
     rows = await async_dal.select_async(
@@ -272,9 +316,13 @@ async def approve_request(
 async def reject_request(
     async_dal: Any, dal: Any, *, community_id: int, request_id: int, reviewer_id: int
 ) -> None:
-    """Reject a pending join request (admin, `community:manage_members|_channels`)."""
+    """Reject a pending join request (needs `community.members:manage`)."""
     await require_community_scope(
-        async_dal, dal, community_id=community_id, user_id=reviewer_id, any_of=_ADMIN_SCOPES
+        async_dal,
+        dal,
+        community_id=community_id,
+        user_id=reviewer_id,
+        any_of=(SCOPE_MEMBERS_MANAGE,),
     )
 
     updated = await async_dal.update_async(

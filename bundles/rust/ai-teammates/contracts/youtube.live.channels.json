@@ -1,6 +1,6 @@
 {
   "tool": "youtube.live.channels",
-  "target": "waddles.core.service.youtube",
+  "target": "penguintechinc.waddles.youtube",
   "access": "read",
   "source": "bundles/contracts/live-channels-contract.v1.json (PR #1119)",
   "request": {

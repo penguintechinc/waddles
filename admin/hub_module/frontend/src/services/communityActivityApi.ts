@@ -137,7 +137,7 @@ export function parseLiveActivityEvent(raw: unknown): LiveActivityEvent {
 
 /** `GET /api/v1/community/:id/leaderboard/{watch-time,messages}`. */
 export async function fetchLeaderboard(
-  communityId: number,
+  communityId: string,
   type: LeaderboardType,
   query: LeaderboardQuery,
 ): Promise<LeaderboardPage> {
@@ -148,13 +148,13 @@ export async function fetchLeaderboard(
 }
 
 /** `GET /api/v1/community/:id/activity/my-stats`. */
-export async function fetchMyActivityStats(communityId: number): Promise<MyActivityStats> {
+export async function fetchMyActivityStats(communityId: string): Promise<MyActivityStats> {
   const { data } = await apiClient.get<unknown>(`/api/v1/community/${communityId}/activity/my-stats`);
   return parseMyStats(data);
 }
 
 /** `GET /api/v1/community/:id/live-activity?limit=`; the body is `{ success, events }`, newest first. */
-export async function fetchLiveActivity(communityId: number, limit: number): Promise<LiveActivityEvent[]> {
+export async function fetchLiveActivity(communityId: string, limit: number): Promise<LiveActivityEvent[]> {
   const { data } = await apiClient.get<unknown>(`/api/v1/community/${communityId}/live-activity`, {
     params: { limit },
   });

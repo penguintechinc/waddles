@@ -11,6 +11,7 @@ from pathlib import Path
 
 import pytest
 import yaml
+from provision_harness import materialize, with_provisioned  # type: ignore[import-not-found]
 
 _CHART = Path(__file__).resolve().parent.parent
 _ENVS = (
@@ -117,12 +118,15 @@ def test_kv_stateful_exception_marker():
 def test_kv_acl_allow_list_probe_works_no_dangerous():
     """+config|get must come AFTER -@dangerous (CONFIG GET is @dangerous); nothing broader is
     granted."""
+    # The bundle `kv` host (svc-process) authenticates as its OWN ACL user, rendered from
+    # infrastructure.valkeyAcl.kvBaseCommands; `default` is `reset` (test_valkey_acl_render.py).
     cmd = _cmd(_docs("values-alpha.yaml"))
-    line = [ln for ln in cmd.splitlines() if "--user default" in ln]
+    assert "--user default reset" in cmd
+    line = [ln for ln in cmd.splitlines() if "--user svc-process reset on" in ln]
     assert len(line) == 1
     rules = [
         r.strip("'\"")
-        for r in line[0].split("--user default on", 1)[1].split()
+        for r in line[0].split("--user svc-process reset on", 1)[1].split()
         if r.strip("'\"")[:1] in "+-"
     ]
     assert rules[0] == "-@all", rules
@@ -144,6 +148,18 @@ def test_kv_acl_allow_list_probe_works_no_dangerous():
     )
     assert not [r for r in rules if r.startswith("+config") and r != "+config|get"]
     assert "'+config|get'" in line[0], "pipe must be shell-quoted"
+    # Regression (alpha kv outage): bundle_host_kv's Lua scripts call `redis.call('TIME')`, which
+    # is @dangerous -- without a later `+time` every kv write/incr/cas/list dies with
+    # "ACL failure in script ... 'time' command". Nothing else single-command may be added.
+    assert "+time" in rules, "kv Lua scripts need TIME (see bundle_host_kv backend.rs)"
+    assert rules.index("+time") > rules.index("-@dangerous"), "+time must follow -@dangerous"
+    assert not [
+        r
+        for r in rules
+        if r.startswith("+")
+        and not r.startswith("+@")
+        and r not in ("+config|get", "+time")
+    ], rules
 
 
 def test_kv_tls_only_and_service():
@@ -178,12 +194,15 @@ def test_kv_has_cilium_policy():
 
 
 def test_kv_password_isolated_and_not_in_nonsecret_fields():
-    docs = _docs("values-alpha.yaml")
+    # -valkey-kv is created at RUNTIME by the provision-secrets hook; run the real hook.
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     kv = [
         d
         for d in docs
         if d["kind"] == "Secret"
         and (d.get("stringData") or {}).get("VALKEY_KV_PASSWORD")
+        # per-service ACL user Secrets (test_valkey_acl_render.py) also carry this key name
+        and "-valkey-user-" not in d["metadata"]["name"]
     ]
     assert len(kv) == 1 and kv[0]["metadata"]["name"].endswith("-valkey-kv")
     pw = kv[0]["stringData"]["VALKEY_KV_PASSWORD"]
@@ -192,9 +211,14 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
     scanned = referrers = 0
     for d in docs:
         if d["kind"] == "Secret":
-            assert d is kv[0] or not any(
-                k.startswith("VALKEY_KV_") for k in (d.get("stringData") or {})
-            ), d["metadata"]["name"]
+            data = d.get("stringData") or {}
+            name = d["metadata"]["name"]
+            # The server-only probe Secret and the per-service ACL user Secrets
+            # (test_valkey_acl_render.py) own their OWN VALKEY_KV_* passwords, never this one.
+            if name.endswith("-valkey-kv-server") or "-valkey-user-" in name:
+                assert pw not in data.values(), name
+                continue
+            assert d is kv[0] or not any(k.startswith("VALKEY_KV_") for k in data), name
             continue
         blob = yaml.safe_dump(d)
         assert pw not in blob and _acl_sha256(pw) not in blob, d["metadata"]["name"]
@@ -225,10 +249,13 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
             ]
         if kv_name in refs:
             referrers += 1
+            # hub-api: GDPR erasure of per-user bundle kv (erasure_external.py) -- the
+            # kv instance is where that data lives (regression: it scanned durable).
             assert d["metadata"]["name"] in (
                 "valkey-kv",
                 "w-waddlebot-svc-action-rust",
                 "w-waddlebot-svc-process-rust",
+                "w-waddlebot-hub-api-v3",
             ) or d["metadata"]["name"].endswith(_RUST), d["metadata"]["name"]
             assert not any(
                 f.get("secretRef", {}).get("name") == kv_name
@@ -236,8 +263,10 @@ def test_kv_password_isolated_and_not_in_nonsecret_fields():
                 for f in c.get("envFrom", [])
             )
     assert scanned > 10, f"examined only {scanned} workloads"
+    # Clients read only the credential-free URL from the kv Secret (each password comes from its
+    # OWN -valkey-user-<name> Secret); the server no longer reads the legacy shared password.
     assert referrers == 3, (
-        f"expected valkey-kv + 2 rust pods to reference the kv Secret, got {referrers}"
+        f"expected 2 rust pods + hub-api to reference the kv Secret (URL only), got {referrers}"
     )
 
 
@@ -309,7 +338,7 @@ def test_kv_disabled_falls_back_to_cache():
 
 
 def test_valkey_tls_cert_covers_kv_san():
-    docs = _docs("values-alpha.yaml")
+    docs = with_provisioned(_docs("values-alpha.yaml"))
     sec = [
         d
         for d in docs
@@ -318,9 +347,11 @@ def test_valkey_tls_cert_covers_kv_san():
     assert len(sec) == 1
 
 
-def test_beta_tier_without_certs_fails_closed():
-    """Real beta tier: TLS now defaults on, so a missing cert fails closed (never silent
-    plaintext)."""
+def test_beta_tier_without_certs_generates_them_at_runtime():
+    """Real beta tier with the cert source removed (no cert-manager, not delegated, no material):
+    owner policy -- internal identities are generated create-if-absent in EVERY tier -- so the
+    provisioner mints the Valkey TLS identity instead of failing (never silent plaintext).
+    """
     r = subprocess.run(
         [
             "helm",
@@ -331,9 +362,48 @@ def test_beta_tier_without_certs_fails_closed():
             "1.30.0",
             "--values",
             str(_CHART / "values-beta.yaml"),
+            "--set",
+            "global.transitTls.certManager.enabled=false",
+            "--set",
+            "global.transitTls.externalSecret=true",
+            "--set",
+            "global.valkeyTls.externalSecret=false",
         ],  # noqa: S603
         capture_output=True,
         text=True,
         check=False,
     )
-    assert r.returncode != 0
+    assert r.returncode == 0, r.stderr
+    docs = [d for d in yaml.safe_load_all(r.stdout) if d]
+    secrets = materialize(docs)
+    valkey = [v for k, v in secrets.items() if k.endswith("valkey-tls")]
+    assert len(valkey) == 1, sorted(secrets)
+    assert {"ca.crt", "tls.crt", "tls.key"} <= set(valkey[0]["data"])
+
+
+@pytest.mark.parametrize(
+    ("values", "extra", "secret", "url_key", "pw_secret", "pw_key"),
+    [
+        ("values-alpha.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "w-waddlebot-valkey-user-hub-api", "VALKEY_KV_PASSWORD"),
+        ("values-beta.yaml", (), "w-waddlebot-valkey-kv", "VALKEY_KV_URL_TLS", "w-waddlebot-valkey-user-hub-api", "VALKEY_KV_PASSWORD"),
+        ("values-local.yaml", (), "w-waddlebot-secrets", "REDIS_URL", "w-waddlebot-secrets", "REDIS_PASSWORD"),
+    ],
+)
+def test_hub_api_erasure_reads_bundle_kv_from_the_kv_instance(values, extra, secret, url_key, pw_secret, pw_key):
+    """regression: GDPR erasure scanned the DURABLE Valkey (VALKEY_URL) for `bundlekv:*`, which lives
+    on valkey-kv, and silently erased nothing. hub-api must get VALKEY_KV_URL from the instance that
+    actually holds bundle kv, authenticating as its OWN ACL user when kv is enabled."""
+    docs = _docs(values, extra)
+    hub = [
+        d
+        for d in docs
+        if d["kind"] == "Deployment" and d["metadata"]["name"] == "w-waddlebot-hub-api-v3"
+    ]
+    assert len(hub) == 1
+    env = {e["name"]: e for e in hub[0]["spec"]["template"]["spec"]["containers"][0]["env"]}
+    assert env["VALKEY_KV_URL"]["valueFrom"]["secretKeyRef"] == {"name": secret, "key": url_key}
+    assert env["VALKEY_KV_PASSWORD"]["valueFrom"]["secretKeyRef"] == {"name": pw_secret, "key": pw_key}
+    if pw_secret.endswith("-valkey-user-hub-api"):
+        assert env["VALKEY_KV_USERNAME"]["value"] == "hub-api"
+    durable_key = env.get("VALKEY_URL", {}).get("valueFrom", {}).get("secretKeyRef", {}).get("key", "")
+    assert "VALKEY_KV" not in durable_key

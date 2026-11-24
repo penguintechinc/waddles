@@ -6,11 +6,10 @@
 # header); the component only names the secret ref. exported_tools is identical in bundle.yaml and
 # hub-manifest.yaml (the seeder's agreement check fails on drift).
 schema_version: 2
-app_id: waddles.core.service.music-soundcloud
+app_id: penguintechinc.waddles.music-soundcloud
 name: SoundCloud Music Service Bundle (Rust)
-version: 1.0.0
+version: 1.0.3
 author: github:penguintechinc
-feature: waddles.core.service
 module: core
 provider: builtin
 language: rust

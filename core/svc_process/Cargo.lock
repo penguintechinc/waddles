@@ -531,6 +531,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "backon"
+version = "1.6.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cffb0e931875b666fc4fcb20fee52e9bbd1ef836fd9e9e04ec21555f9f85f7ef"
+dependencies = [
+ "fastrand",
+]
+
+[[package]]
 name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -626,12 +635,14 @@ checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
 name = "bundle-active-set"
 version = "0.1.0"
 dependencies = [
- "chrono",
+ "futures-util",
  "sea-orm",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "time",
  "tracing",
+ "xxhash-rust",
 ]
 
 [[package]]
@@ -647,6 +658,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "bundle-config-db"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "command-latency",
+ "hub_client",
+ "opentelemetry",
+ "redis",
+ "sea-orm",
+ "tokio",
+ "tonic",
+ "tracing",
+]
+
+[[package]]
 name = "bundle-host-credentials"
 version = "0.1.0"
 dependencies = [
@@ -657,6 +683,24 @@ dependencies = [
  "serde_json",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "bundle-host-crypto"
+version = "0.1.0"
+dependencies = [
+ "aes-gcm",
+ "hkdf 0.12.4",
+ "hmac 0.12.1",
+ "hub_client",
+ "opentelemetry",
+ "redis",
+ "sha2 0.10.9",
+ "thiserror 2.0.20",
+ "tokio",
+ "tracing",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -720,12 +764,14 @@ dependencies = [
 name = "bundle-host-kv"
 version = "0.1.0"
 dependencies = [
+ "bundle-host-crypto",
  "opentelemetry",
  "redis",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "tokio",
  "tracing",
 ]
 
@@ -785,6 +831,8 @@ name = "bundle-host-storage"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "bundle-capability-gate",
+ "bundle-host-crypto",
  "bytes",
  "futures",
  "http",
@@ -795,6 +843,23 @@ dependencies = [
  "tokio",
  "tracing",
  "url",
+]
+
+[[package]]
+name = "bundle-host-surface"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "prost",
+ "serde",
+ "serde_json",
+ "service_auth",
+ "thiserror 2.0.20",
+ "tokio",
+ "tonic",
+ "tonic-prost",
+ "tonic-prost-build",
+ "tracing",
 ]
 
 [[package]]
@@ -863,10 +928,8 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1aa79e62e7697b8e29b513a68abacf485adcd1fe8284a4316c5ae868e6633327"
 dependencies = [
  "iana-time-zone",
- "js-sys",
  "num-traits",
  "serde",
- "wasm-bindgen",
  "windows-link",
 ]
 
@@ -884,6 +947,7 @@ dependencies = [
 name = "circuit-breaker"
 version = "0.1.0"
 dependencies = [
+ "tokio",
  "tracing",
 ]
 
@@ -960,6 +1024,16 @@ dependencies = [
  "pin-project-lite",
  "tokio",
  "tokio-util",
+]
+
+[[package]]
+name = "command-latency"
+version = "0.1.0"
+dependencies = [
+ "opentelemetry",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
 ]
 
 [[package]]
@@ -1445,9 +1519,9 @@ checksum = "77ce24cb58228fbb8aa041425bb1050850ac19177686ea6e0f41a70416f56fdb"
 
 [[package]]
 name = "form_urlencoded"
-version = "1.2.2"
+version = "1.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cb4cb245038516f5f85277875cdaa4f7d2c9a0fa0468de06ed190163b1581fcf"
+checksum = "afa489199eaffb1211795df1c6236ce1ad0d41a6fa45250add73e3b02420f06e"
 dependencies = [
  "percent-encoding",
 ]
@@ -1831,9 +1905,14 @@ checksum = "df3b46402a9d5adb4c86a0cf463f42e19994e3ee891101b1841f30a545cb49a9"
 name = "hub_client"
 version = "0.1.0"
 dependencies = [
+ "aes-gcm",
  "async-trait",
+ "hkdf 0.12.4",
+ "opentelemetry",
  "prost",
+ "redis",
  "service_auth",
+ "sha2 0.10.9",
  "thiserror 2.0.20",
  "tokio",
  "tonic",
@@ -1841,6 +1920,8 @@ dependencies = [
  "tonic-prost-build",
  "tower",
  "tracing",
+ "x25519-dalek",
+ "zeroize",
 ]
 
 [[package]]
@@ -2765,8 +2846,8 @@ dependencies = [
 
 [[package]]
 name = "penguin-bundle-host"
-version = "0.5.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=53e95619f1b3e49e1150b78a125981fcc5905d8a#53e95619f1b3e49e1150b78a125981fcc5905d8a"
+version = "0.6.0"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=dcfbadac813d7203e6f1764c363aee21ebd20c1c#dcfbadac813d7203e6f1764c363aee21ebd20c1c"
 dependencies = [
  "regex",
  "serde",
@@ -2778,16 +2859,16 @@ dependencies = [
 
 [[package]]
 name = "penguin-licensing"
-version = "0.1.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=7110125df28045322e7c4c527d1d1be806f2f086#7110125df28045322e7c4c527d1d1be806f2f086"
+version = "0.1.1"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=f512126656cfca0dc0d52f47a92180eceeddbbed#f512126656cfca0dc0d52f47a92180eceeddbbed"
 dependencies = [
  "arc-swap",
- "chrono",
  "reqwest 0.13.4",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tracing",
  "url",
@@ -2818,9 +2899,8 @@ dependencies = [
 [[package]]
 name = "penguin-spine"
 version = "0.2.0"
-source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=90060a93925c50668cc1c6dd47a4ae24a7b4e321#90060a93925c50668cc1c6dd47a4ae24a7b4e321"
+source = "git+https://github.com/penguintechinc/penguin-libs.git?rev=1df082257597e05b1f8e4c2568fb934422d3e36c#1df082257597e05b1f8e4c2568fb934422d3e36c"
 dependencies = [
- "chrono",
  "hex",
  "hmac 0.12.1",
  "redis",
@@ -2830,6 +2910,7 @@ dependencies = [
  "sha2 0.10.9",
  "subtle",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tracing",
  "uuid",
@@ -3307,11 +3388,14 @@ version = "1.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2acbc41a996f7652b2ddd9dfd98cc4ff602cfd742ae35382f07f608405ab50ed"
 dependencies = [
+ "arc-swap",
  "arcstr",
  "async-lock",
+ "backon",
  "bytes",
  "cfg-if",
  "combine",
+ "futures-channel",
  "futures-util",
  "itoa",
  "percent-encoding",
@@ -3376,6 +3460,7 @@ dependencies = [
  "bytes",
  "futures-core",
  "futures-util",
+ "h2",
  "http",
  "http-body",
  "http-body-util",
@@ -3711,10 +3796,10 @@ version = "1.0.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "546040c653a705e60ec65ecd3191a809603734bebbc225775916dea9ae409b31"
 dependencies = [
- "chrono",
  "ordered-float",
  "sea-query-derive",
  "serde_json",
+ "time",
  "uuid",
 ]
 
@@ -3889,7 +3974,9 @@ dependencies = [
  "hyper-util",
  "jsonwebtoken",
  "opentelemetry",
+ "opentelemetry_sdk",
  "prost",
+ "reqwest 0.12.28",
  "rustls",
  "rustls-pki-types",
  "serde",
@@ -4076,7 +4163,6 @@ dependencies = [
  "base64 0.22.1",
  "bytes",
  "cfg-if",
- "chrono",
  "crc",
  "crossbeam-queue",
  "either",
@@ -4097,6 +4183,7 @@ dependencies = [
  "sha2 0.10.9",
  "smallvec",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-stream",
  "tracing",
@@ -4152,7 +4239,6 @@ dependencies = [
  "bitflags",
  "byteorder",
  "bytes",
- "chrono",
  "crc",
  "digest 0.11.3",
  "dotenvy",
@@ -4167,6 +4253,7 @@ dependencies = [
  "sha2 0.11.0",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
 ]
@@ -4181,7 +4268,6 @@ dependencies = [
  "base64 0.22.1",
  "bitflags",
  "byteorder",
- "chrono",
  "crc",
  "dotenvy",
  "etcetera",
@@ -4203,6 +4289,7 @@ dependencies = [
  "sqlx-core",
  "stringprep",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "uuid",
  "whoami",
@@ -4215,7 +4302,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "488e99c397a62007e4229aec669a179816339afc6d2620ca6fa420dbee2e982c"
 dependencies = [
  "atoi 2.0.0",
- "chrono",
  "flume",
  "form_urlencoded",
  "futures-channel",
@@ -4229,6 +4315,7 @@ dependencies = [
  "serde",
  "sqlx-core",
  "thiserror 2.0.20",
+ "time",
  "tracing",
  "url",
  "uuid",
@@ -4280,7 +4367,9 @@ dependencies = [
  "base64 0.22.1",
  "bundle-active-set",
  "bundle-capability-gate",
+ "bundle-config-db",
  "bundle-host-credentials",
+ "bundle-host-crypto",
  "bundle-host-db",
  "bundle-host-economy",
  "bundle-host-gameserver-net",
@@ -4290,10 +4379,12 @@ dependencies = [
  "bundle-host-platform-table",
  "bundle-host-reputation",
  "bundle-host-storage",
+ "bundle-host-surface",
  "bundle-tool-call",
- "chrono",
+ "bytes",
  "circuit-breaker",
  "clap",
+ "command-latency",
  "connection_resolver",
  "futures-util",
  "governor",
@@ -4324,14 +4415,15 @@ dependencies = [
  "sha2 0.10.9",
  "socket2",
  "thiserror 2.0.20",
+ "time",
  "tokio",
  "tokio-rustls",
+ "tokio-stream",
  "tonic",
  "tower",
  "tower-http 0.7.1",
  "tracing",
  "uuid",
- "x25519-dalek",
  "zeroize",
 ]
 
@@ -4916,9 +5008,9 @@ checksum = "8ecb6da28b8a351d773b68d5825ac39017e680750f980f3a1a85cd8dd28a47c1"
 
 [[package]]
 name = "url"
-version = "2.5.8"
+version = "2.5.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ff67a8a4397373c3ef660812acab3268222035010ab8680ec4215f38ba3d0eed"
+checksum = "f00cd2407bb42c0ef17be88d4cf020f5cceffd121665bac9b8b9493a369b3b1a"
 dependencies = [
  "form_urlencoded",
  "idna",

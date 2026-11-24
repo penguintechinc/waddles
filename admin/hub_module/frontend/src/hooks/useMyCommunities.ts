@@ -10,7 +10,7 @@ import {
 /** Query keys for community reads, as const tuples so invalidation stays exact. */
 export const communityKeys = {
   mine: ['communities', 'mine'] as const,
-  detail: (communityId: number) => ['communities', 'detail', communityId] as const,
+  detail: (communityId: string) => ['communities', 'detail', communityId] as const,
   search: (term: string) => ['communities', 'search', term] as const,
 };
 
@@ -22,11 +22,11 @@ export function useMyCommunities(): UseQueryResult<MyCommunity[]> {
 }
 
 /** One community's public details. */
-export function usePublicCommunity(communityId: number): UseQueryResult<PublicCommunity> {
+export function usePublicCommunity(communityId: string): UseQueryResult<PublicCommunity> {
   return useQuery({
     queryKey: communityKeys.detail(communityId),
     queryFn: () => fetchPublicCommunity(communityId),
-    enabled: Number.isInteger(communityId) && communityId > 0,
+    enabled: communityId !== '',
   });
 }
 
@@ -36,7 +36,7 @@ export function usePublicCommunity(communityId: number): UseQueryResult<PublicCo
  * a community whose public record is unavailable (for example a private one) simply
  * shows without them rather than failing the page.
  */
-export function usePublicCommunityDetails(communityIds: readonly number[]): ReadonlyMap<number, PublicCommunity> {
+export function usePublicCommunityDetails(communityIds: readonly string[]): ReadonlyMap<string, PublicCommunity> {
   return useQueries({
     queries: communityIds.map((id) => ({
       queryKey: communityKeys.detail(id),
@@ -45,7 +45,7 @@ export function usePublicCommunityDetails(communityIds: readonly number[]): Read
       retry: false,
     })),
     combine: (results) => {
-      const details = new Map<number, PublicCommunity>();
+      const details = new Map<string, PublicCommunity>();
       results.forEach((result, index) => {
         const id = communityIds[index];
         if (id !== undefined && result.data) details.set(id, result.data);

@@ -52,7 +52,7 @@ Boxcars 10x (expected return 33/36 of the stake). Deviation from the original (f
 | `storage.kv` | per-user cooldown (180 s, per command) + per-event outcome record (idempotent redelivery) |
 | `economy.wager` (`max_bet: 500`) | `wager` and `max-bet` |
 | `identity.resolve` | actor -> community user uuid |
-| `tool.call:waddles.core.service.economy:points_view` | currency alias for display |
+| `tool.call:penguintechinc.waddles.economy:points_view` | currency alias for display |
 | `chat.send:twitch` / `chat.send:discord` | relay the reply |
 
 ## Platforms
@@ -143,7 +143,7 @@ from the unrelated first-party `bundles/python/roll` bundle's
 
 ## Activation (intentionally NOT in `bundles/core-bundles.yaml`)
 
-Third-party-attributed (`provider: thirdparty`, `waddles.integrations.*`), so `hub_api/cli/seed_core_bundles.py`'s
+Third-party-attributed (`provider: thirdparty`, `psychoboy.penguintwitchbot.*`), so `hub_api/cli/seed_core_bundles.py`'s
 `_guard_core_namespace` refuses it by design (vendor-separation ruling). It must be published through the vendor path
 (`POST /apps/{app_id}/versions`, then admin approve) -- BUT that path's `bundle_component_validator.py` currently requires
 exactly `process-stage` + `action-stage` exports and rejects the `streaming-lifecycle` export every `stage-next*` world carries

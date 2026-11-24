@@ -1,8 +1,7 @@
 schema_version: 2
-app_id: waddles.core.example.vibecheck
+app_id: penguintechinc.waddles.vibecheck
 name: Vibe Check Bundle (Python)
-version: 1.0.1
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc

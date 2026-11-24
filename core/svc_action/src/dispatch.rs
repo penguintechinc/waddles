@@ -248,6 +248,10 @@ pub async fn ensure_loaded(
     let metrics = stage_metrics::stage_metrics();
     let result = if outcome.is_ok() { "ok" } else { "error" };
     metrics.record_bundle_load(app_id, "load", result, started.elapsed());
+    if outcome.is_ok() {
+        // Seed the live-config cache for this scope (lazy-load still covers a failed seed).
+        hub_client::bundle_config::seed_scope_in_background(tenant_id, community_id, app_id);
+    }
     if let Ok(loaded) = &outcome {
         // The executor's own account of the load (`precompile_ms`, covering
         // fetch + verify + compile on its side) -- the stage cannot see
@@ -457,6 +461,9 @@ fn record_executor_call(
                 if let Some(limit) = stage_metrics::sandbox_limit_for(e.code, e.detail.as_deref()) {
                     metrics.record_sandbox_trip(app_id, limit);
                 }
+                if e.detail.as_deref() == Some("pool_exhausted") {
+                    metrics.record_pool_exhausted(app_id);
+                }
                 "executor_error"
             }
             _ => "malformed",
@@ -485,9 +492,17 @@ pub async fn invoke_dispatch(
     community_id: i32,
     app_version: i64,
 ) -> Result<serde_json::Value, InvokeError> {
+    // Command-latency: stamp the invoke-sent instant (and the action-consume instant) into the
+    // tracestate that rides this invoke's scope, so the outbound-confirm point can split the
+    // executor leg from the outbound leg. Metadata only; the trace id is untouched.
+    let invoke_ms = command_latency::stamp::now_ms();
     let trace = env.trace.as_ref().map(|t| TraceContext {
         traceparent: t.traceparent.clone(),
-        tracestate: t.tracestate.clone(),
+        tracestate: command_latency::stage::action_invoke_tracestate(
+            t.tracestate.as_deref(),
+            command_latency::stage::action_consumed_ms().unwrap_or(invoke_ms),
+            invoke_ms,
+        ),
     });
     let payload = serde_json::json!({
         "envelope": envelope_to_wire_json(env)?,
@@ -761,8 +776,14 @@ pub trait AuditSink: Send + Sync {
         community_id: Option<i32>,
         app_id: &'a str,
         record: &'a DispatchRecord,
-        envelope_ts: Option<chrono::DateTime<chrono::FixedOffset>>,
+        envelope_ts: Option<time::OffsetDateTime>,
     ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>>;
+}
+
+/// Parses an envelope `ts` (RFC 3339, any UTC offset) for the audit row's `envelope_ts`
+/// column; `None` on a malformed string, exactly as the former chrono parse behaved.
+pub(crate) fn parse_envelope_ts(ts: &str) -> Option<time::OffsetDateTime> {
+    time::OffsetDateTime::parse(ts, &time::format_description::well_known::Rfc3339).ok()
 }
 
 /// `(tenants.id, communities.id)` -- the pair [`TenantResolver::resolve`]
@@ -886,19 +907,77 @@ pub struct DispatchDeps<A: AuditSink, T: TenantResolver, S: SpineOps> {
 /// dead-lettered) -- only a `SpineError` from the ack/DLQ write itself
 /// propagates, matching `core/svc_process/src/spine.rs`'s error-handling
 /// shape.
+/// Records `queue_wait_seconds` for one delivered entry: how long it sat in
+/// the stream (its id's millisecond timestamp) before this stage picked it
+/// up -- the KEDA scale signal. A malformed id is logged, never fatal.
+fn record_queue_wait(app_id: &str, entry_id: &str) {
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    match bundle_active_set::stream_entry_age(entry_id, now_ms) {
+        Some(wait) => stage_metrics::stage_metrics().record_queue_wait(app_id, wait),
+        None => tracing::debug!(
+            app_id,
+            entry_id,
+            "stream entry id has no millisecond prefix; queue wait not recorded"
+        ),
+    }
+}
+
 async fn handle_delivered<A: AuditSink, T: TenantResolver, S: SpineOps>(
     d: &Delivered,
     stream_key: &str,
     deps: &DispatchDeps<A, T, S>,
 ) -> Result<(), SpineError> {
+    use tracing::Instrument as _;
     let started = std::time::Instant::now();
-    let outcome = handle_delivered_inner(d, stream_key, deps).await;
+    record_queue_wait(&deps.app_id, &d.entry_id);
+    // Command-latency: the action consume instant, the action-stream queue-wait hop, and the
+    // `action.dispatch` span parented on the envelope's W3C trace context.
+    let consumed_ms = command_latency::stamp::now_ms();
+    let queue_wait_ms = command_latency::stage::record_queue_wait(
+        command_latency::Hop::ActionQueueWait,
+        &d.entry_id,
+        consumed_ms,
+    );
+    let span = tracing::info_span!(
+        "action.dispatch",
+        app_id = %deps.app_id,
+        tenant_id = d.env.tenant_id,
+        community_id = d.env.community_id,
+        deliveries = d.deliveries,
+        queue_wait_ms = queue_wait_ms,
+        result = tracing::field::Empty,
+        "otel.kind" = "consumer",
+    );
+    if let Some(trace) = &d.env.trace {
+        command_latency::span::set_remote_parent(
+            &span,
+            &trace.traceparent,
+            trace.tracestate.as_deref(),
+        );
+    }
+    let outcome = command_latency::stage::with_action_consumed(
+        consumed_ms,
+        handle_delivered_inner(d, stream_key, deps),
+    )
+    .instrument(span.clone())
+    .await;
     let result = match &outcome {
         Ok(result) => result.as_str(),
         // The ack/DLQ write itself failed: the entry stays pending for
         // redelivery, so it has no terminal dispatch outcome yet.
         Err(_) => "spine_error",
     };
+    span.record("result", result);
+    if result != "success" {
+        command_latency::span::record_error(
+            &span,
+            "DispatchNotSuccessful",
+            &format!("action dispatch ended {result}"),
+        );
+    }
     stage_metrics::stage_metrics().record_stage(&deps.app_id, result, started.elapsed());
     outcome.map(|_| ())
 }
@@ -1227,7 +1306,7 @@ async fn handle_delivered_inner<A: AuditSink, T: TenantResolver, S: SpineOps>(
         .resolve(&d.env.tenant, d.env.community.as_deref())
         .await
         .unwrap_or((0, None));
-    let envelope_ts = chrono::DateTime::parse_from_rfc3339(&d.env.ts).ok();
+    let envelope_ts = parse_envelope_ts(&d.env.ts);
     deps.audit
         .record(tenant_fk, community_fk, &deps.app_id, &record, envelope_ts)
         .await;
@@ -1256,10 +1335,35 @@ async fn drain_batch<R: StreamReader, A: AuditSink, T: TenantResolver, S: SpineO
 ) -> Result<usize, SpineError> {
     let batch = reader.read().await?;
     stage_metrics::stage_metrics().record_batch(batch.len());
-    for d in &batch {
-        handle_delivered(d, stream_key, deps).await?;
-    }
+    // Bounded per-app concurrency (latency suspect #4) -- same ordering contract as
+    // `core/svc_process/src/spine.rs::drain_batch`; `APP_DRAIN_CONCURRENCY=1` is the old serial loop.
+    let tuning = bundle_active_set::concurrent::tuning();
+    bundle_active_set::concurrent::run_keyed(
+        &batch,
+        tuning.concurrency,
+        |d| drain_ordering_key(d, deps, tuning.ordering),
+        |d| async move { handle_delivered(d, stream_key, deps).await.map(|_| ()) },
+    )
+    .await?;
     Ok(batch.len())
+}
+
+/// Dispatch entries are keyed by app scope `(tenant, community, app)` only: an outbound action
+/// can read-modify-write bundle state through its capabilities, and there is no per-actor
+/// overlap here (see `core/svc_process/src/spine.rs::drain_ordering_key` for the rationale).
+fn drain_ordering_key<A: AuditSink, T: TenantResolver, S: SpineOps>(
+    d: &Delivered,
+    deps: &DispatchDeps<A, T, S>,
+    _ordering: bundle_active_set::concurrent::Ordering,
+) -> bundle_active_set::concurrent::DrainKey {
+    bundle_active_set::concurrent::drain_key(
+        &format!("{:?}", d.env.tenant_id),
+        Some(&format!("{:?}", d.env.community_id)),
+        &deps.app_id,
+        None,
+        bundle_active_set::concurrent::Ordering::Scope,
+        false,
+    )
 }
 
 /// Runs [`drain_batch`] in a loop until `shutdown` resolves -- identical
@@ -1311,8 +1415,34 @@ pub async fn run<A: AuditSink, T: TenantResolver>(
     rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
     shutdown: tokio::sync::oneshot::Receiver<()>,
 ) -> Result<(), SpineError> {
-    let app_id = deps.app_id.clone();
     let dlq = SpineClient::connect(cfg.clone(), deps.metrics.clone()).await?;
+    run_with_client(
+        cfg,
+        grants,
+        stream_key,
+        deps,
+        rust_data_plane,
+        dlq,
+        shutdown,
+    )
+    .await
+}
+
+/// Same as [`run`] but reuses an already-connected, process-shared `dlq`
+/// [`SpineClient`] (cheap clone of one multiplexed connection) instead of
+/// opening and probing a fresh TLS connection per consumer -- the
+/// connection-storm fix (alpha incident 2026-11). Only the blocking
+/// [`GroupReader`] socket stays per-consumer (spec Sec5.7 rule 2).
+pub async fn run_with_client<A: AuditSink, T: TenantResolver>(
+    cfg: SpineConfig,
+    grants: Vec<Grant>,
+    stream_key: String,
+    deps: DispatchDeps<A, T, SpineClient>,
+    rust_data_plane: Arc<dyn crate::flags::FeatureFlag>,
+    dlq: SpineClient,
+    shutdown: tokio::sync::oneshot::Receiver<()>,
+) -> Result<(), SpineError> {
+    let app_id = deps.app_id.clone();
     let streams: Vec<String> = grants.iter().map(|g| g.stream.clone()).collect();
     let sampler_client = dlq.clone();
     let reader = GroupReader::connect(
@@ -1474,7 +1604,7 @@ pub(crate) async fn ensure_consumer_group(
     group: &str,
 ) -> Result<bool, SpineError> {
     let client = build_raw_client(cfg)?;
-    let mut conn = client.get_multiplexed_async_connection().await?;
+    let mut conn = client.get_connection_manager().await?;
     let result: Result<(), redis::RedisError> = redis::cmd("XGROUP")
         .arg("CREATE")
         .arg(stream)
@@ -1543,6 +1673,51 @@ pub(crate) mod test_support {
 mod tests {
     use super::*;
     use crate::hop::BoundaryReason;
+
+    // Golden parses: the instants/offsets chrono's `parse_from_rfc3339` produced for the same
+    // strings (envelope `ts` is emitted as `...SS.mmmZ`; other hops may send offsets/micros).
+    mod parse_envelope_ts_golden {
+        use super::super::parse_envelope_ts;
+
+        #[test]
+        fn utc_millis_z() {
+            let t = parse_envelope_ts("2023-11-14T22:13:20.123Z").unwrap();
+            assert_eq!(t.unix_timestamp_nanos(), 1_700_000_000_123_000_000);
+            assert!(t.offset().is_utc());
+        }
+
+        #[test]
+        fn preserves_offset_and_instant() {
+            let t = parse_envelope_ts("2023-11-15T03:43:20.123+05:30").unwrap();
+            assert_eq!(t.unix_timestamp_nanos(), 1_700_000_000_123_000_000);
+            assert_eq!(t.offset().whole_seconds(), 5 * 3600 + 30 * 60);
+        }
+
+        #[test]
+        fn sub_millisecond_precision_is_kept() {
+            let t = parse_envelope_ts("2023-11-14T22:13:20.123456789Z").unwrap();
+            assert_eq!(t.unix_timestamp_nanos(), 1_700_000_000_123_456_789);
+        }
+
+        #[test]
+        fn whole_seconds_and_negative_offset() {
+            let t = parse_envelope_ts("2023-11-14T14:13:20-08:00").unwrap();
+            assert_eq!(t.unix_timestamp(), 1_700_000_000);
+        }
+
+        #[test]
+        fn malformed_is_none() {
+            for bad in [
+                "",
+                "not-a-ts",
+                "2023-11-14",
+                "2023-13-14T00:00:00Z",
+                "2023-11-14T22:13:20",
+            ] {
+                assert!(parse_envelope_ts(bad).is_none(), "{bad}");
+            }
+        }
+    }
 
     // regression: same-digest manifest-only release (ping 1.0.2/1.0.3)
     // emptied svc-action dispatch digest (alpha 2026-10-03)
@@ -1668,13 +1843,21 @@ mod tests {
         // richer `Serialize` shape.
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
 
         let wire = envelope_to_wire_json(&d.env).expect("payload always serializes");
 
         assert_eq!(wire["tenant"], "acme");
         assert_eq!(wire["community"], "main");
-        assert_eq!(wire["app_id"], "waddles.bot.commands.default");
+        assert_eq!(
+            wire["app_id"],
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         assert_eq!(wire["stage"], "action");
         assert_eq!(wire["ts"], "2026-09-22T00:00:00.000Z");
         assert_eq!(wire["target_app_id"], serde_json::Value::Null);
@@ -1699,7 +1882,12 @@ mod tests {
     fn wire_frame_carries_numeric_scope_only_from_a_v3_envelope() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let mut d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         // legacy envelope: the v1 frame is unchanged (no ids at all).
         let v1 = envelope_to_wire_json(&d.env).expect("serializes");
         assert!(v1.get("tenant_id").is_none() && v1.get("community_id").is_none());
@@ -1809,7 +1997,7 @@ mod tests {
             _community_id: Option<i32>,
             _app_id: &'a str,
             record: &'a DispatchRecord,
-            _envelope_ts: Option<chrono::DateTime<chrono::FixedOffset>>,
+            _envelope_ts: Option<time::OffsetDateTime>,
         ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
             let record = record.clone();
             Box::pin(async move {
@@ -1922,16 +2110,29 @@ mod tests {
     fn fixture_envelope_with_correct_mac_passes_verify_hop() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
-        assert!(
-            crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
-                .is_ok()
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
         );
+        assert!(crate::hop::verify_hop(
+            &ring,
+            &d.env,
+            &d.stream,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        )
+        .is_ok());
     }
 
     /// Builds a v3 fixture envelope with a genuine `compute_binding_mac_v3`.
     fn v3_delivered(ring: &KeyRing, tenant_id: i64, community_id: i32) -> Delivered {
-        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", "0".repeat(64), "k1");
+        let mut d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            "0".repeat(64),
+            "k1",
+        );
         let mac = penguin_spine::compute_binding_mac_v3(
             ring,
             "k1",
@@ -1957,12 +2158,22 @@ mod tests {
     fn relabelled_v2_to_v3_envelope_with_forged_ids_fails_verify_hop() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let mut d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let mut d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         d.env.schema_version = penguin_spine::ENVELOPE_SCHEMA_VERSION;
         d.env.tenant_id = Some(99);
         d.env.community_id = Some(98);
-        let err = crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
-            .unwrap_err();
+        let err = crate::hop::verify_hop(
+            &ring,
+            &d.env,
+            &d.stream,
+            "penguintechinc.waddles.fixture-bot-commands-default",
+        )
+        .unwrap_err();
         assert_eq!(err.as_metric_reason(), "mac_mismatch");
     }
 
@@ -1971,10 +2182,13 @@ mod tests {
         let ring = test_ring();
         // FixedTenantResolver resolves every slug pair to (1, Some(2)).
         let d = v3_delivered(&ring, 1, 2);
-        assert!(
-            crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
-                .is_ok()
-        );
+        assert!(crate::hop::verify_hop(
+            &ring,
+            &d.env,
+            &d.stream,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        )
+        .is_ok());
         assert_eq!(
             resolve_scope(&d.env, &FixedTenantResolver).await,
             Ok((1, 2))
@@ -1986,10 +2200,13 @@ mod tests {
         let ring = test_ring();
         // genuine MAC over ids (10, 7), but the slugs resolve to (1, 2).
         let d = v3_delivered(&ring, 10, 7);
-        assert!(
-            crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.bot.commands.default")
-                .is_ok()
-        );
+        assert!(crate::hop::verify_hop(
+            &ring,
+            &d.env,
+            &d.stream,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        )
+        .is_ok());
         let err = resolve_scope(&d.env, &FixedTenantResolver)
             .await
             .unwrap_err();
@@ -2000,7 +2217,12 @@ mod tests {
     async fn v2_envelope_still_resolves_by_slug() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         assert_eq!(
             resolve_scope(&d.env, &FixedTenantResolver).await,
             Ok((1, 2))
@@ -2025,9 +2247,15 @@ mod tests {
     fn fixture_envelope_with_wrong_app_id_reader_fails_verify_hop() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
-        let err = crate::hop::verify_hop(&ring, &d.env, &d.stream, "waddles.other.app.default")
-            .unwrap_err();
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
+        let err =
+            crate::hop::verify_hop(&ring, &d.env, &d.stream, "penguintechinc.waddles.other-app")
+                .unwrap_err();
         assert_eq!(err.as_metric_reason(), "grant_scope_mismatch");
     }
 
@@ -2043,7 +2271,13 @@ mod tests {
             detail: "ok".to_string(),
         };
         audit
-            .record(1, Some(2), "waddles.bot.commands.default", &record, None)
+            .record(
+                1,
+                Some(2),
+                "penguintechinc.waddles.fixture-bot-commands-default",
+                &record,
+                None,
+            )
             .await;
         assert_eq!(audit.records.lock().unwrap().len(), 1);
         let resolved = resolver.resolve("acme", Some("main")).await;
@@ -2118,7 +2352,7 @@ mod tests {
     ) -> DispatchDeps<FakeAudit, FixedTenantResolver, FakeSpineOps> {
         let app_version_snapshot = bundle_active_set::ActiveVersionSnapshot::new();
         app_version_snapshot.update(&[bundle_active_set::ActiveBundleRow {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             version: "1".to_string(),
             version_id: 1,
             digest: "sha256:00".to_string(),
@@ -2127,13 +2361,14 @@ mod tests {
             artifact_signature: None,
             artifact_signature_key_id: None,
             artifact_signed_approval_id: None,
+            language: "rust".to_string(),
             declared_capabilities: Vec::new(),
             egress: Vec::new(),
             egress_rps: None,
             tools: Default::default(),
         }]);
         DispatchDeps {
-            app_id: "waddles.bot.commands.default".to_string(),
+            app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
             digest_source: DigestSource::Static("sha256:00".to_string()),
             app_version_snapshot,
             config_json: "{}".to_string(),
@@ -2162,8 +2397,13 @@ mod tests {
         // MAC computed for a DIFFERENT tenant than the stream key names --
         // Sec14.11 test 1's exact shape.
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
-        let wrong_key = "waddles:t:other-tenant:c:main:app:waddles.bot.commands.default:action";
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
+        let wrong_key = "waddles:t:other-tenant:c:main:app:penguintechinc.waddles.fixture-bot-commands-default:action";
 
         let spine = FakeSpineOps::default();
         let deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
@@ -2189,7 +2429,12 @@ mod tests {
     async fn handle_delivered_dead_letters_when_no_executor_connection() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
 
         let spine = FakeSpineOps::default();
         // Empty registry: `.active()` returns `None`.
@@ -2235,6 +2480,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2311,6 +2557,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2364,7 +2611,12 @@ mod tests {
     async fn handle_delivered_success_records_audit_usage_and_acks() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         let connections = connected_registry_with_fake_executor(
@@ -2390,7 +2642,12 @@ mod tests {
     async fn handle_delivered_dead_letters_with_no_active_digest_and_never_invokes() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         // Empty `ActiveDigests`: this (tenant, community, app) scope has no
@@ -2400,7 +2657,11 @@ mod tests {
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, Arc::new(ConnectionRegistry::new()));
         deps.digest_source = DigestSource::Active {
-            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            scope: (
+                1,
+                0,
+                "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
+            ),
             digests: Arc::new(ActiveDigests::new()),
             sessions: Arc::new(LoadedSessions::new()),
         };
@@ -2427,7 +2688,12 @@ mod tests {
     async fn handle_delivered_dead_letters_no_active_digest_when_the_resolved_digest_is_empty() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         // A connection IS live (proving the empty-digest guard fires before
@@ -2438,7 +2704,11 @@ mod tests {
             serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
         )
         .await;
-        let scope = (1, 0, "waddles.bot.commands.default".to_string());
+        let scope = (
+            1,
+            0,
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
+        );
         let digests = Arc::new(ActiveDigests::new());
         digests.force_set_for_test(scope.clone(), String::new());
         let spine = FakeSpineOps::default();
@@ -2468,7 +2738,12 @@ mod tests {
     async fn handle_delivered_dead_letters_no_loaded_executor_when_no_session_has_the_digest() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         // A connection IS live (unlike the "no executor at all" test above),
@@ -2479,13 +2754,21 @@ mod tests {
         .await;
         let digests = Arc::new(ActiveDigests::new());
         digests.set(
-            (1, 0, "waddles.bot.commands.default".to_string()),
+            (
+                1,
+                0,
+                "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
+            ),
             "sha256:aa".to_string(),
         );
         let spine = FakeSpineOps::default();
         let mut deps = test_deps(spine, connections);
         deps.digest_source = DigestSource::Active {
-            scope: (1, 0, "waddles.bot.commands.default".to_string()),
+            scope: (
+                1,
+                0,
+                "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
+            ),
             digests,
             sessions: Arc::new(LoadedSessions::new()),
         };
@@ -2507,14 +2790,23 @@ mod tests {
     async fn handle_delivered_active_digest_source_invokes_with_the_scopes_active_digest() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         let connections = connected_registry_with_fake_executor(
             serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
         )
         .await;
-        let scope = (1, 0, "waddles.bot.commands.default".to_string());
+        let scope = (
+            1,
+            0,
+            "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
+        );
         let digests = Arc::new(ActiveDigests::new());
         digests.set(scope.clone(), "sha256:aa".to_string());
         // `pick_session_with_digest` must find the fake executor's session
@@ -2553,7 +2845,12 @@ mod tests {
     async fn handle_delivered_resolves_app_version_from_the_live_snapshot_per_invocation() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         let connections = connected_registry_with_fake_executor_multi(
@@ -2575,7 +2872,7 @@ mod tests {
         // version, never a value cached from the first call.
         deps.app_version_snapshot
             .update(&[bundle_active_set::ActiveBundleRow {
-                app_id: "waddles.bot.commands.default".to_string(),
+                app_id: "penguintechinc.waddles.fixture-bot-commands-default".to_string(),
                 version: "2".to_string(),
                 version_id: 2,
                 digest: "sha256:00".to_string(),
@@ -2584,20 +2881,28 @@ mod tests {
                 artifact_signature: None,
                 artifact_signature_key_id: None,
                 artifact_signed_approval_id: None,
+                language: "rust".to_string(),
                 declared_capabilities: Vec::new(),
                 egress: Vec::new(),
                 egress_rps: None,
                 tools: Default::default(),
             }]);
         assert_eq!(
-            deps.app_version_snapshot
-                .resolve_for_digest("waddles.bot.commands.default", "sha256:00"),
+            deps.app_version_snapshot.resolve_for_digest(
+                "penguintechinc.waddles.fixture-bot-commands-default",
+                "sha256:00"
+            ),
             Some(2),
             "the live snapshot must reflect the hot swap immediately"
         );
 
         let mac2 = mac_for(&ring, "acme");
-        let d2 = fixture_delivered("acme", "waddles.bot.commands.default", mac2, "k1");
+        let d2 = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac2,
+            "k1",
+        );
         handle_delivered(&d2, &stream_key, &deps).await.unwrap();
         assert_eq!(deps.spine.acked.lock().unwrap().len(), 2);
     }
@@ -2637,7 +2942,12 @@ mod tests {
     async fn a_delivered_action_flushes_to_the_usage_sink_as_an_xadd_ready_delta() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         let connections = connected_registry_with_fake_executor(
@@ -2662,7 +2972,10 @@ mod tests {
         let written = sink.written.lock().unwrap();
         assert_eq!(written.len(), 1);
         assert_eq!(written[0].tenant_id, "acme");
-        assert_eq!(written[0].app_id, "waddles.bot.commands.default");
+        assert_eq!(
+            written[0].app_id,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         assert_eq!(written[0].actions_delivered, 1);
     }
 
@@ -2670,7 +2983,12 @@ mod tests {
     async fn handle_delivered_non_retryable_failure_records_audit_and_acks() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
 
         let connections = connected_registry_with_fake_executor(
@@ -2702,7 +3020,12 @@ mod tests {
 
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
         let stream_key = d.stream.clone();
         let connections = connected_registry_with_fake_executor(
             serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
@@ -2756,7 +3079,12 @@ mod tests {
     async fn drain_loop_with_the_flag_off_never_calls_drain_batch() {
         let ring = test_ring();
         let mac = mac_for(&ring, "acme");
-        let d = fixture_delivered("acme", "waddles.bot.commands.default", mac, "k1");
+        let d = fixture_delivered(
+            "acme",
+            "penguintechinc.waddles.fixture-bot-commands-default",
+            mac,
+            "k1",
+        );
 
         struct CountingReader {
             calls: Arc<std::sync::atomic::AtomicUsize>,
@@ -2823,6 +3151,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2873,7 +3202,7 @@ mod tests {
             &connection,
             1,
             0,
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             "1",
             "sha256:00",
             "component-key",
@@ -2885,7 +3214,10 @@ mod tests {
         )
         .await
         .expect("load succeeds");
-        assert_eq!(loaded.app_id, "waddles.bot.commands.default");
+        assert_eq!(
+            loaded.app_id,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         assert_eq!(loaded.exports, vec!["dispatch".to_string()]);
     }
 
@@ -2915,6 +3247,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -2960,7 +3293,7 @@ mod tests {
             &connection,
             1,
             0,
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             "1",
             "sha256:00",
             "component-key",
@@ -3006,6 +3339,7 @@ mod tests {
                             runtime: "runc".to_string(),
                             verified: false,
                         },
+                        executor_id: None,
                     }),
                 ),
             )
@@ -3054,12 +3388,15 @@ mod tests {
             &connection,
             1,
             0,
-            "waddles.bot.commands.default",
+            "penguintechinc.waddles.fixture-bot-commands-default",
             "sha256:00",
         )
         .await
         .expect("unload succeeds");
-        assert_eq!(unloaded.app_id, "waddles.bot.commands.default");
+        assert_eq!(
+            unloaded.app_id,
+            "penguintechinc.waddles.fixture-bot-commands-default"
+        );
         assert_eq!(unloaded.digest, "sha256:00");
     }
 
@@ -3100,6 +3437,7 @@ mod tests {
                                 runtime: "runc".to_string(),
                                 verified: false,
                             },
+                            executor_id: None,
                         }),
                     ),
                 )
@@ -3163,7 +3501,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_successful_dispatch_records_stage_latency_executor_call_and_one_attempt() {
-            let app = "waddles.mtest.success.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-success-v1";
             let connections = connected_registry_with_fake_executor(
                 serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
             )
@@ -3198,7 +3536,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_non_retryable_failure_is_labeled_as_such() {
-            let app = "waddles.mtest.nonretryable.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-nonretryable-v1";
             let connections = connected_registry_with_fake_executor(serde_json::json!({
                 "transport_error": {"retryable": false, "code": "BAD_REQUEST", "message": "bad"}
             }))
@@ -3216,7 +3554,7 @@ mod tests {
 
         #[tokio::test]
         async fn an_exhausted_retry_budget_records_every_attempt() {
-            let app = "waddles.mtest.exhausted.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-exhausted-v1";
             // max_retries = 2 in `test_deps` -> 3 attempts, each answered
             // with the same retryable transport error.
             let connections = connected_registry_with_fake_executor_multi(
@@ -3257,7 +3595,7 @@ mod tests {
 
         #[tokio::test]
         async fn no_executor_records_a_dead_lettered_stage_with_no_executor_call() {
-            let app = "waddles.mtest.noexecutor.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-noexecutor-v1";
             let (d, key, deps) = delivered_and_deps(app, Arc::new(ConnectionRegistry::new()));
             handle_delivered(&d, &key, &deps).await.unwrap();
             let h = shared();
@@ -3282,9 +3620,9 @@ mod tests {
 
         #[tokio::test]
         async fn a_hop_failure_records_a_dead_lettered_stage() {
-            let app = "waddles.mtest.hopfail.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-hopfail-v1";
             let (d, _key, deps) = delivered_and_deps(app, Arc::new(ConnectionRegistry::new()));
-            let wrong_key = "waddles:t:other-tenant:c:main:app:waddles.mtest.hopfail.v1:action";
+            let wrong_key = "waddles:t:other-tenant:c:main:app:penguintechinc.waddles.fixture-mtest-hopfail-v1:action";
             handle_delivered(&d, wrong_key, &deps).await.unwrap();
             assert_eq!(
                 shared().count(
@@ -3301,18 +3639,22 @@ mod tests {
                 (
                     ErrorCode::ExecutorDeadline,
                     "timeout",
-                    "waddles.mtest.triptimeout.v1",
+                    "penguintechinc.waddles.fixture-mtest-triptimeout-v1",
                 ),
                 (
                     ErrorCode::MemoryLimit,
                     "memory",
-                    "waddles.mtest.tripmemory.v1",
+                    "penguintechinc.waddles.fixture-mtest-tripmemory-v1",
                 ),
-                (ErrorCode::WasmTrap, "trap", "waddles.mtest.triptrap.v1"),
+                (
+                    ErrorCode::WasmTrap,
+                    "trap",
+                    "penguintechinc.waddles.fixture-mtest-triptrap-v1",
+                ),
                 (
                     ErrorCode::HostCallDenied,
                     "denied",
-                    "waddles.mtest.tripdenied.v1",
+                    "penguintechinc.waddles.fixture-mtest-tripdenied-v1",
                 ),
             ];
             for (code, limit, app) in cases {
@@ -3352,7 +3694,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_non_sandbox_executor_error_is_not_counted_as_a_trip() {
-            let app = "waddles.mtest.unknownbundle.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-unknownbundle-v1";
             let (d, key, deps) = delivered_and_deps(
                 app,
                 connected_registry_replying_with(error_frame(ErrorCode::UnknownBundle)).await,
@@ -3374,7 +3716,7 @@ mod tests {
 
         #[tokio::test]
         async fn an_unexpected_frame_kind_records_a_malformed_executor_call() {
-            let app = "waddles.mtest.malformed.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-malformed-v1";
             let (d, key, deps) =
                 delivered_and_deps(app, connected_registry_replying_with(Message::Pong).await);
             handle_delivered(&d, &key, &deps).await.unwrap();
@@ -3389,7 +3731,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_closed_connection_records_a_host_api_error_executor_call() {
-            let app = "waddles.mtest.hostapierr.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-hostapierr-v1";
             let registry = connected_registry_replying_with(Message::Pong).await;
             let conn = registry.active().expect("active connection");
             // The read loop observed EOF / the heartbeat declared the session
@@ -3413,7 +3755,7 @@ mod tests {
 
         #[tokio::test]
         async fn a_failed_ack_write_records_spine_error() {
-            let app = "waddles.mtest.spineerror.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-spineerror-v1";
             let connections = connected_registry_with_fake_executor(
                 serde_json::json!({"ok": true, "status": 200, "detail": "sent"}),
             )
@@ -3463,7 +3805,7 @@ mod tests {
 
         #[tokio::test]
         async fn ensure_loaded_records_the_round_trip_and_the_executor_reported_time() {
-            let app = "waddles.mtest.loadok.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-loadok-v1";
             let registry = connected_registry_replying_with(loaded_reply(42)).await;
             let conn = registry.active().expect("active connection");
             load(app, &conn).await.expect("load succeeds");
@@ -3491,7 +3833,7 @@ mod tests {
 
         #[tokio::test]
         async fn ensure_loaded_failure_records_an_error_result_and_no_precompile_phase() {
-            let app = "waddles.mtest.loaderr.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-loaderr-v1";
             let registry =
                 connected_registry_replying_with(error_frame(ErrorCode::LoadFailed)).await;
             let conn = registry.active().expect("active connection");
@@ -3525,7 +3867,7 @@ mod tests {
 
         #[tokio::test]
         async fn drain_batch_records_the_batch_size_including_an_idle_zero() {
-            let app = "waddles.mtest.batch.v1";
+            let app = "penguintechinc.waddles.fixture-mtest-batch-v1";
             let (d, key, deps) = delivered_and_deps(app, Arc::new(ConnectionRegistry::new()));
             let before = shared()
                 .last("waddles_spine_batch_size", &[("stage", "action")])
@@ -3610,7 +3952,7 @@ mod tests {
         /// destinations but must leave their breaker CLOSED.
         #[tokio::test]
         async fn pool_exhausted_back_pressure_never_opens_the_breaker() {
-            let app = "waddles.btest.pool.v1";
+            let app = "penguintechinc.waddles.fixture-btest-pool-v1";
             let (d, key, mut deps) = delivered_with_channel(app, Some("chan-1"));
             let n = FAILURE_THRESHOLD + 1;
             deliver_n(&mut deps, &d, &key, n, || {
@@ -3643,7 +3985,7 @@ mod tests {
             .into_iter()
             .enumerate()
             {
-                let app = format!("waddles.btest.fault{i}.v1");
+                let app = format!("penguintechinc.waddles.fixture-btest-fault{i}-v1");
                 let (d, key, mut deps) = delivered_with_channel(&app, Some("chan-1"));
                 deliver_n(&mut deps, &d, &key, FAILURE_THRESHOLD, || {
                     error_with_detail(code, detail)
@@ -3665,7 +4007,7 @@ mod tests {
         /// another destination of the same app.
         #[tokio::test]
         async fn one_destinations_faults_never_block_another_destination() {
-            let app = "waddles.btest.dest.v1";
+            let app = "penguintechinc.waddles.fixture-btest-dest-v1";
             let (d_bad, key, mut deps) = delivered_with_channel(app, Some("chan-bad"));
             deliver_n(&mut deps, &d_bad, &key, FAILURE_THRESHOLD, || {
                 error_with_detail(ErrorCode::WasmTrap, None)
@@ -3681,7 +4023,7 @@ mod tests {
         /// key that a single bad event could open for every keyless event.
         #[tokio::test]
         async fn keyless_events_bypass_the_breaker_instead_of_sharing_a_key() {
-            let app = "waddles.btest.keyless.v1";
+            let app = "penguintechinc.waddles.fixture-btest-keyless-v1";
             let (d, key, mut deps) = delivered_with_channel(app, None);
             assert!(breaker_key(app, &d.env).is_none());
             let n = FAILURE_THRESHOLD + 2;
@@ -3714,15 +4056,28 @@ mod tests {
                 d.env
             };
             assert_eq!(
-                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", Some("c1"))).as_deref(),
-                Some("waddles.app.a.v1|acme:main|c1")
+                breaker_key(
+                    "penguintechinc.waddles.fixture-app-a-v1",
+                    &mk("penguintechinc.waddles.fixture-app-a-v1", Some("c1"))
+                )
+                .as_deref(),
+                Some("penguintechinc.waddles.fixture-app-a-v1|acme:main|c1")
             );
             assert_ne!(
-                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", Some("c1"))),
-                breaker_key("waddles.app.b.v1", &mk("waddles.app.b.v1", Some("c1")))
+                breaker_key(
+                    "penguintechinc.waddles.fixture-app-a-v1",
+                    &mk("penguintechinc.waddles.fixture-app-a-v1", Some("c1"))
+                ),
+                breaker_key(
+                    "penguintechinc.waddles.fixture-app-b-v1",
+                    &mk("penguintechinc.waddles.fixture-app-b-v1", Some("c1"))
+                )
             );
             assert_eq!(
-                breaker_key("waddles.app.a.v1", &mk("waddles.app.a.v1", None)),
+                breaker_key(
+                    "penguintechinc.waddles.fixture-app-a-v1",
+                    &mk("penguintechinc.waddles.fixture-app-a-v1", None)
+                ),
                 None
             );
         }
@@ -3808,7 +4163,8 @@ mod tests {
 
         #[tokio::test]
         async fn every_stream_is_sampled_each_interval_until_the_guard_drops() {
-            let (source, calls, _fail) = scripted(vec![stat("waddles.mx.sampler.v1", 0)]);
+            let (source, calls, _fail) =
+                scripted(vec![stat("penguintechinc.waddles.mx-sampler-v1", 0)]);
             let streams = vec!["stream-a".to_string(), "stream-b".to_string()];
             let guard = spawn_group_backlog_sampler(source, streams, 20, 5_000)
                 .expect("a sampler is spawned for a non-zero interval");
@@ -3850,8 +4206,8 @@ mod tests {
         #[tokio::test]
         async fn a_group_above_the_pel_alert_is_still_sampled_without_disturbing_the_loop() {
             let (source, calls, _fail) = scripted(vec![
-                stat("waddles.mx.stuck.v1", 9_999),
-                stat("waddles.mx.fine.v1", 1),
+                stat("penguintechinc.waddles.mx-stuck-v1", 9_999),
+                stat("penguintechinc.waddles.mx-fine-v1", 1),
             ]);
             let _guard = spawn_group_backlog_sampler(source, vec!["s".to_string()], 15, 5_000)
                 .expect("sampler spawned");
@@ -3899,15 +4255,12 @@ mod tests {
                 .await
                 .expect("connect");
             let stream = test_support::unique_key("backlog-sampler-stream");
-            let group = "waddles.mx.backlog.v1";
+            let group = "penguintechinc.waddles.mx-backlog-v1";
             client.ensure_group(&stream, group).await.expect("group");
 
             // Three entries; read two without acking -> pending 2, lag 1.
             let raw = redis::Client::open(cfg.valkey_url.as_str()).expect("redis client");
-            let mut conn = raw
-                .get_multiplexed_async_connection()
-                .await
-                .expect("raw connection");
+            let mut conn = raw.get_connection_manager().await.expect("raw connection");
             for _ in 0..3 {
                 let _: String = redis::cmd("XADD")
                     .arg(&stream)
@@ -3981,7 +4334,7 @@ mod tests {
             serde_json::json!({"platform": platform, "account_id": "a", "channel_id": null});
         serde_json::from_value(serde_json::json!({
             "schema_version": 2, "tenant": "acme", "community": "main",
-            "app_id": "waddles.bot.commands.default", "stage": "action",
+            "app_id": "penguintechinc.waddles.fixture-bot-commands-default", "stage": "action",
             "event": {"platform": platform, "event_type": "guild.member.update",
                 "actor": null, "payload": payload,
                 "occurred_at": "2026-09-14T12:00:00.000Z", "source": source},

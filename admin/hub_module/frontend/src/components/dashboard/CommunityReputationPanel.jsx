@@ -238,7 +238,7 @@ function CommunityReputationPanel({ communityId }) {
 }
 
 CommunityReputationPanel.propTypes = {
-  communityId: PropTypes.oneOfType([PropTypes.string, PropTypes.number]).isRequired,
+  communityId: PropTypes.string.isRequired,
 };
 
 export default CommunityReputationPanel;

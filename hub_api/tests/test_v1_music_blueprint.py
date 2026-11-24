@@ -25,13 +25,20 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
 import blueprints.v1.music as music_module
 from blueprints.v1.music import music_bp
 from config import HubAPIConfig
-from tests.conftest import TENANT_SLUG, make_user_token, make_user_token_with_roles
+from tests.community_ids import cpath, install_community_ids
+from tests.conftest import (
+    TENANT_SLUG,
+    make_user_token,
+    make_user_token_with_roles,
+    role_kind_fields,
+)
 
 
 def _test_config() -> HubAPIConfig:
@@ -46,8 +53,7 @@ def _test_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -61,6 +67,7 @@ def _test_config() -> HubAPIConfig:
 def app(streaming_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, streaming_db.dal)
     quart_app.register_blueprint(music_bp)
     quart_app.config["dal"] = streaming_db.dal
     quart_app.config["async_dal"] = streaming_db
@@ -104,7 +111,10 @@ def _seed_member(
     role_id = None
     if scopes is not None:
         role_id = db.dal.community_roles.insert(
-            community_id=community_id, name=role, base_claims={"scopes": scopes}
+            community_id=community_id,
+            name=role,
+            base_claims={"scopes": scopes},
+            **role_kind_fields(role),
         )
     db.dal.community_members.insert(
         community_id=community_id,
@@ -133,7 +143,9 @@ def _seed_settings(db: Any, *, community_id: int) -> None:
 class TestAuthBypass:
     async def test_missing_token_is_401(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings")
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id)
+        )
         assert response.status_code == 401
 
 
@@ -141,7 +153,10 @@ class TestCommunityAdminGate:
     async def test_non_member_is_403(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1, tenant=TENANT_SLUG)}"}
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 403
 
     async def test_member_without_admin_scope_is_403(self, client: Any, streaming_db: Any) -> None:
@@ -154,23 +169,49 @@ class TestCommunityAdminGate:
             scopes=["community:read"],
         )
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 403
 
     async def test_moderator_scope_is_sufficient(self, client: Any, streaming_db: Any) -> None:
-        """`community:manage_channels` (the seeded `moderator` role bundle) satisfies the gate."""
+        """The moderator-kind role (seeded with `music:station.manage`) satisfies the gate."""
         community_id = _seed_community(streaming_db)
         _seed_member(
             streaming_db,
             community_id=community_id,
             user_id=1,
             role="moderator",
-            scopes=["community:manage_channels"],
+            scopes=["community:manage_channels", "music:station.manage"],
         )
         _seed_settings(streaming_db, community_id=community_id)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 200
+
+    async def test_broad_manage_channels_scope_is_not_music_station(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        """`community:manage_channels` alone no longer satisfies the dedicated music gate."""
+        community_id = _seed_community(streaming_db)
+        _seed_member(
+            streaming_db,
+            community_id=community_id,
+            user_id=1,
+            role="moderator",
+            scopes=["community:manage_channels", "community:manage_members"],
+        )
+        _seed_settings(streaming_db, community_id=community_id)
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
+        assert response.status_code == 403
 
     async def test_super_admin_role_claim_bypasses(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
@@ -180,7 +221,10 @@ class TestCommunityAdminGate:
                 f"Bearer {make_user_token_with_roles(user_id=99, roles=['super_admin'])}"
             )
         }
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 200
 
     async def test_tenant_admin_bypasses(self, client: Any, streaming_db: Any) -> None:
@@ -189,7 +233,10 @@ class TestCommunityAdminGate:
         streaming_db.dal.tenant_admins.insert(tenant_id=_tenant_id(streaming_db), user_id=42)
         streaming_db.dal.commit()
         headers = {"Authorization": f"Bearer {make_user_token(user_id=42)}"}
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 200
 
     async def test_community_in_different_tenant_is_403(
@@ -208,7 +255,10 @@ class TestCommunityAdminGate:
         )
         # Caller's JWT carries the DEFAULT tenant, not `other-tenant`.
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1, tenant=TENANT_SLUG)}"}
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 403
 
 
@@ -226,14 +276,20 @@ class TestMusicSettings:
     async def test_get_settings_not_found_is_404(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 404
 
     async def test_get_settings_success(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
         _seed_settings(streaming_db, community_id=community_id)
         headers = self._admin_headers(streaming_db, community_id=community_id)
-        response = await client.get(f"/api/v1/admin/{community_id}/music/settings", headers=headers)
+        response = await client.get(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["settings"]["defaultProvider"] == "spotify"
@@ -244,7 +300,9 @@ class TestMusicSettings:
         _seed_settings(streaming_db, community_id=community_id)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/music/settings", headers=headers, json={}
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
+            headers=headers,
+            json={},
         )
         assert response.status_code == 400
 
@@ -255,7 +313,7 @@ class TestMusicSettings:
         _seed_settings(streaming_db, community_id=community_id)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/music/settings",
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
             headers=headers,
             json={"volumeLimit": 250, "isActive": False},
         )
@@ -270,7 +328,7 @@ class TestMusicSettings:
         _seed_settings(streaming_db, community_id=community_id)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/music/settings",
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
             headers=headers,
             json={
                 "defaultProvider": "youtube",
@@ -294,7 +352,7 @@ class TestMusicSettings:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.put(
-            f"/api/v1/admin/{community_id}/music/settings",
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/settings", community_id),
             headers=headers,
             json={"isActive": True},
         )
@@ -316,7 +374,8 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/music/providers", headers=headers
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/providers", community_id),
+            headers=headers,
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -326,7 +385,8 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         response = await client.get(
-            f"/api/v1/admin/{community_id}/music/providers", headers=headers
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/providers", community_id),
+            headers=headers,
         )
         assert response.status_code == 403
 
@@ -344,7 +404,8 @@ class TestMusicProviders:
         streaming_db.dal.commit()
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/music/providers", headers=headers
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/providers", community_id),
+            headers=headers,
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -357,7 +418,11 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/music/providers/spotify/oauth",
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/providers/spotify/oauth",
+                community_id,
+            ),
             headers=headers,
             json={"redirectUri": ""},
         )
@@ -369,7 +434,11 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/music/providers/spotify/oauth",
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/providers/spotify/oauth",
+                community_id,
+            ),
             headers=headers,
             json={"redirectUri": "http://169.254.169.254/latest/meta-data/"},
         )
@@ -381,7 +450,11 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/music/providers/napster/oauth",
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/providers/napster/oauth",
+                community_id,
+            ),
             headers=headers,
             json={"redirectUri": "https://8.8.8.8/callback"},
         )
@@ -391,7 +464,11 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/music/providers/spotify/oauth",
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/providers/spotify/oauth",
+                community_id,
+            ),
             headers=headers,
             json={"redirectUri": "https://8.8.8.8/callback"},
         )
@@ -413,7 +490,12 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/music/providers/{provider}/oauth",
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/providers/{provider}/oauth",
+                community_id,
+                provider=provider,
+            ),
             headers=headers,
             json={"redirectUri": "https://8.8.8.8/callback"},
         )
@@ -427,7 +509,10 @@ class TestMusicProviders:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/music/providers/spotify", headers=headers
+            cpath(
+                streaming_db, "/api/v1/admin/{community_id}/music/providers/spotify", community_id
+            ),
+            headers=headers,
         )
         assert response.status_code == 404
 
@@ -439,7 +524,10 @@ class TestMusicProviders:
         streaming_db.dal.commit()
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.delete(
-            f"/api/v1/admin/{community_id}/music/providers/spotify", headers=headers
+            cpath(
+                streaming_db, "/api/v1/admin/{community_id}/music/providers/spotify", community_id
+            ),
+            headers=headers,
         )
         assert response.status_code == 200
         # `update_async` never commits (hub_api/PORTING.md Gotcha #2) --
@@ -472,7 +560,8 @@ class TestRadioStations:
         community_id = _seed_community(streaming_db)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         response = await client.get(
-            f"/api/v1/admin/{community_id}/music/radio-stations", headers=headers
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/radio-stations", community_id),
+            headers=headers,
         )
         assert response.status_code == 403
 
@@ -482,7 +571,11 @@ class TestRadioStations:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.get(
-            f"/api/v1/admin/{community_id}/music/radio-stations?page=not-a-number",
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/radio-stations?page=not-a-number",
+                community_id,
+            ),
             headers=headers,
         )
         assert response.status_code == 400
@@ -491,7 +584,7 @@ class TestRadioStations:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/music/radio-stations",
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/radio-stations", community_id),
             headers=headers,
             json={"name": "", "url": ""},
         )
@@ -501,7 +594,7 @@ class TestRadioStations:
         community_id = _seed_community(streaming_db)
         headers = self._admin_headers(streaming_db, community_id=community_id)
         response = await client.post(
-            f"/api/v1/admin/{community_id}/music/radio-stations",
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/radio-stations", community_id),
             headers=headers,
             json={"name": "Internal", "url": "http://127.0.0.1:8080/admin"},
         )
@@ -512,7 +605,7 @@ class TestRadioStations:
         headers = self._admin_headers(streaming_db, community_id=community_id)
 
         add_response = await client.post(
-            f"/api/v1/admin/{community_id}/music/radio-stations",
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/radio-stations", community_id),
             headers=headers,
             json={"name": "Lofi Beats", "url": "https://8.8.8.8/lofi", "genre": "lofi"},
         )
@@ -522,7 +615,8 @@ class TestRadioStations:
         assert added["station"]["name"] == "Lofi Beats"
 
         list_response = await client.get(
-            f"/api/v1/admin/{community_id}/music/radio-stations", headers=headers
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/radio-stations", community_id),
+            headers=headers,
         )
         assert list_response.status_code == 200
         listed = await list_response.get_json()
@@ -530,11 +624,68 @@ class TestRadioStations:
         assert len(listed["stations"]) == 1
 
         remove_response = await client.delete(
-            f"/api/v1/admin/{community_id}/music/radio-stations/{station_id}", headers=headers
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/radio-stations/{station_id}",
+                community_id,
+                station_id=station_id,
+            ),
+            headers=headers,
         )
         assert remove_response.status_code == 200
 
         remove_again = await client.delete(
-            f"/api/v1/admin/{community_id}/music/radio-stations/{station_id}", headers=headers
+            cpath(
+                streaming_db,
+                "/api/v1/admin/{community_id}/music/radio-stations/{station_id}",
+                community_id,
+                station_id=station_id,
+            ),
+            headers=headers,
         )
         assert remove_again.status_code == 404
+
+
+class TestRadioStationPublicUuid:
+    """`<puuid:station_id>`: UUID resolves; a foreign-community UUID and a numeric id are 404."""
+
+    async def test_uuid_resolves_foreign_and_numeric_404(
+        self, client: Any, streaming_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid
+
+        dal = streaming_db.dal
+        community_id = _seed_community(streaming_db)
+        other = _seed_community(streaming_db)
+        admin = TestMusicSettings()._admin_headers
+        headers = admin(streaming_db, community_id=community_id)
+        other_headers = admin(streaming_db, community_id=other)
+
+        added = await client.post(
+            cpath(streaming_db, "/api/v1/admin/{community_id}/music/radio-stations", community_id),
+            headers=headers,
+            json={"name": "Lofi", "url": "https://8.8.8.8/lofi"},
+        )
+        station_uuid = assert_uuid((await added.get_json())["station"]["id"])
+        numeric_id = int(
+            dal(dal.community_radio_stations.public_id == station_uuid).select().first().id
+        )
+        tmpl = "/api/v1/admin/{community_id}/music/radio-stations/{station_id}"
+
+        foreign = await client.delete(
+            cpath(streaming_db, tmpl, other, station_id=station_uuid), headers=other_headers
+        )
+        numeric = await client.delete(
+            cpath(streaming_db, tmpl, community_id, station_id=numeric_id), headers=headers
+        )
+        assert (foreign.status_code, numeric.status_code) == (404, 404)
+        assert dal(dal.community_radio_stations.id == numeric_id).count() == 1
+
+        ok = await client.delete(
+            cpath(streaming_db, tmpl, community_id, station_id=station_uuid), headers=headers
+        )
+        assert ok.status_code == 200
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

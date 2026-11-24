@@ -18,12 +18,14 @@ from typing import Any
 from unittest.mock import AsyncMock
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
 import blueprints.v1.stream as stream_module
 from blueprints.v1.stream import communities_stream_bp, community_stream_bp
 from config import HubAPIConfig
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import TENANT_SLUG, make_user_token
 
 
@@ -39,8 +41,7 @@ def _test_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -54,12 +55,29 @@ def _test_config() -> HubAPIConfig:
 def app(streaming_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(community_stream_bp)
-    quart_app.register_blueprint(communities_stream_bp)
     quart_app.config["dal"] = streaming_db.dal
     quart_app.config["async_dal"] = streaming_db
+    install_community_ids(quart_app, streaming_db.dal)
+    quart_app.register_blueprint(community_stream_bp)
+    quart_app.register_blueprint(communities_stream_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
+
+
+_DB: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _bind_db(streaming_db: Any) -> Any:
+    """Expose the test DB to `cu` so seeded numeric ids map to community UUIDs in URLs."""
+    _DB[:] = [streaming_db]
+    yield
+    _DB.clear()
+
+
+def cu(community_id: int) -> str:
+    """Public UUID of a seeded community (client-facing routes never take the numeric id)."""
+    return public_id(_DB[0], community_id)
 
 
 @pytest.fixture
@@ -129,20 +147,24 @@ def _seed_live_stream(
 class TestAuthAndMembership:
     async def test_missing_token_is_401(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
-        response = await client.get(f"/api/v1/communities/{community_id}/streams")
+        response = await client.get(f"/api/v1/communities/{cu(community_id)}/streams")
         assert response.status_code == 401
 
     async def test_non_member_is_403(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
-        response = await client.get(f"/api/v1/communities/{community_id}/streams", headers=headers)
+        response = await client.get(
+            f"/api/v1/communities/{cu(community_id)}/streams", headers=headers
+        )
         assert response.status_code == 403
 
     async def test_member_can_read_empty_list(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
         _seed_member(streaming_db, community_id=community_id, user_id=1)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
-        response = await client.get(f"/api/v1/communities/{community_id}/streams", headers=headers)
+        response = await client.get(
+            f"/api/v1/communities/{cu(community_id)}/streams", headers=headers
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert body["streams"] == []
@@ -151,7 +173,7 @@ class TestAuthAndMembership:
         community_id = _seed_community(streaming_db)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         response = await client.get(
-            f"/api/v1/communities/{community_id}/streams/featured", headers=headers
+            f"/api/v1/communities/{cu(community_id)}/streams/featured", headers=headers
         )
         assert response.status_code == 403
 
@@ -165,8 +187,12 @@ class TestBothMountPoints:
         _seed_live_stream(streaming_db, community_id=community_id, entity_id="e1")
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
 
-        singular = await client.get(f"/api/v1/community/{community_id}/streams", headers=headers)
-        plural = await client.get(f"/api/v1/communities/{community_id}/streams", headers=headers)
+        singular = await client.get(
+            f"/api/v1/community/{cu(community_id)}/streams", headers=headers
+        )
+        plural = await client.get(
+            f"/api/v1/communities/{cu(community_id)}/streams", headers=headers
+        )
         assert singular.status_code == 200
         assert plural.status_code == 200
         assert (await singular.get_json())["streams"] == (await plural.get_json())["streams"]
@@ -212,7 +238,9 @@ class TestLiveStreamListing:
         streaming_db.dal.commit()
 
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
-        response = await client.get(f"/api/v1/communities/{community_id}/streams", headers=headers)
+        response = await client.get(
+            f"/api/v1/communities/{cu(community_id)}/streams", headers=headers
+        )
         assert response.status_code == 200
         body = await response.get_json()
         assert [s["entityId"] for s in body["streams"]] == ["live-1"]
@@ -240,7 +268,7 @@ class TestLiveStreamListing:
 
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         response = await client.get(
-            f"/api/v1/communities/{community_id}/streams/featured", headers=headers
+            f"/api/v1/communities/{cu(community_id)}/streams/featured", headers=headers
         )
         assert response.status_code == 200
         body = await response.get_json()
@@ -252,7 +280,7 @@ class TestLiveStreamListing:
         _seed_member(streaming_db, community_id=community_id, user_id=1)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         response = await client.get(
-            f"/api/v1/communities/{community_id}/streams/does-not-exist", headers=headers
+            f"/api/v1/communities/{cu(community_id)}/streams/does-not-exist", headers=headers
         )
         assert response.status_code == 404
 
@@ -264,7 +292,7 @@ class TestLiveStreamListing:
         _seed_live_stream(streaming_db, community_id=community_id, entity_id="e1")
         headers = {"Authorization": f"Bearer {make_user_token(user_id=1)}"}
         response = await client.get(
-            f"/api/v1/communities/{community_id}/streams/e1", headers=headers
+            f"/api/v1/communities/{cu(community_id)}/streams/e1", headers=headers
         )
         assert response.status_code == 200
         body = await response.get_json()

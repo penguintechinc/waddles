@@ -3,7 +3,7 @@
  * Full analytics suite: sales overview, install trends, discount code performance,
  * per-community drill-down, and CSV export.
  */
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { Fragment, useEffect, useState, useCallback, useRef } from 'react';
 import { Link } from 'react-router-dom';
 import {
   ArrowDownTrayIcon,
@@ -24,6 +24,15 @@ import {
   ClockIcon,
 } from '@heroicons/react/24/outline';
 import { vendorApi } from '../../services/api';
+import { PanelErrorState } from '../../components/ui';
+import { getErrorMessage } from '../../components/ui/errors';
+import {
+  unwrapEnvelope,
+  normalizeSales,
+  normalizeInstalls,
+  normalizeDiscountPerformance,
+  normalizeCommunities,
+} from './vendorWire';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -37,6 +46,10 @@ const PERIODS = [
 ];
 
 const COMMUNITIES_PAGE_SIZE = 20;
+
+// Columns hub-api can sort the community drill-down by (`sortBy` is an allow-list server-side;
+// any other value is rejected), mapped to the row key each one renders.
+const COMMUNITY_SORT_FIELDS = new Set(['installed_at', 'status', 'last_active']);
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -314,9 +327,14 @@ function VendorAnalytics() {
     setSalesError(null);
     try {
       const res = await vendorApi.getAnalyticsSales({ period: p });
-      setSales(res.data?.data ?? res.data);
+      setSales(normalizeSales(unwrapEnvelope(res)));
     } catch (err) {
-      setSalesError(err.response?.data?.error?.message || 'Failed to load sales data');
+      // 404 = the route exists but the caller has no seller row yet (not a path mismatch).
+      setSalesError(
+        err.response?.status === 404
+          ? 'No vendor profile yet. Create one in Vendor Settings to see sales analytics.'
+          : getErrorMessage(err, 'Failed to load sales data'),
+      );
     } finally {
       setSalesLoading(false);
     }
@@ -326,10 +344,10 @@ function VendorAnalytics() {
     setInstallsLoading(true);
     setInstallsError(null);
     try {
-      const res = await vendorApi.getAnalyticsInstalls({ period: p, granularity: 'daily' });
-      setInstalls(res.data?.data ?? res.data);
+      const res = await vendorApi.getAnalyticsInstalls({ period: p, granularity: 'day' });
+      setInstalls(normalizeInstalls(unwrapEnvelope(res)));
     } catch (err) {
-      setInstallsError(err.response?.data?.error?.message || 'Failed to load install data');
+      setInstallsError(getErrorMessage(err, 'Failed to load install data'));
     } finally {
       setInstallsLoading(false);
     }
@@ -340,9 +358,9 @@ function VendorAnalytics() {
     setDiscountError(null);
     try {
       const res = await vendorApi.getAnalyticsDiscountCodes();
-      setDiscountSummary(res.data?.data ?? res.data);
+      setDiscountSummary(normalizeDiscountPerformance(unwrapEnvelope(res)));
     } catch (err) {
-      setDiscountError(err.response?.data?.error?.message || 'Failed to load discount data');
+      setDiscountError(err);
     } finally {
       setDiscountLoading(false);
     }
@@ -356,11 +374,10 @@ function VendorAnalytics() {
         page,
         limit: COMMUNITIES_PAGE_SIZE,
         sortBy: sort.field,
-        sortDir: sort.dir,
       });
-      setCommunities(res.data?.data ?? res.data);
+      setCommunities(normalizeCommunities(unwrapEnvelope(res)));
     } catch (err) {
-      setCommError(err.response?.data?.error?.message || 'Failed to load community data');
+      setCommError(err);
     } finally {
       setCommLoading(false);
     }
@@ -489,7 +506,7 @@ function VendorAnalytics() {
       <div className="bg-navy-800 border border-navy-700 rounded-lg p-6">
         <h2 className="text-lg font-bold text-white mb-4">Installation Trends</h2>
         <InstallsChart
-          data={installs?.series ?? installs}
+          data={installs}
           loading={installsLoading}
           error={installsError}
           onRetry={() => loadInstalls(period)}
@@ -515,17 +532,8 @@ function VendorAnalytics() {
             ))}
           </div>
         ) : discountError ? (
-          <div className="text-red-400 text-sm flex items-center justify-between">
-            <span>{discountError}</span>
-            <button
-              onClick={loadDiscountSummary}
-              className="flex items-center space-x-1 hover:text-red-300"
-            >
-              <ArrowPathIcon className="w-4 h-4" />
-              <span>Retry</span>
-            </button>
-          </div>
-        ) : !discountSummary || (discountSummary?.codes ?? discountSummary)?.length === 0 ? (
+          <PanelErrorState feature="Discount code performance" error={discountError} onRetry={loadDiscountSummary} />
+        ) : !discountSummary || discountSummary.length === 0 ? (
           <p className="text-navy-400 text-sm text-center py-6">
             No discount codes yet.{' '}
             <Link to="/vendor/discount-codes" className="text-sky-400 hover:underline">
@@ -545,11 +553,11 @@ function VendorAnalytics() {
                 </tr>
               </thead>
               <tbody className="divide-y divide-navy-700/50">
-                {(discountSummary?.codes ?? discountSummary).slice(0, 5).map((code) => (
+                {discountSummary.slice(0, 5).map((code) => (
                   <tr key={code.id ?? code.code} className="hover:bg-navy-750 transition-colors">
                     <td className="py-3 pr-4 font-mono text-amber-400 font-medium">{code.code}</td>
                     <td className="py-3 pr-4 text-white">{formatNum(code.redemptions)}</td>
-                    <td className="py-3 pr-4 text-emerald-400">{formatCurrency(code.revenueImpact ?? 0)}</td>
+                    <td className="py-3 pr-4 text-emerald-400">{formatCurrency(code.revenueImpact)}</td>
                     <td className="py-3 pr-4 text-navy-200">
                       {code.remainingUses != null
                         ? code.remainingUses === -1
@@ -589,17 +597,12 @@ function VendorAnalytics() {
             ))}
           </div>
         ) : commError ? (
-          <div className="text-red-400 text-sm flex items-center justify-between">
-            <span>{commError}</span>
-            <button
-              onClick={() => loadCommunities(commPage, commSort)}
-              className="flex items-center space-x-1 hover:text-red-300"
-            >
-              <ArrowPathIcon className="w-4 h-4" />
-              <span>Retry</span>
-            </button>
-          </div>
-        ) : !communities || (communities?.items ?? communities)?.length === 0 ? (
+          <PanelErrorState
+            feature="Community installations"
+            error={commError}
+            onRetry={() => loadCommunities(commPage, commSort)}
+          />
+        ) : !communities || communities.rows.length === 0 ? (
           <p className="text-navy-400 text-sm text-center py-6">
             No community installations yet
           </p>
@@ -610,68 +613,63 @@ function VendorAnalytics() {
                 <thead>
                   <tr className="border-b border-navy-700 text-left text-xs text-navy-400 uppercase tracking-wide">
                     {[
-                      { label: 'Community', field: 'community_name' },
-                      { label: 'Module', field: 'module_name' },
+                      { label: 'Community', field: null },
+                      { label: 'Module', field: null },
                       { label: 'Install Date', field: 'installed_at' },
                       { label: 'Status', field: 'status' },
-                      { label: 'Discount Code', field: 'discount_code' },
-                      { label: 'Last Active', field: 'last_active_at' },
-                    ].map(({ label, field }) => (
-                      <th
-                        key={field}
-                        className="pb-2 pr-4 cursor-pointer hover:text-white transition-colors select-none"
-                        onClick={() => handleCommSort(field)}
-                      >
-                        <span className="inline-flex items-center">
-                          {label}
-                          <SortIcon
-                            field={field}
-                            sortBy={commSort.field}
-                            sortDir={commSort.dir}
-                          />
-                        </span>
-                      </th>
-                    ))}
+                      { label: 'Last Active', field: 'last_active' },
+                    ].map(({ label, field }) =>
+                      field && COMMUNITY_SORT_FIELDS.has(field) ? (
+                        <th
+                          key={label}
+                          className="pb-2 pr-4 cursor-pointer hover:text-white transition-colors select-none"
+                          onClick={() => handleCommSort(field)}
+                        >
+                          <span className="inline-flex items-center">
+                            {label}
+                            <SortIcon
+                              field={field}
+                              sortBy={commSort.field}
+                              sortDir={commSort.dir}
+                            />
+                          </span>
+                        </th>
+                      ) : (
+                        <th key={label} className="pb-2 pr-4">{label}</th>
+                      ),
+                    )}
                     <th className="pb-2 w-8" />
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-navy-700/50">
-                  {(communities?.items ?? communities).map((comm, idx) => {
-                    const isExpanded = expandedComm === (comm.id ?? idx);
+                  {communities.rows.map((comm, idx) => {
+                    const isExpanded = expandedComm === (comm.installationId ?? idx);
                     return (
-                      <>
+                      <Fragment key={comm.installationId ?? idx}>
                         <tr
-                          key={comm.id ?? idx}
                           data-click-delegate
                           className="hover:bg-navy-750 transition-colors cursor-pointer"
                           onClick={() =>
-                            setExpandedComm(isExpanded ? null : (comm.id ?? idx))
+                            setExpandedComm(isExpanded ? null : (comm.installationId ?? idx))
                           }
                         >
                           <td className="py-3 pr-4 font-medium text-white">
-                            <button type="button" aria-expanded={isExpanded} className="text-left font-medium hover:underline focus-visible:underline">{comm.communityName ?? comm.community_name ?? '—'}</button>
+                            <button type="button" aria-expanded={isExpanded} className="text-left font-medium hover:underline focus-visible:underline">{comm.communityId ?? '—'}</button>
                           </td>
                           <td className="py-3 pr-4 text-navy-200">
-                            {comm.moduleName ?? comm.module_name ?? '—'}
+                            {comm.moduleName ?? '—'}
                           </td>
                           <td className="py-3 pr-4 text-navy-300 whitespace-nowrap">
-                            {comm.installedAt ?? comm.installed_at
-                              ? new Date(comm.installedAt ?? comm.installed_at).toLocaleDateString()
+                            {comm.installedAt
+                              ? new Date(comm.installedAt).toLocaleDateString()
                               : '—'}
                           </td>
                           <td className="py-3 pr-4">
                             <StatusBadge status={comm.status ?? 'active'} />
                           </td>
-                          <td className="py-3 pr-4 font-mono text-amber-400 text-xs">
-                            {comm.discountCode ?? comm.discount_code ?? (
-                              <span className="text-navy-500 font-sans not-italic">None</span>
-                            )}
-                          </td>
                           <td className="py-3 pr-4 text-navy-300 whitespace-nowrap">
-                            {comm.lastActiveAt ?? comm.last_active_at
-                              ? new Date(
-                                  comm.lastActiveAt ?? comm.last_active_at
-                                ).toLocaleDateString()
+                            {comm.lastActiveAt
+                              ? new Date(comm.lastActiveAt).toLocaleDateString()
                               : '—'}
                           </td>
                           <td className="py-3">
@@ -685,52 +683,26 @@ function VendorAnalytics() {
 
                         {/* Expanded detail row */}
                         {isExpanded && (
-                          <tr key={`${comm.id ?? idx}-expanded`} className="bg-navy-900/50">
-                            <td colSpan={7} className="py-3 px-4">
+                          <tr key={`${comm.installationId ?? idx}-expanded`} className="bg-navy-900/50">
+                            <td colSpan={6} className="py-3 px-4">
                               <div className="grid grid-cols-2 sm:grid-cols-3 gap-4 text-xs text-navy-300">
-                                {comm.guildId && (
+                                <div>
+                                  <span className="text-navy-500 uppercase tracking-wide text-xxs">Installation ID</span>
+                                  <p className="font-mono text-navy-200 mt-0.5">{comm.installationId}</p>
+                                </div>
+                                {comm.uninstalledAt && (
                                   <div>
-                                    <span className="text-navy-500 uppercase tracking-wide text-xxs">Guild ID</span>
-                                    <p className="font-mono text-navy-200 mt-0.5">{comm.guildId}</p>
-                                  </div>
-                                )}
-                                {comm.memberCount != null && (
-                                  <div>
-                                    <span className="text-navy-500 uppercase tracking-wide text-xxs">Members</span>
-                                    <p className="text-navy-200 mt-0.5">{formatNum(comm.memberCount)}</p>
-                                  </div>
-                                )}
-                                {comm.plan && (
-                                  <div>
-                                    <span className="text-navy-500 uppercase tracking-wide text-xxs">Plan</span>
-                                    <p className="text-navy-200 capitalize mt-0.5">{comm.plan}</p>
-                                  </div>
-                                )}
-                                {comm.renewalDate && (
-                                  <div>
-                                    <span className="text-navy-500 uppercase tracking-wide text-xxs">Renewal</span>
+                                    <span className="text-navy-500 uppercase tracking-wide text-xxs">Uninstalled</span>
                                     <p className="text-navy-200 mt-0.5">
-                                      {new Date(comm.renewalDate).toLocaleDateString()}
+                                      {new Date(comm.uninstalledAt).toLocaleDateString()}
                                     </p>
-                                  </div>
-                                )}
-                                {comm.revenueTotal != null && (
-                                  <div>
-                                    <span className="text-navy-500 uppercase tracking-wide text-xxs">Revenue</span>
-                                    <p className="text-emerald-400 mt-0.5">{formatCurrency(comm.revenueTotal)}</p>
-                                  </div>
-                                )}
-                                {comm.notes && (
-                                  <div className="col-span-2">
-                                    <span className="text-navy-500 uppercase tracking-wide text-xxs">Notes</span>
-                                    <p className="text-navy-300 mt-0.5">{comm.notes}</p>
                                   </div>
                                 )}
                               </div>
                             </td>
                           </tr>
                         )}
-                      </>
+                      </Fragment>
                     );
                   })}
                 </tbody>

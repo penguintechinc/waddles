@@ -281,9 +281,6 @@ autoEnroll:
     - name: svc-core
       namespace: waddlebot
       serviceAccount: svc-core
-    - name: svc-rtc
-      namespace: waddlebot
-      serviceAccount: svc-rtc
     - name: hub-api
       namespace: waddlebot
       serviceAccount: hub-api

@@ -10,10 +10,8 @@ for; (b) each concatenated `stages`/`config_defaults` JSON blob is
 syntactically valid once its `||`-joined literals are combined (the exact
 bug `0014_wave1a_bundle_seeds`' own test suite was authored to catch: a
 bare `... || '...'::jsonb` casts only the LAST literal unless the whole
-concatenation is wrapped in `(...)::jsonb`); (c) both ingest and action
-entrypoints resolve to real, already-shipped module files under
-`core/svc_ingest/builtin_handlers/` / `core/svc_action/builtin_handlers/` (the "coded but
-not routable" guard `0014`'s own test establishes); (d) both
+concatenation is wrapped in `(...)::jsonb`); (c) [the on-disk module-file check
+was retired with the Python `builtin_handlers/` data plane, commit 08e67f47f]; (d) both
 `app_tenant_availability` rows are upserted with the app-specific
 `config_defaults` secret refs set directly; (e) both upgrade()/downgrade()
 are idempotent (`ON CONFLICT ... DO UPDATE`) and downgrade() removes
@@ -33,12 +31,9 @@ import pytest
 _MIGRATION_PATH = (
     Path(__file__).resolve().parent.parent / "versions" / "0018_slack_youtube_apps.py"
 )
-_REPO_ROOT = Path(__file__).resolve().parent.parent.parent
-_INGEST_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_ingest" / "builtin_handlers"
-_ACTION_BUNDLES_DIR = _REPO_ROOT / "core" / "svc_action" / "builtin_handlers"
 
-SLACK_APP_ID = "waddles.bot.slack.default"
-YOUTUBE_APP_ID = "waddles.bot.youtube.default"
+SLACK_APP_ID = "penguintechinc.waddles.slack-pipeline"
+YOUTUBE_APP_ID = "penguintechinc.waddles.youtube-pipeline"
 TENANT_SLUG = "global"
 
 SLACK_CONFIG_DEFAULTS = {"bot_token_ref": "SLACK_BOT_TOKEN", "app_token_ref": "SLACK_APP_TOKEN"}
@@ -185,7 +180,7 @@ class TestUpgradeSeedsAppCatalog:
         assert '"communication_model": "rest_pull"' in upgrade_sql
 
     def test_slack_ingest_declares_no_communication_model_key(self, upgrade_sql) -> None:
-        """Matches the live waddles.bot.discord.default row's own shape --
+        """Matches the live penguintechinc.waddles.discord-pipeline row's own shape --
         discord's ingest stage carries no communication_model key either."""
         slack_ingest_start = upgrade_sql.index('"ingest": {"entrypoint": "bundles.slack_ingest')
         slack_ingest_end = upgrade_sql.index("}}, ", slack_ingest_start) + len("}}, ")
@@ -193,8 +188,8 @@ class TestUpgradeSeedsAppCatalog:
 
     def test_module_and_feature_follow_each_app_ids_namespace(self, upgrade_sql) -> None:
         assert "'bot'" in upgrade_sql
-        assert "'waddles.bot.slack'" in upgrade_sql
-        assert "'waddles.bot.youtube'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
+        assert "'penguintechinc.waddles'" in upgrade_sql
 
 
 class TestSeededStagesJsonIsValid:
@@ -262,34 +257,6 @@ class TestSeededStagesJsonIsValid:
             "found a ::jsonb cast applied directly to the last literal of a "
             "|| chain with no wrapping parens -- only that literal would be "
             "cast, not the full concatenated JSON"
-        )
-
-
-class TestEntrypointsResolveToRealModules:
-    """The 'coded but not routable' guard 0014_wave1a_bundle_seeds' own
-    test suite establishes: every seeded entrypoint must resolve to a
-    real, already-shipped module file, not a stale/typo'd path."""
-
-    @pytest.mark.parametrize(
-        "app_id,module_name",
-        [(app_id, ingest_mod) for app_id, (ingest_mod, _, _, _) in EXPECTED.items()],
-    )
-    def test_ingest_module_file_exists(self, app_id, module_name) -> None:
-        module_path = _INGEST_BUNDLES_DIR / f"{module_name}.py"
-        assert module_path.is_file(), (
-            f"{app_id}'s ingest entrypoint references bundles.{module_name}, "
-            f"but no {module_path} file exists"
-        )
-
-    @pytest.mark.parametrize(
-        "app_id,module_name",
-        [(app_id, action_mod) for app_id, (_, action_mod, _, _) in EXPECTED.items()],
-    )
-    def test_action_module_file_exists(self, app_id, module_name) -> None:
-        module_path = _ACTION_BUNDLES_DIR / f"{module_name}.py"
-        assert module_path.is_file(), (
-            f"{app_id}'s action entrypoint references bundles.{module_name}, "
-            f"but no {module_path} file exists"
         )
 
 

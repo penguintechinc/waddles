@@ -708,6 +708,7 @@ async fn the_pseudo_header_is_still_forbidden_for_every_other_kind() {
         channel: CHANNEL.into(),
         text: "x".into(),
         origin_channel: Some(CHANNEL.into()),
+        tenant_id: None,
     };
     let e = r.exec.execute(&rq(&a, 1)).await.unwrap_err();
     assert_eq!(code(&e), "header_not_allowed");
@@ -1492,6 +1493,7 @@ async fn chat_send_proves_channel_ownership_through_the_slot_source() {
         channel: CHANNEL.into(),
         text: "hi".into(),
         origin_channel: Some(CHANNEL.into()),
+        tenant_id: None,
     };
     let chat = |b: &str| RequestTpl {
         method: "POST".into(),
@@ -1634,6 +1636,7 @@ async fn the_hook_claims_only_discord_duty_kinds_and_shapes_payloads() {
         channel: "1".into(),
         text: "x".into(),
         origin_channel: None,
+        tenant_id: None,
     };
     let cx = DutyCx {
         platform: "discord",

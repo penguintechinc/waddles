@@ -33,8 +33,10 @@ from services.access_grant_dto import AccessGrantsResponse, access_grants_respon
 from services.app_command_service import ActivationWarning
 from services.bundle_global_state_service import version_by_id
 from services.community_authz import authorize_community
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
 from services.errors import ApiError
+from services.scope_registry import SCOPE_BUNDLE_ACTIVATION
 
 bundle_activation_bp = Blueprint(
     "v1_bundle_activation", __name__, url_prefix="/api/v1/apps/community"
@@ -117,7 +119,7 @@ class ActivationDTO:
     """Response DTO: one `app_active_versions` row for a COMMUNITY-tier activation."""
 
     appId: str
-    communityId: int
+    communityId: str
     tenantId: int
     versionId: int
     version: str | None
@@ -132,10 +134,13 @@ class ActivationListResponse:
     bundles: list[ActivationDTO]
 
 
-def _activation_dto(row: Any, version: str | None = None) -> ActivationDTO:
+def _activation_dto(
+    row: Any, public_community_id: str, version: str | None = None
+) -> ActivationDTO:
+    """Activation DTO; `communityId` is the community's PUBLIC UUID."""
     return ActivationDTO(
         appId=row.app_id,
-        communityId=row.community_id,
+        communityId=public_community_id,
         tenantId=row.tenant_id,
         versionId=row.version_id,
         version=version,
@@ -143,7 +148,7 @@ def _activation_dto(row: Any, version: str | None = None) -> ActivationDTO:
     )
 
 
-@bundle_activation_bp.route("/<int:community_id>/activation", methods=["GET"])
+@bundle_activation_bp.route("/<cuuid:community_id>/activation", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ActivationListResponse)
 async def list_activation(
@@ -157,12 +162,16 @@ async def list_activation(
     except ApiError as exc:
         return _err(exc)
     rows = await svc.list_community_activations(install_dal, community_id=community_id)
-    dtos = [_activation_dto(r, await version_by_id(install_dal, r.version_id)) for r in rows]
+    public_community_id = await lookup_public_id(community_id)
+    dtos = [
+        _activation_dto(r, public_community_id, await version_by_id(install_dal, r.version_id))
+        for r in rows
+    ]
     return ActivationListResponse(success=True, bundles=dtos)
 
 
 @bundle_activation_bp.route(
-    "/<int:community_id>/activation/<app_id>/access-grants", methods=["GET"]
+    "/<cuuid:community_id>/activation/<app_id>/access-grants", methods=["GET"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(AccessGrantsResponse)
@@ -179,7 +188,14 @@ async def activation_access_grants(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_ACTIVATION,
+        )
         _, version = await svc.resolve_activation_version(
             install_dal, tenant_id=ctx.tenant_id, app_id=app_id
         )
@@ -192,7 +208,7 @@ async def activation_access_grants(
     return access_grants_response(blocks, requested, approved, dangerous)
 
 
-@bundle_activation_bp.route("/<int:community_id>/activation", methods=["POST"])
+@bundle_activation_bp.route("/<cuuid:community_id>/activation", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(ActivateRequest)
 @validate_response(ActivateResponse, 201)
@@ -212,7 +228,14 @@ async def activate(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_ACTIVATION,
+        )
         result = await svc.activate_for_community_with_warnings(
             install_dal,
             tenant_id=ctx.tenant_id,
@@ -234,7 +257,7 @@ async def activate(
     )
 
 
-@bundle_activation_bp.route("/<int:community_id>/activation/<app_id>", methods=["DELETE"])
+@bundle_activation_bp.route("/<cuuid:community_id>/activation/<app_id>", methods=["DELETE"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def deactivate(
@@ -246,7 +269,14 @@ async def deactivate(
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_BUNDLE_ACTIVATION,
+        )
         await svc.deactivate_for_community(
             install_dal,
             tenant_id=ctx.tenant_id,
@@ -255,6 +285,7 @@ async def deactivate(
             deactivated_by=get_current_user_id(request),
         )
     except ApiError as exc:
+        logger.debug("handled %s in bundle_activation: %s", type(exc).__name__, exc)
         return _err(exc)
     return MessageResponse(success=True, message=f"{app_id} deactivated")
 

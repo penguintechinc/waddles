@@ -13,8 +13,9 @@ defining ~100 tables per test (`privacy_db`'s approach) costs seconds each.
 
 Fail-first proofs (executed, not narrated -- each mutation applied
 in-process, the named test re-run, then dropped):
-- `test_gate_off_blocks_every_route_before_any_data_access` -- `_authorize()`
-  with the `feature_enabled` check removed: 4 of 4 route params red.
+- `test_bulk_gate_off_blocks_before_any_data_access` -- `_authorize(bulk=True)`
+  with the `feature_enabled` check removed: red. Single-subject routes are NOT gated
+  (`test_single_subject_routes_never_consult_the_enterprise_gate`).
 - `test_cross_tenant_target_is_404_and_untouched` -- `resolve_scope()`
   reporting every existing user `in_tenant=True`: 3 of 3 red (the other
   tenant's user was acted on).
@@ -25,19 +26,22 @@ in-process, the named test re-run, then dropped):
   2 of 2 red.
 - `test_export_excludes_other_tenants_community_rows` -- `_community_scope()`
   returning no filter: red (the other tenant's rows disclosed).
-- `test_production_catalog_alone_denies_every_route_below_enterprise` --
-  `waddles.compliance.bulk_dsar` removed from `flask_core.tier_catalog`: 12 of 12
-  (4 routes x 3 tiers) red -- the gate was fail-open for a flag-on Free tenant.
+- `test_production_catalog_alone_denies_bulk_below_enterprise` --
+  `waddles.compliance.bulk_dsar` removed from `flask_core.tier_catalog`: 3 of 3
+  tiers red -- the gate was fail-open for a flag-on Free tenant.
 - `test_self_service_dsar_erasure_and_do_not_sell_work_in_every_tier` -- the self-service
   export handler consulting the entitlement gate: 14 red (12 tier/flag params + 2 siblings).
 """
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from unittest import mock
 from unittest.mock import AsyncMock
+from uuid import UUID
 
 import bcrypt
 import pytest
@@ -51,13 +55,15 @@ from blueprints.v1.admin_data_privacy import admin_data_privacy_bp
 from services import admin_data_privacy_service as svc
 from services import data_privacy_service as privacy
 from services.global_identity import grant_global_admin_sync
-from services.schema import bind_admin_privacy_tables
-from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, make_user_token
+from services.schema import bind_admin_privacy_tables, bind_tenant_tables
+from tests.community_ids import public_id
+from tests.conftest import OTHER_TENANT_SLUG, TENANT_SLUG, create_exclusions_table, make_user_token
 from tests.entitlement_fakes import FakeFlagGate, FakeLicenseGate, install_entitlement_client
 
 ACME_ID = 1
 OTHER_ID = 2
 FLAG = "waddles.compliance.bulk_dsar"
+UNKNOWN_UUID = "9d1c2f4e-3b5a-4c6d-8e7f-0a1b2c3d4e5f"
 
 
 def _define_tenants(dal: Any, *, migrate: bool) -> None:
@@ -81,6 +87,8 @@ def module_db(tmp_path_factory: pytest.TempPathFactory) -> Any:
     dal = async_dal.dal
     _define_tenants(dal, migrate=True)
     bind_admin_privacy_tables(dal, migrate=True)
+    bind_tenant_tables(dal, migrate=True)  # extends `communities` with `public_id`
+    create_exclusions_table(dal)
     assert dal.tenants.insert(slug=TENANT_SLUG, display_name="Acme", is_active=True) == ACME_ID
     assert dal.tenants.insert(slug=OTHER_TENANT_SLUG, display_name="Other", is_active=True) == (
         OTHER_ID
@@ -92,13 +100,31 @@ def module_db(tmp_path_factory: pytest.TempPathFactory) -> Any:
     dal.close()
 
 
+_CURRENT_DB: list[Any] = []
+
+
+def _uuids(count: int) -> list[str]:
+    """`count` distinct well-formed (unknown) UUID strings."""
+    return [str(UUID(int=i + 1)) for i in range(count)]
+
+
+def _uuid(user_id: int) -> str:
+    """The boundary identifier (`hub_users.uuid`) of internal user `user_id` (current test DB)."""
+    db = _CURRENT_DB[-1]
+    row = db.dal(db.dal.hub_users.id == user_id).select(db.dal.hub_users.uuid).first()
+    db.dal.commit()
+    return str(row.uuid)
+
+
 @pytest.fixture
 def db(module_db: Any) -> Any:
     """The module's database with every non-`tenants` table emptied -- per-test isolation."""
+    _CURRENT_DB[:] = [module_db]
     dal = module_db.dal
     for table_name in dal.tables:
         if table_name != "tenants":
             dal(dal[table_name]).delete()
+    dal.executesql("DELETE FROM data_use_exclusions")
     dal.commit()
     return module_db
 
@@ -190,6 +216,12 @@ def _chat_message(db: Any, *, community_id: int, user_id: int, text: str = "hell
     db.dal.commit()
 
 
+def _community_public_id(db: Any, community_id: int) -> str:
+    row = db.dal(db.dal.communities.id == community_id).select(db.dal.communities.public_id).first()
+    db.dal.commit()
+    return str(row.public_id)
+
+
 def _chat_count(db: Any, user_id: int) -> int:
     count = db.dal(db.dal.hub_chat_messages.sender_hub_user_id == user_id).count()
     db.dal.commit()
@@ -267,37 +299,40 @@ def world(db: Any) -> dict[str, int]:
 
 
 class TestEnterpriseGate:
-    ROUTES = [
+    """Only BULK is Enterprise-gated.
+
+    Single-subject export/erase/do-not-sell are statutory rights and work in every tier
+    (regression: the whole console was gated before the DSAR inbox).
+    """
+
+    SINGLE_ROUTES = [
         ("get", "/users/{uid}/export", None),
         ("post", "/users/{uid}/erase", {"confirm": True}),
         ("put", "/users/{uid}/do-not-sell", None),
-        ("post", "/bulk", {"action": "do_not_sell", "userIds": ["{uid}"]}),
     ]
+    BULK_ROUTE = ("post", "/bulk", {"action": "do_not_sell", "userIds": ["{uid}"]})
+    ROUTES = [*SINGLE_ROUTES, BULK_ROUTE]
 
     @staticmethod
     async def _call(client: Any, world: dict[str, int], method: str, path: str, body: Any) -> Any:
-        uid = world["alice"]
+        uid = _uuid(world["alice"])
         url = _base() + path.format(uid=uid)
         kwargs: dict[str, Any] = {"headers": _headers(world["admin"])}
         if body is not None:
             kwargs["json"] = {k: ([uid] if v == ["{uid}"] else v) for k, v in body.items()}
         return await getattr(client, method)(url, **kwargs)
 
-    @pytest.mark.parametrize(("method", "path", "body"), ROUTES)
-    async def test_gate_off_blocks_every_route_before_any_data_access(
+    async def test_bulk_gate_off_blocks_before_any_data_access(
         self,
         client: Any,
         db: Any,
         world: dict[str, int],
         monkeypatch: pytest.MonkeyPatch,
-        method: str,
-        path: str,
-        body: Any,
     ) -> None:
         gate = AsyncMock(return_value=False)
         monkeypatch.setattr(admin_module, "feature_enabled", gate)
 
-        response = await self._call(client, world, method, path, body)
+        response = await self._call(client, world, *self.BULK_ROUTE)
 
         assert response.status_code == 402
         assert gate.await_args.args[0] == FLAG
@@ -307,16 +342,30 @@ class TestEnterpriseGate:
         assert alice.email == "alice@example.com"  # untouched
         assert db.dal(db.dal.cookie_consent.user_id == world["alice"]).count() == 0
 
-    @pytest.mark.parametrize(("method", "path", "body"), ROUTES)
-    async def test_unreachable_gates_fail_closed(
+    @pytest.mark.parametrize(("method", "path", "body"), SINGLE_ROUTES)
+    async def test_single_subject_routes_never_consult_the_enterprise_gate(
         self,
         client: Any,
-        db: Any,
         world: dict[str, int],
         monkeypatch: pytest.MonkeyPatch,
         method: str,
         path: str,
         body: Any,
+    ) -> None:
+        gate = AsyncMock(return_value=False)  # gate OFF: single-subject must still work
+        monkeypatch.setattr(admin_module, "feature_enabled", gate)
+
+        response = await self._call(client, world, method, path, body)
+
+        assert response.status_code == 200
+        gate.assert_not_awaited()
+
+    async def test_unreachable_gates_fail_closed_for_bulk(
+        self,
+        client: Any,
+        db: Any,
+        world: dict[str, int],
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """Real `EntitlementClient`, PostHog AND license server both down, nothing cached."""
         install_entitlement_client(
@@ -326,7 +375,7 @@ class TestEnterpriseGate:
             tier_requirements={FLAG: "enterprise"},
         )
 
-        response = await self._call(client, world, method, path, body)
+        response = await self._call(client, world, *self.BULK_ROUTE)
 
         assert response.status_code == 402
         assert _audit_rows(db) == []
@@ -342,7 +391,7 @@ class TestEnterpriseGate:
             ("enterprise", True, 200),
         ],
     )
-    async def test_tier_resolution_through_the_real_two_gate(
+    async def test_bulk_tier_resolution_through_the_real_two_gate(
         self,
         client: Any,
         world: dict[str, int],
@@ -358,23 +407,34 @@ class TestEnterpriseGate:
             tier_requirements={FLAG: "enterprise"},
         )
 
-        response = await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
-        )
+        response = await self._call(client, world, *self.BULK_ROUTE)
 
         assert response.status_code == expected
 
+    @pytest.mark.parametrize("tier", ["free", "community", "professional", "enterprise"])
+    async def test_single_subject_actions_work_in_every_tier(
+        self, client: Any, world: dict[str, int], monkeypatch: pytest.MonkeyPatch, tier: str
+    ) -> None:
+        """Regression (statutory rights never tier-gated): Free/Pro tenants can run all three."""
+        install_entitlement_client(
+            monkeypatch,
+            flag_gate=FakeFlagGate(result=False),  # even with the bulk flag OFF
+            license_gate=FakeLicenseGate(tier=tier),
+        )
+
+        # Erase last: it deletes the membership rows the console proves tenant scope with.
+        export, erase, do_not_sell = self.SINGLE_ROUTES
+        for method, path, body in (export, do_not_sell, erase):
+            response = await self._call(client, world, method, path, body)
+            assert response.status_code == 200, (tier, method, path)
+
     @pytest.mark.parametrize("tier", ["free", "community", "professional"])
-    @pytest.mark.parametrize(("method", "path", "body"), ROUTES)
-    async def test_production_catalog_alone_denies_every_route_below_enterprise(
+    async def test_production_catalog_alone_denies_bulk_below_enterprise(
         self,
         client: Any,
         db: Any,
         world: dict[str, int],
         monkeypatch: pytest.MonkeyPatch,
-        method: str,
-        path: str,
-        body: Any,
         tier: str,
     ) -> None:
         """Regression: `bulk_dsar` was missing from `tier_catalog.FEATURE_MIN_TIERS`.
@@ -389,13 +449,13 @@ class TestEnterpriseGate:
             monkeypatch, flag_gate=flag_gate, license_gate=FakeLicenseGate(tier=tier)
         )
 
-        response = await self._call(client, world, method, path, body)
+        response = await self._call(client, world, *self.BULK_ROUTE)
 
         assert response.status_code == 402
         assert _audit_rows(db) == []
         assert _user_row(db, world["alice"]).email == "alice@example.com"  # untouched
 
-    async def test_production_catalog_alone_admits_an_enterprise_tenant(
+    async def test_production_catalog_alone_admits_an_enterprise_tenant_to_bulk(
         self, client: Any, world: dict[str, int], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         install_entitlement_client(
@@ -404,12 +464,9 @@ class TestEnterpriseGate:
             license_gate=FakeLicenseGate("enterprise"),
         )
 
-        # Erase last: it deletes the membership rows the console proves tenant scope with, so any
-        # later call on the same target is (correctly) `not_found`.
-        export, erase, do_not_sell = self.ROUTES[:3]
-        for method, path, body in (export, do_not_sell, erase):
-            response = await self._call(client, world, method, path, body)
-            assert response.status_code == 200, (method, path)
+        response = await self._call(client, world, *self.BULK_ROUTE)
+
+        assert response.status_code == 200
 
 
 class TestSelfServiceStaysUngated:
@@ -543,19 +600,23 @@ class TestSelfServiceStaysUngated:
 
         body = await response.get_json()
         communities = {row["community_id"] for row in body["data"]["message_activity"]}
-        assert communities == {world["acme_community"], world["other_community"]}
+        # the export is a client-facing boundary: public UUIDs, never the numeric ids
+        assert communities == {
+            public_id(db, world["acme_community"]),
+            public_id(db, world["other_community"]),
+        }
 
 
 class TestAuthz:
     async def test_no_token_is_401(self, client: Any, world: dict[str, int], gate_on: Any) -> None:
-        response = await client.get(_base() + f"/users/{world['alice']}/export")
+        response = await client.get(_base() + f"/users/{_uuid(world['alice'])}/export")
         assert response.status_code == 401
 
     async def test_missing_tenant_admin_scope_is_403(
         self, client: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         response = await client.get(
-            _base() + f"/users/{world['alice']}/export",
+            _base() + f"/users/{_uuid(world['alice'])}/export",
             headers=_headers(world["admin"], scope="tenant:read community:admin"),
         )
         assert response.status_code == 403
@@ -566,7 +627,7 @@ class TestAuthz:
     ) -> None:
         """An Acme admin pointing the URL at Other's slug is a 403, not a cross-tenant action."""
         response = await client.put(
-            _base(OTHER_TENANT_SLUG) + f"/users/{world['mallory']}/do-not-sell",
+            _base(OTHER_TENANT_SLUG) + f"/users/{_uuid(world['mallory'])}/do-not-sell",
             headers=_headers(world["admin"], tenant=TENANT_SLUG),
         )
         # tenant_middleware resolves Acme from the JWT; require_matching_tenant rejects the URL.
@@ -577,7 +638,7 @@ class TestAuthz:
         self, client: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         response = await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell",
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
             headers=_headers(world["admin"], scope="*:admin"),
         )
         assert response.status_code == 200
@@ -608,7 +669,7 @@ class TestTenantScope:
             kwargs["json"] = body
 
         response = await getattr(client, method)(
-            _base() + f"/users/{world['mallory']}/{suffix}", **kwargs
+            _base() + f"/users/{_uuid(world['mallory'])}/{suffix}", **kwargs
         )
 
         assert response.status_code == 404
@@ -621,13 +682,13 @@ class TestTenantScope:
         assert len(rows) == 1  # the denied attempt itself is audited
         assert rows[0].details["outcome"] == "denied_not_in_tenant"
         assert rows[0].user_id == world["admin"]
-        assert rows[0].target_id == str(world["mallory"])
+        assert rows[0].target_id == _uuid(world["mallory"])
 
     async def test_unknown_user_id_is_404(
         self, client: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         response = await client.get(
-            _base() + "/users/99999/export", headers=_headers(world["admin"])
+            _base() + f"/users/{UNKNOWN_UUID}/export", headers=_headers(world["admin"])
         )
         assert response.status_code == 404
 
@@ -636,7 +697,7 @@ class TestTenantScope:
     ) -> None:
         orphan = _user(db, name="orphan")
         response = await client.get(
-            _base() + f"/users/{orphan}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(orphan)}/export", headers=_headers(world["admin"])
         )
         assert response.status_code == 404
 
@@ -646,7 +707,7 @@ class TestTenantScope:
         second_admin = _user(db, name="admin2")
         _tenant_admin(db, tenant_id=ACME_ID, user_id=second_admin)
         response = await client.get(
-            _base() + f"/users/{second_admin}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(second_admin)}/export", headers=_headers(world["admin"])
         )
         assert response.status_code == 200
 
@@ -655,7 +716,7 @@ class TestTenantScope:
     ) -> None:
         _member(db, community_id=world["acme_community"], user_id="discord-12345")
         response = await client.get(
-            _base() + f"/users/{world['alice']}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/export", headers=_headers(world["admin"])
         )
         assert response.status_code == 200
 
@@ -668,12 +729,14 @@ class TestTenantScope:
         _message_event(db, community_id=world["other_community"], user_id=world["alice"])
 
         response = await client.get(
-            _base() + f"/users/{world['alice']}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/export", headers=_headers(world["admin"])
         )
 
         body = await response.get_json()
         events = body["result"]["data"]["message_activity"]
-        assert [e["community_id"] for e in events] == [world["acme_community"]]
+        assert [e["community_id"] for e in events] == [
+            _community_public_id(db, world["acme_community"])
+        ]
 
     async def test_export_for_tenant_with_no_communities_is_empty_not_unscoped(
         self, client: Any, db: Any, gate_on: Any
@@ -685,7 +748,7 @@ class TestTenantScope:
         _message_event(db, community_id=other_community, user_id=lonely_admin)
 
         response = await client.get(
-            _base() + f"/users/{lonely_admin}/export", headers=_headers(lonely_admin)
+            _base() + f"/users/{_uuid(lonely_admin)}/export", headers=_headers(lonely_admin)
         )
 
         body = await response.get_json()
@@ -699,7 +762,7 @@ class TestTenantScope:
         _member(db, community_id=global_community, user_id=world["alice"])
 
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -716,7 +779,7 @@ class TestTenantScope:
         _member(db, community_id=community_id, user_id=world["alice"])
 
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -732,7 +795,7 @@ class TestTenantScope:
         _member(db, community_id=global_community, user_id=newcomer)
 
         response = await client.get(
-            _base() + f"/users/{newcomer}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(newcomer)}/export", headers=_headers(world["admin"])
         )
 
         assert response.status_code == 200
@@ -745,15 +808,17 @@ class TestExport:
         _message_event(db, community_id=world["acme_community"], user_id=world["alice"])
 
         response = await client.get(
-            _base() + f"/users/{world['alice']}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/export", headers=_headers(world["admin"])
         )
 
         assert response.status_code == 200
-        assert f"waddles-dsar-{world['alice']}.json" in response.headers["Content-Disposition"]
+        assert (
+            f"waddles-dsar-{_uuid(world['alice'])}.json" in response.headers["Content-Disposition"]
+        )
         body = await response.get_json()
         assert body["success"] is True
         assert body["action"] == "export"
-        assert body["result"]["userId"] == world["alice"]
+        assert body["result"]["userId"] == _uuid(world["alice"])
         assert body["result"]["status"] == "completed"
         account = body["result"]["data"]["account"][0]
         assert account["email"] == "alice@example.com"
@@ -764,7 +829,7 @@ class TestExport:
         assert (row.action, row.target_type, row.target_id) == (
             "dsar.export",
             "user",
-            str(world["alice"]),
+            _uuid(world["alice"]),
         )
         assert row.user_id == world["admin"]
         assert row.details["tenant_id"] == ACME_ID
@@ -783,12 +848,19 @@ class TestExport:
         monkeypatch.setattr(privacy, "_export_passkeys", boom)
 
         response = await client.get(
-            _base() + f"/users/{world['alice']}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/export", headers=_headers(world["admin"])
         )
 
         body = await response.get_json()
         assert response.status_code == 200
-        assert body["result"]["incomplete"] == [{"source": "passkeys", "error": "source down"}]
+        # Bounded reason code only -- never the raw exception text.
+        assert body["result"]["incomplete"] == [
+            {"source": "passkeys", "error": "source_unavailable"}
+        ]
+        assert body["result"]["status"] == "partial"
+        assert body["success"] is False
+        assert "source down" not in str(body)
+        assert _audit_rows(db)[0].details["outcome"] == "partial"
         assert _audit_rows(db)[0].details["incomplete_sources"] == ["passkeys"]
 
 
@@ -797,7 +869,9 @@ class TestErase:
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase", headers=_headers(world["admin"]), json={}
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
+            headers=_headers(world["admin"]),
+            json={},
         )
         assert response.status_code == 400
         assert _user_row(db, world["alice"]).email == "alice@example.com"
@@ -809,7 +883,7 @@ class TestErase:
         _message_event(db, community_id=world["acme_community"], user_id=world["alice"])
 
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -844,7 +918,7 @@ class TestErase:
         assert _chat_count(db, alice) == 2
 
         response = await client.post(
-            _base() + f"/users/{alice}/erase",
+            _base() + f"/users/{_uuid(alice)}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -866,7 +940,7 @@ class TestErase:
         assert len(_member_pii_rows(db, user_id=alice)) == 2
 
         response = await client.post(
-            _base() + f"/users/{alice}/erase",
+            _base() + f"/users/{_uuid(alice)}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -887,7 +961,7 @@ class TestErase:
         _member(db, community_id=world["acme_community"], user_id=carol)
 
         response = await client.post(
-            _base() + f"/users/{carol}/erase",
+            _base() + f"/users/{_uuid(carol)}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -898,7 +972,7 @@ class TestErase:
     async def test_erase_is_idempotent(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        url = _base() + f"/users/{world['alice']}/erase"
+        url = _base() + f"/users/{_uuid(world['alice'])}/erase"
         first = await client.post(url, headers=_headers(world["admin"]), json={"confirm": True})
         second = await client.post(url, headers=_headers(world["admin"]), json={"confirm": True})
 
@@ -913,7 +987,7 @@ class TestErase:
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         response = await client.post(
-            _base() + f"/users/{world['admin']}/erase",
+            _base() + f"/users/{_uuid(world['admin'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -929,7 +1003,7 @@ class TestErase:
         _member(db, community_id=world["acme_community"], user_id=root)
 
         response = await client.post(
-            _base() + f"/users/{root}/erase",
+            _base() + f"/users/{_uuid(root)}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -948,7 +1022,7 @@ class TestErase:
         db.dal.commit()
 
         response = await client.post(
-            _base() + f"/users/{root}/erase",
+            _base() + f"/users/{_uuid(root)}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -967,7 +1041,7 @@ class TestErase:
         _member(db, community_id=world["other_community"], user_id=world["alice"])
 
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -982,7 +1056,7 @@ class TestErase:
         _tenant_admin(db, tenant_id=OTHER_ID, user_id=world["alice"])
 
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -1003,7 +1077,7 @@ class TestErase:
         monkeypatch.setattr(db, "insert_async", failing)
 
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -1023,7 +1097,7 @@ class TestErase:
         monkeypatch.setattr(privacy, "anonymize_user_data", boom)
 
         response = await client.post(
-            _base() + f"/users/{world['alice']}/erase",
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
             headers=_headers(world["admin"]),
             json={"confirm": True},
         )
@@ -1047,7 +1121,8 @@ class TestErase:
         monkeypatch.setattr(db, "update_async", failing)
 
         response = await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
         )
 
         assert response.status_code == 200
@@ -1066,30 +1141,63 @@ class TestErase:
         monkeypatch.setattr(db, "insert_async", failing)
 
         response = await client.get(
-            _base() + f"/users/{world['mallory']}/export", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['mallory'])}/export", headers=_headers(world["admin"])
         )
 
         assert response.status_code == 404
 
 
+def _global_dns(db: Any, user_id: int, *, value: bool = True) -> None:
+    """Give `user_id` their OWN global cookie-consent preference (`doNotSell=value`)."""
+    db.dal.cookie_consent.insert(
+        user_id=user_id,
+        consent_id=f"cid-global-{user_id}",
+        preferences={"necessary": True, "marketing": False, "doNotSell": value},
+        consent_version="1.0",
+    )
+    db.dal.commit()
+
+
+def _consent_rows(db: Any, user_id: int) -> list[Any]:
+    """Every global `cookie_consent` row of `user_id`."""
+    rows = db.dal(db.dal.cookie_consent.user_id == user_id).select().as_list()
+    db.dal.commit()
+    return rows
+
+
+def _cookie_app(db: Any) -> Quart:
+    """A Quart app carrying only the subject's own cookie-consent routes, on the same DB."""
+    from blueprints.v1.cookie_consent import cookie_consent_bp
+
+    quart_app = Quart(__name__)
+    QuartSchema(quart_app)
+    quart_app.register_blueprint(cookie_consent_bp)
+    quart_app.config["dal"] = db.dal
+    quart_app.config["async_dal"] = db
+    quart_app.config["HUB_API_CONFIG"] = None
+    return quart_app
+
+
 class TestDoNotSell:
-    async def test_creates_a_privacy_maximal_record_when_none_exists(
+    """Do-Not-Sell is the user's GLOBAL consent preference; the admin action is opt-out only."""
+
+    async def test_tenant_admin_sets_the_users_global_opt_out(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
         response = await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
         )
 
         assert response.status_code == 200
-        row = db.dal(db.dal.cookie_consent.user_id == world["alice"]).select().first()
-        assert row.preferences["doNotSell"] is True
-        assert row.preferences["marketing"] is False
-        assert row.preferences["analytics"] is False
-        assert row.consent_method == "admin_dsar"
+        [row] = _consent_rows(db, world["alice"])
+        assert row["preferences"]["doNotSell"] is True
+        assert row["preferences"]["marketing"] is False
+        assert row["preferences"]["analytics"] is False
+        assert row["consent_method"] == "admin_dsar"
         audit = db.dal(db.dal.cookie_audit_log.user_id == world["alice"]).select().first()
         assert audit.action == "ADMIN_DO_NOT_SELL"
-        rows = _audit_rows(db)
-        assert [(r.action, r.details["outcome"]) for r in rows] == [
+        assert [(r.action, r.details["outcome"]) for r in _audit_rows(db)] == [
             ("dsar.do_not_sell", "completed")
         ]
 
@@ -1110,7 +1218,8 @@ class TestDoNotSell:
         db.dal.commit()
 
         response = await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
         )
 
         assert response.status_code == 200
@@ -1119,47 +1228,90 @@ class TestDoNotSell:
         assert row.preferences["marketing"] is False
         assert row.preferences["analytics"] is True  # only the sale/sharing categories change
 
-    async def test_is_idempotent_and_one_way(
+    async def test_is_idempotent(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        url = _base() + f"/users/{world['alice']}/do-not-sell"
+        url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
         first = await client.put(url, headers=_headers(world["admin"]))
         second = await client.put(url, headers=_headers(world["admin"]))
 
         assert (await first.get_json())["result"]["status"] == "completed"
         assert (await second.get_json())["result"]["status"] == "already_done"
-        assert db.dal(db.dal.cookie_consent.user_id == world["alice"]).count() == 1
+        assert len(_consent_rows(db, world["alice"])) == 1
+
+    async def test_user_who_already_opted_out_reports_already_done(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        _global_dns(db, world["alice"])
+
+        response = await client.put(
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
+        )
+
+        assert (await response.get_json())["result"]["status"] == "already_done"
+
+    async def test_admin_can_never_opt_a_user_back_in(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """One-way: the only admin write sets doNotSell=True; it never clears it."""
+        url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
+        for _ in range(2):
+            await client.put(url, headers=_headers(world["admin"]))
+        assert all(r["preferences"]["doNotSell"] is True for r in _consent_rows(db, world["alice"]))
+
+    async def test_subject_withdraws_via_cookie_consent_route_and_reapply_works(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """The subject keeps control: explicit doNotSell=False flips it back; DSAR reapplies."""
+        url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
+        assert (await (await client.put(url, headers=_headers(world["admin"]))).get_json())[
+            "result"
+        ]["status"] == "completed"
+
+        # The subject's path: GET /api/v1/cookie (signed in) returns the admin-created record's
+        # consent id; POST /api/v1/cookie with that id and an explicit doNotSell=false wins.
+        # (PATCH /preferences never writes doNotSell from the body, by design.)
+        subject = _cookie_app(db).test_client()
+        current = await subject.get("/api/v1/cookie", headers=_headers(world["alice"]))
+        consent_id = (await current.get_json())["data"]["consentId"]
+        withdrawn = await subject.post(
+            "/api/v1/cookie",
+            headers={**_headers(world["alice"]), "Cookie": f"waddlebot_consent_id={consent_id}"},
+            json={"preferences": {"functional": True, "analytics": True, "doNotSell": False}},
+        )
+        assert withdrawn.status_code == 200
+        assert all(
+            r["preferences"]["doNotSell"] is False for r in _consent_rows(db, world["alice"])
+        )
+
+        again = await client.put(url, headers=_headers(world["admin"]))
+        assert (await again.get_json())["result"]["status"] == "completed"
+        assert all(r["preferences"]["doNotSell"] is True for r in _consent_rows(db, world["alice"]))
 
     async def test_admin_opt_out_survives_a_later_self_service_preferences_update(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
     ) -> None:
-        """Consent writes are key-by-key, so a later self-service edit keeps the admin opt-out.
-
-        Merge-time regression: the old "a later self-service PUT drops doNotSell" caveat no
-        longer holds -- pin the new behaviour.
-        """
-        from blueprints.v1.cookie_consent import cookie_consent_bp
-
+        """Consent writes are key-by-key: an edit that omits doNotSell keeps the opt-out."""
         await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
         )
-        quart_app = Quart(__name__)
-        QuartSchema(quart_app)
-        quart_app.register_blueprint(cookie_consent_bp)
-        quart_app.config["dal"] = db.dal
-        quart_app.config["async_dal"] = db
-        quart_app.config["HUB_API_CONFIG"] = None
 
-        response = await quart_app.test_client().patch(
-            "/api/v1/cookie/preferences",
-            headers=_headers(world["alice"]),
-            json={"preferences": {"functional": True, "analytics": True}},
+        response = (
+            await _cookie_app(db)
+            .test_client()
+            .patch(
+                "/api/v1/cookie/preferences",
+                headers=_headers(world["alice"]),
+                json={"preferences": {"functional": True, "analytics": True}},
+            )
         )
 
         assert response.status_code == 200
-        row = db.dal(db.dal.cookie_consent.user_id == world["alice"]).select().first()
-        assert row.preferences["doNotSell"] is True  # the admin's opt-out is still in force
-        assert row.preferences["analytics"] is True  # ...and the subject's own edit applied
+        [row] = _consent_rows(db, world["alice"])
+        assert row["preferences"]["doNotSell"] is True
+        assert row["preferences"]["analytics"] is True
 
     async def test_only_the_target_user_is_changed(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
@@ -1168,10 +1320,11 @@ class TestDoNotSell:
         _member(db, community_id=world["acme_community"], user_id=bob)
 
         await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
         )
 
-        assert db.dal(db.dal.cookie_consent.user_id == bob).count() == 0
+        assert _consent_rows(db, bob) == []
 
     async def test_new_record_adopts_the_active_policy_version(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any
@@ -1180,11 +1333,58 @@ class TestDoNotSell:
         db.dal.commit()
 
         await client.put(
-            _base() + f"/users/{world['alice']}/do-not-sell", headers=_headers(world["admin"])
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
         )
 
-        row = db.dal(db.dal.cookie_consent.user_id == world["alice"]).select().first()
-        assert row.consent_version == "2.3"
+        assert _consent_rows(db, world["alice"])[0]["consent_version"] == "2.3"
+
+    async def test_foreign_tenant_user_is_not_found_and_untouched(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """A tenant admin cannot opt out a user outside its tenant (uniform 404)."""
+        foreign = await client.put(
+            _base() + f"/users/{_uuid(world['mallory'])}/do-not-sell",
+            headers=_headers(world["admin"]),
+        )
+        unknown = await client.put(
+            _base() + f"/users/{UNKNOWN_UUID}/do-not-sell", headers=_headers(world["admin"])
+        )
+
+        assert foreign.status_code == unknown.status_code == 404
+        assert _consent_rows(db, world["mallory"]) == []
+
+    async def test_concurrent_double_apply_never_aborts_and_ends_opted_out(
+        self, db: Any, world: dict[str, int]
+    ) -> None:
+        user = world["alice"]
+        _global_dns(db, user, value=False)
+        outcomes = await asyncio.gather(
+            *[svc.apply_do_not_sell(db, db.dal, user_id=user) for _ in range(8)]
+        )
+
+        assert any(outcomes)
+        assert all(r["preferences"]["doNotSell"] is True for r in _consent_rows(db, user))
+        assert await svc.apply_do_not_sell(db, db.dal, user_id=user) is False
+
+    async def test_erasure_retains_the_consent_record_as_before(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """Art. 5(2): the global consent row + audit log outlive erasure (unchanged behaviour)."""
+        await client.put(
+            _base() + f"/users/{_uuid(world['alice'])}/do-not-sell",
+            headers=_headers(world["admin"]),
+        )
+
+        response = await client.post(
+            _base() + f"/users/{_uuid(world['alice'])}/erase",
+            headers=_headers(world["admin"]),
+            json={"confirm": True},
+        )
+
+        assert response.status_code == 200
+        assert len(_consent_rows(db, world["alice"])) == 1
+        assert db.dal(db.dal.cookie_audit_log.user_id == world["alice"]).count() == 1
 
 
 class TestBulk:
@@ -1199,7 +1399,12 @@ class TestBulk:
             headers=_headers(world["admin"]),
             json={
                 "action": "do_not_sell",
-                "userIds": [world["alice"], world["mallory"], bob, 99999],
+                "userIds": [
+                    _uuid(world["alice"]),
+                    _uuid(world["mallory"]),
+                    _uuid(bob),
+                    UNKNOWN_UUID,
+                ],
             },
         )
 
@@ -1207,10 +1412,10 @@ class TestBulk:
         body = await response.get_json()
         statuses = {r["userId"]: r["status"] for r in body["results"]}
         assert statuses == {
-            world["alice"]: "completed",
-            world["mallory"]: "not_found",  # other tenant
-            bob: "completed",
-            99999: "not_found",
+            _uuid(world["alice"]): "completed",
+            _uuid(world["mallory"]): "not_found",  # other tenant
+            _uuid(bob): "completed",
+            UNKNOWN_UUID: "not_found",
         }
         assert (body["requested"], body["succeeded"], body["failed"]) == (4, 2, 2)
         assert body["success"] is False
@@ -1234,7 +1439,11 @@ class TestBulk:
         response = await client.post(
             _base() + "/bulk",
             headers=_headers(world["admin"]),
-            json={"action": "erase", "userIds": [world["alice"], bob], "confirm": True},
+            json={
+                "action": "erase",
+                "userIds": [_uuid(world["alice"]), _uuid(bob)],
+                "confirm": True,
+            },
         )
 
         assert response.status_code == 200
@@ -1255,7 +1464,11 @@ class TestBulk:
         response = await client.post(
             _base() + "/bulk",
             headers=_headers(world["admin"]),
-            json={"action": "erase", "userIds": [world["alice"], bob], "confirm": True},
+            json={
+                "action": "erase",
+                "userIds": [_uuid(world["alice"]), _uuid(bob)],
+                "confirm": True,
+            },
         )
 
         assert response.status_code == 200
@@ -1270,7 +1483,14 @@ class TestBulk:
         response = await client.post(
             _base() + "/bulk",
             headers=_headers(world["admin"]),
-            json={"action": "do_not_sell", "userIds": [world["alice"], world["alice"]]},
+            json={
+                "action": "do_not_sell",
+                "userIds": [
+                    _uuid(world["alice"]),
+                    _uuid(world["alice"]).upper(),
+                    f" {_uuid(world['alice'])} ",
+                ],
+            },
         )
 
         body = await response.get_json()
@@ -1296,12 +1516,16 @@ class TestBulk:
         response = await client.post(
             _base() + "/bulk",
             headers=_headers(world["admin"]),
-            json={"action": "erase", "userIds": [world["alice"], bob], "confirm": True},
+            json={
+                "action": "erase",
+                "userIds": [_uuid(world["alice"]), _uuid(bob)],
+                "confirm": True,
+            },
         )
 
         body = await response.get_json()
         statuses = {r["userId"]: r["status"] for r in body["results"]}
-        assert statuses == {world["alice"]: "failed", bob: "completed"}
+        assert statuses == {_uuid(world["alice"]): "failed", _uuid(bob): "completed"}
         assert _user_row(db, bob).email == f"deleted_{bob}@deleted.waddlebot"
         assert _user_row(db, world["alice"]).email == "alice@example.com"
 
@@ -1314,7 +1538,7 @@ class TestBulk:
         response = await client.post(
             _base() + "/bulk",
             headers=_headers(world["admin"]),
-            json={"action": "export", "userIds": [world["alice"], bob]},
+            json={"action": "export", "userIds": [_uuid(world["alice"]), _uuid(bob)]},
         )
 
         body = await response.get_json()
@@ -1324,12 +1548,10 @@ class TestBulk:
     @pytest.mark.parametrize(
         ("payload", "needle"),
         [
-            ({"action": "erase", "userIds": [1]}, "confirm"),
+            ({"action": "erase", "userIds": [UNKNOWN_UUID]}, "confirm"),
             ({"action": "do_not_sell", "userIds": []}, "non-empty"),
-            ({"action": "do_not_sell", "userIds": [0]}, "positive"),
-            ({"action": "do_not_sell", "userIds": [-3]}, "positive"),
-            ({"action": "do_not_sell", "userIds": list(range(1, 102))}, "At most 100"),
-            ({"action": "export", "userIds": list(range(1, 27))}, "At most 25"),
+            ({"action": "do_not_sell", "userIds": _uuids(101)}, "At most 100"),
+            ({"action": "export", "userIds": _uuids(26)}, "At most 25"),
         ],
     )
     async def test_bulk_validation_is_400_before_any_audit(
@@ -1352,10 +1574,11 @@ class TestBulk:
     @pytest.mark.parametrize(
         "payload",
         [
-            {"action": "drop_tables", "userIds": [1]},
-            {"userIds": [1]},
+            {"action": "drop_tables", "userIds": [UNKNOWN_UUID]},
+            {"userIds": [UNKNOWN_UUID]},
             {"action": "export"},
-            {"action": "export", "userIds": ["abc"]},
+            {"action": "export", "userIds": [1, 2]},  # numeric ids are no longer accepted
+            {"action": "export", "userIds": [None]},
         ],
     )
     async def test_bulk_rejects_malformed_bodies(
@@ -1365,6 +1588,50 @@ class TestBulk:
             _base() + "/bulk", headers=_headers(world["admin"]), json=payload
         )
         assert response.status_code in (400, 422)
+
+    @pytest.mark.parametrize(
+        ("action", "extra"),
+        [("erase", {"confirm": True}), ("do_not_sell", {})],
+    )
+    async def test_bulk_non_export_results_never_carry_an_export_payload(
+        self,
+        client: Any,
+        db: Any,
+        world: dict[str, int],
+        gate_on: Any,
+        action: str,
+        extra: dict[str, Any],
+    ) -> None:
+        """Response-shape guard: only `export` may populate `data`/`incomplete`.
+
+        `DsarResultDTO.data` holds the subject's raw personal rows (account
+        records, emails) -- it is the point of an access-request export and
+        the one PII-bearing field on this polymorphic endpoint's response.
+        `bulk_dsar` branches its result shape on `action`; a regression that
+        let `erase`/`do_not_sell` echo an export payload would leak that PII
+        through the bulk console's response. This pins the non-export variants
+        to an empty `data`/`incomplete` (asserted present-as-null OR absent, so
+        it holds regardless of how None fields serialize), contrasting the
+        `export`-carries-`data` path proven by
+        `test_bulk_export_returns_each_users_data`.
+        """
+        bob = _user(db, name="bob")
+        _member(db, community_id=world["acme_community"], user_id=bob)
+
+        response = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": action, "userIds": [_uuid(world["alice"]), _uuid(bob)], **extra},
+        )
+
+        assert response.status_code == 200
+        body = await response.get_json()
+        assert body["action"] == action
+        results = body["results"]
+        assert len(results) == 2, body
+        for row in results:
+            assert row.get("data") is None, (action, row)
+            assert row.get("incomplete") is None, (action, row)
 
 
 class TestScopeResolution:
@@ -1403,39 +1670,178 @@ class TestScopeResolution:
 
 
 class TestPathUserId:
-    @pytest.mark.parametrize("raw", ["abc", "0", "-1", "1.5", "\u0661\u0662", "9" * 19, "%20"])
-    async def test_malformed_user_id_is_400_after_the_gate(
+    @pytest.mark.parametrize("raw", ["abc", "0", "-1", "1.5", "\u0661\u0662", "9" * 19, "%20", "7"])
+    async def test_malformed_or_numeric_user_id_is_the_uniform_404(
         self, client: Any, db: Any, world: dict[str, int], gate_on: Any, raw: str
     ) -> None:
         response = await client.get(
             _base() + f"/users/{raw}/export", headers=_headers(world["admin"])
         )
+        unknown = await client.get(
+            _base() + f"/users/{UNKNOWN_UUID}/export", headers=_headers(world["admin"])
+        )
 
-        assert response.status_code == 400
-        assert _audit_rows(db) == []
+        assert response.status_code == unknown.status_code == 404
+        body = await response.get_json()
+        assert body["result"]["status"] == "not_found"
+        assert body["result"]["detail"] == "User not found"
 
-    async def test_malformed_user_id_still_hits_the_gate_first(
+    async def test_numeric_internal_id_never_resolves_even_for_a_real_tenant_user(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        for suffix, method, kwargs in (
+            ("export", "get", {}),
+            ("erase", "post", {"json": {"confirm": True}}),
+            ("do-not-sell", "put", {}),
+        ):
+            response = await getattr(client, method)(
+                _base() + f"/users/{world['alice']}/{suffix}",
+                headers=_headers(world["admin"]),
+                **kwargs,
+            )
+            assert response.status_code == 404, suffix
+        assert _user_row(db, world["alice"]).email == "alice@example.com"
+        assert db.dal(db.dal.cookie_consent.user_id == world["alice"]).count() == 0
+
+    async def test_malformed_id_is_404_even_with_the_bulk_gate_off(
         self, client: Any, world: dict[str, int], monkeypatch: pytest.MonkeyPatch
     ) -> None:
         monkeypatch.setattr(admin_module, "feature_enabled", AsyncMock(return_value=False))
 
         response = await client.get(_base() + "/users/abc/export", headers=_headers(world["admin"]))
 
-        assert response.status_code == 402
+        assert response.status_code == 404
+
+
+class TestUuidBoundary:
+    """Numeric PKs never cross the boundary: indistinguishable misses, UUID-only responses."""
+
+    async def test_unknown_and_foreign_single_routes_are_byte_identical(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        foreign = _uuid(world["mallory"])
+        for method, suffix, kwargs in (
+            ("get", "export", {}),
+            ("post", "erase", {"json": {"confirm": True}}),
+            ("put", "do-not-sell", {}),
+        ):
+            a = await getattr(client, method)(
+                _base() + f"/users/{foreign}/{suffix}",
+                headers=_headers(world["admin"]),
+                **kwargs,
+            )
+            b = await getattr(client, method)(
+                _base() + f"/users/{UNKNOWN_UUID}/{suffix}",
+                headers=_headers(world["admin"]),
+                **kwargs,
+            )
+            assert a.status_code == b.status_code == 404, suffix
+            text_a = (await a.get_data(as_text=True)).replace(foreign, "<U>")
+            text_b = (await b.get_data(as_text=True)).replace(UNKNOWN_UUID, "<U>")
+            assert text_a == text_b, suffix
+        # The foreign user was never touched.
+        assert _user_row(db, world["mallory"]).email == "mallory@example.com"
+        assert db.dal(db.dal.cookie_consent.user_id == world["mallory"]).count() == 0
+        # Internal audit rows keep the true reason; the client cannot see them.
+        reasons = {r.details["outcome"] for r in _audit_rows(db)}
+        assert reasons == {"denied_not_in_tenant", "denied_unknown_user"}
+
+    async def test_bulk_unknown_foreign_and_malformed_items_are_identical(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        foreign = _uuid(world["mallory"])
+        response = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": "do_not_sell", "userIds": [foreign, UNKNOWN_UUID, "not-a-uuid", "12"]},
+        )
+
+        assert response.status_code == 200
+        results = (await response.get_json())["results"]
+        assert len(results) == 4
+        assert {
+            tuple(sorted((k, str(v)) for k, v in r.items() if k != "userId")) for r in results
+        } == {
+            (
+                ("data", "None"),
+                ("detail", "User not found"),
+                ("incomplete", "None"),
+                ("status", "not_found"),
+            )
+        }
+        assert db.dal(db.dal.cookie_consent.user_id == world["mallory"]).count() == 0
+
+    async def test_dto_field_sets_and_no_numeric_ids(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        alice = _uuid(world["alice"])
+        single = await client.put(
+            _base() + f"/users/{alice}/do-not-sell", headers=_headers(world["admin"])
+        )
+        body = await single.get_json()
+        assert set(body) == {"success", "action", "result"}
+        assert set(body["result"]) == {"userId", "status", "detail", "data", "incomplete"}
+        assert body["result"]["userId"] == alice
+
+        export = await client.get(
+            _base() + f"/users/{alice}/export", headers=_headers(world["admin"])
+        )
+        ebody = await export.get_json()
+        account = ebody["result"]["data"]["account"][0]
+        assert "id" not in account and account["public_id"] == alice
+        assert ebody["result"]["userId"] == alice
+        assert str(world["alice"]) not in export.headers["Content-Disposition"]
+
+        bulk = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": "do_not_sell", "userIds": [alice]},
+        )
+        bbody = await bulk.get_json()
+        assert set(bbody) == {"success", "action", "requested", "succeeded", "failed", "results"}
+        assert set(bbody["results"][0]) == {"userId", "status", "detail", "data", "incomplete"}
+        assert bbody["results"][0]["userId"] == alice
+
+    async def test_bulk_dedupes_on_canonical_form_and_audits_once(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        alice = _uuid(world["alice"])
+        response = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": "do_not_sell", "userIds": [alice, alice.upper(), f"  {alice} "]},
+        )
+        body = await response.get_json()
+        assert body["requested"] == 1 and [r["userId"] for r in body["results"]] == [alice]
+        assert len(_audit_rows(db)) == 1
+
+    async def test_cross_tenant_cannot_export_erase_or_opt_out_in_bulk(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        mallory = _uuid(world["mallory"])
+        for action, extra in (("export", {}), ("erase", {"confirm": True}), ("do_not_sell", {})):
+            response = await client.post(
+                _base() + "/bulk",
+                headers=_headers(world["admin"]),
+                json={"action": action, "userIds": [mallory], **extra},
+            )
+            result = (await response.get_json())["results"][0]
+            assert result["status"] == "not_found" and result["data"] is None, action
+        assert _user_row(db, world["mallory"]).email == "mallory@example.com"
 
 
 class TestOpenApiPaths:
     def test_single_user_routes_publish_their_full_paths(self, app: Quart) -> None:
-        """quart-schema collapses a typed param after another; untyped `<user_id>` must not."""
+        """quart-schema collapses a typed param after another; untyped `<user_uuid>` must not."""
         schema = app.extensions["QUART_SCHEMA"].openapi_provider.schema()
 
         paths = set(schema["paths"])
         base = "/api/v1/tenant/{tenant_slug}/privacy"
-        assert f"{base}/users/{{user_id}}/export" in paths
-        assert f"{base}/users/{{user_id}}/erase" in paths
-        assert f"{base}/users/{{user_id}}/do-not-sell" in paths
+        assert f"{base}/users/{{user_uuid}}/export" in paths
+        assert f"{base}/users/{{user_uuid}}/erase" in paths
+        assert f"{base}/users/{{user_uuid}}/do-not-sell" in paths
         assert f"{base}/bulk" in paths
-        assert not any(path.startswith("/api/v1/tenant/{user_id}") for path in paths)
+        assert not any(path.startswith("/api/v1/tenant/{user_uuid}") for path in paths)
 
 
 class TestScopeEdgeCases:
@@ -1453,7 +1859,7 @@ class TestScopeEdgeCases:
         assert scopes[world["alice"]].foreign_tenant_ids == frozenset()
 
     async def test_erase_of_a_vanished_user_is_not_found(self, db: Any) -> None:
-        result = await svc._erase_one(db, db.dal, user_id=99999)
+        result = await svc._erase_one(db, db.dal, user_id=99999, user_uuid=UNKNOWN_UUID)
 
         assert result.status is svc.DsarStatus.NOT_FOUND
 
@@ -1475,3 +1881,172 @@ class TestAnonymizeCore:
         db.dal.commit()
         assert row.status == "completed"
         assert row.deletion_scope["temp_passwords"] == 0
+
+
+class TestAdversarialReviewFixes:
+    """Adversarial-review items 2, 3, 4, 5, 6 (area C)."""
+
+    async def test_export_rows_carry_community_public_uuid_never_numeric_pk(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        _message_event(db, community_id=world["acme_community"], user_id=world["alice"])
+        _chat_message(db, community_id=world["acme_community"], user_id=world["alice"])
+
+        response = await client.get(
+            _base() + f"/users/{_uuid(world['alice'])}/export", headers=_headers(world["admin"])
+        )
+
+        data = (await response.get_json())["result"]["data"]
+        expected = _community_public_id(db, world["acme_community"])
+        assert [r["community_id"] for r in data["message_activity"]] == [expected]
+        assert [r["community_id"] for r in data["chat_messages"]] == [expected]
+        assert "id" not in data["account"][0]
+
+    async def test_do_not_sell_single_tenant_user_keeps_already_done(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        url = _base() + f"/users/{_uuid(world['alice'])}/do-not-sell"
+        await client.put(url, headers=_headers(world["admin"]))
+        second = await client.put(url, headers=_headers(world["admin"]))
+
+        assert (await second.get_json())["result"]["status"] == "already_done"
+
+    async def test_all_four_routes_identical_for_foreign_preopted_out_and_unknown(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        """Foreign user (already opted out) vs unknown UUID: same status+body on every route."""
+        db.dal.cookie_consent.insert(
+            user_id=world["mallory"],
+            consent_id="cid-m",
+            preferences={"necessary": True, "marketing": False, "doNotSell": True},
+            consent_version="v1",
+            consent_method="banner",
+            consented_at=datetime.now(UTC),
+            updated_at=datetime.now(UTC),
+        )
+        db.dal.commit()
+        foreign = _uuid(world["mallory"])
+
+        async def call(uid: str, route: str) -> tuple[int, str]:
+            if route == "bulk":
+                r = await client.post(
+                    _base() + "/bulk",
+                    headers=_headers(world["admin"]),
+                    json={"action": "do_not_sell", "userIds": [uid]},
+                )
+                text = await r.get_data(as_text=True)
+            else:
+                method, suffix, kw = {
+                    "export": ("get", "export", {}),
+                    "erase": ("post", "erase", {"json": {"confirm": True}}),
+                    "dns": ("put", "do-not-sell", {}),
+                }[route]
+                r = await getattr(client, method)(
+                    _base() + f"/users/{uid}/{suffix}", headers=_headers(world["admin"]), **kw
+                )
+                text = await r.get_data(as_text=True)
+            return r.status_code, text.replace(uid, "<U>")
+
+        for route in ("export", "erase", "dns", "bulk"):
+            assert await call(foreign, route) == await call(UNKNOWN_UUID, route), route
+
+    async def test_bulk_cap_applies_to_raw_list_including_duplicates(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        response = await client.post(
+            _base() + "/bulk",
+            headers=_headers(world["admin"]),
+            json={"action": "do_not_sell", "userIds": [UNKNOWN_UUID] * (svc.MAX_BULK_USERS + 1)},
+        )
+
+        assert response.status_code == 400
+        assert _audit_rows(db) == []
+
+    async def test_oversize_post_body_is_413(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        response = await client.post(
+            _base() + "/bulk",
+            headers={**_headers(world["admin"]), "Content-Type": "application/json"},
+            data=b"{" + b" " * 20000 + b"}",
+        )
+
+        assert response.status_code == 413
+
+    def test_partial_status_is_a_distinct_non_success_value(self) -> None:
+        assert svc.DsarStatus.PARTIAL.value == "partial"
+        assert svc.DsarStatus.PARTIAL not in (svc.DsarStatus.COMPLETED, svc.DsarStatus.ALREADY_DONE)
+
+
+class TestAdversarialReviewFixesAreaD:
+    """Adversarial-review area D: consent fail-closed, export scope, failure audit, NUL, PK."""
+
+    async def test_export_carries_the_global_do_not_sell_state_and_no_other_tenants_data(
+        self, client: Any, db: Any, world: dict[str, int], gate_on: Any
+    ) -> None:
+        alice = world["alice"]
+        _member(db, community_id=world["other_community"], user_id=alice)
+        _global_dns(db, alice)
+
+        response = await client.get(
+            _base() + f"/users/{_uuid(alice)}/export", headers=_headers(world["admin"])
+        )
+
+        data = (await response.get_json())["result"]["data"]
+        assert [r["preferences"]["doNotSell"] for r in data["cookie_consent"]] == [True]
+        assert not [key for key in data if "tenant" in key]
+        other = _community_public_id(db, world["other_community"])
+        assert other not in {
+            r["community_id"] for rows in data.values() for r in rows if "community_id" in r
+        }
+
+    async def test_failed_item_audited_and_bulk_loop_continues(
+        self, db: Any, world: dict[str, int]
+    ) -> None:
+        bob = _user(db, name="bob")
+        _member(db, community_id=world["acme_community"], user_id=bob)
+        actor = svc.DsarActor(user_id=world["admin"], tenant_id=ACME_ID, tenant_slug=TENANT_SLUG)
+        real = svc.apply_do_not_sell
+        calls = {"n": 0}
+
+        async def flaky(*a: Any, **kw: Any) -> bool:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise RuntimeError("txn aborted")
+            return await real(*a, **kw)
+
+        with mock.patch.object(svc, "apply_do_not_sell", flaky):
+            results = await svc.run_dsar_by_uuid(
+                db,
+                db.dal,
+                actor=actor,
+                action=svc.DsarAction.DO_NOT_SELL,
+                user_uuids=[_uuid(world["alice"]), _uuid(bob)],
+            )
+
+        assert [r.status.value for r in results] == ["failed", "completed"]
+        outcomes = [dict(r.details or {}).get("outcome") for r in _audit_rows(db)]
+        assert outcomes == ["failed", "completed"]
+
+    async def test_nul_bytes_never_reach_audit_target_or_result(
+        self, db: Any, world: dict[str, int]
+    ) -> None:
+        actor = svc.DsarActor(user_id=world["admin"], tenant_id=ACME_ID, tenant_slug=TENANT_SLUG)
+        results = await svc.run_dsar_by_uuid(
+            db,
+            db.dal,
+            actor=actor,
+            action=svc.DsarAction.EXPORT,
+            user_uuids=["abc\x00def"],
+        )
+
+        assert results[0].status is svc.DsarStatus.NOT_FOUND
+        assert "\x00" not in results[0].user_uuid
+        audit = _audit_rows(db)
+        assert len(audit) == 1 and "\x00" not in audit[0].target_id
+        assert audit[0].target_id == "abcdef"
+
+    def test_dsar_result_cannot_carry_a_numeric_user_pk(self) -> None:
+        import dataclasses
+
+        assert "user_id" not in {f.name for f in dataclasses.fields(svc.DsarResult)}

@@ -16,7 +16,7 @@ Authz order (security.md): `tenant_middleware` first, then DB-backed community m
 (`authorize_community`, tenant-ownership re-checked), then the manifest-declared community scope.
 There is deliberately no flat JWT scope: a community admin never carries one at issuance (see
 `services/community_authz.py`). Every route is rate limited per user/community/bundle/tool and
-fails closed (503) when the limiter is not wired.
+fails closed (503) when no limiter is configured on the app.
 """
 
 from __future__ import annotations
@@ -34,6 +34,9 @@ from quart import Blueprint, current_app, request
 from quart_schema import validate_request, validate_response
 
 from services import bundle_admin_gateway_service as svc
+from services import bundle_community_config_runtime as bundle_config_runtime
+from services import valkey_admin_client
+from services.bundle_app_id import is_valid_app_id
 from services.bundle_tool_transport import ToolTransport, ValkeyToolTransport
 from services.community_authz import CommunityMembership, authorize_community
 from services.current_user import get_current_user_id
@@ -45,16 +48,41 @@ logger = logging.getLogger(__name__)
 bundle_admin_gateway_bp = Blueprint(
     "v1_bundle_admin_gateway",
     __name__,
-    url_prefix="/api/v1/apps/community/<int:community_id>/bundles/<app_id>",
+    url_prefix="/api/v1/apps/community/<cuuid:community_id>/bundles/<app_id>",
 )
 
-_APP_ID_RE = re.compile(r"^waddles\.[a-z0-9_-]+\.[a-z0-9_-]+\.[a-z0-9_-]+$")
 _NAME_RE = re.compile(r"^[a-z][a-z0-9_.]{0,63}$")
 #: Requests per minute per (user, community, bundle, tool).
 ACTION_RATE_PER_MIN = 30
 READ_RATE_PER_MIN = 120
 _RATE_WINDOW_S = 60
 _MAX_QUERY_ARGS = 4096
+
+
+async def _publish_config_version(
+    tenant_id: int, community_id: int, app_id: str, version: int
+) -> bool:
+    """Bump the Valkey version key stages poll (best-effort; never fails the admin's save)."""
+    try:
+        valkey = valkey_admin_client.build_client()
+    except Exception as exc:  # noqa: BLE001 - propagation is best-effort (stage TTL backstop)
+        logger.warning(
+            "bundle_config.publish_unavailable error_type=%s tenant_id=%s community_id=%s",
+            type(exc).__name__,
+            tenant_id,
+            community_id,
+        )
+        return False
+    try:
+        return await bundle_config_runtime.publish_version(
+            valkey,
+            tenant_id=tenant_id,
+            community_id=community_id,
+            app_id=app_id,
+            version=version,
+        )
+    finally:
+        await valkey.aclose()
 
 
 def _err(exc: ApiError) -> tuple[Any, int]:
@@ -100,7 +128,7 @@ async def _gate(community_id: int, app_id: str, *, name: str, limit: int) -> Gat
     """Tenant -> membership -> rate limit -> active-bundle resolution (each fails closed)."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 - tenant_middleware ran first
-    if not _APP_ID_RE.fullmatch(app_id):
+    if not is_valid_app_id(app_id):
         raise ApiError("invalid app id", 400, "BAD_REQUEST")
     async_dal, dal = current_app.config["async_dal"], current_app.config["dal"]
     membership = await authorize_community(
@@ -276,6 +304,7 @@ async def put_config(
             actor_id=gate.user_id,
             config=data.config,
             expected_version=data.expectedVersion,
+            on_saved=_publish_config_version,
         )
     except ApiError as exc:
         logger.warning(

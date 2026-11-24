@@ -1,9 +1,8 @@
 # hub-api install-pipeline manifest (bundle_manifest_v2 schema, schema_version 2) for
 schema_version: 2
-app_id: waddles.core.example.define
+app_id: penguintechinc.waddles.define
 name: Define (AI) Example Bundle (Python)
-version: 1.0.1
-feature: waddles.core.example
+version: 1.0.4
 module: core
 provider: builtin
 author: github:penguintechinc

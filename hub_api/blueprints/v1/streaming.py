@@ -32,8 +32,10 @@ from quart_schema import validate_response
 
 from services import stream_keys_service as svc
 from services.community_authz import authorize_community
-from services.errors import ApiError, bad_request, payment_required
+from services.community_public_id import UNKNOWN_COMMUNITY_ID
+from services.errors import ApiError, bad_request, not_found, payment_required
 from services.schema import bind_stream_keys_tables
+from services.scope_registry import SCOPE_STREAM_CONFIG
 from services.stream_keys_service import (
     StreamConfigDTO,
     StreamDestinationDTO,
@@ -123,7 +125,15 @@ def _dal() -> tuple[Any, Any]:
 async def _authorize(community_id: int, *, require_broadcast: bool = False) -> tuple[Any, Any]:
     """Tenant + community-admin gate (and optionally the broadcast flag); returns the DAL pair."""
     async_dal, dal = _dal()
-    await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+    await authorize_community(
+        request, async_dal, dal, community_id=community_id, admin=True, scope=SCOPE_STREAM_CONFIG
+    )
+    # An unknown community UUID resolves to the -1 sentinel and a platform/system admin passes
+    # the authz helper for ANY id; without this the create path inserted community_id=-1 and hit
+    # `streaming_configs_community_id_fkey` (500). Checked AFTER authz so non-admins still get the
+    # same response they always did (no existence oracle).
+    if community_id == UNKNOWN_COMMUNITY_ID:
+        raise not_found("Community not found")
     if require_broadcast:
         ctx = get_tenant_context(request)
         assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
@@ -146,7 +156,7 @@ async def _json_body() -> dict[str, Any]:
     return body
 
 
-@streaming_bp.route("/<int:community_id>/streams", methods=["GET"])
+@streaming_bp.route("/<cuuid:community_id>/streams", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(ConfigResponse)
 async def get_stream_config(
@@ -160,7 +170,7 @@ async def get_stream_config(
     return ConfigResponse(success=True, config=config)
 
 
-@streaming_bp.route("/<int:community_id>/streams", methods=["POST"])
+@streaming_bp.route("/<cuuid:community_id>/streams", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(KeyRevealResponse, 201)
 async def create_stream_config(
@@ -179,7 +189,7 @@ async def create_stream_config(
     return KeyRevealResponse(success=True, config=config, streamKey=key), 201, _NO_STORE
 
 
-@streaming_bp.route("/<int:community_id>/streams/key/regenerate", methods=["POST"])
+@streaming_bp.route("/<cuuid:community_id>/streams/key/regenerate", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(KeyRevealResponse)
 async def regenerate_stream_key(
@@ -193,7 +203,7 @@ async def regenerate_stream_key(
     return KeyRevealResponse(success=True, config=config, streamKey=key), 200, _NO_STORE
 
 
-@streaming_bp.route("/<int:community_id>/streams/destinations", methods=["GET"])
+@streaming_bp.route("/<cuuid:community_id>/streams/destinations", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(DestinationsResponse)
 async def get_destinations(
@@ -205,7 +215,7 @@ async def get_destinations(
     return DestinationsResponse(success=True, destinations=destinations)
 
 
-@streaming_bp.route("/<int:community_id>/streams/destinations", methods=["POST"])
+@streaming_bp.route("/<cuuid:community_id>/streams/destinations", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(DestinationResponse, 201)
 async def add_destination(
@@ -220,7 +230,9 @@ async def add_destination(
     return DestinationResponse(success=True, destination=destination), 201
 
 
-@streaming_bp.route("/<int:community_id>/streams/destinations/<destination_id>", methods=["DELETE"])
+@streaming_bp.route(
+    "/<cuuid:community_id>/streams/destinations/<destination_id>", methods=["DELETE"]
+)
 @tenant_middleware  # type: ignore[misc]
 @validate_response(MessageResponse)
 async def remove_destination(
@@ -235,7 +247,7 @@ async def remove_destination(
 
 
 @streaming_bp.route(
-    "/<int:community_id>/streams/destinations/<destination_id>/force-cut", methods=["PUT"]
+    "/<cuuid:community_id>/streams/destinations/<destination_id>/force-cut", methods=["PUT"]
 )
 @tenant_middleware  # type: ignore[misc]
 @validate_response(DestinationResponse)
@@ -258,7 +270,7 @@ async def toggle_force_cut(
     return DestinationResponse(success=True, destination=destination)
 
 
-@streaming_bp.route("/<int:community_id>/streams/status", methods=["GET"])
+@streaming_bp.route("/<cuuid:community_id>/streams/status", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(StatusResponse)
 async def get_stream_status(

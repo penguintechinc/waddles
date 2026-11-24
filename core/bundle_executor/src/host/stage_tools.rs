@@ -129,7 +129,7 @@ mod tests {
         });
         let state = ExecState::new(
             Some(HostBridge::new(connection)),
-            "waddles.test.caller".to_string(),
+            "penguintechinc.waddles.test-caller".to_string(),
             7,
         );
         (state, seen_rx)
@@ -140,7 +140,7 @@ mod tests {
         let (mut st, seen) = state_with_stage(Ok(serde_json::json!({"ok": {"balance": 5}})));
         let out = tool::Host::invoke(
             &mut st,
-            "waddles.core.economy".to_string(),
+            "penguintechinc.waddles.economy".to_string(),
             "get_balance".to_string(),
             br#"{"user":"u1"}"#.to_vec(),
             Some("k".to_string()),
@@ -156,7 +156,7 @@ mod tests {
         assert_eq!(
             args,
             serde_json::json!({
-                "target": "waddles.core.economy",
+                "target": "penguintechinc.waddles.economy",
                 "tool": "get_balance",
                 "args": {"user": "u1"},
                 "idempotency_key": "k",

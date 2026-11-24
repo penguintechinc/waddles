@@ -30,7 +30,7 @@ struct FakeDekProvider;
 impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
     async fn get_dek(
         &self,
-        _tenant_id: &str,
+        _tenant_id: i64,
     ) -> Result<
         (svc_ingest::identity_crypto::Dek, u32),
         svc_ingest::identity_crypto::DekUnavailableError,
@@ -147,7 +147,7 @@ async fn start(
     let rig = WireRig::start(
         vec![RigConnector {
             platform: platform.to_string(),
-            app_id: format!("waddles.core.example.{platform}"),
+            app_id: format!("penguintechinc.waddles.{platform}"),
             wasm,
             world: bundle_executor::manifest::WitWorld::Connector,
         }],
@@ -443,7 +443,7 @@ async fn faulty_rig(platform: &str) -> WireRig {
     WireRig::start(
         vec![RigConnector {
             platform: platform.to_string(),
-            app_id: format!("waddles.core.test.{platform}"),
+            app_id: format!("penguintechinc.waddles.test-{platform}"),
             wasm: FAULTY_WASM,
             world: bundle_executor::manifest::WitWorld::Connector,
         }],
@@ -516,7 +516,7 @@ async fn two_executor_replicas_share_one_link_and_survive_losing_one() {
 
     let faulty = || RigConnector {
         platform: "faulty".to_string(),
-        app_id: "waddles.core.test.faulty".to_string(),
+        app_id: "penguintechinc.waddles.test-faulty".to_string(),
         wasm: FAULTY_WASM,
         world: bundle_executor::manifest::WitWorld::Connector,
     };
@@ -601,7 +601,7 @@ async fn a_digest_the_executor_never_pinned_is_refused_not_rerouted() {
     registry
         .register(PinnedConnector::new(
             "faulty",
-            "waddles.core.test.faulty",
+            "penguintechinc.waddles.test-faulty",
             "sha256:0000000000000000000000000000000000000000000000000000000000000000",
             4096,
         ))

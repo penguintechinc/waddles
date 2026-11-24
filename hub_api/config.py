@@ -12,15 +12,11 @@ every data structure, `frozen=True` for a value object built once at
 startup and never mutated.
 
 Two field names deliberately mirror `flask_core` verbatim rather than
-inventing a hub-api-local name: `secret_key` reads `SECRET_KEY` (not
-`JWT_SECRET_KEY`) because `flask_core.tenancy.tenant_middleware` and
-`flask_core.authz.require_scope` both call `flask_core.secrets.
-require_secret_key()` directly at request time -- a differently-named env
-var here would leave those decorators reading a different (or unset)
-value than `HubAPIConfig.secret_key`. `require_secret_key()` fails closed
-(raises `InsecureSecretError`) rather than silently falling back to the
-`"change-me-in-production"` placeholder when running in a production-like
-environment (C1, security audit) -- see `flask_core.secrets` module docs.
+inventing a hub-api-local name: `secret_key` reads `SESSION_MAC_KEY`. It is NOT a JWT key (platform
+JWTs are ES256 with keys in `platform_vault`, see `flask_core.jwt_keyring`); it only keys the
+Flask session cookie and the refresh-token MAC, and `require_secret_key()` fails closed (raises
+`InsecureSecretError`) rather than silently falling back to the `"change-me-in-production"`
+placeholder when running in a production-like environment (C1, security audit).
 Likewise `posthog_api_key`/`posthog_host` mirror `flask_core.entitlement`'s
 own `POSTHOG_API_KEY`/`POSTHOG_HOST` lookups. Config.from_env() exists so
 hub-api's own code (logging, health blueprint naming, OpenAPI info) has
@@ -35,6 +31,7 @@ import os
 from dataclasses import dataclass
 from urllib.parse import quote_plus
 
+from flask_core.auth import DEFAULT_TENANT_SLUG
 from flask_core.secrets import require_secret_key
 
 #: DB_TYPE values this config understands (backend-database.md Database
@@ -113,9 +110,8 @@ class HubAPIConfig:
     db_max_retries: int
     db_retry_delay: int
 
-    # Mirrors flask_core's own SECRET_KEY / HS256 lookup -- see module docstring.
+    # Session-cookie / refresh-token MAC key (SESSION_MAC_KEY) -- NOT a JWT key.
     secret_key: str
-    jwt_algorithm: str
     default_tenant_slug: str
 
     # flask_core.entitlement reads POSTHOG_API_KEY/POSTHOG_HOST directly;
@@ -230,6 +226,11 @@ class HubAPIConfig:
     # actual ingress chain; it is never inferred automatically.
     trusted_proxy_hops: int = 0
 
+    # Dedicated MAC key for the login ALTCHA challenge (`ALTCHA_HMAC_KEY`, auto-generated
+    # into waddlebot-secrets by the chart). Never derived from the app/session secret; empty
+    # means the captcha endpoint and verification fail closed (503).
+    altcha_hmac_key: str = ""
+
     # security.md Input Validation -- server-side upper bound on every
     # client-suppliable `?limit=` page-size param. Read by
     # `services/pagination.py::parse_limit()`, the shared helper every
@@ -335,9 +336,8 @@ class HubAPIConfig:
             db_pool_size=int(os.getenv("DB_POOL_SIZE", "10")),
             db_max_retries=int(os.getenv("DB_MAX_RETRIES", "5")),
             db_retry_delay=int(os.getenv("DB_RETRY_DELAY", "5")),
-            secret_key=require_secret_key(),
-            jwt_algorithm=os.getenv("JWT_ALGORITHM", "HS256"),
-            default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", "default"),
+            secret_key=require_secret_key("SESSION_MAC_KEY"),
+            default_tenant_slug=os.getenv("DEFAULT_TENANT_SLUG", DEFAULT_TENANT_SLUG),
             posthog_api_key=os.getenv("POSTHOG_API_KEY") or os.getenv("POSTHOG_KEY"),
             posthog_host=os.getenv("POSTHOG_HOST", "https://license.penguintech.io"),
             license_server_url=os.getenv("LICENSE_SERVER_URL", "https://license.penguintech.io"),
@@ -367,6 +367,7 @@ class HubAPIConfig:
                 1, int(os.getenv("RATE_LIMIT_AUTH_WINDOW_MS", "60000")) // 1000
             ),
             trusted_proxy_hops=max(0, int(os.getenv("TRUSTED_PROXY_HOPS", "0"))),
+            altcha_hmac_key=os.getenv("ALTCHA_HMAC_KEY", ""),
             api_max_page_size=int(os.getenv("API_MAX_PAGE_SIZE", "100")),
             public_webui_url=os.getenv("PUBLIC_WEBUI_URL", "http://localhost:30879").rstrip("/"),
             connections_callback_base_url=(

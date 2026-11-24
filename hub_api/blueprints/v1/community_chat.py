@@ -40,8 +40,9 @@ from services.community_chat import (
     get_chat_channels,
     get_chat_history,
 )
-from services.community_common import api_error, community_in_tenant
+from services.community_common import api_error, community_in_tenant, feature_not_enabled
 from services.pagination import parse_limit
+from services.route_guards import community_member_guard
 
 chat_bp = Blueprint("v1_community_chat", __name__, url_prefix="/api/v1/community")
 
@@ -50,16 +51,17 @@ chat_bp = Blueprint("v1_community_chat", __name__, url_prefix="/api/v1/community
 FEATURE_COMMUNITY_CHAT = "waddles.community.chat"
 
 
-@chat_bp.route("/<int:community_id>/chat/history", methods=["GET"])
+@chat_bp.route("/<cuuid:community_id>/chat/history", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.chat:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(ChatHistoryResponse)
 async def chat_history(community_id: int) -> ChatHistoryResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/chat/history` -- paginated message history."""
     ctx = get_tenant_context(request)
     assert ctx is not None  # nosec B101 -- tenant_middleware guarantees this
     if not await feature_enabled(FEATURE_COMMUNITY_CHAT, tenant=ctx.tenant_slug):
-        return api_error("Community chat is not enabled for this plan", 402)
+        return feature_not_enabled("Community chat is not enabled for this plan")
     dal = current_app.config["dal"]
     if not community_in_tenant(dal, community_id, ctx):
         return api_error("Community not found", status_code=404)
@@ -74,9 +76,10 @@ async def chat_history(community_id: int) -> ChatHistoryResponse | tuple[dict[st
     return ChatHistoryResponse(success=True, messages=messages, has_more=has_more)
 
 
-@chat_bp.route("/<int:community_id>/chat/channels", methods=["GET"])
+@chat_bp.route("/<cuuid:community_id>/chat/channels", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.chat:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 @validate_response(ChatChannelsResponse)
 async def chat_channels(community_id: int) -> ChatChannelsResponse | tuple[dict[str, object], int]:
     """`GET /api/v1/community/<id>/chat/channels` -- distinct channels + activity."""

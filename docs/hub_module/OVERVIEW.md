@@ -70,7 +70,7 @@ OAuth credentials are now managed at the correct ownership layer rather than cen
 - **Platform Settings Page** — `AdminPlatformSettings.jsx` at `/admin/:communityId/platform-settings` — manage default community per linked server; grouped by platform
 - **My Channels** — `MyChannels.jsx` at `/dashboard/my-channels` — personal page for users to manage their own platform channel connections
 - **Community Context Switching** — Per-user context override via `/context switch <community>` on all platforms; validated against approved links; Redis-cached with DB fallback
-- **Shared Platform Library** — `libs/platform_receiver/` provides `PlatformReceiverBase`, event schema, and response helpers for all receiver bots; designed for future platform additions
+- **Shared Platform Library** — libs/platform_receiver provides `PlatformReceiverBase`, event schema, and response helpers for all receiver bots; designed for future platform additions
 - **Migrations 051–054** — Corrected `is_core` flags, added `initiated_by`/`link_type` to server link requests, seeded 60+ platform commands, added `user_platform_context` table
 
 ## New in v1.1.0

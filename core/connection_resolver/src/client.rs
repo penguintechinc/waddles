@@ -359,6 +359,7 @@ impl ConnectionResolver {
         let request = bearer_request(
             ListBindingsRequest {
                 provider: provider.to_string(),
+                // nosemgrep: rust-silent-unwrap-or-default -- Option<&str> to proto empty-string sentinel for no capability filter
                 capability: capability.unwrap_or_default().to_string(),
                 after,
                 limit,

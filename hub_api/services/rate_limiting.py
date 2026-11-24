@@ -51,6 +51,8 @@ from services.current_user import get_optional_current_user_id
 _AUTH_TIER_PREFIXES: tuple[str, ...] = (
     "/api/v1/auth/",
     "/api/v1/user/passkey/",
+    # Discount-code validation is a guessable-secret oracle: brute-force tier.
+    "/api/v1/marketplace/vendor/discount-codes/validate",
     # (The machine-JWT bootstrap is gRPC now; its per-peer rate limit lives in
     # grpc_internal/interceptors.py::RateLimitInterceptor, keyed by peer host.)
 )

@@ -32,7 +32,7 @@ PLATFORM_CHAIN_ID: Final[str] = "platform"
 _ACTION_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_.]{1,99}$")
 _DETAIL_KEY_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_]{0,39}$")
 #: Identifier-shaped strings only: no spaces, no ``@`` (so no e-mail address), no quotes.
-_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:/<>=\-]{1,128}$")
+_TOKEN_RE: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z0-9_.:/<>=*\-]{1,128}$")
 _TARGET_TYPE_RE: Final[re.Pattern[str]] = re.compile(r"^[a-z][a-z0-9_.]{0,49}$")
 
 MAX_DETAIL_KEYS: Final[int] = 16
@@ -147,6 +147,7 @@ class AuditAction(StrEnum):
     ADMIN_REPUTATION_POLICY_CHANGED = "admin.reputation_policy_changed"
     ADMIN_REPUTATION_OVERRIDDEN = "admin.reputation_overridden"
     ADMIN_REPUTATION_SOFT_BAN_CHANGED = "admin.reputation_soft_ban_changed"
+    ADMIN_FLOOR_BAN_LIFTED = "admin.floor_ban_lifted"
     AUDIT_EXPORTED = "audit.exported"
     AUDIT_VERIFY_FAILED = "audit.verify_failed"
     # --- credential / secret lifecycle (inline-authz routes; the secret value is never logged) ---
@@ -177,6 +178,15 @@ class AuditAction(StrEnum):
     LICENSE_TOKEN_BALANCE_CHANGED = "license.token_balance_changed"  # noqa: S105  # nosec B105
     LICENSE_PAYOUT_PROFILE_CHANGED = "license.payout_profile_changed"
     LICENSE_VENDOR_MODULE_CHANGED = "license.vendor_module_changed"
+    # --- community tier allocation (Pro/Ent team entitlements drawn from the tenant pool) ---
+    LICENSE_COMMUNITY_TIER_ALLOCATED = "license.community_tier_allocated"
+    LICENSE_COMMUNITY_TIER_RELEASED = "license.community_tier_released"
+    LICENSE_COMMUNITY_TIER_OVERRIDDEN = "license.community_tier_overridden"
+    LICENSE_COMMUNITY_TIER_ALLOCATION_BLOCKED = "license.community_tier_allocation_blocked"
+    # --- per-tenant licensing (issue #901): tenant license key + operator-set pools ---
+    LICENSE_TENANT_KEY_SET = "license.tenant_key_set"
+    LICENSE_TENANT_KEY_CLEARED = "license.tenant_key_cleared"
+    LICENSE_TENANT_POOL_SET = "license.tenant_pool_set"
     # --- community administration ---
     ADMIN_COMMUNITY_PROFILE_CHANGED = "admin.community_profile_changed"
     ADMIN_AI_CONFIG_CHANGED = "admin.ai_config_changed"
@@ -186,6 +196,9 @@ class AuditAction(StrEnum):
     ADMIN_CALENDAR_EVENT_CHANGED = "admin.calendar_event_changed"
     ADMIN_TICKETING_CHANGED = "admin.ticketing_changed"
     PRIVACY_CONSENT_CHANGED = "privacy.consent_changed"
+    PRIVACY_EXCLUSION_ADDED = "privacy.exclusion_added"
+    PRIVACY_EXCLUSION_REMOVED = "privacy.exclusion_removed"
+    PRIVACY_EXCLUSIONS_RECONCILED = "privacy.exclusions_reconciled"
 
 
 class AuditValidationError(ValueError):
@@ -193,7 +206,8 @@ class AuditValidationError(ValueError):
 
 
 #: ``<identifier>@<semver>`` -- how bundle lifecycle events name a versioned artefact
-#: (``waddles.core.ping@1.0.0``). The part after ``@`` must look like a version (digits first,
+#: (``penguintechinc.waddles.ping@1.0.0``). The part after ``@`` must look like a version
+#: (digits first,
 #: no letters-only TLD), so an e-mail address still cannot pass as an identifier.
 _VERSIONED_REF_RE: Final[re.Pattern[str]] = re.compile(
     r"^[A-Za-z0-9_.\-]{1,100}@\d+(\.\d+){0,3}([\-+][A-Za-z0-9.\-+]{0,30})?$"
@@ -205,7 +219,7 @@ def _check_token(label: str, value: str) -> str:
     if _TOKEN_RE.match(value) or _VERSIONED_REF_RE.match(value):
         return value
     raise AuditValidationError(
-        f"{label} must be identifier-shaped ([A-Za-z0-9_.:/<>=-], 1-128 chars, or "
+        f"{label} must be identifier-shaped ([A-Za-z0-9_.:/<>=*-], 1-128 chars, or "
         "name@version); free text and e-mail-shaped values are not auditable"
     )
 
@@ -362,65 +376,66 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("POST", "/api/v1/tenant/<tenant_slug>/admins"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_ADDED
     ),
-    ("DELETE", "/api/v1/tenant/<tenant_slug>/admins/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/tenant/<tenant_slug>/admins/<uuuid:user_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.TENANT_ADMIN_REMOVED
     ),
     ("POST", "/api/v1/superadmin/tenants"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_CREATED
     ),
-    ("PUT", "/api/v1/superadmin/tenants/<int:tenant_id>"): RouteAudit(
+    ("PUT", "/api/v1/superadmin/tenants/<puuid:tenant_id>"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_UPDATED
     ),
-    ("DELETE", "/api/v1/superadmin/tenants/<int:tenant_id>"): RouteAudit(
+    ("DELETE", "/api/v1/superadmin/tenants/<puuid:tenant_id>"): RouteAudit(
         AuditCategory.TENANT, AuditAction.TENANT_DELETED
     ),
     # --- session revocation (admin) ---
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/revoke-sessions"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/revoke-sessions"): RouteAudit(
         AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/sessions/<int:session_id>/revoke"): RouteAudit(
-        AuditCategory.AUTHN, AuditAction.SESSION_REVOKED
-    ),
+    (
+        "POST",
+        "/api/v1/superadmin/users/<uuuid:user_id>/sessions/<puuid:session_id>/revoke",
+    ): RouteAudit(AuditCategory.AUTHN, AuditAction.SESSION_REVOKED),
     # --- role / privilege changes ---
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/super-admin-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/super-admin-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_SUPER_ADMIN_CHANGED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/vendor-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/vendor-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_VENDOR_CHANGED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/analytics-consumer-role"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/analytics-consumer-role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_ANALYTICS_CONSUMER_CHANGED
     ),
-    ("PUT", "/api/v1/platform/users/<int:user_id>/role"): RouteAudit(
+    ("PUT", "/api/v1/platform/users/<uuuid:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_PLATFORM_USER_CHANGED
     ),
-    ("POST", "/api/v1/communities/<int:community_id>/join"): RouteAudit(
+    ("POST", "/api/v1/communities/<cuuid:community_id>/join"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<int:community_id>/members/<int:user_id>/role"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>/role"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_MEMBER_CHANGED
     ),
-    ("POST", "/api/v1/admin/<int:community_id>/interaction/roles"): RouteAudit(
+    ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/roles"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<int:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<puuid:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
-    ("DELETE", "/api/v1/admin/<int:community_id>/interaction/roles/<int:role_id>"): RouteAudit(
+    ("DELETE", "/api/v1/admin/<cuuid:community_id>/interaction/roles/<puuid:role_id>"): RouteAudit(
         AuditCategory.ROLE, AuditAction.ROLE_DEFINITION_CHANGED
     ),
     # --- user administration ---
     ("POST", "/api/v1/superadmin/users"): RouteAudit(AuditCategory.USER, AuditAction.USER_CREATED),
-    ("PUT", "/api/v1/superadmin/users/<int:user_id>"): RouteAudit(
+    ("PUT", "/api/v1/superadmin/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_UPDATED
     ),
-    ("DELETE", "/api/v1/superadmin/users/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/superadmin/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_DELETED
     ),
-    ("DELETE", "/api/v1/platform/users/<int:user_id>"): RouteAudit(
+    ("DELETE", "/api/v1/platform/users/<uuuid:user_id>"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_DELETED
     ),
-    ("POST", "/api/v1/superadmin/users/<int:user_id>/password-reset"): RouteAudit(
+    ("POST", "/api/v1/superadmin/users/<uuuid:user_id>/password-reset"): RouteAudit(
         AuditCategory.USER, AuditAction.USER_PASSWORD_RESET
     ),
     # --- statutory privacy rights (audited in every entitled tenant; never gated themselves) ---
@@ -464,7 +479,7 @@ SEMANTIC_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
     ("PUT", "/api/v1/tenant/<tenant_slug>/reputation/config"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_POLICY_CHANGED
     ),
-    ("PUT", "/api/v1/admin/<int:community_id>/members/<int:user_id>/reputation"): RouteAudit(
+    ("PUT", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>/reputation"): RouteAudit(
         AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_OVERRIDDEN
     ),
 }
@@ -476,11 +491,10 @@ def _ra(category: AuditCategory, action: AuditAction) -> RouteAudit:
 
 
 _P = "/api/v1"
-_ADM = "/api/v1/admin/<int:community_id>"
-_ADMS = "/api/v1/admin/<community_id>"
-_CAL = "/api/v1/admin/<community_id>/calendar/events/<event_id>"
-_WF = "/api/v1/admin/<community_id>/workflows"
-_APPS = "/api/v1/apps/community/<int:community_id>"
+_ADM = "/api/v1/admin/<cuuid:community_id>"
+_ADMS = "/api/v1/admin/<cuuid:community_id>"
+_WF = "/api/v1/admin/<cuuid:community_id>/workflows"
+_APPS = "/api/v1/apps/community/<cuuid:community_id>"
 
 #: Routes that authorize *inline* (a ``tenant_middleware`` + in-handler community/role check, or
 #: self-service ownership) instead of ``@require_scope``. ``require_scope`` publishes the
@@ -502,9 +516,13 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.ADMIN, AuditAction.ADMIN_REPUTATION_SOFT_BAN_CHANGED),
         (
-            ("PUT", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
-            ("DELETE", f"{_ADM}/reputation/soft-bans/<int:user_id>"),
+            ("PUT", f"{_ADM}/reputation/soft-bans/<uuuid:user_id>"),
+            ("DELETE", f"{_ADM}/reputation/soft-bans/<uuuid:user_id>"),
         ),
+    ),
+    (
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_FLOOR_BAN_LIFTED),
+        (("DELETE", f"{_ADM}/reputation/floor-bans/<uuid:user_uuid>"),),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_BYOK_KEY_SET),
@@ -539,13 +557,13 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_PASSKEY_REMOVED),
-        (("DELETE", f"{_P}/user/passkey/credentials/<int:credential_id>"),),
+        (("DELETE", f"{_P}/user/passkey/credentials/<puuid:credential_id>"),),
     ),
     (
         _ra(AuditCategory.CREDENTIAL, AuditAction.CREDENTIAL_CONNECTION_CHANGED),
         (
-            ("POST", f"{_P}/<community_id>/github-sync/connections"),
-            ("DELETE", f"{_P}/<community_id>/github-sync/connections/<connection_id>"),
+            ("POST", f"{_P}/<cuuid:community_id>/github-sync/connections"),
+            ("DELETE", f"{_P}/<cuuid:community_id>/github-sync/connections/<connection_id>"),
             ("POST", f"{_ADM}/music/providers/<provider>/oauth"),
             ("DELETE", f"{_ADM}/music/providers/<provider>"),
             ("POST", f"{_ADM}/streams/destinations"),
@@ -578,18 +596,10 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (("PUT", f"{_P}/user/identities/primary"),),
     ),
     (
-        _ra(AuditCategory.ROLE, AuditAction.ROLE_EVENT_ADMIN_CHANGED),
-        (
-            ("POST", f"{_CAL}/admins"),
-            ("PUT", f"{_CAL}/admins/<admin_id>"),
-            ("DELETE", f"{_CAL}/admins/<admin_id>"),
-        ),
-    ),
-    (
         _ra(AuditCategory.ROLE, AuditAction.ROLE_JOIN_REQUEST_DECIDED),
         (
-            ("PUT", f"{_ADM}/join-requests/<int:request_id>/approve"),
-            ("PUT", f"{_ADM}/join-requests/<int:request_id>/reject"),
+            ("PUT", f"{_ADM}/join-requests/<puuid:request_id>/approve"),
+            ("PUT", f"{_ADM}/join-requests/<puuid:request_id>/reject"),
         ),
     ),
     (
@@ -604,8 +614,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("POST", f"{_APPS}/activation"),
             ("DELETE", f"{_APPS}/activation/<app_id>"),
-            ("POST", f"{_P}/marketplace/community/<int:community_id>/bundles"),
-            ("DELETE", f"{_P}/marketplace/community/<int:community_id>/bundles/<app_id>"),
+            ("POST", f"{_P}/marketplace/community/<cuuid:community_id>/bundles"),
+            ("DELETE", f"{_P}/marketplace/community/<cuuid:community_id>/bundles/<app_id>"),
         ),
     ),
     (
@@ -623,8 +633,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
     (
         _ra(AuditCategory.LICENSE, AuditAction.LICENSE_TOKEN_BALANCE_CHANGED),
         (
-            ("POST", f"{_P}/marketplace/communities/<int:community_id>/tokens/credit"),
-            ("POST", f"{_P}/marketplace/communities/<int:community_id>/tokens/debit"),
+            ("POST", f"{_P}/marketplace/communities/<cuuid:community_id>/tokens/credit"),
+            ("POST", f"{_P}/marketplace/communities/<cuuid:community_id>/tokens/debit"),
         ),
     ),
     (
@@ -639,8 +649,8 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("POST", f"{_P}/marketplace/vendor/request"),
             ("POST", f"{_P}/marketplace/vendor/modules"),
-            ("PUT", f"{_P}/marketplace/vendor/modules/<int:module_id>"),
-            ("POST", f"{_P}/marketplace/vendor/modules/<int:module_id>/submit"),
+            ("PUT", f"{_P}/marketplace/vendor/modules/<puuid:module_id>"),
+            ("POST", f"{_P}/marketplace/vendor/modules/<puuid:module_id>/submit"),
         ),
     ),
     (
@@ -662,8 +672,7 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         (
             ("PUT", f"{_ADM}/music/settings"),
             ("POST", f"{_ADM}/music/radio-stations"),
-            ("DELETE", f"{_ADM}/music/radio-stations/<int:station_id>"),
-            ("PUT", f"{_ADM}/music-station/policy"),
+            ("DELETE", f"{_ADM}/music/radio-stations/<puuid:station_id>"),
         ),
     ),
     (
@@ -684,26 +693,31 @@ _INLINE_AUTHZ_GROUPS: Final[tuple[tuple[RouteAudit, tuple[tuple[str, str], ...]]
         ),
     ),
     (
-        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_CALENDAR_EVENT_CHANGED),
+        # Community admin routes gated by dedicated community scopes resolved in-handler (they
+        # used a JWT `require_scope`, which the generic admin-action rule covered).
+        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_ACTION),
         (
-            ("POST", f"{_ADMS}/calendar/events"),
-            ("PUT", _CAL),
-            ("DELETE", _CAL),
-            ("POST", f"{_CAL}/approve"),
-            ("POST", f"{_CAL}/reject"),
-        ),
-    ),
-    (
-        _ra(AuditCategory.ADMIN, AuditAction.ADMIN_TICKETING_CHANGED),
-        (
-            ("POST", f"{_CAL}/ticketing/enable"),
-            ("POST", f"{_CAL}/ticketing/disable"),
-            ("POST", f"{_CAL}/ticket-types"),
-            ("PUT", f"{_CAL}/ticket-types/<type_id>"),
-            ("DELETE", f"{_CAL}/ticket-types/<type_id>"),
-            ("POST", f"{_CAL}/tickets"),
-            ("POST", f"{_CAL}/tickets/<ticket_id>/cancel"),
-            ("POST", f"{_CAL}/tickets/<ticket_id>/transfer"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/settings"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkout"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/inventory/checkin"),
+            ("DELETE", "/api/v1/admin/<cuuid:community_id>/members/<uuuid:user_id>"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/temp-password"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/modules/<int:module_id>/config"),
+            ("POST", "/api/v1/admin/<cuuid:community_id>/interaction/channels"),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>"),
+            (
+                "DELETE",
+                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>",
+            ),
+            ("PUT", "/api/v1/admin/<cuuid:community_id>/interaction/forum/posts/<puuid:post_id>"),
+            (
+                "DELETE",
+                "/api/v1/admin/<cuuid:community_id>/interaction/forum/replies/<puuid:reply_id>",
+            ),
+            (
+                "PUT",
+                "/api/v1/admin/<cuuid:community_id>/interaction/channels/<puuid:channel_id>/permissions",
+            ),
         ),
     ),
     (
@@ -722,6 +736,11 @@ INLINE_AUTHZ_ROUTES: Final[Mapping[tuple[str, str], RouteAudit]] = {
 _R_SESSION: Final[str] = (
     "login/session/registration handshake: session issue/revoke is audited at the mint/revoke "
     "chokepoint (audit_http.record_session_*)"
+)
+_R_DSAR: Final[str] = (
+    "DSAR inbox intake/verification: every state change is recorded, PII-free, in the "
+    "append-only dsar_request_events table (a per-request audit trail with its own actor kinds), "
+    "and public callers have no identity to attribute in the chain"
 )
 _R_PUBLIC: Final[str] = (
     "unauthenticated public/inbound endpoint: no actor, pre-identity noise an attacker could use "
@@ -751,59 +770,44 @@ INLINE_AUTHZ_UNAUDITED: Final[Mapping[tuple[str, str], str]] = {
     ("POST", "/api/v1/auth/passkey/login/finish"): _R_SESSION,
     ("POST", "/api/v1/auth/passkey/login/start"): _R_SESSION,
     ("POST", "/api/v1/auth/refresh"): _R_SESSION,
+    ("POST", "/api/v1/auth/step-up/passkey/finish"): (
+        "re-issues the caller's own session token after a verified passkey assertion (no scope "
+        "added); the sensitive action it unlocks is audited by its own route"
+    ),
+    ("POST", "/api/v1/auth/step-up/passkey/start"): "issues a challenge only; no state change",
     ("POST", "/api/v1/auth/register"): _R_SESSION,
     ("POST", "/api/v1/auth/resend-verification"): _R_SESSION,
     ("POST", "/api/v1/auth/sso/<public_id>/acs"): _R_SESSION,
     ("POST", "/api/v1/auth/temp-password"): _R_SESSION,
     ("POST", "/api/v1/user/passkey/register/start"): _R_SESSION,
     ("POST", "/api/v1/cookie"): _R_PUBLIC,
+    ("POST", "/api/v1/user/me/privacy-requests"): _R_DSAR,
+    ("POST", "/api/v1/public/<tenant_slug>/privacy-requests"): _R_DSAR,
+    ("POST", "/api/v1/public/<tenant_slug>/privacy-requests/resend-verification"): _R_DSAR,
+    ("POST", "/api/v1/public/privacy-requests/verify"): _R_DSAR,
+    ("POST", "/api/v1/public/privacy-requests/verify/preview"): (
+        "previews a verification token (request type and expiry only); consumes nothing and "
+        "changes no state"
+    ),
     ("POST", "/api/v1/github-sync/webhook"): _R_PUBLIC,
     ("POST", "/api/v1/marketplace/public/vendor/submit"): _R_PUBLIC,
-    ("POST", "/api/v1/calendar/book/<slug>"): _R_PUBLIC,
-    ("DELETE", "/api/v1/admin/<community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
-    ("POST", "/api/v1/admin/<community_id>/calendar/events/<event_id>/rsvp"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/booking-pages/<page_id>/members/<user_id>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/bookings/<uuid>"): _R_SELF,
-    ("DELETE", "/api/v1/calendar/oauth/calendars/<id>"): _R_SELF,
     ("DELETE", "/api/v1/user/profile/avatar"): _R_SELF,
-    ("POST", "/api/v1/calendar/booking-pages"): _R_SELF,
-    ("POST", "/api/v1/calendar/booking-pages/<page_id>/members"): _R_SELF,
-    ("POST", "/api/v1/calendar/oauth/calendars/<id>/sync"): _R_SELF,
     ("POST", "/api/v1/user/profile/avatar"): _R_SELF,
-    ("PUT", "/api/v1/calendar/availability/settings"): _R_SELF,
-    ("PUT", "/api/v1/calendar/availability/weekly"): _R_SELF,
-    ("PUT", "/api/v1/calendar/booking-pages/<id>"): _R_SELF,
     ("PUT", "/api/v1/user/profile"): _R_SELF,
-    ("POST", "/api/v1/<int:community_id>/join-requests"): _R_SELF,
-    ("DELETE", "/api/v1/admin/<int:community_id>/music-station/queue/<int:queue_id>"): _R_OPS,
-    (
-        "DELETE",
-        "/api/v1/admin/<int:community_id>/music-station/queue/playlists/<playlist_id>",
-    ): _R_OPS,
-    ("POST", "/api/v1/<community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
-    ("POST", "/api/v1/admin/<community_id>/calendar/events/<event_id>/check-in"): _R_OPS,
+    ("POST", "/api/v1/<cuuid:community_id>/join-requests"): _R_SELF,
+    ("POST", "/api/v1/<cuuid:community_id>/github-sync/ticket/<ticket_id>/sync"): _R_OPS,
     (
         "POST",
-        "/api/v1/admin/<community_id>/calendar/events/<event_id>/tickets/<ticket_id>/undo-check-in",
+        "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel",
     ): _R_OPS,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/<workflow_id>/test"): _R_OPS,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/workflows/validate"): _R_OPS,
     (
         "POST",
-        "/api/v1/admin/<community_id>/workflows/<workflow_id>/executions/<execution_id>/cancel",
-    ): _R_OPS,
-    ("POST", "/api/v1/admin/<community_id>/workflows/<workflow_id>/test"): _R_OPS,
-    ("POST", "/api/v1/admin/<community_id>/workflows/validate"): _R_OPS,
-    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/advance"): _R_OPS,
-    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/playlists"): _R_OPS,
-    ("POST", "/api/v1/admin/<int:community_id>/music-station/queue/requests"): _R_OPS,
-    ("PUT", "/api/v1/admin/<int:community_id>/music-station/queue/reorder"): _R_OPS,
-    ("POST", "/api/v1/admin/calendar/verify-ticket"): _R_OPS,
-    (
-        "POST",
-        "/api/v1/admin/<int:community_id>/support/my-tickets/<int:ticket_id>/comments",
+        "/api/v1/admin/<cuuid:community_id>/support/my-tickets/<puuid:ticket_id>/comments",
     ): _R_USAGE,
-    ("POST", "/api/v1/admin/<int:community_id>/support/submit"): _R_USAGE,
-    ("POST", "/api/v1/community/<int:community_id>/ai/completions"): _R_USAGE,
+    ("POST", "/api/v1/admin/<cuuid:community_id>/support/submit"): _R_USAGE,
+    ("POST", "/api/v1/community/<cuuid:community_id>/ai/completions"): _R_USAGE,
 }
 
 #: Methods that change state; a scope-protected request using one is an auditable admin action.

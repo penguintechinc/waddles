@@ -20,13 +20,13 @@ vi.mock('../../../components/dashboard/CommunityReputationPanel', () => ({
 
 const me = (role: string) => ({
   success: true,
-  user: { id: 1, communities: [{ id: 7, name: 'acme', displayName: 'Acme', role }] },
+  user: { id: 1, communities: [{ id: '00000007-0000-4000-8000-000000000000', name: 'acme', displayName: 'Acme', role }] },
 });
 
 const PUBLIC = {
   success: true,
   community: {
-    id: 7,
+    id: '00000007-0000-4000-8000-000000000000',
     name: 'acme',
     displayName: 'Acme HQ',
     description: 'd',
@@ -54,7 +54,7 @@ const STREAM = {
 
 const ANNOUNCEMENT = {
   id: 1,
-  community_id: 7,
+  community_id: '00000007-0000-4000-8000-000000000000',
   title: 'Maintenance window',
   content: 'Server restarts at noon',
   announcement_type: 'important',
@@ -71,17 +71,17 @@ function serve(role: string, overrides: Handler = () => undefined) {
     const custom = overrides(url);
     if (custom !== undefined) return custom;
     if (url === '/api/v1/auth/me') return me(role);
-    if (url === '/api/v1/public/communities/7') return PUBLIC;
-    if (url === '/api/v1/communities/7/streams') return { success: true, streams: [STREAM] };
-    if (url === '/api/v1/admin/7/announcements') return { success: true, data: [ANNOUNCEMENT], pagination: {} };
-    if (url.startsWith('/api/v1/community/7/leaderboard/')) {
+    if (url === '/api/v1/public/communities/00000007-0000-4000-8000-000000000000') return PUBLIC;
+    if (url === '/api/v1/communities/00000007-0000-4000-8000-000000000000/streams') return { success: true, streams: [STREAM] };
+    if (url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/announcements') return { success: true, data: [ANNOUNCEMENT], pagination: {} };
+    if (url.startsWith('/api/v1/community/00000007-0000-4000-8000-000000000000/leaderboard/')) {
       return { success: true, leaderboard: [], pagination: { offset: 0, limit: 5, total: 0, has_more: false }, period: 'weekly' };
     }
     return unexpectedUrl(url);
   });
 }
 
-function renderPage(route = '/dashboard/community/7') {
+function renderPage(route = '/dashboard/community/00000007-0000-4000-8000-000000000000') {
   return renderWithProviders(<CommunityDashboard />, { route, path: '/dashboard/community/:id' });
 }
 
@@ -94,7 +94,7 @@ describe('CommunityDashboard', () => {
     renderPage();
 
     expect(await screen.findByRole('heading', { level: 1, name: 'Acme HQ' })).toBeInTheDocument();
-    expect(screen.getByRole('link', { name: 'Admin Panel' })).toHaveAttribute('href', '/admin/7');
+    expect(screen.getByRole('link', { name: 'Admin Panel' })).toHaveAttribute('href', '/admin/00000007-0000-4000-8000-000000000000');
     expect(await screen.findByText('1,234')).toBeInTheDocument();
     expect(await screen.findByText('Maintenance window')).toBeInTheDocument();
     expect(await screen.findByText('penguinzplays')).toBeInTheDocument();
@@ -106,7 +106,7 @@ describe('CommunityDashboard', () => {
     expect(gated.sort()).toEqual(['bot-score', 'community-recent-activity']);
 
     const urls = get.mock.calls.map(([url]) => url);
-    for (const dead of ['/api/v1/communities/7/dashboard', '/api/v1/admin/7/bot-score', '/api/v1/communities/7/activity']) {
+    for (const dead of ['/api/v1/communities/00000007-0000-4000-8000-000000000000/dashboard', '/api/v1/admin/00000007-0000-4000-8000-000000000000/bot-score', '/api/v1/communities/00000007-0000-4000-8000-000000000000/activity']) {
       expect(urls).not.toContain(dead);
     }
   });
@@ -124,7 +124,7 @@ describe('CommunityDashboard', () => {
     serve('member', (url) => (url === '/api/v1/auth/me' ? { success: true, user: { id: 1, communities: [] } } : undefined));
     renderPage();
     const state = await screen.findByTestId('not-a-member');
-    expect(within(state).getByRole('link', { name: 'View community' })).toHaveAttribute('href', '/communities/7');
+    expect(within(state).getByRole('link', { name: 'View community' })).toHaveAttribute('href', '/communities/00000007-0000-4000-8000-000000000000');
   });
 
   it('shows a retryable error when memberships cannot be loaded', async () => {
@@ -144,7 +144,7 @@ describe('CommunityDashboard', () => {
 
   it('still renders from /auth/me when the public record is unavailable', async () => {
     serve('member', (url) => {
-      if (url === '/api/v1/public/communities/7') throw httpError(404, { error: 'Community not found' });
+      if (url === '/api/v1/public/communities/00000007-0000-4000-8000-000000000000') throw httpError(404, { error: 'Community not found' });
       return undefined;
     });
     renderPage();
@@ -155,7 +155,7 @@ describe('CommunityDashboard', () => {
   it('isolates a live-streams failure: error with retry, rest of the page intact', async () => {
     let calls = 0;
     serve('member', (url) => {
-      if (url !== '/api/v1/communities/7/streams') return undefined;
+      if (url !== '/api/v1/communities/00000007-0000-4000-8000-000000000000/streams') return undefined;
       calls += 1;
       if (calls <= 1) throw httpError(402, { success: false, error: { code: 'FEATURE_NOT_ENABLED', message: 'Live streams are not enabled for this plan' } });
       return { success: true, streams: [STREAM] };
@@ -171,11 +171,11 @@ describe('CommunityDashboard', () => {
     const first = renderPage();
     await screen.findByRole('heading', { level: 1 });
     await act(async () => {});
-    expect(get.mock.calls.some(([url]) => url === '/api/v1/admin/7/announcements')).toBe(false);
+    expect(get.mock.calls.some(([url]) => url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/announcements')).toBe(false);
     first.unmount();
 
     serve('community-admin', (url) => {
-      if (url === '/api/v1/admin/7/announcements') throw httpError(500, { error: 'Announcements exploded' });
+      if (url === '/api/v1/admin/00000007-0000-4000-8000-000000000000/announcements') throw httpError(500, { error: 'Announcements exploded' });
       return undefined;
     });
     renderPage();

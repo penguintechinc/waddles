@@ -2,13 +2,18 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
+import { TIER } from '../../services/communityTierConstants';
 
 const AI_PROVIDERS = [
   { id: 'ollama', name: 'Ollama', tier: 'free' },
+  { id: 'waddleai', name: 'WaddleAI', tier: 'free' },
   { id: 'openai', name: 'OpenAI', tier: 'premium' },
   { id: 'anthropic', name: 'Anthropic', tier: 'premium' },
   { id: 'gemini', name: 'Google Gemini', tier: 'premium' },
 ];
+
+/** Providers a Free community may point a custom endpoint at (mirrors the server rule; UX hint only). */
+const FREE_CUSTOM_ENDPOINT_PROVIDERS = ['ollama', 'waddleai'];
 
 const RESPONSE_DESTINATIONS = [
   { id: 'same_chat', name: 'Same Chat Channel', description: 'Send responses in the same channel' },
@@ -41,13 +46,17 @@ const BLOCKED_TOPICS = [
 
 function AdminAIResearcherConfig() {
   const { communityId } = useParams();
-  const { user } = useAuth();
+  const { communityTier } = useAuth();
   const [config, setConfig] = useState(null);
   const [availableModels, setAvailableModels] = useState({});
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState(null);
-  const isPremium = user?.isPremium || false;
+  // UX hints only: the server's tier gates (ai_routing/router.py) are authoritative. Free may use a
+  // custom endpoint only for Ollama or WaddleAI; Premium adds BYOK for OpenAI, Gemini, Anthropic.
+  // Bot detection needs Premium.
+  const tier = communityTier(communityId);
+  const isPremium = tier >= TIER.premium;
 
   useEffect(() => {
     fetchConfig();
@@ -220,14 +229,14 @@ function AdminAIResearcherConfig() {
                   const isLocked = provider.tier === 'premium' && !isPremium;
                   return (
                     <option key={provider.id} value={provider.id} disabled={isLocked}>
-                      {provider.name} {isLocked ? '(Premium)' : ''}
+                      {provider.name} {isLocked ? '(Requires Premium)' : ''}
                     </option>
                   );
                 })}
               </select>
               {!isPremium && (
                 <p className="text-xs text-navy-500 mt-1">
-                  Upgrade to Premium for access to all AI providers
+                  Free communities can use Ollama or WaddleAI. OpenAI, Gemini and Anthropic (bring your own key) require Premium
                 </p>
               )}
             </div>
@@ -256,7 +265,7 @@ function AdminAIResearcherConfig() {
         </div>
 
         {/* Custom Endpoint (Premium Only) */}
-        {isPremium && config.customEndpoint !== null && (
+        {(isPremium || FREE_CUSTOM_ENDPOINT_PROVIDERS.includes(config.aiProvider)) && config.customEndpoint !== null && (
           <div className="card p-6 border-sky-500/30">
             <div className="flex items-center gap-2 mb-4">
               <h2 className="text-lg font-semibold text-sky-100">Custom AI Endpoint</h2>
@@ -507,7 +516,7 @@ function AdminAIResearcherConfig() {
           </div>
           {!isPremium && (
             <div className="mb-4 p-3 bg-gold-500/10 border border-gold-500/30 rounded-lg text-sm text-gold-300">
-              Upgrade to Premium to enable advanced bot detection
+              Advanced bot detection requires the Premium tier
             </div>
           )}
           {config.botDetectionEnabled && (

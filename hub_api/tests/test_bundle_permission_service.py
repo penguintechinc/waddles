@@ -11,8 +11,8 @@ from services import bundle_permission_service as svc
 from services.bundle_manifest_v2 import parse_bundle_manifest_v2
 from services.errors import ApiError
 
-_APP_ID = "waddles.socials.music.default"
-_CORE_APP_ID = "waddles.core.example.echo"
+_APP_ID = "acmecorp.widgets.music"
+_CORE_APP_ID = "penguintechinc.waddles.echo"
 _VERSION = "3.0.0"
 
 _MANIFEST_RAW = {
@@ -20,7 +20,7 @@ _MANIFEST_RAW = {
     "app_id": _APP_ID,
     "name": "Music Station",
     "version": _VERSION,
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",
@@ -150,11 +150,11 @@ async def test_record_permission_requests_requires_ack_for_interaction_pii_recei
     install_dal: Any,
 ) -> None:
     """`interaction.pii.receive` goes through the identical dangerous-ack gate as `ai.generate`."""
-    app_id = "waddles.socials.forms.default"
+    app_id = "penguintechinc.waddles.forms"
     manifest_raw = {
         **_MANIFEST_RAW,
         "app_id": app_id,
-        "feature": "waddles.socials.forms",
+        "feature": "forms",
         "permissions": [
             {"id": "storage.kv", "justification": "Stores state."},
             {"id": "interaction.pii.receive", "justification": "Reads a viewer-typed email."},
@@ -212,7 +212,7 @@ async def test_seed_core_permission_requests_skips_ack(install_dal: Any) -> None
     manifest_raw = {
         **_MANIFEST_RAW,
         "app_id": _CORE_APP_ID,
-        "feature": "waddles.core.example",
+        "feature": "example",
         "module": "core",
     }
     manifest = parse_bundle_manifest_v2(
@@ -294,6 +294,28 @@ async def test_grant_community_permissions_consent_required(install_dal: Any) ->
             granted_by=1,
         )
     assert exc.value.code == "consent_required"
+
+
+@pytest.mark.parametrize("bogus", ["storage.objects", "storage.nonexistent", "not a permission"])
+async def test_grant_community_permissions_rejects_ids_outside_the_catalog(
+    install_dal: Any, bogus: str
+) -> None:
+    await _seed_upload(install_dal)
+    await _approve(install_dal)
+    community_id = await install_dal.communities.async_insert(tenant_id=1, name="acme")
+    with pytest.raises(ApiError) as exc:
+        await svc.grant_community_permissions(
+            install_dal,
+            tenant_id=1,
+            community_id=community_id,
+            app_id=_APP_ID,
+            version=_VERSION,
+            manifest=_manifest(),
+            granted_permission_ids=frozenset({"storage.kv", "ai.generate", bogus}),
+            params_by_id=None,
+            granted_by=1,
+        )
+    assert exc.value.code == "unknown_permission"
 
 
 async def test_grant_community_permissions_rejects_restricted(install_dal: Any) -> None:
@@ -530,7 +552,7 @@ async def test_requested_tool_becomes_version_pinned_permission_request(install_
     raw = {
         **_MANIFEST_RAW,
         "requested_tools": [
-            {"target_app_id": "waddles.services.lookup.default", "tool": "search", "access": "read"}
+            {"target_app_id": "penguintechinc.waddles.lookup", "tool": "search", "access": "read"}
         ],
     }
     manifest = parse_bundle_manifest_v2(

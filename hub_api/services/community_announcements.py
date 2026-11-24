@@ -24,6 +24,7 @@ from typing import Any
 import httpx
 
 from .community_common import ensure_community_tables
+from .community_public_id import lookup_public_ids_sync
 
 _VALID_TYPES = {"general", "important", "event", "update"}
 _VALID_STATUSES = {"draft", "published", "archived"}
@@ -41,12 +42,17 @@ def _iso(value: Any) -> str | None:
     return value.isoformat() if isinstance(value, datetime) else value
 
 
+def _public_id(dal: Any, community_id: int) -> str:
+    """Public UUID for one community id (fails loud when the row has none)."""
+    return lookup_public_ids_sync(dal, [community_id])[int(community_id)]
+
+
 @dataclass(slots=True, frozen=True)
 class Announcement:
     """One `announcements` row, camelCase-in-Node fields kept snake_case here (ruff N815)."""
 
-    id: int
-    community_id: int
+    id: str
+    community_id: str
     title: str
     content: str
     announcement_type: str
@@ -61,10 +67,11 @@ class Announcement:
     archived_at: str | None
 
 
-def _to_dto(row: Any) -> Announcement:
+def _to_dto(row: Any, public_community_id: str) -> Announcement:
+    """Announcement DTO; `community_id` is the community's PUBLIC UUID (never the numeric id)."""
     return Announcement(
-        id=row.id,
-        community_id=row.community_id,
+        id=str(row.public_id),
+        community_id=public_community_id,
         title=row.title,
         content=row.content,
         announcement_type=row.announcement_type,
@@ -126,9 +133,10 @@ def list_announcements(
         orderby=(~dal.announcements.is_pinned, ~dal.announcements.created_at),
         limitby=(offset, offset + limit),
     )
+    public_ids = lookup_public_ids_sync(dal, [community_id])
     return AnnouncementListResponse(
         success=True,
-        data=[_to_dto(r) for r in rows],
+        data=[_to_dto(r, public_ids[int(r.community_id)]) for r in rows],
         pagination=AnnouncementPagination(
             page=page, limit=limit, total=total, total_pages=-(-total // limit) if limit else 0
         ),
@@ -146,7 +154,7 @@ def get_announcement(dal: Any, community_id: int, announcement_id: int) -> Annou
         .select()
         .first()
     )
-    return _to_dto(row) if row else None
+    return _to_dto(row, _public_id(dal, row.community_id)) if row else None
 
 
 def create_announcement(
@@ -190,7 +198,7 @@ def create_announcement(
     )
     dal.commit()
     row = dal.announcements[new_id]
-    return _to_dto(row), None
+    return _to_dto(row, _public_id(dal, row.community_id)), None
 
 
 def update_announcement(
@@ -247,7 +255,7 @@ def update_announcement(
     dal(dal.announcements.id == announcement_id).update(**fields)
     dal.commit()
     row = dal.announcements[announcement_id]
-    return _to_dto(row), None
+    return _to_dto(row, _public_id(dal, row.community_id)), None
 
 
 def _transition(
@@ -268,7 +276,8 @@ def _transition(
     fields.setdefault("updated_at", datetime.utcnow())
     dal(dal.announcements.id == announcement_id).update(**fields)
     dal.commit()
-    return _to_dto(dal.announcements[announcement_id])
+    updated = dal.announcements[announcement_id]
+    return _to_dto(updated, _public_id(dal, updated.community_id))
 
 
 def delete_announcement(
@@ -441,7 +450,7 @@ class BroadcastRecord:
     """One `announcement_broadcasts` row, for the broadcast-status endpoint."""
 
     id: int
-    announcement_id: int
+    announcement_id: str
     platform: str
     status: str
     broadcast_at: str | None
@@ -449,7 +458,9 @@ class BroadcastRecord:
     error_message: str | None
 
 
-def get_broadcast_status(dal: Any, announcement_id: int) -> list[BroadcastRecord]:
+def get_broadcast_status(
+    dal: Any, announcement_id: int, *, public_id: str
+) -> list[BroadcastRecord]:
     """All broadcast attempts for one announcement, newest first.
 
     `completed_at` has no backing column (Node's own query referenced one
@@ -464,7 +475,7 @@ def get_broadcast_status(dal: Any, announcement_id: int) -> list[BroadcastRecord
     return [
         BroadcastRecord(
             id=r.id,
-            announcement_id=r.announcement_id,
+            announcement_id=public_id,
             platform=r.platform,
             status=r.status,
             broadcast_at=_iso(r.broadcast_at),

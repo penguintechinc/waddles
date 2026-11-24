@@ -62,14 +62,36 @@ async def grant_to(
         )
 
 
-async def set_column(db: Any, table: str, row_id: int, **values: Any) -> None:
-    """Force columns on one row (simulating state another worker/replica produced)."""
+async def set_column(db: Any, table: str, row_id: int | str, **values: Any) -> None:
+    """Force columns on one row (simulating state another worker/replica produced).
+
+    `row_id` is the numeric id, or the row's public UUID text (what the admin API now returns).
+    """
     assignments = ", ".join(f"{name} = :{name}" for name in values)
+    key = "public_id" if isinstance(row_id, str) else "id"
     async with db.install_dal.engine.begin() as conn:
         await conn.execute(
-            text(f"UPDATE {table} SET {assignments} WHERE id = :_id"),  # noqa: S608 - fixed test table names
+            text(f"UPDATE {table} SET {assignments} WHERE {key} = :_id"),  # noqa: S608 - fixed test table names
             {**values, "_id": row_id},
         )
+
+
+async def numeric_connection_id(db: Any, ref: int | str) -> int:
+    """Numeric `platform_connections.id` for an admin-API public UUID (ints pass through).
+
+    The data plane (gRPC, machine-JWT `conn` claim, service calls) speaks numeric ids; the admin
+    API's `id` is the public UUID.
+    """
+    if isinstance(ref, int):
+        return ref
+    async with db.install_dal.engine.connect() as conn:
+        value = (
+            await conn.execute(
+                text("SELECT id FROM platform_connections WHERE public_id = :p"),  # noqa: S608
+                {"p": ref},
+            )
+        ).scalar_one()
+    return int(value)
 
 
 def row_aad(row: Mapping[str, Any]) -> bytes:

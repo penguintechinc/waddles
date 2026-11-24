@@ -68,12 +68,36 @@ describe('VendorSubmissionForm', () => {
     expect(screen.getByTestId('vendor-submit-app-id')).toBeInTheDocument();
   });
 
+  it.each([
+    ['penguintechinc.waddles.mine', /reserved/],
+    ['penguintechinc.waddles.mine', /reserved/],
+    ['psychoboy.penguintwitchbot.mine', /reserved/],
+    ['Acme.widgets.mine', /three lowercase segments/],
+    ['acme.mine', /three lowercase segments/],
+  ])('rejects app id %s client-side', async (badId, msg) => {
+    mockAuth();
+    mount();
+    fireEvent.change(screen.getByTestId('vendor-submit-app-id'), { target: { value: badId } });
+    await act(async () => {
+      fireEvent.click(screen.getByTestId('vendor-submit-button'));
+    });
+    expect(screen.getByTestId('vendor-submit-error')).toHaveTextContent(msg);
+    expect(bundleApi.createVersion).not.toHaveBeenCalled();
+  });
+
+  it('shows the <github-org>.<repo>.<bundle-name> format help text', () => {
+    mockAuth();
+    mount();
+    expect(screen.getByText('<github-org>.<repo>.<bundle-name>')).toBeInTheDocument();
+    expect(screen.getByText(/are reserved/)).toHaveTextContent('psychoboy');
+  });
+
   it('blocks submit client-side when the component file is missing', async () => {
     mockAuth();
     mount();
 
     fireEvent.change(screen.getByTestId('vendor-submit-app-id'), {
-      target: { value: 'waddles.integrations.vendor-42.mybundle' },
+      target: { value: 'acme.widgets.mybundle' },
     });
     fireEvent.change(screen.getByTestId('vendor-submit-manifest-file'), {
       target: { files: [manifestFile()] },
@@ -97,7 +121,7 @@ describe('VendorSubmissionForm', () => {
     mount();
 
     fireEvent.change(screen.getByTestId('vendor-submit-app-id'), {
-      target: { value: 'waddles.integrations.vendor-42.mybundle' },
+      target: { value: 'acme.widgets.mybundle' },
     });
     fireEvent.change(screen.getByTestId('vendor-submit-manifest-file'), {
       target: { files: [manifestFile()] },
@@ -112,7 +136,7 @@ describe('VendorSubmissionForm', () => {
 
     expect(bundleApi.createVersion).toHaveBeenCalledTimes(1);
     const [calledAppId, calledFormData] = bundleApi.createVersion.mock.calls[0];
-    expect(calledAppId).toBe('waddles.integrations.vendor-42.mybundle');
+    expect(calledAppId).toBe('acme.widgets.mybundle');
     expect(calledFormData.get('manifest')).toBeInstanceOf(File);
     expect(calledFormData.get('component')).toBeInstanceOf(File);
     expect(calledFormData.get('source')).toBeNull();
@@ -133,7 +157,7 @@ describe('VendorSubmissionForm', () => {
     mount();
 
     fireEvent.change(screen.getByTestId('vendor-submit-app-id'), {
-      target: { value: 'waddles.integrations.vendor-42.mybundle' },
+      target: { value: 'acme.widgets.mybundle' },
     });
     fireEvent.change(screen.getByTestId('vendor-submit-manifest-file'), {
       target: { files: [manifestFile()] },
@@ -163,7 +187,7 @@ describe('VendorSubmissionForm', () => {
     mount();
 
     fireEvent.change(screen.getByTestId('vendor-submit-app-id'), {
-      target: { value: 'waddles.integrations.vendor-99.mybundle' },
+      target: { value: 'acme.widgets.mybundle' },
     });
     fireEvent.change(screen.getByTestId('vendor-submit-manifest-file'), {
       target: { files: [manifestFile()] },

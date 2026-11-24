@@ -279,7 +279,11 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
 
     // --- 1. Insert round-trips, SQL-injection-shaped values are inert ---
     let injection_note = "acme'); DROP TABLE app_core.fishing_core; --".to_string();
-    let tenant_a_scope = DbScope::new(TENANT_A, COMMUNITY_MAIN, "waddles.bot.a");
+    let tenant_a_scope = DbScope::new(
+        TENANT_A,
+        COMMUNITY_MAIN,
+        "penguintechinc.waddles.fixture-bot-a",
+    );
     let inserted = backend
         .insert(
             &schema,
@@ -324,7 +328,11 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
     );
 
     // --- 3. Tenant isolation, BOTH layers active: tenant B cannot read tenant A's row ---
-    let tenant_b_scope = DbScope::new(TENANT_B, COMMUNITY_MAIN, "waddles.bot.a");
+    let tenant_b_scope = DbScope::new(
+        TENANT_B,
+        COMMUNITY_MAIN,
+        "penguintechinc.waddles.fixture-bot-a",
+    );
     let cross_tenant_get = backend
         .get(&schema, &tenant_b_scope, &inserted.row_id)
         .await;
@@ -439,7 +447,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
 
     // --- 6. Cross-bundle isolation: bundle Y's table never exposes bundle X's row ---
     let other_schema = other_app_core_schema();
-    let bundle_y_scope = DbScope::new(TENANT_A, COMMUNITY_MAIN, "waddles.bot.other");
+    let bundle_y_scope = DbScope::new(TENANT_A, COMMUNITY_MAIN, "penguintechinc.waddles.bot-other");
     let cross_bundle = backend
         .get(&other_schema, &bundle_y_scope, &inserted.row_id)
         .await;
@@ -478,7 +486,7 @@ async fn bundle_db_capability_isolation_and_safety_against_real_postgres() {
             .expect("quota-test connection"),
     )
     .with_row_cap_for_test(2);
-    let quota_scope = DbScope::new(103, TENANT_WIDE, "waddles.bot.a");
+    let quota_scope = DbScope::new(103, TENANT_WIDE, "penguintechinc.waddles.fixture-bot-a");
     quota_backend
         .insert(&schema, &quota_scope, vec![])
         .await
@@ -568,7 +576,11 @@ async fn concurrent_inserts_never_exceed_the_row_cap() {
     apply_bundle_schema_ddl(&superuser_conn).await;
 
     let schema = Arc::new(fishing_core_schema());
-    let scope = Arc::new(DbScope::new(104, TENANT_WIDE, "waddles.bot.a"));
+    let scope = Arc::new(DbScope::new(
+        104,
+        TENANT_WIDE,
+        "penguintechinc.waddles.fixture-bot-a",
+    ));
 
     let mut handles = Vec::with_capacity(CONCURRENT_ATTEMPTS);
     for _ in 0..CONCURRENT_ATTEMPTS {
@@ -625,9 +637,12 @@ async fn db_host_wrapper_reaches_a_real_backend_for_every_op() {
             .expect("runtime connects"),
     ));
     let schemas = SchemaCache::new();
-    schemas.update("waddles.bot.a", fishing_core_schema());
+    schemas.update(
+        "penguintechinc.waddles.fixture-bot-a",
+        fishing_core_schema(),
+    );
     let snapshot = CapabilitySnapshot::new();
-    let scope = DbScope::new(105, COMMUNITY_MAIN, "waddles.bot.a");
+    let scope = DbScope::new(105, COMMUNITY_MAIN, "penguintechinc.waddles.fixture-bot-a");
 
     // Denied before ever touching the schema cache or the DB.
     let denied = host
@@ -636,7 +651,10 @@ async fn db_host_wrapper_reaches_a_real_backend_for_every_op() {
         .unwrap_err();
     assert_eq!(denied.code(), "invalid_column");
 
-    snapshot.update("waddles.bot.a", ["storage.tables".to_string()]);
+    snapshot.update(
+        "penguintechinc.waddles.fixture-bot-a",
+        ["storage.tables".to_string()],
+    );
 
     let row = host
         .insert(
@@ -757,7 +775,11 @@ async fn typed_columns_round_trip_against_real_postgres() {
             .expect("runtime role connects"),
     );
     let schema = typed_core_schema();
-    let scope = DbScope::new(TYPED_TENANT, COMMUNITY_MAIN, "waddles.bot.typed");
+    let scope = DbScope::new(
+        TYPED_TENANT,
+        COMMUNITY_MAIN,
+        "penguintechinc.waddles.bot-typed",
+    );
 
     // --- 1. insert: every typed column, incl. user_ref and a non-UTC offset ---
     let user_ref = "3f2b8c1e-7a4d-4e0b-9c55-1d2e3f4a5b6c";
@@ -957,7 +979,11 @@ async fn typed_columns_round_trip_against_real_postgres() {
     );
 
     // --- 6. query: typed columns decode, and ORDER BY sorts the stored type ---
-    let q_scope = DbScope::new(TYPED_TENANT + 1, TENANT_WIDE, "waddles.bot.typed");
+    let q_scope = DbScope::new(
+        TYPED_TENANT + 1,
+        TENANT_WIDE,
+        "penguintechinc.waddles.bot-typed",
+    );
     // Insert order differs from chronological order; the middle row is only
     // earliest once its -05:00 offset is applied (2026-01-01T04:00:00Z).
     let instants = [
@@ -1195,13 +1221,33 @@ async fn scope_columns_are_integers_end_to_end_against_production_ddl() {
         );
     }
 
-    let community = DbScope::new(TENANT_A, COMMUNITY_MAIN, "waddles.bot.a");
-    let tenant_wide = DbScope::new(TENANT_A, TENANT_WIDE, "waddles.bot.a");
-    let other_community = DbScope::new(TENANT_A, COMMUNITY_MAIN + 1, "waddles.bot.a");
-    let other_tenant = DbScope::new(TENANT_B, COMMUNITY_MAIN, "waddles.bot.a");
+    let community = DbScope::new(
+        TENANT_A,
+        COMMUNITY_MAIN,
+        "penguintechinc.waddles.fixture-bot-a",
+    );
+    let tenant_wide = DbScope::new(
+        TENANT_A,
+        TENANT_WIDE,
+        "penguintechinc.waddles.fixture-bot-a",
+    );
+    let other_community = DbScope::new(
+        TENANT_A,
+        COMMUNITY_MAIN + 1,
+        "penguintechinc.waddles.fixture-bot-a",
+    );
+    let other_tenant = DbScope::new(
+        TENANT_B,
+        COMMUNITY_MAIN,
+        "penguintechinc.waddles.fixture-bot-a",
+    );
     // Same two numbers, swapped: a tenant/community binding mix-up cannot
     // pass as a match.
-    let swapped = DbScope::new(COMMUNITY_MAIN, TENANT_A, "waddles.bot.a");
+    let swapped = DbScope::new(
+        COMMUNITY_MAIN,
+        TENANT_A,
+        "penguintechinc.waddles.fixture-bot-a",
+    );
 
     // --- 2. insert: stored as real integers, tenant-wide is 0 (never NULL) ---
     let row = backend
@@ -1463,7 +1509,7 @@ async fn numeric_columns_round_trip_against_real_postgres() {
             .expect("runtime role connects"),
     );
     let schema = money_schema();
-    let scope = DbScope::new(120, COMMUNITY_MAIN, "waddles.bot.money");
+    let scope = DbScope::new(120, COMMUNITY_MAIN, "penguintechinc.waddles.bot-money");
 
     // --- 1. insert: decimal text, integer and NULL; exact text back ---
     let row = backend
@@ -1544,7 +1590,7 @@ async fn numeric_columns_round_trip_against_real_postgres() {
     }
 
     // --- 4. ORDER BY sorts by numeric value, not by the text projection ---
-    let q_scope = DbScope::new(121, TENANT_WIDE, "waddles.bot.money");
+    let q_scope = DbScope::new(121, TENANT_WIDE, "penguintechinc.waddles.bot-money");
     let mut ids = Vec::new();
     for amount in ["100.00", "9.50", "10.25"] {
         ids.push(

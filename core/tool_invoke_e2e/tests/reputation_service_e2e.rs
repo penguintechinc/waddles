@@ -58,8 +58,8 @@ const CALLER_WASM: &[u8] =
     include_bytes!("../../bundle_executor/tests/fixtures/tool_caller_fixture.wasm");
 const REP_WASM: &[u8] = include_bytes!("fixtures/reputation_service.wasm");
 
-const CALLER: &str = "waddles.e2e.app.giveaway";
-const REP: &str = "waddles.core.service.reputation";
+const CALLER: &str = "penguintechinc.waddles.fixture-e2e-app-giveaway";
+const REP: &str = "penguintechinc.waddles.reputation";
 const TENANT: i32 = 7;
 const COMMUNITY_A: i32 = 3;
 const COMMUNITY_B: i32 = 4;
@@ -547,6 +547,7 @@ fn row(app: &str, version_id: i64, wasm: &[u8], tools: ToolManifestInfo) -> Acti
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,
@@ -772,6 +773,7 @@ impl World {
         .with_reputation(ReputationWiring {
             store: Arc::clone(&self.store) as Arc<dyn ReputationStore>,
             flag: Arc::new(StaticGate(true)),
+            auto_ban_flag: None,
         })
         .with_tool(ToolContext {
             connections: Arc::clone(&self.rig.registry),
@@ -1166,7 +1168,7 @@ async fn i_activity_writes_from_a_non_active_logic_origin_are_forbidden_end_to_e
     // Another bundle is the tenant's active reputation-logic app (or none):
     // the chain origin (CALLER) is refused before any write, whatever the
     // service tool or its grants say.
-    for active in [Some("waddles.core.app.reputation-accrual"), None] {
+    for active in [Some("penguintechinc.waddles.reputation-accrual"), None] {
         let w = World::new(None, None).await;
         *w.store.active_logic.lock().unwrap() = Some(active.map(str::to_string));
         let out = w

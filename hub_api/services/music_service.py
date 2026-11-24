@@ -50,6 +50,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import quote
 
+from services.community_public_id import lookup_public_id
 from services.errors import bad_request, not_found
 from services.url_guard import validate_outbound_url
 
@@ -62,7 +63,7 @@ class MusicSettingsDTO:
     """Wire DTO for one community's music settings -- camelCase pinned to `api.js`."""
 
     id: int
-    communityId: int
+    communityId: str
     defaultProvider: str | None
     autoplayEnabled: bool
     volumeLimit: int
@@ -79,7 +80,7 @@ class MusicProviderDTO:
     """Wire DTO for one connected music provider."""
 
     id: int
-    communityId: int
+    communityId: str
     providerName: str
     isConnected: bool
     isActive: bool
@@ -92,10 +93,10 @@ class MusicProviderDTO:
 
 @dataclass(slots=True, frozen=True)
 class RadioStationDTO:
-    """Wire DTO for one community radio station."""
+    """Wire DTO for one community radio station; `id` is its public UUID."""
 
-    id: int
-    communityId: int
+    id: str
+    communityId: str
     name: str
     url: str
     description: str | None
@@ -110,10 +111,11 @@ def _iso(value: datetime | None) -> str | None:
     return value.isoformat() if value else None
 
 
-def _settings_dto(row: Any) -> MusicSettingsDTO:
+def _settings_dto(row: Any, public_community_id: str) -> MusicSettingsDTO:
+    """Wire DTO; `communityId` is the community's PUBLIC UUID (never the numeric id)."""
     return MusicSettingsDTO(
         id=row.id,
-        communityId=row.community_id,
+        communityId=public_community_id,
         defaultProvider=row.default_provider,
         autoplayEnabled=bool(row.autoplay_enabled),
         volumeLimit=row.volume_limit,
@@ -137,10 +139,11 @@ def _parse_provider_config(raw: Any) -> dict[str, Any]:
     return parsed if isinstance(parsed, dict) else {}
 
 
-def _provider_dto(row: Any) -> MusicProviderDTO:
+def _provider_dto(row: Any, public_community_id: str) -> MusicProviderDTO:
+    """Wire DTO; `communityId` is the community's PUBLIC UUID (never the numeric id)."""
     return MusicProviderDTO(
         id=row.id,
-        communityId=row.community_id,
+        communityId=public_community_id,
         providerName=row.provider_name,
         isConnected=bool(row.is_connected),
         isActive=bool(row.is_active),
@@ -152,10 +155,11 @@ def _provider_dto(row: Any) -> MusicProviderDTO:
     )
 
 
-def _station_dto(row: Any) -> RadioStationDTO:
+def _station_dto(row: Any, public_community_id: str) -> RadioStationDTO:
+    """Wire DTO; `communityId` is the community's PUBLIC UUID (never the numeric id)."""
     return RadioStationDTO(
-        id=row.id,
-        communityId=row.community_id,
+        id=str(row.public_id),
+        communityId=public_community_id,
         name=row.name,
         url=row.url,
         description=row.description,
@@ -174,7 +178,7 @@ async def get_music_settings(async_dal: Any, dal: Any, *, community_id: int) -> 
     )
     if not rows:
         raise not_found("Music settings not found")
-    return _settings_dto(rows.first())
+    return _settings_dto(rows.first(), await lookup_public_id(community_id))
 
 
 async def update_music_settings(
@@ -214,7 +218,7 @@ async def update_music_settings(
         raise not_found("Music settings not found")
 
     rows = await async_dal.select_async(dal(query))
-    return _settings_dto(rows.first())
+    return _settings_dto(rows.first(), await lookup_public_id(community_id))
 
 
 async def get_providers(async_dal: Any, dal: Any, *, community_id: int) -> list[MusicProviderDTO]:
@@ -223,7 +227,8 @@ async def get_providers(async_dal: Any, dal: Any, *, community_id: int) -> list[
         dal(dal.community_music_providers.community_id == community_id),
         orderby=dal.community_music_providers.provider_name,
     )
-    return [_provider_dto(row) for row in rows]
+    public_id = await lookup_public_id(community_id)
+    return [_provider_dto(row, public_id) for row in rows]
 
 
 def _build_auth_url(provider: str, state_token: str, community_id: int) -> str:
@@ -350,7 +355,8 @@ async def get_radio_stations(
         orderby=~dal.community_radio_stations.created_at,
         limitby=(offset, offset + limit),
     )
-    return [_station_dto(row) for row in rows], page, limit, total
+    public_id = await lookup_public_id(community_id)
+    return [_station_dto(row, public_id) for row in rows], page, limit, total
 
 
 async def add_radio_station(
@@ -384,7 +390,7 @@ async def add_radio_station(
         updated_at=now,
     )
     rows = await async_dal.select_async(dal(dal.community_radio_stations.id == new_id))
-    return _station_dto(rows.first())
+    return _station_dto(rows.first(), await lookup_public_id(community_id))
 
 
 async def remove_radio_station(

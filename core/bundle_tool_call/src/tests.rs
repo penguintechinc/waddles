@@ -16,9 +16,9 @@ use penguin_bundle_host::wire::{ErrorBody, ErrorCode, Message, ResultBody};
 
 use super::*;
 
-const APP: &str = "waddles.test.app.caller";
-const SVC: &str = "waddles.core.economy.svc";
-const SVC2: &str = "waddles.core.other.svc";
+const APP: &str = "penguintechinc.waddles.caller-app";
+const SVC: &str = "penguintechinc.waddles.economy-svc";
+const SVC2: &str = "penguintechinc.waddles.other-svc";
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
 fn gate_scope(app: &str) -> InvokeScope {
@@ -76,6 +76,7 @@ fn row(app: &str, version_id: i64, digest: &str, tools: ToolManifestInfo) -> Act
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,
@@ -255,7 +256,7 @@ fn e_depth_three_is_depth_exceeded_and_depth_two_is_allowed() {
     // chain A -> B -> C is two hops taken; calling D is the third.
     let err = plan(
         &[APP, SVC, SVC2],
-        req("waddles.core.fourth.svc", "t", None),
+        req("penguintechinc.waddles.fourth-svc", "t", None),
         &snap,
         &gate,
     )
@@ -735,11 +736,35 @@ fn plan_as(actor: &ActorContext, tool: &str) -> Result<ToolPlan, ToolRefusal> {
 
 #[test]
 fn role_scope_map_is_cumulative_and_fails_closed() {
-    assert_eq!(scopes_for_role("member"), ["community:member"]);
+    assert!(scopes_for_role("member").contains(&"community:member"));
+    assert!(!scopes_for_role("member").contains(&"community:moderate"));
     assert!(scopes_for_role("community-owner").contains(&"community:admin"));
     assert_eq!(scopes_for_role("owner"), scopes_for_role("community-owner"));
     assert!(scopes_for_role("community-admin").contains(&"community:moderate"));
     assert!(!scopes_for_role("moderator").contains(&"community:admin"));
+    // Dedicated room scopes: admin/owner bundles carry all of them, a moderator none yet.
+    let mgmt = [
+        "rooms:create",
+        "rooms:update",
+        "rooms:close",
+        "rooms:guests",
+    ];
+    let moderation = ["rooms:kick", "rooms:mute", "rooms:lock", "rooms:hands"];
+    for s in mgmt.iter().chain(moderation.iter()) {
+        assert!(scopes_for_role("community-admin").contains(s), "{s}");
+        assert!(scopes_for_role("owner").contains(s), "{s}");
+        assert!(!scopes_for_role("vip").contains(s) && !scopes_for_role("member").contains(s));
+    }
+    // A moderator holds exactly the moderation scopes (today's powers), none of management.
+    for s in moderation {
+        assert!(scopes_for_role("moderator").contains(&s), "{s}");
+    }
+    for s in mgmt {
+        assert!(
+            !scopes_for_role("moderator").contains(&s),
+            "moderator must not hold {s}"
+        );
+    }
     assert!(!scopes_for_role("vip").contains(&"community:moderate"));
     for s in ["community:ban", "community:timeout"] {
         assert!(scopes_for_role("moderator").contains(&s));
@@ -748,11 +773,59 @@ fn role_scope_map_is_cumulative_and_fails_closed() {
         assert!(!scopes_for_role("vip").contains(&s));
         assert!(!scopes_for_role("member").contains(&s));
     }
-    assert_eq!(scopes_for_role("owner").len(), 7);
-    assert_eq!(scopes_for_role("community-admin").len(), 6);
-    assert_eq!(scopes_for_role("moderator").len(), 4);
+    assert_eq!(scopes_for_role("owner").len(), 22);
+    assert_eq!(scopes_for_role("community-admin").len(), 21);
+    assert_eq!(scopes_for_role("moderator").len(), 15);
     for bad in ["", "admin", "COMMUNITY-ADMIN", "root"] {
         assert!(scopes_for_role(bad).is_empty(), "{bad:?}");
+    }
+}
+
+#[test]
+fn music_scopes_follow_the_role_bundles() {
+    let viewer = [
+        "music:requests.read",
+        "music:history.read",
+        "music:requests.write",
+        "music:stats.read",
+    ];
+    let staff = [
+        "music:requests.manage",
+        "music:dj.manage",
+        "music:settings.write",
+    ];
+    for role in [
+        "member",
+        "vip",
+        "moderator",
+        "community-admin",
+        "community-owner",
+        "owner",
+    ] {
+        for s in viewer {
+            assert!(scopes_for_role(role).contains(&s), "{role} lacks {s}");
+        }
+    }
+    for role in ["moderator", "community-admin", "community-owner", "owner"] {
+        for s in staff {
+            assert!(scopes_for_role(role).contains(&s), "{role} lacks {s}");
+        }
+    }
+    for role in ["member", "vip"] {
+        for s in staff {
+            assert!(
+                !scopes_for_role(role).contains(&s),
+                "{role} must not have {s}"
+            );
+        }
+    }
+    for bad in ["", "admin", "root"] {
+        assert!(
+            scopes_for_role(bad)
+                .iter()
+                .all(|s| !s.starts_with("music:")),
+            "{bad:?}"
+        );
     }
 }
 
@@ -781,6 +854,7 @@ fn scope_gate_refuses_no_actor_and_scopes_without_actor() {
     let forged = ActorContext {
         actor: None,
         scopes: vec!["community:admin".to_string()],
+        participant: None,
     };
     assert_eq!(
         plan_as(&forged, "admin_op").unwrap_err().code(),
@@ -931,4 +1005,24 @@ fn authz_scope_shape_is_enforced() {
     }
     assert!(is_valid_authz_scope(&format!("a:{}", "b".repeat(62))));
     assert!(!is_valid_authz_scope(&format!("a:{}", "b".repeat(63))));
+}
+
+#[test]
+fn app_id_validator_accepts_three_hyphenated_segments_only() {
+    for ok in [
+        "penguintechinc.waddles.discord-invite",
+        "psychoboy.penguintwitchbot.wix-event-sync",
+        "penguintechinc.waddles.echo-pipeline",
+    ] {
+        assert!(super::valid_app_id(ok), "{ok}");
+    }
+    for bad in [
+        "penguintechinc.waddles.legacy.four",
+        "penguintechinc.waddles",
+        "penguintechinc.waddles.a_b",
+        "penguintechinc.waddles.A",
+        "penguintechinc..x",
+    ] {
+        assert!(!super::valid_app_id(bad), "{bad}");
+    }
 }

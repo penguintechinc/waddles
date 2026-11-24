@@ -92,6 +92,11 @@ _SCOPE_DEFINITIONS: dict[str, dict[str, str]] = {
 }
 
 
+def _row(dal: Any, table: str, row_id: int) -> Any:
+    """The `table` row with `row_id`, or `None` (a sentinel id is a miss, never a KeyError)."""
+    return dal(dal[table].id == row_id).select().first()
+
+
 def _reject_self_approval(*, submitter_ref: Any, reviewer_ref: Any) -> None:
     """403 if the reviewer and the original submitter are the same identity."""
     if submitter_ref is not None and reviewer_ref is not None and submitter_ref == reviewer_ref:
@@ -219,8 +224,8 @@ def get_submissions(
         module = modules.get(r.module_id)
         submissions.append(
             {
-                "id": r.id,
-                "moduleId": r.module_id,
+                "id": str(r.public_id),
+                "moduleId": str(module.public_id) if module else None,
                 "moduleName": module.name if module else None,
                 "category": module.category if module else None,
                 "submitterUsername": submitters.get(r.submitted_by),
@@ -242,7 +247,7 @@ def approve_submission(
     dal: Any, submission_id: int, *, admin_user_id: int, notes: str | None = None
 ) -> None:
     """`POST /admin/marketplace/submissions/<id>/approve`."""
-    submission = dal.marketplace_submissions[submission_id]
+    submission = _row(dal, "marketplace_submissions", submission_id)
     if submission is None:
         raise not_found("Submission not found")
     _reject_self_approval(submitter_ref=submission.submitted_by, reviewer_ref=admin_user_id)
@@ -266,7 +271,7 @@ def reject_submission(
     notes: str | None = None,
 ) -> None:
     """`POST /admin/marketplace/submissions/<id>/reject`."""
-    submission = dal.marketplace_submissions[submission_id]
+    submission = _row(dal, "marketplace_submissions", submission_id)
     if submission is None:
         raise not_found("Submission not found")
 
@@ -447,7 +452,7 @@ def get_submission_status(dal: Any, submission_id: str, email: str) -> dict[str,
         orderby=~dal.vendor_submission_reviews.created_at, limitby=(0, 10)
     )
     return {
-        "id": row.id,
+        "id": str(row.public_id),
         "submissionId": row.submission_id,
         "vendorName": row.vendor_name,
         "moduleName": row.module_name,
@@ -536,7 +541,7 @@ def get_vendor_submissions_for_review(
 
 def _vendor_submission_dict(row: Any) -> dict[str, Any]:
     return {
-        "id": row.id,
+        "id": str(row.public_id),
         "submissionId": row.submission_id,
         "vendorName": row.vendor_name,
         "vendorEmail": row.vendor_email,
@@ -551,7 +556,7 @@ def _vendor_submission_dict(row: Any) -> dict[str, Any]:
 
 def get_vendor_submission_details(dal: Any, submission_id: int) -> dict[str, Any]:
     """`GET /admin/marketplace/vendor-submissions/<id>` -- full admin detail."""
-    row = dal.vendor_submissions[submission_id]
+    row = _row(dal, "vendor_submissions", submission_id)
     if row is None:
         raise not_found("Submission not found")
     scopes = dal(dal.vendor_submission_scopes.submission_id == submission_id).select()
@@ -569,7 +574,6 @@ def get_vendor_submission_details(dal: Any, submission_id: int) -> dict[str, Any
         "paymentMethod": row.payment_method,
         "scopes": [
             {
-                "id": s.id,
                 "scopeName": s.scope_name,
                 "riskLevel": s.risk_level,
                 "description": s.description,
@@ -592,7 +596,7 @@ def approve_vendor_submission(
     dal: Any, submission_id: int, *, admin_user_id: int, admin_notes: str | None = None
 ) -> dict[str, Any]:
     """`POST /admin/marketplace/vendor-submissions/<id>/approve`."""
-    row = dal.vendor_submissions[submission_id]
+    row = _row(dal, "vendor_submissions", submission_id)
     if row is None:
         raise not_found("Submission not found")
     admin = dal.hub_users[admin_user_id]
@@ -612,7 +616,7 @@ def approve_vendor_submission(
         created_at=now,
     )
     dal.commit()
-    return _vendor_submission_dict(dal.vendor_submissions[submission_id])
+    return _vendor_submission_dict(_row(dal, "vendor_submissions", submission_id))
 
 
 def reject_vendor_submission(
@@ -626,7 +630,7 @@ def reject_vendor_submission(
     """`POST /admin/marketplace/vendor-submissions/<id>/reject`."""
     if not rejection_reason:
         raise bad_request("Rejection reason is required")
-    row = dal.vendor_submissions[submission_id]
+    row = _row(dal, "vendor_submissions", submission_id)
     if row is None:
         raise not_found("Submission not found")
 
@@ -646,14 +650,14 @@ def reject_vendor_submission(
         created_at=now,
     )
     dal.commit()
-    return _vendor_submission_dict(dal.vendor_submissions[submission_id])
+    return _vendor_submission_dict(_row(dal, "vendor_submissions", submission_id))
 
 
 def request_more_info(dal: Any, submission_id: int, *, admin_user_id: int, message: str) -> None:
     """`POST /admin/marketplace/vendor-submissions/<id>/request-info`."""
     if not message:
         raise bad_request("Information request message is required")
-    if dal.vendor_submissions[submission_id] is None:
+    if _row(dal, "vendor_submissions", submission_id) is None:
         raise not_found("Submission not found")
     dal(dal.vendor_submissions.id == submission_id).update(status="under-review")
     dal.vendor_submission_reviews.insert(
@@ -688,7 +692,7 @@ def publish_vendor_module(dal: Any, submission_id: int, *, admin_user_id: int) -
     functionally equivalent to what Node's code actually does at
     runtime, without the misleading `decryptWebhookSecret` call name.
     """
-    row = dal.vendor_submissions[submission_id]
+    row = _row(dal, "vendor_submissions", submission_id)
     if row is None:
         raise not_found("Submission not found")
     if row.status != "approved":

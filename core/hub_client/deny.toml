@@ -29,6 +29,9 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "CDLA-Permissive-2.0",
+    # `xxhash-rust` (transitive via `redis`) -- permissive, OSI-approved and FSF-free (same tier as
+    # MIT/BSD). Same allowance core/svc_ingest/deny.toml and core/svc_process/deny.toml carry.
+    "BSL-1.0",
 ]
 exceptions = []
 

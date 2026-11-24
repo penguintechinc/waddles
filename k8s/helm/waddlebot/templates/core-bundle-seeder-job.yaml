@@ -1,5 +1,5 @@
 # Core-bundle seeder -- post-install/post-upgrade hook Job that activates first-party
-# `waddles.core.*` App Bundles (hub_api/cli/seed_core_bundles.py) under the platform's SYSTEM
+# `penguintechinc.waddles.*` App Bundles (hub_api/cli/seed_core_bundles.py) under the platform's SYSTEM
 # identity, no human global-admin approval. Runs AFTER templates/migrations-job.yaml, now
 # that both are post-install hooks (2026-10-01 user decision: the schema always comes from
 # that Job, fresh install included) -- ordering between them is by hook-weight within the
@@ -71,7 +71,7 @@ spec:
       {{- include "waddlebot.waitForHubApiInitContainer" . | nindent 6 }}
       containers:
       - name: core-bundle-seeder
-        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "seeder" "imageTag" .Values.global.imageTag) }}"
+        image: "{{ include "waddlebot.legacyModuleImage" (dict "root" . "module" "seeder") }}"
         imagePullPolicy: {{ .Values.global.imagePullPolicy }}
         # Explicit (not a `toYaml .Values.securityContext` reference) for the same reason as
         # the pod-level securityContext above -- also adds a container-level seccompProfile,
@@ -100,9 +100,17 @@ spec:
 {{- include "waddlebot.transitTls.clientEnv" . | nindent 8 }}
         - name: MODULE_NAME
           value: "core-bundle-seeder"
-        # PR #870 -- the seeder now signs bundles on activation (activate_for_community ->
-        # bundle_signing_service.sign_and_record_version -> PlatformSigner.from_env()), which
-        # fail-closes without this pair. Same secretKeyRef pair as templates/hub-api.yaml.
+        # Bundle storage v2: same BUNDLE_MIGRATOR_* as hub-api -- approving a core bundle with a
+        # db-v2 schema (e.g. penguintechinc.waddles.music-requests) provisions its tables here.
+        # Without it the service fails `bundle_data_provisioning_unavailable`, is never made
+        # available, and every consumer is refused 422 `tool_target_cross_tenant`.
+{{- include "waddlebot.bundleMigratorEnv" . | nindent 8 }}
+        # PR #870 -- the seeder signs bundles on activation (activate_for_community ->
+        # bundle_signing_service.sign_and_record_version -> PlatformSigner.from_vault()). This
+        # Job never holds the platform KEK: cli/seed_core_bundles.py::_run calls
+        # platform_secrets.bootstrap.load_offline_signer_cache, which accepts this Secret's key
+        # ONLY when it is platform_vault's ACTIVE bundle_signing key (public-key match), else
+        # fails closed. Same secretKeyRef pair as templates/hub-api.yaml.
         - name: BUNDLE_SIGNING_PRIVATE_KEY
           valueFrom:
             secretKeyRef:
@@ -145,16 +153,7 @@ spec:
         # plaintext VALKEY_URL from envFrom's secretRef above and crashed at
         # valkey_admin_client.build_client() with "VALKEY_URL must use rediss://" (hub_api/
         # services/valkey_admin_client.py's SECURITY_TRANSPORT_TLS=true-by-default check).
-        - name: VALKEY_URL
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_URL_TLS
-        - name: VALKEY_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: {{ include "waddlebot.fullname" . }}-secrets
-              key: VALKEY_DURABLE_PASSWORD
+        {{- include "waddlebot.valkeyAcl.durableEnv" (dict "root" . "user" "core-bundle-seeder" "url" "auth") | nindent 8 }}
         {{- end }}
         # Platform connections (services/ingest_source_service.py::ensure_ingest_source(),
         # NO credentials/tokens stored -- see hub_api/cli/seed_core_bundles.py's own module

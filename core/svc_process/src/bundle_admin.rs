@@ -500,13 +500,13 @@ pub async fn handle_one<B: AdminBackend, E: AdminExecutor>(
 
 /// Valkey [`AdminBackend`].
 pub struct ValkeyBackend {
-    conn: redis::aio::MultiplexedConnection,
+    conn: redis::aio::ConnectionManager,
 }
 
 impl ValkeyBackend {
     /// Wraps a (non-blocking) connection.
     #[must_use]
-    pub fn new(conn: redis::aio::MultiplexedConnection) -> Self {
+    pub fn new(conn: redis::aio::ConnectionManager) -> Self {
         Self { conn }
     }
 }
@@ -669,7 +669,7 @@ pub async fn run_consumer<B, E>(
                         Arc::clone(&executor),
                     );
                     tokio::spawn(async move {
-                        let now = chrono::Utc::now().timestamp_millis();
+                        let now = crate::timefmt::now_unix_millis();
                         handle_one(&raw, &ring, &*backend, &*executor, now).await;
                         drop(permit);
                     });
@@ -693,7 +693,7 @@ mod tests {
 
     const KEY: &[u8] = &[7u8; 32];
     const NOW: i64 = 1_800_000_000_000;
-    const APP: &str = "waddles.core.service.reputation";
+    const APP: &str = "penguintechinc.waddles.reputation";
 
     fn ring() -> KeyRing {
         KeyRing::parse(&format!("k1:{}", hex::encode(KEY))).unwrap()
@@ -759,7 +759,7 @@ mod tests {
         // tool "override", args '{"amount":5}'), request_id "r-1", exp_ms 1800000120000.
         let r = req("r-1", 1_800_000_120_000, "community:admin");
         assert_eq!(
-            r.sig, "k1:13eba2d368d58a6ddbcc47ec5f8ff5cfa91e38c7b697548f365a4b7460bb34ec",
+            r.sig, "k1:92728619e6fa89c724d312a3192dedbafd1f33f167e46567c12b9f32fe1a04f9",
             "update this vector from hub-api's sign_call if the field order ever changes"
         );
     }
@@ -775,8 +775,8 @@ mod tests {
             ("community_id", json!(4)),
             ("actor_user_id", json!(43)),
             ("actor_scope", json!("community:owner")),
-            ("caller_app_id", json!("waddles.core.service.other")),
-            ("target_app_id", json!("waddles.core.service.other")),
+            ("caller_app_id", json!("penguintechinc.waddles.other")),
+            ("target_app_id", json!("penguintechinc.waddles.other")),
             ("tool", json!("leaderboard")),
             ("args_json", json!(r#"{"amount":500}"#)),
             ("request_id", json!("r-2")),
@@ -1004,5 +1004,44 @@ mod tests {
             reply_for(Err(ToolRefusal::Forbidden("x".into()))),
             json!({"ok": false, "code": "forbidden"})
         );
+    }
+
+    /// A scope this stage never resolved is refused fail-closed, never guessed.
+    #[test]
+    fn display_scope_refuses_an_unresolved_scope() {
+        let err = display_scope((2_000_000_001, 2_000_000_002)).unwrap_err();
+        assert!(matches!(err, ToolRefusal::TargetUnavailable(_)));
+    }
+
+    /// Backend errors carry only the redis error kind, never URL or password text.
+    #[test]
+    fn backend_error_exposes_only_the_redis_error_kind() {
+        let e = redis::RedisError::from((
+            redis::ErrorKind::Io,
+            "boom",
+            "redis://:hunter2@host:6379".to_string(),
+        ));
+        let b = be(&e);
+        assert_eq!(b.0, format!("{:?}", redis::ErrorKind::Io));
+        assert!(!b.0.contains("hunter2"));
+    }
+
+    /// With Valkey unreachable the consumer backs off and exits promptly on shutdown.
+    #[tokio::test]
+    async fn run_consumer_exits_on_shutdown_when_valkey_is_unreachable() {
+        let client = redis::Client::open("redis://127.0.0.1:1/").unwrap();
+        let done = tokio::time::timeout(
+            Duration::from_secs(20),
+            run_consumer(
+                client,
+                Arc::new(ring()),
+                Arc::new(Mem::default()),
+                Arc::new(Exec::default()),
+                2,
+                tokio::time::sleep(Duration::from_millis(300)),
+            ),
+        )
+        .await;
+        assert!(done.is_ok(), "shutdown must end the consumer loop");
     }
 }

@@ -2,6 +2,7 @@ import { useState, useEffect } from 'react';
 import { useParams } from 'react-router-dom';
 import { adminApi } from '../../services/api';
 import { useAuth } from '../../contexts/AuthContext';
+import { TIER } from '../../services/communityTierConstants';
 import {
   ChartBarIcon,
   UserGroupIcon,
@@ -12,11 +13,13 @@ import {
 
 function AdminAnalytics() {
   const { communityId } = useParams();
-  const { user } = useAuth();
+  const { communityTier } = useAuth();
   const [analytics, setAnalytics] = useState(null);
   const [loading, setLoading] = useState(true);
   const [message, setMessage] = useState(null);
-  const isPremium = user?.isPremium || false;
+  // UX hint only: the server's tier gates are authoritative (an ungated client still gets 402/403).
+  const tier = communityTier(communityId);
+  const isPremium = tier >= TIER.premium;
   const [pollInterval, setPollInterval] = useState(null);
 
   useEffect(() => {
@@ -28,7 +31,7 @@ function AdminAnalytics() {
     return () => {
       if (interval) clearInterval(interval);
     };
-  }, [communityId]);
+  }, [communityId, isPremium]);
 
   async function fetchAnalytics() {
     setLoading(true);
@@ -298,9 +301,9 @@ function AdminAnalytics() {
           <div className="flex items-center gap-3">
             <SparklesIcon className="w-6 h-6 text-gold-400" />
             <div>
-              <div className="font-medium text-gold-300">Premium Analytics Features</div>
+              <div className="font-medium text-gold-300">Advanced analytics requires Premium</div>
               <div className="text-sm text-gold-200">
-                Upgrade to Premium to unlock health scores, bad actor detection, and retention analytics
+                Health scores, bad actor detection and retention analytics require Premium (this community is on Free). Ask your tenant administrator to allocate a Premium slot
               </div>
             </div>
           </div>

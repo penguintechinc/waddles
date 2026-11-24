@@ -68,17 +68,20 @@ def table_catalog(dal: Any) -> dict[str, frozenset[str]]:
     sqlite (the unit-test dialect) walks `sqlite_master` + `PRAGMA table_info`.
     """
     catalog: dict[str, set[str]] = {}
-    if getattr(dal, "_dbname", "") == "sqlite":
+    if str(getattr(dal, "_dbname", "")).startswith("sqlite"):  # "sqlite" or "sqlite:memory"
         for (name,) in dal.executesql("SELECT name FROM sqlite_master WHERE type = 'table'"):
             safe = str(name).replace('"', "")
             for row in dal.executesql(f'PRAGMA table_info("{safe}")'):
                 catalog.setdefault(str(name).lower(), set()).add(str(row[1]).lower())
         return {k: frozenset(v) for k, v in catalog.items()}
     rows = dal.executesql(
-        "SELECT c.table_name, c.column_name FROM information_schema.columns c "
+        "SELECT CASE WHEN c.table_schema = current_schema() THEN c.table_name "
+        "ELSE c.table_schema || '.' || c.table_name END, c.column_name "
+        "FROM information_schema.columns c "
         "JOIN information_schema.tables t "
         "ON t.table_schema = c.table_schema AND t.table_name = c.table_name "
-        "WHERE c.table_schema = current_schema() AND t.table_type = 'BASE TABLE'"
+        "WHERE (c.table_schema = current_schema() OR c.table_schema = 'analytics_fp') "
+        "AND t.table_type = 'BASE TABLE'"
     )
     for table, column in rows:
         catalog.setdefault(str(table).lower(), set()).add(str(column).lower())
@@ -116,14 +119,25 @@ def _column_types() -> dict[str, dict[str, str]]:
 _COLUMN_TYPES = _column_types()
 
 
+def _quote_table(dal: Any, table: str) -> str:
+    """Quote `table`; a `schema.table` registry name is quoted per part on Postgres.
+
+    sqlite (the unit-test dialect) has no schemas, so a dotted name stays one identifier.
+    """
+    quote = dal._adapter.dialect.quote
+    if "." in table and getattr(dal, "_dbname", "") != "sqlite":
+        return ".".join(quote(part) for part in table.split("."))
+    return str(quote(table))
+
+
 def _alias(dal: Any, table: str) -> Any:
     """The lazily-defined pydal alias of `table` carrying only the registry's columns."""
-    name = _ALIAS_PREFIX + table
+    name = _ALIAS_PREFIX + table.replace(".", "__")  # pydal names cannot contain a dot
     if name not in dal.tables:
         with _ALIAS_LOCK:
             if name not in dal.tables:
                 fields = [Field(col, ftype) for col, ftype in _COLUMN_TYPES.get(table, {}).items()]
-                rname = dal._adapter.dialect.quote(table)
+                rname = _quote_table(dal, table)
                 dal.define_table(name, *fields, rname=rname, migrate=False)
     return dal[name]
 
@@ -229,6 +243,7 @@ def run_registry_erasure(dal: Any, subject: ErasureSubject) -> RegistryResult:
             if changed:
                 key = scrubbed_key(rule.table)
                 result.counts[key] = result.counts.get(key, 0) + changed
+    record_erasure_exclusions(dal, subject, catalog)
     result.tables_examined = len(examined)
     result.tables_absent = tuple(sorted(absent))
     result.rules_skipped = tuple(skipped)
@@ -242,6 +257,35 @@ def run_registry_erasure(dal: Any, subject: ErasureSubject) -> RegistryResult:
         },
     )
     return result
+
+
+def record_erasure_exclusions(
+    dal: Any, subject: ErasureSubject, catalog: dict[str, frozenset[str]]
+) -> int:
+    """Insert `(user_uuid, ERASED)` into `data_use_exclusions` for each in-scope uuid token.
+
+    Same transaction as the erasure (no commit here). Without this the RETAIN rule on the
+    suppression list is fail-open: a late analytics event could re-create layer A rows for an
+    erased subject. Idempotent (existing key skipped); stores the uuid token only, never PII.
+    Returns the number of tokens examined (0 when the table is absent from this deployment).
+    """
+    present = catalog.get(registry.EXCLUSIONS_TABLE)
+    if present is None or not {"user_uuid", "reason_code"} <= present:
+        return 0
+    tokens = _uuid_tokens(subject.user_uuids)
+    reason = registry.EXCLUSION_REASON_ERASED
+    table = registry.EXCLUSIONS_TABLE
+    is_sqlite = getattr(dal, "_dbname", "") == "sqlite"
+    on_conflict = "" if is_sqlite else " ON CONFLICT DO NOTHING"
+    cast = "" if is_sqlite else "::uuid"
+    for token in tokens:  # tokens are canonical uuids (validated above), safe to inline
+        dal.executesql(
+            f"INSERT INTO {table} (user_uuid, reason_code) "  # noqa: S608  # nosec B608
+            f"SELECT '{token}'{cast}, {reason} WHERE NOT EXISTS "
+            f"(SELECT 1 FROM {table} WHERE user_uuid = '{token}' AND reason_code = {reason})"
+            f"{on_conflict}"
+        )
+    return len(tokens)
 
 
 def collect_object_urls(dal: Any, subject: ErasureSubject) -> tuple[str, ...]:

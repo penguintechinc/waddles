@@ -9,9 +9,11 @@ import { StreamsPanel } from '../../components/dashboard/StreamsPanel';
 import BotScoreCard from '../../components/BotScoreCard';
 import { Card, CardHeader, EmptyState, ErrorState, NotAvailableYet, QueryBoundary, ServedFeature } from '../../components/ui';
 import { useAuthView } from '../../contexts/authView';
+import { TIER } from '../../services/communityTierConstants';
 import { useLiveStreams } from '../../hooks/useCommunityPanels';
 import { useMyCommunities, usePublicCommunity } from '../../hooks/useMyCommunities';
 import type { MyCommunity } from '../../services/myCommunitiesApi';
+import { parseCommunityId } from '../../lib/communityId';
 
 function StatTile({ value, label, tone }: { value: string; label: string; tone: string }) {
   return (
@@ -25,7 +27,7 @@ function StatTile({ value, label, tone }: { value: string; label: string; tone: 
 /** Everything on the dashboard that needs the caller to be a member. */
 function DashboardBody({ membership }: { membership: MyCommunity }) {
   const communityId = membership.id;
-  const { isSuperAdmin } = useAuthView();
+  const { isSuperAdmin, communityTier } = useAuthView();
   const details = usePublicCommunity(communityId);
   const streams = useLiveStreams(communityId);
   const canManage = isCommunityAdminRole(membership.role);
@@ -61,7 +63,7 @@ function DashboardBody({ membership }: { membership: MyCommunity }) {
         <div className="space-y-6">
           {isOwnerOrAdmin ? (
             <ServedFeature feature="bot-score" fallbackClassName="card py-8">
-              <BotScoreCard communityId={communityId} isPremium={false} />
+              <BotScoreCard communityId={communityId} isPremium={communityTier(communityId) >= TIER.premium} />
             </ServedFeature>
           ) : null}
           <CommunityReputationPanel communityId={communityId} />
@@ -75,7 +77,7 @@ function DashboardBody({ membership }: { membership: MyCommunity }) {
 }
 
 /** Member dashboard for one community, composed only from routes hub-api serves. */
-function DashboardView({ communityId }: { communityId: number }) {
+function DashboardView({ communityId }: { communityId: string }) {
   const mine = useMyCommunities();
   return (
     <QueryBoundary
@@ -108,8 +110,8 @@ function DashboardView({ communityId }: { communityId: number }) {
 /** Route wrapper: validates `:id` before any query runs. */
 export default function CommunityDashboard() {
   const { id } = useParams<{ id: string }>();
-  const communityId = Number(id);
-  if (!Number.isInteger(communityId) || communityId <= 0) {
+  const communityId = parseCommunityId(id);
+  if (communityId === null) {
     return <ErrorState title="Unknown community" message="This community link is not valid." />;
   }
   return <DashboardView communityId={communityId} />;

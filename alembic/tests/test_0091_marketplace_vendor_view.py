@@ -30,6 +30,7 @@ _VIEW_059 = (
     _ROOT / "config" / "postgres" / "migrations" / "059_marketplace_consolidation.sql"
 )
 _PREVIOUS = "0090_kick_connection"
+_REVISION = "0091_marketplace_vendor_view"
 
 _LEGACY_DDL = """
 CREATE TABLE hub_modules (
@@ -119,21 +120,21 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
         )
         for app_id, author, url in (
             (
-                "waddles.core.a.one",
+                "penguintechinc.waddles.a-one",
                 "github:Acme-Co",
                 "https://github.com/Acme-Co/social/tree/main/a",
             ),
             (
-                "waddles.core.a.two",
+                "penguintechinc.waddles.a-two",
                 "github:acme-co",
                 "https://github.com/acme-co/business/x",
             ),
             (
-                "waddles.core.a.three",
+                "penguintechinc.waddles.a-three",
                 "Plain Name",
                 "https://github.com/Url-Org/repo.git",
             ),
-            ("waddles.core.a.orphan", "Plain Name", None),
+            ("penguintechinc.waddles.a-orphan", "Plain Name", None),
         ):
             cur.execute(
                 "INSERT INTO app_catalog (app_id, name, manifest_version, status, author, "
@@ -143,7 +144,7 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
         # NULL attribution on the catalog row, but the newest published version carries it.
         cur.execute(
             "INSERT INTO app_catalog (app_id, name, manifest_version, status) "
-            "VALUES ('waddles.core.a.legacy', 'legacy', '1.0.0', 'active')"
+            "VALUES ('penguintechinc.waddles.a-legacy', 'legacy', '1.0.0', 'active')"
         )
         for version, author in (
             ("1.0.0", "github:old-org"),
@@ -151,17 +152,19 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
         ):
             cur.execute(
                 "INSERT INTO app_versions (app_id, version, language, artifact_kind, author, "
-                "source_url) VALUES ('waddles.core.a.legacy', %s, 'rust', 'prebuilt', %s, "
+                "source_url) VALUES ('penguintechinc.waddles.a-legacy', %s, 'rust', 'prebuilt', %s, "
                 "'https://github.com/new-org/repo/tree/main/l')",
                 (version, author),
             )
         cur.execute(
             "INSERT INTO app_catalog (app_id, name, manifest_version, status, author) "
-            "VALUES ('waddles.core.a.yanked', 'y', '1.0.0', 'yanked', 'github:acme-co')"
+            "VALUES ('penguintechinc.waddles.a-yanked', 'y', '1.0.0', 'yanked', 'github:acme-co')"
         )
 
-        alembic_cli("upgrade", "head", dsn=db.dsn)
-        alembic_cli("upgrade", "head", dsn=db.dsn)  # idempotent re-run is a no-op
+        # Upgrade to the revision under test, not `head`: 0093_catalog_bundles_only later drops
+        # the legacy branches this test proves 0091 preserves (asserted separately below).
+        alembic_cli("upgrade", _REVISION, dsn=db.dsn)
+        alembic_cli("upgrade", _REVISION, dsn=db.dsn)  # idempotent re-run is a no-op
 
         got = {
             r[0]: r[1:]
@@ -172,29 +175,29 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
             )
         }
         assert set(got) == {
-            "waddles.core.a.one",
-            "waddles.core.a.two",
-            "waddles.core.a.three",
-            "waddles.core.a.orphan",
-            "waddles.core.a.legacy",
+            "penguintechinc.waddles.a-one",
+            "penguintechinc.waddles.a-two",
+            "penguintechinc.waddles.a-three",
+            "penguintechinc.waddles.a-orphan",
+            "penguintechinc.waddles.a-legacy",
         }, "yanked bundle must be excluded; every active bundle present"
-        assert got["waddles.core.a.one"][:2] == ("acme-co", "acme-co/social")
-        assert got["waddles.core.a.two"][:2] == ("acme-co", "acme-co/business")
+        assert got["penguintechinc.waddles.a-one"][:2] == ("acme-co", "acme-co/social")
+        assert got["penguintechinc.waddles.a-two"][:2] == ("acme-co", "acme-co/business")
         # No github author -> vendor falls back to the source URL's org.
-        assert got["waddles.core.a.three"][:2] == (
+        assert got["penguintechinc.waddles.a-three"][:2] == (
             "url-org",
             "url-org/repo",
         )  # `.git` stripped
-        assert got["waddles.core.a.orphan"][:2] == (
+        assert got["penguintechinc.waddles.a-orphan"][:2] == (
             None,
             None,
         )  # stays NULL; API lists it as _unaffiliated
-        assert got["waddles.core.a.legacy"][:2] == (
+        assert got["penguintechinc.waddles.a-legacy"][:2] == (
             "new-org",
             "new-org/repo",
         )  # newest version
         assert (
-            got["waddles.core.a.legacy"][2] == "1.0.1"
+            got["penguintechinc.waddles.a-legacy"][2] == "1.0.1"
         )  # newest `app_versions` row wins
         assert all(r[3] is None for r in got.values()), "bundle source_id is NULL"
 
@@ -211,6 +214,22 @@ def test_view_rebuild_backfill_vendor_derivation_and_grants() -> None:
             "SELECT has_table_privilege('mc_reader_test', 'marketplace_catalog', 'SELECT')"
         )
         assert cur.fetchone() == (True,), "SELECT grant must survive the view rebuild"
+
+        # At head, 0093 keeps only the bundle branch with 0091's exact bundle rows and grant.
+        alembic_cli("upgrade", "head", dsn=db.dsn)
+        at_head = {
+            r[0]: r[1:]
+            for r in _rows(
+                cur,
+                "SELECT source_ref, vendor_key, source_repo, version, source_id, source "
+                "FROM marketplace_catalog",
+            )
+        }
+        assert at_head == got, "head view = 0091's bundle rows only (legacy branches dropped)"
+        cur.execute(
+            "SELECT has_table_privilege('mc_reader_test', 'marketplace_catalog', 'SELECT')"
+        )
+        assert cur.fetchone() == (True,), "SELECT grant must survive the 0093 rebuild"
 
         alembic_cli("downgrade", _PREVIOUS, dsn=db.dsn)
         cur.execute(

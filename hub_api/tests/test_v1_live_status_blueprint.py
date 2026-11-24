@@ -14,11 +14,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from flask_core.tenancy import DEFAULT_TENANT_SLUG
 from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.live_status import live_status_internal_bp, live_status_public_bp
 from config import HubAPIConfig
+from tests.community_ids import UNKNOWN_PUBLIC_ID, install_community_ids, public_id
 from tests.conftest import TENANT_SLUG
 
 SERVICE_API_KEY = "test-service-key"
@@ -36,8 +38,7 @@ def _test_config() -> HubAPIConfig:
         db_max_retries=1,
         db_retry_delay=1,
         secret_key="change-me-in-production",
-        jwt_algorithm="HS256",
-        default_tenant_slug="global",
+        default_tenant_slug=DEFAULT_TENANT_SLUG,
         posthog_api_key=None,
         posthog_host="https://license.penguintech.io",
         license_server_url="https://license.penguintech.io",
@@ -52,12 +53,29 @@ def app(streaming_db: Any, monkeypatch: pytest.MonkeyPatch) -> Quart:
     monkeypatch.setenv("SERVICE_API_KEY", SERVICE_API_KEY)
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(live_status_public_bp)
-    quart_app.register_blueprint(live_status_internal_bp)
     quart_app.config["dal"] = streaming_db.dal
     quart_app.config["async_dal"] = streaming_db
+    install_community_ids(quart_app, streaming_db.dal)
+    quart_app.register_blueprint(live_status_public_bp)
+    quart_app.register_blueprint(live_status_internal_bp)
     quart_app.config["HUB_API_CONFIG"] = _test_config()
     return quart_app
+
+
+_DB: list[Any] = []
+
+
+@pytest.fixture(autouse=True)
+def _bind_db(streaming_db: Any) -> Any:
+    """Expose the test DB to `cu` so seeded numeric ids map to community UUIDs in URLs."""
+    _DB[:] = [streaming_db]
+    yield
+    _DB.clear()
+
+
+def cu(community_id: int) -> str:
+    """Public UUID of a seeded community (client-facing routes never take the numeric id)."""
+    return public_id(_DB[0], community_id)
 
 
 @pytest.fixture
@@ -100,14 +118,14 @@ def _seed_live_channel(
 class TestPublicLiveStatus:
     async def test_no_auth_required(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
-        response = await client.get(f"/api/v1/public/communities/{community_id}/live")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/live")
         assert response.status_code == 200
 
     async def test_live_community_response_shape(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db)
         _seed_live_channel(streaming_db, community_id=community_id)
 
-        response = await client.get(f"/api/v1/public/communities/{community_id}/live")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/live")
         assert response.status_code == 200
         assert response.headers["Cache-Control"] == "no-store"
         body = await response.get_json()
@@ -125,7 +143,7 @@ class TestPublicLiveStatus:
         community_id = _seed_community(streaming_db)
         _seed_live_channel(streaming_db, community_id=community_id, is_live=False, viewer_count=0)
 
-        response = await client.get(f"/api/v1/public/communities/{community_id}/live")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/live")
         assert response.status_code == 200
         body = await response.get_json()
         assert body["data"]["live"] is False
@@ -134,24 +152,24 @@ class TestPublicLiveStatus:
         self, client: Any, streaming_db: Any
     ) -> None:
         community_id = _seed_community(streaming_db)
-        response = await client.get(f"/api/v1/public/communities/{community_id}/live")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/live")
         assert response.status_code == 200
         body = await response.get_json()
         assert body["data"]["live"] is False
         assert body["data"]["streams"] == []
 
     async def test_unknown_community_is_404(self, client: Any, streaming_db: Any) -> None:
-        response = await client.get("/api/v1/public/communities/999999/live")
+        response = await client.get(f"/api/v1/public/communities/{UNKNOWN_PUBLIC_ID}/live")
         assert response.status_code == 404
 
     async def test_private_community_is_404(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db, is_public=False)
-        response = await client.get(f"/api/v1/public/communities/{community_id}/live")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/live")
         assert response.status_code == 404
 
     async def test_inactive_community_is_404(self, client: Any, streaming_db: Any) -> None:
         community_id = _seed_community(streaming_db, is_active=False)
-        response = await client.get(f"/api/v1/public/communities/{community_id}/live")
+        response = await client.get(f"/api/v1/public/communities/{cu(community_id)}/live")
         assert response.status_code == 404
 
 

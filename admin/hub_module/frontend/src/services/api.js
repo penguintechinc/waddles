@@ -1,4 +1,5 @@
 import axios from 'axios';
+import { redirectToLoginIfProtected, shouldSkipAuthRefresh } from '../lib/authRedirect';
 
 // SECURITY (security.md C4 / OWASP A07): the session JWT lives ONLY in the
 // HttpOnly `wb_session` cookie hub-api sets on login/OAuth-exchange/refresh
@@ -39,7 +40,12 @@ api.interceptors.response.use(
     // the request that triggered it (-> /login) instead of re-entering here and
     // refreshing without bound.
     const isRefreshCall = originalRequest?.url === REFRESH_URL;
-    if (error.response?.status === 401 && !originalRequest._retry && !isRefreshCall) {
+    if (
+      error.response?.status === 401 &&
+      !originalRequest._retry &&
+      !isRefreshCall &&
+      !shouldSkipAuthRefresh(originalRequest?.url)
+    ) {
       originalRequest._retry = true;
 
       try {
@@ -48,7 +54,7 @@ api.interceptors.response.use(
           return api(originalRequest);
         }
       } catch (refreshError) {
-        window.location.href = '/login';
+        redirectToLoginIfProtected();
         return Promise.reject(refreshError);
       }
     }
@@ -80,7 +86,6 @@ export const publicApi = {
   getSignupSettings: () => api.get('/api/v1/signup-settings'),
   getBanner: () => api.get('/api/v1/public/banner'),
   // Public song-queue page (no auth required) -- chat users land here via !sq
-  getMusicQueue: (communityId) => api.get(`/api/v1/public/communities/${communityId}/music-station/queue`),
 };
 
 export const communityApi = {
@@ -239,6 +244,18 @@ export const adminApi = {
   updateOverlay: (communityId, data) => api.put(`/api/v1/admin/${communityId}/overlay`, data),
   rotateOverlayKey: (communityId) => api.post(`/api/v1/admin/${communityId}/overlay/rotate`),
   getOverlayStats: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/stats`),
+  // Overlay Builder: widget palette, composite scene layout, canvas resolution
+  getOverlayWidgets: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/widgets`),
+  getOverlayLayout: (communityId) => api.get(`/api/v1/admin/${communityId}/overlay/layout`),
+  addOverlayComponent: (communityId, data) =>
+    api.post(`/api/v1/admin/${communityId}/overlay/layout/components`, data),
+  updateOverlayComponent: (communityId, instanceId, data) =>
+    api.patch(`/api/v1/admin/${communityId}/overlay/layout/components/${instanceId}`, data),
+  removeOverlayComponent: (communityId, instanceId) =>
+    api.delete(`/api/v1/admin/${communityId}/overlay/layout/components/${instanceId}`),
+  clearOverlayLayout: (communityId) => api.delete(`/api/v1/admin/${communityId}/overlay/layout`),
+  setOverlayCanvas: (communityId, resolution) =>
+    api.put(`/api/v1/admin/${communityId}/overlay/layout/canvas`, { resolution }),
   // Loyalty configuration
   getLoyaltyConfig: (communityId) =>
     api.get(`/api/v1/admin/${communityId}/loyalty/config`),
@@ -247,8 +264,9 @@ export const adminApi = {
   // Loyalty leaderboard
   getLoyaltyLeaderboard: (communityId, params) =>
     api.get(`/api/v1/admin/${communityId}/loyalty/leaderboard`, { params }),
-  adjustLoyaltyBalance: (communityId, userId, data) =>
-    api.put(`/api/v1/admin/${communityId}/loyalty/user/${userId}/balance`, data),
+  // `memberUuid` is the member's public UUID (leaderboard entry `user_uuid`), never a platform id.
+  adjustLoyaltyBalance: (communityId, memberUuid, data) =>
+    api.put(`/api/v1/admin/${communityId}/loyalty/user/${memberUuid}/balance`, data),
   wipeLoyaltyCurrency: (communityId) =>
     api.post(`/api/v1/admin/${communityId}/loyalty/wipe`),
   getLoyaltyStats: (communityId) =>
@@ -355,91 +373,6 @@ export const adminApi = {
     api.get(`/api/v1/admin/${communityId}/music/dashboard`),
   controlPlayback: (communityId, action) =>
     api.post(`/api/v1/admin/${communityId}/music/playback/control`, { action }),
-  // Moderation from the public queue page (admin/moderator only, server-enforced)
-  removeMusicQueueItem: (communityId, itemId) =>
-    api.delete(`/api/v1/admin/${communityId}/music-station/queue/${itemId}`),
-  // Music Station policy (YouTube allowed labels, etc.)
-  getMusicStationPolicy: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/music-station/policy`),
-  updateMusicStationPolicy: (communityId, policy) =>
-    api.put(`/api/v1/admin/${communityId}/music-station/policy`, policy),
-
-  // Calendar Events
-  getCalendarEvents: (communityId, params) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events`, { params }),
-  createCalendarEvent: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events`, data),
-  getCalendarEvent: (communityId, eventId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}`),
-  updateCalendarEvent: (communityId, eventId, data) =>
-    api.put(`/api/v1/admin/${communityId}/calendar/events/${eventId}`, data),
-  deleteCalendarEvent: (communityId, eventId) =>
-    api.delete(`/api/v1/admin/${communityId}/calendar/events/${eventId}`),
-  approveCalendarEvent: (communityId, eventId) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/approve`),
-  rejectCalendarEvent: (communityId, eventId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/reject`, data),
-  getEventRsvpCounts: (communityId, eventId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/rsvp-counts`),
-  getEventAttendees: (communityId, eventId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/attendees`),
-
-  // ===== Calendar Ticketing =====
-  // Ticket types
-  getTicketTypes: (communityId, eventId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/ticket-types`),
-  createTicketType: (communityId, eventId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/ticket-types`, data),
-  updateTicketType: (communityId, eventId, typeId, data) =>
-    api.put(`/api/v1/admin/${communityId}/calendar/events/${eventId}/ticket-types/${typeId}`, data),
-  deleteTicketType: (communityId, eventId, typeId) =>
-    api.delete(`/api/v1/admin/${communityId}/calendar/events/${eventId}/ticket-types/${typeId}`),
-
-  // Tickets
-  getTickets: (communityId, eventId, params) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/tickets`, { params }),
-  createTicket: (communityId, eventId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/tickets`, data),
-  getTicket: (communityId, eventId, ticketId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/tickets/${ticketId}`),
-  cancelTicket: (communityId, eventId, ticketId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/tickets/${ticketId}/cancel`, data),
-  transferTicket: (communityId, eventId, ticketId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/tickets/${ticketId}/transfer`, data),
-
-  // Check-in
-  verifyTicket: (ticketCode, performCheckin = true) =>
-    api.post('/api/v1/admin/calendar/verify-ticket', { ticket_code: ticketCode, perform_checkin: performCheckin }),
-  checkIn: (communityId, eventId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/check-in`, data),
-  undoCheckIn: (communityId, eventId, ticketId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/tickets/${ticketId}/undo-check-in`, data),
-
-  // Attendance & Reporting
-  getAttendanceStats: (communityId, eventId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/attendance`),
-  getCheckInLog: (communityId, eventId, params) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/check-in-log`, { params }),
-  exportAttendance: (communityId, eventId, format = 'json') =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/attendance/export`, { params: { format } }),
-
-  // Event admins
-  getEventAdmins: (communityId, eventId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/admins`),
-  assignEventAdmin: (communityId, eventId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/admins`, data),
-  updateEventAdmin: (communityId, eventId, adminId, data) =>
-    api.put(`/api/v1/admin/${communityId}/calendar/events/${eventId}/admins/${adminId}`, data),
-  revokeEventAdmin: (communityId, eventId, adminId, data) =>
-    api.delete(`/api/v1/admin/${communityId}/calendar/events/${eventId}/admins/${adminId}`, { data }),
-  getMyEventPermissions: (communityId, eventId) =>
-    api.get(`/api/v1/admin/${communityId}/calendar/events/${eventId}/my-permissions`),
-
-  // Ticketing configuration
-  enableTicketing: (communityId, eventId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/ticketing/enable`, data),
-  disableTicketing: (communityId, eventId) =>
-    api.post(`/api/v1/admin/${communityId}/calendar/events/${eventId}/ticketing/disable`),
 
   // ===== Live Streaming =====
   getStreamConfig: (communityId) =>
@@ -459,51 +392,9 @@ export const adminApi = {
   getStreamStatus: (communityId) =>
     api.get(`/api/v1/admin/${communityId}/streams/status`),
 
-  // ===== Community Calls (WebRTC) =====
-  getCallRooms: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms`),
-  getCallRoom: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}`),
-  createCallRoom: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms`, data),
-  deleteCallRoom: (communityId, roomName) =>
-    api.delete(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}`),
-  lockCallRoom: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/lock`),
-  unlockCallRoom: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/unlock`),
-  getCallParticipants: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/participants`),
-  kickCallParticipant: (communityId, roomName, identity) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/kick`, { identity }),
-  muteAllCallParticipants: (communityId, roomName) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/mute-all`),
-  getRaisedHands: (communityId, roomName) =>
-    api.get(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/raised-hands`),
-  acknowledgeHand: (communityId, roomName, userId) =>
-    api.post(`/api/v1/admin/${communityId}/calls/rooms/${encodeURIComponent(roomName)}/acknowledge-hand`, { user_id: userId }),
+  // Community calls (admin) moved to the typed `services/callsApi.ts` (UUID room ids, hands, mute).
 
-  // ===== Polls =====
-  getPolls: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/polls`),
-  getPoll: (communityId, pollId) =>
-    api.get(`/api/v1/admin/${communityId}/polls/${pollId}`),
-  createPoll: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/polls`, data),
-  deletePoll: (communityId, pollId) =>
-    api.delete(`/api/v1/admin/${communityId}/polls/${pollId}`),
-
-  // ===== Forms =====
-  getForms: (communityId) =>
-    api.get(`/api/v1/admin/${communityId}/forms`),
-  getForm: (communityId, formId) =>
-    api.get(`/api/v1/admin/${communityId}/forms/${formId}`),
-  createForm: (communityId, data) =>
-    api.post(`/api/v1/admin/${communityId}/forms`, data),
-  deleteForm: (communityId, formId) =>
-    api.delete(`/api/v1/admin/${communityId}/forms/${formId}`),
-  getFormSubmissions: (communityId, formId) =>
-    api.get(`/api/v1/admin/${communityId}/forms/${formId}/submissions`),
+  // Polls and forms are bundle apps now (installed via Bundle Apps); no hub-api routes.
 
   // ===== Support Tickets =====
   getSupportCategories: (communityId) =>
@@ -792,44 +683,6 @@ export const workflowApi = {
     api.post(`/api/v1/admin/${communityId}/workflows/${workflowId}/webhooks/${webhookId}/regenerate`),
 };
 
-// Calendar API
-export const calendarApi = {
-  // OAuth
-  getGoogleAuthUrl: () => api.get('/api/v1/calendar/oauth/google/auth-url'),
-  getMicrosoftAuthUrl: () => api.get('/api/v1/calendar/oauth/microsoft/auth-url'),
-  getConnectedCalendars: () => api.get('/api/v1/calendar/oauth/calendars'),
-  syncCalendar: (id) => api.post(`/api/v1/calendar/oauth/calendars/${id}/sync`),
-  disconnectCalendar: (id) => api.delete(`/api/v1/calendar/oauth/calendars/${id}`),
-
-  // Availability
-  getAvailabilitySettings: () => api.get('/api/v1/calendar/availability/settings'),
-  updateAvailabilitySettings: (data) => api.put('/api/v1/calendar/availability/settings', data),
-  getWeeklyAvailability: () => api.get('/api/v1/calendar/availability/weekly'),
-  updateWeeklyAvailability: (data) => api.put('/api/v1/calendar/availability/weekly', data),
-  getAvailableSlots: (userId, date, duration) => api.get(`/api/v1/calendar/availability/${userId}/slots`, { params: { date, duration } }),
-
-  // Booking Pages
-  createBookingPage: (data) => api.post('/api/v1/calendar/booking-pages', data),
-  getBookingPages: () => api.get('/api/v1/calendar/booking-pages'),
-  getBookingPage: (idOrSlug) => api.get(`/api/v1/calendar/booking-pages/${idOrSlug}`),
-  updateBookingPage: (id, data) => api.put(`/api/v1/calendar/booking-pages/${id}`, data),
-  deleteBookingPage: (id) => api.delete(`/api/v1/calendar/booking-pages/${id}`),
-
-  // Public Booking
-  getBookingSlots: (slug, date) => api.get(`/api/v1/calendar/book/${slug}/slots`, { params: { date } }),
-  createBooking: (slug, data) => api.post(`/api/v1/calendar/book/${slug}`, data),
-  getBooking: (uuid) => api.get(`/api/v1/calendar/bookings/${uuid}`),
-  cancelBooking: (uuid) => api.delete(`/api/v1/calendar/bookings/${uuid}`),
-  getMyBookings: (params) => api.get('/api/v1/calendar/my-bookings', { params }),
-
-  // Group
-  addGroupMember: (pageId, data) => api.post(`/api/v1/calendar/booking-pages/${pageId}/members`, data),
-  removeGroupMember: (pageId, userId) => api.delete(`/api/v1/calendar/booking-pages/${pageId}/members/${userId}`),
-  getGroupMembers: (pageId) => api.get(`/api/v1/calendar/booking-pages/${pageId}/members`),
-  getGroupAvailability: (pageId, date) => api.get(`/api/v1/calendar/booking-pages/${pageId}/group-availability`, { params: { date } }),
-  getBestSlots: (pageId, start, end, limit) => api.get(`/api/v1/calendar/booking-pages/${pageId}/best-slots`, { params: { start, end, limit } }),
-};
-
 // Inventory (Quartermaster) API
 export const inventoryApi = {
   // Admin
@@ -940,15 +793,7 @@ export const interactionApi = {
   deleteReply: (communityId, replyId) =>
     api.delete(`/api/v1/admin/${communityId}/interaction/forum/replies/${replyId}`),
 
-  // Voice rooms (proxied to module_rtc via calls controller)
-  getVoiceRooms: (communityId) =>
-    api.get(`/api/v1/community/${communityId}/interact/voice/rooms`),
-  joinVoiceRoom: (communityId, roomName) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms/${encodeURIComponent(roomName)}/join`),
-  leaveVoiceRoom: (communityId, roomName) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms/${encodeURIComponent(roomName)}/leave`),
-  createAdHocVoiceRoom: (communityId, data) =>
-    api.post(`/api/v1/community/${communityId}/interact/voice/rooms`, data),
+  // Member voice rooms moved to the typed `services/callsApi.ts`.
 };
 
 // ─── Server Manager (RCON / Voice) API ──────────────────────────────────────
@@ -1042,7 +887,7 @@ export const superadminTenantApi = {
 // ── Bundle Onboarding API (hub_api/blueprints/v1/bundle_versions.py +
 // bundle_approvals.py) ─────────────────────────────────────────────
 // `app_id` is a URL path segment, not a query value -- encoded so a
-// namespace like `waddles.integrations.vendor-42.mybundle` round-trips
+// namespace like `acme.widgets.mybundle` round-trips
 // safely even though it already only contains URL-safe characters.
 export const bundleApi = {
   // multipart: `manifest` (YAML, required) + `component` (prebuilt WASM,

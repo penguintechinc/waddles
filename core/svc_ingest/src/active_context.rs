@@ -562,6 +562,7 @@ impl<S: EventSink> EventSink for ContextSink<S> {
         let is_context = event.event_type == "interaction.command"
             && payload.get("command").and_then(Value::as_str) == Some("context");
         if is_context {
+            // nosemgrep: rust-silent-unwrap-or-default -- Option<&str> when /context is invoked with no argument (shows current context)
             let args = payload
                 .get("args")
                 .and_then(Value::as_str)
@@ -804,16 +805,22 @@ mod tests {
         let store = InteractionStore::new(
             redis::Client::open(url)
                 .unwrap()
-                .get_multiplexed_async_connection()
+                .get_connection_manager()
                 .await
                 .unwrap(),
         );
+        // Unique per call even when the wall clock is coarse: a process-wide counter makes the
+        // id collision-free across parallel tests (nanos alone collide on CI runners, and the
+        // NX `put_new` then silently keeps ANOTHER test's record under our id).
+        static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let n = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap()
             .as_nanos();
-        let id = format!("3{n}");
-        store
+        let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        // A snowflake is at most 20 digits: 1 prefix + 4 (seq) + 15 (nanos mod 1e15).
+        let id = format!("3{:04}{:015}", seq % 10_000, n % 1_000_000_000_000_000);
+        let stored = store
             .put_new(
                 &id,
                 &crate::interaction_store::InteractionRecord {
@@ -826,6 +833,10 @@ mod tests {
             )
             .await
             .unwrap();
+        assert!(
+            stored,
+            "test interaction id {id} collided with an existing record"
+        );
         let client = GuardedClient::new(
             GuardedLimits {
                 max_redirects: 0,

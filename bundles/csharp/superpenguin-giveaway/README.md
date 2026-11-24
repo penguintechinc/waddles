@@ -2,7 +2,7 @@
 
 Provably-fair ticket giveaway and keyed raffles, ported from [Psychoboy/PenguinTwitchBot](https://github.com/Psychoboy/PenguinTwitchBot)
 (`Features/GiveawayFeature.cs`, `Features/GiveawayFairnessReport.cs`, `TicketGames/RaffleRuntimeService.cs`; MIT, used with permission,
-see `bundle.yaml` `notice`). App `waddles.integrations.superpenguin.giveaway`, author `github/psychoboy`, collection `superpenguintv`.
+see `bundle.yaml` `notice`). App `psychoboy.penguintwitchbot.giveaway`, author `github/psychoboy`, collection `superpenguintv`.
 It is an **app** bundle: it owns giveaway policy (eligibility, fairness, exclusions); the economy **service** owns the ledger.
 
 | | |
@@ -101,7 +101,7 @@ Chat announcements work without any overlay. Upstream assets: none used, none sh
 | Overlay asset serving (`overlay_assets` -> a URL the OBS page can load) and a presentation-side consumer | Manifest section is declarative only; no host reads it yet. Host the two files yourself (any static host) until it does. |
 | Moderator badges (`is_mod`, `is_broadcaster`, `is_bot`) on `chat.message` payloads | Provided for Twitch; Discord's normalizer may omit them, in which case moderator commands are denied (fail-closed) and bots cannot be detected (use `!tgw exclude`). |
 | App config forwarding | Settings (points per entry, rules/terms markdown, passive earnings) are fixed defaults; upstream's settings UI has no counterpart. |
-| `catalog row` for third-party ports | Not added (core seeder refuses non-`waddles.core.*` rows); vendor path only, same as the other SuperPenguin ports. |
+| `catalog row` for third-party ports | Not added (core seeder refuses non-`penguintechinc.waddles.*` rows); vendor path only, same as the other SuperPenguin ports. |
 
 ## Deviations from upstream
 

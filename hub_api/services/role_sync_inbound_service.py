@@ -85,6 +85,7 @@ from services.role_sync_service import (
     _flag_enabled,
     _resolve_desired_community_role,
     _resolve_tenant_for_community,
+    pairing_sync_allowed,
 )
 from services.schema import bind_guild_pairing_tables
 from services.sync_worker_dal import open_worker_dal
@@ -472,6 +473,8 @@ async def apply_inbound_event(
         return InboundOutcome("direction_not_inbound")
     if not await _flag_enabled(tenant_slug):
         return InboundOutcome("flag_off")
+    if not await pairing_sync_allowed(pairing, tenant_slug):
+        return InboundOutcome("pairing_unverified")
 
     bindings = list_bindings(dal, event.community_id, int(pairing.id))
     if event.event_type != _MEMBER_EVENT:
@@ -523,7 +526,11 @@ async def apply_inbound_event(
     if desired is None:  # defensive: `mapped` is non-empty, so never expected
         return InboundOutcome("no_mapped_roles")
     result = _apply_community_role(
-        dal, community_id=event.community_id, hub_user_id=hub_user_id, desired_role=desired
+        dal,
+        community_id=event.community_id,
+        hub_user_id=hub_user_id,
+        desired_role=desired,
+        pairing_id=int(pairing.id),
     )
     if result == "applied":
         _applied_counter.add(1)

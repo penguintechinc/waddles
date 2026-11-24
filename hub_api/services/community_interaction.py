@@ -11,11 +11,28 @@ per-channel permission overrides. Ported close to 1:1 -- see
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
 from typing import Any
 
 from .community_common import ensure_community_tables, sql_bool
+from .community_public_id import lookup_public_ids_sync
 from .community_relay import relay_message
+from .errors import ApiError
+from .public_ids import Scope, lookup_public_ids, parse_public_id, resolve_public_id_sync
+from .scope_registry import (
+    KIND_CUSTOM,
+    KIND_FIXED,
+    KIND_MODERATOR,
+    effective_scopes,
+    guard_delete,
+    guard_grant,
+    guard_scope_edit,
+    normalize_scopes,
+)
+from .sql_util import execute_positional
+
+logger = logging.getLogger(__name__)
 
 
 def _iso(value: Any) -> str | None:
@@ -65,10 +82,16 @@ def _create_server_channel(
 # ── Hub channel CRUD ─────────────────────────────────────────────────────
 
 
-def _channel_dto(row: Any) -> dict[str, Any]:
+def _public_id(dal: Any, community_id: int) -> str:
+    """Public UUID for one community id (fails loud when the row has none)."""
+    return lookup_public_ids_sync(dal, [community_id])[int(community_id)]
+
+
+def _channel_dto(row: Any, public_community_id: str) -> dict[str, Any]:
+    """Channel wire dict; `community_id` is the community's PUBLIC UUID."""
     return {
-        "id": row.id,
-        "community_id": row.community_id,
+        "id": str(row.public_id),
+        "community_id": public_community_id,
         "name": row.name,
         "description": row.description,
         "channel_type": row.channel_type,
@@ -94,7 +117,8 @@ def get_hub_channels(dal: Any, community_id: int) -> list[dict[str, Any]]:
     ).select(
         orderby=dal.hub_channels.channel_type | dal.hub_channels.sort_order | dal.hub_channels.name
     )
-    return [_channel_dto(r) for r in rows]
+    public_id = _public_id(dal, community_id)
+    return [_channel_dto(r, public_id) for r in rows]
 
 
 def can_create_channel(dal: Any, community_id: int, user_id: int, is_admin_like: bool) -> bool:
@@ -102,7 +126,8 @@ def can_create_channel(dal: Any, community_id: int, user_id: int, is_admin_like:
     if is_admin_like:
         return True
     ensure_community_tables(dal)
-    row = dal.executesql(
+    row = execute_positional(
+        dal,
         """
         SELECT c.config, cr.base_claims, cm.claims_cache
         FROM communities c
@@ -198,7 +223,7 @@ def create_hub_channel(
             )
             dal.commit()
 
-    return _channel_dto(dal.hub_channels[channel_id]), None
+    return _channel_dto(dal.hub_channels[channel_id], _public_id(dal, community_id)), None
 
 
 def update_hub_channel(
@@ -229,7 +254,7 @@ def update_hub_channel(
             fields[key] = value.strip() if key == "name" and isinstance(value, str) else value
     dal(query).update(**fields)
     dal.commit()
-    return _channel_dto(dal.hub_channels[channel_id])
+    return _channel_dto(dal.hub_channels[channel_id], _public_id(dal, community_id))
 
 
 def delete_hub_channel(dal: Any, community_id: int, channel_id: int) -> bool:
@@ -246,10 +271,11 @@ def delete_hub_channel(dal: Any, community_id: int, channel_id: int) -> bool:
 # ── Forum CRUD ───────────────────────────────────────────────────────────
 
 
-def _post_summary_dto(row: Any) -> dict[str, Any]:
+def _post_summary_dto(row: Any, channel_public_id: str) -> dict[str, Any]:
+    """Post wire dict; `id` and `hub_channel_id` are PUBLIC UUIDs (never the numeric ids)."""
     return {
-        "id": row.id,
-        "hub_channel_id": row.hub_channel_id,
+        "id": str(row.public_id),
+        "hub_channel_id": channel_public_id,
         "title": row.title,
         "body": row.body,
         "tags": row.tags or [],
@@ -283,7 +309,8 @@ def get_forum_posts(
         ),
         limitby=(offset, offset + limit),
     )
-    return [_post_summary_dto(r) for r in rows], total
+    channel_public_id = lookup_public_ids(dal, "hub_channels", [channel_id])[int(channel_id)]
+    return [_post_summary_dto(r, channel_public_id) for r in rows], total
 
 
 def get_forum_post(dal: Any, community_id: int, post_id: int) -> dict[str, Any] | None:
@@ -301,10 +328,12 @@ def get_forum_post(dal: Any, community_id: int, post_id: int) -> dict[str, Any] 
     replies = dal(dal.hub_forum_replies.post_id == post_id).select(
         orderby=dal.hub_forum_replies.created_at
     )
-    post = _post_summary_dto(row)
+    post = _post_summary_dto(
+        row, lookup_public_ids(dal, "hub_channels", [row.hub_channel_id])[int(row.hub_channel_id)]
+    )
     post["replies"] = [
         {
-            "id": r.id,
+            "id": str(r.public_id),
             "author_hub_user_id": r.author_hub_user_id,
             "author_platform": r.author_platform,
             "author_username": r.author_username,
@@ -325,6 +354,16 @@ async def create_forum_post(
     title = (payload.get("title") or "").strip()
     if not title:
         return None, "Title is required"
+
+    # The channel id comes from the URL: it must belong to THIS community, or a member of
+    # community A could post into (and relay through) community B's channel.
+    owned = (
+        dal((dal.hub_channels.id == channel_id) & (dal.hub_channels.community_id == community_id))
+        .select(dal.hub_channels.id)
+        .first()
+    )
+    if owned is None:
+        return None, "__not_found__"
 
     post_id = dal.hub_forum_posts.insert(
         hub_channel_id=channel_id,
@@ -361,7 +400,11 @@ async def create_forum_post(
             },
             message_type="forum_post",
         )
-    return {"id": row.id, "title": row.title, "created_at": _iso(row.created_at)}, None
+    return {
+        "id": str(row.public_id),
+        "title": row.title,
+        "created_at": _iso(row.created_at),
+    }, None
 
 
 async def create_forum_reply(
@@ -373,7 +416,8 @@ async def create_forum_reply(
     if not content:
         return None, "Reply content is required"
 
-    post = dal.executesql(
+    post = execute_positional(
+        dal,
         """
         SELECT p.id, p.is_locked, p.platform_thread_id, hc.community_server_channel_id
         FROM hub_forum_posts p JOIN hub_channels hc ON hc.id = p.hub_channel_id
@@ -416,15 +460,21 @@ async def create_forum_reply(
             },
             message_type="forum_reply",
         )
-    return {"id": row.id, "content": row.content, "created_at": _iso(row.created_at)}, None
+    return {
+        "id": str(row.public_id),
+        "content": row.content,
+        "created_at": _iso(row.created_at),
+    }, None
 
 
 def moderate_forum_post(
     dal: Any, community_id: int, post_id: int, payload: dict[str, Any]
 ) -> str | None:
-    """Pin/lock/delete a post. Returns `None` on success, else an error string."""
+    """Pin/lock/delete a post. Returns `None` on success, else an error string (`__not_found__`)."""
     ensure_community_tables(dal)
     query = (dal.hub_forum_posts.id == post_id) & (dal.hub_forum_posts.community_id == community_id)
+    if dal(query).select(dal.hub_forum_posts.id, limitby=(0, 1)).first() is None:
+        return "__not_found__"  # unknown / foreign-community post: one indistinguishable 404
     if payload.get("delete"):
         dal(query).delete()
         dal.commit()
@@ -443,10 +493,31 @@ def moderate_forum_post(
     return None
 
 
+def resolve_reply_public_id(dal: Any, raw: object, community_id: int) -> int | None:
+    """Numeric id of the reply with public UUID `raw` IF its post belongs to `community_id`.
+
+    `hub_forum_replies` has no community column, so scope goes through the parent post. Every miss
+    (malformed, unknown, foreign community) returns `None` -- one indistinguishable not-found.
+    """
+    canonical = parse_public_id(raw)
+    if canonical is None:
+        return None
+    ensure_community_tables(dal)
+    reply, post = dal.hub_forum_replies, dal.hub_forum_posts
+    query = (
+        (reply.public_id == canonical)
+        & (reply.post_id == post.id)
+        & (post.community_id == community_id)
+    )
+    row = dal(query).select(reply.id, limitby=(0, 1)).first()
+    return int(row.id) if row is not None else None
+
+
 def delete_forum_reply(dal: Any, community_id: int, reply_id: int) -> bool:
     """Delete a reply and decrement its post's reply counter."""
     ensure_community_tables(dal)
-    row = dal.executesql(
+    row = execute_positional(
+        dal,
         """
         SELECT r.post_id FROM hub_forum_replies r
         JOIN hub_forum_posts p ON r.post_id = p.id
@@ -496,17 +567,31 @@ async def internal_relay_incoming(dal: Any, payload: dict[str, Any]) -> str | No
 # ── Community roles CRUD ─────────────────────────────────────────────────
 
 
-def _role_dto(row: Any) -> dict[str, Any]:
+def role_kind_of(row: Any) -> int:
+    """Effective `role_kind` of a role row; a kind-less `is_system` row counts as FIXED."""
+    kind = getattr(row, "role_kind", None) or KIND_CUSTOM
+    if kind == KIND_CUSTOM and row.is_system:
+        return KIND_FIXED
+    return int(kind)
+
+
+def _role_dto(row: Any, public_community_id: str) -> dict[str, Any]:
+    """Role wire dict; `community_id` is the community's PUBLIC UUID."""
     claims = row.base_claims or {}
+    kind = role_kind_of(row)
+    scopes = sorted(effective_scopes(kind, claims.get("scopes", [])))
     return {
-        "id": row.id,
-        "community_id": row.community_id,
+        "id": str(row.public_id),
+        "community_id": public_community_id,
         "name": row.name,
         "display_name": row.display_name,
         "description": row.description,
         "is_system": bool(row.is_system),
+        "role_kind": kind,
         "priority": row.priority,
-        "scopes": claims.get("scopes", []),
+        "scopes": scopes,
+        "scopes_editable": kind in (KIND_CUSTOM, KIND_MODERATOR),
+        "deletable": kind == KIND_CUSTOM,
         "created_at": _iso(row.created_at),
         "updated_at": _iso(row.updated_at),
     }
@@ -518,13 +603,31 @@ def get_community_roles(dal: Any, community_id: int) -> list[dict[str, Any]]:
     rows = dal(dal.community_roles.community_id == community_id).select(
         orderby=(~dal.community_roles.priority, dal.community_roles.name)
     )
-    return [_role_dto(r) for r in rows]
+    public_id = _public_id(dal, community_id)
+    return [_role_dto(r, public_id) for r in rows]
+
+
+def _log_role_change(
+    action: str, community_id: int, role_id: int, scopes: list[str] | None
+) -> None:
+    """Structured, PII-free trace of a role mutation (the audit chain row is written per-route)."""
+    logger.info(
+        "community_role.%s community_id=%s role_id=%s scope_count=%s",
+        action,
+        community_id,
+        role_id,
+        "n/a" if scopes is None else len(scopes),
+    )
 
 
 def create_community_role(
-    dal: Any, community_id: int, payload: dict[str, Any]
+    dal: Any,
+    community_id: int,
+    payload: dict[str, Any],
+    *,
+    editor_scopes: frozenset[str],
 ) -> tuple[dict[str, Any] | None, str | None]:
-    """Create a custom (non-system) role. Custom-role priority is capped at 0-49."""
+    """Create a custom role. Priority is capped 0-49; granted scopes must be held by the editor."""
     ensure_community_tables(dal)
     name = (payload.get("name") or "").strip()
     if not name:
@@ -532,6 +635,8 @@ def create_community_role(
     priority = payload.get("priority", 0)
     if priority is not None and not (0 <= priority <= 49):
         return None, "Custom role priority must be between 0 and 49"
+    scopes = normalize_scopes(payload.get("scopes") or [])
+    guard_grant(editor_scopes, scopes)
 
     existing = (
         dal(
@@ -550,19 +655,31 @@ def create_community_role(
         display_name=payload.get("displayName") or name,
         description=payload.get("description") or "",
         is_system=False,
+        role_kind=KIND_CUSTOM,
         priority=priority or 0,
-        base_claims={"scopes": payload.get("scopes") or []},
+        base_claims={"scopes": scopes},
         created_at=datetime.utcnow(),
         updated_at=datetime.utcnow(),
     )
     dal.commit()
-    return _role_dto(dal.community_roles[role_id]), None
+    _log_role_change("created", community_id, role_id, scopes)
+    return _role_dto(dal.community_roles[role_id], _public_id(dal, community_id)), None
 
 
 def update_community_role(
-    dal: Any, community_id: int, role_id: int, payload: dict[str, Any]
+    dal: Any,
+    community_id: int,
+    role_id: int,
+    payload: dict[str, Any],
+    *,
+    editor_scopes: frozenset[str],
 ) -> str | None:
-    """Update a role. System roles may only have `display_name`/`description` changed."""
+    """Update a role under the role-kind guards.
+
+    Admin-kind scopes are never editable (always the full registry); fixed predefined roles keep
+    their scopes; the moderator-kind and custom roles accept a scope edit, but only for scopes
+    the editor holds (a scope the role already carries and the editor lacks is left untouched).
+    """
     ensure_community_tables(dal)
     existing = (
         dal(
@@ -573,32 +690,40 @@ def update_community_role(
     )
     if existing is None:
         return "__not_found__"
+    kind = role_kind_of(existing)
 
     fields: dict[str, Any] = {"updated_at": datetime.utcnow()}
     if "displayName" in payload:
         fields["display_name"] = payload["displayName"]
     if "description" in payload:
         fields["description"] = payload["description"]
-    scopes_changed = False
-    if not existing.is_system:
-        if "priority" in payload:
-            fields["priority"] = payload["priority"]
-        if "scopes" in payload:
-            fields["base_claims"] = {"scopes": payload["scopes"]}
-            scopes_changed = True
+    new_scopes: list[str] | None = None
+    if "scopes" in payload:
+        guard_scope_edit(kind)
+        new_scopes = normalize_scopes(payload["scopes"])
+        current = set(effective_scopes(kind, (existing.base_claims or {}).get("scopes", [])))
+        # No downgrading a role more powerful than the editor: they must hold every current scope.
+        guard_grant(editor_scopes, current)
+        guard_grant(editor_scopes, set(new_scopes) - current)
+        fields["base_claims"] = {"scopes": new_scopes}
+    if "priority" in payload and kind == KIND_CUSTOM:
+        fields["priority"] = payload["priority"]
 
     dal(dal.community_roles.id == role_id).update(**fields)
-    if scopes_changed:
+    if new_scopes is not None:
         dal(
             (dal.community_members.community_id == community_id)
             & (dal.community_members.community_role_id == role_id)
         ).update(claims_cache=None)
     dal.commit()
+    _log_role_change("updated", community_id, role_id, new_scopes)
     return None
 
 
-def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | None:
-    """Delete a custom role, reassigning its members to `member`."""
+def delete_community_role(
+    dal: Any, community_id: int, role_id: int, *, editor_scopes: frozenset[str]
+) -> str | None:
+    """Delete a custom role (members move to `member`); predefined roles are refused (409)."""
     ensure_community_tables(dal)
     existing = (
         dal(
@@ -609,8 +734,12 @@ def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | No
     )
     if existing is None:
         return "__not_found__"
-    if existing.is_system:
-        return "Cannot delete system roles"
+    kind = role_kind_of(existing)
+    guard_delete(kind)
+    # No deleting a role more powerful than the editor: they must hold every scope it carries.
+    guard_grant(
+        editor_scopes, effective_scopes(kind, (existing.base_claims or {}).get("scopes", []))
+    )
 
     member_role = (
         dal(
@@ -627,6 +756,7 @@ def delete_community_role(dal: Any, community_id: int, role_id: int) -> str | No
         ).update(community_role_id=member_role.id, claims_cache=None)
     dal(dal.community_roles.id == role_id).delete()
     dal.commit()
+    _log_role_change("deleted", community_id, role_id, None)
     return None
 
 
@@ -645,10 +775,11 @@ def get_channel_permission_overrides(
         is None
     ):
         return None
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         """
         SELECT o.id, o.hub_channel_id, o.community_role_id, cr.name, cr.display_name,
-               o.grant_scopes, o.deny_scopes, o.scope, o.created_at
+               o.grant_scopes, o.deny_scopes, o.scope, o.created_at, cr.public_id
         FROM hub_channel_permission_overrides o
         JOIN community_roles cr ON cr.id = o.community_role_id
         WHERE o.hub_channel_id = $1
@@ -656,11 +787,12 @@ def get_channel_permission_overrides(
         """,
         placeholders=[channel_id],
     )
+    channel_public_id = lookup_public_ids(dal, "hub_channels", [channel_id])[int(channel_id)]
     return [
         {
             "id": r[0],
-            "hub_channel_id": r[1],
-            "community_role_id": r[2],
+            "hub_channel_id": channel_public_id,
+            "community_role_id": str(r[9]),
             "role_name": r[3],
             "role_display_name": r[4],
             "grant_scopes": r[5] or [],
@@ -672,10 +804,95 @@ def get_channel_permission_overrides(
     ]
 
 
+_OVERRIDE_SCOPES = frozenset({"permanent", "temporary", "both"})
+
+
+def _role_covered(role: Any, editor_scopes: frozenset[str]) -> bool:
+    """True when the editor holds every scope `role` holds (admin-kind roles hold the full set)."""
+    stored = (role.base_claims or {}).get("scopes", [])
+    return effective_scopes(getattr(role, "role_kind", None), stored) <= editor_scopes
+
+
+def _protected_role_ids(
+    dal: Any, community_id: int, channel_id: int, editor_scopes: frozenset[str]
+) -> set[int]:
+    """Role ids with an override on this channel whose scopes the editor does not fully cover."""
+    table = dal.hub_channel_permission_overrides
+    role_ids = {int(r.community_role_id) for r in dal(table.hub_channel_id == channel_id).select()}
+    protected: set[int] = set()
+    for role_id in role_ids:
+        role = (
+            dal(
+                (dal.community_roles.id == role_id)
+                & (dal.community_roles.community_id == community_id)
+            )
+            .select()
+            .first()
+        )
+        if role is None or not _role_covered(role, editor_scopes):
+            protected.add(role_id)
+    return protected
+
+
+def _validated_overrides(
+    dal: Any, community_id: int, overrides: list[dict[str, Any]], editor_scopes: frozenset[str]
+) -> list[dict[str, Any]]:
+    """Validate every override BEFORE any write (all-or-nothing); raises 400/403 `ApiError`.
+
+    Roles must belong to `community_id`, scopes must be registered, `scope` must be one of the
+    stored enum values, and the editor must hold every scope they grant or deny (no escalation).
+    """
+    clean: list[dict[str, Any]] = []
+    for override in overrides:
+        if not isinstance(override, dict):
+            raise ApiError("each override must be an object", 400, "BAD_REQUEST")
+        raw_role_id = override.get("communityRoleId")
+        if not raw_role_id:
+            continue
+        # The client names the role by its public UUID; unknown/foreign/malformed/numeric all give
+        # the same 400 (the role must belong to THIS community).
+        role_id = resolve_public_id_sync(
+            dal, "community_roles", raw_role_id, scope=Scope(community_id=community_id)
+        )
+        if role_id is None:
+            raise ApiError("Role not found in this community", 400, "BAD_REQUEST")
+        role = (
+            dal(
+                (dal.community_roles.id == role_id)
+                & (dal.community_roles.community_id == community_id)
+            )
+            .select()
+            .first()
+        )
+        if role is None:
+            raise ApiError("Role not found in this community", 400, "BAD_REQUEST")
+        if not _role_covered(role, editor_scopes):
+            raise ApiError(
+                "Cannot change overrides for a role holding scopes you do not hold",
+                403,
+                "SCOPE_ESCALATION",
+            )
+        grant = normalize_scopes(override.get("grantScopes") or [])
+        deny = normalize_scopes(override.get("denyScopes") or [])
+        guard_grant(editor_scopes, set(grant) | set(deny))
+        scope = override.get("scope", "both")
+        if scope not in _OVERRIDE_SCOPES:
+            raise ApiError("scope must be one of permanent, temporary, both", 400, "BAD_REQUEST")
+        if any(c["role_id"] == role_id and c["scope"] == scope for c in clean):
+            raise ApiError("duplicate override for the same role and scope", 400, "BAD_REQUEST")
+        clean.append({"role_id": role_id, "grant": grant, "deny": deny, "scope": scope})
+    return clean
+
+
 def update_channel_permission_overrides(
-    dal: Any, community_id: int, channel_id: int, overrides: list[dict[str, Any]]
+    dal: Any,
+    community_id: int,
+    channel_id: int,
+    overrides: list[dict[str, Any]],
+    *,
+    editor_scopes: frozenset[str],
 ) -> bool:
-    """Replace all overrides for one channel; invalidates every member's claims cache."""
+    """Replace the editor-covered overrides of one channel; clears every member's claims cache."""
     ensure_community_tables(dal)
     if (
         dal((dal.hub_channels.id == channel_id) & (dal.hub_channels.community_id == community_id))
@@ -685,17 +902,22 @@ def update_channel_permission_overrides(
     ):
         return False
 
-    dal(dal.hub_channel_permission_overrides.hub_channel_id == channel_id).delete()
-    for override in overrides:
-        role_id = override.get("communityRoleId")
-        if not role_id:
-            continue
+    clean = _validated_overrides(dal, community_id, overrides, editor_scopes)
+    # Replace only rows for roles the editor fully covers; rows for higher-privileged roles
+    # survive untouched (no blanket delete -> a PUT can never strip or invert an admin's override).
+    table = dal.hub_channel_permission_overrides
+    protected = _protected_role_ids(dal, community_id, channel_id, editor_scopes)
+    query = table.hub_channel_id == channel_id
+    if protected:
+        query = query & ~table.community_role_id.belongs(protected)
+    dal(query).delete()
+    for item in clean:
         dal.hub_channel_permission_overrides.insert(
             hub_channel_id=channel_id,
-            community_role_id=role_id,
-            grant_scopes=override.get("grantScopes") or [],
-            deny_scopes=override.get("denyScopes") or [],
-            scope=override.get("scope", "both"),
+            community_role_id=item["role_id"],
+            grant_scopes=item["grant"],
+            deny_scopes=item["deny"],
+            scope=item["scope"],
             created_at=datetime.utcnow(),
             updated_at=datetime.utcnow(),
         )

@@ -16,6 +16,8 @@ from datetime import datetime
 from typing import Any
 
 from .community_common import ensure_community_tables
+from .community_public_id import lookup_public_ids_sync
+from .sql_util import execute_positional
 
 
 @dataclass(slots=True, frozen=True)
@@ -23,7 +25,7 @@ class ChatMessage:
     """One row of `hub_chat_messages`, shaped for the REST history response."""
 
     id: int
-    community_id: int
+    community_id: str
     channel_name: str | None
     sender_id: int | None
     sender_platform: str | None
@@ -78,10 +80,11 @@ def get_chat_history(
         orderby=~dal.hub_chat_messages.created_at, limitby=(0, effective_limit)
     )
 
+    public_id = lookup_public_ids_sync(dal, [community_id])[community_id]
     messages = [
         ChatMessage(
             id=row.id,
-            community_id=row.community_id,
+            community_id=public_id,
             channel_name=row.channel_name,
             sender_id=row.sender_hub_user_id,
             sender_platform=row.sender_platform,
@@ -100,7 +103,8 @@ def get_chat_history(
 def get_chat_channels(dal: Any, community_id: int) -> list[ChatChannel]:
     """Distinct channels with message count + last-message time, `general` always present."""
     ensure_community_tables(dal)
-    rows = dal.executesql(
+    rows = execute_positional(
+        dal,
         """
         SELECT channel_name, COUNT(*) AS message_count, MAX(created_at) AS last_message_at
         FROM hub_chat_messages

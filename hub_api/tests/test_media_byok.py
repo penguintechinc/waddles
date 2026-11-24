@@ -15,6 +15,7 @@ Mutation checks (executed): (1) removing the `tier_meets_media_floor` gate in `r
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import grpc
@@ -33,16 +34,20 @@ from grpc_internal.dataplane_servicers import (
     SCOPE_MEDIA_TIER_RESOLVE,
     MediaServicer,
 )
+from services import community_tier_service as tier_svc
 from services import media_byok_service as svc
 from services.ai_routing.errors import invalid_byok_key
 from services.schema import _define_audit_log
 from tests._dataplane_grpc import DataplaneClient, serving_dataplane
+from tests.ai_routing_helpers import ensure_tier_tables, grant_tier, patch_tenant_tier
+from tests.community_ids import UNKNOWN_PUBLIC_ID, cpath, install_community_ids
 from tests.conftest import (
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
     make_user_token,
     seed_community,
     seed_membership,
+    seed_scoped_member,
 )
 
 PLAINTEXT = "not-a-real-gemini-key-" + "x" * 20 + "-test"
@@ -53,7 +58,8 @@ SCOPES = frozenset({SCOPE_MEDIA_BYOK_RESOLVE, SCOPE_MEDIA_TIER_RESOLVE})
 
 
 @pytest.fixture(autouse=True)
-def _env(monkeypatch: pytest.MonkeyPatch) -> None:
+def _env(monkeypatch: pytest.MonkeyPatch, ai_routing_db: Any) -> None:
+    ensure_tier_tables(ai_routing_db.dal)
     monkeypatch.setenv("AI_BYOK_ENCRYPTION_KEY", "22" * 32)
     monkeypatch.delenv("MEDIA_BYOK_ALLOWED_SERVICES", raising=False)
 
@@ -61,11 +67,8 @@ def _env(monkeypatch: pytest.MonkeyPatch) -> None:
         if api_key == "bad-key":
             raise invalid_byok_key("gemini rejected this API key")
 
-    async def _free_tenant(*, tenant: str, community: int | None = None) -> str:
-        return "free"
-
     monkeypatch.setattr(svc, "_validate_gemini_key", _valid)
-    monkeypatch.setattr(svc, "get_tier", _free_tenant)
+    patch_tenant_tier(monkeypatch, "free")
 
 
 @pytest.fixture
@@ -86,9 +89,10 @@ def app(ai_routing_db: Any, issuer: ServiceJwtIssuer) -> Quart:
     ai_routing_db.dal.commit()
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(media_byok.media_byok_admin_bp)
     quart_app.config["dal"] = ai_routing_db.dal
     quart_app.config["async_dal"] = ai_routing_db
+    install_community_ids(quart_app, ai_routing_db.dal)
+    quart_app.register_blueprint(media_byok.media_byok_admin_bp)
     quart_app.config["SERVICE_JWT_ISSUER"] = issuer
     quart_app.config["SERVICE_JWT_VERIFIER"] = issuer.as_verifier()
     quart_app.config["rate_limiter"] = RateLimiter(redis_url="", namespace="t")
@@ -96,15 +100,26 @@ def app(ai_routing_db: Any, issuer: ServiceJwtIssuer) -> Quart:
 
 
 def _set_tier(db: Any, community_id: int, tier: str | None) -> None:
-    db.dal(db.dal.communities.id == community_id).update(license_tier=tier)
-    db.dal.commit()
+    """Set the community's ALLOCATED tier (real ledger row); free/None/unknown = no allocation."""
+    dal = db.dal
+    now = tier_svc.now_utc()
+    dal(
+        (dal.community_tier_allocations.community_id == community_id)
+        & (dal.community_tier_allocations.released_at == None)  # noqa: E711
+    ).update(released_at=now)
+    code = {
+        "premium": tier_svc.TIER_CODE_PREMIUM,
+    }.get(tier or "")
+    if code is not None:
+        grant_tier(dal, community_id, code)
+    dal.commit()
 
 
 def _tenant_id(db: Any, slug: str) -> int:
     return int(db.dal(db.dal.tenants.slug == slug).select().first().id)
 
 
-def _admin(db: Any, *, tenant: str = TENANT_SLUG, tier: str | None = "professional") -> tuple:
+def _admin(db: Any, *, tenant: str = TENANT_SLUG, tier: str | None = "premium") -> tuple:
     community_id = seed_community(db, tenant_slug=tenant)
     _set_tier(db, community_id, tier)
     seed_membership(db, community_id=community_id, user_id=801, role="community-owner")
@@ -121,11 +136,44 @@ def _audit_rows(db: Any) -> list[Any]:
     return list(db.dal(db.dal.audit_log.action == "media.byok.resolve").select())
 
 
+class TestByokDedicatedScope:
+    """BYOK admin needs `media.byok:manage`; broad scopes (even billing/ai) do not satisfy it."""
+
+    async def test_broad_scopes_cannot_manage_byok_keys(
+        self, app: Quart, ai_routing_db: Any
+    ) -> None:
+        cid = seed_community(ai_routing_db)
+        _set_tier(ai_routing_db, cid, "premium")
+        seed_scoped_member(
+            ai_routing_db,
+            community_id=cid,
+            user_id=811,
+            scopes=[
+                "community:manage_members",
+                "community:manage_channels",
+                "calls:manage",
+                "billing:manage",
+            ]
+            + ["ai.routing:manage"],
+        )
+        headers = {"Authorization": f"Bearer {make_user_token(user_id=811)}"}
+        client = app.test_client()
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
+        r = await client.put(
+            url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
+        )
+        assert r.status_code == 403
+        r = await client.get(url, headers=headers)
+        assert r.status_code == 403
+        r = await client.delete(url + "/gemini", headers=headers)
+        assert r.status_code in (403, 404)
+
+
 class TestAdminApi:
     async def test_set_status_rotate_delete(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         client = app.test_client()
-        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
         r = await client.put(
             url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
         )
@@ -145,7 +193,7 @@ class TestAdminApi:
     async def test_key_never_returned_or_stored_plain(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         client = app.test_client()
-        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
         put = await client.put(
             url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
         )
@@ -160,32 +208,31 @@ class TestAdminApi:
     ) -> None:
         headers, cid = _admin(ai_routing_db, tier="free")
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": PLAINTEXT},
         )
         assert r.status_code == 402
         assert ai_routing_db.dal(ai_routing_db.dal.ai_byok_keys).count() == 0
 
-    async def test_tenant_tier_lifts_free_community(
+    async def test_tenant_tier_never_lifts_free_community(
         self, app: Quart, ai_routing_db: Any, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        async def _pro(*, tenant: str, community: int | None = None) -> str:
-            return "professional"
-
-        monkeypatch.setattr(svc, "get_tier", _pro)
-        headers, cid = _admin(ai_routing_db, tier=None)
-        r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
-            headers=headers,
-            json={"provider": "gemini", "api_key": PLAINTEXT},
-        )
-        assert r.status_code == 200
+        """Regression: a Professional/Enterprise TENANT with no allocation is still Free (402)."""
+        for tenant_tier in ("professional", "enterprise"):
+            patch_tenant_tier(monkeypatch, tenant_tier)
+            headers, cid = _admin(ai_routing_db, tier=None)
+            r = await app.test_client().put(
+                cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
+                headers=headers,
+                json={"provider": "gemini", "api_key": PLAINTEXT},
+            )
+            assert r.status_code == 402
 
     async def test_rejected_key_not_stored(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": "bad-key"},
         )
@@ -195,7 +242,7 @@ class TestAdminApi:
     async def test_invalid_provider_400(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "openai", "api_key": PLAINTEXT},
         )
@@ -206,7 +253,7 @@ class TestAdminApi:
         seed_membership(ai_routing_db, community_id=cid, user_id=802, role="member")
         headers = {"Authorization": f"Bearer {make_user_token(user_id=802)}"}
         r = await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": PLAINTEXT},
         )
@@ -216,7 +263,7 @@ class TestAdminApi:
         _, other_cid = _admin(ai_routing_db, tenant=OTHER_TENANT_SLUG)
         headers = {"Authorization": f"Bearer {make_user_token(user_id=801, tenant=TENANT_SLUG)}"}
         client = app.test_client()
-        url = f"/api/v1/admin/{other_cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", other_cid)
         assert (await client.get(url, headers=headers)).status_code == 403
         r = await client.put(
             url, headers=headers, json={"provider": "gemini", "api_key": PLAINTEXT}
@@ -225,14 +272,16 @@ class TestAdminApi:
         assert (await client.delete(f"{url}/gemini", headers=headers)).status_code == 403
 
     async def test_unauthenticated_401(self, app: Quart) -> None:
-        assert (await app.test_client().get("/api/v1/admin/1/media/byok-keys")).status_code == 401
+        assert (
+            await app.test_client().get(f"/api/v1/admin/{UNKNOWN_PUBLIC_ID}/media/byok-keys")
+        ).status_code == 401
 
     async def test_ai_listing_excludes_gemini(self, app: Quart, ai_routing_db: Any) -> None:
         from services.ai_routing import config_service
 
         headers, cid = _admin(ai_routing_db)
         await app.test_client().put(
-            f"/api/v1/admin/{cid}/media/byok-keys",
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
             headers=headers,
             json={"provider": "gemini", "api_key": PLAINTEXT},
         )
@@ -244,7 +293,7 @@ class TestAdminApi:
 
 async def _store(app: Quart, db: Any, headers: dict[str, str], cid: int) -> None:
     r = await app.test_client().put(
-        f"/api/v1/admin/{cid}/media/byok-keys",
+        cpath(db, "/api/v1/admin/{community_id}/media/byok-keys", cid),
         headers=headers,
         json={"provider": "gemini", "api_key": PLAINTEXT},
     )
@@ -255,7 +304,9 @@ _BYOK = "/waddles.hub.internal.v1.MediaService/ResolveByok"
 _TIER = "/waddles.hub.internal.v1.MediaService/GetEffectiveTier"
 _TIER_NAMES = {
     media_pb2.MEDIA_TIER_FREE: "free",
-    media_pb2.MEDIA_TIER_PROFESSIONAL: "professional",
+    # Community Premium is reported as the lowest paid media enum (PROFESSIONAL); the proto's
+    # ENTERPRISE value is never emitted any more.
+    media_pb2.MEDIA_TIER_PROFESSIONAL: "premium",
     media_pb2.MEDIA_TIER_ENTERPRISE: "enterprise",
 }
 
@@ -310,7 +361,7 @@ class TestResolver:
         r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert (r.status, _TIER_NAMES[r.tier], r.api_key) == (
             media_pb2.BYOK_STATUS_OK,
-            "professional",
+            "premium",
             PLAINTEXT,
         )
         rows = _audit_rows(ai_routing_db)
@@ -326,7 +377,7 @@ class TestResolver:
         r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert (r.status, _TIER_NAMES[r.tier], r.HasField("api_key")) == (
             media_pb2.BYOK_STATUS_NOT_CONFIGURED,
-            "professional",
+            "premium",
             False,
         )
 
@@ -335,7 +386,10 @@ class TestResolver:
     ) -> None:
         admin, cid = _admin(ai_routing_db)
         await _store(app, ai_routing_db, admin, cid)
-        await app.test_client().delete(f"/api/v1/admin/{cid}/media/byok-keys/gemini", headers=admin)
+        await app.test_client().delete(
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys/gemini", cid),
+            headers=admin,
+        )
         r = await _resolve(dp, _token(issuer), _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert r.status == media_pb2.BYOK_STATUS_NOT_CONFIGURED
 
@@ -469,15 +523,15 @@ class TestEffectiveTier:
         ("tenant_tier", "community_tier", "expected"),
         [
             ("free", None, "free"),
-            ("free", "professional", "professional"),
-            ("professional", "free", "professional"),
-            ("professional", "enterprise", "enterprise"),
-            ("enterprise", "free", "enterprise"),
+            ("free", "premium", "premium"),
+            ("professional", None, "free"),
+            ("enterprise", None, "free"),
+            ("professional", "premium", "premium"),
             ("free", "bogus", "free"),
             ("bogus", None, "free"),
         ],
     )
-    async def test_max_of_tenant_and_community(
+    async def test_premium_only_via_allocation_tenant_never_uplifts(
         self,
         ai_routing_db: Any,
         issuer: ServiceJwtIssuer,
@@ -487,14 +541,83 @@ class TestEffectiveTier:
         community_tier: str | None,
         expected: str,
     ) -> None:
-        async def _t(*, tenant: str, community: int | None = None) -> str:
-            return tenant_tier
-
-        monkeypatch.setattr(svc, "get_tier", _t)
+        patch_tenant_tier(monkeypatch, tenant_tier)
         _, cid = _admin(ai_routing_db, tier=community_tier)
         token = _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE)
         r = await _tier_call(dp, token, _tenant_id(ai_routing_db, TENANT_SLUG), cid)
         assert _TIER_NAMES[r.tier] == expected
+
+    async def test_resolver_failure_is_free_and_logs_error(
+        self,
+        ai_routing_db: Any,
+        issuer: ServiceJwtIssuer,
+        dp: DataplaneClient,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Tier lookup fails -> Free (never a paid tier, never an RPC error) + an ERROR record."""
+
+        def _boom(*args: Any, **kwargs: Any) -> Any:
+            raise RuntimeError("allocation store down")
+
+        monkeypatch.setattr(tier_svc, "_community_active_row", _boom)
+        _, cid = _admin(ai_routing_db, tier="premium")
+        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
+        with caplog.at_level(logging.ERROR):
+            r = await _tier_call(dp, _token(issuer, scope=SCOPE_MEDIA_TIER_RESOLVE), tid, cid)
+            b = await _resolve(dp, _token(issuer), tid, cid)
+        assert _TIER_NAMES[r.tier] == "free"
+        assert b.status == media_pb2.BYOK_STATUS_TIER_REQUIRED
+        assert any(
+            x.levelno >= logging.ERROR and "RuntimeError" in x.getMessage() for x in caplog.records
+        )
+
+    async def test_scope_check_failure_is_free_and_logs_error(
+        self,
+        ai_routing_db: Any,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """A DB error in the community-in-tenant check fails closed to Free (ERROR, type only)."""
+
+        async def _boom(*a: Any, **k: Any) -> bool:
+            raise RuntimeError("db down")
+
+        monkeypatch.setattr(svc, "community_belongs_to_tenant", _boom)
+        _, cid = _admin(ai_routing_db, tier="premium")
+        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
+        with caplog.at_level(logging.ERROR):
+            tier = await svc.effective_tier(
+                ai_routing_db, ai_routing_db.dal, tenant_id=tid, community_id=cid
+            )
+        assert tier == "free"
+        assert any("RuntimeError" in x.getMessage() for x in caplog.records)
+
+    async def test_numeric_id_keying_twin_display_name_and_slug_rename(
+        self, ai_routing_db: Any, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Allocation never crosses same-display-name tenants and survives a slug rename."""
+        dal = ai_routing_db.dal
+        twin_tid = int(dal.tenants.insert(slug="acme-twin", display_name="Acme Corp"))
+        dal.commit()
+        _, granted = _admin(ai_routing_db, tier="premium")
+        tid = _tenant_id(ai_routing_db, TENANT_SLUG)
+        twin_cid = seed_community(ai_routing_db, tenant_slug="acme-twin")
+
+        got = await svc.effective_tier(ai_routing_db, dal, tenant_id=tid, community_id=granted)
+        assert got == "premium"
+        twin = await svc.effective_tier(
+            ai_routing_db, dal, tenant_id=twin_tid, community_id=twin_cid
+        )
+        assert twin == "free"
+        # the allocation's tenant never lifts a community claimed under the other tenant
+        with pytest.raises(svc.CommunityScopeError):
+            await svc.effective_tier(ai_routing_db, dal, tenant_id=twin_tid, community_id=granted)
+        dal(dal.tenants.id == tid).update(slug="acme-renamed")
+        dal.commit()
+        patch_tenant_tier(monkeypatch, {TENANT_SLUG: "enterprise"})  # license keyed to the OLD slug
+        renamed = await svc.effective_tier(ai_routing_db, dal, tenant_id=tid, community_id=granted)
+        assert renamed == "premium"
 
     async def test_refusals(
         self, ai_routing_db: Any, issuer: ServiceJwtIssuer, dp: DataplaneClient
@@ -590,7 +713,7 @@ class TestGeminiValidation:
 class TestInputBounds:
     async def test_blank_and_oversized_key_400(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
-        url = f"/api/v1/admin/{cid}/media/byok-keys"
+        url = cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys", cid)
         for key in ("   ", "k" * (svc.MAX_KEY_CHARS + 1)):
             r = await app.test_client().put(
                 url, headers=headers, json={"provider": "gemini", "api_key": key}
@@ -601,6 +724,7 @@ class TestInputBounds:
     async def test_delete_without_key_404(self, app: Quart, ai_routing_db: Any) -> None:
         headers, cid = _admin(ai_routing_db)
         r = await app.test_client().delete(
-            f"/api/v1/admin/{cid}/media/byok-keys/gemini", headers=headers
+            cpath(ai_routing_db, "/api/v1/admin/{community_id}/media/byok-keys/gemini", cid),
+            headers=headers,
         )
         assert r.status_code == 404

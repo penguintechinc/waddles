@@ -4,8 +4,8 @@
 //! (`activate_route`), which also starts the production `KickSubscriber` (real
 //! `ResolverKickCredentials`, real HTTP client) against a fake Kick events endpoint.
 //!
-//! Doubles (and only these): the hub-api and Kick HTTP endpoints (wiremock) and an in-memory
-//! dedup store / inert webhook secret source (no delivery is verified here; that is
+//! Doubles (and only these): the hub-api (a real in-process gRPC server), the Kick HTTP
+//! endpoints (wiremock) and an in-memory dedup store / inert webhook secret source (no delivery is verified here; that is
 //! `kick_webhook.rs`).
 
 #![allow(clippy::unwrap_used, clippy::expect_used)]
@@ -14,10 +14,8 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use connection_resolver::{
-    ConnectionKind, ConnectionRef, ConnectionResolver, ResolverConfig, ResolverMetrics,
-    SecretString,
-};
+use connection_resolver::{ConnectionRef, ConnectionResolver, SecretString};
+use grpc_hub::FakeHub;
 use svc_ingest::connector::kick_subscribe::{
     BackgroundSubscriber, HttpKickEvents, KickOwnerVerifier, KickSubscriber, SharedResolver, EVENTS,
 };
@@ -36,17 +34,13 @@ use svc_ingest::outbound_creds_kick::ResolverKickCredentials;
 use wiremock::matchers::{method, path, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[path = "support/grpc_hub.rs"]
+mod grpc_hub;
+
 const COMMUNITY: i64 = 7;
 const CONNECTION: i64 = 12;
 const TOKEN: &str = "KICK-OAUTH-SECRET";
 const SECRET: &str = "0123456789abcdef0123456789abcdef-route-key-secret";
-
-struct NoMetrics;
-
-impl ResolverMetrics for NoMetrics {
-    fn resolve(&self, _: ConnectionKind, _: &'static str, _: Duration) {}
-    fn list(&self, _: &'static str) {}
-}
 
 struct NoInner;
 
@@ -70,63 +64,22 @@ impl WebhookDedup for MemDedup {
     }
 }
 
-struct TestSa(std::path::PathBuf);
-
-impl Drop for TestSa {
-    fn drop(&mut self) {
-        if let Err(e) = std::fs::remove_file(&self.0) {
-            eprintln!("synthetic sa token cleanup failed: {e}");
-        }
-    }
-}
-
-/// A fake hub-api serving one Kick connection with the given metadata.
-async fn hub(
-    metadata: serde_json::Value,
-    tag: &str,
-) -> (MockServer, Arc<ConnectionResolver>, TestSa) {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/internal/service-token"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"token": "machine-tok", "expires_in": 3600})),
-        )
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/api/v1/internal/provider-connections"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "success": true,
+/// A fake hub-api (real in-process gRPC) serving one Kick connection with the given metadata.
+async fn hub(metadata: serde_json::Value, tag: &str) -> (FakeHub, Arc<ConnectionResolver>) {
+    let (hub, resolver) = grpc_hub::start(
+        &serde_json::json!({
             "items": [{"communityId": COMMUNITY, "connectionId": CONNECTION, "tenantId": 3,
                        "secretVersion": 1, "provider": "kick", "kind": 1, "metadata": metadata}],
             "nextAfter": null
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("POST"))
-        .and(path(format!(
-            "/api/v1/internal/communities/{COMMUNITY}/provider-connections/{CONNECTION}/resolve"
-        )))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+        }),
+        &serde_json::json!({
             "communityId": COMMUNITY, "connectionId": CONNECTION, "provider": "kick", "kind": 1,
             "accessToken": TOKEN, "expiresAt": null, "metadata": metadata
-        })))
-        .mount(&server)
-        .await;
-    let sa = std::env::temp_dir().join(format!("kick-plan-sa-{}-{tag}", std::process::id()));
-    std::fs::write(&sa, "synthetic-sa").unwrap();
-    let resolver = ConnectionResolver::new(
-        ResolverConfig::new(
-            server.uri(),
-            "alpha",
-            format!("{}/internal/service-token", server.uri()),
-            sa.to_string_lossy().to_string(),
-        ),
-        Arc::new(NoMetrics),
+        }),
+        tag,
     )
-    .unwrap();
-    (server, Arc::new(resolver), TestSa(sa))
+    .await;
+    (hub, Arc::new(resolver))
 }
 
 fn env() -> RuntimeEnv {
@@ -192,7 +145,7 @@ async fn desired(
 
 #[tokio::test(flavor = "multi_thread")]
 async fn the_feed_plans_two_lanes_and_the_webhook_route_activates_and_subscribes() {
-    let (_hub, resolver, _sa) = hub(
+    let (_hub, resolver) = hub(
         serde_json::json!({"chatroom_id": "4242", "broadcaster_user_id": "555"}),
         "ok",
     )
@@ -326,7 +279,7 @@ async fn a_binding_without_a_valid_broadcaster_is_refused_loudly_when_webhooks_a
             serde_json::json!({"chatroom_id": "4242", "broadcaster_user_id": "abc"}),
         ),
     ] {
-        let (_hub, resolver, _sa) = hub(meta, tag).await;
+        let (_hub, resolver) = hub(meta, tag).await;
         let owner = kick_users(555).await;
         // The feed skips the malformed binding entirely (no chat-only fallback) ...
         assert!(
@@ -348,44 +301,32 @@ async fn a_binding_without_a_valid_broadcaster_is_refused_loudly_when_webhooks_a
 #[tokio::test(flavor = "multi_thread")]
 async fn two_communities_binding_one_broadcaster_are_both_dropped() {
     // The same hub row served under two communities would claim one broadcaster twice.
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/internal/service-token"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .set_body_json(serde_json::json!({"token": "machine-tok", "expires_in": 3600})),
-        )
-        .mount(&server)
-        .await;
     let item = |community: i64, conn: i64, room: &str| {
         serde_json::json!({"communityId": community, "connectionId": conn, "tenantId": 3,
             "secretVersion": 1, "provider": "kick", "kind": 1,
             "metadata": {"chatroom_id": room, "broadcaster_user_id": "555"}})
     };
-    Mock::given(method("GET"))
-        .and(path("/api/v1/internal/provider-connections"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "success": true,
-            "items": [item(7, 12, "1"), item(8, 13, "2")],
-            "nextAfter": null
-        })))
-        .mount(&server)
-        .await;
-    let sa = std::env::temp_dir().join(format!("kick-plan-sa-{}-dup", std::process::id()));
-    std::fs::write(&sa, "synthetic-sa").unwrap();
-    let _sa = TestSa(sa.clone());
-    let resolver = Arc::new(
-        ConnectionResolver::new(
-            ResolverConfig::new(
-                server.uri(),
-                "alpha",
-                format!("{}/internal/service-token", server.uri()),
-                sa.to_string_lossy().to_string(),
-            ),
-            Arc::new(NoMetrics),
-        )
-        .unwrap(),
+    // Each community's credential resolves to its OWN connection (the reply echoes the request),
+    // so the owner check passes for both and ONLY the duplicate-claim rule can drop the lanes --
+    // a hub that refused one community's token would drop that lane for the wrong reason.
+    let list = serde_json::json!({
+        "items": [item(7, 12, "1"), item(8, 13, "2")],
+        "nextAfter": null
+    });
+    let list_reply = connection_resolver::test_support::list_reply_from_json(&list);
+    let hub = connection_resolver::test_support::Hub::new(
+        Arc::new(|_, req| {
+            Ok(connection_resolver::test_support::reply_from_json(
+                &serde_json::json!({
+                    "communityId": req.community_id, "connectionId": req.connection_id,
+                    "provider": "kick", "kind": 1, "accessToken": TOKEN, "expiresAt": null
+                }),
+            ))
+        }),
+        Arc::new(move |_, _| Ok(list_reply.clone())),
     );
+    let (_hub, resolver) = grpc_hub::start_with(hub, "dup").await;
+    let resolver = Arc::new(resolver);
     // Both communities' tokens "belong" to 555 here (one Kick account connected twice).
     let owner = kick_users(555).await;
     let got = desired(&resolver, true, Some(&owner)).await.unwrap();
@@ -405,7 +346,7 @@ async fn two_communities_binding_one_broadcaster_are_both_dropped() {
 /// verifier outage fails closed. The chat socket lane is untouched.
 #[tokio::test(flavor = "multi_thread")]
 async fn a_broadcaster_that_is_not_the_token_owner_is_refused_and_a_check_outage_fails_closed() {
-    let (_hub, resolver, _sa) = hub(
+    let (_hub, resolver) = hub(
         serde_json::json!({"chatroom_id": "4242", "broadcaster_user_id": "555"}),
         "mismatch",
     )

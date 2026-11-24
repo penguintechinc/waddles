@@ -43,6 +43,7 @@ from services.community_common import community_in_tenant
 from services.current_user import get_current_user_id
 from services.errors import ApiError, not_found
 from services.pagination import parse_limit
+from services.route_guards import community_member_guard
 
 reputation_bp = Blueprint("v1_community_reputation", __name__, url_prefix="/api/v1/community")
 
@@ -71,7 +72,7 @@ def _envelope(data: dict[str, Any]) -> tuple[dict[str, Any], int]:
     return {"status": "success", "data": data, "meta": {"version": 1}}, 200
 
 
-@reputation_bp.route("/<int:community_id>/reputation/me", methods=["GET"])
+@reputation_bp.route("/<cuuid:community_id>/reputation/me", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.reputation:read")  # type: ignore[misc]
 async def get_my_reputation(community_id: int) -> tuple[dict[str, Any], int]:
@@ -97,9 +98,10 @@ async def get_my_reputation(community_id: int) -> tuple[dict[str, Any], int]:
     return _envelope(asdict(snapshot))
 
 
-@reputation_bp.route("/<int:community_id>/reputation/leaderboard", methods=["GET"])
+@reputation_bp.route("/<cuuid:community_id>/reputation/leaderboard", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.reputation:read")  # type: ignore[misc]
+@community_member_guard  # type: ignore[misc]
 async def get_reputation_leaderboard(community_id: int) -> tuple[dict[str, Any], int]:
     """`GET /api/v1/community/<id>/reputation/leaderboard?limit=` -- top scorers, names only."""
     ctx = get_tenant_context(request)

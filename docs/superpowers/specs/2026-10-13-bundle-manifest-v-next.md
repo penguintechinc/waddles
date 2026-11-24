@@ -42,11 +42,11 @@ Annotated `bundle.yaml` (build manifest). The same three fields appear in `hub-m
 
 ```yaml
 schema_version: 3            # BUMPED 2 → 3 (locked): v3 = REQUIRED kind + network, optional requires
-app_id: waddles.core.connector.discord
+app_id: penguintechinc.waddles.discord
 name: Discord Connector
 version: 1.0.0
 kind: service                # NEW. app | service. REQUIRED. (§7)
-feature: waddles.core.connector
+feature: penguintechinc.waddles
 module: core
 provider: builtin
 language: rust
@@ -66,7 +66,7 @@ network:                     # NEW. REQUIRED on EVERY bundle (app + service). Ha
     # [] = no inbound; block missing = validation ERROR
 
 requires:                    # NEW. optional. APP bundles only (kind: app). (§5)
-  - bundle: waddles.core.connector.discord   # a service bundle
+  - bundle: penguintechinc.waddles.discord   # a service bundle
     min_version: 1.2.0       #   SemVer 2.0.0, optional
 
 permissions:                 # existing — structured catalog entries
@@ -262,7 +262,7 @@ The network filter is **not Waddles-specific**. It is extracted to the penguin-l
 
 ### 5.2 Target (locked)
 
-- `requires: [{bundle: <app_id>, min_version?: <SemVer>}]` — a **list of service-bundle dependencies, each with an OPTIONAL minimum version**. **App bundles only** (`kind: app`); a `kind: service` manifest declaring `requires` is refused (`requires_not_allowed_for_service`). `bundle` is a full `app_id` (`waddles.<module>.<feature>.<name>`); `min_version` is SemVer 2.0.0, optional (absent = any active version).
+- `requires: [{bundle: <app_id>, min_version?: <SemVer>}]` — a **list of service-bundle dependencies, each with an OPTIONAL minimum version**. **App bundles only** (`kind: app`); a `kind: service` manifest declaring `requires` is refused (`requires_not_allowed_for_service`). `bundle` is a full `app_id` (`<github-org>.<repo>.<bundle-name>`); `min_version` is SemVer 2.0.0, optional (absent = any active version).
 - **Enforced at activation time** (the moment a bundle would start running for a tenant/community), not install time — availability/install of an app whose service is missing is allowed; *activation* is refused.
 - **Satisfaction rule:** a dependency on service `S` is satisfied for a dependent activating in `(tenant T, community C)` iff `app_active_versions` has a row `(S, T, community_id ∈ {C, 0})` whose version ≥ `min_version`. I.e. **tenant-wide (`community_id = 0`) satisfies community-level deps via `max(scope, tenant)`** (consistent with the tier cascade, `critical-rules.md`). Corollary: a **tenant-wide dependent** (`community_id = 0`) requires the service active **tenant-wide** — a community-scoped service activation does not satisfy a tenant-wide app.
 - **Missing or below-min ⇒ activation BLOCKED: HTTP 422, code `requires_unsatisfied`**, body lists each unmet `{bundle, min_version, found_version|null}`; audited like `routes_to` refusals.
@@ -336,7 +336,7 @@ Ordering note: transport verbs depend on (a) B0 (merged), (b) `network` parse + 
 ## 7. Subsystem: `kind: app | service`
 
 ### 7.1 Current state
-No discriminator exists in any parser or manifest (verified: no `kind` key in `bundle_manifest_v2.py`, `app_manifest.py`, or any `bundle.yaml`/`hub-manifest.yaml`; `module`/`provider`/`is_default` are unrelated). "Service-like" behavior is inferred ad hoc (`waddles.core.*` namespace, `connector` WIT world).
+No discriminator exists in any parser or manifest (verified: no `kind` key in `bundle_manifest_v2.py`, `app_manifest.py`, or any `bundle.yaml`/`hub-manifest.yaml`; `module`/`provider`/`is_default` are unrelated). "Service-like" behavior is inferred ad hoc (`penguintechinc.waddles.*` namespace, `connector` WIT world).
 
 ### 7.2 Target
 - `kind` is **REQUIRED** on every manifest (schema v3); values exactly `app` or `service`; anything else ⇒ `invalid_kind`. All 79 existing bundles migrate to `kind: app` in F3.
@@ -349,7 +349,7 @@ No discriminator exists in any parser or manifest (verified: no `kind` key in `b
 | May declare `transport` / `connector.*` permissions | No (refused) | Yes |
 | May declare `requires` | Yes (targets must be `service`) | No (refused — `requires_not_allowed_for_service`) |
 | Valid `requires` target | No | Yes |
-| Approval path | Normal 3-tier consent | Global-approval-only, first-party `waddles.core.*` for v3.0 (connector spec §3.2); vendor services deferred |
+| Approval path | Normal 3-tier consent | Global-approval-only, first-party `penguintechinc.waddles.*` for v3.0 (connector spec §3.2); vendor services deferred |
 | WIT world | `waddle:bundle` stage worlds | `waddle:connector` world(s) |
 | `network.ingress` expected non-empty | rarely | typically (webhook-family services) |
 
@@ -401,7 +401,7 @@ Discord/Twitch/Slack/Kick/YouTube service bundles (connector spec §5/§6 order)
 - **Fail-closed:** missing `network` or `kind` ⇒ refuse; no catalog row ⇒ deny; unsatisfied `requires` ⇒ 422; PSL unavailable ⇒ refuse to validate; ingress with no declared source match ⇒ reject before any parse; a service-bundle guard that cannot determine dependents ⇒ block the destructive action (409/500), never proceed.
 - **Fail-loud:** seeder aborts on missing dependency/malformed network (and defensive cycle tripwire); dual-manifest mismatch is a hard error; denials are counted with bounded labels and logged at WARN/ERROR with type+message (never swallowed into `extra`-only fields).
 - **PII-free:** manifests and denial telemetry carry app ids, rule families and reason codes only — no user identifiers, request URLs with queries, headers or bodies; raw source IPs appear only in the ingress denial *debug* log, never as metric labels or in spans' attributes beyond the bounded reason.
-- **Vendor-tier stricter than first-party:** for non-`waddles.core.*` (vendor) bundles — wildcard egress entries and public CIDR entries require explicit admin re-consent shown as dangerous (the `/24` CIDR cap applies to vendors exactly as to first-party — no exception either way); **`kind: service` and `transport`/`connector.*` are not available to vendors in v3.0** (connector spec §3.2); `network.ingress` for a vendor app is limited to an operator-defined allowlist; a vendor `network.egress` may not be broader than a tenant-level egress denylist allows (existing tenant denylist, penguin-libs rule V21, applies to wildcard coverage too — a wildcard that *covers* a denylisted host is rejected, not just an exact match).
+- **Vendor-tier stricter than first-party:** for non-`penguintechinc.waddles.*` (vendor) bundles — wildcard egress entries and public CIDR entries require explicit admin re-consent shown as dangerous (the `/24` CIDR cap applies to vendors exactly as to first-party — no exception either way); **`kind: service` and `transport`/`connector.*` are not available to vendors in v3.0** (connector spec §3.2); `network.ingress` for a vendor app is limited to an operator-defined allowlist; a vendor `network.egress` may not be broader than a tenant-level egress denylist allows (existing tenant denylist, penguin-libs rule V21, applies to wildcard coverage too — a wildcard that *covers* a denylisted host is rejected, not just an exact match).
 
 ---
 

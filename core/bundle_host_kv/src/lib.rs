@@ -28,10 +28,17 @@
 
 pub mod authorize;
 pub mod backend;
+#[cfg(feature = "grpc")]
+pub mod grpc_wiring;
 mod limits;
 mod metrics;
 pub mod policy;
 pub mod scope;
+pub mod seal;
+#[cfg(test)]
+mod seal_policy_tests;
+#[cfg(test)]
+mod seal_tests;
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -40,13 +47,29 @@ use sha2::{Digest, Sha256};
 
 pub use authorize::CapabilitySnapshot;
 pub use backend::{
-    BoxFuture, CasDelete, CasOutcome, KvBackend, QuotaOutcome, ReconcileOutcome, VERSION_SCHEME,
+    BoxFuture, ByteCasOutcome, CasDelete, CasOutcome, KvBackend, QuotaOutcome, ReconcileOutcome,
+    VERSION_SCHEME,
 };
 pub use limits::{
     LIST_SCAN_CAP, MAX_BYTES_PER_INVOKE, MAX_GUEST_KEY_LEN, MAX_KEYS_PER_APP, MAX_LISTS_PER_INVOKE,
     MAX_LIST_LIMIT, MAX_OPS_PER_INVOKE, MAX_TTL_SECONDS, MAX_VALUE_BYTES,
 };
 pub use scope::KvScope;
+pub use seal::{AlwaysSeal, Sealing, SealingGate};
+
+/// How many read-modify-CAS rounds a sealed `increment` tries before it
+/// reports contention.
+const SEALED_INCREMENT_ATTEMPTS: u32 = 64;
+
+/// Jittered, growing backoff after a lost compare-and-set race, so many
+/// writers on one hot counter spread out instead of retrying in lockstep.
+fn conflict_backoff(attempt: u32) -> Duration {
+    let jitter_ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| u64::from(d.subsec_nanos()));
+    let ceiling_us = 200u64.saturating_mul(u64::from(attempt.min(10)) + 1);
+    Duration::from_micros(jitter_ns % ceiling_us + 50)
+}
 
 /// The `kv` capability's error surface. Deliberately richer than
 /// `stage.wit`'s two-variant `kv.error` (`too-large`/`backend`) --
@@ -85,6 +108,15 @@ pub enum KvError {
     /// Valkey itself failed (network, protocol, script error).
     #[error("backend error: {0}")]
     Backend(String),
+    /// The tenant's data key could not be resolved (broker down, revoked,
+    /// unknown tenant) or the scope lacks numeric ids. The op is refused;
+    /// nothing is ever written in plaintext as a fallback.
+    #[error("tenant data key unavailable: {0}")]
+    KeyUnavailable(String),
+    /// A sealed value failed authentication (wrong tenant/community/app/key
+    /// binding, tamper, or corruption).
+    #[error("integrity failure: {0}")]
+    Integrity(String),
 }
 
 impl KvError {
@@ -114,6 +146,8 @@ impl KvError {
             | KvError::QuotaExceeded(m)
             | KvError::RateLimited(m)
             | KvError::Reconciling(m)
+            | KvError::KeyUnavailable(m)
+            | KvError::Integrity(m)
             | KvError::Backend(m) => m.clone(),
         }
     }
@@ -131,6 +165,8 @@ impl KvError {
             KvError::RateLimited(_) => "rate_limited",
             KvError::Reconciling(_) => "reconciling",
             KvError::Backend(_) => "backend",
+            KvError::KeyUnavailable(_) => "key_unavailable",
+            KvError::Integrity(_) => "integrity",
         }
     }
 }
@@ -216,6 +252,69 @@ fn finish<T>(
     }
 }
 
+/// Longest error detail written to a log line (a backend error can embed a long server reply).
+const MAX_ERROR_DETAIL_CHARS: usize = 300;
+
+/// The operator-facing detail of a failed kv call: the [`KvError`] message with control
+/// characters stripped and length capped. Never contains the guest key or value (every
+/// `KvError` message is built without them) and never a connection URL or credential.
+pub fn error_detail(err: &KvError) -> String {
+    err.to_string()
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .take(MAX_ERROR_DETAIL_CHARS)
+        .collect()
+}
+
+/// Reports a failed kv host call from the invoking stage: ERROR log with the underlying
+/// error kind + message and `waddles_bundle_kv_errors_total{stage,op,kind}`.
+///
+/// Called by `core/svc_process` and `core/svc_action` (`stage` = `"process"`/`"action"`)
+/// because the guest only ever sees the collapsed wire error, and a bundle's own log line
+/// ("`count.kv_failure`") carries none of the host-side reason -- before this, a kv outage
+/// was a single INFO line with a bare kind. Guest-caused rejections (`invalid_key`,
+/// `too_large`, `quota_exceeded`, `rate_limited`) log at WARN so a chatty bundle cannot
+/// flood ERROR; everything the operator must act on (`not_granted`, `backend`,
+/// `reconciling`, `key_unavailable`, `integrity`) logs at ERROR. No key, value or secret is ever included.
+pub fn report_failure(stage: &'static str, op: &str, scope: &KvScope, err: &KvError) {
+    let kind = err.code();
+    metrics::record_stage_error(stage, op, kind);
+    let community = scope.community.as_deref().unwrap_or("");
+    let detail = error_detail(err);
+    let op = metrics::normalise_op(op);
+    match err {
+        KvError::InvalidKey(_)
+        | KvError::TooLarge(_)
+        | KvError::QuotaExceeded(_)
+        | KvError::RateLimited(_) => tracing::warn!(
+            stage,
+            tenant = %scope.tenant,
+            community,
+            app_id = %scope.app_id,
+            op,
+            error_kind = kind,
+            error = %detail,
+            "bundle kv call rejected"
+        ),
+        KvError::NotGranted(_)
+        | KvError::Reconciling(_)
+        | KvError::Backend(_)
+        | KvError::KeyUnavailable(_)
+        | KvError::Integrity(_) => {
+            tracing::error!(
+                stage,
+                tenant = %scope.tenant,
+                community,
+                app_id = %scope.app_id,
+                op,
+                error_kind = kind,
+                error = %detail,
+                "bundle kv call failed"
+            );
+        }
+    }
+}
+
 /// The `kv` host capability, generic over [`KvBackend`] so production
 /// (`redis::aio::MultiplexedConnection`) and unit tests (an in-memory
 /// fake) share every byte of orchestration logic below.
@@ -226,6 +325,10 @@ pub struct KvHost<B: KvBackend> {
     /// "undeclared means denied" is the default for any `app_id` it has
     /// never been told about.
     capabilities: Arc<CapabilitySnapshot>,
+    /// Per-tenant value sealing ([`seal`]). `None` only for hosts built
+    /// without it (unit tests of unrelated behaviour); every production
+    /// stage attaches it via [`KvHost::with_sealing`].
+    sealing: Option<Sealing>,
 }
 
 impl<B: KvBackend> KvHost<B> {
@@ -233,7 +336,21 @@ impl<B: KvBackend> KvHost<B> {
         Self {
             backend,
             capabilities,
+            sealing: None,
         }
+    }
+
+    /// Attaches per-tenant at-rest value sealing: `set` seals before the
+    /// write, `get` opens sealed values (and passes legacy plaintext through).
+    #[must_use]
+    pub fn with_sealing(mut self, sealing: Sealing) -> Self {
+        self.sealing = Some(sealing);
+        self
+    }
+
+    /// In-place form of [`Self::with_sealing`] for a host already built.
+    pub fn attach_sealing(&mut self, sealing: Sealing) {
+        self.sealing = Some(sealing);
     }
 
     /// Self-heal, low-severity fix (PR #425 security review): if the live
@@ -344,11 +461,18 @@ impl<B: KvBackend> KvHost<B> {
         validate_key(key)?;
         self.check_rate(scope, call_id).await?;
         self.charge_bytes(scope, call_id, key.len()).await?;
-        let value = self
+        let stored = self
             .backend
             .get(&scope.data_key(key))
             .await
             .map_err(KvError::Backend)?;
+        let value = match (stored, &self.sealing) {
+            (Some(raw), Some(sealing)) => sealing
+                .open_for_read(&self.backend, scope, key, raw)
+                .await
+                .map(Some)?,
+            (stored, _) => stored,
+        };
         if let Some(v) = &value {
             self.charge_bytes(scope, call_id, v.len()).await?;
         }
@@ -393,13 +517,23 @@ impl<B: KvBackend> KvHost<B> {
             .await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        // Seal before any backend write: a key failure refuses the op here,
+        // so there is no code path that stores plaintext as a fallback.
+        let stored = match &self.sealing {
+            Some(sealing) => {
+                sealing
+                    .seal_for_write(&self.backend, scope, key, value)
+                    .await?
+            }
+            None => value.to_vec(),
+        };
         match self
             .backend
             .set_with_quota(
                 &scope.data_key(key),
                 &scope.live_key(),
                 &scope.legacy_count_key(),
-                value,
+                &stored,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
             )
@@ -440,6 +574,68 @@ impl<B: KvBackend> KvHost<B> {
             .map_err(KvError::Backend)
     }
 
+    /// Sealed `increment`: read the stored value, open it, add `delta`,
+    /// re-seal, and write back through an atomic compare-and-set (Lua) that
+    /// only succeeds if the stored bytes are still what was read. A
+    /// concurrent writer yields a conflict and the loop re-reads, so no
+    /// update is ever lost; contention beyond [`SEALED_INCREMENT_ATTEMPTS`]
+    /// fails loud rather than spinning. The counter is sealed at rest like
+    /// every other value (never a plaintext `INCRBY`).
+    async fn sealed_increment(
+        &self,
+        sealing: &Sealing,
+        scope: &KvScope,
+        key: &str,
+        delta: i64,
+        ttl: u32,
+    ) -> Result<i64, KvError> {
+        let data_key = scope.data_key(key);
+        for attempt in 0..SEALED_INCREMENT_ATTEMPTS {
+            let stored = self
+                .backend
+                .get(&data_key)
+                .await
+                .map_err(KvError::Backend)?;
+            let current = sealing
+                .read_counter(&self.backend, scope, key, stored.clone())
+                .await?;
+            let new_value = current.checked_add(delta).ok_or_else(|| {
+                KvError::Backend("value is not an integer or out of range".to_string())
+            })?;
+            let sealed = sealing
+                .seal_for_write(&self.backend, scope, key, new_value.to_string().as_bytes())
+                .await?;
+            match self
+                .backend
+                .compare_and_set_with_quota(
+                    &data_key,
+                    &scope.live_key(),
+                    &scope.legacy_count_key(),
+                    stored.as_deref(),
+                    &sealed,
+                    ttl,
+                    limits::MAX_KEYS_PER_APP,
+                )
+                .await
+                .map_err(KvError::Backend)?
+            {
+                ByteCasOutcome::Written => return Ok(new_value),
+                ByteCasOutcome::QuotaExceeded => {
+                    return Err(KvError::QuotaExceeded(format!(
+                        "app already holds the maximum {} live keys",
+                        limits::MAX_KEYS_PER_APP
+                    )))
+                }
+                ByteCasOutcome::Conflict => {
+                    tokio::time::sleep(conflict_backoff(attempt)).await;
+                }
+            }
+        }
+        Err(KvError::Backend(
+            "increment contention: gave up after repeated concurrent writes; retry".to_string(),
+        ))
+    }
+
     /// `stage.wit` `kv.increment`. `ttl_seconds` follows the same clamp/
     /// `0`-means-no-expiry rule as [`Self::set`], applied on every call
     /// (not just the first) -- passing `0` clears any TTL a prior call set.
@@ -474,6 +670,9 @@ impl<B: KvBackend> KvHost<B> {
         self.charge_bytes(scope, call_id, key.len()).await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        if let Some(sealing) = &self.sealing {
+            return self.sealed_increment(sealing, scope, key, delta, ttl).await;
+        }
         match self
             .backend
             .increment_with_quota(
@@ -559,6 +758,17 @@ impl<B: KvBackend> KvHost<B> {
             .get_versioned(&scope.data_key(key))
             .await
             .map_err(KvError::Backend)?;
+        // The version token is taken over the *stored* bytes, so under
+        // sealing it versions the ciphertext; the guest still gets plaintext.
+        let found = match (found, &self.sealing) {
+            (Some((raw, version)), Some(sealing)) => Some((
+                sealing
+                    .open_for_read(&self.backend, scope, key, raw)
+                    .await?,
+                version,
+            )),
+            (found, _) => found,
+        };
         if let Some((v, _)) = &found {
             self.charge_bytes(scope, call_id, v.len()).await?;
         }
@@ -604,6 +814,17 @@ impl<B: KvBackend> KvHost<B> {
             .await?;
         self.ensure_count_reconciled(scope).await?;
         let ttl = limits::clamp_ttl_seconds(ttl_seconds);
+        // Seal before any backend write: a key failure refuses the op here,
+        // so there is no code path that stores plaintext as a fallback. The
+        // version compare runs on the stored (sealed) bytes inside Valkey.
+        let stored = match &self.sealing {
+            Some(sealing) => {
+                sealing
+                    .seal_for_write(&self.backend, scope, key, value)
+                    .await?
+            }
+            None => value.to_vec(),
+        };
         match self
             .backend
             .cas_with_quota(
@@ -611,7 +832,7 @@ impl<B: KvBackend> KvHost<B> {
                 &scope.live_key(),
                 &scope.legacy_count_key(),
                 expected_version,
-                value,
+                &stored,
                 ttl,
                 limits::MAX_KEYS_PER_APP,
             )
@@ -778,15 +999,27 @@ mod tests {
     use backend::fake::FakeBackend;
 
     fn scope_a() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     fn scope_b_app() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.b")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.bot-b",
+        )
     }
 
     fn scope_other_tenant() -> KvScope {
-        KvScope::new("globex", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new(
+            "globex",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     /// A [`CapabilitySnapshot`] granting `storage.kv` to every `app_id`
@@ -812,7 +1045,7 @@ mod tests {
 
     #[tokio::test]
     async fn set_then_get_round_trips_the_value() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "counter", b"hello", 0).await.unwrap();
         let got = host.get(&scope, 2, "counter").await.unwrap();
@@ -821,14 +1054,14 @@ mod tests {
 
     #[tokio::test]
     async fn get_of_an_absent_key_is_none_not_an_error() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         assert_eq!(host.get(&scope, 1, "absent").await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn delete_then_get_returns_none() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "counter", b"v", 0).await.unwrap();
         host.delete(&scope, 2, "counter").await.unwrap();
@@ -837,14 +1070,14 @@ mod tests {
 
     #[tokio::test]
     async fn delete_of_an_absent_key_is_not_an_error() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.delete(&scope, 1, "never-existed").await.unwrap();
     }
 
     #[tokio::test]
     async fn increment_from_absent_starts_at_delta() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let v = host.increment(&scope, 1, "hits", 5, 0).await.unwrap();
         assert_eq!(v, 5);
@@ -854,7 +1087,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_accepts_negative_deltas() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.increment(&scope, 1, "hits", 10, 0).await.unwrap();
         let v = host.increment(&scope, 2, "hits", -3, 0).await.unwrap();
@@ -868,7 +1101,7 @@ mod tests {
 
     #[tokio::test]
     async fn kv_call_succeeds_when_the_app_declares_storage_kv() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         host.set(&scope_a(), 1, "k", b"v", 0).await.unwrap();
     }
 
@@ -882,7 +1115,7 @@ mod tests {
     #[tokio::test]
     async fn kv_call_is_denied_for_an_app_id_the_snapshot_has_never_seen() {
         // Granting a *different* app_id must not accidentally grant this one.
-        let host = host(&["waddles.bot.other"]);
+        let host = host(&["penguintechinc.waddles.bot-other"]);
         let err = host.get(&scope_a(), 1, "k").await.unwrap_err();
         assert_eq!(err.code(), "not_granted");
     }
@@ -891,7 +1124,10 @@ mod tests {
 
     #[tokio::test]
     async fn one_app_cannot_read_another_apps_key_in_the_same_community() {
-        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
+        let host = host(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -904,7 +1140,10 @@ mod tests {
 
     #[tokio::test]
     async fn one_app_cannot_delete_another_apps_key() {
-        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
+        let host = host(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]);
         host.set(&scope_a(), 1, "secret", b"a-only", 0)
             .await
             .unwrap();
@@ -918,7 +1157,7 @@ mod tests {
 
     #[tokio::test]
     async fn same_app_id_in_a_different_tenant_is_a_fully_separate_namespace() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         host.set(&scope_a(), 1, "secret", b"acme-value", 0)
             .await
             .unwrap();
@@ -931,7 +1170,10 @@ mod tests {
 
     #[tokio::test]
     async fn increment_counters_are_isolated_per_app() {
-        let host = host(&["waddles.bot.a", "waddles.bot.b"]);
+        let host = host(&[
+            "penguintechinc.waddles.fixture-bot-a",
+            "penguintechinc.waddles.bot-b",
+        ]);
         host.increment(&scope_a(), 1, "hits", 100, 0).await.unwrap();
         let b = host
             .increment(&scope_b_app(), 1, "hits", 1, 0)
@@ -947,9 +1189,15 @@ mod tests {
 
     #[tokio::test]
     async fn a_key_containing_a_colon_is_rejected_not_silently_namespaced_elsewhere() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
-            .set(&scope_a(), 1, "waddles.bot.b:data:secret", b"x", 0)
+            .set(
+                &scope_a(),
+                1,
+                "penguintechinc.waddles.bot-b:data:secret",
+                b"x",
+                0,
+            )
             .await
             .unwrap_err();
         assert_eq!(err.code(), "invalid_key");
@@ -962,12 +1210,12 @@ mod tests {
         // it after `bundlekv:{tenant}:{community}:{app_id}:data:`, so it
         // could only ever shadow a key inside the caller's own namespace --
         // but the leading colon is rejected outright regardless.
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
             .set(
                 &scope_a(),
                 1,
-                "bundlekv:acme:main:waddles.bot.b:data:secret",
+                "bundlekv:acme:main:penguintechinc.waddles.bot-b:data:secret",
                 b"x",
                 0,
             )
@@ -978,7 +1226,7 @@ mod tests {
 
     #[tokio::test]
     async fn an_oversized_key_is_rejected_as_too_large() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let long_key = "a".repeat(MAX_GUEST_KEY_LEN + 1);
         let err = host
             .set(&scope_a(), 1, &long_key, b"x", 0)
@@ -994,7 +1242,7 @@ mod tests {
         let backend = FakeBackend::new();
         let scope = scope_a();
         backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP);
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
             .set(&scope, 1, "one-too-many", b"x", 0)
             .await
@@ -1006,7 +1254,7 @@ mod tests {
     async fn overwriting_an_existing_key_is_exempt_from_the_key_count_quota() {
         let backend = FakeBackend::new();
         let scope = scope_a();
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
         host.set(&scope, 1, "existing", b"v1", 0).await.unwrap();
         // Fill the app's index to its ceiling (the existing key counts
         // toward it): the quota is now full.
@@ -1027,7 +1275,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_value_over_the_size_quota_is_rejected_as_too_large() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let big = vec![0u8; MAX_VALUE_BYTES + 1];
         let err = host.set(&scope_a(), 1, "k", &big, 0).await.unwrap_err();
         assert_eq!(err, KvError::TooLarge((MAX_VALUE_BYTES + 1) as u64));
@@ -1035,7 +1283,7 @@ mod tests {
 
     #[tokio::test]
     async fn exceeding_the_per_invocation_op_rate_limit_is_rejected() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let call_id = 42;
         for _ in 0..MAX_OPS_PER_INVOKE {
@@ -1047,7 +1295,7 @@ mod tests {
 
     #[tokio::test]
     async fn the_rate_limit_is_scoped_per_invocation_not_per_app() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         for _ in 0..MAX_OPS_PER_INVOKE {
             host.get(&scope, 1, "k").await.unwrap();
@@ -1080,7 +1328,7 @@ mod tests {
 
     #[tokio::test]
     async fn ttl_keys_that_lapse_stop_counting_against_the_quota() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         fill(&host, &scope, "cooldown.", MAX_KEYS_PER_APP, TTL_SECONDS).await;
         assert_eq!(host.backend.live_count(&scope.live_key()), MAX_KEYS_PER_APP);
@@ -1103,7 +1351,7 @@ mod tests {
     async fn the_app_can_cycle_far_more_ttl_keys_than_the_lifetime_ceiling() {
         // 3 full generations of ceiling-sized TTL keys -- 30k lifetime keys
         // through a 10k quota -- only works if lapsed keys free their slots.
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         for generation in 0..3u64 {
             fill(
@@ -1121,7 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn only_lapsed_keys_free_slots_permanent_keys_keep_theirs() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let permanent = 4_000;
         fill(&host, &scope, "perm.", permanent, 0).await;
@@ -1152,7 +1400,7 @@ mod tests {
 
     #[tokio::test]
     async fn live_count_is_exact_across_set_expire_overwrite_and_delete() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let live = scope.live_key();
         let count = || host.backend.live_count(&live);
@@ -1191,7 +1439,7 @@ mod tests {
 
     #[tokio::test]
     async fn overwriting_a_ttl_key_refreshes_its_lifetime_without_double_counting() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let live = scope.live_key();
 
@@ -1216,7 +1464,7 @@ mod tests {
 
     #[tokio::test]
     async fn overwriting_with_ttl_zero_makes_the_key_permanent() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "k", b"v1", 10).await.unwrap();
         host.set(&scope, 2, "k", b"v2", 0).await.unwrap();
@@ -1231,7 +1479,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_ttl_keys_free_their_slot_and_restart_from_zero() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         let live = scope.live_key();
 
@@ -1253,7 +1501,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_failed_increment_leaves_the_live_index_untouched() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "text", b"not-a-number", 0)
             .await
@@ -1270,7 +1518,7 @@ mod tests {
         // Every key lapsed => the index is empty but must still exist (the
         // sentinel's job on real Valkey), so the next write does not
         // trigger a keyspace `SCAN` reconciliation.
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "cooldown", b"v", 5).await.unwrap();
         host.backend.advance(Duration::from_secs(6));
@@ -1282,7 +1530,7 @@ mod tests {
 
     #[tokio::test]
     async fn deleting_the_last_key_does_not_make_the_index_look_evicted() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         host.set(&scope, 1, "only", b"v", 0).await.unwrap();
         host.delete(&scope, 2, "only").await.unwrap();
@@ -1296,7 +1544,7 @@ mod tests {
         let scope = scope_a();
         let headroom = 25u64;
         backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP - headroom);
-        let host = Arc::new(host_for(backend, &["waddles.bot.a"]));
+        let host = Arc::new(host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]));
 
         let mut tasks = Vec::new();
         for i in 0..200u64 {
@@ -1326,7 +1574,7 @@ mod tests {
         let scope = scope_a();
         // A brand-new app: the live index has never existed at all.
         backend.seed_unindexed(&scope.data_key("pre-existing"), b"v", None);
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
 
         // A brand-new key still succeeds -- reconciliation rebuilds the
         // index from the true live keys (1), well under quota.
@@ -1396,7 +1644,7 @@ mod tests {
 
     #[tokio::test]
     async fn increment_reconciles_a_missing_live_index_the_same_way() {
-        let host = host(&["waddles.bot.a"]);
+        let host = host(&["penguintechinc.waddles.fixture-bot-a"]);
         let scope = scope_a();
         // No prior seeding at all -- the live index has never existed, the
         // "brand-new app" shape of the same reconciliation path.
@@ -1409,7 +1657,7 @@ mod tests {
         let backend = FakeBackend::new();
         let scope = scope_a();
         backend.hold_lock(&scope.reconcile_lock_key());
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
 
         let err = host.set(&scope, 1, "k", b"v", 0).await.unwrap_err();
         assert_eq!(err.code(), "reconciling");
@@ -1425,7 +1673,7 @@ mod tests {
         let backend = FakeBackend::new();
         let scope = scope_a();
         backend.seed_count(&scope.live_key(), MAX_KEYS_PER_APP);
-        let host = host_for(backend, &["waddles.bot.a"]);
+        let host = host_for(backend, &["penguintechinc.waddles.fixture-bot-a"]);
         let err = host
             .set(&scope, 1, "one-too-many", b"x", 0)
             .await
@@ -1440,12 +1688,19 @@ mod v2_tests {
     use backend::fake::FakeBackend;
 
     fn scope() -> KvScope {
-        KvScope::new("acme", Some("main".to_string()), "waddles.bot.a")
+        KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        )
     }
 
     fn host() -> KvHost<FakeBackend> {
         let caps = Arc::new(CapabilitySnapshot::new());
-        caps.update("waddles.bot.a", [authorize::KV_PERMISSION_ID.to_string()]);
+        caps.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            [authorize::KV_PERMISSION_ID.to_string()],
+        );
         KvHost::new(FakeBackend::new(), caps)
     }
 
@@ -1548,14 +1803,22 @@ mod v2_tests {
         let h = host();
         let s = scope();
         h.set(&s, 1, "ev.1", b"x", 0).await.unwrap();
-        let other_comm = KvScope::new("acme", Some("other".to_string()), "waddles.bot.a");
+        let other_comm = KvScope::new(
+            "acme",
+            Some("other".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         assert!(h
             .list(&other_comm, 2, "", None, 10)
             .await
             .unwrap()
             .keys
             .is_empty());
-        let other_tenant = KvScope::new("globex", Some("main".to_string()), "waddles.bot.a");
+        let other_tenant = KvScope::new(
+            "globex",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
         assert!(h
             .list(&other_tenant, 3, "", None, 10)
             .await
@@ -1670,7 +1933,10 @@ mod v2_tests {
             }
         }
         let caps = Arc::new(CapabilitySnapshot::new());
-        caps.update("waddles.bot.a", [authorize::KV_PERMISSION_ID.to_string()]);
+        caps.update(
+            "penguintechinc.waddles.fixture-bot-a",
+            [authorize::KV_PERMISSION_ID.to_string()],
+        );
         let h = KvHost::new(V1Only, caps);
         let s = scope();
         assert!(
@@ -1684,5 +1950,118 @@ mod v2_tests {
             h.list(&s, 1, "", None, 5).await,
             Err(KvError::Backend(_))
         ));
+    }
+}
+
+/// Tests for [`report_failure`]/[`error_detail`]: a captured-event subscriber (tracing core API
+/// only, no new dev-dependency) proves the level, the error kind + message, and that nothing
+/// sensitive reaches the line.
+#[cfg(test)]
+mod report_failure_tests {
+    use super::*;
+    use std::fmt::Write as _;
+    use std::sync::Mutex;
+
+    /// Collects `(level, "field=value ...")` for every event emitted while it is the default.
+    #[derive(Default, Clone)]
+    struct Capture(Arc<Mutex<Vec<(tracing::Level, String)>>>);
+
+    struct Fields(String);
+
+    impl tracing::field::Visit for Fields {
+        fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
+            let _ = write!(self.0, "{}={:?} ", f.name(), v);
+        }
+    }
+
+    impl tracing::Subscriber for Capture {
+        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
+        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
+        fn event(&self, e: &tracing::Event<'_>) {
+            let mut f = Fields(String::new());
+            e.record(&mut f);
+            self.0.lock().unwrap().push((*e.metadata().level(), f.0));
+        }
+        fn enter(&self, _: &tracing::span::Id) {}
+        fn exit(&self, _: &tracing::span::Id) {}
+    }
+
+    fn report(err: &KvError) -> Vec<(tracing::Level, String)> {
+        let capture = Capture::default();
+        let scope = KvScope::new(
+            "acme",
+            Some("main".to_string()),
+            "penguintechinc.waddles.fixture-bot-a",
+        );
+        tracing::subscriber::with_default(capture.clone(), || {
+            report_failure("process", "get", &scope, err);
+        });
+        let events = capture.0.lock().unwrap().clone();
+        events
+    }
+
+    #[test]
+    fn operator_actionable_failures_log_at_error_with_kind_and_message() {
+        let cases = [
+            (
+                KvError::NotGranted("storage.kv is not declared for this app version".into()),
+                "not_granted",
+                "storage.kv is not declared",
+            ),
+            (
+                KvError::Backend("NOPERM User default has no permissions".into()),
+                "backend",
+                "NOPERM",
+            ),
+            (
+                KvError::Reconciling("lock held".into()),
+                "reconciling",
+                "lock held",
+            ),
+        ];
+        for (err, kind, needle) in cases {
+            let events = report(&err);
+            assert_eq!(events.len(), 1, "{kind}: exactly one event");
+            let (level, line) = &events[0];
+            assert_eq!(*level, tracing::Level::ERROR, "{kind}");
+            assert!(
+                line.contains(&format!("error_kind=\"{kind}\"")),
+                "{kind}: {line}"
+            );
+            assert!(line.contains(needle), "{kind}: message missing from {line}");
+            assert!(line.contains("stage=\"process\""), "{line}");
+            assert!(
+                line.contains("penguintechinc.waddles.fixture-bot-a") && line.contains("acme"),
+                "{line}"
+            );
+        }
+    }
+
+    #[test]
+    fn guest_caused_rejections_log_at_warn_not_error() {
+        for err in [
+            KvError::InvalidKey("bad".into()),
+            KvError::TooLarge(10),
+            KvError::QuotaExceeded("full".into()),
+            KvError::RateLimited("slow down".into()),
+        ] {
+            let events = report(&err);
+            assert_eq!(events.len(), 1);
+            assert_eq!(events[0].0, tracing::Level::WARN, "{err}");
+        }
+    }
+
+    #[test]
+    fn error_detail_strips_control_characters_and_caps_length() {
+        let nasty = KvError::Backend(format!("line1\nline2\r\x1b[31m{}", "x".repeat(2000)));
+        let d = error_detail(&nasty);
+        assert!(!d.chars().any(char::is_control), "{d:?}");
+        assert_eq!(d.chars().count(), MAX_ERROR_DETAIL_CHARS);
     }
 }

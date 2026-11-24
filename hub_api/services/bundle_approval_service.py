@@ -13,7 +13,7 @@ older `AppManifest` pipeline (`app_catalog` -> `app_tenant_availability`
      `uninstall_globally()`, THIS module): approve a version into the
      platform catalog (`app_global_installs`, migration 0027). Vendor
      bundles require a human `platform:admin`; first-party
-     `waddles.core.*` bundles use `install_source="system:core-seeder"`
+     `penguintechinc.waddles.*` bundles use `install_source="system:core-seeder"`
      with `installed_by=None` (`hub_api/cli/seed_core_bundles.py`, same
      SYSTEM-actor convention `app_install_approvals.approval_source`,
      migration 0026, already established). NO tenant/community
@@ -111,7 +111,9 @@ from services import (
     app_command_service,
     app_source_binding_service,
     bundle_audit,
+    bundle_precompile_service,
     bundle_signing_service,
+    music_legacy_migration,
     reputation_logic_exclusivity,
     valkey_admin_client,
 )
@@ -134,6 +136,7 @@ from services.bundle_manifest_v2 import (
     parse_config_schema,
     parse_exported_tools,
     parse_permission_declarations,
+    parse_presentation_widgets,
     parse_requested_tools,
     parse_schedule,
     requested_tool_declarations,
@@ -220,7 +223,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         app_id=raw["app_id"],
         name=raw["name"],
         version=raw["version"],
-        feature=raw["feature"],
+        feature=raw.get("feature") or raw["app_id"].rsplit(".", 1)[0],
         module=raw["module"],
         provider=raw["provider"],
         language=raw["language"],
@@ -263,6 +266,7 @@ def _reparse_trusted(raw: dict[str, Any]) -> BundleManifestV2:
         schedule=parse_schedule(raw.get("schedule")),
         community_config_schema=parse_config_schema(raw.get("community_config_schema")),
         admin_tools=parse_admin_tools(raw.get("admin_tools"), own_app_id=raw["app_id"]),
+        overlay_widgets=parse_presentation_widgets(stages.get("presentation"), raw["app_id"]),
     )
 
 
@@ -280,6 +284,20 @@ KV_PERMISSION_ID = "storage.kv"
 MCP_TOOLS_CAPABILITY = "mcp.tools"
 
 
+def declares_permission(manifest: BundleManifestV2, permission_id: str) -> bool:
+    """Whether `manifest` declares `permission_id` in EITHER `permissions:` shape.
+
+    The structured form (`- id: storage.kv` + justification, parsed into
+    `permission_declarations`) is the real schema; the bare-string form
+    (`permissions: [storage.kv]`) is the legacy shape kept for back-compat.
+    Checking only the bare-string tuple silently dropped every structured
+    declaration, so no bundle using the real schema was ever granted `kv`.
+    """
+    return permission_id in manifest.permissions or any(
+        d.id == permission_id for d in manifest.permission_declarations
+    )
+
+
 def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
     """The host capabilities a manifest's declared shape implies -- see this module's scope note."""
     caps = {"context", "flags", "log", "clock"}
@@ -289,7 +307,7 @@ def _derive_capabilities(manifest: BundleManifestV2) -> frozenset[str]:
         caps.add("db")
     if "action" in manifest.stages:
         caps.add("relay")
-    if KV_PERMISSION_ID in manifest.permissions:
+    if declares_permission(manifest, KV_PERMISSION_ID):
         caps.add(KV_PERMISSION_ID)
     if manifest.kind == "service" and manifest.exported_tools and manifest.trusted_source:
         caps.add(MCP_TOOLS_CAPABILITY)
@@ -730,6 +748,18 @@ async def _live_install_schema(
     return schema_from_manifest(upload.manifest_json), True
 
 
+async def _run_music_legacy_import(install_dal: AsyncDB) -> None:
+    """Post-commit hook: import the retired Music Station queue into the fresh service tables.
+
+    Idempotent and retry-safe (see `services.music_legacy_migration`); a failure is logged
+    and never fails the install -- `python3 -m cli.migrate_legacy_music_queue` re-runs it.
+    """
+    try:
+        await music_legacy_migration.migrate_all(install_dal)
+    except Exception:  # noqa: BLE001 - the install already committed; the job is retryable
+        logger.exception("bundle install: legacy music import failed; rerun the CLI job")
+
+
 async def install_version_globally(
     install_dal: AsyncDB,
     *,
@@ -746,7 +776,7 @@ async def install_version_globally(
     (`platform:admin`) for a human-gated vendor install, or through
     `hub_api/cli/seed_core_bundles.py` (`install_source=
     "system:core-seeder"`, `installed_by=None`) for a first-party
-    `waddles.core.*` bundle at deploy time -- no vendor-scoped code path
+    `penguintechinc.waddles.*` bundle at deploy time -- no vendor-scoped code path
     calls this with a SYSTEM `install_source` (guarded in the seeder
     itself, `services.vendor_bundle_authz.CORE_NAMESPACE_PREFIX`).
 
@@ -844,6 +874,8 @@ async def install_version_globally(
         "bundle install: version installed into the platform catalog",
         extra={"app_id": app_id, "version": version, "install_source": install_source},
     )
+    if app_id == music_legacy_migration.MUSIC_REQUESTS_APP_ID:
+        await _run_music_legacy_import(install_dal)
     return (await install_dal(install_dal.app_global_installs.id == new_id).select()).first()
 
 
@@ -986,7 +1018,7 @@ async def _write_approval_and_activate(
 
     `approved_by=None` + `approval_source="system:core-seeder"` is the
     SYSTEM-actor representation `hub_api/cli/seed_core_bundles.py` uses
-    to activate a first-party `waddles.core.*` bundle with no human
+    to activate a first-party `penguintechinc.waddles.*` bundle with no human
     global-admin approval -- `approved_by` is a NULLABLE FK (migration
     0023), so this is a real NULL, never a fake `hub_users` row.
     `approval_source` (migration 0026) defaults to `"human"`, matching
@@ -1398,6 +1430,14 @@ async def activate_tenant_wide_with_warnings(
     # SIGN (post-commit sidecar upload to the executor's bundle bucket) -- raised, not
     # best-effort: see `activate_for_community()`'s own SIGN note.
     await bundle_signing_service.upload_signed_sidecar(**signing_result)
+    # PRECOMPILE -- queue the now-signed digest for the AOT precompiler (idempotent per digest;
+    # raised like the sidecar upload above, the caller may simply retry).
+    await bundle_precompile_service.enqueue_precompile(
+        install_dal,
+        app_id=signing_result["app_id"],
+        version=signing_result["version"],
+        digest=signing_result["digest"],
+    )
 
     if bound:
         tenant_slug = await _tenant_slug(install_dal, tenant_id)
@@ -1667,6 +1707,14 @@ async def activate_for_community_with_warnings(
     # actually carrying the signature (see that function's own doc for the
     # backfill CLI that re-runs this write idempotently).
     await bundle_signing_service.upload_signed_sidecar(**signing_result)
+    # PRECOMPILE -- queue the now-signed digest for the AOT precompiler (idempotent per digest;
+    # raised like the sidecar upload above, the caller may simply retry).
+    await bundle_precompile_service.enqueue_precompile(
+        install_dal,
+        app_id=signing_result["app_id"],
+        version=signing_result["version"],
+        digest=signing_result["digest"],
+    )
 
     # PROVISION -- AFTER the transaction above committed: ensure_group is a
     # Valkey side effect with no rollback, so it must never run inside a
@@ -1783,7 +1831,7 @@ async def deactivate_tenant_wide(
 
     Never wired to any HTTP route (no community-admin or tenant-admin surface can reach this --
     same restriction `activate_tenant_wide()`'s own docstring states) -- today's only caller is
-    `hub_api/cli/seed_core_bundles.py`'s reconcile sweep, uninstalling a `waddles.core.*` bundle
+    `hub_api/cli/seed_core_bundles.py`'s reconcile sweep, uninstalling a core bundle
     dropped from `bundles/core-bundles.yaml`.
     """
     active_table = install_dal.metadata.tables["app_active_versions"]

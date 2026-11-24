@@ -1,10 +1,10 @@
 """Shared gRPC server interceptor for ES256 machine-JWT service-to-service auth.
 
 Replaces the per-module copy-pasted ``grpc_auth_interceptor.py`` files that
-verified an HS256 JWT against the fleet-wide ``MODULE_SECRET_KEY``. A module
+verified a shared-secret JWT against the fleet-wide ``MODULE_SECRET_KEY``. A module
 cutover is: build a verify-only verifier (`service_jwt.load_verifier_from_env`),
 register this interceptor with one module-specific scope and a caller allow-list.
-Every failure denies; there is no HS256/shared-secret branch.
+Every failure denies; there is no shared-secret branch.
 """
 
 from __future__ import annotations

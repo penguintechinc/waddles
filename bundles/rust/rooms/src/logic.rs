@@ -27,8 +27,10 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 
+use crate::grants;
+
 /// The webrtc service bundle this app is granted tools on.
-pub const SERVICE: &str = "waddles.core.service.webrtc";
+pub const SERVICE: &str = "penguintechinc.waddles.webrtc";
 /// Most rooms tracked per community (index bound).
 pub const MAX_ROOMS: usize = 256;
 /// Longest room label.
@@ -79,6 +81,9 @@ pub struct Room {
     /// Host-closed (tool `room.close` succeeded).
     pub closed: bool,
     pub created_by: String,
+    /// Moderator-locked: new joins refused for non-staff (host enforces too).
+    #[serde(default)]
+    pub locked: bool,
 }
 
 /// What can go wrong; every variant maps to one closed user/admin message.
@@ -119,7 +124,7 @@ pub trait Ident {
     fn actor(&self) -> Result<String, String>;
 }
 
-fn is_uuid(s: &str) -> bool {
+pub(crate) fn is_uuid(s: &str) -> bool {
     let b = s.as_bytes();
     b.len() == 36
         && b.iter().enumerate().all(|(i, c)| match i {
@@ -128,7 +133,7 @@ fn is_uuid(s: &str) -> bool {
         })
 }
 
-fn need_uuid(what: &str, s: &str) -> Result<(), RoomsError> {
+pub(crate) fn need_uuid(what: &str, s: &str) -> Result<(), RoomsError> {
     if is_uuid(s) {
         Ok(())
     } else {
@@ -157,7 +162,7 @@ pub fn idem_key(message_id: &str, op: &str) -> String {
 
 // ---------------------------------------------------------------- storage
 
-fn kv_json<T: for<'de> Deserialize<'de>>(
+pub(crate) fn kv_json<T: for<'de> Deserialize<'de>>(
     s: &dyn Store,
     key: &str,
 ) -> Result<Option<T>, RoomsError> {
@@ -174,7 +179,7 @@ fn key_label(key: &str) -> &str {
     key.split('.').next().unwrap_or("kv")
 }
 
-fn put_json<T: Serialize>(s: &dyn Store, key: &str, v: &T) -> Result<(), RoomsError> {
+pub(crate) fn put_json<T: Serialize>(s: &dyn Store, key: &str, v: &T) -> Result<(), RoomsError> {
     let b = serde_json::to_vec(v).map_err(|e| RoomsError::Store(e.to_string()))?;
     s.set(key, &b).map_err(RoomsError::Store)
 }
@@ -195,16 +200,16 @@ fn index(s: &dyn Store) -> Result<Vec<String>, RoomsError> {
     }
 }
 
-fn load(s: &dyn Store, id: &str) -> Result<Room, RoomsError> {
+pub(crate) fn load(s: &dyn Store, id: &str) -> Result<Room, RoomsError> {
     need_uuid("room id", id)?;
     kv_json(s, &room_key(id))?.ok_or(RoomsError::NotFound)
 }
 
-fn save(s: &dyn Store, r: &Room) -> Result<(), RoomsError> {
+pub(crate) fn save(s: &dyn Store, r: &Room) -> Result<(), RoomsError> {
     put_json(s, &room_key(&r.id), r)
 }
 
-fn list_rooms(s: &dyn Store) -> Result<Vec<Room>, RoomsError> {
+pub(crate) fn list_rooms(s: &dyn Store) -> Result<Vec<Room>, RoomsError> {
     let mut out = Vec::new();
     for id in index(s)? {
         if let Some(r) = kv_json::<Room>(s, &room_key(&id))? {
@@ -217,41 +222,83 @@ fn list_rooms(s: &dyn Store) -> Result<Vec<Room>, RoomsError> {
 // ------------------------------------------------------------ access policy
 
 /// Publish/subscribe grants a `role` gets in `room` at `now`, or why not.
-/// Pure: the single source of access truth for join tokens.
+///
+/// A thin adapter: the policy itself is the webrtc bundle's canonical
+/// [`grants::grants_for`] (same source file, replayed against
+/// `bundles/rust/webrtc/contract/grants.json`), so the app and the service can
+/// never disagree about who may publish.
 pub fn grants_for(room: &Room, role: Role, now: i64) -> Result<(bool, bool), RoomsError> {
-    if room.closed {
-        return Err(RoomsError::Denied("room is closed".into()));
-    }
-    let staff = role >= Role::Moderator;
-    if let Some(s) = room.schedule
-        && !staff
-        && !(s.open_at <= now && now < s.close_at)
-    {
-        return Err(RoomsError::Denied(
-            "room is outside its scheduled window".into(),
-        ));
-    }
-    match (room.kind, role) {
-        (Kind::GreenRoom, r) if r < Role::Moderator => {
-            Err(RoomsError::Denied("green room is for moderators".into()))
-        }
-        (_, Role::Guest) if !room.allow_guests => Err(RoomsError::Denied(
-            "guests are not allowed in this room".into(),
-        )),
-        (_, Role::Guest) => Ok((false, true)),
-        (Kind::Stage, r) if r < Role::Moderator => Ok((false, true)),
-        _ => Ok((true, true)),
-    }
+    let kind = match room.kind {
+        Kind::Community => grants::GrantKind::Community,
+        Kind::Event => grants::GrantKind::Event,
+        Kind::Breakout => grants::GrantKind::Breakout,
+        Kind::Stage => grants::GrantKind::Stage,
+        Kind::GreenRoom => grants::GrantKind::GreenRoom,
+    };
+    let role = match role {
+        Role::Guest => grants::GrantRole::Guest,
+        Role::Member => grants::GrantRole::Member,
+        Role::Moderator => grants::GrantRole::Moderator,
+        Role::Admin => grants::GrantRole::Admin,
+    };
+    let window = match room.schedule {
+        None => grants::Window::Unscheduled,
+        Some(s) if s.open_at <= now && now < s.close_at => grants::Window::Inside,
+        Some(_) => grants::Window::Outside,
+    };
+    let ctx = grants::GrantCtx {
+        closed: room.closed,
+        locked: room.locked,
+        allow_guests: room.allow_guests,
+        window,
+    };
+    grants::grants_for(kind, role, ctx)
+        .map(|g| (g.publish, g.subscribe))
+        .map_err(|m| RoomsError::Denied(m.into()))
 }
 
-fn role_of(s: &dyn Store, room: &str, actor: &str) -> Result<Role, RoomsError> {
+pub(crate) fn role_of(s: &dyn Store, room: &str, actor: &str) -> Result<Role, RoomsError> {
     Ok(kv_json::<Role>(s, &acl_key(room, actor))?.unwrap_or(Role::Member))
 }
 
 // ------------------------------------------------------------- webrtc calls
 
-fn tool_err(e: ToolFail) -> RoomsError {
+pub(crate) fn tool_err(e: ToolFail) -> RoomsError {
     RoomsError::Tool(e)
+}
+
+/// The svc-streaming room kind a rooms-app kind creates (event and breakout rooms are
+/// ordinary community rooms there; only stage and green room change the grants).
+fn svc_kind(kind: Kind) -> &'static str {
+    match kind {
+        Kind::Stage => "stage",
+        Kind::GreenRoom => "green_room",
+        Kind::Community | Kind::Event | Kind::Breakout => "community",
+    }
+}
+
+/// Pushes the room's current facts (kind, closed, guests, schedule) to svc-streaming through
+/// the staff-only `room.update` tool, so live and future joins follow the rooms-app state. The
+/// local copy is only saved after this succeeds (a refused push changes nothing).
+fn push_facts(tools: &dyn Tools, msg: &str, r: &Room) -> Result<(), RoomsError> {
+    let mut args = json!({
+        "room_id": r.id,
+        "kind": svc_kind(r.kind),
+        "closed": r.closed,
+        "allow_guests": r.allow_guests,
+    });
+    if let Some(sc) = r.schedule {
+        args["starts_at"] = json!(sc.open_at);
+        args["ends_at"] = json!(sc.close_at);
+    }
+    tools
+        .invoke(
+            "room.update",
+            &args,
+            Some(&idem_key(&format!("{msg}|{}", r.id), "room.update")),
+        )
+        .map_err(tool_err)?;
+    Ok(())
 }
 
 fn whitelist_room(v: &Value) -> Result<String, RoomsError> {
@@ -302,7 +349,12 @@ fn create_room(
     let out = tools
         .invoke(
             "room.create",
-            &json!({"label": label}),
+            &json!({
+                "label": label,
+                "kind": svc_kind(kind),
+                "closed": false,
+                "allow_guests": false,
+            }),
             Some(&idem_key(msg, "room.create")),
         )
         .map_err(tool_err)?;
@@ -317,6 +369,7 @@ fn create_room(
         schedule: None,
         closed: false,
         created_by: actor.to_string(),
+        locked: false,
     };
     save(store, &room)?;
     idx.push(id.clone());
@@ -378,7 +431,9 @@ fn join(
     let mut out =
         json!({"room_id": room.id, "role": role, "publish": publish, "subscribe": subscribe});
     let key = |op: &str| idem_key(&format!("{msg}|{id}|{actor}"), op);
-    let args = json!({"room_id": id, "participant_id": actor});
+    // Short-lived by contract: the credential only has to survive the WHIP/WHEP
+    // exchange, so it never takes the host's longer default.
+    let args = json!({"room_id": id, "participant_id": actor, "ttl_secs": grants::JOIN_TTL_SECS});
     if publish {
         let e = tools
             .invoke("whip.endpoint", &args, Some(&key("whip")))
@@ -533,6 +588,7 @@ fn admin_inner(
                 .get("allow_guests")
                 .and_then(Value::as_bool)
                 .ok_or_else(|| RoomsError::Usage("allow_guests (bool) is required".into()))?;
+            push_facts(tools, msg, &r)?;
             save(store, &r)?;
             Ok(view(&r))
         }
@@ -563,6 +619,7 @@ fn admin_inner(
                     ));
                 }
             };
+            push_facts(tools, msg, &r)?;
             save(store, &r)?;
             Ok(view(&r))
         }
@@ -610,17 +667,19 @@ fn parse_virtual(k: &str) -> Result<Kind, RoomsError> {
 fn view(r: &Room) -> Value {
     json!({"room_id": r.id, "kind": r.kind, "label": r.label, "parent": r.parent,
            "event_ref": r.event_ref, "allow_guests": r.allow_guests, "schedule": r.schedule,
-           "closed": r.closed})
+           "closed": r.closed, "locked": r.locked})
 }
 
 // ------------------------------------------------------------- chat commands
 
 /// Usage text for `!room`.
 pub const USAGE: &str = "Usage: !room [list] | info <room> | join [<room>] | create <label> [--event <event-uuid>] | \
-close <room> | virtual <parent-room> <breakout|stage|green_room> <label>";
+close <room> | virtual <parent-room> <breakout|stage|green_room> <label> | \
+hand|lock|mute|participants|participant|rooms (moderation; see `!room help moderation`)";
 
 /// Handles one chat message; `None` when it is not a rooms command. The reply is
-/// plain text and never contains a credential.
+/// plain text and never contains a credential. Moderation verbs are enabled.
+#[cfg(test)]
 pub fn handle_chat(
     text: &str,
     msg: &str,
@@ -629,18 +688,46 @@ pub fn handle_chat(
     ident: &dyn Ident,
     join_base_url: Option<&str>,
 ) -> Option<String> {
+    handle_chat_ex(text, msg, tools, store, ident, join_base_url, true).map(|o| o.reply)
+}
+
+/// What one chat command produced: the reply plus a closed op label and whether
+/// it succeeded (for PII-free metrics and logs).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChatOutcome {
+    pub reply: String,
+    pub op: &'static str,
+    pub ok: bool,
+}
+
+/// Like [`handle_chat`], with the `rooms.moderation` flag state passed in and
+/// the outcome label returned so the wasm glue can emit telemetry.
+pub fn handle_chat_ex(
+    text: &str,
+    msg: &str,
+    tools: &dyn Tools,
+    store: &dyn Store,
+    ident: &dyn Ident,
+    join_base_url: Option<&str>,
+    moderation: bool,
+) -> Option<ChatOutcome> {
     let mut it = text.split_whitespace();
     let head = it.next()?.to_ascii_lowercase();
     if head != "!room" && head != "!rooms" {
         return None;
     }
     let args: Vec<&str> = it.collect();
-    Some(
-        match run_chat(&args, msg, tools, store, ident, join_base_url) {
+    let op = crate::moderation::op_label(&args).unwrap_or("chat");
+    let res = run_chat(&args, msg, tools, store, ident, join_base_url, moderation);
+    let ok = res.is_ok();
+    Some(ChatOutcome {
+        reply: match res {
             Ok(r) => r,
             Err(e) => user_message(&e),
         },
-    )
+        op,
+        ok,
+    })
 }
 
 fn run_chat(
@@ -650,6 +737,7 @@ fn run_chat(
     store: &dyn Store,
     ident: &dyn Ident,
     join_base_url: Option<&str>,
+    moderation: bool,
 ) -> Result<String, RoomsError> {
     let verb = args
         .first()
@@ -657,6 +745,7 @@ fn run_chat(
         .unwrap_or_else(|| "list".into());
     let rest = if args.is_empty() { &[][..] } else { &args[1..] };
     match verb.as_str() {
+        "help" if rest == ["moderation"] => Ok(crate::moderation::USAGE.to_string()),
         "help" | "--help" | "-h" => Ok(USAGE.to_string()),
         "list" => {
             let rooms: Vec<Room> = list_rooms(store)?
@@ -787,7 +876,8 @@ fn run_chat(
             }
             _ => Err(RoomsError::Usage(USAGE.into())),
         },
-        _ => Err(RoomsError::Usage(USAGE.into())),
+        other => crate::moderation::run(other, rest, msg, tools, store, ident, moderation)?
+            .ok_or_else(|| RoomsError::Usage(USAGE.into())),
     }
 }
 
@@ -909,9 +999,40 @@ mod tests {
                     )
                 }
                 "room.close" => Ok(json!({"room_id": args["room_id"]})),
+                "room.update" => Ok(json!({"room_id": args["room_id"]})),
+                "room.list" => Ok(
+                    json!({"rooms": [{"room_id": "00000000-0000-0000-0000-000000000001", "subscriber_count": 2, "locked": false}]}),
+                ),
+                "room.participants" => Ok(json!({"room_id": args["room_id"], "count": 2,
+                    "participants": [{"participant_id": ADMIN, "publisher": true, "subscriber": true, "muted": false},
+                                     {"participant_id": USER, "publisher": true, "subscriber": false, "muted": true}]})),
+                "room.leave" | "room.kick" => Ok(
+                    json!({"room_id": args["room_id"], "participant_id": args["participant_id"], "sessions_closed": 1}),
+                ),
+                "room.mute" | "room.unmute" => Ok(
+                    json!({"room_id": args["room_id"], "participant_id": args["participant_id"], "muted": tool == "room.mute"}),
+                ),
+                "room.mute_all" => Ok(json!({"room_id": args["room_id"], "muted": 3})),
+                "room.lock" | "room.unlock" => {
+                    Ok(json!({"room_id": args["room_id"], "locked": tool == "room.lock"}))
+                }
                 "whip.endpoint" | "whep.endpoint" => Ok(
                     json!({"url": format!("https://m/{tool}"), "token": "T", "token_id": USER, "expires_at": 9, "extra": 1}),
                 ),
+                "room.hand.raise" => Ok(
+                    json!({"room_id": args["room_id"], "hand": {"participant_id": USER, "raised_at": 1}}),
+                ),
+                "room.hand.lower" | "room.hand.lower_other" => Ok(
+                    json!({"room_id": args["room_id"], "participant_id": args["participant_id"], "lowered": true}),
+                ),
+                "room.hand.list" | "room.hand.list_all" => Ok(
+                    json!({"room_id": args["room_id"], "count": 1, "hands": [{"participant_id": USER, "raised_at": 1, "position": 1}]}),
+                ),
+                "room.hand.ack" => Ok(
+                    json!({"room_id": args["room_id"], "hand": {"participant_id": args["participant_id"], "raised_at": 1, "acknowledged_at": 2, "acknowledged_by": args["actor_id"]}}),
+                ),
+                "room.hand.reset" => Ok(json!({"room_id": args["room_id"], "cleared": 1})),
+                "participant.self" => Ok(json!({"participant": USER})),
                 other => panic!("unexpected tool {other}"),
             }
         }
@@ -968,7 +1089,10 @@ mod tests {
         let (tool, args, idem) = s.calls.borrow()[0].clone();
         assert_eq!(
             (tool.as_str(), args),
-            ("room.create", json!({"label": "Game Night"}))
+            (
+                "room.create",
+                json!({"label": "Game Night", "kind": "community", "closed": false, "allow_guests": false})
+            )
         );
         assert_eq!(
             idem.unwrap(),
@@ -1083,6 +1207,7 @@ mod tests {
             schedule: None,
             closed: false,
             created_by: ADMIN.into(),
+            locked: false,
         }
     }
 
@@ -1341,6 +1466,62 @@ mod tests {
         let id = "00000000-0000-0000-0000-000000000001";
         admin("room.list", &json!({}), &s, &k, "m1", 0).unwrap();
         admin_as(USER, "join_token", &json!({"room_id": id}), &s, &k, "m2", 0).unwrap();
+        admin(
+            "acl.set",
+            &json!({"room_id": id, "member": ADMIN, "role": "admin"}),
+            &s,
+            &k,
+            "m3",
+            0,
+        )
+        .unwrap();
+        // Leave runs as USER; every other moderation command as the room admin.
+        let cmds: [(String, &str); 16] = [
+            ("!room rooms list".into(), ADMIN),
+            (format!("!room participants list {id}"), ADMIN),
+            (format!("!room participant remove {id}"), USER),
+            (format!("!room participant remove {id} {USER}"), ADMIN),
+            (format!("!room mute enable {id} {USER}"), ADMIN),
+            (format!("!room mute disable {id} {USER}"), ADMIN),
+            (format!("!room mute enable {id} all"), ADMIN),
+            (format!("!room lock enable {id}"), ADMIN),
+            (format!("!room lock disable {id}"), ADMIN),
+            (format!("!room hand add {id}"), USER),
+            (format!("!room hand remove {id}"), USER),
+            (format!("!room hand list {id}"), USER),
+            (format!("!room hand list {id}"), ADMIN),
+            (format!("!room hand remove {id} {USER}"), ADMIN),
+            (format!("!room hand set ack {id} {USER}"), ADMIN),
+            (format!("!room hand reset {id}"), ADMIN),
+        ];
+        for (text, who) in &cmds {
+            let r = chat(text, &s, &k, who);
+            assert!(
+                !r.starts_with("Usage") && !r.starts_with("Not allowed"),
+                "{text}: {r}"
+            );
+        }
+        admin(
+            "room.set_schedule",
+            &json!({"room_id": id, "open_at": 5, "close_at": 9}),
+            &s,
+            &k,
+            "m4",
+            0,
+        )
+        .unwrap();
+        admin(
+            "room.set_access",
+            &json!({"room_id": id, "allow_guests": true}),
+            &s,
+            &k,
+            "m5",
+            0,
+        )
+        .unwrap();
+        // `WasmIdent` (lib.rs, wasm-only) resolves the actor through this tool; the logic tests
+        // use a fake identity, so the call is made here to keep the fixture exhaustive.
+        s.invoke("participant.self", &json!({}), None).unwrap();
         chat(&format!("!room close {id}"), &s, &k, ADMIN);
         let mut seen: HashMap<String, Value> = HashMap::new();
         for (tool, args, _) in s.calls.borrow().iter() {
@@ -1355,6 +1536,143 @@ mod tests {
         );
         for (tool, args) in want {
             assert_eq!(seen.get(tool), Some(args), "{tool}");
+        }
+    }
+
+    /// Access and schedule changes are pushed to svc-streaming (`room.update`) with the whole
+    /// fact set; a refused push (the tool is staff-only) leaves the local state unchanged.
+    #[test]
+    fn set_access_and_schedule_push_room_facts_and_a_refusal_changes_nothing() {
+        let (s, k) = (Svc::default(), Kv::default());
+        chat("!room create Game Night", &s, &k, ADMIN);
+        let id = "00000000-0000-0000-0000-000000000001";
+        admin(
+            "room.set_access",
+            &json!({"room_id": id, "allow_guests": true}),
+            &s,
+            &k,
+            "a1",
+            0,
+        )
+        .unwrap();
+        admin(
+            "room.set_schedule",
+            &json!({"room_id": id, "open_at": 5, "close_at": 9}),
+            &s,
+            &k,
+            "a2",
+            0,
+        )
+        .unwrap();
+        let pushes: Vec<Value> = s
+            .calls
+            .borrow()
+            .iter()
+            .filter(|(t, _, _)| t == "room.update")
+            .map(|(_, a, _)| a.clone())
+            .collect();
+        assert_eq!(
+            pushes,
+            vec![
+                json!({"room_id": id, "kind": "community", "closed": false, "allow_guests": true}),
+                json!({"room_id": id, "kind": "community", "closed": false,
+                       "allow_guests": true, "starts_at": 5, "ends_at": 9}),
+            ]
+        );
+        // The host refuses the push: the error surfaces and nothing is saved locally.
+        *s.fail.borrow_mut() = Some(ToolFail::Forbidden);
+        for (op, args) in [
+            (
+                "room.set_access",
+                json!({"room_id": id, "allow_guests": false}),
+            ),
+            ("room.set_schedule", json!({"room_id": id})),
+        ] {
+            assert!(admin(op, &args, &s, &k, "a3", 0).is_err(), "{op}");
+        }
+        *s.fail.borrow_mut() = None;
+        let v = admin("room.get", &json!({"room_id": id}), &s, &k, "a4", 0).unwrap();
+        assert_eq!(v["allow_guests"], true);
+        assert_eq!(v["schedule"]["close_at"], 9);
+    }
+
+    /// The shared policy contract the webrtc bundle and hub-api are held to.
+    const GRANTS_CONTRACT: &str = include_str!("../../webrtc/contract/grants.json");
+
+    /// The app's `grants_for` adapter must give exactly the contract's answer for
+    /// every case (the policy itself is the webrtc bundle's source file).
+    #[test]
+    fn grants_for_replays_the_shared_contract() {
+        let c: Value = serde_json::from_str(GRANTS_CONTRACT).unwrap();
+        let cases = c["cases"].as_array().unwrap();
+        assert!(cases.len() >= 20, "only {} cases examined", cases.len());
+        for case in cases {
+            let id = case["id"].as_str().unwrap();
+            let kind: Kind = serde_json::from_value(case["kind"].clone()).unwrap();
+            let role: Role = serde_json::from_value(case["role"].clone()).unwrap();
+            let mut r = room(kind);
+            r.closed = case["closed"].as_bool().unwrap_or(false);
+            r.locked = case["locked"].as_bool().unwrap_or(false);
+            r.allow_guests = case["allow_guests"].as_bool().unwrap_or(false);
+            let now = match case["window"].as_str().unwrap_or("none") {
+                "none" => 0,
+                w => {
+                    r.schedule = Some(Schedule {
+                        open_at: 100,
+                        close_at: 200,
+                    });
+                    if w == "inside" { 150 } else { 99 }
+                }
+            };
+            match (grants_for(&r, role, now), &case["expect"]["denied"]) {
+                (Err(RoomsError::Denied(m)), Value::String(want)) => assert_eq!(&m, want, "{id}"),
+                (Ok((p, sub)), Value::Null) => {
+                    assert_eq!(p, case["expect"]["publish"], "{id} publish");
+                    assert_eq!(sub, case["expect"]["subscribe"], "{id} subscribe");
+                }
+                (got, want) => panic!("{id}: contract wants {want}, app gave {got:?}"),
+            }
+        }
+    }
+
+    /// Join credentials: short-lived per the contract, UUID participant only, no
+    /// display name anywhere in what is sent to the token-minting tools.
+    #[test]
+    fn join_asks_for_short_lived_uuid_only_tokens() {
+        let c: Value = serde_json::from_str(GRANTS_CONTRACT).unwrap();
+        let ttl = c["token"]["join_ttl_secs"].as_i64().unwrap();
+        let forbidden: Vec<&str> = c["token"]["forbidden_claims"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(Value::as_str)
+            .collect();
+        let (s, k) = (Svc::default(), Kv::default());
+        chat("!room create Hall", &s, &k, ADMIN);
+        let id = "00000000-0000-0000-0000-000000000001";
+        s.calls.borrow_mut().clear();
+        admin_as(USER, "join_token", &json!({"room_id": id}), &s, &k, "m2", 0).unwrap();
+        let minted: Vec<_> = s
+            .calls
+            .borrow()
+            .iter()
+            .filter(|c| c.0 == "whip.endpoint" || c.0 == "whep.endpoint")
+            .cloned()
+            .collect();
+        assert_eq!(
+            minted.len(),
+            2,
+            "member of a community room publishes and watches"
+        );
+        for (tool, args, _) in &minted {
+            assert_eq!(
+                args["ttl_secs"], ttl,
+                "{tool} must carry the contract join TTL"
+            );
+            assert!(is_uuid(args["participant_id"].as_str().unwrap()), "{tool}");
+            for key in args.as_object().unwrap().keys() {
+                assert!(!forbidden.contains(&key.as_str()), "{tool} sends {key}");
+            }
         }
     }
 

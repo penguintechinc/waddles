@@ -76,10 +76,12 @@ from __future__ import annotations
 
 import logging
 import re
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 
 from penguin_dal import AsyncDB
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
 from services.bundle_telemetry import bundle_span
@@ -129,6 +131,75 @@ def _validate_source_id(source_id: str) -> None:
 def _validate_label(label: str) -> None:
     if not label or len(label) > _LABEL_MAX_LEN:
         raise unprocessable(f"label must be 1-{_LABEL_MAX_LEN} characters")
+
+
+def parse_public_id(raw: str | None) -> str | None:
+    """Canonical lowercase hyphenated UUID for `raw`, or `None` when it is not a UUID.
+
+    Every id that crosses the API boundary (community, ingest source, list cursor) is a
+    `public_id` UUID; a numeric or otherwise malformed value parses to `None` so callers
+    answer it exactly like an absent row (404), never leaking which shape was wrong.
+    """
+    if not raw:
+        return None
+    try:
+        return str(uuid.UUID(raw))
+    except (ValueError, AttributeError, TypeError):
+        return None
+
+
+def _pid_param(install_dal: AsyncDB, canonical: str) -> Any:
+    """Bind value for a `public_id` comparison: a `uuid.UUID` on Postgres, text on sqlite."""
+    if install_dal.engine.dialect.name == "postgresql":
+        return uuid.UUID(canonical)
+    return canonical
+
+
+async def resolve_community(
+    install_dal: AsyncDB, *, tenant_id: int, community_public_id: str | None
+) -> tuple[int, str]:
+    """`(internal community id, canonical public_id)` for a community UUID inside `tenant_id`.
+
+    The tenant fence is part of the lookup itself: a malformed UUID, an unknown community
+    and another tenant's community all raise the same 404, so existence never leaks.
+    """
+    canonical = parse_public_id(community_public_id)
+    if canonical is None:
+        raise not_found("Community not found")
+    t = install_dal.metadata.tables["communities"]
+    async with install_dal.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                select(t.c.id).where(
+                    (t.c.public_id == _pid_param(install_dal, canonical))
+                    & (t.c.tenant_id == tenant_id)
+                )
+            )
+        ).first()
+    if row is None:
+        raise not_found("Community not found")
+    return int(row[0]), canonical
+
+
+async def resolve_ingest_source_id(
+    install_dal: AsyncDB, *, tenant_id: int, community_id: int, public_id: str | None
+) -> int | None:
+    """Internal id of the ingest source with `public_id` in this tenant+community, else `None`."""
+    canonical = parse_public_id(public_id)
+    if canonical is None:
+        return None
+    t = install_dal.metadata.tables["ingest_sources"]
+    async with install_dal.engine.connect() as conn:
+        row = (
+            await conn.execute(
+                select(t.c.id).where(
+                    (t.c.public_id == _pid_param(install_dal, canonical))
+                    & (t.c.tenant_id == tenant_id)
+                    & (t.c.community_id == community_id)
+                )
+            )
+        ).first()
+    return None if row is None else int(row[0])
 
 
 async def _validate_community_tenant(
@@ -397,5 +468,8 @@ __all__ = [
     "delete_ingest_source",
     "get_ingest_source",
     "list_ingest_sources",
+    "parse_public_id",
+    "resolve_community",
+    "resolve_ingest_source_id",
     "update_ingest_source",
 ]

@@ -15,10 +15,10 @@ _REPO = pathlib.Path(__file__).resolve().parents[2]
 
 _BASE: dict[str, Any] = {
     "schema_version": 2,
-    "app_id": "waddles.socials.music.default",
+    "app_id": "penguintechinc.waddles.music",
     "name": "Music",
     "version": "1.0.0",
-    "feature": "waddles.socials.music",
+    "feature": "music",
     "module": "socials",
     "provider": "builtin",
     "author": "github:penguintechinc",

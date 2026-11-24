@@ -91,7 +91,7 @@ struct FakeDekProvider;
 impl svc_ingest::identity_crypto::DekProvider for FakeDekProvider {
     async fn get_dek(
         &self,
-        _tenant_id: &str,
+        _tenant_id: i64,
     ) -> Result<
         (svc_ingest::identity_crypto::Dek, u32),
         svc_ingest::identity_crypto::DekUnavailableError,
@@ -116,7 +116,9 @@ struct Live {
     /// hub-api's internal gRPC endpoint (machine-JWT mint), from the live-hub manifest.
     grpc_url: String,
     admin_token: String,
-    community_a: i64,
+    /// Community public UUID: client-facing `/api/v1/communities/{uuid}/...` routes reject numeric
+    /// ids (#1434).
+    community_a_public_id: String,
     sa_path: PathBuf,
     bot_tokens: Vec<(String, String)>,
     channels: Vec<String>,
@@ -171,7 +173,10 @@ impl Live {
                 .to_string(),
             grpc_url: m["grpc_url"].as_str().expect("grpc_url").to_string(),
             admin_token: m["admin_token"].as_str().expect("admin_token").to_string(),
-            community_a: m["community_a"].as_i64().expect("community_a"),
+            community_a_public_id: m["community_a_public_id"]
+                .as_str()
+                .expect("community_a_public_id")
+                .to_string(),
             sa_path,
             bot_tokens,
             channels,
@@ -182,14 +187,14 @@ impl Live {
         }
     }
 
-    /// Creates a Twitch binding through the REAL admin API; returns the connection id.
-    async fn create_binding(&self, which: usize) -> i64 {
+    /// Creates a Twitch binding through the REAL admin API; returns the connection's public UUID.
+    async fn create_binding(&self, which: usize) -> String {
         let (access, refresh) = &self.bot_tokens[which];
         let resp = self
             .http
             .post(format!(
                 "{}/api/v1/communities/{}/provider-connections",
-                self.hub_url, self.community_a
+                self.hub_url, self.community_a_public_id
             ))
             .bearer_auth(&self.admin_token)
             .json(&json!({
@@ -201,28 +206,31 @@ impl Live {
             .await
             .expect("create request");
         let status = resp.status().as_u16();
-        let body: Value = resp.json().await.expect("create body");
-        assert_eq!(status, 201, "admin create twitch binding failed: {body}");
-        body["connection"]["id"].as_i64().expect("connection id")
+        let text = resp.text().await.expect("create body text");
+        assert_eq!(status, 201, "admin create twitch binding failed: {text}");
+        let body: Value = serde_json::from_str(&text)
+            .unwrap_or_else(|e| panic!("create body not JSON ({e}): {text}"));
+        body["connection"]["id"]
+            .as_str()
+            .expect("connection public id")
+            .to_string()
     }
 
     /// Deletes a binding through the REAL admin API.
-    async fn delete_binding(&self, connection: i64) {
+    async fn delete_binding(&self, connection: &str) {
         let resp = self
             .http
             .delete(format!(
                 "{}/api/v1/communities/{}/provider-connections/{connection}",
-                self.hub_url, self.community_a
+                self.hub_url, self.community_a_public_id
             ))
             .bearer_auth(&self.admin_token)
             .send()
             .await
             .expect("delete request");
-        assert!(
-            resp.status().is_success(),
-            "admin delete failed: {}",
-            resp.status()
-        );
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        assert!(status.is_success(), "admin delete failed: {status} {text}");
     }
 
     /// Spawns the REAL manager loop (real resolver, real Valkey lease, real IRC client).
@@ -233,10 +241,10 @@ impl Live {
         let valkey = std::env::var("VALKEY_URL")
             .expect("VALKEY_URL must be set: these tests need a REAL Valkey (no silent skip)");
         let client = redis::Client::open(valkey).expect("valkey client");
-        let cfg =
-            redis::AsyncConnectionConfig::new().set_response_timeout(Some(Duration::from_secs(2)));
+        let cfg = redis::aio::ConnectionManagerConfig::new()
+            .set_response_timeout(Some(Duration::from_secs(2)));
         let conn = client
-            .get_multiplexed_async_connection_with_config(&cfg)
+            .get_connection_manager_with_config(cfg)
             .await
             .expect("real valkey must be reachable");
         let resolver = Arc::new(
@@ -375,7 +383,7 @@ async fn live_hub_binding_created_via_api_starts_a_session_within_one_interval()
     live.report("create");
     // The hub DB is shared by every test in this run: remove this binding so the next test
     // starts from an empty desired set.
-    live.delete_binding(conn).await;
+    live.delete_binding(&conn).await;
     stop.send(()).expect("stop manager");
     task.await.expect("manager task");
 }
@@ -396,7 +404,7 @@ async fn live_hub_binding_deleted_via_api_stops_the_session() {
     .await;
     assert_eq!(live.server.live_conn_count(), 1);
 
-    live.delete_binding(conn).await;
+    live.delete_binding(&conn).await;
     let elapsed = within("socket closed after API delete", limit, || {
         live.server.live_conn_count() == 0
     })

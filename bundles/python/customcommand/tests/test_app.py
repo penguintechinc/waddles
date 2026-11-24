@@ -891,7 +891,7 @@ def test_transform_output_is_finalised_dispatch_does_not_resanitize(fake_host) -
     envelope = StageEnvelope(
         tenant="t",
         community="c",
-        app_id="waddles.core.example.customcommand",
+        app_id="penguintechinc.waddles.customcommand",
         stage="action",
         event=result,
         ts="2026-10-05T00:00:00.000Z",
@@ -1047,7 +1047,7 @@ def _envelope(payload: dict, platform: str = "twitch") -> StageEnvelope:
     return StageEnvelope(
         tenant="tenant-1",
         community="comm-1",
-        app_id="waddles.core.example.customcommand",
+        app_id="penguintechinc.waddles.customcommand",
         stage="action",
         event=PlatformEvent(
             platform=platform,

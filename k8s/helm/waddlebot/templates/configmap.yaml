@@ -25,19 +25,9 @@ data:
   DATABASE_PORT: {{ .Values.infrastructure.postgresql.service.port | quote }}
   DATABASE_NAME: {{ .Values.infrastructure.postgresql.database | quote }}
 
-  # Redis Configuration
-  REDIS_HOST: {{ .Values.infrastructure.redis.service.name | quote }}
-  # TLS port only -- the cache Valkey has no plaintext listener (feature/transit-tls-core F2).
-  REDIS_PORT: {{ .Values.infrastructure.redis.tls.port | quote }}
-
-  # S3-compatible object storage (SeaweedFS, was MinIO) -- key names kept as
-  # MINIO_* for backward compatibility with consumers still reading them
-  # (legacy consumers); S3_* names are the primary/preferred keys.
-  MINIO_ENDPOINT: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
-  MINIO_CONSOLE_ENDPOINT: "http://{{ .Values.infrastructure.seaweedfs.service.name }}:{{ .Values.infrastructure.seaweedfs.service.masterPort }}"
+  # S3-compatible object storage (SeaweedFS)
   S3_ENDPOINT_URL: "{{ include "waddlebot.transitTls.s3Endpoint" . }}"
   S3_BUCKET_NAME: {{ .Values.infrastructure.seaweedfs.bucketName | quote }}
-  S3_STORAGE_ENABLED: "true"
   # regression: bundle publish/fetch bucket split after SeaweedFS migration (#508/#509) --
   # hub_api/services/storage_service.py's bundle component/sidecar uploads (and
   # hub_api/cli/seed_core_bundles.py, which shares this ConfigMap via envFrom) MUST target
@@ -49,26 +39,12 @@ data:
 
   # Qdrant Configuration
   QDRANT_URL: "http://{{ .Values.infrastructure.qdrant.service.name }}:{{ .Values.infrastructure.qdrant.service.port }}"
-  MEM0_VECTOR_STORE: "qdrant"
-
-  # Ollama Configuration
-  OLLAMA_HOST: {{ .Values.infrastructure.ollama.service.name | quote }}
-  OLLAMA_PORT: {{ .Values.infrastructure.ollama.service.port | quote }}
-  OLLAMA_USE_TLS: "false"
-  AI_PROVIDER: {{ .Values.infrastructure.ollama.defaultProvider | quote }}
-  AI_MODEL: {{ .Values.infrastructure.ollama.defaultModel | quote }}
-  OLLAMA_MODEL: {{ .Values.infrastructure.ollama.defaultModel | quote }}
-
-  # CORS Configuration (comma-separated origins for hub-api)
-  CORS_ORIGIN: {{ .Values.global.corsOrigin | default "http://localhost:5173" | quote }}
 
   # General Configuration
   LOG_LEVEL: {{ .Values.global.logLevel | quote }}
   NODE_ENV: {{ .Values.global.nodeEnv | quote }}
   DEPLOYMENT_TIER: {{ .Values.global.deploymentTier | quote }}
-  BASE_DOMAIN: {{ .Values.global.baseDomain | quote }}
   OVERLAY_BASE_URL: {{ .Values.global.overlayBaseUrl | quote }}
-  OVERLAY_KEY_GRACE_PERIOD_MINUTES: "5"
 
   # PostgreSQL Init Configuration
   POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
@@ -78,20 +54,8 @@ data:
   # hosted default. See templates/infrastructure/posthog/_helpers.tpl.
   POSTHOG_HOST: {{ include "waddlebot.posthog.effectiveHost" . | quote }}
 
-  # Connector channel configuration (svc-ingest receivers)
-  TWITCH_CHANNELS: {{ .Values.config.twitchChannels | default "" | quote }}
-  KICK_CHANNELS: {{ .Values.config.kickChannels | default "" | quote }}
-  KICK_PUSHER_KEY: {{ .Values.config.kickPusherKey | default "" | quote }}
-  KICK_PUSHER_CLUSTER: {{ .Values.config.kickPusherCluster | default "" | quote }}
-  YOUTUBE_LIVE_CHANNELS: {{ .Values.config.youtubeLiveChannels | default "" | quote }}
-  # RSI Spectrum one-way ingest (gh #101). Flag baseline defaults OFF; PostHog overrides when connected.
-  SPECTRUM_FORUM_CHANNELS: {{ .Values.config.spectrumForumChannels | default "" | quote }}
-  SPECTRUM_LOBBIES: {{ .Values.config.spectrumLobbies | default "" | quote }}
-  FLAG_WADDLES_SPECTRUM_INTEGRATION: {{ .Values.config.spectrumIntegrationEnabled | default false | quote }}
-  # Spectrum org sync (roster join/leave/role changes + event create/update/RSVP). Needs BOTH
-  # flags ON; baseline defaults OFF, PostHog overrides when connected.
-  SPECTRUM_ORG_COMMUNITIES: {{ .Values.config.spectrumOrgCommunities | default "" | quote }}
-  FLAG_WADDLES_SPECTRUM_ORG_SYNC: {{ .Values.config.spectrumOrgSyncEnabled | default false | quote }}
+  # waddles.analytics-stream ENV baseline (default OFF; PostHog overrides when connected).
+  FLAG_WADDLES_ANALYTICS_STREAM: {{ .Values.config.analyticsStreamEnabled | default false | quote }}
   # waddles.calendar.event_discord_sync ENV baseline (default OFF; PostHog overrides when connected).
   # Read by hub-api via envFrom waddlebot-config.
   FLAG_WADDLES_CALENDAR_EVENT_DISCORD_SYNC: {{ .Values.config.eventDiscordSyncEnabled | default false | quote }}
@@ -102,20 +66,78 @@ data:
   # waddles.webui.role_sync_mapping (the admin role-sync page) ENV baselines (default OFF).
   FLAG_WADDLES_COMMUNITY_GUILD_PAIRING: {{ .Values.config.guildPairingEnabled | default false | quote }}
   FLAG_WADDLES_WEBUI_ROLE_SYNC_MAPPING: {{ .Values.config.webuiRoleSyncMappingEnabled | default false | quote }}
+  # waddles.webui.super_tenants ENV baseline (super-admin Tenants page; PostHog -> ENV -> default).
+  FLAG_WADDLES_WEBUI_SUPER_TENANTS: {{ .Values.config.webuiSuperTenantsEnabled | default false | quote }}
+  # waddles.dsar-inbox ENV baseline (DSAR request inbox rollout; PostHog -> ENV -> default OFF).
+  # Gates ONLY the new inbox -- the existing manual export/erase/do-not-sell routes are never gated.
+  FLAG_WADDLES_DSAR_INBOX: {{ .Values.config.dsarInboxEnabled | default false | quote }}
+  # waddles.community-tier-allocation ENV baseline (tenant-admin tier allocation; default OFF).
+  FLAG_WADDLES_COMMUNITY_TIER_ALLOCATION: {{ .Values.config.communityTierAllocationEnabled | default false | quote }}
+  # DSAR inbox tunables (non-secret). Secrets (DSAR_FINGERPRINT_KEY, captcha secret/HMAC key) come from the Secret.
+  DSAR_UNVERIFIED_EXPIRY_HOURS: {{ .Values.config.dsarUnverifiedExpiryHours | default 72 | quote }}
+  DSAR_CONTACT_RETENTION_DAYS: {{ .Values.config.dsarContactRetentionDays | default 30 | quote }}
+  DSAR_CAPTCHA_PROVIDER: {{ .Values.config.dsarCaptchaProvider | default "altcha" | quote }}
+  DSAR_CAPTCHA_SITE_KEY: {{ .Values.config.dsarCaptchaSiteKey | default "" | quote }}
+  # Provider-reported hostnames accepted for turnstile/recaptcha (comma list). Blank => host of DSAR_VERIFY_URL_BASE; none resolvable => captcha fails closed (503).
+  DSAR_CAPTCHA_HOSTNAMES: {{ .Values.config.dsarCaptchaHostnames | default "" | quote }}
+  DSAR_RECAPTCHA_VERSION: {{ .Values.config.dsarRecaptchaVersion | default "v3" | quote }}
+  # Public verification page. Blank => derived from webui.publicUrl (+ /privacy-request/verify); both blank => verification mail cannot be built (fails loud, request stays verification_pending).
+  {{- $verifyBase := .Values.config.dsarVerifyUrlBase | default "" }}
+  {{- if and (not $verifyBase) .Values.webui.publicUrl }}{{ $verifyBase = printf "%s/privacy-request/verify" (trimSuffix "/" .Values.webui.publicUrl) }}{{ end }}
+  DSAR_VERIFY_URL_BASE: {{ $verifyBase | quote }}
+  # DSAR verification mail over SMTP (hub-api, hub_api/services/dsar_email_sender.py). Non-secret settings; the
+  # username/password come from the operator-supplied Secret named by config.dsarSmtp.existingSecret (hub-api.yaml).
+  # DSAR_SMTP_HOST blank => no sender: delivery fails loud (event + ERROR log), never faked.
+  DSAR_SMTP_HOST: {{ .Values.config.dsarSmtp.host | default "" | quote }}
+  DSAR_SMTP_PORT: {{ .Values.config.dsarSmtp.port | default "" | quote }}
+  DSAR_SMTP_TLS: {{ .Values.config.dsarSmtp.tls | default "starttls" | quote }}
+  DSAR_SMTP_ALLOW_PLAINTEXT: {{ .Values.config.dsarSmtp.allowPlaintext | default false | quote }}
+  DSAR_SMTP_TLS_CA_FILE: {{ .Values.config.dsarSmtp.tlsCaFile | default "" | quote }}
+  DSAR_SMTP_FROM_ADDRESS: {{ .Values.config.dsarSmtp.fromAddress | default "" | quote }}
+  DSAR_SMTP_FROM_NAME: {{ .Values.config.dsarSmtp.fromName | default "" | quote }}
+  DSAR_SMTP_REPLY_TO: {{ .Values.config.dsarSmtp.replyTo | default "" | quote }}
+  DSAR_SMTP_CONNECT_TIMEOUT: {{ .Values.config.dsarSmtp.connectTimeoutSeconds | default 5 | quote }}
+  DSAR_SMTP_SEND_TIMEOUT: {{ .Values.config.dsarSmtp.sendTimeoutSeconds | default 10 | quote }}
+  DSAR_SMTP_MAX_RETRIES: {{ .Values.config.dsarSmtp.maxRetries | default 2 | quote }}
+  DSAR_SMTP_BACKOFF_SECONDS: {{ .Values.config.dsarSmtp.backoffSeconds | default 0.5 | quote }}
+  DSAR_SMTP_TOTAL_TIMEOUT: {{ .Values.config.dsarSmtp.totalTimeoutSeconds | default 30 | quote }}
+  # DSAR verification-mail outbox worker (hub_api/services/dsar_outbox.py).
+  DSAR_OUTBOX_MAX_ATTEMPTS: {{ (.Values.config.dsarOutbox | default dict).maxAttempts | default 5 | quote }}
+  DSAR_OUTBOX_BACKOFF_SECONDS: {{ (.Values.config.dsarOutbox | default dict).backoffSeconds | default 30 | quote }}
+  DSAR_OUTBOX_LEASE_SECONDS: {{ (.Values.config.dsarOutbox | default dict).leaseSeconds | default 180 | quote }}
+  DSAR_OUTBOX_POLL_SECONDS: {{ (.Values.config.dsarOutbox | default dict).pollSeconds | default 5 | quote }}
+  DSAR_OUTBOX_RETENTION_DAYS: {{ (.Values.config.dsarOutbox | default dict).retentionDays | default 7 | quote }}
   # waddles.community.connections ENV baseline (default OFF; PostHog overrides when connected).
   # Gates the per-community Discord/Twitch connect authorize route (hub-api); also tier-gated
   # (Professional) -- tier is bypassed only on *.penguintech.cloud hosts.
   FLAG_WADDLES_COMMUNITY_CONNECTIONS: {{ .Values.config.communityConnectionsEnabled | default false | quote }}
+  # Data-plane FEATURE-flag ENV baselines (svc-action/process/ingest/presentation via envFrom).
+  # The license-bypass domain no longer forces flags ON (2026-11-12, docs/licensing/
+  # feature-flags-and-domain-bypass.md); PostHog -> these -> OFF. Never for licensed flags.
+  {{- range $key, $value := .Values.config.dataPlaneFlagBaselines }}
+  {{- if not (hasPrefix "FLAG_" $key) }}
+  {{- fail (printf "config.dataPlaneFlagBaselines key %q must start with FLAG_" $key) }}
+  {{- end }}
+  {{- if contains "_DISABLE_" $key }}
+  {{- fail (printf "config.dataPlaneFlagBaselines key %q is a kill switch (waddles.*.disable-*): never ENV-baseline it on; unset = mechanism ON" $key) }}
+  {{- end }}
+  {{- /* Licensed (tier/entitlement-gated) flags are never env-baselined: the license server decides. */}}
+  {{- if has $key (list "FLAG_WADDLES_COMMUNITY_CONNECTIONS" "FLAG_WADDLES_COMPLIANCE_EXTERNAL_KMS" "FLAG_WADDLES_AUTH_SSO_SAML" "FLAG_WADDLES_AUTH_SSO_CUSTOM" "FLAG_WADDLES_HUB_API_SSO" "FLAG_WADDLES_TENANCY_WHITELABEL" "FLAG_WADDLES_AI_BYOK") }}
+  {{- fail (printf "config.dataPlaneFlagBaselines key %q is a licensed flag: licensed flags are never ENV-baselined" $key) }}
+  {{- end }}
+  {{ $key }}: {{ $value | quote }}
+  {{- end }}
+  # Command-latency canary (alpha only; docs/observability/command-latency.md "Synthetic canary").
+  # Rendered ONLY when latencyCanary.enabled, and then fail-loud (missing ids / non-alpha fail the
+  # render). Read by svc-ingest (driver) and svc-action (confirm point) via envFrom. No secrets.
+{{- include "waddlebot.latencyCanary.env" . }}
   # hub-api login-OAuth redirect-back origin. Only rendered when set (hub-api defaults to localhost:5173).
   {{- if .Values.webui.frontendOrigin }}
   FRONTEND_ORIGIN: {{ .Values.webui.frontendOrigin | quote }}
   {{- end }}
-  SPECTRUM_ORG_POLL_INTERVAL_S: {{ .Values.config.spectrumOrgPollIntervalS | default 300 | quote }}
-  SPECTRUM_ROSTER_MAX_DEPARTURE_RATIO: {{ .Values.config.spectrumRosterMaxDepartureRatio | default 0.5 | quote }}
-  SPECTRUM_ORG_EMIT_BACKLOG: {{ .Values.config.spectrumOrgEmitBacklog | default false | quote }}
 
   # Service Discovery URLs
-  HUB_API_URL: "http://{{ include "waddlebot.fullname" . }}-hub-api-v3:8204"
+  HUB_API_URL: {{ include "waddlebot.hubApiBaseUrl" . | quote }}
   PUBLIC_WEBUI_URL: {{ .Values.webui.publicUrl | quote }}
   # #320 Connections: OAuth redirect_uri base for the per-community connect flow. Empty
   # by default -- hub-api falls back to PUBLIC_WEBUI_URL when this is blank. Override

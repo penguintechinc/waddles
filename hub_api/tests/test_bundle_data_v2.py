@@ -52,7 +52,7 @@ _RAW: dict[str, Any] = {
         },
     ]
 }
-_APP = "waddles.cal.test"
+_APP = "acme.cal.test"
 
 
 def _phys(logical: str, app: str = _APP) -> str:
@@ -132,7 +132,7 @@ class TestIdentityAndRegistry:
     def test_identity_is_app_double_underscore_logical(self) -> None:
         ident = derive_v2_table_identity(_APP, "events", provider="thirdparty")
         assert ident.schema == "app_community"
-        assert re.fullmatch(r"waddles_cal_test_[0-9a-f]{12}__events", ident.table)
+        assert re.fullmatch(r"acme_cal_test_[0-9a-f]{12}__events", ident.table)
         core = derive_v2_table_identity(_APP, "events", provider="builtin")
         assert core.schema == "app_core"
 
@@ -145,10 +145,10 @@ class TestIdentityAndRegistry:
     def test_physical_names_are_injective_across_apps_and_logicals(self) -> None:
         """Regression (security review): `.`/`_` normalization and `__` must not alias names."""
         apps = [
-            "waddles.cal.test",
-            "waddles_cal_test",
-            "waddles.cal_test",
-            "waddles.cal.test2",
+            "acme.cal.test",
+            "acme_cal_test",
+            "acme.cal_test",
+            "acme.cal.test2",
             "a.b",
             "a_b",
             "waddles." + "x" * 70 + "1",
@@ -173,11 +173,9 @@ class TestIdentityAndRegistry:
         assert a.table != b.table and a.table.endswith("__ab_cd")
 
     def test_v1_namespace_is_disjoint_from_v2(self) -> None:
-        """v1 rejects `__`; every v2 name has one -> a v1 app can never squat a v2 table."""
+        """v1 names never contain `__` (runs collapse); every v2 name has one -> no squatting."""
         for app in ["a..b", "a._b", "x__y", "x.._y"]:
-            with pytest.raises(TableDeclarationError) as e:
-                derive_table_identity(app, provider="thirdparty")
-            assert e.value.reason == "invalid_table_identity"
+            assert "__" not in derive_table_identity(app, provider="thirdparty").table
         assert "__" in derive_v2_table_identity(_APP, "events", provider="thirdparty").table
 
     def test_guest_cannot_smuggle_a_separator(self) -> None:
@@ -357,15 +355,15 @@ class TestOwnershipFailsClosed:
     def test_teardown_drops_only_this_apps_tables(self, cur: Any) -> None:
         mine, theirs = _schema(), _schema()
         provision_schema(cur, _APP, "thirdparty", mine)
-        provision_schema(cur, "waddles.cal_test", "thirdparty", theirs)  # near-identical id
+        provision_schema(cur, "acme.cal_test", "thirdparty", theirs)  # near-identical id
         teardown_schema(cur, _APP, "thirdparty", mine)
         cur.execute("SELECT to_regclass(%s)", (f"app_community.{_phys('events')}",))
         assert cur.fetchone() == (None,)
-        other = _phys("events", "waddles.cal_test")
+        other = _phys("events", "acme.cal_test")
         cur.execute("SELECT to_regclass(%s)", (f"app_community.{other}",))
         assert cur.fetchone()[0] is not None, "another app's table must survive"
         cur.execute(
-            "SELECT count(*) FROM bundle_data.table_registry WHERE app_id = 'waddles.cal_test'"
+            "SELECT count(*) FROM bundle_data.table_registry WHERE app_id = 'acme.cal_test'"
         )
         assert cur.fetchone() == (2,)
 

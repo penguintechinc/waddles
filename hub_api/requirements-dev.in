@@ -17,3 +17,6 @@ testcontainers[postgres]>=4.8.0,<5.0.0
 # bundle_data_ddl.py's mypy --strict gate -- psycopg2-binary ships no py.typed
 # marker/stubs of its own.
 types-psycopg2>=2.9.21,<3.0.0
+# tests/test_dsar_email_sender.py -- in-process real SMTP sink (STARTTLS/AUTH/scripted 4xx/5xx).
+# Apache-2.0, aio-libs; last release 2024-05 but upstream commits through 2026-11 (maintained).
+aiosmtpd==1.4.6

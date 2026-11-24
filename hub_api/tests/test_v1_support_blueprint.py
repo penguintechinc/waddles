@@ -13,6 +13,7 @@ data) and post a comment onto it (201). Reverted, both green again.
 from __future__ import annotations
 
 import json as json_module
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,6 +21,8 @@ from quart import Quart
 from quart_schema import QuartSchema
 
 from blueprints.v1.support import support_admin_bp, support_member_bp
+from tests.community_ids import cpath, install_community_ids
+from tests.conftest import seed_membership
 
 ADMIN_SCOPE = "community.support:admin"
 
@@ -29,6 +32,7 @@ def app(support_token_db: Any) -> Quart:
     dal, _ = support_token_db
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
+    install_community_ids(quart_app, dal)
     quart_app.register_blueprint(support_admin_bp)
     quart_app.register_blueprint(support_member_bp)
     quart_app.config["dal"] = dal
@@ -38,6 +42,33 @@ def app(support_token_db: Any) -> Quart:
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
+
+
+def _seed_membership(dal: Any, community_id: int, user_id: int, *, active: bool = True) -> None:
+    """Insert one `community_members` row (`user_id` is the legacy VARCHAR column)."""
+    dal.community_members.insert(
+        community_id=community_id, user_id=str(user_id), role="member", is_active=active
+    )
+    dal.commit()
+
+
+#: Administers the seeded community (real `community-admin` role row): the admin routes check
+#: per-community standing, never just the tenant-wide `community.support:admin` token scope.
+SUPPORT_ADMIN_UID = 77
+
+
+@pytest.fixture(autouse=True)
+def _seeded_members(support_token_db: Any) -> None:
+    """Users 1 and 2 are active members, 77 is the community admin; 99 is deliberately not."""
+    dal, community_id = support_token_db
+    _seed_membership(dal, community_id, 1)
+    _seed_membership(dal, community_id, 2)
+    seed_membership(
+        SimpleNamespace(dal=dal),
+        community_id=community_id,
+        user_id=SUPPORT_ADMIN_UID,
+        role="community-admin",
+    )
 
 
 async def _post_json(
@@ -62,25 +93,205 @@ async def _put_json(
 
 class TestAuthBypass:
     async def test_categories_requires_token(self, client: Any, support_token_db: Any) -> None:
-        _, community_id = support_token_db
-        response = await client.get(f"/api/v1/admin/{community_id}/support/categories")
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id)
+        )
         assert response.status_code == 401
 
     async def test_tickets_requires_token(self, client: Any, support_token_db: Any) -> None:
-        _, community_id = support_token_db
-        response = await client.get(f"/api/v1/admin/{community_id}/support/tickets")
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/tickets", community_id)
+        )
         assert response.status_code == 401
 
     async def test_submit_requires_token(self, client: Any, support_token_db: Any) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         response = await _post_json(
-            client, f"/api/v1/admin/{community_id}/support/submit", {}, {"subject": "help"}
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            {},
+            {"subject": "help"},
         )
         assert response.status_code == 401
 
     async def test_my_tickets_requires_token(self, client: Any, support_token_db: Any) -> None:
-        _, community_id = support_token_db
-        response = await client.get(f"/api/v1/admin/{community_id}/support/my-tickets")
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id)
+        )
+        assert response.status_code == 401
+
+
+class TestMemberGate:
+    """regression: unscoped-routes -- member routes were tenant_middleware-only."""
+
+    async def test_non_member_cannot_read_categories(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=user_auth_headers(user_id=99),
+        )
+        assert response.status_code == 403
+
+    async def test_non_member_cannot_submit_ticket(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=99),
+            {"subject": "spam"},
+        )
+        assert response.status_code == 403
+        assert dal(dal.support_tickets).count() == 0
+
+    async def test_non_member_cannot_list_or_comment_own_tickets(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        mine = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id),
+            headers=user_auth_headers(user_id=99),
+        )
+        one = await client.get(
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}",
+                community_id,
+                ticket_id="00000000-0000-4000-8000-00000000dead",
+            ),
+            headers=user_auth_headers(user_id=99),
+        )
+        comment = await _post_json(
+            client,
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id="00000000-0000-4000-8000-00000000dead",
+            ),
+            user_auth_headers(user_id=99),
+            {"content": "hi"},
+        )
+        assert (mine.status_code, one.status_code, comment.status_code) == (403, 403, 403)
+
+    async def test_cross_tenant_community_is_404(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, _ = support_token_db
+        other = dal.tenants.insert(slug="other-tenant", is_active=True)
+        foreign_community = dal.communities.insert(name="foreign", tenant_id=other)
+        dal.commit()
+        _seed_membership(dal, foreign_community, 1)
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", foreign_community),
+            headers=user_auth_headers(user_id=1),
+        )
+        assert response.status_code == 404
+
+    async def test_deactivated_member_is_403(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        _seed_membership(dal, community_id, 50, active=False)
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=user_auth_headers(user_id=50),
+        )
+        assert response.status_code == 403
+
+    async def test_member_can_submit_ticket(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=1),
+            {"subject": "help"},
+        )
+        assert response.status_code == 201
+        assert dal(dal.support_tickets).count() == 1
+
+    async def test_cross_tenant_submit_is_404_and_writes_nothing(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, _ = support_token_db
+        other = dal.tenants.insert(slug="other-tenant-submit", is_active=True)
+        foreign_community = dal.communities.insert(name="foreign-submit", tenant_id=other)
+        dal.commit()
+        _seed_membership(dal, foreign_community, 1)
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", foreign_community),
+            user_auth_headers(user_id=1),
+            {"subject": "spam"},
+        )
+        assert response.status_code == 404
+        assert dal(dal.support_tickets).count() == 0
+
+    async def test_deactivated_member_cannot_submit(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        _seed_membership(dal, community_id, 51, active=False)
+        response = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=51),
+            {"subject": "spam"},
+        )
+        assert response.status_code == 403
+        assert dal(dal.support_tickets).count() == 0
+
+    async def test_tenant_wide_admin_scope_without_standing_is_refused(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        """`community.support:admin` is tenant-wide: it must not open another community's desk."""
+        dal, community_id = support_token_db
+        headers = user_auth_headers(user_id=99, scope="community.support:admin")
+        read = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=headers,
+        )
+        submit = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            headers,
+            {"subject": "x"},
+        )
+        assert (read.status_code, submit.status_code) == (403, 403)
+
+    async def test_community_admin_can_read_categories(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        read = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=user_auth_headers(user_id=SUPPORT_ADMIN_UID, scope=ADMIN_SCOPE),
+        )
+        assert read.status_code == 200
+
+    async def test_member_gets_2xx(
+        self, client: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id),
+            headers=user_auth_headers(user_id=1),
+        )
+        assert response.status_code == 200
+
+    async def test_unauthenticated_is_401(self, client: Any, support_token_db: Any) -> None:
+        dal, community_id = support_token_db
+        response = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id)
+        )
         assert response.status_code == 401
 
 
@@ -88,10 +299,10 @@ class TestScopeEnforcement:
     async def test_categories_read_open_to_any_authenticated_member(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        """Matches Node's plain `requireAuth` (no `requireCommunityAdmin`) on this one route."""
-        _, community_id = support_token_db
+        """Categories need an ACTIVE community membership (the ticket-form read)."""
+        dal, community_id = support_token_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/support/categories",
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
             headers=user_auth_headers(user_id=1, scope=""),
         )
         assert response.status_code == 200
@@ -99,10 +310,10 @@ class TestScopeEnforcement:
     async def test_create_category_requires_admin_scope(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/categories",
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
             user_auth_headers(user_id=1, scope=""),
             {"name": "Billing"},
         )
@@ -119,11 +330,11 @@ class TestCategoryCrud:
     async def test_create_list_update_delete_roundtrip(
         self, client: Any, auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
-        headers = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        dal, community_id = support_token_db
+        headers = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
         create = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/categories",
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
             headers,
             {"name": "Billing", "description": "Payment issues", "sort_order": 1},
         )
@@ -133,13 +344,19 @@ class TestCategoryCrud:
         category_id = category["id"]
 
         listing = await client.get(
-            f"/api/v1/admin/{community_id}/support/categories", headers=headers
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            headers=headers,
         )
         assert any(c["id"] == category_id for c in (await listing.get_json())["categories"])
 
         update = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/categories/{category_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/categories/{category_id}",
+                community_id,
+                category_id=category_id,
+            ),
             headers,
             {"is_active": False},
         )
@@ -149,13 +366,24 @@ class TestCategoryCrud:
         assert updated["name"] == "Billing"  # omitted field kept its old value
 
         delete = await client.delete(
-            f"/api/v1/admin/{community_id}/support/categories/{category_id}", headers=headers
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/categories/{category_id}",
+                community_id,
+                category_id=category_id,
+            ),
+            headers=headers,
         )
         assert delete.status_code == 200
 
         missing_update = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/categories/{category_id}",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/categories/{category_id}",
+                community_id,
+                category_id=category_id,
+            ),
             headers,
             {"name": "gone"},
         )
@@ -164,11 +392,11 @@ class TestCategoryCrud:
     async def test_create_requires_name(
         self, client: Any, auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/categories",
-            auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
             {"name": "  "},
         )
         assert response.status_code == 400
@@ -178,13 +406,13 @@ class TestTicketAdminTriage:
     async def test_full_triage_flow(
         self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
-        admin = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        dal, community_id = support_token_db
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
         reporter = user_auth_headers(user_id=1)
 
         submit = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             reporter,
             {"subject": "Cannot log in", "priority": "high"},
         )
@@ -195,20 +423,33 @@ class TestTicketAdminTriage:
         assert ticket["reporter_user_id"] == 1
         ticket_id = ticket["id"]
 
-        listing = await client.get(f"/api/v1/admin/{community_id}/support/tickets", headers=admin)
+        listing = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/tickets", community_id), headers=admin
+        )
         body = await listing.get_json()
         assert body["total"] == 1
         assert body["tickets"][0]["id"] == ticket_id
 
         got = await client.get(
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}", headers=admin
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}",
+                community_id,
+                ticket_id=ticket_id,
+            ),
+            headers=admin,
         )
         assert got.status_code == 200
         assert (await got.get_json())["comments"] == []
 
         status = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}/status",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/status",
+                community_id,
+                ticket_id=ticket_id,
+            ),
             admin,
             {"status": "resolved"},
         )
@@ -219,7 +460,12 @@ class TestTicketAdminTriage:
 
         assign = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}/assign",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/assign",
+                community_id,
+                ticket_id=ticket_id,
+            ),
             admin,
             {"assignee_user_id": 2},
         )
@@ -228,7 +474,12 @@ class TestTicketAdminTriage:
 
         priority = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}/priority",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/priority",
+                community_id,
+                ticket_id=ticket_id,
+            ),
             admin,
             {"priority": "critical"},
         )
@@ -237,7 +488,12 @@ class TestTicketAdminTriage:
 
         comment = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}/comments",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id=ticket_id,
+            ),
             admin,
             {"content": "internal note", "is_internal": True},
         )
@@ -245,7 +501,13 @@ class TestTicketAdminTriage:
         assert (await comment.get_json())["comment"]["is_internal"] is True
 
         got_again = await client.get(
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}", headers=admin
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}",
+                community_id,
+                ticket_id=ticket_id,
+            ),
+            headers=admin,
         )
         comments = (await got_again.get_json())["comments"]
         assert len(comments) == 1
@@ -254,18 +516,23 @@ class TestTicketAdminTriage:
     async def test_invalid_status_is_400(
         self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         submit = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             user_auth_headers(user_id=1),
             {"subject": "x"},
         )
         ticket_id = (await submit.get_json())["ticket"]["id"]
         response = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}/status",
-            auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/status",
+                community_id,
+                ticket_id=ticket_id,
+            ),
+            auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
             {"status": "not-a-status"},
         )
         assert response.status_code == 400
@@ -273,18 +540,23 @@ class TestTicketAdminTriage:
     async def test_invalid_priority_is_400(
         self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         submit = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             user_auth_headers(user_id=1),
             {"subject": "x"},
         )
         ticket_id = (await submit.get_json())["ticket"]["id"]
         response = await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}/priority",
-            auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/priority",
+                community_id,
+                ticket_id=ticket_id,
+            ),
+            auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
             {"priority": "urgent"},  # Node route-layer drift value -- rejected by controller enum
         )
         assert response.status_code == 400
@@ -292,10 +564,10 @@ class TestTicketAdminTriage:
     async def test_unknown_ticket_is_404(
         self, client: Any, auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         response = await client.get(
-            f"/api/v1/admin/{community_id}/support/tickets/9999",
-            headers=auth_headers(scope=ADMIN_SCOPE, user_id="99"),
+            cpath(dal, "/api/v1/admin/{community_id}/support/tickets/9999", community_id),
+            headers=auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID)),
         )
         assert response.status_code == 404
 
@@ -304,10 +576,10 @@ class TestMemberSelfService:
     async def test_submit_requires_subject(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         response = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             user_auth_headers(user_id=1),
             {"subject": "   "},
         )
@@ -316,24 +588,25 @@ class TestMemberSelfService:
     async def test_my_tickets_only_shows_own_tickets(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         reporter_a = user_auth_headers(user_id=1)
         reporter_b = user_auth_headers(user_id=2)
         await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             reporter_a,
             {"subject": "A's issue"},
         )
         await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             reporter_b,
             {"subject": "B's issue"},
         )
 
         mine = await client.get(
-            f"/api/v1/admin/{community_id}/support/my-tickets", headers=reporter_a
+            cpath(dal, "/api/v1/admin/{community_id}/support/my-tickets", community_id),
+            headers=reporter_a,
         )
         tickets = (await mine.get_json())["tickets"]
         assert len(tickets) == 1
@@ -346,38 +619,61 @@ class TestMemberOwnership:
     async def test_get_my_ticket_of_another_reporter_is_404(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         owner = user_auth_headers(user_id=1)
         intruder = user_auth_headers(user_id=2)
         submit = await _post_json(
-            client, f"/api/v1/admin/{community_id}/support/submit", owner, {"subject": "private"}
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            owner,
+            {"subject": "private"},
         )
         ticket_id = (await submit.get_json())["ticket"]["id"]
 
         own_view = await client.get(
-            f"/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}", headers=owner
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}",
+                community_id,
+                ticket_id=ticket_id,
+            ),
+            headers=owner,
         )
         assert own_view.status_code == 200
 
         intruder_view = await client.get(
-            f"/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}", headers=intruder
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}",
+                community_id,
+                ticket_id=ticket_id,
+            ),
+            headers=intruder,
         )
         assert intruder_view.status_code == 404
 
     async def test_add_own_comment_on_another_reporters_ticket_is_404(
         self, client: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         owner = user_auth_headers(user_id=1)
         intruder = user_auth_headers(user_id=2)
         submit = await _post_json(
-            client, f"/api/v1/admin/{community_id}/support/submit", owner, {"subject": "private"}
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            owner,
+            {"subject": "private"},
         )
         ticket_id = (await submit.get_json())["ticket"]["id"]
 
         intruder_comment = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}/comments",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id=ticket_id,
+            ),
             intruder,
             {"content": "sneaky"},
         )
@@ -385,7 +681,12 @@ class TestMemberOwnership:
 
         owner_comment = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}/comments",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id=ticket_id,
+            ),
             owner,
             {"content": "legit"},
         )
@@ -394,22 +695,36 @@ class TestMemberOwnership:
     async def test_my_ticket_never_shows_internal_comments(
         self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         owner = user_auth_headers(user_id=1)
-        admin = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
         submit = await _post_json(
-            client, f"/api/v1/admin/{community_id}/support/submit", owner, {"subject": "x"}
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            owner,
+            {"subject": "x"},
         )
         ticket_id = (await submit.get_json())["ticket"]["id"]
         await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{ticket_id}/comments",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id=ticket_id,
+            ),
             admin,
             {"content": "internal only", "is_internal": True},
         )
 
         own_view = await client.get(
-            f"/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}", headers=owner
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/my-tickets/{ticket_id}",
+                community_id,
+                ticket_id=ticket_id,
+            ),
+            headers=owner,
         )
         assert (await own_view.get_json())["comments"] == []
 
@@ -418,34 +733,155 @@ class TestStats:
     async def test_stats_counts_and_average_resolution(
         self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
     ) -> None:
-        _, community_id = support_token_db
+        dal, community_id = support_token_db
         reporter = user_auth_headers(user_id=1)
-        admin = auth_headers(scope=ADMIN_SCOPE, user_id="99")
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
 
         open_ticket = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             reporter,
             {"subject": "still open"},
         )
         resolved_submit = await _post_json(
             client,
-            f"/api/v1/admin/{community_id}/support/submit",
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
             reporter,
             {"subject": "will resolve"},
         )
         resolved_id = (await resolved_submit.get_json())["ticket"]["id"]
         await _put_json(
             client,
-            f"/api/v1/admin/{community_id}/support/tickets/{resolved_id}/status",
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{resolved_id}/status",
+                community_id,
+                resolved_id=resolved_id,
+            ),
             admin,
             {"status": "resolved"},
         )
         assert open_ticket.status_code == 201
 
-        stats = await client.get(f"/api/v1/admin/{community_id}/support/stats", headers=admin)
+        stats = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/stats", community_id), headers=admin
+        )
         body = (await stats.get_json())["stats"]
         assert body["total"] == 2
         assert body["open"] == 1
         assert body["resolved"] == 1
         assert body["avg_resolution_seconds"] is not None
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True
+
+
+class TestSupportPublicUuids:
+    """Category / ticket ids are public UUIDs, scoped to the URL community."""
+
+    async def _seed(self, client: Any, auth_headers: Any, user_auth_headers: Any, db: Any) -> Any:
+        from tests.entity_uuid_support import assert_uuid
+
+        dal, community_id = db
+        admin = auth_headers(scope=ADMIN_SCOPE, user_id=str(SUPPORT_ADMIN_UID))
+        cat = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/categories", community_id),
+            admin,
+            {"name": "Billing"},
+        )
+        category = assert_uuid((await cat.get_json())["category"]["id"])
+        sub = await _post_json(
+            client,
+            cpath(dal, "/api/v1/admin/{community_id}/support/submit", community_id),
+            user_auth_headers(user_id=1),
+            {"subject": "Help", "category_id": category},
+        )
+        assert sub.status_code == 201
+        ticket = (await sub.get_json())["ticket"]
+        assert ticket["category_id"] == category
+        return admin, category, assert_uuid(ticket["id"])
+
+    async def test_uuid_resolves_in_url_community(
+        self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import assert_uuid
+
+        dal, community_id = support_token_db
+        admin, category, ticket = await self._seed(
+            client, auth_headers, user_auth_headers, support_token_db
+        )
+        got = await client.get(
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}",
+                community_id,
+                ticket_id=ticket,
+            ),
+            headers=admin,
+        )
+        assert got.status_code == 200
+        assert (await got.get_json())["ticket"]["id"] == ticket
+        comment = await _post_json(
+            client,
+            cpath(
+                dal,
+                "/api/v1/admin/{community_id}/support/tickets/{ticket_id}/comments",
+                community_id,
+                ticket_id=ticket,
+            ),
+            admin,
+            {"content": "hi"},
+        )
+        assert assert_uuid((await comment.get_json())["comment"]["ticket_id"]) == ticket
+        filtered = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/tickets", community_id)
+            + f"?category_id={category}",
+            headers=admin,
+        )
+        assert [t["id"] for t in (await filtered.get_json())["tickets"]] == [ticket]
+        numeric_filter = await client.get(
+            cpath(dal, "/api/v1/admin/{community_id}/support/tickets", community_id)
+            + "?category_id=1",
+            headers=admin,
+        )
+        assert numeric_filter.status_code == 404
+
+    async def test_foreign_community_and_numeric_ids_are_404(
+        self, client: Any, auth_headers: Any, user_auth_headers: Any, support_token_db: Any
+    ) -> None:
+        from tests.entity_uuid_support import second_community
+
+        dal, community_id = support_token_db
+        admin, category, ticket = await self._seed(
+            client, auth_headers, user_auth_headers, support_token_db
+        )
+        other = second_community(dal, community_id)
+        seed_membership(
+            SimpleNamespace(dal=dal),
+            community_id=other,
+            user_id=SUPPORT_ADMIN_UID,
+            role="community-admin",
+        )
+        ticket_n = int(dal(dal.support_tickets.public_id == ticket).select().first().id)
+        category_n = int(
+            dal(dal.support_ticket_categories.public_id == category).select().first().id
+        )
+        tickets = "/api/v1/admin/{community_id}/support/tickets/{ticket_id}"
+        cats = "/api/v1/admin/{community_id}/support/categories/{category_id}"
+        urls = [
+            cpath(dal, tickets, other, ticket_id=ticket),
+            cpath(dal, tickets, community_id, ticket_id=ticket_n),
+            cpath(dal, tickets, community_id, ticket_id="not-a-uuid"),
+        ]
+        for url in urls:
+            resp = await client.get(url, headers=admin)
+            assert resp.status_code == 404, url
+        for url in (
+            cpath(dal, cats, other, category_id=category),
+            cpath(dal, cats, community_id, category_id=category_n),
+        ):
+            resp = await client.delete(url, headers=admin)
+            assert resp.status_code == 404, url
+        assert dal(dal.support_ticket_categories.id == category_n).count() == 1

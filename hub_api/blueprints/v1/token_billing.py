@@ -24,18 +24,26 @@ tokens on a premium feature is a normal member action, not an admin one.
 
 from __future__ import annotations
 
+import logging
+import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, cast
 
 from flask_core.api_utils import error_response
+from flask_core.service_jwt import SCOPE_TOKEN_DEBIT
 from flask_core.tenancy import tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, current_app, g, request
 from quart_schema import validate_request, validate_response
 
 from services import token_billing_service as svc
-from services.community_authz import authorize_community
-from services.errors import ApiError, bad_request
+from services.community_authz import authorize_community, get_caller_community_role
+from services.community_public_id import lookup_public_id
+from services.errors import ApiError, bad_request, forbidden
+from services.machine_auth import machine_authenticated
+from services.scope_registry import SCOPE_TOKEN_BILLING
+
+logger = logging.getLogger(__name__)
 
 token_products_bp = Blueprint(
     "v1_marketplace_token_products", __name__, url_prefix="/api/v1/marketplace/token-products"
@@ -44,7 +52,15 @@ tokens_bp = Blueprint(
     "v1_marketplace_tokens", __name__, url_prefix="/api/v1/marketplace/communities"
 )
 
-BLUEPRINTS = [token_products_bp, tokens_bp]
+#: Service-to-service debit (svc-streaming acting for a member) -- machine JWT, never a user JWT.
+tokens_internal_bp = Blueprint(
+    "v1_marketplace_tokens_internal", __name__, url_prefix="/api/v1/internal/communities"
+)
+
+BLUEPRINTS = [token_products_bp, tokens_bp, tokens_internal_bp]
+
+#: The only service identity allowed to debit on a member's behalf (SPIFFE id, any environment).
+_DEBIT_CALLER_RE = re.compile(r"spiffe://penguintech\.io/[a-z0-9-]+/svc-streaming")
 
 
 def _dal() -> tuple[Any, Any]:
@@ -102,7 +118,7 @@ class TokenBalancesResponse:
     """Response DTO for a community's token balances."""
 
     success: bool
-    community_id: int
+    community_id: str
     balances: list[TokenBalanceDTO]
 
 
@@ -114,6 +130,18 @@ class CreditTokensRequest:
     amount: int
     reason: str
     ref: str | None = None
+
+
+@dataclass(slots=True, frozen=True)
+class ServiceDebitRequest:
+    """Request DTO for the service-to-service debit: the debit plus the acting member's id."""
+
+    product_key: str
+    amount: int
+    reason: str
+    actor_user_id: int
+    ref: str | None = None
+    idempotency_key: str | None = None
 
 
 @dataclass(slots=True, frozen=True)
@@ -148,7 +176,7 @@ class TokenTransactionDTO:
     """One ledger row."""
 
     id: int
-    community_id: int
+    community_id: str
     product_id: int
     product_key: str
     delta: int
@@ -177,6 +205,7 @@ _BLOCKED_STATUS: dict[str, int] = {
     svc.REASON_INSUFFICIENT_BALANCE: 402,
     svc.REASON_NO_BALANCE: 402,
     svc.REASON_LEDGER_UNAVAILABLE: 503,
+    svc.REASON_IDEMPOTENCY_CONFLICT: 409,
 }
 _BLOCKED_MESSAGES: dict[str, str] = {
     svc.REASON_UNKNOWN_PRODUCT: "Unknown or inactive token product.",
@@ -184,6 +213,9 @@ _BLOCKED_MESSAGES: dict[str, str] = {
     svc.REASON_NO_BALANCE: "This community has no balance for this token product yet.",
     svc.REASON_LEDGER_UNAVAILABLE: (
         "Token ledger is temporarily unavailable -- please try again shortly."
+    ),
+    svc.REASON_IDEMPOTENCY_CONFLICT: (
+        "Idempotency key already used by another request or its replay window has closed."
     ),
 }
 
@@ -253,7 +285,7 @@ async def list_token_products() -> TokenProductsResponse:
 # ---------------------------------------------------------------------------
 
 
-@tokens_bp.route("/<int:community_id>/tokens/balances", methods=["GET"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/balances", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(TokenBalancesResponse)
 async def get_balances(
@@ -268,7 +300,7 @@ async def get_balances(
         return _err(exc)
     return TokenBalancesResponse(
         success=True,
-        community_id=community_id,
+        community_id=await lookup_public_id(community_id),
         balances=[
             TokenBalanceDTO(
                 product_id=b.product_id,
@@ -283,7 +315,7 @@ async def get_balances(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/credit", methods=["POST"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/credit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(CreditTokensRequest)
 @validate_response(TokenLedgerResponse)
@@ -293,7 +325,14 @@ async def credit_tokens(
     """Grant tokens to a community -- community-admin action (manual grant or purchase credit)."""
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_TOKEN_BILLING,
+        )
         result = await svc.credit_tokens(
             async_dal,
             dal,
@@ -304,6 +343,7 @@ async def credit_tokens(
             ref=data.ref,
         )
     except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc)
         return _err(exc)
     if not result.ok:
         return _blocked_response(result)
@@ -313,7 +353,7 @@ async def credit_tokens(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/debit", methods=["POST"])
+@tokens_bp.route("/<cuuid:community_id>/tokens/debit", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @validate_request(DebitTokensRequest)
 @validate_response(TokenLedgerResponse)
@@ -322,15 +362,21 @@ async def debit_tokens(
 ) -> TokenLedgerResponse | tuple[dict[str, object], int]:
     """Spend tokens from a community's balance -- the HTTP face of a metered feature's own spend.
 
-    Community-member action (`admin=False`): a member consuming a
-    premium feature on their own community's behalf, not a financial/
-    admin operation. Other backend features that meter their own
-    consumption should call `token_billing_service.debit_tokens()`
-    directly instead of round-tripping through this HTTP endpoint.
+    Community-admin action (`admin=True` + `token.billing:manage`): a debit mutates the
+    community's money-equivalent ledger, so a plain member must never be able to drain it.
+    Services that meter on a member's behalf (svc-streaming) use `service_debit_tokens`
+    below with a machine identity; they never forward the member's JWT here.
     """
     async_dal, dal = _dal()
     try:
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=False)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_TOKEN_BILLING,
+        )
         result = await svc.debit_tokens(
             async_dal,
             dal,
@@ -341,6 +387,7 @@ async def debit_tokens(
             ref=data.ref,
         )
     except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc.code)
         return _err(exc)
     if not result.ok:
         return _blocked_response(result)
@@ -350,7 +397,67 @@ async def debit_tokens(
     )
 
 
-@tokens_bp.route("/<int:community_id>/tokens/transactions", methods=["GET"])
+_service_debit_auth = machine_authenticated(
+    SCOPE_TOKEN_DEBIT,
+    bind_community=True,
+    unconfigured_event="token_billing.service_auth_unconfigured",
+    rejected_event="token_billing.service_auth_rejected",
+    wrong_tenant_event="token_billing.service_auth_wrong_tenant",
+)
+
+
+@tokens_internal_bp.route("/<cuuid:community_id>/tokens/debit", methods=["POST"])
+@_service_debit_auth
+@validate_request(ServiceDebitRequest)
+@validate_response(TokenLedgerResponse)
+async def service_debit_tokens(
+    data: ServiceDebitRequest, community_id: int
+) -> TokenLedgerResponse | tuple[dict[str, object], int]:
+    """Debit a community's balance on behalf of an ACTIVE member -- machine identity only.
+
+    Auth: community-bound machine JWT (`token.billing:debit`, `system` tenant, `community`
+    claim == the numeric id of the community whose public UUID is `<id>`; see
+    `machine_authenticated`) from the allow-listed `svc-streaming`
+    identity. The acting member (`actor_user_id`) must hold an active membership row in this
+    very community, so a service can never spend a community's tokens for an outsider or a
+    member of another tenant's community. 403 otherwise; no ledger mutation.
+    """
+    if _DEBIT_CALLER_RE.fullmatch(getattr(g, "machine_subject", "")) is None:
+        logger.warning("token_billing.service_debit_caller_not_allow_listed")
+        return _err(forbidden("service not permitted to debit"))
+    async_dal, dal = _dal()
+    role = await get_caller_community_role(
+        async_dal, dal, community_id=community_id, user_id=data.actor_user_id
+    )
+    if role is None:
+        logger.warning(
+            "token_billing.service_debit_actor_not_member", extra={"community_id": community_id}
+        )
+        return _err(forbidden("actor is not an active member of this community"))
+    try:
+        result = await svc.debit_tokens(
+            async_dal,
+            dal,
+            community_id=community_id,
+            product_key=data.product_key,
+            amount=data.amount,
+            reason=data.reason,
+            ref=data.ref,
+            idempotency_key=data.idempotency_key,
+            actor_user_id=data.actor_user_id,
+        )
+    except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc.code)
+        return _err(exc)
+    if not result.ok:
+        return _blocked_response(result)
+    assert result.balance_after is not None and result.transaction_id is not None  # noqa: S101
+    return TokenLedgerResponse(
+        success=True, balance_after=result.balance_after, transaction_id=result.transaction_id
+    )
+
+
+@tokens_bp.route("/<cuuid:community_id>/tokens/transactions", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @validate_response(TokenTransactionsResponse)
 async def get_transactions(
@@ -365,7 +472,14 @@ async def get_transactions(
         # caller gets the same 403 regardless of whether their query
         # string happens to be malformed, never a 400 that would confirm
         # "you reached the validation logic" ahead of the authz check.
-        await authorize_community(request, async_dal, dal, community_id=community_id, admin=True)
+        await authorize_community(
+            request,
+            async_dal,
+            dal,
+            community_id=community_id,
+            admin=True,
+            scope=SCOPE_TOKEN_BILLING,
+        )
 
         try:
             limit = int(request.args.get("limit", "50"))
@@ -390,13 +504,15 @@ async def get_transactions(
             offset=offset,
         )
     except ApiError as exc:
+        logger.debug("handled %s in token_billing: %s", type(exc).__name__, exc)
         return _err(exc)
+    public_community_id = await lookup_public_id(community_id)
     return TokenTransactionsResponse(
         success=True,
         transactions=[
             TokenTransactionDTO(
                 id=r.id,
-                community_id=r.community_id,
+                community_id=public_community_id,
                 product_id=r.product_id,
                 product_key=r.product_key,
                 delta=r.delta,

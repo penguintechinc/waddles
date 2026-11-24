@@ -40,16 +40,18 @@ from quart_schema import QuartSchema
 from blueprints.v1.marketplace_lifecycle import marketplace_lifecycle_bp
 from services.errors import ApiError
 from services.marketplace_lifecycle_service import ensure_registered
+from tests.community_ids import install_community_ids, public_id
 from tests.conftest import (
     LIFECYCLE_COMMUNITY_ID,
     LIFECYCLE_OTHER_COMMUNITY_ID,
     OTHER_TENANT_SLUG,
     TENANT_SLUG,
     make_user_token,
+    role_kind_fields,
 )
 
-APP_ID_A = "waddles.bot.shoutout.custom-a"
-APP_ID_B = "waddles.bot.shoutout.custom-b"
+APP_ID_A = "acme.widgets.custom-a"
+APP_ID_B = "acme.widgets.custom-b"
 
 
 def _manifest(
@@ -95,15 +97,21 @@ def _clear_registry() -> Any:
 def app(lifecycle_db: Any) -> Quart:
     quart_app = Quart(__name__)
     QuartSchema(quart_app)
-    quart_app.register_blueprint(marketplace_lifecycle_bp)
     quart_app.config["dal"] = lifecycle_db.dal
     quart_app.config["async_dal"] = lifecycle_db
+    install_community_ids(quart_app, lifecycle_db.dal)
+    quart_app.register_blueprint(marketplace_lifecycle_bp)
     return quart_app
 
 
 @pytest.fixture
 def client(app: Quart) -> Any:
     return app.test_client()
+
+
+def _cuuid(client: Any, community_id: int = LIFECYCLE_COMMUNITY_ID) -> str:
+    """The public UUID for a seeded community (community routes take it, not the numeric id)."""
+    return public_id(client.app.config["dal"], community_id)
 
 
 def _platform_admin_headers() -> dict[str, str]:
@@ -191,7 +199,7 @@ class TestAttributionMetadata:
             license="MIT",
             sourceUrl="https://github.com/acme/waddles-bundle",
             homepageUrl="https://acme.example.com",
-            alternativeTo=["waddles.bot.shoutout.builtin"],
+            alternativeTo=["penguintechinc.waddles.bot-shoutout-builtin"],
             notice="Portions (c) Acme Corp, under MIT.",
             category="alternatives",
         )
@@ -213,7 +221,7 @@ class TestAttributionMetadata:
         assert bundle["licenseReviewRequired"] is False
         assert bundle["sourceUrl"] == "https://github.com/acme/waddles-bundle"
         assert bundle["homepageUrl"] == "https://acme.example.com"
-        assert bundle["alternativeTo"] == ["waddles.bot.shoutout.builtin"]
+        assert bundle["alternativeTo"] == ["penguintechinc.waddles.bot-shoutout-builtin"]
         assert bundle["notice"] == "Portions (c) Acme Corp, under MIT."
         assert bundle["category"] == "alternatives"
 
@@ -336,7 +344,7 @@ async def _activate(
     client: Any, app_id: str = APP_ID_A, community_id: int = LIFECYCLE_COMMUNITY_ID
 ) -> Any:
     return await client.post(
-        f"/api/v1/marketplace/community/{community_id}/bundles",
+        f"/api/v1/marketplace/community/{_cuuid(client, community_id)}/bundles",
         headers=_community_admin_headers(),
         json={"appId": app_id},
     )
@@ -394,7 +402,7 @@ class TestInstallUninstall:
 
     async def test_uninstall_unknown_is_404(self, client: Any) -> None:
         response = await client.delete(
-            "/api/v1/marketplace/bundles/waddles.bot.shoutout.nope",
+            "/api/v1/marketplace/bundles/penguintechinc.waddles.bot-shoutout-nope",
             headers=_platform_admin_headers(),
         )
         assert response.status_code == 404
@@ -470,7 +478,7 @@ class TestActivateDeactivate:
         await _make_available(client)
         token = make_user_token(user_id=999, scope="", tenant=TENANT_SLUG)
         response = await client.post(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles",
             headers={"Authorization": f"Bearer {token}"},
             json={"appId": APP_ID_A},
         )
@@ -497,6 +505,7 @@ class TestActivateDeactivate:
             community_id=LIFECYCLE_OTHER_COMMUNITY_ID,
             name="admin",
             base_claims={"scopes": ["community:manage_members"]},
+            **role_kind_fields("admin"),
         )
         dal.community_members.insert(
             community_id=LIFECYCLE_OTHER_COMMUNITY_ID,
@@ -519,7 +528,7 @@ class TestActivateDeactivate:
         assert response.status_code == 201
 
         listing = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles",
             headers=_community_admin_headers(),
         )
         body = await listing.get_json()
@@ -541,13 +550,13 @@ class TestActivateDeactivate:
         await _make_available(client)
         await _activate(client)
         response = await client.delete(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles/{APP_ID_A}",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles/{APP_ID_A}",
             headers=_community_admin_headers(),
         )
         assert response.status_code == 200
 
         listing = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles?enabled=true",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles?enabled=true",
             headers=_community_admin_headers(),
         )
         body = await listing.get_json()
@@ -555,7 +564,7 @@ class TestActivateDeactivate:
 
     async def test_deactivate_unknown_is_404(self, client: Any) -> None:
         response = await client.delete(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles/{APP_ID_A}",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles/{APP_ID_A}",
             headers=_community_admin_headers(),
         )
         assert response.status_code == 404
@@ -616,7 +625,7 @@ class TestListingFiltersAndPagination:
     async def test_list_activated_no_membership_is_403(self, client: Any) -> None:
         token = make_user_token(user_id=999, scope="", tenant=TENANT_SLUG)
         response = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -626,13 +635,13 @@ class TestListingFiltersAndPagination:
         await _make_available(client)
         await _activate(client)
         hit = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles"
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles"
             "?module=bot&feature=waddles.bot.shoutout",
             headers=_community_admin_headers(),
         )
         assert len((await hit.get_json())["bundles"]) == 1
         miss = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles?module=social",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles?module=social",
             headers=_community_admin_headers(),
         )
         assert (await miss.get_json())["bundles"] == []
@@ -671,14 +680,14 @@ class TestUpsertAndRegistryEdgeCases:
         await _make_available(client)
         await _activate(client)
         await client.delete(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles/{APP_ID_A}",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles/{APP_ID_A}",
             headers=_community_admin_headers(),
         )
         response = await _activate(client)
         assert response.status_code == 201
 
         listing = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/bundles",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/bundles",
             headers=_community_admin_headers(),
         )
         body = await listing.get_json()
@@ -733,7 +742,7 @@ class TestEnsureRegisteredDirect:
 
     async def test_unknown_app_id_raises_not_found(self, lifecycle_db: Any) -> None:
         with pytest.raises(ApiError) as exc_info:
-            await ensure_registered(lifecycle_db.dal, "waddles.bot.shoutout.nope")
+            await ensure_registered(lifecycle_db.dal, "penguintechinc.waddles.bot-shoutout-nope")
         assert exc_info.value.status_code == 404
 
 
@@ -755,7 +764,7 @@ class TestResolvedBundlesNoBinding:
             headers=_tenant_admin_headers(),
         )
         response = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/resolved",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/resolved",
             headers=_community_admin_headers(),
         )
         assert response.status_code == 200
@@ -768,7 +777,7 @@ class TestResolvedBundles:
     async def test_resolved_no_membership_is_403(self, client: Any) -> None:
         token = make_user_token(user_id=999, scope="", tenant=TENANT_SLUG)
         response = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/resolved",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/resolved",
             headers={"Authorization": f"Bearer {token}"},
         )
         assert response.status_code == 403
@@ -778,7 +787,7 @@ class TestResolvedBundles:
         await _make_available(client)
         await _activate(client)
         response = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/resolved",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/resolved",
             headers=_community_admin_headers(),
         )
         assert response.status_code == 200
@@ -805,7 +814,7 @@ class TestResolvedBundles:
         await _activate(client, APP_ID_A)
 
         response = await client.get(
-            f"/api/v1/marketplace/community/{LIFECYCLE_COMMUNITY_ID}/resolved",
+            f"/api/v1/marketplace/community/{_cuuid(client)}/resolved",
             headers=_community_admin_headers(),
         )
         assert response.status_code == 200
@@ -828,3 +837,7 @@ class TestCrossTenantIsolation:
         assert response.status_code == 200
         body = await response.get_json()
         assert body["bundles"] == []
+
+
+#: Every JSON response read here must carry community ids as UUID strings (conftest guard).
+UUID_COMMUNITY_RESPONSES = True

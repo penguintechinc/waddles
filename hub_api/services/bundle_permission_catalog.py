@@ -28,8 +28,19 @@ import os
 import re
 from typing import Literal
 
-from services.bundle_storage_access import is_storage_access_id, parse_storage_access_id
-from services.bundle_table_access import is_table_access_id, parse_table_access_id
+from services.bundle_app_id import APP_ID_PATTERN
+from services.bundle_app_id import CORE_NAMESPACE_PREFIX as _CORE_NAMESPACE_PREFIX
+from services.bundle_storage_access import (
+    STORAGE_OPS,
+    is_storage_access_id,
+    parse_storage_access_id,
+)
+from services.bundle_table_access import (
+    TABLE_ACCESS_OPS,
+    TABLE_ACCESS_PREFIX,
+    is_table_access_id,
+    parse_table_access_id,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -95,7 +106,8 @@ def _overlaps_always_denied(network: IpNetwork) -> bool:
 STATIC_PERMISSIONS: dict[str, Risk] = {
     "storage.kv": "normal",
     "storage.tables": "normal",
-    "storage.objects": "normal",
+    "storage.objects.read": "normal",
+    "storage.objects.write": "normal",
     "overlay.media": "dangerous",
     #: Control plane of svc-streaming's WebRTC rooms/SFU (`webrtc` host capability):
     #: create/close rooms, mint short-lived room join tokens, route tracks. `dangerous`:
@@ -135,6 +147,16 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: (`core/bundle_capability_gate`'s `reputation.community.admin`).
     #: `dangerous` -- an admin must explicitly approve the grant.
     "reputation.community.admin": "dangerous",
+    #: Core-only reputation families mirrored from `core/bundle_capability_gate`
+    #: (the host refuses non-`penguintechinc.waddles.` apps): own/admin ledger page, the
+    #: tenant aggregate + auto-ban policy, and MODERATION-class deltas (cap 200).
+    "reputation.history.read": "normal",
+    "reputation.tenant.read": "normal",
+    "reputation.moderation.write": "dangerous",
+    #: Per-action grant mirrored from `core/bundle_capability_gate`: lets a bundle's CONFIRMED
+    #: platform `mod.unban` lift the matching Waddles floor/soft ban in its own community (core
+    #: moderation bundles on svc_action's explicit allowlist hold it implicitly).
+    "reputation.floor_ban.lift": "dangerous",
     #: Shared community currency (issue #714), `core/bundle_capability_gate`'s
     #: `economy.*` families. `read` = balance/leaderboard; `wager` = atomic
     #: stake-debit/payout-credit (+ `max-bet`); `transfer` = member-to-member.
@@ -175,7 +197,7 @@ STATIC_PERMISSIONS: dict[str, Risk] = {
     #: returns raw PII (handle, display name) to a guest
     #: (`core/bundle_capability_gate`'s `connector.pii.read`). `dangerous`;
     #: global-approved and first-party-core-only: the executor refuses to link
-    #: it for a non-`waddles.core.` app_id, and a vendor namespace can never
+    #: it for a non-`penguintechinc.waddles.` app_id, and a vendor namespace can never
     #: carry a core app_id (`vendor_bundle_authz.enforce_vendor_namespace`).
     "connector.pii.read": "dangerous",
     "flags.read": "normal",
@@ -221,11 +243,12 @@ _PLATFORM_OP_RE = re.compile(
     r":(?P<platform>[a-z0-9_-]+)$"
 )
 # `tool.call:<target_app_id>:<tool>` -- mirrors Rust `permission.rs`
-# (`validate_tool_target` / `validate_tool_name`) and `bundle_manifest_v2`'s
-# `_APP_ID_RE` / `_TOOL_NAME_RE`. Matched with `.fullmatch` (no `$`, which
-# would accept a trailing newline); `:` can't appear in a segment so the split is unambiguous.
+# (`validate_tool_target` / `validate_tool_name`) and the one app-id grammar in
+# `bundle_app_id` (`APP_ID_PATTERN`: segments `[a-z0-9][a-z0-9-]*`, no `_`) / `_TOOL_NAME_RE`.
+# Matched with `.fullmatch` (no `$`, which would accept a trailing newline); `:` can't appear
+# in a segment so the split is unambiguous.
 _TOOL_CALL_RE = re.compile(
-    r"tool\.call:(?P<target>waddles(?:\.[a-z0-9][a-z0-9_-]*){3}):(?P<tool>[a-z][a-z0-9_.]{0,63})"
+    rf"tool\.call:(?P<target>{APP_ID_PATTERN})" r":(?P<tool>[a-z][a-z0-9_.]{0,63})"
 )
 _NET_HTTP_FQDN_RE = re.compile(r"^net\.http\.fqdn:(?P<host>.+)$")
 _NET_HTTP_PUBLIC_IP_RE = re.compile(r"^net\.http\.public-ip:(?P<ip>.+)$")
@@ -419,6 +442,34 @@ def is_valid_egress_host(host: str, *, allow_wildcard: bool = True) -> bool:
     return bool(_HOST_RE.match(host))
 
 
+#: Every key `permission_family()` can return for a parameterized id -- the instance-policy
+#: key space together with `STATIC_PERMISSIONS`.
+PARAMETERIZED_FAMILIES: frozenset[str] = frozenset(
+    {
+        "net.http.fqdn",
+        "net.http.public-ip",
+        "net.http.private-ip",
+        "chat.send",
+        "chat.delete",
+        "dm.send",
+        "moderation",
+        "tool.call",
+        *PLATFORM_OP_FAMILIES,
+        *(f"storage.{op}" for op in STORAGE_OPS),
+        *(f"{TABLE_ACCESS_PREFIX}{op}" for op in TABLE_ACCESS_OPS),
+    }
+)
+
+
+def is_known_policy_key(key: str) -> bool:
+    """`True` iff `key` is a catalog id or a catalog family -- a valid instance-policy key.
+
+    A typo'd or renamed key (e.g. the retired `storage.objects`) would otherwise be stored as
+    a policy that silently never matches anything.
+    """
+    return key in STATIC_PERMISSIONS or key in PARAMETERIZED_FAMILIES
+
+
 def is_known_permission(permission_id: str) -> bool:
     """`True` iff `permission_id` resolves to a risk level -- i.e. is a catalog member."""
     return resolve_risk(permission_id) is not None
@@ -433,9 +484,7 @@ def is_dangerous(permission_id: str) -> bool:
     return resolve_risk(permission_id) == "dangerous"
 
 
-#: `waddles.core.*` -- the reserved first-party namespace pre-granted at
-#: catalog approval by `seed_core_bundles.py` (spec Sec3.6). Re-exported
-#: here (not re-derived) from `vendor_bundle_authz` to avoid two sources
-#: of truth for the same literal string; imported lazily to dodge any
-#: import cycle since `vendor_bundle_authz` does not import this module.
-CORE_NAMESPACE_PREFIX = "waddles.core."
+#: `penguintechinc.waddles.*` -- the reserved first-party namespace pre-granted at
+#: catalog approval by `seed_core_bundles.py` (spec Sec3.6). Re-exported from the one
+#: grammar module (`bundle_app_id`); detection is `bundle_app_id.is_core_namespace`.
+CORE_NAMESPACE_PREFIX = _CORE_NAMESPACE_PREFIX

@@ -2,10 +2,9 @@
 # holds no address, no secret, no socket. Server registration / allowlists / audit are service tools reached by the
 # generic bundle-admin gateway under the admin's verified scope (see README "Admin path").
 schema_version: 2
-app_id: waddles.core.example.game-servers
+app_id: penguintechinc.waddles.game-servers
 name: Game Servers (Rust)
-version: 1.0.0
-feature: waddles.core.example
+version: 1.0.2
 module: core
 provider: builtin
 author: github:penguintechinc
@@ -53,14 +52,14 @@ permissions: []
 requested_tools:
 - tool: gameserver.server.list
   access: read
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 - tool: gameserver.status.query
   access: read
-  target_app_id: waddles.core.service.gameserver
+  target_app_id: penguintechinc.waddles.gameserver
 - tool: gameserver.rcon.exec
   access: write
-  target_app_id: waddles.core.service.gameserver
-config_schema:
+  target_app_id: penguintechinc.waddles.gameserver
+community_config_schema:
   type: object
   additionalProperties: false
   properties:
@@ -72,9 +71,17 @@ config_schema:
       enum:
       - twitch
       - discord
+      - null
+      type:
+      - string
+      - 'null'
+      default: null
     status_post_channel_id:
-      type: string
+      type:
+      - string
+      - 'null'
       maxLength: 64
+      default: null
     status_post_servers:
       type: array
       maxItems: 5
@@ -82,6 +89,7 @@ config_schema:
         type: string
         maxLength: 64
       description: Server aliases to include (empty = all enabled)
+      default: []
 compatible_with: []
 incompatible_with: []
 platform_compatibility:

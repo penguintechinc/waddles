@@ -113,6 +113,7 @@ pub fn id_string(v: &Value) -> Option<String> {
 /// Badge `type` names from a Kick `identity.badges` array (`[{"type":"moderator",...}]`). Names
 /// only (no counts/text); an absent or malformed list is empty, never an error.
 pub fn badge_types(identity: Option<&Value>) -> Vec<String> {
+    // nosemgrep: rust-silent-unwrap-or-default -- absent/malformed badges yield empty Vec (fail closed: fewer privileges)
     identity
         .and_then(|i| i.get("badges"))
         .and_then(Value::as_array)

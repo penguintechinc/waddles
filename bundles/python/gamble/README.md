@@ -1,7 +1,7 @@
 # gamble (Python)
 
 `!gamble <amount>` -- a single-user points bet. First-party (`provider: builtin`,
-`app_id: waddles.core.example.gamble`), net-new Waddles content (no attribution required).
+`app_id: penguintechinc.waddles.gamble`), net-new Waddles content (no attribution required).
 Points only; no real-money ties.
 
 | Command | Behavior |

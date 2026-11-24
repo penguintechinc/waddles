@@ -1,5 +1,5 @@
 schema_version: 2
-app_id: waddles.core.example.poll
+app_id: penguintechinc.waddles.poll
 name: Community Polls Bundle (Python)
 # 1.0.0: extracted from the bot_process monolith (core/svc_process/builtin_handlers/
 # community_polls_process.py) onto waddle_sdk.command's standard grammar and
@@ -11,8 +11,7 @@ name: Community Polls Bundle (Python)
 # markers), strict-boolean mod gate (a string badge no longer passes), tenant-wide community
 # sentinel support (fix/bundle-defects-wave; refs gh-675).
 # 1.0.3: activation-gated only -- removed the in-bundle waddles.command-poll feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.5
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

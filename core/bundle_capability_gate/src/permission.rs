@@ -227,7 +227,10 @@ pub enum Quota {
 pub enum PermissionFamily {
     StorageKv,
     StorageTables,
-    StorageObjects,
+    /// `storage.objects.read` -- get/head/list/presign-get on own prefix.
+    StorageObjectsRead,
+    /// `storage.objects.write` -- put/delete/tag/presign-put on own prefix.
+    StorageObjectsWrite,
     /// `net.http.fqdn:<host>` -- the preferred, `Normal`-risk outbound-HTTP
     /// family (2026-09-28 decision). A bundle should reach for this family
     /// first; `NetHttpPublicIp`/`NetHttpPrivateIp` exist for the exceptional
@@ -286,7 +289,7 @@ pub enum PermissionFamily {
     /// callers.
     ReputationCommunityAdmin,
     /// `reputation.history.read` -- a user's reputation ledger page (core
-    /// bundles only: the host refuses any non-`waddles.core.` app).
+    /// bundles only: the host refuses any non-`penguintechinc.waddles.` app).
     ReputationHistoryRead,
     /// `reputation.tenant.read` -- the user's aggregate across the tenant's
     /// communities and the tenant auto-ban policy (core bundles only).
@@ -294,6 +297,10 @@ pub enum PermissionFamily {
     /// `reputation.moderation.write` -- moderation-class deltas (larger cap,
     /// e.g. -200 for a ban) and soft-ban writes (core/approved bundles only).
     ReputationModerationWrite,
+    /// `reputation.floor_ban.lift` -- lets a bundle's CONFIRMED platform `mod.unban` lift the
+    /// matching Waddles floor ban + soft ban in its own community (per-action scope; core
+    /// moderation bundles on the explicit allowlist hold it implicitly).
+    ReputationFloorBanLift,
     /// `economy.read` -- balance / max-bet / leaderboard reads (issue #714).
     EconomyRead,
     /// `economy.wager` -- atomic debit-stake/credit-payout (issue #714).
@@ -334,7 +341,7 @@ pub enum PermissionFamily {
     /// `connector.pii.read` -- gates the connector world's `identity.lookup`
     /// import, the ONE capability that returns raw PII (handle, display name)
     /// to a guest. `Dangerous`; global-approved, first-party-core-only (the
-    /// executor additionally refuses to link it for a non-`waddles.core.`
+    /// executor additionally refuses to link it for a non-`penguintechinc.waddles.`
     /// app_id, `VerifiedManifest::may_link_identity`).
     ConnectorPiiRead,
     FlagsRead,
@@ -360,7 +367,7 @@ pub enum PermissionFamily {
     ToolCall,
     /// `platform.table.read:<table>.<column>` -- read one allowlisted platform
     /// table column, row-scoped to the invocation's community+tenant.
-    /// `Dangerous`, NEVER auto-granted (not even to `waddles.core.*`).
+    /// `Dangerous`, NEVER auto-granted (not even to `penguintechinc.waddles.*`).
     PlatformTableRead,
     /// `platform.table.write:<table>.<column>` -- as above, write.
     PlatformTableWrite,
@@ -393,7 +400,8 @@ impl PermissionFamily {
     pub const ALL: &'static [PermissionFamily] = &[
         Self::StorageKv,
         Self::StorageTables,
-        Self::StorageObjects,
+        Self::StorageObjectsRead,
+        Self::StorageObjectsWrite,
         Self::NetHttpFqdn,
         Self::NetHttpPublicIp,
         Self::NetHttpPrivateIp,
@@ -421,6 +429,7 @@ impl PermissionFamily {
         Self::ReputationHistoryRead,
         Self::ReputationTenantRead,
         Self::ReputationModerationWrite,
+        Self::ReputationFloorBanLift,
         Self::EconomyRead,
         Self::EconomyWager,
         Self::EconomyTransfer,
@@ -455,7 +464,8 @@ impl PermissionFamily {
         match self {
             Self::StorageKv => "storage.kv",
             Self::StorageTables => "storage.tables",
-            Self::StorageObjects => "storage.objects",
+            Self::StorageObjectsRead => "storage.objects.read",
+            Self::StorageObjectsWrite => "storage.objects.write",
             Self::NetHttpFqdn => "net.http.fqdn",
             Self::NetHttpPublicIp => "net.http.public-ip",
             Self::NetHttpPrivateIp => "net.http.private-ip",
@@ -483,6 +493,7 @@ impl PermissionFamily {
             Self::ReputationHistoryRead => "reputation.history.read",
             Self::ReputationTenantRead => "reputation.tenant.read",
             Self::ReputationModerationWrite => "reputation.moderation.write",
+            Self::ReputationFloorBanLift => "reputation.floor_ban.lift",
             Self::EconomyRead => "economy.read",
             Self::EconomyWager => "economy.wager",
             Self::EconomyTransfer => "economy.transfer",
@@ -604,7 +615,7 @@ impl PermissionFamily {
         match self {
             Self::StorageKv => AppScopedResource::KvState,
             Self::StorageTables => AppScopedResource::Table,
-            Self::StorageObjects => AppScopedResource::Objects,
+            Self::StorageObjectsRead | Self::StorageObjectsWrite => AppScopedResource::Objects,
             Self::OverlayMedia => AppScopedResource::Overlay,
             _ => AppScopedResource::None,
         }
@@ -655,12 +666,19 @@ impl PermissionFamily {
                 default_quota: Quota::Descriptive("100k rows / 50 MB per (tenant, app)"),
                 notes: "Exactly one table, in a server-derived schema (spec SS1.1)",
             },
-            Self::StorageObjects => CatalogEntry {
+            Self::StorageObjectsRead => CatalogEntry {
                 family: *self,
                 risk: Risk::Normal,
                 capability_kind: CapabilityKind::Objects,
                 default_quota: Quota::Descriptive("1k objects / 500 MB per (tenant, app)"),
-                notes: "Tiered bucket/prefix topology, spec SS6",
+                notes: "Read (get/head/list/presign-get) on the bundle's own object prefix, spec SS6",
+            },
+            Self::StorageObjectsWrite => CatalogEntry {
+                family: *self,
+                risk: Risk::Normal,
+                capability_kind: CapabilityKind::Objects,
+                default_quota: Quota::Descriptive("1k objects / 500 MB per (tenant, app)"),
+                notes: "Write (put/delete/tag) on the bundle's own object prefix, spec SS6",
             },
             Self::NetHttpFqdn => CatalogEntry {
                 family: *self,
@@ -900,7 +918,7 @@ impl PermissionFamily {
                     max_calls: 20,
                     window: Duration::from_secs(1),
                 },
-                notes: "ledger history page; core bundles only (host refuses non-waddles.core. apps)",
+                notes: "ledger history page; core bundles only (host refuses non-penguintechinc.waddles. apps)",
             },
             Self::ReputationTenantRead => CatalogEntry {
                 family: *self,
@@ -922,6 +940,16 @@ impl PermissionFamily {
                     per_scope_daily_abs_max: 4_000,
                 },
                 notes: "moderation-class deltas + soft-ban writes; core/approved bundles only; separate from the activity cap",
+            },
+            Self::ReputationFloorBanLift => CatalogEntry {
+                family: *self,
+                risk: Risk::Dangerous,
+                capability_kind: CapabilityKind::Reputation,
+                default_quota: Quota::CallsPerWindow {
+                    max_calls: 20,
+                    window: Duration::from_secs(1),
+                },
+                notes: "lift the matching Waddles floor/soft ban after a confirmed platform unban; own community only",
             },
             Self::EconomyRead => CatalogEntry {
                 family: *self,
@@ -1177,7 +1205,10 @@ impl fmt::Display for PermissionFamily {
 pub enum PermissionId {
     StorageKv,
     StorageTables,
-    StorageObjects,
+    /// `storage.objects.read` -- get/head/list/presign-get on own prefix.
+    StorageObjectsRead,
+    /// `storage.objects.write` -- put/delete/tag/presign-put on own prefix.
+    StorageObjectsWrite,
     NetHttpFqdn(String),
     NetHttpPublicIp(String),
     NetHttpPrivateIp(String),
@@ -1205,6 +1236,7 @@ pub enum PermissionId {
     ReputationHistoryRead,
     ReputationTenantRead,
     ReputationModerationWrite,
+    ReputationFloorBanLift,
     EconomyRead,
     EconomyWager,
     EconomyTransfer,
@@ -1279,7 +1311,8 @@ impl PermissionId {
         match self {
             Self::StorageKv => PermissionFamily::StorageKv,
             Self::StorageTables => PermissionFamily::StorageTables,
-            Self::StorageObjects => PermissionFamily::StorageObjects,
+            Self::StorageObjectsRead => PermissionFamily::StorageObjectsRead,
+            Self::StorageObjectsWrite => PermissionFamily::StorageObjectsWrite,
             Self::NetHttpFqdn(_) => PermissionFamily::NetHttpFqdn,
             Self::NetHttpPublicIp(_) => PermissionFamily::NetHttpPublicIp,
             Self::NetHttpPrivateIp(_) => PermissionFamily::NetHttpPrivateIp,
@@ -1308,6 +1341,7 @@ impl PermissionId {
             Self::ReputationHistoryRead => PermissionFamily::ReputationHistoryRead,
             Self::ReputationTenantRead => PermissionFamily::ReputationTenantRead,
             Self::ReputationModerationWrite => PermissionFamily::ReputationModerationWrite,
+            Self::ReputationFloorBanLift => PermissionFamily::ReputationFloorBanLift,
             Self::EconomyRead => PermissionFamily::EconomyRead,
             Self::EconomyWager => PermissionFamily::EconomyWager,
             Self::EconomyTransfer => PermissionFamily::EconomyTransfer,
@@ -1408,24 +1442,18 @@ impl PermissionId {
         Ok(())
     }
 
-    /// `tool.call` target: the 4-segment `waddles.<a>.<b>.<c>` app id
-    /// (`hub_api` `_APP_ID_RE`). Every char is RFC-3986 unreserved, so Python's
-    /// `quote(app_id, safe='')` (P1's `requested_tool_permission_id`) is the
-    /// identity on a valid id and no percent-encoding exists on the wire; a
-    /// `%`/`:` therefore can never be valid and is rejected.
+    /// `tool.call` target: a valid 3-segment `<org>.<repo>.<name>` app id (the one
+    /// shared grammar, [`crate::resource::is_valid_app_id`]: segments
+    /// `[a-z0-9][a-z0-9-]*`, no `_`). Every char is RFC-3986 unreserved, so Python's
+    /// `quote(app_id, safe='')` is the identity on a valid id and no percent-encoding
+    /// exists on the wire; a `%`/`:` therefore can never be valid and is rejected.
     fn validate_tool_target(target: &str) -> Result<(), ParsePermissionIdError> {
-        let err = || ParsePermissionIdError::UnknownPermission(format!("tool.call:{target}"));
-        let segment_ok = |s: &str| {
-            let mut chars = s.chars();
-            matches!(chars.next(), Some(c) if c.is_ascii_lowercase() || c.is_ascii_digit())
-                && chars
-                    .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-')
-        };
-        let parts: Vec<&str> = target.split('.').collect();
-        if parts.len() == 4 && parts[0] == "waddles" && parts[1..].iter().all(|p| segment_ok(p)) {
+        if crate::resource::is_valid_app_id(target) {
             Ok(())
         } else {
-            Err(err())
+            Err(ParsePermissionIdError::UnknownPermission(format!(
+                "tool.call:{target}"
+            )))
         }
     }
 
@@ -1630,7 +1658,8 @@ impl PermissionId {
         match raw {
             "storage.kv" => Ok(Self::StorageKv),
             "storage.tables" => Ok(Self::StorageTables),
-            "storage.objects" => Ok(Self::StorageObjects),
+            "storage.objects.read" => Ok(Self::StorageObjectsRead),
+            "storage.objects.write" => Ok(Self::StorageObjectsWrite),
             "overlay.media" => Ok(Self::OverlayMedia),
             "ai.generate" => Ok(Self::AiGenerate),
             "media.generate" => Ok(Self::MediaGenerate),
@@ -1645,6 +1674,7 @@ impl PermissionId {
             "reputation.history.read" => Ok(Self::ReputationHistoryRead),
             "reputation.tenant.read" => Ok(Self::ReputationTenantRead),
             "reputation.moderation.write" => Ok(Self::ReputationModerationWrite),
+            "reputation.floor_ban.lift" => Ok(Self::ReputationFloorBanLift),
             "economy.read" => Ok(Self::EconomyRead),
             "economy.wager" => Ok(Self::EconomyWager),
             "economy.transfer" => Ok(Self::EconomyTransfer),
@@ -1680,12 +1710,15 @@ mod tests {
 
     #[test]
     fn storage_access_ids_are_dangerous_validated_and_round_trip() {
-        let id = PermissionId::parse("storage.read:waddles.harness.media").unwrap();
+        let id = PermissionId::parse("storage.read:penguintechinc.waddles.harness-media").unwrap();
         assert_eq!(id.family(), PermissionFamily::StorageRead);
         assert_eq!(id.risk(), Risk::Dangerous);
-        assert_eq!(id.canonical_id(), "storage.read:waddles.harness.media");
+        assert_eq!(
+            id.canonical_id(),
+            "storage.read:penguintechinc.waddles.harness-media"
+        );
         for op in ["list", "write", "delete"] {
-            let raw = format!("storage.{op}:a.b");
+            let raw = format!("storage.{op}:a.b.c");
             assert_eq!(PermissionId::parse(&raw).unwrap().canonical_id(), raw);
         }
         for bad in [
@@ -1694,6 +1727,8 @@ mod tests {
             "storage.read:A",
             "storage.read:a/b",
             "storage.read:a b",
+            "storage.read:a.b",
+            "storage.read:a.b_c.d",
             "storage.rm:a",
             "storage.read",
         ] {
@@ -2082,7 +2117,11 @@ mod tests {
             AppScopedResource::Table
         );
         assert_eq!(
-            PermissionFamily::StorageObjects.expected_app_scoped_resource(),
+            PermissionFamily::StorageObjectsRead.expected_app_scoped_resource(),
+            AppScopedResource::Objects
+        );
+        assert_eq!(
+            PermissionFamily::StorageObjectsWrite.expected_app_scoped_resource(),
             AppScopedResource::Objects
         );
         assert_eq!(
@@ -2128,9 +2167,10 @@ mod tests {
     fn tool_call_round_trips_a_real_p1_encoded_id() {
         // P1's quote(app_id, safe='') is the identity on a valid app id.
         for raw in [
-            "tool.call:waddles.core.economy.default:get_balance",
-            "tool.call:waddles.core.example_echo.v2:a.b_c",
-            "tool.call:waddles.some-vendor.x1.y_2:t",
+            "tool.call:penguintechinc.waddles.economy:get_balance",
+            "tool.call:penguintechinc.waddles.discord-invite:a.b_c",
+            "tool.call:psychoboy.penguintwitchbot.wix-event-sync:t",
+            "tool.call:some-vendor.x1.echo-pipeline-2:t",
         ] {
             let id = PermissionId::parse(raw).unwrap();
             assert_eq!(id.canonical_id(), raw);
@@ -2138,9 +2178,9 @@ mod tests {
             assert_eq!(id.risk(), Risk::Dangerous);
         }
         assert_eq!(
-            PermissionId::parse("tool.call:waddles.core.economy.default:get_balance").unwrap(),
+            PermissionId::parse("tool.call:penguintechinc.waddles.economy:get_balance").unwrap(),
             PermissionId::ToolCall {
-                target: "waddles.core.economy.default".into(),
+                target: "penguintechinc.waddles.economy".into(),
                 tool: "get_balance".into()
             }
         );
@@ -2153,18 +2193,48 @@ mod tests {
             "tool.call:",
             "tool.call:x",
             "tool.call::get",
-            "tool.call:waddles.core.economy.default:",
-            "tool.call:waddles.core.economy.default:Get",
-            "tool.call:waddles.core.economy.default:1get",
-            "tool.call:waddles.core:get",
-            "tool.call:waddles%2Ecore.economy.default:get",
-            "tool.call:a:waddles.core.economy.default:get",
-            "tool.call:other.core.economy.default:get",
+            "tool.call:penguintechinc.waddles.economy:",
+            "tool.call:penguintechinc.waddles.economy:Get",
+            "tool.call:penguintechinc.waddles.economy:1get",
+            "tool.call:penguintechinc.waddles:get",
+            "tool.call:penguintechinc%2Ewaddles.economy:get",
+            "tool.call:a:penguintechinc.waddles.economy:get",
+            "tool.call:penguintechinc.waddles.economy.default:get",
+            "tool.call:penguintechinc.waddles.-bad:get",
+            "tool.call:penguintechinc.waddles.a_b:get",
         ] {
             assert!(PermissionId::parse(raw).is_err(), "{raw} must be rejected");
         }
-        let long = format!("tool.call:waddles.core.economy.default:a{}", "b".repeat(64));
+        let long = format!(
+            "tool.call:penguintechinc.waddles.economy:a{}",
+            "b".repeat(64)
+        );
         assert!(PermissionId::parse(&long).is_err());
+    }
+
+    #[test]
+    fn storage_objects_is_split_per_action_and_the_old_id_is_gone() {
+        assert_eq!(
+            PermissionId::parse("storage.objects.read").unwrap(),
+            PermissionId::StorageObjectsRead
+        );
+        assert_eq!(
+            PermissionId::parse("storage.objects.write").unwrap(),
+            PermissionId::StorageObjectsWrite
+        );
+        assert_ne!(
+            PermissionId::StorageObjectsRead.family(),
+            PermissionId::StorageObjectsWrite.family()
+        );
+        // The blanket id must not silently keep working.
+        assert!(PermissionId::parse("storage.objects").is_err());
+        for f in [
+            PermissionFamily::StorageObjectsRead,
+            PermissionFamily::StorageObjectsWrite,
+        ] {
+            assert!(PermissionFamily::ALL.contains(&f));
+            assert_eq!(f.catalog_entry().capability_kind, CapabilityKind::Objects);
+        }
     }
 
     #[test]

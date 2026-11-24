@@ -75,6 +75,7 @@ from config import HubAPIConfig  # noqa: E402
 from grpc_internal.dataplane_servicers import ProviderConnectionServicer  # noqa: E402
 from grpc_internal.server import build_interceptor_chain  # noqa: E402
 from grpc_internal.service_auth_servicer import ServiceAuthServicer  # noqa: E402
+from services.community_public_id import install_community_public_ids  # noqa: E402
 from services.provider_connections import (  # noqa: E402
     PlatformKeyVault,
     ProviderConnectionService,
@@ -140,10 +141,15 @@ def _sql(container: str, statement: str) -> str:
     return result.stdout.strip()
 
 
-def _seed(container: str) -> dict[str, int]:
-    """One tenant with two communities (A, B) and a second tenant's community (C)."""
+def _seed(container: str) -> dict[str, Any]:
+    """One tenant with two communities (A, B) and a second tenant's community (C).
+
+    Besides each community's numeric id (`a`/`b`/`c`, for internal service-key routes and DB
+    keys), returns its `public_id` UUID (`a_public`/...), which the client-facing
+    `/api/v1/communities/<cuuid:...>` routes require (#1434).
+    """
     _sql(container, "ALTER TABLE communities ADD COLUMN IF NOT EXISTS tenant_id INTEGER")
-    ids: dict[str, int] = {}
+    ids: dict[str, Any] = {}
     for key, slug in (("tenant", TENANT_SLUG), ("other_tenant", "live-other")):
         ids[key] = int(
             _sql(container, f"INSERT INTO tenants (slug) VALUES ('{slug}') RETURNING id")  # noqa: S608
@@ -151,24 +157,42 @@ def _seed(container: str) -> dict[str, int]:
     ids["admin_user"] = int(
         _sql(container, "INSERT INTO hub_users (username) VALUES ('live-admin') RETURNING id")
     )
+    # The admin administers its tenant (`tenant_admins` row): the community authz gate
+    # (`authorize_community`) grants a tenant admin the community-admin bypass.
+    _sql(
+        container,
+        "INSERT INTO tenant_admins (tenant_id, user_id) "  # noqa: S608
+        f"VALUES ({ids['tenant']}, {ids['admin_user']})",
+    )
+    # Channel-ownership proof (#1271): binding a Twitch channel requires the installing hub user to
+    # have OAuth-linked the broadcaster's Twitch account (a `hub_user_identities` row, which the
+    # social-login / account-linking flow writes). The harness's admin is that linked owner of both
+    # fake channels -- the real `_prove_ownership` path still runs; nothing is bypassed.
+    for channel_id in (CHANNEL_ID, OTHER_CHANNEL_ID):
+        _sql(
+            container,
+            "INSERT INTO hub_user_identities (hub_user_id, platform, platform_user_id) "  # noqa: S608
+            f"VALUES ({ids['admin_user']}, 'twitch', '{channel_id}')",
+        )
     for key, name, tenant in (
         ("a", "live-a", "tenant"),
         ("b", "live-b", "tenant"),
         ("c", "live-c", "other_tenant"),
     ):
-        ids[key] = int(
-            _sql(
-                container,
-                f"INSERT INTO communities (name, tenant_id) VALUES ('{name}', {ids[tenant]})"  # noqa: S608
-                " RETURNING id",
-            )
+        row = _sql(
+            container,
+            f"INSERT INTO communities (name, tenant_id) VALUES ('{name}', {ids[tenant]})"  # noqa: S608
+            " RETURNING id, public_id",
         )
+        numeric, public = row.split("|")
+        ids[key] = int(numeric)
+        ids[f"{key}_public"] = public.strip().lower()
     return ids
 
 
 async def _serve(manifest_path: Path) -> None:
     with migrated_postgres("connection-resolver-live") as pg:
-        ids = _seed("waddles-migtest-connection-resolver-live")
+        ids = _seed(pg.container)
         identities_env = _chart_identities_env()
         os.environ["SERVICE_JWT_IDENTITIES"] = identities_env
         identities = load_identities_from_env(env="alpha")
@@ -187,6 +211,25 @@ async def _serve(manifest_path: Path) -> None:
         async_dal = AsyncDAL(pydal_uri, pool_size=2, migrate=False)
         async_dal.dal.define_table(
             "tenants", Field("slug"), Field("is_active", "boolean"), migrate=False, rname="tenants"
+        )
+        # `authorize_community` first proves the community belongs to the caller's tenant
+        # (IDOR guard) before honouring the admin token's global-admin scope.
+        async_dal.dal.define_table(
+            "communities",
+            Field("tenant_id", "integer"),
+            # `public_id` must be bound: `lookup_community_id` (the cuuid before_request hook)
+            # re-binds the full legacy `tenants`/`communities` field lists when it is missing,
+            # and those reference columns the Alembic-migrated schema no longer has.
+            Field("public_id"),
+            migrate=False,
+            rname="communities",
+        )
+        async_dal.dal.define_table(
+            "tenant_admins",
+            Field("user_id", "integer"),
+            Field("tenant_id", "integer"),
+            migrate=False,
+            rname="tenant_admins",
         )
         install_dal = AsyncDB(pg.dsn, pool_size=4, echo=False)
         await install_dal.reflect()
@@ -214,6 +257,9 @@ async def _serve(manifest_path: Path) -> None:
 
         app = Quart(__name__)
         QuartSchema(app)
+        # Same wiring as app.py: the `cuuid` converter + the before_request hook that maps the
+        # community public UUID in the path to the internal numeric id for the handlers.
+        install_community_public_ids(app)
         app.register_blueprint(provider_connections_bp)
         cfg: HubAPIConfig = hub_config()
         app.config.update(
@@ -250,10 +296,15 @@ async def _serve(manifest_path: Path) -> None:
         await grpc_server.start()
 
         port = _free_port()
+        # T10: user JWTs are ES256 from the platform key ring (no shared secret). The live hub runs
+        # in this process, so an in-memory ring both signs the admin token and verifies it.
+        from flask_core import jwt_keyring as _jk  # noqa: PLC0415
+
+        _jk.set_jwt_keyring(_jk.generate_test_keyring())
         admin_token = create_jwt_token(
             user_id=str(ids["admin_user"]), username="live-admin", email="admin@example.invalid",
-            roles=["super_admin"], secret_key=os.environ["SECRET_KEY"],
-            tenant=TENANT_SLUG, scope="connections:admin", expiration_seconds=3600,
+            roles=["super_admin"], tenant=TENANT_SLUG, scope="connections:admin",
+            expiration_seconds=3600,
         )  # fmt: skip
         manifest: dict[str, Any] = {
             "hub_url": f"http://127.0.0.1:{port}",
@@ -262,10 +313,15 @@ async def _serve(manifest_path: Path) -> None:
             "grpc_url": f"http://127.0.0.1:{grpc_port}",
             "admin_token": admin_token,
             "tenant_id": ids["tenant"],
+            # Numeric ids: internal service-key routes + DB keys. `*_public_id`: the UUIDs the
+            # client-facing `/api/v1/communities/<cuuid:...>` routes accept (numeric -> 404).
             "community_a": ids["a"],
             "community_b": ids["b"],
             "community_other_tenant": ids["c"],
-            "pg_container": "waddles-migtest-connection-resolver-live",
+            "community_a_public_id": ids["a_public"],
+            "community_b_public_id": ids["b_public"],
+            "community_other_tenant_public_id": ids["c_public"],
+            "pg_container": pg.container,
             "sa_tokens": SA_TOKENS,
             "twitch_bot_tokens": twitch_bot_tokens,
             "twitch_channels": [CHANNEL_LOGIN, OTHER_CHANNEL_LOGIN],

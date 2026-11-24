@@ -20,7 +20,7 @@ pub const DEFAULT_PLATFORMS: [&str; 3] = ["twitch", "youtube", "discord"];
 /// Platforms this bundle may post announcements to (declared `chat.send:*` permissions).
 pub const CHAT_PLATFORMS: [&str; 3] = ["discord", "twitch", "youtube"];
 /// Platform service bundle app-id prefix; the target is `<prefix><platform>`.
-pub const SERVICE_PREFIX: &str = "waddles.core.service.";
+pub const SERVICE_PREFIX: &str = "penguintechinc.waddles.";
 /// Contract error codes a provider's invalid-args message may start with.
 pub const ERROR_CODES: [&str; 3] = ["platform_unavailable", "rate_limited", "not_connected"];
 
@@ -998,7 +998,7 @@ mod tests {
         assert!(h.kv.borrow().contains_key("snapshot"));
         // community scope args: contract-shaped, no caller-supplied channel ids
         let calls = h.calls.borrow();
-        assert_eq!(calls[0].0, "waddles.core.service.twitch");
+        assert_eq!(calls[0].0, "penguintechinc.waddles.twitch");
         assert_eq!(calls[0].1, "twitch.live.channels");
         assert_eq!(calls[0].2, json!({"scope": "community", "limit": 100}));
     }

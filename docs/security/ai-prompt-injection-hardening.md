@@ -1,7 +1,6 @@
 # AI path hardening: prompt injection and tool-call abuse (OWASP LLM01)
 
-SOC2 / enterprise control for the WaddleAI path: `hub_api/services/ai_routing`,
-`action/interactive/ai_interaction_module`, `core/ai_researcher_module`.
+SOC2 / enterprise control for the WaddleAI path: `hub_api/services/ai_routing` (legacy v2 `ai_interaction_module` / `ai_researcher_module` retired).
 Shared code: `libs/flask_core/flask_core/ai_guard.py`, `ai_tool_authz.py`, `ai_telemetry.py`.
 
 ## Threat model

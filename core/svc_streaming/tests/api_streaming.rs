@@ -14,11 +14,11 @@ use axum::http::header::AUTHORIZATION;
 use axum::http::{Request, StatusCode};
 use clap::Parser;
 use http_body_util::BodyExt;
-use jsonwebtoken::{encode, Algorithm, EncodingKey, Header};
 use sea_orm::{ConnectionTrait, Database, DatabaseConnection};
 use tower::ServiceExt;
 
 use svc_streaming::api::{router_for_testing, SharedEngine};
+use svc_streaming::billing::token_ledger::{ServiceBearer, TokenLedgerClient};
 use svc_streaming::config::{CliConfig, Config, Secret};
 use svc_streaming::http::auth::Claims;
 use svc_streaming::http::AppState;
@@ -27,7 +27,7 @@ use svc_streaming::pipeline::{
     PipelineStatus,
 };
 
-const HMAC_SECRET: &str = "test-hmac-secret";
+mod jwt_common;
 /// Seeded in `tenants`/`communities` below: tenant id 1 ("tenant-abc") owns
 /// community 10; community 20 belongs to a different tenant (id 2) and has
 /// no matching row in `tenants`, exercising the cross-tenant 403 path.
@@ -40,7 +40,7 @@ async fn seed_db() -> DatabaseConnection {
         .expect("connect in-memory sqlite");
     let schema = r#"
         CREATE TABLE tenants (id INTEGER PRIMARY KEY, slug TEXT NOT NULL UNIQUE);
-        CREATE TABLE communities (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL);
+        CREATE TABLE communities (id INTEGER PRIMARY KEY, tenant_id INTEGER NOT NULL, public_id TEXT);
         CREATE TABLE community_servers (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             community_id INTEGER NOT NULL,
@@ -72,8 +72,8 @@ async fn seed_db() -> DatabaseConnection {
             audio_codec TEXT
         );
         INSERT INTO tenants (id, slug) VALUES (1, 'tenant-abc');
-        INSERT INTO communities (id, tenant_id) VALUES (10, 1);
-        INSERT INTO communities (id, tenant_id) VALUES (20, 2);
+        INSERT INTO communities (id, tenant_id, public_id) VALUES (10, 1, '6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f');
+        INSERT INTO communities (id, tenant_id, public_id) VALUES (20, 2, '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d');
         INSERT INTO community_servers (community_id, platform, platform_server_id, platform_server_name)
             VALUES (10, 'twitch', 'twitch-123', 'Cool Channel');
     "#;
@@ -140,7 +140,7 @@ fn test_state() -> AppState {
         db_password: Secret::new("db-pass"),
         cache_password: None,
         service_api_key: Secret::new("service-key"),
-        jwt_hmac_secret: Some(Secret::new(HMAC_SECRET)),
+        jwt_keys: jwt_common::keys(),
     };
     AppState::new(config, prometheus::Registry::new())
 }
@@ -153,18 +153,14 @@ async fn build_app() -> (axum::Router, DatabaseConnection, SharedEngine) {
 }
 
 fn sign_token(claims: &Claims) -> String {
-    encode(
-        &Header::new(Algorithm::HS256),
-        claims,
-        &EncodingKey::from_secret(HMAC_SECRET.as_bytes()),
-    )
-    .unwrap()
+    jwt_common::sign(claims)
 }
 
 fn claims_for_tenant(state: &AppState, tenant: &str) -> Claims {
-    let now = chrono::Utc::now().timestamp();
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
     Claims {
-        sub: "user-123".into(),
+        // A numeric `hub_users.id`: transcode admission bills this member as the debit actor.
+        sub: MEMBER_USER_ID.to_string(),
         iss: state.config.cli.jwt_issuer.clone(),
         aud: state.config.cli.jwt_audience.clone(),
         iat: now,
@@ -175,6 +171,9 @@ fn claims_for_tenant(state: &AppState, tenant: &str) -> Claims {
         roles: vec![],
     }
 }
+
+/// The acting member's hub-api user id (the JWT `sub`) used by every request in this file.
+const MEMBER_USER_ID: i64 = 42;
 
 fn bearer_for_owned_tenant() -> String {
     let token = sign_token(&claims_for_tenant(&test_state(), "tenant-abc"));
@@ -1170,13 +1169,48 @@ async fn add_target_with_an_unknown_protocol_or_codec_is_rejected() {
     }
 }
 
-/// Spawns a mock hub-api whose token ledger always admits the debit.
+/// Service-credential stand-in for the machine-JWT mint (the real client needs hub-api gRPC).
+struct FixedServiceBearer;
+
+#[async_trait::async_trait]
+impl ServiceBearer for FixedServiceBearer {
+    async fn bearer_for(&self, community_id: i64) -> Result<Arc<str>, String> {
+        Ok(Arc::from(format!("service-jwt-c{community_id}")))
+    }
+}
+
+/// Public UUID of the owned community (seeded as `communities.public_id`); hub-api's debit URL
+/// carries it, never the numeric id (a numeric segment is a 404 there).
+const OWNED_COMMUNITY_UUID: &str = "6f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f";
+
+/// Spawns a mock hub-api whose INTERNAL token-ledger route admits the debit, but only when the
+/// request carries the service credential and names the JWT's member as `actor_user_id` (a
+/// forwarded member token or a missing actor would be refused, like the real hub-api). The path
+/// segment must be the owned community's public UUID: the real route resolves it to the numeric id
+/// the community-bound JWT claims (`service-jwt-c10`).
 async fn spawn_admitting_ledger() -> String {
     let app = axum::Router::new().route(
-        "/api/v1/marketplace/communities/{community_id}/tokens/debit",
-        axum::routing::post(|| async {
-            axum::Json(serde_json::json!({"success": true, "balance_after": 55}))
-        }),
+        "/api/v1/internal/communities/{community_public_id}/tokens/debit",
+        axum::routing::post(
+            |axum::extract::Path(community_public_id): axum::extract::Path<String>,
+             headers: axum::http::HeaderMap,
+             axum::Json(body): axum::Json<serde_json::Value>| async move {
+                let expected = "Bearer service-jwt-c10";
+                let authed = community_public_id == OWNED_COMMUNITY_UUID
+                    && headers
+                        .get(AUTHORIZATION)
+                        .and_then(|v| v.to_str().ok())
+                        .is_some_and(|v| v == expected);
+                if authed && body["actor_user_id"] == MEMBER_USER_ID {
+                    (
+                        StatusCode::OK,
+                        axum::Json(serde_json::json!({"success": true, "balance_after": 55})),
+                    )
+                } else {
+                    (StatusCode::FORBIDDEN, axum::Json(serde_json::json!({})))
+                }
+            },
+        ),
     );
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -1191,16 +1225,18 @@ async fn build_app_capturing(hub_api_url: &str) -> (axum::Router, DatabaseConnec
     let engine = FakeEngine::default();
     let cli = CliConfig::try_parse_from(["svc-streaming", "--hub-api-url", hub_api_url])
         .expect("cli parses");
-    let state = AppState::new(
+    let mut state = AppState::new(
         Config {
             cli,
             db_password: Secret::new("db-pass"),
             cache_password: None,
             service_api_key: Secret::new("service-key"),
-            jwt_hmac_secret: Some(Secret::new(HMAC_SECRET)),
+            jwt_keys: jwt_common::keys(),
         },
         prometheus::Registry::new(),
     );
+    state.token_ledger =
+        Arc::new(TokenLedgerClient::new().with_bearer_source(Arc::new(FixedServiceBearer)));
     let shared: SharedEngine = Arc::new(engine.clone());
     let app = router_for_testing(db.clone(), shared).with_state(state);
     (app, db, engine)

@@ -1,10 +1,9 @@
 schema_version: 2
-app_id: waddles.core.example.roll
+app_id: penguintechinc.waddles.roll
 name: Dice Roll Example Bundle (Python)
 # 1.0.0 retired -- fix/bump-command-bundles-1.0.1, see this bundle's hub-manifest.yaml for why.
 # 1.0.4: activation-gated only -- removed the in-bundle waddles.command-roll feature-flag guard (activation is the sole gate; see docs/reference/command-bundles.md).
-version: 1.0.6
-feature: waddles.core.example
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

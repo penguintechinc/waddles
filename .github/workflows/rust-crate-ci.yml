@@ -9,6 +9,11 @@ name: Rust Crate CI (Reusable)
 on:
   workflow_call:
     inputs:
+      ref:
+        required: false
+        type: string
+        default: ''
+        description: 'Ref to check out (empty = the triggering ref)'
       crate_name:
         required: true
         type: string
@@ -47,6 +52,11 @@ on:
         type: boolean
         default: false
         description: 'Start a real Valkey container and export VALKEY_URL for the crate tests (lease/real-socket tests fail loudly without it, by design)'
+      postgres:
+        required: false
+        type: boolean
+        default: false
+        description: 'Start a real Postgres container and export TEST_DATABASE_URL (owner credential, CI-only) for the crate tests; they fail loudly without it'
 
 permissions:
   contents: read
@@ -57,13 +67,39 @@ jobs:
     # bare dal2-alpha-ci image has no cc/cmake/libatomic and sudo is blocked (no-new-privileges): C-toolchain / node jobs stay on hosted ubuntu-latest until a custom runner image bakes them in
     runs-on: ubuntu-latest
     timeout-minutes: 90
+    env:
+      # sccache gives every crate a shared compilation cache on the GitHub
+      # Actions cache backend: common deps (tokio/tonic/serde) compile once and
+      # are reused by all ~25 callers instead of being recompiled and stored in
+      # a per-crate `target/` cache. Those per-crate target caches summed to
+      # ~21GB against GitHub's 10GB/repo limit and evicted constantly, so every
+      # run started cold. The target/ path is dropped from the actions/cache
+      # step below; sccache now owns compilation caching.
+      RUSTC_WRAPPER: sccache
+      # Scheduled/manual runs are restore-only: disabling the GHA backend makes
+      # sccache use local disk, so they can never write the shared cache.
+      SCCACHE_GHA_ENABLED: ${{ (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') && 'false' || 'true' }}
+      # sccache cannot cache incremental-compilation artifacts and CI builds
+      # gain nothing from incremental anyway; disabling it is what lets sccache
+      # actually populate (otherwise rustc emits non-cacheable incremental units).
+      CARGO_INCREMENTAL: "0"
     defaults:
       run:
         working-directory: ${{ inputs.working_directory }}
     steps:
+      - name: Validate ref input (main or release/* only)
+        working-directory: ${{ runner.temp }}
+        env:
+          REF_INPUT: ${{ inputs.ref }}
+        run: |
+          if [ -n "$REF_INPUT" ] && ! printf '%s' "$REF_INPUT" | grep -Eq '^(main|release/[A-Za-z0-9._-]+)$'; then
+            echo "::error::ref must be main or release/<name>; got a disallowed value"; exit 1
+          fi
+
       - name: Checkout code
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd  # v6.0.2
         with:
+          ref: ${{ inputs.ref }}
           persist-credentials: false
 
       - name: Setup build deps (${{ inputs.extra_apt_reason }})
@@ -77,35 +113,39 @@ jobs:
           toolchain: "1.97.1"
           components: rustfmt, clippy, llvm-tools-preview
 
-      # Persistent cargo cache (GitHub-hosted cache service, survives the
-      # runner's hourly docker prune). Keyed per crate + toolchain +
-      # Cargo.lock so a dependency change gets a fresh entry; restore-keys
-      # fall back to the newest cache for the same crate/toolchain so an
-      # incremental rebuild never starts fully cold. Release-branch push
-      # runs seed it for PR runs. A cache miss only costs time, never
-      # correctness (all cargo steps still run with --locked).
-      - name: Cache cargo registry + git + target
-        if: github.event_name != 'merge_group'
+      # Shared compilation cache (GitHub Actions cache backend via
+      # SCCACHE_GHA_ENABLED). Deduplicates dependency compiles across every
+      # crate, so the common dep tree is stored once instead of ~25 times.
+      - name: Set up sccache (GitHub Actions cache backend)
+        uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba  # v0.0.11
+
+      # Cargo registry + git caches only (NO target/ -- sccache above owns
+      # compilation caching now). Keyed per crate + toolchain + Cargo.lock so a
+      # dependency change gets a fresh entry; restore-keys fall back to the
+      # newest cache for the same crate/toolchain. These are small (downloaded
+      # .crate sources + git deps), so they no longer blow the 10GB/repo limit
+      # the way the old per-crate target/ caches did. A cache miss only costs
+      # time, never correctness (all cargo steps still run with --locked).
+      - name: Cache cargo registry + git
+        if: github.event_name != 'merge_group' && github.event_name != 'schedule' && github.event_name != 'workflow_dispatch'
         uses: actions/cache@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ${{ inputs.working_directory }}/target
           key: cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working_directory)) }}
           restore-keys: |
             cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-
 
-      - name: Restore-only cargo cache (merge_group refs never save; avoids evicting real cache)
-        if: github.event_name == 'merge_group'
+      - name: Restore-only cargo cache (merge_group/schedule/dispatch never save; avoids evicting real cache)
+        if: github.event_name == 'merge_group' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
         uses: actions/cache/restore@0400d5f644dc74513175e3cd8d07132dd4860809  # v4.2.4  # zizmor: ignore[cache-poisoning]
         with:
           path: |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            ${{ inputs.working_directory }}/target
           key: cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-${{ hashFiles(format('{0}/Cargo.lock', inputs.working_directory)) }}
           restore-keys: |
             cargo-${{ inputs.crate_name }}-1.97.1-${{ runner.os }}-
@@ -166,9 +206,38 @@ jobs:
           echo "valkey did not become ready" >&2
           exit 1
 
+      # A REAL Postgres for crates with real-DB tests (svc-ingest's egress display-name
+      # resolver). The tests FAIL (never skip) when TEST_DATABASE_URL is unset. Throwaway CI-only
+      # credential on a loopback-bound container.
+      - name: Start Postgres (TEST_DATABASE_URL for crate tests)
+        if: inputs.postgres
+        run: |
+          set -euo pipefail
+          docker run -d --name ci-postgres -p 127.0.0.1:5432:5432 \
+            -e POSTGRES_USER=ci -e POSTGRES_PASSWORD=ci -e POSTGRES_DB=ci \
+            postgres:17-bookworm@sha256:639ab7ceb90e13123085b741fb31ef493fba25463002f6da665352e7b534b652
+          for i in $(seq 1 60); do
+            if docker exec ci-postgres pg_isready -h 127.0.0.1 -U ci -d ci >/dev/null 2>&1; then
+              echo "TEST_DATABASE_URL=postgresql://ci:ci@127.0.0.1:5432/ci" >> "$GITHUB_ENV"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "postgres did not become ready" >&2
+          exit 1
+
       - name: cargo fmt --check
         run: cargo fmt --check
 
+      # clippy (check-only, clippy-driver) and llvm-cov (instrumented codegen
+      # via rustc under -Cinstrument-coverage) genuinely cannot share compiled
+      # artifacts: different driver AND different RUSTFLAGS, and collapsing them
+      # would mean dropping either clippy's -D warnings gate or coverage
+      # instrumentation. They are left as two steps. The repeated dependency
+      # compile they caused is now recovered by sccache (env above): each
+      # distinct (flags, driver) compile is cached once and reused across runs
+      # and across crates, so the second pass is cache hits rather than a cold
+      # rebuild of the dep tree.
       - name: cargo clippy --all-targets --locked -- -D warnings
         run: cargo clippy --all-targets --locked -- -D warnings
 
@@ -193,3 +262,10 @@ jobs:
           else
             cargo llvm-cov --locked --fail-under-lines 90
           fi
+
+      # Hit-rate visibility: prints compile requests vs cache hits so a
+      # regression in cache effectiveness (e.g. an env/flag change that stops
+      # sccache populating) is obvious in the job log. Never fails the job.
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats

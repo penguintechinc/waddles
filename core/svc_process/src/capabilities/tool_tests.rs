@@ -25,9 +25,9 @@ use super::super::tests::test_egress;
 use super::*;
 use crate::capabilities::CapabilityHandler;
 
-const APP: &str = "waddles.test.app.caller";
-const SVC: &str = "waddles.core.economy.svc";
-const SVC2: &str = "waddles.core.other.svc";
+const APP: &str = "penguintechinc.waddles.fixture-test-app-caller";
+const SVC: &str = "penguintechinc.waddles.economy-svc";
+const SVC2: &str = "penguintechinc.waddles.other-svc";
 const DIGEST: &str = "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const TENANT_ID: i32 = 7;
 const COMMUNITY_ID: i32 = 3;
@@ -44,6 +44,7 @@ fn row(app: &str, version_id: i64, tools: ToolManifestInfo) -> ActiveBundleRow {
         artifact_signature: None,
         artifact_signature_key_id: None,
         artifact_signed_approval_id: None,
+        language: "rust".to_string(),
         declared_capabilities: Vec::new(),
         egress: Vec::new(),
         egress_rps: None,
@@ -170,6 +171,7 @@ async fn fake_executor(behavior: Behavior) -> FakeExecutor {
                         runtime: "runc".to_string(),
                         verified: false,
                     },
+                    executor_id: None,
                 }),
             ),
         )
@@ -548,7 +550,7 @@ async fn e_depth_three_is_refused_and_depth_two_runs() {
         default_gate(),
         Arc::clone(&exec.registry),
         vec![
-            "waddles.x.y.z".to_string(),
+            "penguintechinc.waddles.fixture-x-y-z".to_string(),
             SVC2.to_string(),
             APP.to_string(),
         ],
@@ -1218,6 +1220,7 @@ fn tool_mutation_keys_are_domain_separated_and_read_calls_cannot_mutate() {
     another_actor.actor = bundle_tool_call::ActorContext {
         actor: Some(ACTOR_UUID.into()),
         scopes: vec![],
+        participant: None,
     };
     assert_ne!(original, key(&parent, &another_actor).unwrap());
     parent.tenant_id += 1;
@@ -1417,3 +1420,6 @@ async fn write_actor_directory_outage_fails_closed_but_actorless_events_proceed(
         .unwrap();
     assert_eq!(recorded(&exec).len(), 1);
 }
+
+#[path = "floor_ban_tests.rs"]
+mod floor_ban_tests;

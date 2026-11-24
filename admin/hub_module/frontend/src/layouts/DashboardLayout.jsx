@@ -5,6 +5,7 @@ import {
   HomeIcon,
   UserGroupIcon,
   ChatBubbleLeftRightIcon,
+  VideoCameraIcon,
   Cog6ToothIcon,
   UserCircleIcon,
   UserIcon,
@@ -16,10 +17,15 @@ import {
   LinkIcon,
   TrophyIcon,
   InboxStackIcon,
+  MusicalNoteIcon,
   ServerStackIcon,
   TicketIcon,
   CubeIcon,
   CodeBracketIcon,
+  BuildingOffice2Icon,
+  KeyIcon,
+  LockClosedIcon,
+  ArrowDownTrayIcon,
 } from '@heroicons/react/24/outline';
 import { useMemo, useState } from 'react';
 import GlobalBanner from '../components/GlobalBanner';
@@ -28,18 +34,26 @@ import UserDropdown from '../components/UserDropdown';
 import { MAIN_CONTENT_ID, RouteAnnouncer, RouteOutlet, SkipLink } from '../components/ui';
 import { WADDLES_SIDEBAR_COLORS } from '../theme/sidebarTheme';
 import { useSidebarNav } from './useSidebarNav';
+import { useFeatureFlag } from '../lib/useFeatureFlag';
 
 function DashboardLayout() {
-  const { user, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin } = useAuth();
+  const { user, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin, hasScope, tenantSlug } = useAuth();
+  // Tenant admin authz is scope-based; the slug comes from the auth context, never user input.
+  const isTenantAdmin = Boolean(hasScope?.('tenant:admin') && tenantSlug);
+  // KMS (BYOK) is gated by its own scope; it can be held without tenant:admin.
+  const canKms = Boolean(hasScope?.('compliance.kms:admin') && tenantSlug);
   const location = useLocation();
   const { id: communityId } = useParams();
   const navigate = useNavigate();
   const [mobileOpen, setMobileOpen] = useState(false);
+  // Music page is feature-flagged (defaults OFF); only advertise it when the page will render.
+  const musicEnabled = useFeatureFlag('waddles.music.queue-page');
 
   const activeGroupKey = useMemo(() => {
     if (location.pathname.startsWith('/superadmin') || location.pathname.startsWith('/admin/platform')) {
       return 'super-admin';
     }
+    if (location.pathname.startsWith('/tenant/')) return 'tenant-admin';
     if (!communityId) return 'main';
     if (location.pathname.startsWith('/admin')) return 'community-admin';
     return 'community';
@@ -80,8 +94,12 @@ function DashboardLayout() {
           { name: 'Overview', href: `/dashboard/community/${communityId}`, icon: HomeIcon },
           { name: 'Members', href: `/dashboard/community/${communityId}/members`, icon: UserGroupIcon },
           { name: 'Chat & Forums', href: `/community/${communityId}/interact`, icon: ChatBubbleLeftRightIcon },
+          { name: 'Town Hall', href: `/community/${communityId}/town-hall`, icon: VideoCameraIcon },
           { name: 'Leaderboard', href: `/dashboard/community/${communityId}/leaderboard`, icon: TrophyIcon },
           { name: 'Inventory', href: `/community/${communityId}/inventory`, icon: InboxStackIcon },
+          ...(musicEnabled
+            ? [{ name: 'Music', href: `/community/${communityId}/music`, icon: MusicalNoteIcon }]
+            : []),
           { name: 'Game Servers', href: `/community/${communityId}/game-servers`, icon: ServerStackIcon },
           { name: 'Support', href: `/community/${communityId}/support/submit`, icon: TicketIcon },
         ],
@@ -130,6 +148,7 @@ function DashboardLayout() {
         items: [
           { name: 'Dashboard', href: '/superadmin', icon: ChartBarIcon },
           { name: 'Communities', href: '/superadmin/communities', icon: HomeIcon },
+          { name: 'Tenants', href: '/superadmin/tenants', icon: BuildingOffice2Icon },
           { name: 'App Bundles', href: '/superadmin/bundles/apps', icon: InboxStackIcon },
           { name: 'Service Bundles', href: '/superadmin/bundles/services', icon: Cog6ToothIcon },
           { name: 'User Management', href: '/superadmin/users', icon: UserIcon },
@@ -140,8 +159,40 @@ function DashboardLayout() {
       });
     }
 
+    if (isTenantAdmin || canKms) {
+      const base = `/tenant/${encodeURIComponent(tenantSlug)}`;
+      const items = [];
+      if (isTenantAdmin) {
+        items.push(
+          { name: 'Overview', href: base, icon: BuildingOffice2Icon },
+          { name: 'Settings', href: `${base}/settings`, icon: Cog6ToothIcon },
+          { name: 'Admins', href: `${base}/admins`, icon: UserGroupIcon },
+          { name: 'Communities', href: `${base}/communities`, icon: HomeIcon },
+          { name: 'Community tiers', href: `${base}/community-tiers`, icon: TrophyIcon },
+          { name: 'License', href: `${base}/license`, icon: KeyIcon },
+          { name: 'Bundles', href: `${base}/bundles`, icon: InboxStackIcon },
+          { name: 'Reputation', href: `${base}/reputation`, icon: TrophyIcon },
+          { name: 'Discord App', href: `${base}/discord-app`, icon: ChatBubbleLeftRightIcon },
+          { name: 'Data Privacy', href: `${base}/privacy`, icon: LockClosedIcon },
+        );
+      }
+      if (canKms) {
+        items.push({ name: 'Encryption keys (BYOK)', href: `${base}/kms`, icon: KeyIcon });
+      }
+      if (isTenantAdmin) {
+        items.push({ name: 'Ingest sources', href: `${base}/ingest-sources`, icon: ArrowDownTrayIcon });
+      }
+      cats.push({
+        key: 'tenant-admin',
+        header: 'Tenant Admin',
+        collapsible: true,
+        defaultOpen: activeGroupKey === 'tenant-admin',
+        items,
+      });
+    }
+
     return cats;
-  }, [communityId, activeGroupKey, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin]);
+  }, [communityId, activeGroupKey, isTenantAdmin, canKms, tenantSlug, isSuperAdmin, isVendor, isAnalyticsConsumer, isCommunityAdmin, musicEnabled]);
 
   const footer = useMemo(
     () => [

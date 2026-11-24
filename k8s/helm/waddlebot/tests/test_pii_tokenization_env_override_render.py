@@ -8,7 +8,7 @@ comment on this key).
 
 1. An explicit `pipeline.piiTokenization.enabled=false` (operator escape hatch
    only -- no values file sets it) renders `PII_TOKENIZATION_ENABLED=false` on
-   svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on svc-action-rust
+   svc-process-rust and `PII_DETOKENIZATION_ENABLED=false` on svc-ingest-rust
    AND svc-presentation-rust.
 2. The default (`true`, including values-alpha.yaml which no longer overrides
    it) omits those env vars entirely -- PII tokenization is ON by default
@@ -103,7 +103,7 @@ class TestExplicitFalseRendersTheOverride:
         ("deployment_suffix", "container_name", "env_var"),
         [
             ("svc-process-rust", "svc-process-rust", "PII_TOKENIZATION_ENABLED"),
-            ("svc-action-rust", "svc-action-rust", "PII_DETOKENIZATION_ENABLED"),
+            ("svc-ingest-rust", "svc-ingest-rust", "PII_DETOKENIZATION_ENABLED"),
             ("svc-presentation", "svc-presentation", "PII_DETOKENIZATION_ENABLED"),
         ],
     )
@@ -128,7 +128,7 @@ class TestDefaultEnabledOmitsTheOverrideEntirely:
         ("deployment_suffix", "container_name", "env_var"),
         [
             ("svc-process-rust", "svc-process-rust", "PII_TOKENIZATION_ENABLED"),
-            ("svc-action-rust", "svc-action-rust", "PII_DETOKENIZATION_ENABLED"),
+            ("svc-ingest-rust", "svc-ingest-rust", "PII_DETOKENIZATION_ENABLED"),
             ("svc-presentation", "svc-presentation", "PII_DETOKENIZATION_ENABLED"),
         ],
     )

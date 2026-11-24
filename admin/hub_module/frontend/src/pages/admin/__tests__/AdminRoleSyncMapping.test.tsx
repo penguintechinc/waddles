@@ -111,6 +111,13 @@ vi.mock('@penguintechinc/react-libs', () => ({
   },
 }));
 
+vi.mock('../../../services/eventSyncApi', () => ({
+  eventSyncApi: {
+    get: vi.fn().mockResolvedValue({ event_sync_enabled: false, pairings_total: 1, pairings_enabled: 0 }),
+    set: vi.fn(),
+  },
+}));
+
 vi.mock('../../../services/roleSyncApi', async () => {
   const actual = await vi.importActual<typeof import('../../../services/roleSyncApi')>(
     '../../../services/roleSyncApi',
@@ -123,6 +130,8 @@ vi.mock('../../../services/roleSyncApi', async () => {
       createBinding: vi.fn(),
       deleteBinding: vi.fn(),
       updatePairing: vi.fn(),
+      createPairing: vi.fn(),
+      startServerInstall: vi.fn(),
       listMirrors: vi.fn(),
       listGuildRoles: vi.fn(),
       createMirror: vi.fn(),
@@ -136,8 +145,8 @@ const mockedUseAuth = vi.mocked(useAuth);
 const mockedRoleSyncApi = vi.mocked(roleSyncApi);
 
 const PAIRING: GuildPairing = {
-  id: 7,
-  community_id: 42,
+  id: '7',
+  community_id: '0000002a-0000-4000-8000-000000000000',
   discord_guild_id: '555000111',
   direction: 'bidirectional',
   sync_enabled: true,
@@ -149,8 +158,8 @@ const PAIRING: GuildPairing = {
 };
 
 const SUBSCRIBER_BINDING: RoleSyncBinding = {
-  id: 1,
-  pairing_id: 7,
+  id: '1',
+  pairing_id: '7',
   sync_scope: 'subscriber_tier',
   subscriber_tier: 2,
   community_role: null,
@@ -160,8 +169,8 @@ const SUBSCRIBER_BINDING: RoleSyncBinding = {
 };
 
 const COMMUNITY_ROLE_BINDING: RoleSyncBinding = {
-  id: 2,
-  pairing_id: 7,
+  id: '2',
+  pairing_id: '7',
   sync_scope: 'community_role',
   subscriber_tier: null,
   community_role: 'moderator',
@@ -175,9 +184,9 @@ function wrapper({ children }: { children: ReactNode }) {
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
 }
 
-function mount(communityId = '42') {
+function mount(communityId = '0000002a-0000-4000-8000-000000000000', search = '') {
   return render(
-    <MemoryRouter initialEntries={[`/admin/${communityId}/role-sync`]}>
+    <MemoryRouter initialEntries={[`/admin/${communityId}/role-sync${search}`]}>
       <Routes>
         <Route path="/admin/:communityId/role-sync" element={<AdminRoleSyncMapping />} />
       </Routes>
@@ -215,6 +224,65 @@ describe('AdminRoleSyncMapping', () => {
     expect(mockedRoleSyncApi.listBindings).not.toHaveBeenCalled();
   });
 
+  it('shows the add-server panel even with zero pairings, pointing at it instead of Connections', async () => {
+    mockedRoleSyncApi.listPairings.mockResolvedValue([]);
+    mount();
+    expect(await screen.findByText(/Use/)).toHaveTextContent('Add Discord server');
+    expect(screen.queryByText(/under\s*Connections/)).toBeNull();
+    expect(screen.getByRole('button', { name: 'Add Discord server' })).toBeInTheDocument();
+  });
+
+  it('mounts the Discord event-sync toggle for a manager and hides it otherwise', async () => {
+    mount();
+    expect(await screen.findByTestId('event-discord-sync')).toBeInTheDocument();
+  });
+
+  it('hides the event-sync toggle when the user cannot manage', async () => {
+    mockedUseAuth.mockReturnValue({ isCommunityAdmin: () => false } as ReturnType<typeof useAuth>);
+    mount();
+    await screen.findByTestId('binding-row-1');
+    expect(screen.queryByTestId('event-discord-sync')).toBeNull();
+  });
+
+  it('hides the add-server panel when the user cannot manage', async () => {
+    mockedUseAuth.mockReturnValue({ isCommunityAdmin: () => false } as ReturnType<typeof useAuth>);
+    mount();
+    await screen.findByTestId('binding-row-1');
+    expect(screen.queryByRole('button', { name: 'Add Discord server' })).toBeNull();
+    expect(screen.queryByLabelText('Discord server ID')).toBeNull();
+  });
+
+  it('pairing a 2nd server by ID refetches pairings and reveals mirror roles without reload', async () => {
+    const second = { ...PAIRING, id: '8', discord_guild_id: '777888999' };
+    mockedRoleSyncApi.listPairings.mockResolvedValueOnce([PAIRING]);
+    mockedRoleSyncApi.listPairings.mockResolvedValue([PAIRING, second]);
+    mockedRoleSyncApi.createPairing.mockResolvedValue(second);
+    mount();
+    await screen.findByTestId('binding-row-1');
+    expect(screen.getByTestId('mirror-needs-two-guilds')).toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText('Discord server ID'), { target: { value: '777888999' } });
+    fireEvent.click(screen.getByRole('button', { name: 'Pair server by ID' }));
+    await waitFor(() => expect(screen.queryByTestId('mirror-needs-two-guilds')).toBeNull());
+    expect(screen.getByRole('button', { name: /mirror/i })).toBeInTheDocument();
+    expect(mockedRoleSyncApi.listPairings).toHaveBeenCalledTimes(2);
+  });
+
+  it('shows a success banner and refetches after the install callback redirect', async () => {
+    mount('0000002a-0000-4000-8000-000000000000', '?discord_server=paired&guild_id=555000111');
+    expect(await screen.findByTestId('install-banner-success')).toHaveTextContent('555000111');
+    await waitFor(() => expect(mockedRoleSyncApi.listPairings).toHaveBeenCalled());
+  });
+
+  it('shows a friendly error banner for a callback error reason', async () => {
+    mount('0000002a-0000-4000-8000-000000000000', '?discord_server=error&reason=invalid_or_expired_state');
+    expect(await screen.findByTestId('install-banner-error')).toHaveTextContent('expired');
+  });
+
+  it('falls back to a generic banner for an unknown callback reason', async () => {
+    mount('0000002a-0000-4000-8000-000000000000', '?discord_server=error&reason=weird');
+    expect(await screen.findByTestId('install-banner-error')).toHaveTextContent('Adding the Discord server failed');
+  });
+
   it('lists bindings for the selected pairing with direction summaries', async () => {
     mount();
 
@@ -226,7 +294,7 @@ describe('AdminRoleSyncMapping', () => {
     expect(role).toHaveTextContent('902');
     expect(role).toHaveTextContent('moderator');
     expect(role).toHaveTextContent('Discord → Waddles');
-    expect(mockedRoleSyncApi.listBindings).toHaveBeenCalledWith(42, 7);
+    expect(mockedRoleSyncApi.listBindings).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7');
   });
 
   it('renders the pairing status card with sync state, event sync and mapping count', async () => {
@@ -253,7 +321,7 @@ describe('AdminRoleSyncMapping', () => {
     const box = await screen.findByLabelText('Role sync enabled');
     fireEvent.click(box);
     await waitFor(() =>
-      expect(mockedRoleSyncApi.updatePairing).toHaveBeenCalledWith(42, 7, { sync_enabled: false }),
+      expect(mockedRoleSyncApi.updatePairing).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7', { sync_enabled: false }),
     );
   });
 
@@ -279,7 +347,7 @@ describe('AdminRoleSyncMapping', () => {
   it('creates a community_role binding and refreshes the list', async () => {
     mockedRoleSyncApi.createBinding.mockResolvedValue({
       ...COMMUNITY_ROLE_BINDING,
-      id: 3,
+      id: '3',
       discord_role_id: '903',
       community_role: 'vip',
     });
@@ -306,7 +374,7 @@ describe('AdminRoleSyncMapping', () => {
     });
 
     await waitFor(() =>
-      expect(mockedRoleSyncApi.createBinding).toHaveBeenCalledWith(42, 7, {
+      expect(mockedRoleSyncApi.createBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7', {
         sync_scope: 'community_role',
         discord_role_id: '903',
         community_role: 'vip',
@@ -330,7 +398,7 @@ describe('AdminRoleSyncMapping', () => {
       fireEvent.click(screen.getByText('Delete', { selector: 'button[type="submit"]' }));
     });
 
-    await waitFor(() => expect(mockedRoleSyncApi.deleteBinding).toHaveBeenCalledWith(42, 7, 1));
+    await waitFor(() => expect(mockedRoleSyncApi.deleteBinding).toHaveBeenCalledWith('0000002a-0000-4000-8000-000000000000', '7', '1'));
   });
 
   it('surfaces a create error instead of swallowing it', async () => {

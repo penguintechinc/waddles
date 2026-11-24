@@ -1,8 +1,12 @@
 name: Security & Code Quality
 
 on:
+  # Short-lived branches (feature/fix/chore/docs/refactor/hotfix) are covered by
+  # the pull_request trigger below; listing them here too ran every scan twice
+  # per PR commit (push + pull_request, different concurrency keys). KEEP main,
+  # v*, release/** so direct pushes to long-lived branches still scan.
   push:
-    branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
+    branches: [main, 'v*', 'release/**']
   pull_request:
     branches: [main, 'v*', 'release/**', 'feature/**', 'fix/**', 'chore/**', 'hotfix/**', 'docs/**', 'refactor/**']
   merge_group:
@@ -108,8 +112,6 @@ jobs:
         include:
           - name: Hub frontend
             path: admin/hub_module/frontend
-            # GHSA-mrhx-c7xc-m3w5: zod DoS, transitive via @penguintechinc/react-libs@1.3.4 (pins zod 3.x, no 3.x patch); allow-list pending react-libs->zod4. Low exposure (login-form lib).
-            audit_allow: "GHSA-mrhx-c7xc-m3w5"
           - name: Website
             path: website
           - name: API tests
@@ -204,13 +206,17 @@ jobs:
             if grep -q -- '--hash=sha256' "$f"; then
               gated=$((gated + 1))
               echo "::group::[gated] $f"
-              pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
+              # --disable-pip: a fully hash-pinned lockfile already lists every package at its
+              # exact version, so pip-audit reads the pins directly instead of dry-run
+              # installing them. That install step failed on sdist-only pins (flask-principal
+              # 0.4.0 ships no wheel) and built nothing the audit needs.
+              pip-audit -r "$f" --no-deps --disable-pip --progress-spinner off $IGNORES \
                 || gated_bad=$((gated_bad + 1))
               echo "::endgroup::"
             else
               ungated=$((ungated + 1))
               echo "::group::[report-only] $f"
-              pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
+              PIP_ONLY_BINARY=:all: pip-audit -r "$f" --no-deps --progress-spinner off $IGNORES \
                 || ungated_bad=$((ungated_bad + 1))
               echo "::endgroup::"
             fi
@@ -234,17 +240,18 @@ jobs:
           bandit -r . -lll -iii \
             --exclude ./node_modules,./.worktrees,./tests,./.venv
 
-  # Slow static analysis (~17-21 min): CodeQL on go/javascript/python.
+  # Slow static analysis (~17-21 min): CodeQL on javascript/python.
   # Runs in parallel with builds -- does NOT gate container builds or any other jobs.
   # Pre-existing OS-level CVEs in bookworm base images cause false positives;
   # continue-on-error prevents them from blocking the pipeline.
   codeql:
     name: CodeQL Analysis
     needs: changes
-    # CodeQL here analyzes go, javascript and python only.
+    # CodeQL here analyzes javascript and python only.
     # Main-only tier: skipped on PRs into release/** (see scripts/ci/ci-gate-tier.py)
     if: (github.event_name != 'pull_request' || github.base_ref == 'main') && (needs.changes.outputs.python == 'true' || needs.changes.outputs.node == 'true' || needs.changes.outputs.go == 'true')
-    runs-on: ${{ ((github.event_name == 'pull_request' && github.base_ref != 'main' && github.event.pull_request.head.repo.full_name == github.repository) || (github.event_name == 'merge_group' && !endsWith(github.event.merge_group.base_ref, '/main')) || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/') && github.ref != 'refs/heads/main') || (github.event_name == 'workflow_dispatch' && github.ref != 'refs/heads/main')) && 'dal2-alpha-ci' || 'ubuntu-latest' }}
+    # egress allowlist pending admin CNP update
+    runs-on: ubuntu-latest
     continue-on-error: true
     steps:
       - name: Checkout code
@@ -252,10 +259,18 @@ jobs:
         with:
           fetch-depth: 0
 
+      # The dal2-alpha-ci runners ship no Node.js; CodeQL's JavaScript/TypeScript extractor needs
+      # `node` on PATH ("Could not start Node.js. It is required for TypeScript extraction").
+      - name: Set up Node.js (CodeQL TypeScript extraction)
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020  # v7.0.0
+        with:
+          node-version: '26'
+          package-manager-cache: false
+
       - name: Initialize CodeQL
         uses: github/codeql-action/init@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4
         with:
-          languages: go, javascript, python
+          languages: javascript, python
 
       - name: Autobuild
         uses: github/codeql-action/autobuild@95e58e9a2cdfd71adc6e0353d5c52f41a045d225  # v4

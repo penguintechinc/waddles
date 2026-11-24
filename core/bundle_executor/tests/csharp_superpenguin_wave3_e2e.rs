@@ -143,7 +143,7 @@ impl StageModel {
                 args["target"].as_str().unwrap(),
                 args["tool"].as_str().unwrap(),
             ) {
-                ("waddles.core.service.economy", "points_leaders") => {
+                ("penguintechinc.waddles.economy", "points_leaders") => {
                     ok(serde_json::json!({ "ok": {
                     "entries": [{ "user": ACTOR_UUID, "balance": 4200 }], "alias": "stars" } }))
                 }
@@ -229,7 +229,7 @@ struct Run {
 }
 
 async fn run_steps(app: &str, wasm: Vec<u8>, steps: &[Step]) -> Vec<Run> {
-    let app_id = format!("waddles.integrations.superpenguin.{app}");
+    let app_id = format!("psychoboy.penguintwitchbot.{app}");
     let flag_key = format!("waddles.command-superpenguin-{app}");
     let (executor_io, stage_io) = tokio::io::duplex(256 * 1024);
     let digest = format!("sha256:{:x}", Sha256::digest(&wasm));
@@ -371,6 +371,7 @@ async fn run_steps(app: &str, wasm: Vec<u8>, steps: &[Step]) -> Vec<Run> {
                     runtime: "runc".to_string(),
                     verified: false,
                 },
+                executor_id: None,
             },
             Arc::clone(&executor),
             "test-peer",

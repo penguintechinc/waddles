@@ -1,7 +1,7 @@
 //! Wix connector (`kind: service`, `connector-tools` world): inbound webhooks + outbound Wix Events templates.
 //! The host owns the verified webhook ingress and every credential; this
-//! component maps verified Wix events to normalized records and tokenizes the
-//! Wix member id through `identity.lookup`. Outbound event tools are host-executed request templates.
+//! component maps verified Wix calendar events to normalized records (events only:
+//! member webhooks are ignored, no identity lookup). Outbound event tools are host-executed request templates.
 #[cfg(target_arch = "wasm32")]
 #[allow(warnings)]
 mod bindings;
@@ -17,7 +17,6 @@ mod component {
     };
     use super::bindings::waddle::bundle::log;
     use super::bindings::waddle::bundle::tool::ToolError as WitError;
-    use super::bindings::waddle::connector::identity::{self, Error as IdError, IdentityKey};
     use super::bindings::waddle::connector::types::{
         ConnectionCtx, FrameError, HandshakePayload, NormalizedEvent, RawFrame,
     };
@@ -30,27 +29,6 @@ mod component {
     fn log_counts(level: log::Level, op: &str, events: usize, skipped: usize) {
         let fields = serde_json::json!({"op": op, "events": events, "skipped": skipped});
         log::write(level, "wix connector", &fields.to_string());
-    }
-
-    /// Resolution of one Wix member id: a canonical UUID, or not linked (drop).
-    enum Resolved {
-        Uuid(String),
-        Unlinked,
-    }
-
-    fn resolve(member_id: &str) -> Result<Resolved, FrameError> {
-        match identity::lookup(&IdentityKey::PlatformIdentity((
-            "wix".to_string(),
-            member_id.to_string(),
-        ))) {
-            Ok(rec) => Ok(Resolved::Uuid(rec.uuid)),
-            Err(IdError::NotFound) => Ok(Resolved::Unlinked),
-            Err(IdError::RateLimited(_)) => {
-                Err(FrameError::Backend("identity rate-limited".into()))
-            }
-            Err(IdError::Denied(_)) => Err(FrameError::Backend("identity denied".into())),
-            Err(IdError::Backend(_)) => Err(FrameError::Backend("identity backend error".into())),
-        }
     }
 
     impl ReceiverGuest for Component {
@@ -71,27 +49,18 @@ mod component {
                     return Err(FrameError::Malformed(m));
                 }
             };
-            let mut out = Vec::with_capacity(parsed.events.len());
-            let mut skipped = parsed.skipped;
-            for e in parsed.events {
-                let actor = match e.member.as_deref() {
-                    None => None,
-                    Some(id) => match resolve(id)? {
-                        Resolved::Uuid(u) => Some(u),
-                        Resolved::Unlinked => {
-                            skipped += 1;
-                            continue;
-                        }
-                    },
-                };
-                out.push(NormalizedEvent {
+            let skipped = parsed.skipped;
+            let out: Vec<NormalizedEvent> = parsed
+                .events
+                .into_iter()
+                .map(|e| NormalizedEvent {
                     platform: e.platform,
                     event_type: e.event_type,
-                    actor,
+                    actor: None,
                     payload_json: e.payload_json,
                     occurred_at: e.occurred_at,
-                });
-            }
+                })
+                .collect();
             log_counts(
                 if skipped > 0 {
                     log::Level::Warn

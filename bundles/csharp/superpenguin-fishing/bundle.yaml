@@ -1,8 +1,8 @@
 schema_version: 2
-app_id: waddles.integrations.superpenguin.fishing
+app_id: psychoboy.penguintwitchbot.fishing
 name: Fishing (SuperPenguinTV)
 version: 1.0.1
-feature: waddles.integrations.superpenguin
+feature: psychoboy.penguintwitchbot
 module: integrations
 provider: thirdparty
 language: csharp
@@ -92,7 +92,7 @@ permissions:
     payload with a tokenized user uuid, never a name or HTML)
   params:
     mode: data
-- id: tool.call:waddles.core.service.economy:adjust_balance
+- id: tool.call:penguintechinc.waddles.economy:adjust_balance
   justification: tournament point rewards only, minted through the economy service with
     a stable per-window idempotency key; the app owns all game rules
   params:
@@ -107,4 +107,4 @@ platform_compatibility:
 requested_tools:
 - tool: adjust_balance
   access: write
-  target_app_id: waddles.core.service.economy
+  target_app_id: penguintechinc.waddles.economy

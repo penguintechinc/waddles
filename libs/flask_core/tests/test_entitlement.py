@@ -204,6 +204,57 @@ async def test_bypass_domain_still_respects_flag_off() -> None:
     assert license_gate.calls == 0
 
 
+KILL_SWITCH = "waddles.core.disable-test-mechanism"
+
+
+@pytest.mark.asyncio
+async def test_bypass_domain_never_turns_on_unseen_kill_switch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """User decision 2026-11-12: bypass domains never flip a kill switch ON; unseen = OFF."""
+    # regression: bypass domains are license-only (2026-11-12 decision)
+    monkeypatch.delenv("FLAG_WADDLES_CORE_DISABLE_TEST_MECHANISM", raising=False)
+    client, _, _ = make_client(flag_result=None, tier=None)
+    for host in ("svc.waddles.app", "x.penguincloud.io", "x.penguintech.cloud"):
+        assert (
+            await client.evaluate(KILL_SWITCH, tenant=TENANT, request_host=host)
+            is False
+        )
+
+
+@pytest.mark.asyncio
+async def test_bypass_domain_kill_switch_follows_env_then_posthog(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On a bypass host a kill switch resolves PostHog -> FLAG_ env -> default."""
+    # regression: bypass domains are license-only (2026-11-12 decision)
+    monkeypatch.setenv("FLAG_WADDLES_CORE_DISABLE_TEST_MECHANISM", "true")
+    client, _, _ = make_client(flag_result=None, tier=None)
+    assert (
+        await client.evaluate(KILL_SWITCH, tenant=TENANT, request_host="a.waddles.app")
+        is True
+    )
+    client, _, _ = make_client(flag_result=False, tier=None)
+    assert (
+        await client.evaluate(KILL_SWITCH, tenant=TENANT, request_host="a.waddles.app")
+        is False
+    )
+
+
+@pytest.mark.asyncio
+async def test_bypass_domain_still_grants_license_feature() -> None:
+    """The bypass still answers the licence/entitlement check for licensed flags."""
+    # regression: bypass domains are license-only (2026-11-12 decision)
+    client, _, license_gate = make_client(
+        flag_result=True, tier=None, tier_requirements={FLAG_KEY: "enterprise"}
+    )
+    assert (
+        await client.evaluate(FLAG_KEY, tenant=TENANT, request_host="a.waddles.app")
+        is True
+    )
+    assert license_gate.calls == 0
+
+
 @pytest.mark.asyncio
 async def test_non_bypass_domain_still_checks_license() -> None:
     client, _, license_gate = make_client(
@@ -694,3 +745,65 @@ def test_forwarded_host_flag_off_never_trusted(monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("TRUSTED_PROXY_CIDRS", "10.244.0.0/16")
     resolved = resolve_trusted_host("hub-api:8204", "waddles.app", "10.244.1.5")
     assert tier_check_bypassed(resolved, None) is False
+
+
+@pytest.mark.asyncio
+async def test_last_known_posthog_value_beats_env_when_posthog_goes_down(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Precedence PostHog -> last-known -> env: a cached PostHog OFF outranks env ON on outage."""
+    monkeypatch.setenv(ENV_VAR, "true")
+    client, flag_gate, _ = make_client(flag_result=False)
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    flag_gate.result = None  # PostHog now unreachable / flag undefined
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+    flag_gate.raises = RuntimeError("down")
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is False
+
+
+@pytest.mark.asyncio
+async def test_posthog_outage_never_raises_and_falls_to_env_then_off(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never-seen flag + PostHog raising: env wins, then default OFF; no exception escapes."""
+    client, _, _ = make_client(flag_raises=RuntimeError("down"))
+    monkeypatch.setenv(ENV_VAR, "true")
+    assert await client.evaluate(ENV_FLAG, tenant=TENANT) is True
+    monkeypatch.delenv(ENV_VAR)
+    assert await client.evaluate(ENV_FLAG, tenant="other") is False
+
+
+def test_posthog_flag_gate_applies_bounded_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The SDK request timeout is bounded (default 3s) and env-tunable."""
+    monkeypatch.setenv("POSTHOG_API_KEY", "phc_test_key")
+    monkeypatch.delenv("POSTHOG_TIMEOUT_SECONDS", raising=False)
+    assert PostHogFlagGate.from_env()._client.timeout == 3.0
+    monkeypatch.setenv("POSTHOG_TIMEOUT_SECONDS", "7")
+    assert PostHogFlagGate.from_env()._client.timeout == 7.0
+
+@pytest.mark.parametrize(
+    ("host", "flag", "expected"),
+    [
+        # Alpha's real edge host (with port) and the other bypass domains pass the TIER gate.
+        ("waddles-alpha.penguintech.cloud:8443", True, True),
+        ("waddles-alpha.penguintech.cloud", True, True),
+        ("foo.penguincloud.io:443", True, True),
+        # The flag gate is never skipped by a bypass domain.
+        ("waddles-alpha.penguintech.cloud:8443", False, False),
+        # Lookalike / non-bypass host on a Free tenant stays denied on the tier gate.
+        ("waddles-alpha.penguintech.cloud.evil.com:8443", True, False),
+        ("customer.example.com", True, False),
+        (None, True, False),
+    ],
+)
+@pytest.mark.asyncio
+async def test_bypass_domain_passes_tier_gate_but_never_the_flag_gate(
+    host: Optional[str], flag: bool, expected: bool
+) -> None:
+    """Regression (alpha 402s): a licensed flag passes on a bypass host incl. `host:port` form."""
+    client, _, _ = make_client(
+        flag_result=flag, tier="free", tier_requirements={FLAG_KEY: "professional"}
+    )
+    assert await client.evaluate(FLAG_KEY, tenant=TENANT, request_host=host) is expected

@@ -154,15 +154,24 @@ DISCORD_SPEC: Final = AdapterSpec(
         ),
     ),
     public_metadata_keys=frozenset(
-        {"guild_id", "managed_roles", "bot_user_id", "bot_username", "scopes", "capabilities"}
+        {
+            "guild_id",
+            "application_id",
+            "managed_roles",
+            "bot_user_id",
+            "bot_username",
+            "scopes",
+            "capabilities",
+        }
     ),
     runtime_metadata_keys=frozenset(
-        {"guild_id", "managed_roles", "bot_user_id", "scopes", "capabilities"}
+        {"guild_id", "application_id", "managed_roles", "bot_user_id", "scopes", "capabilities"}
     ),
     refreshable=False,
     binding_metadata=(
         BindingKey("guild_id", "guild_id", required=True),
         BindingKey("managed_roles", "managed_roles"),
+        BindingKey("application_id", "application_id"),
     ),
 )
 

@@ -12,7 +12,7 @@ import { apiClient } from '../lib/apiClient';
 /** One `app_active_versions` row for a COMMUNITY-tier activation. */
 export interface BundleActivation {
   appId: string;
-  communityId: number;
+  communityId: string;
   tenantId: number;
   versionId: number;
   /** Activated version string (null when unknown). */
@@ -57,7 +57,7 @@ export interface AccessGrants {
 
 export const bundleActivationApi = {
   /** `GET /api/v1/apps/community/<communityId>/activation` -- requires active community membership. */
-  list: (communityId: number) =>
+  list: (communityId: string) =>
     apiClient
       .get<ActivationListResponse>(`/api/v1/apps/community/${communityId}/activation`)
       .then((res) => res.data.bundles),
@@ -66,7 +66,7 @@ export const bundleActivationApi = {
    * `GET /api/v1/apps/community/<communityId>/activation/<appId>/access-grants` -- the dangerous
    * access grants (platform tables, ...) this activation carries; community-admin only.
    */
-  accessGrants: (communityId: number, appId: string) =>
+  accessGrants: (communityId: string, appId: string) =>
     apiClient
       .get<AccessGrants>(
         `/api/v1/apps/community/${communityId}/activation/${encodeURIComponent(appId)}/access-grants`,
@@ -77,7 +77,7 @@ export const bundleActivationApi = {
    * `POST /api/v1/apps/community/<communityId>/activation` -- requires community-admin membership.
    * `acknowledgedAccessGrants` must list every approved dangerous access id (else 422).
    */
-  activate: (communityId: number, appId: string, acknowledgedAccessGrants: string[] = []) =>
+  activate: (communityId: string, appId: string, acknowledgedAccessGrants: string[] = []) =>
     apiClient
       .post<MessageResponse>(`/api/v1/apps/community/${communityId}/activation`, {
         appId,
@@ -86,7 +86,7 @@ export const bundleActivationApi = {
       .then((res) => res.data),
 
   /** `DELETE /api/v1/apps/community/<communityId>/activation/<appId>` -- requires community-admin membership. */
-  deactivate: (communityId: number, appId: string) =>
+  deactivate: (communityId: string, appId: string) =>
     apiClient
       .delete<MessageResponse>(`/api/v1/apps/community/${communityId}/activation/${appId}`)
       .then((res) => res.data),

@@ -52,41 +52,41 @@ function failWith(status: number, data: unknown): void {
 
 describe('bundleActivationApi', () => {
   it('list unwraps the bundles array from the community activation path', async () => {
-    const row = { appId: 'a.b', communityId: 7, tenantId: 1, versionId: 3, activatedAt: null };
+    const row = { appId: 'a.b', communityId: '00000007-0000-4000-8000-000000000000', tenantId: 1, versionId: 3, activatedAt: null };
     rec.reply.data = { success: true, bundles: [row] };
 
-    await expect(bundleActivationApi.list(7)).resolves.toEqual([row]);
+    await expect(bundleActivationApi.list('00000007-0000-4000-8000-000000000000')).resolves.toEqual([row]);
     expect(sent().method).toBe('get');
-    expect(sent().url).toBe('/api/v1/apps/community/7/activation');
+    expect(sent().url).toBe('/api/v1/apps/community/00000007-0000-4000-8000-000000000000/activation');
   });
 
   it('activate POSTs the appId + (default-empty) access-grant acks and returns the message envelope', async () => {
     rec.reply.data = { success: true, message: 'activated' };
 
-    await expect(bundleActivationApi.activate(7, 'a.b')).resolves.toEqual({ success: true, message: 'activated' });
+    await expect(bundleActivationApi.activate('00000007-0000-4000-8000-000000000000', 'a.b')).resolves.toEqual({ success: true, message: 'activated' });
     expect(sent().method).toBe('post');
-    expect(sent().url).toBe('/api/v1/apps/community/7/activation');
+    expect(sent().url).toBe('/api/v1/apps/community/00000007-0000-4000-8000-000000000000/activation');
     expect(bodyOf(sent())).toEqual({ appId: 'a.b', acknowledgedAccessGrants: [] });
   });
 
   it('activate forwards the acknowledged dangerous access grants', async () => {
     rec.reply.data = { success: true, message: 'activated' };
 
-    await bundleActivationApi.activate(7, 'a.b', ['platform.table.x']);
+    await bundleActivationApi.activate('00000007-0000-4000-8000-000000000000', 'a.b', ['platform.table.x']);
     expect(bodyOf(sent())).toEqual({ appId: 'a.b', acknowledgedAccessGrants: ['platform.table.x'] });
   });
 
   it('deactivate DELETEs the per-app activation path', async () => {
     rec.reply.data = { success: true, message: 'deactivated' };
 
-    await expect(bundleActivationApi.deactivate(7, 'a.b')).resolves.toMatchObject({ message: 'deactivated' });
+    await expect(bundleActivationApi.deactivate('00000007-0000-4000-8000-000000000000', 'a.b')).resolves.toMatchObject({ message: 'deactivated' });
     expect(sent().method).toBe('delete');
-    expect(sent().url).toBe('/api/v1/apps/community/7/activation/a.b');
+    expect(sent().url).toBe('/api/v1/apps/community/00000007-0000-4000-8000-000000000000/activation/a.b');
   });
 
   it('propagates a 403 to the caller', async () => {
     failWith(403, { success: false });
-    await expect(bundleActivationApi.list(7)).rejects.toMatchObject({ response: { status: 403 } });
+    await expect(bundleActivationApi.list('00000007-0000-4000-8000-000000000000')).rejects.toMatchObject({ response: { status: 403 } });
   });
 });
 
@@ -189,29 +189,29 @@ describe('platformCommunitiesApi', () => {
   it('get returns the detail envelope for one community', async () => {
     rec.reply.data = { success: true, community: { id: 5, name: 'c' } };
 
-    await expect(platformCommunitiesApi.get(5)).resolves.toEqual({ success: true, community: { id: 5, name: 'c' } });
-    expect(sent().url).toBe('/api/v1/platform/communities/5');
+    await expect(platformCommunitiesApi.get('00000005-0000-4000-8000-000000000000')).resolves.toEqual({ success: true, community: { id: 5, name: 'c' } });
+    expect(sent().url).toBe('/api/v1/platform/communities/00000005-0000-4000-8000-000000000000');
   });
 
   it('update PUTs the partial payload', async () => {
-    await platformCommunitiesApi.update(5, { displayName: 'New', isPublic: false });
+    await platformCommunitiesApi.update('00000005-0000-4000-8000-000000000000', { displayName: 'New', isPublic: false });
     expect(sent().method).toBe('put');
-    expect(sent().url).toBe('/api/v1/platform/communities/5');
+    expect(sent().url).toBe('/api/v1/platform/communities/00000005-0000-4000-8000-000000000000');
     expect(bodyOf(sent())).toEqual({ displayName: 'New', isPublic: false });
   });
 
   it('deactivate sends the reason as a DELETE body, or an empty body without one', async () => {
-    await platformCommunitiesApi.deactivate(5, 'abuse');
+    await platformCommunitiesApi.deactivate('00000005-0000-4000-8000-000000000000', 'abuse');
     expect(sent().method).toBe('delete');
     expect(bodyOf(sent())).toEqual({ reason: 'abuse' });
 
-    await platformCommunitiesApi.deactivate(5);
+    await platformCommunitiesApi.deactivate('00000005-0000-4000-8000-000000000000');
     expect(bodyOf(sent())).toEqual({});
   });
 
   it('propagates a 404', async () => {
     failWith(404, { success: false });
-    await expect(platformCommunitiesApi.get(99)).rejects.toMatchObject({ response: { status: 404 } });
+    await expect(platformCommunitiesApi.get('00000063-0000-4000-8000-000000000000')).rejects.toMatchObject({ response: { status: 404 } });
   });
 });
 
@@ -227,31 +227,31 @@ describe('superTenantApi', () => {
   });
 
   it('create POSTs the payload', async () => {
-    rec.reply.data = { success: true, tenant: { id: 9, slug: 'acme', displayName: 'Acme', createdAt: null } };
+    rec.reply.data = { success: true, tenant: { id: 'aaaaaaaa-0000-4000-8000-000000000009', slug: 'acme', displayName: 'Acme', createdAt: null } };
 
     const res = await superTenantApi.create({ slug: 'acme', displayName: 'Acme', seatLimit: 10 });
 
-    expect(res.data.tenant.id).toBe(9);
+    expect(res.data.tenant.id).toBe('aaaaaaaa-0000-4000-8000-000000000009');
     expect(sent().method).toBe('post');
     expect(bodyOf(sent())).toEqual({ slug: 'acme', displayName: 'Acme', seatLimit: 10 });
   });
 
   it('update PUTs to the tenant id', async () => {
-    await superTenantApi.update(9, { isActive: false });
+    await superTenantApi.update('aaaaaaaa-0000-4000-8000-000000000009', { isActive: false });
     expect(sent().method).toBe('put');
-    expect(sent().url).toBe('/api/v1/superadmin/tenants/9');
+    expect(sent().url).toBe('/api/v1/superadmin/tenants/aaaaaaaa-0000-4000-8000-000000000009');
     expect(bodyOf(sent())).toEqual({ isActive: false });
   });
 
   it('deactivate DELETEs the tenant id', async () => {
-    await superTenantApi.deactivate(9);
+    await superTenantApi.deactivate('aaaaaaaa-0000-4000-8000-000000000009');
     expect(sent().method).toBe('delete');
-    expect(sent().url).toBe('/api/v1/superadmin/tenants/9');
+    expect(sent().url).toBe('/api/v1/superadmin/tenants/aaaaaaaa-0000-4000-8000-000000000009');
   });
 
   it('propagates a 403 for non-super-admins', async () => {
     failWith(403, { success: false });
-    await expect(superTenantApi.deactivate(9)).rejects.toMatchObject({ response: { status: 403 } });
+    await expect(superTenantApi.deactivate('aaaaaaaa-0000-4000-8000-000000000009')).rejects.toMatchObject({ response: { status: 403 } });
   });
 });
 

@@ -175,6 +175,7 @@ spec:
             dns:
               - matchPattern: "*"
           {{- end }}
+    {{- include "waddlebot.otel.egressRule" (dict "root" $root "component" $c) | nindent 4 }}
     # Own namespace (DB / cache / hub-api / peers) — the destination's ingress CNP scopes the port.
     - toEndpoints:
         - matchLabels:

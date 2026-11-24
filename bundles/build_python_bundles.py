@@ -99,7 +99,7 @@ def _load_python_bundles() -> list[dict[str, Any]]:
         # loudly, never report a quiet no-op success.
         raise BuildError(
             f"no language: python entries found in {CATALOG_PATH} -- "
-            "expected at least one (e.g. waddles.core.example.pyping)"
+            "expected at least one (e.g. penguintechinc.waddles.pyping)"
         )
     return python_entries
 

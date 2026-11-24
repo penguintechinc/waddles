@@ -96,7 +96,7 @@ class TestFetchActiveBundles:
             _success_handler(
                 [
                     {
-                        "appId": "waddles.core.demo.echo",
+                        "appId": "penguintechinc.waddles.echo-pipeline",
                         "communityId": 42,
                         "entrypoint": "builtin_handlers.echo_ingest:normalize",
                         "spec": {},
@@ -113,7 +113,7 @@ class TestFetchActiveBundles:
         )
         assert len(bundles) == 1
         assert bundles[0] == sr.BundleDistribution(
-            app_id="waddles.core.demo.echo",
+            app_id="penguintechinc.waddles.echo-pipeline",
             community_id=42,
             entrypoint="builtin_handlers.echo_ingest:normalize",
             spec={},
@@ -167,7 +167,7 @@ class TestBundlePoller:
             _success_handler(
                 [
                     {
-                        "appId": "waddles.core.demo.echo",
+                        "appId": "penguintechinc.waddles.echo-pipeline",
                         "communityId": None,
                         "entrypoint": "builtin_handlers.echo_process:transform",
                         "spec": {},
@@ -208,7 +208,7 @@ class TestBundlePoller:
                     json={
                         "bundles": [
                             {
-                                "appId": "waddles.core.demo.echo",
+                                "appId": "penguintechinc.waddles.echo-pipeline",
                                 "communityId": None,
                                 "entrypoint": "builtin_handlers.echo_ingest:normalize",
                                 "spec": {},

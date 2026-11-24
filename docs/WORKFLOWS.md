@@ -72,7 +72,6 @@ Waddles uses a sophisticated multi-workflow CI/CD pipeline that automates:
 ├── build-alias-interaction.yml
 ├── build-shoutout-interaction.yml
 ├── build-inventory-interaction.yml
-├── build-calendar-interaction.yml
 ├── build-memories-interaction.yml
 ├── build-youtube-music-interaction.yml
 ├── build-spotify-interaction.yml
@@ -477,7 +476,6 @@ jobs:
 - `build-alias-interaction.yml` - Command aliases (port 8006)
 - `build-shoutout-interaction.yml` - User shoutouts (port 8007)
 - `build-inventory-interaction.yml` - Inventory management (port 8008)
-- `build-calendar-interaction.yml` - Event scheduling (port 8009)
 - `build-memories-interaction.yml` - Memories/quotes (port 8014)
 - `build-youtube-music-interaction.yml` - YouTube Music (port 8015)
 - `build-spotify-interaction.yml` - Spotify integration (port 8016)
@@ -551,7 +549,7 @@ path-dependency crates, e.g. `core/hub_client/**`, `proto/**`). Add a path depen
 
 | Workflow | Gate |
 |---|---|
-| `rust-*.yml` per crate, `core-bundles-reproducible`, `data-plane-parity`, `python-waddle-sdk`, `node-waddle-sdk-js`, `go-gates`, `helm-chart-e2e`, `builtin-handler-inventory`, `bundle-hygiene` | own `changes` job + `globs` |
+| `rust-*.yml` per crate, `core-bundles-reproducible`, `data-plane-parity`, `python-waddle-sdk`, `node-waddle-sdk-js`, `helm-chart-e2e`, `builtin-handler-inventory`, `bundle-hygiene` | own `changes` job + `globs` |
 | `rust-build-all`, `security`, `pr-validation` | shared area outputs (`rust/python/node/go/helm/docker/any_code`) |
 | `gate-integrity`, `ci-gate` | always run (gate self-tests / the gate) |
 | `build-*.yml`, `containers.yml` image builds | NOT changed here: main-tier only (not examined on release PRs) and already path-filtered by their own `detect-changes` |
@@ -564,17 +562,19 @@ The main tier is unchanged: every check is examined. Self-tests: `scripts/ci/tes
 
 ## Merging a PR into a Release Branch
 
-`make release-merge PR=<n> [HEAD=<sha-prefix>] [DRY=1]` (wraps `scripts/release-merge.sh`) is the
-verify-then-merge procedure for feature/fix/chore PRs into `release/v*.X`.
+`make release-merge PR=<n> SHA=<full-head-sha> [MAX=<minutes>] [DRY=1]` (wraps `scripts/release-merge.sh <pr> <full-head-sha> [max_minutes] [--dry-run]`)
+waits for the PR's whole check set, then merges feature/fix/chore PRs into `release/v*.X`. No admin, no `--auto`.
 
-- Refuses unless base is `release/*` (never `main`) and the PR is OPEN; `HEAD=` pins the reviewed head (refuses on drift)
-- Requires every non-skipped check on the current head to be SUCCESS/NEUTRAL; the advisory `submit-queue` status is printed but ignored (as in `ci-gate.yml`)
-- `ci-gate` (override: `RELEASE_MERGE_REQUIRED`) must be present and SUCCESS on the head; SKIPPED checks never count, all-skipped = refuse
-- Two check snapshots a few seconds apart must be identical before merging; merge uses `--match-head-commit` so GitHub refuses if the head moved
-- Zero checks examined = refuse; CONFLICTING = refuse (never auto-resolved)
-- Then `gh pr merge --admin --merge` (release branches only), polls to MERGED, confirms the merge commit is in `origin/<base>`, and lists the latest runs on the base
-- `DRY=1` runs all checks without merging; release -> `main` is never done with this tool
-- Self-test: `make test-scripts` (also part of `make test`)
+- Refuses (exit 4) unless the PR base is `release/*` (never `main`); aborts (exit 4) if the PR is no longer OPEN
+- TOCTOU-safe: every poll takes ONE `gh pr view --json baseRefName,headRefOid,state,statusCheckRollup` snapshot and re-checks base (`release/*` and unchanged since start; a retarget even to another `release/*` aborts, exit 4), state OPEN and head; a fresh snapshot is re-verified immediately before `gh pr merge`
+- After merging it confirms via the GitHub API (`compare <base>...<mergeCommit>`) that the merge commit is on the expected base; otherwise prints `POST-MERGE CHECK FAILED` (exit 5)
+- The release ruleset has no required status checks, so `gh pr merge --auto` would merge at once; the script itself polls (default 90 polls, `POLL_SECONDS`=60) until `ci-gate` passes with zero pending and zero failed checks
+- The merge is `gh pr merge --merge --match-head-commit <sha>`; if the PR head moves from the pinned sha it aborts (exit 2). Sha omitted: the head is read once at start and pinned
+- The external `submit-queue` status is ignored (as `ci-gate.yml` does); override with `IGNORE_CHECKS`, required check with `REQUIRED_CHECK`, repo with `REPO` (default `gh repo view`)
+- Check buckets come from `gh pr view --json statusCheckRollup`; gh calls are retried (`GH_RETRIES`, `GH_RETRY_SLEEP`) for api.github.com timeouts
+- Exit codes: 0 merged, 1 a check failed, 2 head moved, 3 timeout, 4 bad usage / non-release base / base retargeted / PR not OPEN, 5 post-merge check failed
+- `DRY=1` / `--dry-run` does one poll, prints pass/pending/fail counts and what it would do, never merges; release -> `main` is never done with this tool
+- Self-test: `make test-scripts` (also part of `make test`; fake `gh` on PATH)
 
 ### Auto-merge watcher
 
@@ -1557,8 +1557,7 @@ share `scripts/lib/checks.sh`. Rules, enforced by
   finding fails, ceilings only move down, and a run under its ceiling prints a
   `RATCHET` line to lower it in the same PR.
 - Zero applicable checks, or a missing tool for files that exist, fails the suite.
-- Python unit suites (`hub_api`, `core/workflow_core_module`, `core/community_module`,
-  `libs/*`, `core/svc_ingest|presentation|streaming`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
+- Python unit suites (`hub_api`, `libs/*`, `core/svc_presentation`, `core/svc_streaming`) each carry a `.coveragerc` (`fail_under = 90`, tests omitted)
   and `addopts = --cov ...` in `pytest.ini`, so `make test-unit` / CI fail below 90%
   line coverage. Use `pytest --no-cov <file>` when iterating on a single test file.
   `core/svc_action` and `core/svc_process` are not yet wired: touching their directory triggers the Rust

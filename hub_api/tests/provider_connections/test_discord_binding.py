@@ -35,6 +35,7 @@ from services.provider_connections.errors import (
     ResourceUnresolvable,
 )
 from services.provider_connections.registry import build_default_registry
+from tests.community_ids import public_id
 from tests.conftest import make_user_token
 from tests.provider_connections.conftest import (
     SYSTEM_SERVICE_ID,
@@ -124,7 +125,7 @@ def dclient(pc_app: Any, discord_service: ProviderConnectionService) -> Any:
 
 
 def _base(db: Any) -> str:
-    return f"/api/v1/communities/{db.seed.community_id}/provider-connections"
+    return f"/api/v1/communities/{public_id(db, db.seed.community_id)}/provider-connections"
 
 
 def _create_body(metadata: dict[str, Any] | None = None, **overrides: Any) -> str:

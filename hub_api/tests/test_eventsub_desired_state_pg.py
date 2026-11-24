@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
+from cryptography.hazmat.primitives.asymmetric import ec
 from flask_core.service_jwt import ServiceIdentity, ServiceJwtIssuer, SigningKey
 from quart import Quart
 from quart_schema import QuartSchema
@@ -58,9 +58,18 @@ def _manifest(app_id: str, patterns: list[str], platform: str = "twitch") -> dic
 class World:
     """Rows for one test: its own tenant/community/connection."""
 
-    def __init__(self, dal: Any, tenant: int, community: int, conn_id: int) -> None:
-        """Bind the ids a test's rows belong to."""
+    def __init__(self, dal: Any, tenant: int, community: int, conn_id: int, seed: int = 0) -> None:
+        """Bind the ids a test's rows belong to, plus the seed behind its raw string values."""
         self.dal, self.tenant, self.community, self.conn_id = dal, tenant, community, conn_id
+        self.seed = seed
+
+    @property
+    def raw_values(self) -> list[str]:
+        """Seeded raw strings (tenant slug, community name, broadcaster id) that must never leak.
+
+        Each embeds a non-hex letter ('s'/'t'), so none can collide with UUID hex text.
+        """
+        return [f"es-{self.seed}", f"es-c-{self.seed}", f"bcast-{self.seed}"]
 
     async def activate(self, patterns: list[str], *, community: int | None = None) -> None:
         n = next(SEQ)
@@ -140,7 +149,7 @@ async def world(pg_dal: Any) -> World:  # noqa: F811
                     "resource_id, access_token) VALUES (:t, 'twitch', 'twitch_channel', :r, 'x') "
                     "RETURNING id"
                 ),
-                {"t": tenant, "r": f"bc-{n}"},
+                {"t": tenant, "r": f"bcast-{n}"},
             )
         ).scalar_one()
         await c.execute(
@@ -150,7 +159,7 @@ async def world(pg_dal: Any) -> World:  # noqa: F811
             ),
             {"c": community, "n": conn_id},
         )
-    return World(pg_dal, tenant, community, conn_id)
+    return World(pg_dal, tenant, community, conn_id, n)
 
 
 async def _reconcile(w: World, **kw: Any) -> tuple[es.SyncSummary, list[es.WorkItem], list[str]]:
@@ -839,7 +848,7 @@ class TestSchemaConstraints:
 @pytest.fixture
 def issuer() -> ServiceJwtIssuer:
     """Real issuer: host (reconcile+secret), other service (neither), non-system tenant."""
-    private = Ed25519PrivateKey.generate()
+    private = ec.generate_private_key(ec.SECP256R1())
     key = SigningKey(kid="k1", private_key=private, public_key=private.public_key())
 
     def ident(sid: str, scopes: set[str], tenant: str = "system") -> ServiceIdentity:
@@ -914,7 +923,8 @@ class TestContractHttp:
         assert all(w["action"] == 1 and w["tenantId"] == world.tenant for w in mine)
         assert body["sweep"]["communities"] >= 1
         # no PII / raw broadcaster id leaks into the contract
-        assert "bc-" not in json.dumps(mine)
+        dumped = json.dumps(mine)
+        assert all(v not in dumped for v in world.raw_values)
 
         results = [
             {

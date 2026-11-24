@@ -49,6 +49,9 @@ async fn full_binary_serves_healthz_and_shuts_down_gracefully_on_sigterm() {
             "127.0.0.1",
         ])
         .env_remove("OTEL_EXPORTER_OTLP_ENDPOINT")
+        // A tenant-DEK source is mandatory; the hard-gated dev/alpha KEK stands in for hub-api.
+        .env("WADDLES_ENV", "local")
+        .env("INGEST_DEV_KEK", "k".repeat(48))
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()

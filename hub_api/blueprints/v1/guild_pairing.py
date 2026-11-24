@@ -28,6 +28,8 @@ touching the DB.
 
 from __future__ import annotations
 
+import dataclasses
+import logging
 from dataclasses import dataclass
 from typing import Any, cast
 
@@ -35,17 +37,44 @@ from flask_core.api_utils import error_response
 from flask_core.authz import require_scope
 from flask_core.feature_flags import feature_enabled
 from flask_core.tenancy import get_tenant_context, tenant_middleware
-from quart import Blueprint, current_app, request
+from quart import Blueprint, after_this_request, current_app, request
 from quart_schema import validate_response
 
 from services import discord_guild_roles as roles_svc
 from services import discord_role_mirror as mirror_svc
+from services import discord_server_install as server_install_svc
+from services import guild_ownership as ownership_svc
 from services import guild_pairing as pairing_svc
+from services import install_state_binding as binding
 from services.community_common import community_in_tenant
+from services.community_public_id import lookup_public_id
 from services.current_user import get_current_user_id
-from services.errors import ApiError, bad_request, not_found, payment_required
+from services.errors import ApiError, bad_request, conflict, not_found, payment_required
+from services.public_ids import (
+    UNKNOWN_ID,
+    PublicId,
+    PublicIdTarget,
+    build_view_arg_translator,
+    lookup_public_ids,
+)
+from services.route_guards import community_admin_guard
+
+logger = logging.getLogger(__name__)
 
 guild_pairing_bp = Blueprint("v1_guild_pairing", __name__, url_prefix="/api/v1")
+
+# `<puuid:...>` path ids -> numeric before the handler, scoped to the URL community (the app-level
+# `cuuid` hook already ran). Unknown / foreign / malformed all become `UNKNOWN_ID` and hit the
+# handlers' existing not-found answers. Bindings have no community column, so `binding_id` is
+# resolved inside its (already community-scoped) pairing by `_translate_binding_id`.
+guild_pairing_bp.before_request(
+    build_view_arg_translator(
+        {
+            "pairing_id": PublicIdTarget("guild_tenant_pairings"),
+            "mapping_id": PublicIdTarget("discord_role_mirror_mappings"),
+        }
+    )
+)
 
 #: Two-gate feature flag -- this port's `waddles.<module>.<feature>` convention
 #: (`waddles.community.connections`, `waddles.community.activity`, ...).
@@ -58,12 +87,90 @@ FEATURE_GUILD_PAIRING = "waddles.community.guild_pairing"
 # ---------------------------------------------------------------------------
 
 
+async def _translate_binding_id() -> None:
+    """`before_request`: resolve `<puuid:binding_id>` WITHIN the already-translated pairing."""
+    view_args = request.view_args
+    raw = view_args.get("binding_id") if view_args else None
+    if not isinstance(raw, PublicId):
+        return None
+    pairing_id = view_args.get("pairing_id") if view_args else None
+    resolved = UNKNOWN_ID
+    if isinstance(pairing_id, int) and pairing_id > 0:
+        dal = _dal()
+        pairing_svc.bind_guild_pairing_tables(dal)
+        tbl = dal.community_role_sync_bindings
+        row = (
+            dal((tbl.public_id == str(raw)) & (tbl.pairing_id == pairing_id))
+            .select(tbl.id, limitby=(0, 1))
+            .first()
+        )
+        resolved = int(row.id) if row is not None else UNKNOWN_ID
+    if view_args is not None:
+        view_args["binding_id"] = resolved
+    return None
+
+
+guild_pairing_bp.before_request(_translate_binding_id)
+
+
+@dataclass(slots=True, frozen=True)
+class RoleSyncBindingDTO:
+    """Wire shape of one role-sync binding: `id` and `pairing_id` are PUBLIC UUIDs."""
+
+    id: str
+    pairing_id: str
+    sync_scope: str
+    subscriber_tier: int | None
+    community_role: str | None
+    discord_role_id: str
+    created_at: str | None
+    updated_at: str | None
+
+
+def _binding_dtos(bindings: list[pairing_svc.RoleSyncBinding]) -> list[RoleSyncBindingDTO]:
+    """Swap numeric binding/pairing ids for UUIDs with two batched lookups (fails loud)."""
+    bind_ids = lookup_public_ids(_dal(), "community_role_sync_bindings", [b.id for b in bindings])
+    pair_ids = lookup_public_ids(_dal(), "guild_tenant_pairings", [b.pairing_id for b in bindings])
+    out: list[RoleSyncBindingDTO] = []
+    for b in bindings:
+        values = {f.name: getattr(b, f.name) for f in dataclasses.fields(b)}
+        values["id"] = bind_ids[b.id]
+        values["pairing_id"] = pair_ids[b.pairing_id]
+        out.append(RoleSyncBindingDTO(**values))
+    return out
+
+
+@dataclass(slots=True, frozen=True)
+class GuildPairingDTO:
+    """Wire shape of one pairing: `id`/`community_id` are PUBLIC UUIDs."""
+
+    id: str
+    community_id: str
+    discord_guild_id: str
+    direction: str
+    sync_enabled: bool
+    role_name_prefix: str
+    event_sync_enabled: bool
+    propagate_moderators: bool
+    created_by_user_id: int | None
+    created_at: str | None
+    updated_at: str | None
+
+
+def _pairing_dto(pairing: pairing_svc.GuildPairing, public_community_id: str) -> GuildPairingDTO:
+    """Map a service pairing to its wire DTO, swapping the numeric ids for their UUIDs."""
+    values = {f.name: getattr(pairing, f.name) for f in dataclasses.fields(pairing)}
+    values["community_id"] = public_community_id
+    values["id"] = lookup_public_ids(_dal(), "guild_tenant_pairings", [pairing.id])[pairing.id]
+    return GuildPairingDTO(**values)
+
+
 @dataclass(slots=True, frozen=True)
 class GuildPairingResponse:
     """Single-pairing response envelope."""
 
     success: bool
-    pairing: pairing_svc.GuildPairing
+    pairing: GuildPairingDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -71,7 +178,7 @@ class GuildPairingListResponse:
     """List-of-pairings response envelope."""
 
     success: bool
-    pairings: list[pairing_svc.GuildPairing]
+    pairings: list[GuildPairingDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -79,7 +186,7 @@ class RoleSyncBindingResponse:
     """Single-binding response envelope."""
 
     success: bool
-    binding: pairing_svc.RoleSyncBinding
+    binding: RoleSyncBindingDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -87,7 +194,7 @@ class RoleSyncBindingListResponse:
     """List-of-bindings response envelope."""
 
     success: bool
-    bindings: list[pairing_svc.RoleSyncBinding]
+    bindings: list[RoleSyncBindingDTO]
 
 
 @dataclass(slots=True, frozen=True)
@@ -99,11 +206,41 @@ class DiscordGuildRolesResponse:
 
 
 @dataclass(slots=True, frozen=True)
+class RoleMirrorMappingDTO:
+    """Wire shape of one mirror mapping: `id`/`community_id` are PUBLIC UUIDs."""
+
+    id: str
+    community_id: str
+    source_guild_id: str
+    source_role_id: str
+    target_guild_id: str
+    target_role_id: str
+    last_synced_at: str | None
+    last_roles_added: int
+    last_roles_removed: int
+    last_skipped_not_member: int
+    last_error: str | None
+    created_at: str | None
+
+
+def _mapping_dto(
+    mapping: mirror_svc.RoleMirrorMapping, public_community_id: str
+) -> RoleMirrorMappingDTO:
+    """Map a service mapping to its wire DTO, swapping the numeric community id for the UUID."""
+    values = {f.name: getattr(mapping, f.name) for f in dataclasses.fields(mapping)}
+    values["community_id"] = public_community_id
+    values["id"] = lookup_public_ids(_dal(), "discord_role_mirror_mappings", [mapping.id])[
+        mapping.id
+    ]
+    return RoleMirrorMappingDTO(**values)
+
+
+@dataclass(slots=True, frozen=True)
 class RoleMirrorMappingResponse:
     """Single mirror-mapping response envelope."""
 
     success: bool
-    mapping: mirror_svc.RoleMirrorMapping
+    mapping: RoleMirrorMappingDTO
 
 
 @dataclass(slots=True, frozen=True)
@@ -111,7 +248,7 @@ class RoleMirrorMappingListResponse:
     """List-of-mirror-mappings response envelope."""
 
     success: bool
-    mappings: list[mirror_svc.RoleMirrorMapping]
+    mappings: list[RoleMirrorMappingDTO]
 
 
 # ---------------------------------------------------------------------------
@@ -149,9 +286,10 @@ async def _feature_gate_and_tenant_check(community_id: int) -> tuple[dict[str, o
 # ---------------------------------------------------------------------------
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["GET"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/guild-pairings", methods=["GET"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(GuildPairingListResponse)
 async def list_pairings(
     community_id: int,
@@ -161,12 +299,16 @@ async def list_pairings(
     if gate_error is not None:
         return gate_error
     pairings = pairing_svc.list_pairings(_dal(), community_id)
-    return GuildPairingListResponse(success=True, pairings=pairings)
+    public_id = await lookup_public_id(community_id)
+    return GuildPairingListResponse(
+        success=True, pairings=[_pairing_dto(p, public_id) for p in pairings]
+    )
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/guild-pairings", methods=["POST"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/guild-pairings", methods=["POST"])
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(GuildPairingResponse, status_code=201)
 async def create_pairing(
     community_id: int,
@@ -181,19 +323,121 @@ async def create_pairing(
         return _err(bad_request("Request body must be a JSON object"))
 
     actor_user_id = get_current_user_id(request)
+    guild_id = str(body.get("discord_guild_id", "")).strip()
     try:
+        if not guild_id.isdigit():
+            raise bad_request("discord_guild_id must be a non-empty numeric Discord snowflake")
+        if any(
+            p.discord_guild_id == guild_id for p in pairing_svc.list_pairings(_dal(), community_id)
+        ):
+            raise conflict("This Discord server is already paired with this community")
+        # Authority, not just presence: the guild must have been installed through the
+        # OAuth flow under this tenant with an approved grant for THIS community.
+        # Existing pairings are not re-validated (grandfathered); only new creates.
+        if not server_install_svc.community_has_install_grant(_dal(), community_id, guild_id):
+            raise ApiError(
+                "This Discord server has not been installed for this community. "
+                'Use "Add Discord server" to install the bot and pair it.',
+                403,
+                "DISCORD_INSTALL_REQUIRED",
+            )
+        # Only pair a guild the tenant's bot is actually in (409 DISCORD_BOT_NOT_IN_GUILD).
+        await roles_svc.verify_bot_in_guild(_dal(), community_id, guild_id)
+        # S3: the tenant's own bot must be in the guild and the actor must administer it.
+        await ownership_svc.verify_guild_control(
+            _dal(), community_id, guild_id, actor_user_id=actor_user_id
+        )
         pairing = pairing_svc.create_pairing(
             _dal(),
             community_id,
-            discord_guild_id=str(body.get("discord_guild_id", "")),
-            direction=str(body.get("direction", "")),
-            role_name_prefix=str(body.get("role_name_prefix", "")),
+            discord_guild_id=guild_id,
+            direction=str(body.get("direction") or server_install_svc.PAIRING_DIRECTION),
+            role_name_prefix=str(
+                body.get("role_name_prefix") or server_install_svc.DEFAULT_ROLE_NAME_PREFIX
+            ),
             sync_enabled=bool(body.get("sync_enabled", False)),
+            propagate_moderators=bool(body.get("propagate_moderators", False)),
+            ownership_verified=True,
             actor_user_id=actor_user_id,
         )
     except ApiError as exc:
+        logger.warning("create_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return GuildPairingResponse(success=True, pairing=pairing), 201
+    public_id = await lookup_public_id(community_id)
+    return GuildPairingResponse(success=True, pairing=_pairing_dto(pairing, public_id)), 201
+
+
+@dataclass(slots=True, frozen=True)
+class ServerInstallAuthorizeResponse:
+    """`authorize_url` envelope for the add-Discord-server flow -- never a secret."""
+
+    success: bool
+    authorize_url: str
+
+
+#: Browser-binding cookie for the add-server flow (``__Host-`` HttpOnly Secure SameSite=Lax).
+SERVER_INSTALL_BINDING_COOKIE = binding.cookie_name("dc_server_install")
+
+
+def _install_redirect_uri() -> str:
+    """The shared Discord install callback (`blueprints.v1.tenant_discord_install`)."""
+    cfg = current_app.config.get("HUB_API_CONFIG")
+    base = str(getattr(cfg, "identity_callback_base_url", "") or "").rstrip("/")
+    return f"{base}/api/v1/discord/install/callback"
+
+
+@guild_pairing_bp.route(
+    "/communities/<cuuid:community_id>/discord/server-install/authorize", methods=["POST"]
+)
+@tenant_middleware  # type: ignore[misc]
+@require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
+@validate_response(ServerInstallAuthorizeResponse)
+async def start_server_install(
+    community_id: int,
+) -> ServerInstallAuthorizeResponse | tuple[dict[str, object], int]:
+    """`POST /api/v1/communities/<id>/discord/server-install/authorize`.
+
+    Body `{"sync_enabled": bool}`. Returns Discord's bot-authorize URL; the callback records
+    the install and pairs the returned guild with this community.
+    """
+    gate_error = await _feature_gate_and_tenant_check(community_id)
+    if gate_error is not None:
+        return gate_error
+    body = await request.get_json(force=True, silent=True) or {}
+    if not isinstance(body, dict):
+        return _err(bad_request("Request body must be a JSON object"))
+    sync_enabled = body.get("sync_enabled", False)
+    if not isinstance(sync_enabled, bool):
+        return _err(bad_request("sync_enabled must be a boolean"))
+    nonce = binding.new_nonce()
+    try:
+        url = await server_install_svc.build_server_install_url(
+            _dal(),
+            community_id=community_id,
+            admin_user_id=get_current_user_id(request),
+            sync_enabled=sync_enabled,
+            redirect_uri=_install_redirect_uri(),
+            binding_nonce=nonce,
+        )
+    except ApiError as exc:
+        logger.warning(
+            "start_server_install rejected: code=%s status=%s", exc.code, exc.status_code
+        )
+        return _err(exc)
+
+    @after_this_request
+    def _bind_browser(response: Any) -> Any:
+        """Bind the state to THIS browser."""
+        binding.set_binding_cookie(
+            response,
+            SERVER_INSTALL_BINDING_COOKIE,
+            nonce,
+            server_install_svc.DEFAULT_TTL_SECONDS,
+        )
+        return response
+
+    return ServerInstallAuthorizeResponse(success=True, authorize_url=url)
 
 
 # ---------------------------------------------------------------------------
@@ -202,10 +446,11 @@ async def create_pairing(
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["PATCH"]
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>", methods=["PATCH"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(GuildPairingResponse)
 async def update_pairing(
     community_id: int, pairing_id: int
@@ -230,17 +475,23 @@ async def update_pairing(
             sync_enabled=body["sync_enabled"] if "sync_enabled" in body else None,
             direction=body.get("direction"),
             role_name_prefix=body.get("role_name_prefix"),
+            propagate_moderators=(
+                bool(body["propagate_moderators"]) if "propagate_moderators" in body else None
+            ),
         )
     except ApiError as exc:
+        logger.warning("update_pairing rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return GuildPairingResponse(success=True, pairing=pairing)
+    public_id = await lookup_public_id(community_id)
+    return GuildPairingResponse(success=True, pairing=_pairing_dto(pairing, public_id))
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>", methods=["DELETE"]
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
@@ -259,11 +510,12 @@ async def delete_pairing(community_id: int, pairing_id: int) -> tuple[Any, int]:
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>/role-bindings",
     methods=["GET"],
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:read")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleSyncBindingListResponse)
 async def list_bindings(
     community_id: int, pairing_id: int
@@ -277,15 +529,16 @@ async def list_bindings(
         bindings = pairing_svc.list_bindings(_dal(), community_id, pairing_id)
     except ApiError as exc:
         return _err(exc)
-    return RoleSyncBindingListResponse(success=True, bindings=bindings)
+    return RoleSyncBindingListResponse(success=True, bindings=_binding_dtos(bindings))
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings",
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>/role-bindings",
     methods=["POST"],
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleSyncBindingResponse, status_code=201)
 async def create_binding(
     community_id: int, pairing_id: int
@@ -300,7 +553,7 @@ async def create_binding(
         return _err(bad_request("Request body must be a JSON object"))
 
     try:
-        binding = pairing_svc.create_binding(
+        binding = await pairing_svc.create_binding_checked(
             _dal(),
             community_id,
             pairing_id,
@@ -310,16 +563,18 @@ async def create_binding(
             community_role=body.get("community_role"),
         )
     except ApiError as exc:
+        logger.warning("create_binding rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return RoleSyncBindingResponse(success=True, binding=binding), 201
+    return RoleSyncBindingResponse(success=True, binding=_binding_dtos([binding])[0]), 201
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/guild-pairings/<int:pairing_id>/role-bindings/<int:binding_id>",
+    "/communities/<cuuid:community_id>/guild-pairings/<puuid:pairing_id>/role-bindings/<puuid:binding_id>",
     methods=["DELETE"],
 )
 @tenant_middleware  # type: ignore[misc]
 @require_scope("community.guild_pairing:write")  # type: ignore[misc]
+@community_admin_guard  # type: ignore[misc]
 async def delete_binding(community_id: int, pairing_id: int, binding_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/guild-pairings/<pairing_id>/role-bindings/<binding_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
@@ -340,9 +595,10 @@ async def delete_binding(community_id: int, pairing_id: int, binding_id: int) ->
 # ---------------------------------------------------------------------------
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/discord/roles", methods=["GET"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/roles", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(DiscordGuildRolesResponse)
 async def list_discord_roles(
     community_id: int,
@@ -370,9 +626,10 @@ async def _list_roles_for_mirror(dal: Any, community_id: int, guild_id: str) -> 
     return await roles_svc.list_guild_roles(dal, community_id, guild_id=guild_id)
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["GET"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/role-mirrors", methods=["GET"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:read")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleMirrorMappingListResponse)
 async def list_role_mirrors(
     community_id: int,
@@ -381,14 +638,19 @@ async def list_role_mirrors(
     gate_error = await _feature_gate_and_tenant_check(community_id)
     if gate_error is not None:
         return gate_error
+    public_id = await lookup_public_id(community_id)
     return RoleMirrorMappingListResponse(
-        success=True, mappings=mirror_svc.list_mappings(_dal(), community_id)
+        success=True,
+        mappings=[
+            _mapping_dto(m, public_id) for m in mirror_svc.list_mappings(_dal(), community_id)
+        ],
     )
 
 
-@guild_pairing_bp.route("/communities/<int:community_id>/discord/role-mirrors", methods=["POST"])
+@guild_pairing_bp.route("/communities/<cuuid:community_id>/discord/role-mirrors", methods=["POST"])
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 @validate_response(RoleMirrorMappingResponse, status_code=201)
 async def create_role_mirror(
     community_id: int,
@@ -411,15 +673,18 @@ async def create_role_mirror(
             list_roles=_list_roles_for_mirror,
         )
     except ApiError as exc:
+        logger.warning("create_role_mirror rejected: code=%s status=%s", exc.code, exc.status_code)
         return _err(exc)
-    return RoleMirrorMappingResponse(success=True, mapping=mapping), 201
+    public_id = await lookup_public_id(community_id)
+    return RoleMirrorMappingResponse(success=True, mapping=_mapping_dto(mapping, public_id)), 201
 
 
 @guild_pairing_bp.route(
-    "/communities/<int:community_id>/discord/role-mirrors/<int:mapping_id>", methods=["DELETE"]
+    "/communities/<cuuid:community_id>/discord/role-mirrors/<puuid:mapping_id>", methods=["DELETE"]
 )
 @tenant_middleware  # type: ignore[untyped-decorator]
 @require_scope("community.guild_pairing:write")  # type: ignore[untyped-decorator]
+@community_admin_guard  # type: ignore[misc]
 async def delete_role_mirror(community_id: int, mapping_id: int) -> tuple[Any, int]:
     """`DELETE /api/v1/communities/<id>/discord/role-mirrors/<mapping_id>`."""
     gate_error = await _feature_gate_and_tenant_check(community_id)
