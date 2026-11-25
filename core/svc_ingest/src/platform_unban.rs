@@ -564,7 +564,16 @@ impl UnbanTap {
         // 2. The pairing must belong to the SAME tenant as the receiving connection. An ambiguous
         //    guild (several communities of the tenant) is fine: svc-action expands under the signed
         //    tenant and a cross-tenant claim lifts nothing there.
-        match self.scope.lookup(PLATFORM, &ev.guild_id).await {
+        const RETRY_DELAYS_MS: [u64; 3] = [50, 150, 450];
+        let mut scope_res = self.scope.lookup(PLATFORM, &ev.guild_id).await;
+        for delay_ms in RETRY_DELAYS_MS {
+            if !matches!(scope_res, Err(Unresolved::Transient)) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            scope_res = self.scope.lookup(PLATFORM, &ev.guild_id).await;
+        }
+        match scope_res {
             Ok(s) if s.tenant_id != binding.tenant_id => {
                 return rejected("tenant_mismatch", Some(binding));
             }
@@ -590,7 +599,18 @@ impl UnbanTap {
             tenant_id: binding.tenant_id,
             connection_id: binding.connection_id,
         };
-        let user_uuid = match self.tokenizer.tokenize(&call, &ev.user_id).await {
+        let mut tok_res = self.tokenizer.tokenize(&call, &ev.user_id).await;
+        for delay_ms in RETRY_DELAYS_MS {
+            if !matches!(
+                tok_res,
+                Err(TokenizeError::Unavailable | TokenizeError::RateLimited)
+            ) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+            tok_res = self.tokenizer.tokenize(&call, &ev.user_id).await;
+        }
+        let user_uuid = match tok_res {
             Ok(u) if Uuid::parse_str(&u).is_ok() => u,
             Ok(_) => return ignored("tokenize_invalid"),
             Err(TokenizeError::Unavailable | TokenizeError::RateLimited) => {

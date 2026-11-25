@@ -172,6 +172,8 @@ pub enum Outcome {
 
 /// Single-use marker store.
 pub trait SeenStore: Send + Sync {
+    /// `Ok(true)` if `event_id` has already been processed and committed.
+    fn is_seen<'a>(&'a self, event_id: &'a str) -> StoreFuture<'a, bool>;
     /// `Ok(true)` on the first claim of `event_id`, `Ok(false)` on a replay.
     fn claim<'a>(&'a self, event_id: &'a str) -> StoreFuture<'a, bool>;
 }
@@ -190,6 +192,18 @@ impl ValkeySeen {
 }
 
 impl SeenStore for ValkeySeen {
+    fn is_seen<'a>(&'a self, event_id: &'a str) -> StoreFuture<'a, bool> {
+        Box::pin(async move {
+            let mut conn = self.conn.clone();
+            let exists: i64 = redis::cmd("EXISTS")
+                .arg(format!("{SEEN_PREFIX}{event_id}"))
+                .query_async(&mut conn)
+                .await
+                .map_err(|e| format!("{:?}", e.kind()))?;
+            Ok(exists > 0)
+        })
+    }
+
     fn claim<'a>(&'a self, event_id: &'a str) -> StoreFuture<'a, bool> {
         Box::pin(async move {
             let mut conn = self.conn.clone();
@@ -289,51 +303,59 @@ impl PlatformUnban {
         if ev.exp_ms < now || ev.exp_ms > now.saturating_add(MAX_AHEAD_MS) {
             return self.rejected("gateway_unban_expired", "expired");
         }
-        match self.seen.claim(&ev.event_id).await {
-            Ok(true) => {}
-            Ok(false) => return self.rejected("gateway_unban_replayed", "replayed"),
+        match self.seen.is_seen(&ev.event_id).await {
+            Ok(false) => {}
+            Ok(true) => return self.rejected("gateway_unban_replayed", "replayed"),
             Err(_) => {
-                // Fail closed: without the single-use marker a replay could lift a fresh ban.
+                // Fail closed: without the single-use store a replay could lift a fresh ban.
                 self.metrics
                     .record_floor_ban_dispatch("gateway_unban_error");
                 tracing::error!(
                     tenant_id = tenant,
-                    "platform unban: single-use store unavailable; event dropped, ban stays"
+                    "platform unban: single-use store unavailable; event deferred"
                 );
                 return Outcome::Error;
             }
         }
-        match self
+        let lift_res = self
             .lift
             .lift_guild_from_platform(tenant, PLATFORM, &ev.guild_id, user, SOURCE_APP, observed)
-            .await
-        {
-            Ok((communities, lifted, soft)) if lifted + soft > 0 => {
-                self.metrics
-                    .record_floor_ban_dispatch("gateway_unban_lifted");
-                tracing::info!(
-                    tenant_id = tenant,
-                    connection_id = ev.connection_id,
-                    communities,
-                    lifted,
-                    soft_cleared = soft,
-                    "discord-native unban lifted the Waddles ban (no echo)"
-                );
-                Outcome::Lifted {
-                    communities,
-                    lifted,
-                    soft,
+            .await;
+        match lift_res {
+            Ok((communities, lifted, soft)) => {
+                if let Err(e) = self.seen.claim(&ev.event_id).await {
+                    tracing::warn!(
+                        tenant_id = tenant,
+                        error = %e,
+                        "platform unban: lift committed but single-use marker write failed"
+                    );
                 }
-            }
-            Ok((communities, _, _)) => {
-                self.metrics
-                    .record_floor_ban_dispatch("gateway_unban_no_ban");
-                tracing::info!(
-                    tenant_id = tenant,
-                    communities,
-                    "discord-native unban: no community-scope Waddles ban in force to lift"
-                );
-                Outcome::NoBan
+                if lifted + soft > 0 {
+                    self.metrics
+                        .record_floor_ban_dispatch("gateway_unban_lifted");
+                    tracing::info!(
+                        tenant_id = tenant,
+                        connection_id = ev.connection_id,
+                        communities,
+                        lifted,
+                        soft_cleared = soft,
+                        "discord-native unban lifted the Waddles ban (no echo)"
+                    );
+                    Outcome::Lifted {
+                        communities,
+                        lifted,
+                        soft,
+                    }
+                } else {
+                    self.metrics
+                        .record_floor_ban_dispatch("gateway_unban_no_ban");
+                    tracing::info!(
+                        tenant_id = tenant,
+                        communities,
+                        "discord-native unban: no community-scope Waddles ban in force to lift"
+                    );
+                    Outcome::NoBan
+                }
             }
             Err(e) => {
                 self.metrics
@@ -349,7 +371,11 @@ impl PlatformUnban {
     }
 }
 
-/// Pops [`EVENTS_LIST`] until `shutdown`, handing each entry to `handler`.
+/// In-flight list used for crash-safe consumption before acking.
+pub const INFLIGHT_LIST: &str = "waddles:platform-unban:discord:inflight";
+
+/// Pops [`EVENTS_LIST`] into [`INFLIGHT_LIST`] until `shutdown`, handing each entry to `handler`
+/// and removing it only after a non-error outcome (re-queuing transient `Outcome::Error`).
 pub async fn run_consumer<S>(
     handler: Arc<PlatformUnban>,
     mut pop_conn: redis::aio::ConnectionManager,
@@ -358,18 +384,61 @@ pub async fn run_consumer<S>(
     S: std::future::Future<Output = ()>,
 {
     tokio::pin!(shutdown);
+    // Recover any items left in-flight by a previous worker crash.
+    loop {
+        let recovered: Result<Option<String>, _> = redis::cmd("LMOVE")
+            .arg(INFLIGHT_LIST)
+            .arg(EVENTS_LIST)
+            .arg("RIGHT")
+            .arg("LEFT")
+            .query_async(&mut pop_conn)
+            .await;
+        match recovered {
+            Ok(Some(_)) => {}
+            Ok(None) | Err(_) => break,
+        }
+    }
     let mut failures: u32 = 0;
     loop {
-        let mut pop = redis::cmd("BRPOP");
-        pop.arg(EVENTS_LIST).arg(POP_TIMEOUT_SECS);
+        let mut pop = redis::cmd("BLMOVE");
+        pop.arg(EVENTS_LIST)
+            .arg(INFLIGHT_LIST)
+            .arg("RIGHT")
+            .arg("LEFT")
+            .arg(POP_TIMEOUT_SECS);
         let popped = tokio::select! {
             () = &mut shutdown => return,
-            r = pop.query_async::<Option<(String, String)>>(&mut pop_conn) => r,
+            r = pop.query_async::<Option<String>>(&mut pop_conn) => r,
         };
         match popped {
-            Ok(Some((_key, raw))) => {
-                failures = 0;
-                handler.handle(&raw, now_ms()).await;
+            Ok(Some(raw)) => {
+                if matches!(handler.handle(&raw, now_ms()).await, Outcome::Error) {
+                    failures = failures.saturating_add(1);
+                    let delay = Duration::from_millis(500u64.saturating_mul(1 << failures.min(5)));
+                    tokio::select! {
+                        () = &mut shutdown => return,
+                        () = tokio::time::sleep(delay) => {}
+                    }
+                    let _: Result<i64, _> = redis::cmd("LREM")
+                        .arg(INFLIGHT_LIST)
+                        .arg(1)
+                        .arg(&raw)
+                        .query_async(&mut pop_conn)
+                        .await;
+                    let _: Result<i64, _> = redis::cmd("LPUSH")
+                        .arg(EVENTS_LIST)
+                        .arg(&raw)
+                        .query_async(&mut pop_conn)
+                        .await;
+                } else {
+                    failures = 0;
+                    let _: Result<i64, _> = redis::cmd("LREM")
+                        .arg(INFLIGHT_LIST)
+                        .arg(1)
+                        .arg(&raw)
+                        .query_async(&mut pop_conn)
+                        .await;
+                }
             }
             Ok(None) => failures = 0,
             Err(e) => {
@@ -440,6 +509,14 @@ mod tests {
     #[derive(Default)]
     struct FakeSeen(Mutex<HashSet<String>>, bool);
     impl SeenStore for FakeSeen {
+        fn is_seen<'a>(&'a self, id: &'a str) -> StoreFuture<'a, bool> {
+            Box::pin(async move {
+                if self.1 {
+                    return Err("down".into());
+                }
+                Ok(self.0.lock().unwrap().contains(id))
+            })
+        }
         fn claim<'a>(&'a self, id: &'a str) -> StoreFuture<'a, bool> {
             Box::pin(async move {
                 if self.1 {
