@@ -142,6 +142,7 @@ def test_chart_grants_svc_ingest_exactly_connections_resolve_on_the_system_tenan
             "bundle-schedules:read",
             "identity:platform-user:resolve",
             "identity:ephemeral:mint",
+            "eventsub:secret-read",
         }
     )
     assert "connections:resolve:static" not in identity.allowed_scopes

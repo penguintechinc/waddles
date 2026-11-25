@@ -57,6 +57,7 @@ ROLE_SYNC_SCOPES: tuple[str, ...] = (
     "channel:read:subscriptions",
     "moderation:read",
     "channel:manage:moderators",
+    "channel:moderate",
 )
 
 
