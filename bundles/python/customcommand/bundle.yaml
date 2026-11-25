@@ -4,7 +4,7 @@ name: Custom Command Bundle (Python)
 # 1.0.0: new bundle -- see src/app.py's module docstring. Activation-gated only (no feature flag).
 # 1.0.3: RESERVED_NAMES now covers every bundle command added since 1.0.0 (ban, rep, twitch, youtube, superpenguin-*, ...) so a custom command can no longer shadow one.
 # 1.0.7: add/edit/del authorize via caller_can(community:admin); is_mod/is_broadcaster no longer read.
-version: 1.0.7
+version: 1.0.8
 module: core
 provider: builtin
 author: github:penguintechinc

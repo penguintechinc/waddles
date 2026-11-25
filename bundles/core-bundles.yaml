@@ -448,7 +448,7 @@ bundles:
   # gates its own reply behind a `waddles.command-<name>` PostHog flag (default OFF) inside
   # `transform()` -- this catalog entry only installs the bundle, it does not make it respond.
   - app_id: penguintechinc.waddles.rank
-    version: "1.0.10"
+    version: "1.0.11"
     language: python
     wit_world: stage-next-tools
     source_dir: python/rank
@@ -641,7 +641,7 @@ bundles:
       - tenant_slug: default
         community_id: null
   - app_id: penguintechinc.waddles.giveaway
-    version: "1.0.7"
+    version: "1.0.8"
     language: python
     wit_world: stage-next
     source_dir: python/giveaway
@@ -1347,7 +1347,7 @@ bundles:
   # 8 bundles on the default `stage` world (customcommand is the exception: `wit_world: stage-next`
   # because it authorizes writes via the `authz` import):
   - app_id: penguintechinc.waddles.customcommand
-    version: "1.0.7"
+    version: "1.0.8"
     language: python
     wit_world: stage-next
     source_dir: python/customcommand
